@@ -59,10 +59,9 @@ async fn startup_migrates_legacy_codes_with_300_failures_without_reopening_their
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let origin = format!("http://localhost:{}", listener.local_addr().unwrap().port());
-    let app =
-        cairn_beacon::router(pool.clone(), Arc::new(Mailbox::default()), origin.clone())
-            .await
-            .expect("startup must migrate codes with more than fifty legacy failures");
+    let app = cairn_beacon::router(pool.clone(), Arc::new(Mailbox::default()), origin.clone())
+        .await
+        .expect("startup must migrate codes with more than fifty legacy failures");
     let server = tokio::spawn(async move {
         axum::serve(
             listener,
@@ -337,10 +336,9 @@ async fn renaming_the_proof_timestamp_preserves_existing_session_proofs_and_dead
     }
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let origin = format!("http://localhost:{}", listener.local_addr().unwrap().port());
-    let app =
-        cairn_beacon::router(pool.clone(), Arc::new(Mailbox::default()), origin.clone())
-            .await
-            .unwrap();
+    let app = cairn_beacon::router(pool.clone(), Arc::new(Mailbox::default()), origin.clone())
+        .await
+        .unwrap();
     let server = tokio::spawn(async move {
         axum::serve(
             listener,
@@ -412,10 +410,9 @@ async fn existing_mcp_registrations_get_a_grace_period_on_startup() {
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let origin = format!("http://localhost:{}", listener.local_addr().unwrap().port());
-    let app =
-        cairn_beacon::router(pool.clone(), Arc::new(Mailbox::default()), origin.clone())
-            .await
-            .expect("startup must preserve existing MCP client registrations");
+    let app = cairn_beacon::router(pool.clone(), Arc::new(Mailbox::default()), origin.clone())
+        .await
+        .expect("startup must preserve existing MCP client registrations");
     let server = tokio::spawn(async move {
         axum::serve(
             listener,

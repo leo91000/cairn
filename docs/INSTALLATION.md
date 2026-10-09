@@ -163,5 +163,5 @@ endpoint, relay reconnection and conversation reads are real.
 It checks successful replacement and an exited-candidate rollback, including
 identity, synthetic credentials, workspaces and runner state. The readiness runner
 boots no VM; active VM checkpointing remains covered by the existing node tests.
-`python3 tests/installation_installer_test.py` checks failure cleanup and
+`python3 scripts/tests/installation_installer_test.py` checks failure cleanup and
 idempotent configuration separately.

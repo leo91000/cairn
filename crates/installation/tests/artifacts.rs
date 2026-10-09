@@ -9,7 +9,6 @@ use axum::{
     response::IntoResponse,
     routing::post,
 };
-use common::{Credentials, RelayContext, eventually, request, send};
 use cairn_installation::{
     artifacts::{self, file, sharing},
     config::{Config, MAIN_AGENT_ID, id},
@@ -19,6 +18,7 @@ use cairn_installation::{
     service::Service,
     validation::text,
 };
+use common::{Credentials, RelayContext, eventually, request, send};
 use serde_json::{Value, json};
 use std::{path::Path, sync::Arc, time::Duration};
 use tempfile::TempDir;

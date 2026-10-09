@@ -19,7 +19,9 @@ pub fn router(origin: String) -> Router {
         )
         .replace(
             "__CAIRN_NODE_HOST_SHA256__",
-            &hex::encode(Sha256::digest(include_bytes!("../../../deploy/nodes/host.py"))),
+            &hex::encode(Sha256::digest(include_bytes!(
+                "../../../deploy/nodes/host.py"
+            ))),
         );
     Router::new()
         .route(

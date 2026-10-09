@@ -479,7 +479,7 @@ mod tests {
             host: "127.0.0.1".into(),
             port: 0,
             codex_bin: std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("../tests/fixtures/title-codex.mjs")
+                .join("../../tests/fixtures/title-codex.mjs")
                 .to_string_lossy()
                 .into_owned(),
             claude_bin: "claude".into(),

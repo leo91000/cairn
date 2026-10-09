@@ -272,9 +272,7 @@ async fn audit_failure_rolls_back_access_changes_and_retention_is_enforced_witho
         .unwrap();
     for clean in [false, true] {
         if clean {
-            cairn_beacon::cleanup_expired(&app.pool)
-                .await
-                .unwrap();
+            cairn_beacon::cleanup_expired(&app.pool).await.unwrap();
         }
         let expired: Value = app
             .authenticated(

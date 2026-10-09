@@ -1,11 +1,18 @@
 {
   "compilerOptions": {
     "target": "ES2024",
-    "lib": ["ES2024", "DOM", "DOM.Iterable"],
+    "lib": [
+      "ES2024",
+      "DOM",
+      "DOM.Iterable"
+    ],
     "module": "ESNext",
     "moduleResolution": "Bundler",
     "resolveJsonModule": true,
-    "types": ["node", "vite/client"],
+    "types": [
+      "node",
+      "vite/client"
+    ],
     "allowImportingTsExtensions": true,
     "strict": true,
     "noEmit": true,
@@ -13,10 +20,13 @@
     "skipLibCheck": true
   },
   "include": [
-    "apps/web/src/**/*.ts",
-    "apps/web/src/**/*.vue",
-    "packages/contracts/**/*.ts",
+    "src/**/*.ts",
+    "src/**/*.vue",
     "tests/**/*.ts",
-    "*.ts"
+    "../../packages/contracts/**/*.ts",
+    "../../tests/**/*.ts",
+    "../../*.ts",
+    "*.ts",
+    "../../scripts/tests/**/*.ts"
   ]
 }

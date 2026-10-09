@@ -1,6 +1,8 @@
 //! Durable write and verified read costs, without FUSE, networking or VM scheduling.
 //! Run with the repository's pinned toolchain and `cargo run --release --example storage-write-benchmark`.
-use cairn_installation::storage::{BlockSource, Disk, LazyDisk, LocalDisk, policy::Policy, runtime};
+use cairn_installation::storage::{
+    BlockSource, Disk, LazyDisk, LocalDisk, policy::Policy, runtime,
+};
 use serde_json::json;
 use std::{io, sync::Arc, time::Instant};
 

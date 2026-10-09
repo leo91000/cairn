@@ -1,8 +1,8 @@
 import type { RunEvent } from '../../../packages/contracts/contracts'
 import { describe, expect, it } from 'vitest'
-import { activityEntries } from '../src/activity'
 import sample from '../../../tests/fixtures/activity-events.json'
-import { redactPayload } from '../../../tests/legacy/server/worker.ts'
+import { redactPayload } from '../../../tests/fixtures/legacy/server/worker.ts'
+import { activityEntries } from '../src/activity'
 
 const events: RunEvent[] = sample.map((payload, index) => ({
   id: index + 1,

@@ -24,7 +24,7 @@ Bootstrap tokens are generated privately when `SETUP_TOKEN` is absent, as before
 Schema version 5 adds durable shared S3 object references and deletion jobs. Older
 executables refuse that database; see [shared blocks and rollback](SHARED-S3-BLOCKS.md).
 
-The old implementation is frozen under `tests/legacy/server` solely as a migration
+The old implementation is frozen under `tests/fixtures/legacy/server` solely as a migration
 oracle, fixture seeder and benchmark reference. It is excluded from the container.
 Browser fixtures serve every request and run every worker through Rust; direct
 legacy service access in tests only seeds or inspects persisted fixtures.

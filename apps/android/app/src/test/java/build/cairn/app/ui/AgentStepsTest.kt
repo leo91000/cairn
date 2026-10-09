@@ -60,7 +60,10 @@ class AgentStepsTest {
     private val events =
         listOf(
             item(1, "reasoning") { put("text", "Je regarde comment l’en-tête est construit.") },
-            command(2, "sed -n 1,80p apps/android/app/src/main/java/build/cairn/app/ui/ChatsScreen.kt"),
+            command(
+                2,
+                "sed -n 1,80p apps/android/app/src/main/java/build/cairn/app/ui/ChatsScreen.kt",
+            ),
             command(3, "sed -n 1,60p apps/android/app/src/main/java/build/cairn/app/ui/Signal.kt"),
             command(4, "rg -n \"ConversationHeader\" apps/android/app/src"),
             item(5, "file_change") {

@@ -343,13 +343,13 @@ mod capability_tests {
     #[test]
     fn workflow_scope_is_exact_and_unknown_for_fine_grained_tokens() {
         assert_eq!(
-            super::workflow_scope("X-OAuth-Scopes: repo, workflow\r\n\r\nleo"),
+            super::workflow_scope("X-OAuth-Scopes: repo, workflow\r\n\r\ncairn"),
             Some(true)
         );
         assert_eq!(
             super::workflow_scope("x-oauth-scopes: repo, not-workflow"),
             Some(false)
         );
-        assert_eq!(super::workflow_scope("HTTP/2 200\r\n\r\nleo"), None);
+        assert_eq!(super::workflow_scope("HTTP/2 200\r\n\r\ncairn"), None);
     }
 }

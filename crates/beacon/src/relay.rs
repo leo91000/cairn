@@ -10,12 +10,12 @@ use axum::{
     http::{HeaderMap, HeaderName, HeaderValue, StatusCode},
     response::{Html, IntoResponse, Response},
 };
-use futures_util::{SinkExt, StreamExt};
 use cairn_protocol::direct::{DIRECT_VERSION, DirectRevocation, SignalBudget, unix_time};
 use cairn_protocol::{
     ApiRequest, ApiResponse, Frame, MAX_BODY, MAX_FRAME, MAX_IN_FLIGHT, MAX_NOTIFICATION_IN_FLIGHT,
     MAX_PUBLIC_IN_FLIGHT, MAX_STREAM_CHUNK, REQUEST_TIMEOUT, Role,
 };
+use futures_util::{SinkExt, StreamExt};
 use sqlx_core::query_as::query_as;
 use std::{
     collections::{HashMap, VecDeque},
@@ -327,8 +327,7 @@ async fn serve_socket(
     let (stop, mut stopped) = watch::channel(false);
     let (control, mut controls) =
         mpsc::channel::<Frame>((MAX_IN_FLIGHT + MAX_PUBLIC_IN_FLIGHT) * 2);
-    let (signaling, mut signals) =
-        mpsc::channel::<Frame>(cairn_protocol::direct::MAX_DIRECT_QUEUE);
+    let (signaling, mut signals) = mpsc::channel::<Frame>(cairn_protocol::direct::MAX_DIRECT_QUEUE);
     let Ok(key) = ring::signature::Ed25519KeyPair::generate_pkcs8(&ring::rand::SystemRandom::new())
     else {
         return;

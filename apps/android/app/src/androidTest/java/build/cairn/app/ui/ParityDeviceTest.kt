@@ -169,9 +169,7 @@ internal class ParityDeviceCases(private val compose: ComposeContentTestRule) {
                             "/api/installations/fixture/api/schedule/preview" ->
                                 "{\"occurrences\":[${timestamp + 86400000},${timestamp + 8 * 86400000}]}"
                             "/api/installations/fixture/api/projects" ->
-                                wireJson.encodeToString(
-                                    listOf(Project("project", "Cairn"))
-                                )
+                                wireJson.encodeToString(listOf(Project("project", "Cairn")))
                             "/api/installations/fixture/api/skills",
                             "/api/installations/fixture/api/mcps" -> "[]"
                             else -> "{}"

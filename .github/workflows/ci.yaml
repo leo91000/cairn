@@ -11,6 +11,9 @@ on:
         type: choice
         options: ['1', '2']
         default: '2'
+env:
+  CARGO_BUILD_JOBS: '4'
+  CARGO_PROFILE_DEV_DEBUG: '0'
 permissions:
   contents: read
 concurrency:
@@ -80,7 +83,7 @@ jobs:
         run: |
           cargo build --locked --bin cairn --example worker_fixture --example network_direct_client --features ublk
           cargo build --locked -p cairn-beacon --bin cairn-beacon --example network_stun_server
-          pnpm exec vite build
+          pnpm exec vite build --config apps/web/vite.config.ts
       - uses: actions/upload-artifact@v7.0.1
         with:
           name: browser-backend
@@ -150,16 +153,16 @@ jobs:
           cargo build --locked -p cairn-beacon --bin cairn-beacon --example network_stun_server
       - name: Validate node supervisor and S3 recovery
         run: |
-          python3 tests/guest_projects_test.py
-          python3 tests/node_supervisor_test.py
-          python3 tests/installation_installer_test.py
-          python3 tests/compressed_swap_test.py
-          python3 tests/installation_updates_test.py
+          python3 scripts/tests/guest_projects_test.py
+          python3 scripts/tests/node_supervisor_test.py
+          python3 scripts/tests/installation_installer_test.py
+          python3 scripts/tests/compressed_swap_test.py
+          python3 scripts/tests/installation_updates_test.py
           bash tests/installation-installer-container.sh
           python3 tests/installation_update_containers.py
           python3 -m venv .node-s3-test
           .node-s3-test/bin/pip install 'moto[server]==5.2.3' awscli
-          PATH="$PWD/.node-s3-test/bin:$PATH" .node-s3-test/bin/python tests/node_s3_test.py
+          PATH="$PWD/.node-s3-test/bin:$PATH" .node-s3-test/bin/python scripts/tests/node_s3_test.py
   browser:
     services:
       postgres:
@@ -351,7 +354,7 @@ jobs:
       - uses: gradle/actions/setup-gradle@v5
       - run: sdkmanager 'platforms;android-37.0' 'build-tools;36.0.0'
       - name: Build the native client and instrumented tests
-        working-directory: android
+        working-directory: apps/android
         run: ./gradlew assembleDebug assembleDebugAndroidTest --no-daemon --stacktrace
       - name: Enable emulator acceleration
         run: |
@@ -438,12 +441,12 @@ jobs:
       - uses: docker/metadata-action@v6.2.0
         id: meta
         with:
-          images: ghcr.io/${{ github.repository }}
+          images: ghcr.io/${{ github.repository_owner }}/cairn
           labels: org.opencontainers.image.version=${{ steps.package.outputs.version }}
       - name: Choose the image destination
         id: target
         run: |
-          image="ghcr.io/${GITHUB_REPOSITORY}"
+          image="ghcr.io/${GITHUB_REPOSITORY_OWNER}/cairn"
           if [[ "$GITHUB_EVENT_NAME" != pull_request ]]; then
             # Publish only an untagged digest. Release/latest tags wait for all checks.
             echo "destination=type=image,name=$image,push-by-digest=true,name-canonical=true,push=true" >> "$GITHUB_OUTPUT"
@@ -454,8 +457,8 @@ jobs:
             echo "destination=type=image,name=$image:pull-request,push=true" >> "$GITHUB_OUTPUT"
             echo "local=$image:pull-request" >> "$GITHUB_OUTPUT"
           else
-            echo "destination=type=docker,name=cairn-installation:test" >> "$GITHUB_OUTPUT"
-            echo "local=cairn-installation:test" >> "$GITHUB_OUTPUT"
+            echo "destination=type=docker,name=cairn:test" >> "$GITHUB_OUTPUT"
+            echo "local=cairn:test" >> "$GITHUB_OUTPUT"
           fi
       - uses: docker/build-push-action@v7.3.0
         id: build
@@ -471,9 +474,9 @@ jobs:
           # GHCR deduplicates layers across main builds. PRs read the trusted
           # main cache but skip the expensive cache upload on their critical path.
           cache-from: |
-            type=registry,ref=ghcr.io/${{ github.repository }}:buildcache
+            type=registry,ref=ghcr.io/${{ github.repository_owner }}/cairn:buildcache
             type=gha
-          cache-to: ${{ github.ref == 'refs/heads/main' && format('type=registry,ref=ghcr.io/{0}:buildcache,mode=max,compression=zstd,compression-level=3,ignore-error=true', github.repository) || '' }}
+          cache-to: ${{ github.ref == 'refs/heads/main' && format('type=registry,ref=ghcr.io/{0}/cairn:buildcache,mode=max,compression=zstd,compression-level=3,ignore-error=true', github.repository_owner) || '' }}
           secrets: github_token=${{ github.token }}
           provenance: ${{ env.PUBLISH == 'true' && 'mode=max' || 'false' }}
           sbom: ${{ env.PUBLISH == 'true' }}
@@ -483,7 +486,7 @@ jobs:
           LOCAL_IMAGE: ${{ steps.target.outputs.local }}
         run: |
           if [[ -z "$LOCAL_IMAGE" ]]; then
-            echo "SMOKE_IMAGE=ghcr.io/${GITHUB_REPOSITORY}@${IMAGE_DIGEST}" >> "$GITHUB_ENV"
+            echo "SMOKE_IMAGE=ghcr.io/${GITHUB_REPOSITORY_OWNER}/cairn@${IMAGE_DIGEST}" >> "$GITHUB_ENV"
             exit 0
           fi
           if [[ "$PUBLISH" == true ]]; then
@@ -576,13 +579,13 @@ jobs:
       - uses: docker/metadata-action@v6.2.0
         id: meta
         with:
-          images: ghcr.io/${{ github.repository }}-official
+          images: ghcr.io/${{ github.repository_owner }}/cairn-beacon
           labels: org.opencontainers.image.version=${{ steps.package.outputs.version }}
       - name: Choose the official image destination
         id: target
         run: |
           if [[ "$PUBLISH" == true ]]; then
-            echo "destination=type=image,name=ghcr.io/${GITHUB_REPOSITORY}-official,push-by-digest=true,name-canonical=true,push=true" >> "$GITHUB_OUTPUT"
+            echo "destination=type=image,name=ghcr.io/${GITHUB_REPOSITORY_OWNER}/cairn-beacon,push-by-digest=true,name-canonical=true,push=true" >> "$GITHUB_OUTPUT"
           else
             echo "destination=type=docker,name=cairn-beacon:test" >> "$GITHUB_OUTPUT"
           fi
@@ -595,9 +598,9 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           build-args: VCS_REF=${{ github.sha }}
           cache-from: |
-            type=registry,ref=ghcr.io/${{ github.repository }}-official:buildcache
+            type=registry,ref=ghcr.io/${{ github.repository_owner }}/cairn-beacon:buildcache
             type=gha,scope=official
-          cache-to: ${{ github.ref == 'refs/heads/main' && format('type=registry,ref=ghcr.io/{0}-official:buildcache,mode=max,compression=zstd,compression-level=3,ignore-error=true', github.repository) || '' }}
+          cache-to: ${{ github.ref == 'refs/heads/main' && format('type=registry,ref=ghcr.io/{0}/cairn-beacon:buildcache,mode=max,compression=zstd,compression-level=3,ignore-error=true', github.repository_owner) || '' }}
           provenance: ${{ env.PUBLISH == 'true' && 'mode=max' || 'false' }}
           sbom: ${{ env.PUBLISH == 'true' }}
       - uses: ./.github/actions/setup-pnpm
@@ -608,7 +611,7 @@ jobs:
           IMAGE_DIGEST: ${{ steps.build.outputs.digest }}
         run: |
           if [[ "$PUBLISH" == true ]]; then
-            image="ghcr.io/${GITHUB_REPOSITORY}-official@${IMAGE_DIGEST}"
+            image="ghcr.io/${GITHUB_REPOSITORY_OWNER}/cairn-beacon@${IMAGE_DIGEST}"
           else
             image=cairn-beacon:test
           fi
@@ -641,8 +644,8 @@ jobs:
             VCS_REF=${{ github.sha }}
             CODEX_VERSION=${{ needs.resolve.outputs.codex }}
             GH_VERSION=${{ needs.resolve.outputs.gh }}
-          cache-from: type=registry,ref=ghcr.io/${{ github.repository }}:buildcache
-          cache-to: type=registry,ref=ghcr.io/${{ github.repository }}:buildcache,mode=max,compression=zstd,compression-level=3,ignore-error=true
+          cache-from: type=registry,ref=ghcr.io/${{ github.repository_owner }}/cairn:buildcache
+          cache-to: type=registry,ref=ghcr.io/${{ github.repository_owner }}/cairn:buildcache,mode=max,compression=zstd,compression-level=3,ignore-error=true
           secrets: github_token=${{ github.token }}
           provenance: false
       - name: Refresh the official cache when main reuses validated images
@@ -653,8 +656,8 @@ jobs:
           target: official
           outputs: type=cacheonly
           build-args: VCS_REF=${{ github.sha }}
-          cache-from: type=registry,ref=ghcr.io/${{ github.repository }}-official:buildcache
-          cache-to: type=registry,ref=ghcr.io/${{ github.repository }}-official:buildcache,mode=max,compression=zstd,compression-level=3,ignore-error=true
+          cache-from: type=registry,ref=ghcr.io/${{ github.repository_owner }}/cairn-beacon:buildcache
+          cache-to: type=registry,ref=ghcr.io/${{ github.repository_owner }}/cairn-beacon:buildcache,mode=max,compression=zstd,compression-level=3,ignore-error=true
           provenance: false
 
   publish:
@@ -679,7 +682,7 @@ jobs:
       - uses: ./.github/actions/promote-image
         if: github.event_name != 'pull_request'
         with:
-          image: ghcr.io/${{ github.repository }}-official
+          image: ghcr.io/${{ github.repository_owner }}/cairn-beacon
           digest: ${{ needs.official-image.outputs.digest }}
           token: ${{ secrets.GITHUB_TOKEN }}
       - name: Record the validated image
@@ -719,7 +722,7 @@ jobs:
           token: ${{ secrets.GITHUB_TOKEN }}
       - uses: ./.github/actions/promote-image
         with:
-          image: ghcr.io/${{ github.repository }}-official
+          image: ghcr.io/${{ github.repository_owner }}/cairn-beacon
           digest: ${{ needs.resolve.outputs.official-digest }}
           token: ${{ secrets.GITHUB_TOKEN }}
   deploy:
@@ -746,8 +749,8 @@ jobs:
           COOLIFY_SERVICE_UUID: ${{ vars.COOLIFY_SERVICE_UUID }}
           COOLIFY_TOKEN: ${{ secrets.COOLIFY_TOKEN }}
           CAIRN_BEACON_ORIGIN: ${{ vars.CAIRN_BEACON_ORIGIN }}
-          DEPLOY_IMAGE: ghcr.io/${{ github.repository }}-official@${{ needs.resolve.outputs.official-digest || needs.official-image.outputs.digest }}
-          DEPLOY_INSTALLATION_IMAGE: ghcr.io/${{ github.repository }}@${{ needs.resolve.outputs.digest || needs.image.outputs.digest }}
+          DEPLOY_IMAGE: ghcr.io/${{ github.repository_owner }}/cairn-beacon@${{ needs.resolve.outputs.official-digest || needs.official-image.outputs.digest }}
+          DEPLOY_INSTALLATION_IMAGE: ghcr.io/${{ github.repository_owner }}/cairn@${{ needs.resolve.outputs.digest || needs.image.outputs.digest }}
           # A reused image reports the commit it was validated at, with this tag's tree.
           DEPLOY_COMMIT: ${{ needs.resolve.outputs.commit }}
         run: node scripts/deploy-coolify.mjs

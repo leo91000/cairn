@@ -209,8 +209,7 @@ class SignalPresentationTest {
                         Agent("rev", "Revue de code", description = "Relit les PR"),
                         Agent("ops", "Ops", description = "Revue des déploiements"),
                     ),
-                projects =
-                    listOf(Project("p", "Cairn", description = "Revue continue")),
+                projects = listOf(Project("p", "Cairn", description = "Revue continue")),
                 tasks =
                     listOf(
                         Task("t", "Revue hebdomadaire", cron = "0 9 * * 1"),

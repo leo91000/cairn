@@ -57,7 +57,7 @@ Single keys never fire while typing or while a dialog is open (`apps/web/src/sho
 
 ## Evidence
 
-`tests/signal.test.ts` covers grouping, working steps, elapsed times and the
+`apps/web/tests/signal.test.ts` covers grouping, working steps, elapsed times and the
 identity colours shared with Android. `tests/e2e/signal.spec.ts` drives the real
 server: Fil sections and badges, J/Enter, G chords, the shortcut sheet, the
 palette running a mission, the conversation beside the Fil with its live step,

@@ -13,6 +13,7 @@ import App from './App.vue'
 import AccountMenu from './components/AccountMenu.vue'
 import AccountMethods from './components/AccountMethods.vue'
 import AccountSecurity from './components/AccountSecurity.vue'
+import BrandWordmark from './components/BrandWordmark.vue'
 import Icon from './components/Icon.vue'
 import InstallationSharing from './components/InstallationSharing.vue'
 import Modal from './components/Modal.vue'
@@ -860,9 +861,7 @@ onMounted(async () => {
       <ThemeControl compact />
     </div>
     <section class="w-full max-w-sm" aria-label="Cairn account" :aria-busy="busy">
-      <p class="font-heading text-brand text-3xl font-bold mb-10">
-        cairn
-      </p>
+      <BrandWordmark class="mb-10" />
       <template v-if="!ready">
         <p v-if="busy" role="status">
           Loading…

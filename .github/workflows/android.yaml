@@ -1,11 +1,11 @@
 name: Android
 on:
   pull_request:
-    paths: ['apps/android/**', '.github/actions/setup-pnpm/**', '.github/actions/setup-android-emulator/**', .github/workflows/android.yaml, 'scripts/android-*.mjs', scripts/resolve-android-release.mjs, 'tests/android-*.test.mjs', tests/android-runner-smoke.mjs, tests/runner-storage-smoke.mjs]
+    paths: ['apps/android/**', '.github/actions/setup-pnpm/**', '.github/actions/setup-android-emulator/**', .github/workflows/android.yaml, 'scripts/android-*.mjs', scripts/resolve-android-release.mjs, 'scripts/tests/android-*.test.mjs', tests/android-runner-smoke.mjs, tests/runner-storage-smoke.mjs]
   push:
     branches: [main]
     tags: ['v*']
-    paths: ['apps/android/**', '.github/actions/setup-pnpm/**', '.github/actions/setup-android-emulator/**', .github/workflows/android.yaml, 'scripts/android-*.mjs', scripts/resolve-android-release.mjs, 'tests/android-*.test.mjs', tests/android-runner-smoke.mjs, tests/runner-storage-smoke.mjs]
+    paths: ['apps/android/**', '.github/actions/setup-pnpm/**', '.github/actions/setup-android-emulator/**', .github/workflows/android.yaml, 'scripts/android-*.mjs', scripts/resolve-android-release.mjs, 'scripts/tests/android-*.test.mjs', tests/android-runner-smoke.mjs, tests/runner-storage-smoke.mjs]
   workflow_dispatch:
 env:
   CAIRN_BEACON_ORIGIN: ${{ vars.CAIRN_BEACON_ORIGIN }}
@@ -57,13 +57,13 @@ jobs:
       - uses: gradle/actions/setup-gradle@v5
       - run: sdkmanager 'platforms;android-37.0' 'build-tools;36.0.0'
       - name: Check Kotlin formatting
-        working-directory: android
+        working-directory: apps/android
         run: ./gradlew spotlessCheck --no-daemon
       - name: Use the tag version for a fresh release build
         if: startsWith(github.ref, 'refs/tags/v')
         run: printf 'CAIRN_ANDROID_VERSION=%s\n' "${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
       - name: Test, lint and build debug
-        working-directory: android
+        working-directory: apps/android
         run: ./gradlew testDebugUnitTest lintDebug assembleDebug assembleDebugAndroidTest --no-daemon --stacktrace
       - name: Enable emulator acceleration
         run: |
@@ -82,7 +82,7 @@ jobs:
           profile: pixel_6
           disable-animations: false
           script: |
-            cd android && ./gradlew connectedDebugAndroidTest -Pandroid.testInstrumentationRunnerArguments.class=build.cairn.app.ui.HistoryFollowDeviceTest --no-daemon
+            cd apps/android && ./gradlew connectedDebugAndroidTest -Pandroid.testInstrumentationRunnerArguments.class=build.cairn.app.ui.HistoryFollowDeviceTest --no-daemon
             adb install -r apps/android/app/build/outputs/apk/debug/app-debug.apk
             adb install -r -t apps/android/app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk
             # Gradle uninstalls the test app, so regenerate the captures after reinstalling.
@@ -130,7 +130,7 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/v')
         run: printf 'CAIRN_ANDROID_VERSION=%s\n' "${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
       - name: Build debug and instrumentation APKs
-        working-directory: android
+        working-directory: apps/android
         run: ./gradlew assembleDebug assembleDebugAndroidTest --no-daemon --stacktrace
       - name: Enable emulator acceleration
         run: |
@@ -147,7 +147,7 @@ jobs:
           profile: pixel_6
           disable-animations: false
           script: |
-            cd android && ./gradlew connectedDebugAndroidTest -Pandroid.testInstrumentationRunnerArguments.class=build.cairn.app.ui.BackgroundWaitDeviceTest,build.cairn.app.ui.NativeAccountDeviceTest,build.cairn.app.data.NativePushDeviceTest,build.cairn.app.ui.CairnAccountDeviceTest,build.cairn.app.ui.CairnAccountRestorationDeviceTest,build.cairn.app.ui.ModelPickerDeviceTest,build.cairn.app.ui.AccountsDeviceTest,build.cairn.app.ui.ModelCatalogDeviceTest,build.cairn.app.ui.ChatProviderDeviceTest,build.cairn.app.ui.SkillMentionDeviceTest,build.cairn.app.ui.ConversationLifecycleDeviceTest,build.cairn.app.ui.ImagePasteDeviceTest,build.cairn.app.ui.QueueStripDeviceTest,build.cairn.app.ui.NodePlacementDeviceTest,build.cairn.app.ui.MissionBackDeviceTest --no-daemon
+            cd apps/android && ./gradlew connectedDebugAndroidTest -Pandroid.testInstrumentationRunnerArguments.class=build.cairn.app.ui.BackgroundWaitDeviceTest,build.cairn.app.ui.NativeAccountDeviceTest,build.cairn.app.data.NativePushDeviceTest,build.cairn.app.ui.CairnAccountDeviceTest,build.cairn.app.ui.CairnAccountRestorationDeviceTest,build.cairn.app.ui.ModelPickerDeviceTest,build.cairn.app.ui.AccountsDeviceTest,build.cairn.app.ui.ModelCatalogDeviceTest,build.cairn.app.ui.ChatProviderDeviceTest,build.cairn.app.ui.SkillMentionDeviceTest,build.cairn.app.ui.ConversationLifecycleDeviceTest,build.cairn.app.ui.ImagePasteDeviceTest,build.cairn.app.ui.QueueStripDeviceTest,build.cairn.app.ui.NodePlacementDeviceTest,build.cairn.app.ui.MissionBackDeviceTest --no-daemon
             adb install -r apps/android/app/build/outputs/apk/debug/app-debug.apk
             adb install -r -t apps/android/app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk
             adb shell am instrument -w -e class build.cairn.app.ui.NodePlacementDeviceTest build.cairn.app.test/androidx.test.runner.AndroidJUnitRunner > apps/android/app/build/reports/node-captures.txt
@@ -191,7 +191,7 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/v')
         run: printf 'CAIRN_ANDROID_VERSION=%s\n' "${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
       - name: Build optimized release
-        working-directory: android
+        working-directory: apps/android
         run: ./gradlew assembleRelease --no-daemon
       # The workflow only succeeds when this build and the device checks pass.
       # A tag signs these exact bytes without compiling them again.

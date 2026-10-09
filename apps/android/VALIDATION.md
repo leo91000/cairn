@@ -152,7 +152,7 @@ The shared device suite also verifies explicit accessibility scrolling and
 deferred native text relocation after a stationary touch (13 cases total).
 
 Run `./gradlew testDebugUnitTest lintDebug assembleDebug assembleRelease` from
-`apps/android/`. Add `-PleoScreenshotsDir=/absolute/path` for native-graphics previews.
+`apps/android/`. Add `-PcairnScreenshotsDir=/absolute/path` for native-graphics previews.
 These images use Robolectric and fixture data, not a physical phone. Android 16
 instrumentation remains a separate CI gate; the current commit's checks on
 [PR #1](https://github.com/leo91000/leo-agent-manager/pull/1) are authoritative.
@@ -182,7 +182,7 @@ to 89 tests. An additional same-frame paging case brings the final suite to
 90; it is also included in the device selection (12 cases). The final commit's PR checks are the authoritative validation of
 these final additions.
 
-Preview images generated with `-PleoScreenshotsDir=...` use Robolectric native
+Preview images generated with `-PcairnScreenshotsDir=...` use Robolectric native
 graphics and synthetic data. They are not emulator or physical-phone screenshots.
 Local software emulators did not finish booting reliably; the successful device
 evidence above comes from the accelerated Android 16 CI emulator. Physical-phone
@@ -327,7 +327,7 @@ mise exec java@temurin-21 -- apps/android/gradlew -p android --no-daemon assembl
 
 The GitHub Android workflow runs the complete suite, lint, debug and optimized
 release builds on the published commit. See that commit's checks for final CI
-results. Local screenshots, when enabled with `-PleoScreenshotsDir=...`, use
+results. Local screenshots, when enabled with `-PcairnScreenshotsDir=...`, use
 Robolectric native graphics. They are not emulator or physical-device evidence.
 
 Package `build.cairn.app`; minSdk 26; targetSdk 37; version **0.5.3 / code 10**.

@@ -48,12 +48,10 @@ pub(super) async fn task_authors(
         },
         members: members
             .into_iter()
-            .map(
-                |(account_id, access_id)| cairn_protocol::TaskAuthorGrant {
-                    account_id,
-                    access_id,
-                },
-            )
+            .map(|(account_id, access_id)| cairn_protocol::TaskAuthorGrant {
+                account_id,
+                access_id,
+            })
             .collect(),
     };
     transaction.commit().await?;

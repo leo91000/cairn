@@ -60,25 +60,12 @@ impl Fixture {
         Self::with_pool_size(oauth, 5).await
     }
 
-    pub async fn with_pool_size(
-        oauth: cairn_beacon::OAuthProviders,
-        connections: u32,
-    ) -> Self {
-        Self::with_network(
-            oauth,
-            connections,
-            cairn_beacon::TrustedProxies::default(),
-        )
-        .await
+    pub async fn with_pool_size(oauth: cairn_beacon::OAuthProviders, connections: u32) -> Self {
+        Self::with_network(oauth, connections, cairn_beacon::TrustedProxies::default()).await
     }
 
     pub async fn with_push(push: Arc<dyn cairn_beacon::PushSender>) -> Self {
-        Self::with_options(
-            cairn_beacon::OAuthProviders::default(),
-            5,
-            Some(push),
-        )
-        .await
+        Self::with_options(cairn_beacon::OAuthProviders::default(), 5, Some(push)).await
     }
 
     async fn with_options(
@@ -336,8 +323,7 @@ impl RelayedInstallation {
 
     pub async fn with_pool_size(extra_routes: axum::Router, connections: u32) -> Self {
         let app =
-            Fixture::with_pool_size(cairn_beacon::OAuthProviders::default(), connections)
-                .await;
+            Fixture::with_pool_size(cairn_beacon::OAuthProviders::default(), connections).await;
         Self::with_app(extra_routes, String::new(), app).await
     }
 
@@ -363,7 +349,7 @@ impl RelayedInstallation {
             .unwrap();
         let root = tempfile::tempdir().unwrap();
         let codex_bin =
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../tests/fixtures/codex.mjs");
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/codex.mjs");
         let config: Config = serde_json::from_value(json!({
             "dataDir": root.path().join("data"),
             "home": root.path().join("home"),

@@ -2,7 +2,7 @@ import { mkdir, rm } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import process from 'node:process'
-import { buildApp } from './legacy/server/app.ts'
+import { buildApp } from './fixtures/legacy/server/app.ts'
 
 async function main() {
   const port = Number(process.env.TEST_PORT || 4321)

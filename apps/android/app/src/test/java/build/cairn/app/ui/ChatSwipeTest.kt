@@ -364,7 +364,8 @@ class ChatSwipeTest {
             server.start()
             val vault =
                 object : SessionVault {
-                    override fun read(origin: String) = "cairn_session=fixture; Path=/; Max-Age=3600"
+                    override fun read(origin: String) =
+                        "cairn_session=fixture; Path=/; Max-Age=3600"
 
                     override fun write(origin: String, cookie: String?) = Unit
                 }

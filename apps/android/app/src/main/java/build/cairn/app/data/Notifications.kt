@@ -191,7 +191,7 @@ constructor(
                     )
                 val notification =
                     NotificationCompat.Builder(context, QUESTION_CHANNEL)
-                        .setSmallIcon(R.drawable.ic_leo)
+                        .setSmallIcon(R.drawable.ic_cairn)
                         .setContentTitle("Cairn attend votre réponse")
                         .setContentText(
                             if (questions.size == 1)
@@ -263,7 +263,7 @@ private suspend fun notifyAlerts(
                 .addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP)
         val notification =
             NotificationCompat.Builder(context, EXECUTION_CHANNEL)
-                .setSmallIcon(R.drawable.ic_leo)
+                .setSmallIcon(R.drawable.ic_cairn)
                 .setContentTitle(alert.localized().first.take(120))
                 .setContentText(alert.localized().second.take(300))
                 .setStyle(

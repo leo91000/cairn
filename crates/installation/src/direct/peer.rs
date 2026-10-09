@@ -54,7 +54,9 @@ impl PeerConfig {
             |_| Self::default().stun_urls,
             |urls| {
                 if urls.trim().is_empty() {
-                    tracing::info!("Empty CAIRN_DIRECT_STUN_URLS; using authenticated official STUN");
+                    tracing::info!(
+                        "Empty CAIRN_DIRECT_STUN_URLS; using authenticated official STUN"
+                    );
                     Vec::new()
                 } else {
                     urls.split(',').map(str::to_owned).collect()

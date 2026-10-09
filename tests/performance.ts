@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto'
 import { writeFile } from 'node:fs/promises'
 import { performance } from 'node:perf_hooks'
 import process from 'node:process'
-import { fixture } from './helpers.ts'
+import { fixture } from './fixtures/legacy-helpers.ts'
 
 async function main() {
   const ctx = await fixture()

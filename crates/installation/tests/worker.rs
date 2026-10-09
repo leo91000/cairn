@@ -9,7 +9,6 @@ use axum::{
     routing::any,
 };
 use base64::{Engine, engine::general_purpose::STANDARD};
-use common::eventually;
 use cairn_installation::{
     accounts::{self, KIND},
     config::{Config, MAIN_AGENT_ID, id, now},
@@ -19,6 +18,7 @@ use cairn_installation::{
     service::Service,
     validation::text,
 };
+use common::eventually;
 use serde_json::{Value, json};
 use std::{
     path::{Path, PathBuf},
@@ -83,7 +83,7 @@ impl Fixture {
                 .arg(common::fixture_path("legacy-worker.mjs"));
             command
         } else {
-            let binary = std::path::Path::new(env!("CARGO_BIN_EXE_leo"))
+            let binary = std::path::Path::new(env!("CARGO_BIN_EXE_cairn"))
                 .parent()
                 .unwrap()
                 .join("examples/worker_fixture");

@@ -14,9 +14,9 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import process from 'node:process'
 import { expect, test } from '@playwright/test'
-import { config as loadConfig } from '../legacy/server/config'
-import { Service as SeedService } from '../legacy/server/service'
-import { Store } from '../legacy/server/store'
+import { config as loadConfig } from '../fixtures/legacy/server/config'
+import { Service as SeedService } from '../fixtures/legacy/server/service'
+import { Store } from '../fixtures/legacy/server/store'
 import { executeOfficialSql, expireAccountProof } from './official-relay-fixture'
 
 test('owner shares an installation and member works without management controls', async ({ page, browser }) => {

@@ -12,3 +12,6 @@ tests
 *.db*
 *.log
 target
+
+apps/web/tests
+apps/android

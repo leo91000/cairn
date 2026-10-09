@@ -1,7 +1,7 @@
 mod common;
 
-use common::RelayedInstallation;
 use cairn_installation::{auth::digest, config::now};
+use common::RelayedInstallation;
 use reqwest::StatusCode;
 use serde_json::json;
 

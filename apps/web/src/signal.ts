@@ -3,7 +3,7 @@ import type { RunEvent, RunListItem, Task } from '../../../packages/contracts/co
 import type { ActivityEntry } from './activity'
 
 // Same identity palette as the Android « Signal » design: readable on white text in both themes.
-const identityColors = ['#4545EF', '#D9542F', '#B23F8C', '#12806F', '#8A5A12', '#3F7FBF', '#7A4FD1', '#5E6B2E']
+const identityColors = ['#14365A', '#D9542F', '#B23F8C', '#12806F', '#8A5A12', '#3F7FBF', '#7A4FD1', '#5E6B2E']
 
 /** A deterministic colour per agent or project, matching Android's `String.hashCode`. */
 export function identityColor(key: string) {

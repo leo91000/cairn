@@ -9,7 +9,6 @@ use axum::{
     response::IntoResponse,
 };
 use base64::{Engine, engine::general_purpose::STANDARD};
-use common::RelayContext;
 use cairn_installation::{
     auth,
     config::{Config, MAIN_AGENT_ID, id, now},
@@ -25,6 +24,7 @@ use cairn_installation::{
     storage::{Disk, LazyDisk, bootstrap, policy::Policy, remote::RemoteSource, runtime},
     validation::parse,
 };
+use common::RelayContext;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::{
@@ -637,7 +637,7 @@ async fn node_installer_cannot_hide_a_different_download_origin_in_its_url() {
         config.public_url = configured.into();
         let config_file = owner.root().join("manager-config.json");
         std::fs::write(&config_file, serde_json::to_vec(&config).unwrap()).unwrap();
-        let mut manager = tokio::process::Command::new(env!("CARGO_BIN_EXE_leo"))
+        let mut manager = tokio::process::Command::new(env!("CARGO_BIN_EXE_cairn"))
             .env("CAIRN_CONFIG", &config_file)
             .env(
                 "CAIRN_NODE_IMAGE",
@@ -813,7 +813,7 @@ async fn connector_enrolls_over_http_without_printing_or_exposing_its_token() {
     let server = owner.serve(listener);
     let invitation = owner.invite("Linux connector").await;
     let state = owner.root().join("node");
-    let mut child = tokio::process::Command::new(env!("CARGO_BIN_EXE_leo"))
+    let mut child = tokio::process::Command::new(env!("CARGO_BIN_EXE_cairn"))
         .args([
             "node-enroll",
             &format!("http://{host}"),
@@ -1024,7 +1024,7 @@ async fn prepared_node_disks_use_the_enrolled_manager_origin() {
         .to_string(),
     )
     .unwrap();
-    let mut connector = tokio::process::Command::new(env!("CARGO_BIN_EXE_leo"))
+    let mut connector = tokio::process::Command::new(env!("CARGO_BIN_EXE_cairn"))
         .args(["node-connect", node_directory.to_str().unwrap()])
         .env("DATA_DIR", data)
         .env("RUNNER_URL", runner)
@@ -2300,7 +2300,7 @@ async fn assert_legacy_block_envelope_is_readable(
 }
 
 #[tokio::test]
-#[ignore = "requires loopback S3; run tests/node_s3_test.py"]
+#[ignore = "requires loopback S3; run scripts/tests/node_s3_test.py"]
 async fn encrypted_recovery_points_cross_the_outbound_relay_and_reject_incomplete_publication() {
     let (listener, address) = common::bind().await;
     let owner = Owner::at(address.to_string()).await;
@@ -3020,7 +3020,7 @@ async fn assert_moved_with_its_disk(owner: &Owner, run: &str, target: &str) {
 }
 
 #[tokio::test]
-#[ignore = "requires loopback S3; run tests/node_s3_test.py"]
+#[ignore = "requires loopback S3; run scripts/tests/node_s3_test.py"]
 async fn idle_conversations_move_twice_through_outbound_relays_and_failed_moves_stay_idle() {
     let (listener, address) = common::bind().await;
     let owner = Owner::at(address.to_string()).await;
@@ -3130,7 +3130,7 @@ async fn pending_movement_retries_a_lost_stop_without_stopping_a_later_execution
 }
 
 #[tokio::test]
-#[ignore = "requires loopback S3; run tests/node_s3_test.py"]
+#[ignore = "requires loopback S3; run scripts/tests/node_s3_test.py"]
 async fn queued_capacity_transfer_carries_unpublished_writes_and_keeps_the_source_after_failure() {
     let (listener, address) = common::bind().await;
     let owner = Owner::at(address.to_string()).await;
@@ -3550,7 +3550,7 @@ struct CaptureLog {
 }
 
 #[tokio::test]
-#[ignore = "requires loopback S3; run tests/node_s3_test.py"]
+#[ignore = "requires loopback S3; run scripts/tests/node_s3_test.py"]
 async fn coalesced_final_publication_survives_a_new_attempt_and_preserves_later_writes() {
     let root = TempDir::new().unwrap();
     let state = root.path().to_owned();
@@ -3942,7 +3942,7 @@ async fn assert_lost_acknowledgement_keeps_the_new_pointer(
 }
 
 #[tokio::test]
-#[ignore = "requires loopback S3; run tests/node_s3_test.py"]
+#[ignore = "requires loopback S3; run scripts/tests/node_s3_test.py"]
 async fn active_captures_name_the_last_published_recovery_point_as_baseline() {
     let root = TempDir::new().unwrap();
     let disk = root.path().join("disk");
@@ -4394,7 +4394,7 @@ fn s3api(args: &[&str]) -> std::process::Output {
 }
 
 #[tokio::test]
-#[ignore = "requires loopback S3; run tests/node_s3_test.py"]
+#[ignore = "requires loopback S3; run scripts/tests/node_s3_test.py"]
 async fn obsolete_object_collection_deletes_versions_without_deleting_prefix_neighbors() {
     let owner = Owner::new().await;
     assert!(std::env::var_os("CAIRN_NODE_TEST_S3_ENDPOINT").is_some());
@@ -4418,7 +4418,13 @@ async fn obsolete_object_collection_deletes_versions_without_deleting_prefix_nei
         .upload_bytes(b"neighbor".to_vec(), &neighbor)
         .await
         .unwrap();
-    let marker = s3api(&["delete-object", "--bucket", "cairn-node-test", "--key", &key]);
+    let marker = s3api(&[
+        "delete-object",
+        "--bucket",
+        "cairn-node-test",
+        "--key",
+        &key,
+    ]);
     assert!(marker.status.success());
     storage.purge_key(&key).await.unwrap();
     let listing = s3api(&[
@@ -4486,7 +4492,7 @@ fn paused_capture_controller(
 }
 
 #[tokio::test]
-#[ignore = "requires loopback S3; run tests/node_s3_test.py"]
+#[ignore = "requires loopback S3; run scripts/tests/node_s3_test.py"]
 async fn interrupted_first_publication_is_collected_after_restart_without_another_write() {
     for explicit_purge in [false, true] {
         let root = TempDir::new().unwrap();
@@ -4667,7 +4673,7 @@ fn shared_publication_controller(
 }
 
 #[tokio::test]
-#[ignore = "requires loopback S3; run tests/node_s3_test.py"]
+#[ignore = "requires loopback S3; run scripts/tests/node_s3_test.py"]
 async fn shared_publications_reuse_across_runs_migrate_legacy_and_ignore_slow_cleanup() {
     let root = TempDir::new().unwrap();
     let disk = root.path().join("source");

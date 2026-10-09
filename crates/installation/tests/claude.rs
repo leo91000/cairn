@@ -1,6 +1,5 @@
 mod common;
 
-use common::eventually;
 use cairn_installation::{
     accounts::{self, KIND, Lease},
     claude, claude_process,
@@ -9,6 +8,7 @@ use cairn_installation::{
     provider::Provider,
     service::Service,
 };
+use common::eventually;
 use serde_json::{Value, json};
 use std::{collections::BTreeSet, sync::Arc, time::Duration};
 use tempfile::TempDir;

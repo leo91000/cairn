@@ -1,10 +1,10 @@
 mod common;
 
-use common::RelayedInstallation;
 use cairn_protocol::{
     Frame,
     direct::{DirectAuthorization, DirectSignal},
 };
+use common::RelayedInstallation;
 use reqwest::{Method, StatusCode};
 use rtc::peer_connection::configuration::setting_engine::{
     SctpMaxMessageSize, SettingEngineBuilder,
@@ -1175,12 +1175,7 @@ async fn a_member_holding_reassembly_capacity_does_not_disconnect_the_owner() {
     let (waiting, waiting_channel, _) =
         client_with_fingerprint(&relay, waiting_cookie, &waiting_session, false).await;
     let (owner, owner_channel, _) = client(&relay).await;
-    partial_transfer(
-        member_channel.as_ref(),
-        1,
-        cairn_protocol::MAX_FRAME - 1024,
-    )
-    .await;
+    partial_transfer(member_channel.as_ref(), 1, cairn_protocol::MAX_FRAME - 1024).await;
     send_frame(
         member_channel.as_ref(),
         2,
@@ -1536,12 +1531,7 @@ async fn reservations_expire_even_when_the_peer_stops_reading_rejections() {
     production_connector(&mut relay).await;
     let (holder, holder_channel, _) = client(&relay).await;
     let (waiter, waiter_channel, _) = client(&relay).await;
-    partial_transfer(
-        holder_channel.as_ref(),
-        1,
-        cairn_protocol::MAX_FRAME - 1024,
-    )
-    .await;
+    partial_transfer(holder_channel.as_ref(), 1, cairn_protocol::MAX_FRAME - 1024).await;
     send_frame(
         holder_channel.as_ref(),
         2,
@@ -1603,12 +1593,7 @@ async fn reassembly_waiters_survive_abort_close_and_expiry_of_the_holder() {
     let (holder, holder_channel, _) = client(&relay).await;
     let (waiter, waiter_channel, _) = client(&relay).await;
     // Both peers belong to the same verified account, so they share its cap.
-    partial_transfer(
-        holder_channel.as_ref(),
-        1,
-        cairn_protocol::MAX_FRAME - 1024,
-    )
-    .await;
+    partial_transfer(holder_channel.as_ref(), 1, cairn_protocol::MAX_FRAME - 1024).await;
     send_frame(
         holder_channel.as_ref(),
         2,
@@ -1645,12 +1630,7 @@ async fn reassembly_waiters_survive_abort_close_and_expiry_of_the_holder() {
         .unwrap();
     assert!(matches!(reply.await, Frame::Response(reply) if reply.status == 200));
 
-    partial_transfer(
-        holder_channel.as_ref(),
-        3,
-        cairn_protocol::MAX_FRAME - 1024,
-    )
-    .await;
+    partial_transfer(holder_channel.as_ref(), 3, cairn_protocol::MAX_FRAME - 1024).await;
     send_frame(
         holder_channel.as_ref(),
         4,
@@ -1681,12 +1661,7 @@ async fn reassembly_waiters_survive_abort_close_and_expiry_of_the_holder() {
 
     // Expiry releases this peer's own reservation while it is backpressured.
     // It then drains late fragments and continues serving fresh requests.
-    partial_transfer(
-        waiter_channel.as_ref(),
-        5,
-        cairn_protocol::MAX_FRAME - 1024,
-    )
-    .await;
+    partial_transfer(waiter_channel.as_ref(), 5, cairn_protocol::MAX_FRAME - 1024).await;
     send_frame(
         waiter_channel.as_ref(),
         6,

@@ -30,7 +30,7 @@ async fn failed_claims_leave_the_installation_running_without_a_relay_identity()
         tokio::fs::create_dir(root.path().join("home"))
             .await
             .unwrap();
-        let mut command = Command::new(env!("CARGO_BIN_EXE_leo"));
+        let mut command = Command::new(env!("CARGO_BIN_EXE_cairn"));
         command
             .arg("serve")
             .env("DATA_DIR", root.path().join("data"))

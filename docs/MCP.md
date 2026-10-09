@@ -12,7 +12,7 @@ without retaining a session; standalone SSE GET and session DELETE return 405.
 The run queue persists
 in SQLite independently of MCP transport state.
 
-The official SDK client is exercised over real HTTP in `tests/mcp.test.ts` with:
+The official SDK client is exercised over real HTTP in `scripts/tests/mcp.test.ts` with:
 
 ```ts
 const client = new Client(

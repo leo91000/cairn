@@ -1,6 +1,6 @@
 use axum::{Json, Router, extract::Form, routing::post};
-use jwt_simple::prelude::*;
 use cairn_beacon::{FcmPushSender, PushSender, PushSubscription};
+use jwt_simple::prelude::*;
 use serde_json::{Value, json};
 use std::{
     collections::HashMap,

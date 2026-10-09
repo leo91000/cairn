@@ -8,10 +8,8 @@ WORKDIR /app
 FROM base AS build
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
 RUN --mount=type=cache,id=pnpm-store,target=/pnpm/store pnpm install --frozen-lockfile
-COPY apps/web/tsconfig.json apps/web/vite.config.ts apps/web/index.html apps/web/beacon.html ./
-COPY src ./apps/web/src
-COPY shared ./packages/contracts
-COPY public ./apps/web/public
+COPY apps/web ./apps/web
+COPY packages/contracts ./packages/contracts
 RUN pnpm build
 
 FROM rust:1.97.1-bookworm AS backend
@@ -32,8 +30,8 @@ RUN --mount=type=cache,id=cargo-registry,target=/usr/local/cargo/registry \
     && printf 'fn main() {}\n' > crates/beacon/src/main.rs \
     && printf '' > crates/protocol/src/lib.rs \
     && printf '' > crates/beacon/src/lib.rs && cargo build --locked --release --bin cairn --features ublk
-COPY backend ./crates/installation
-COPY relay-protocol ./crates/protocol
+COPY crates/installation ./crates/installation
+COPY crates/protocol ./crates/protocol
 COPY deploy/nodes ./deploy/nodes
 RUN --mount=type=cache,id=cargo-registry,target=/usr/local/cargo/registry \
     touch crates/installation/src/main.rs crates/installation/src/lib.rs crates/protocol/src/lib.rs && \
@@ -56,8 +54,8 @@ RUN --mount=type=cache,id=cargo-registry,target=/usr/local/cargo/registry \
     && printf '' > crates/beacon/src/lib.rs \
     && printf '' > crates/protocol/src/lib.rs \
     && cargo build --locked --release --bin cairn-beacon
-COPY official-service ./crates/beacon
-COPY relay-protocol ./crates/protocol
+COPY crates/beacon ./crates/beacon
+COPY crates/protocol ./crates/protocol
 COPY deploy/installations ./deploy/installations
 COPY deploy/nodes ./deploy/nodes
 RUN --mount=type=cache,id=cargo-registry,target=/usr/local/cargo/registry \

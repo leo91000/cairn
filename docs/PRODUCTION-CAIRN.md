@@ -484,3 +484,37 @@ per source IP per second and 1000 responses globally per second remain, with
 at most 1000 tracked IPs and 512-byte request parsing. No unbounded state or
 application content enters STUN. Requiring padded requests would break minimal
 standard WebRTC Binding discovery, so #117 documents this bounded ratio instead.
+
+## Naming cutover: manual actions reserved for Léo
+
+After review and #105 qualification, before the first approved release:
+
+- GitHub `production`: configure `CAIRN_BEACON_ORIGIN=https://cairn.build`,
+  `COOLIFY_URL`, the new Beacon `COOLIFY_SERVICE_UUID`, and private `COOLIFY_TOKEN`;
+  keep environment approval required. Replace the former product-prefixed variable
+  names rather than providing aliases.
+- Coolify: use the production Compose above and configure its `CAIRN_BEACON_*`,
+  `CAIRN_INSTALLATION_IMAGE` and `CAIRN_PROXY_*` values. The paired images are
+  `ghcr.io/leo91000/cairn` and `ghcr.io/leo91000/cairn-beacon`; approve only validated
+  digests from the same Git tree. Replace the old service and timers as described
+  in step 2; no production configuration is changed by this PR.
+- Resend: verify `cairn.build`, authorize the new sender `Cairn <cairn@cairn.build>`
+  and put its sending key in `CAIRN_BEACON_EMAIL_KEY`. The email wordmark is served
+  by Beacon at `/brand/cairn-wordmark.png`.
+- OAuth: rename the displayed product Cairn and configure the Google/GitHub
+  homepage, origins and callbacks in step 4. Preserve the separation between
+  account sign-in and coding-agent repository credentials.
+- Android/Firebase: register a **new** app `build.cairn.app`, reinstall the app,
+  configure the four `CAIRN_ANDROID_FIREBASE_*` public workflow variables and
+  repository `CAIRN_BEACON_ORIGIN`; register the approved signing certificate in
+  Firebase/Google and `CAIRN_BEACON_ANDROID_CERTIFICATES` for `assetlinks.json`.
+  Prepare the signing key with alias `cairn-android` (the prior key must be
+  re-aliased or a new key provisioned; changing an environment variable does not
+  change a keystore alias).
+- GitHub repository: **Léo** renames `leo91000/leo-agent-manager` to
+  `leo91000/cairn`. Then update the repository references listed in
+  [naming exceptions](NAMING-EXCEPTIONS.md). GitHub redirects old links; the image
+  paths already use Cairn and remain independent of the repository name.
+
+No DNS, provider setting, repository rename, release or deployment is performed
+by implementing #122/#132.

@@ -104,8 +104,8 @@ async function main() {
     // Include reset/setup and any maintenance, so a changed probe SQL cannot
     // evade the assertion. Public requests must not scale database work.
     assert.ok(healthQueries <= 5, `100 public probes must use cached readiness, observed ${healthQueries} database queries`)
-    assert.equal((await docker('exec', name, 'stat', '-c', '%u:%g', '/app/dist/official.html')).stdout.trim(), '0:0', 'Bundled web assets must be root-owned')
-    await docker('exec', name, 'sh', '-c', 'test ! -w /app/dist && test ! -w /app/dist/official.html')
+    assert.equal((await docker('exec', name, 'stat', '-c', '%u:%g', '/app/dist/beacon.html')).stdout.trim(), '0:0', 'Bundled web assets must be root-owned')
+    await docker('exec', name, 'sh', '-c', 'test ! -w /app/dist && test ! -w /app/dist/beacon.html')
     const root = await fetch(origin)
     assert.equal(root.status, 200)
     assert.equal(root.headers.get('x-frame-options'), 'DENY')

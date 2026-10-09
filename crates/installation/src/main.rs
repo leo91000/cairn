@@ -122,8 +122,8 @@ where
         "claim" => {
             let config = Config::load()?;
             let official = std::env::var("CAIRN_BEACON_ORIGIN").ok();
-            let name =
-                std::env::var("CAIRN_INSTALLATION_NAME").unwrap_or_else(|_| "My installation".into());
+            let name = std::env::var("CAIRN_INSTALLATION_NAME")
+                .unwrap_or_else(|_| "My installation".into());
             cairn_installation::relay::device_claim(
                 official.as_deref(),
                 &config.data_dir.join("installation-relay"),
@@ -320,8 +320,8 @@ where
         let claimed = async {
             let origin = std::env::var("CAIRN_BEACON_ORIGIN")
                 .map_err(|_| Error::bad("Set CAIRN_BEACON_ORIGIN to claim this installation."))?;
-            let name =
-                std::env::var("CAIRN_INSTALLATION_NAME").unwrap_or_else(|_| "My installation".into());
+            let name = std::env::var("CAIRN_INSTALLATION_NAME")
+                .unwrap_or_else(|_| "My installation".into());
             cairn_installation::relay::claim(&origin, &relay_directory, &code, &name).await
         }
         .await;
@@ -393,7 +393,8 @@ async fn chat(config: &Config, plan: Value, stop: CancellationToken) -> Result<i
     let (tx, mut rx) = tokio::sync::mpsc::channel::<Value>(32);
     let run_id = cairn_installation::performance::identity(text(&plan, "runId"));
     let attempt_id = cairn_installation::performance::identity(text(&plan, "attemptId"));
-    let span = tracing::info_span!(target: "cairn_performance", "agent_attempt", run_id, attempt_id);
+    let span =
+        tracing::info_span!(target: "cairn_performance", "agent_attempt", run_id, attempt_id);
     let provider = if plan["provider"] == "claude" {
         cairn_installation::provider::Provider::Claude
     } else {
@@ -444,7 +445,8 @@ async fn chat(config: &Config, plan: Value, stop: CancellationToken) -> Result<i
             )
             .await;
         }
-        cairn_installation::chat_process::run(config, Path::new(&home), plan, tx.clone(), stop).await
+        cairn_installation::chat_process::run(config, Path::new(&home), plan, tx.clone(), stop)
+            .await
     }
     .instrument(span)
     .await;

@@ -51,7 +51,7 @@ form's DOM subtree. Positioning responds to scrolling, resizing, and the visual
 viewport, with upward opening where space is limited. This application targets
 modern browsers with native popover support.
 
-`tests/select.test.ts` checks search and window geometry. The Chromium/WebKit
+`apps/web/tests/select.test.ts` checks search and window geometry. The Chromium/WebKit
 journeys check every editor's menu at four viewport sizes, keyboard selection
 from 10,000 options with fewer than 20 mounted rows, accent-insensitive search,
 empty results, and focus restoration.

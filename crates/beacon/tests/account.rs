@@ -1,7 +1,7 @@
 mod common;
 
-use common::Fixture;
 use cairn_beacon::router;
+use common::Fixture;
 use reqwest::{Client, StatusCode};
 use serde_json::{Value, json};
 use sqlx_core::query::query;
@@ -74,7 +74,7 @@ impl SoftwarePasskey {
 }
 
 #[tokio::test]
-async fn email_code_creates_a_verified_leo_account_and_a_persistent_session() {
+async fn email_code_creates_a_verified_cairn_account_and_a_persistent_session() {
     let app = Fixture::new().await;
     let response = app
         .post(
@@ -1272,7 +1272,7 @@ async fn oauth_linking_rechecks_proof_and_session_after_waiting_for_the_account_
 }
 
 #[tokio::test]
-async fn a_linked_oauth_identity_keeps_its_leo_account_when_the_provider_email_changes() {
+async fn a_linked_oauth_identity_keeps_its_cairn_account_when_the_provider_email_changes() {
     let provider = OAuthMock::new().await;
     provider.state.profiles.lock().unwrap()["google"]["email"] = json!("relay-owner@example.test");
     provider.state.profiles.lock().unwrap()["emails"][1]["email"] =
@@ -1440,7 +1440,7 @@ async fn github_sign_in_requires_an_acknowledged_revocation_not_a_redirect() {
 }
 
 #[tokio::test]
-async fn verified_google_and_github_emails_attach_to_the_same_leo_account() {
+async fn verified_google_and_github_emails_attach_to_the_same_cairn_account() {
     let provider = OAuthMock::new().await;
     let app = Fixture::with_oauth(provider.providers()).await;
     let (challenge, code) = app.code("alice@example.test").await;
@@ -1707,8 +1707,7 @@ async fn verified_google_and_github_emails_attach_to_the_same_leo_account() {
 async fn passkeys_and_email_reactivation_preserve_methods_with_small_database_pools() {
     for connections in [1, 5] {
         let app =
-            Fixture::with_pool_size(cairn_beacon::OAuthProviders::default(), connections)
-                .await;
+            Fixture::with_pool_size(cairn_beacon::OAuthProviders::default(), connections).await;
         let (challenge, code) = app.code("passkey@example.test").await;
         let response = app.verify(&challenge, &code).await;
         let cookie = response.headers()["set-cookie"]

@@ -1,5 +1,5 @@
 <resources>
-    <color name="cairn_brand">#4545F5</color>
+    <color name="cairn_brand">#14365A</color>
     <!-- Launch window matches the Compose "Signal" background to avoid a flash on start. -->
     <color name="cairn_window">#F4F2EC</color>
 </resources>

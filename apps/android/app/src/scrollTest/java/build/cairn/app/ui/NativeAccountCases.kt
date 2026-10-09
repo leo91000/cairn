@@ -63,7 +63,10 @@ abstract class NativeAccountCases {
                                     .setBody(
                                         """{"challenge":"challenge","nonce":"nonce","clientId":"client"}"""
                                     )
-                                    .addHeader("Set-Cookie", "cairn_oauth=browser; Path=/; HttpOnly")
+                                    .addHeader(
+                                        "Set-Cookie",
+                                        "cairn_oauth=browser; Path=/; HttpOnly",
+                                    )
                             path == "/api/account/oauth/github/start" ->
                                 return MockResponse()
                                     .setBody(
@@ -87,7 +90,10 @@ abstract class NativeAccountCases {
                                     .setBody(
                                         """{"authenticated":true,"csrf":"csrf","account":{"id":"account","email":"alice@example.test"},"installations":[]}"""
                                     )
-                                    .addHeader("Set-Cookie", "cairn_session=cairn; Path=/; HttpOnly")
+                                    .addHeader(
+                                        "Set-Cookie",
+                                        "cairn_session=cairn; Path=/; HttpOnly",
+                                    )
                             }
                         }
                         return MockResponse().setBody("{}").setResponseCode(404)

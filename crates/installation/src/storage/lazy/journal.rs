@@ -9,8 +9,8 @@ use std::{
 
 const HEADER: usize = 112;
 const SEGMENT_BYTES: u64 = 64 * 1024 * 1024;
-const LEGACY_MAGIC: &[u8; 8] = b"CAIRNJNL02";
-const MAGIC: &[u8; 8] = b"CAIRNJNL03";
+const LEGACY_MAGIC: &[u8; 8] = b"CAIRNJ02";
+const MAGIC: &[u8; 8] = b"CAIRNJ03";
 
 #[cfg(test)]
 pub(super) fn crash_point(directory: &Path, phase: &str) {

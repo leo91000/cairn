@@ -80,7 +80,7 @@ class NativeNotificationReceiver(
                 .addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP)
         val notification =
             NotificationCompat.Builder(context, channel)
-                .setSmallIcon(R.drawable.ic_leo)
+                .setSmallIcon(R.drawable.ic_cairn)
                 .setContentTitle(
                     if (question != null) "Cairn attend votre réponse"
                     else "Une conversation requiert votre attention"

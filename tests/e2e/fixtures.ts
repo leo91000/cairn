@@ -1,5 +1,5 @@
 import type { Page } from '@playwright/test'
-import type { Service } from '../legacy/server/service'
+import type { Service } from '../fixtures/legacy/server/service'
 import { execFileSync, spawn } from 'node:child_process'
 import { once } from 'node:events'
 import {
@@ -13,9 +13,9 @@ import os from 'node:os'
 import path from 'node:path'
 import process from 'node:process'
 import { test as base, expect } from '@playwright/test'
-import { config as loadConfig } from '../legacy/server/config'
-import { Service as SeedService } from '../legacy/server/service'
-import { Store } from '../legacy/server/store'
+import { config as loadConfig } from '../fixtures/legacy/server/config'
+import { Service as SeedService } from '../fixtures/legacy/server/service'
+import { Store } from '../fixtures/legacy/server/store'
 import { executeOfficialSql, officialRelayFixture } from './official-relay-fixture'
 
 export interface Workspace {

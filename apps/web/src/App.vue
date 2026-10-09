@@ -30,7 +30,6 @@ import {
   LogOut,
   Plus,
   Search,
-  Zap,
 } from './icons'
 import { useMissionRuns } from './mission-runs'
 import { modifier, typingTarget } from './shortcuts'
@@ -183,8 +182,13 @@ function openShortcuts() {
   </div>
   <div v-else class="shell flex min-h-0 overflow-hidden" :class="state.installationId ? 'flex-1' : 'h-dvh'">
     <nav class="rail z-30 flex w-19 shrink-0 flex-col items-center gap-1 border-r border-line bg-canvas pb-4 pt-4 phone:hidden" aria-label="Workspace navigation">
-      <RouterLink to="/" class="press mb-4 grid size-10 place-items-center rounded-xl bg-brand text-white shadow-[0_6px_16px_-6px_#4545ef99]" aria-label="Cairn home">
-        <Icon :name="Zap" :size="20" />
+      <RouterLink to="/" class="press mb-4 grid size-10 place-items-center rounded-xl" aria-label="Cairn home">
+        <img
+          src="/brand/cairn-app-dark.svg"
+          alt=""
+          width="40"
+          height="40"
+        >
       </RouterLink>
       <div class="relative flex flex-col gap-1">
         <span v-if="place >= 0" class="rail-pill absolute left-0 top-0 h-15 w-15 rounded-2xl bg-surface shadow-arcade" :style="{ transform: `translateY(${place * 64}px)` }" />

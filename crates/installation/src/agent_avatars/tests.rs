@@ -63,7 +63,7 @@ impl Fixture {
         );
         let provider = tokio::spawn(async move { axum::serve(listener, mock).await.unwrap() });
         let codex = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../tests/fixtures/avatar-codex.mjs");
+            .join("../../tests/fixtures/avatar-codex.mjs");
         let config: Config = serde_json::from_value(json!({
             "dataDir": root.path().join("data"),
             "home": root.path().join("home"),

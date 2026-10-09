@@ -103,13 +103,13 @@ The repeatable checks live beside the implementation:
   Conversation archival and restoration retain a sequential 256 KiB outer
   protocol, so their gains differ from the 4 MiB snapshot fixture. Normal node
   movements use recovery-point blocks, not this archive transfer loop.
-- `python3 tests/guest_projects_test.py`: real mount-namespace regression for
+- `python3 scripts/tests/guest_projects_test.py`: real mount-namespace regression for
   atomic read-only project publication, retry and reboot restoration. An
   unprivileged observer must never gain write access while mounts are prepared.
-- `python3 tests/node_supervisor_test.py`: four shipped-supervisor CLI scenarios
+- `python3 scripts/tests/node_supervisor_test.py`: four shipped-supervisor CLI scenarios
   covering update, rollback, lost acknowledgement and retained-runtime download.
   Docker and master responses are fixtures.
-- `uv run --with 'moto[server]==5.2.3' python tests/node_s3_test.py`: actual AWS CLI
+- `uv run --with 'moto[server]==5.2.3' python scripts/tests/node_s3_test.py`: actual AWS CLI
   against a loopback S3-compatible fixture with synthetic credentials. Covers
   remote retrieval after cache removal, integrity, retention, quota exhaustion,
   older-point fallback and complete purge. This is not a live AWS account test.

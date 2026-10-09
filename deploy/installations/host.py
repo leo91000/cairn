@@ -20,7 +20,7 @@ import urllib.request
 
 ROOT = Path(os.environ.get('CAIRN_INSTALLATION_ROOT', '/var/lib/cairn-installation'))
 GARAGE_IMAGE = 'dxflrs/garage@sha256:866bd13ed2038ba7e7190e840482bc27234c4afaf77be8cfa439ae088c1e4690'
-IMAGE = re.compile(r'^ghcr\.io/leo91000/leo-agent-manager@sha256:[a-f0-9]{64}$')
+IMAGE = re.compile(r'^ghcr\.io/leo91000/cairn@sha256:[a-f0-9]{64}$')
 
 
 def atomic(path, data):

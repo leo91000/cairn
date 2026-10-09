@@ -666,9 +666,9 @@ async fn session_expiration_closes_the_lease_and_sends_only_session_revocation()
 
 #[tokio::test]
 async fn session_revocation_preserves_other_devices_and_denies_further_grants_or_renewal() {
-    use common::login;
     use cairn_installation::direct::DirectEvent;
     use cairn_protocol::direct::DirectRevocation;
+    use common::login;
     for revoke_others in [false, true] {
         let relay = RelayedInstallation::new(axum::Router::new()).await;
         sqlx_core::query::query("UPDATE account_rate_limits SET resets_at = now() - interval '1 second' WHERE key LIKE 'email:%'")
@@ -1812,8 +1812,8 @@ async fn installation_accepts_bounded_signing_clock_skew_but_rejects_long_lived_
 
 #[tokio::test]
 async fn one_members_signaling_budget_does_not_block_the_owner_and_refusals_are_visible() {
-    use common::stream_accounts;
     use cairn_protocol::direct::DirectSignal;
+    use common::stream_accounts;
     let relay = RelayedInstallation::new(axum::Router::new()).await;
     let cookies = stream_accounts(&relay).await;
     let member_cookie = &cookies[1];

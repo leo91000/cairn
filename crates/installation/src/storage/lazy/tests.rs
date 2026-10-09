@@ -114,7 +114,7 @@ fn old_sha256_segment_and_new_blake3_frames_can_share_a_journal() {
     drop(disk);
     let path = root.path().join("payload-1-1.segment");
     let mut frame = std::fs::read(&path).unwrap();
-    frame[..8].copy_from_slice(b"CAIRNJNL02");
+    frame[..8].copy_from_slice(b"CAIRNJ02");
     let header = Sha256::digest(&frame[..48]);
     frame[48..80].copy_from_slice(&header);
     let mut digest = Sha256::new();
@@ -455,7 +455,7 @@ fn interrupted_tail_is_trimmed_and_missing_acknowledged_segments_are_rejected() 
         .append(true)
         .open(&path)
         .unwrap();
-    tail.write_all(b"CAIRNJNL02partial").unwrap();
+    tail.write_all(b"CAIRNJ02partial").unwrap();
     tail.sync_all().unwrap();
     let disk = LazyDisk::open(root.path(), source.clone()).unwrap();
     assert_eq!(std::fs::metadata(&path).unwrap().len(), length);

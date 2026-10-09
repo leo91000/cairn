@@ -7,9 +7,9 @@ import { createServer } from 'node:http'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import process from 'node:process'
-import { config as loadConfig } from '../legacy/server/config'
-import { Service as SeedService } from '../legacy/server/service'
-import { Store } from '../legacy/server/store'
+import { config as loadConfig } from '../fixtures/legacy/server/config'
+import { Service as SeedService } from '../fixtures/legacy/server/service'
+import { Store } from '../fixtures/legacy/server/store'
 
 // Shared by journeys-official-relay and the network bench: real processes, fake mail only.
 export async function officialRelayFixture(port = 4395, listen = '127.0.0.1', directory = tmpdir()) {

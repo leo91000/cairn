@@ -4,7 +4,6 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
@@ -345,17 +344,25 @@ private fun Stamp(value: Long, now: Long) {
 
 @Composable
 internal fun Wordmark() {
-    Row(verticalAlignment = Alignment.CenterVertically) {
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        androidx.compose.foundation.Image(
+            painter = androidx.compose.ui.res.painterResource(build.cairn.app.R.drawable.ic_cairn),
+            contentDescription = null,
+            modifier =
+                Modifier.size(40.dp)
+                    .background(
+                        androidx.compose.ui.graphics.Color(0xFF14365A),
+                        androidx.compose.foundation.shape.RoundedCornerShape(10.dp),
+                    ),
+        )
         Text(
-            "cairn",
+            "Cairn",
             style = MaterialTheme.typography.headlineMedium,
             fontWeight = FontWeight.Bold,
-            letterSpacing = MaterialTheme.typography.headlineMedium.letterSpacing,
-        )
-        Box(
-            Modifier.padding(start = 2.dp, top = 8.dp)
-                .size(8.dp)
-                .background(MaterialTheme.colorScheme.primary, CircleShape)
+            color = MaterialTheme.colorScheme.primary,
         )
     }
 }

@@ -111,7 +111,7 @@ are configured; tag CI uses a persistent release key. Never commit a signing key
   the activity pauses following; scrolling toward older text disables it. Scrolling
   to the end or tapping the down arrow resumes following, including bottom padding.
 - Semantic colors match `src/styles/theme.css` at `207ca4f`: blue-violet accent
-  `#4545ef`, ink `#28283c`, canvas `#fdfcfe`; dark accent `#b8b2ff`, canvas `#1b1b20`,
+  `#14365a`, ink `#28283c`, canvas `#fdfcfe`; dark accent `#8db8e8`, canvas `#1b1b20`,
   surface `#222228`. Material roles also map borders, muted text and error colors.
   Settings → Appearance offers System, Light and Dark, saved on the device.
   Status/navigation bar contrast follows the selected appearance. Native typography,
@@ -197,7 +197,7 @@ The Android workflow does not deploy the server or publish to Google Play.
 Optional native UI test captures (fixture data only):
 
 ```sh
-./gradlew testDebugUnitTest -PleoScreenshotsDir=/tmp/cairn-android-captures
+./gradlew testDebugUnitTest -PcairnScreenshotsDir=/tmp/cairn-android-captures
 ```
 
 ## MCP OAuth and deployment

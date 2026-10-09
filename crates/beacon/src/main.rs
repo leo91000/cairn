@@ -35,6 +35,21 @@ struct HttpEmailSender {
     from: String,
 }
 
+fn escape_html(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&#39;")
+}
+
+fn branded_email(body: &str) -> String {
+    format!(
+        r#"<html><body style="background:#F4F2EC;color:#16151D;font-family:Arial,sans-serif"><div style="max-width:520px;margin:32px auto;padding:24px"><img src="https://cairn.build/brand/cairn-wordmark.png" width="156" alt="Cairn" style="display:block;margin-bottom:32px">{body}</div></body></html>"#
+    )
+}
+
 #[async_trait]
 impl EmailSender for HttpEmailSender {
     async fn send_code(&self, email: &str, code: &str) -> Result<(), String> {
@@ -42,6 +57,7 @@ impl EmailSender for HttpEmailSender {
             "from": self.from,
             "to": [email],
             "subject": "Your Cairn sign-in code",
+            "html": branded_email(&format!("<p>Your Cairn sign-in code is <strong>{code}</strong>.</p><p>It expires in 10 minutes. If you did not request it, ignore this email.</p>")),
             "text": format!("Your Cairn sign-in code is {code}. It expires in 10 minutes. If you did not request it, ignore this email."),
         });
         self.deliver(message).await
@@ -57,6 +73,7 @@ impl EmailSender for HttpEmailSender {
             "from": self.from,
             "to": [email],
             "subject": "Invitation to a Cairn installation",
+            "html": branded_email(&format!("<p>You have been invited to the Cairn installation <strong>{}</strong>.</p><p><a href=\"{}\">Sign in or create your Cairn account</a> with this email address to accept.</p><p>Members use the owner’s coding-agent accounts and secrets. This invitation expires in 7 days.</p>", escape_html(installation), escape_html(url))),
             "text": format!("You have been invited to the Cairn installation \"{installation}\". Sign in or create your Cairn account with this email address to accept: {url}\nMembers use the owner's coding-agent accounts and secrets. This invitation expires in 7 days."),
         })).await
     }
@@ -196,7 +213,7 @@ async fn run() -> Result<(), String> {
         .map_err(|_| "Invalid CAIRN_BEACON_LISTEN")?;
 
     let web = PathBuf::from(env::var("CAIRN_BEACON_WEB_DIR").unwrap_or_else(|_| "dist".into()));
-    if !web.join("official.html").is_file() {
+    if !web.join("beacon.html").is_file() {
         return Err(
             "Build the web application with pnpm build before starting the official service".into(),
         );
@@ -274,8 +291,7 @@ async fn run() -> Result<(), String> {
         };
     let relay = Relay::default();
     relay.set_stun_url(
-        env::var("CAIRN_BEACON_STUN_URL")
-            .unwrap_or(cairn_beacon::stun::url(&origin)?.to_owned()),
+        env::var("CAIRN_BEACON_STUN_URL").unwrap_or(cairn_beacon::stun::url(&origin)?.to_owned()),
     )?;
     let stun_address = env::var("CAIRN_BEACON_STUN_LISTEN").unwrap_or_else(|_| {
         if loopback {
@@ -338,9 +354,9 @@ async fn run() -> Result<(), String> {
         }),
     )
     .route("/api/{*path}", any(|| async { StatusCode::NOT_FOUND }))
-    .route_service("/", ServeFile::new(web.join("official.html")))
-    .route_service("/index.html", ServeFile::new(web.join("official.html")))
-    .fallback_service(ServeDir::new(&web).fallback(ServeFile::new(web.join("official.html"))))
+    .route_service("/", ServeFile::new(web.join("beacon.html")))
+    .route_service("/index.html", ServeFile::new(web.join("beacon.html")))
+    .fallback_service(ServeDir::new(&web).fallback(ServeFile::new(web.join("beacon.html"))))
     .layer(SetResponseHeaderLayer::if_not_present(
         header::CONTENT_SECURITY_POLICY,
         HeaderValue::from_static("frame-ancestors 'none'"),

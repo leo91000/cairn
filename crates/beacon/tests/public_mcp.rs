@@ -205,9 +205,7 @@ async fn oauth_pkce_registration_rotation_and_reuse_are_bound_to_the_selected_in
         .execute(&app.pool)
         .await
         .unwrap();
-    cairn_beacon::cleanup_expired(&app.pool)
-        .await
-        .unwrap();
+    cairn_beacon::cleanup_expired(&app.pool).await.unwrap();
 
     let response = exchange_request(&exchange).send().await.unwrap();
     assert_eq!(response.status(), StatusCode::OK);
@@ -248,9 +246,7 @@ async fn oauth_pkce_registration_rotation_and_reuse_are_bound_to_the_selected_in
         .unwrap();
     assert_eq!(rotated["scope"], "read");
     // Preserve active clients and used refresh proofs during rotation.
-    cairn_beacon::cleanup_expired(&app.pool)
-        .await
-        .unwrap();
+    cairn_beacon::cleanup_expired(&app.pool).await.unwrap();
 
     let call = |token: &Value| {
         app.client
@@ -298,6 +294,8 @@ async fn an_external_mcp_connection_returns_through_the_official_installation_an
         ])
         .current_dir(
             std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .parent()
+                .unwrap()
                 .parent()
                 .unwrap(),
         )

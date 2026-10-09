@@ -3,12 +3,12 @@ package build.cairn.app.data
 import android.content.Context
 import android.os.Build
 import androidx.work.*
+import build.cairn.app.BuildConfig
 import com.google.firebase.FirebaseApp
 import com.google.firebase.FirebaseOptions
 import com.google.firebase.messaging.FirebaseMessaging
 import com.google.firebase.messaging.FirebaseMessagingService
 import com.google.firebase.messaging.RemoteMessage
-import build.cairn.app.BuildConfig
 import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
 import kotlinx.coroutines.CancellationException

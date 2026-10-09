@@ -30,7 +30,7 @@ export function evidenceStatus(evidence, url) {
     throw new Error('Incomplete Intel Android boot, interaction and restart evidence')
   }
 
-  const prefix = `ghcr.io/${evidence.repository.toLowerCase()}@`
+  const prefix = `ghcr.io/${evidence.repository.split('/')[0].toLowerCase()}/cairn@`
   if (!evidence.image?.startsWith(prefix))
     throw new Error('Evidence image does not belong to this repository')
   return {

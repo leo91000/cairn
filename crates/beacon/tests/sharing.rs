@@ -514,7 +514,7 @@ async fn only_the_recipient_can_accept_and_only_the_owner_can_cancel_an_invitati
 }
 
 #[tokio::test]
-async fn relay_rate_limits_are_per_leo_account_and_headers_cannot_choose_a_bucket() {
+async fn relay_rate_limits_are_per_cairn_account_and_headers_cannot_choose_a_bucket() {
     let relay = RelayedInstallation::new(axum::Router::new()).await;
     let (cookie, session) = member(&relay, "member@example.test").await;
     let id = relay.session["installations"][0]["id"].as_str().unwrap();

@@ -1,5 +1,5 @@
 import { setTimeout } from 'node:timers/promises'
-import { mcpProvider } from '../mcp-provider'
+import { mcpProvider } from '../fixtures/mcp-provider'
 import {
   signIn as authenticateWorkspace,
   expect,

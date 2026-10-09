@@ -1,6 +1,6 @@
 import { readFile } from 'node:fs/promises'
 import process from 'node:process'
-import { buildApp } from '../legacy/server/app.ts'
+import { buildApp } from './legacy/server/app.ts'
 
 async function main() {
   const config = JSON.parse(await readFile(process.env.CAIRN_CONFIG, 'utf8'))

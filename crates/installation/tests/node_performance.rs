@@ -35,7 +35,8 @@ const MIB: usize = 1024 * 1024;
 #[tokio::test]
 #[ignore = "explicit ext4 bootstrap benchmark on persistent host storage"]
 async fn conversation_bootstrap_by_logical_disk_size() {
-    let directory = std::env::var("CAIRN_BOOTSTRAP_BENCH_ROOT").unwrap_or_else(|_| "/var/tmp".into());
+    let directory =
+        std::env::var("CAIRN_BOOTSTRAP_BENCH_ROOT").unwrap_or_else(|_| "/var/tmp".into());
     let context = json!({
         "master": "http://127.0.0.1:1/",
         "grant": "fixture-bootstrap",

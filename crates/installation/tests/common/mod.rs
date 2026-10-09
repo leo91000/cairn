@@ -46,13 +46,17 @@ pub fn config(root: &Path) -> Config {
 
 /// The repository checkout, which holds the Node tooling and `tests/`.
 pub fn repository() -> &'static Path {
-    Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap()
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
 }
 
 /// Path of a file under the repository's `tests/fixtures`.
 pub fn fixture_path(name: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../tests/fixtures")
+        .join("../../tests/fixtures")
         .join(name)
 }
 

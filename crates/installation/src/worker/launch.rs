@@ -48,8 +48,7 @@ pub(super) async fn execute(
     existing: bool,
     sensitive: &mut Vec<String>,
 ) -> Result<()> {
-    let span =
-        tracing::info_span!(target: "cairn_performance", "agent_execution", run_id = text(run, "id"));
+    let span = tracing::info_span!(target: "cairn_performance", "agent_execution", run_id = text(run, "id"));
     execute_inner(s, run, admission, cancel, checkpoint, existing, sensitive)
         .instrument(span)
         .await

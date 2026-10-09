@@ -664,7 +664,9 @@ internal fun ChatPage(
                             }
                         }
                         Box {
-                            ActionIcon("Options de la conversation", CairnIcons.More) { menu = true }
+                            ActionIcon("Options de la conversation", CairnIcons.More) {
+                                menu = true
+                            }
                             DropdownMenu(menu, { menu = false }) {
                                 DropdownMenuItem(
                                     text = { Text("Nouvelle conversation") },

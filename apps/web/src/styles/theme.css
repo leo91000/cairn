@@ -12,12 +12,12 @@
   --dark-text: #f3f2f7;
   --dark-muted: #9d9bab;
   --dark-subtle: #9898a5;
-  --dark-accent: #8c88ff;
+  --dark-accent: #8db8e8;
   --dark-danger: #ff7b5e;
   --dark-warn: #dfc38e;
   --dark-blue: #a2cbe2;
   --dark-purple: #ceb5e5;
-  --dark-accent-surface: #23224a;
+  --dark-accent-surface: #21354c;
   --dark-danger-surface: #3a211c;
   --dark-warn-surface: #383222;
   --dark-blue-surface: #21323c;
@@ -44,8 +44,8 @@
   --color-ink: light-dark(#16151d, var(--dark-text));
   --color-muted: light-dark(#6d6a78, var(--dark-muted));
   --color-line: light-dark(#e3dfd5, var(--dark-border));
-  --color-accent: light-dark(#4545ef, var(--dark-accent));
-  --color-soft: light-dark(#e8e8fd, var(--dark-accent-surface));
+  --color-accent: light-dark(#14365a, var(--dark-accent));
+  --color-soft: light-dark(#e4edf6, var(--dark-accent-surface));
   --color-sidebar: light-dark(#f9f8f4, var(--dark-inset));
   --color-canvas: light-dark(#f4f2ec, var(--dark-canvas));
   --color-surface: light-dark(#fff, var(--dark-surface));
@@ -56,16 +56,17 @@
   --color-variant: light-dark(#ece9e1, #22222b);
   --color-control: light-dark(#cfc9bb, var(--dark-control-border));
   --color-subtle: light-dark(#8a8694, var(--dark-subtle));
-  --color-brand: #4545ef;
-  --color-brand-hover: #3939db;
-  --color-brand-edge: light-dark(#16151d, #9390fb);
+  --color-brand: light-dark(#14365a, #8db8e8);
+  --color-on-brand: light-dark(#ffffff, #0f0f14);
+  --color-brand-hover: light-dark(#204b78, #a4c9ee);
+  --color-brand-edge: light-dark(#16151d, #346aa3);
   --color-danger: light-dark(#b53d22, var(--dark-danger));
   --color-danger-surface: light-dark(#fbe6df, var(--dark-danger-surface));
   --color-warning: light-dark(#66501c, #ffdf88);
   --color-warning-surface: light-dark(#fff0b5, #403722);
   --shadow-arcade: 0 1px 2px light-dark(#16151d0d, #0006);
   --shadow-pressed: none;
-  --shadow-focus: 0 0 0 3px light-dark(#dcdcfb, #8c88ff33);
+  --shadow-focus: 0 0 0 3px light-dark(#cadcf0, #8db8e833);
   /* « Signal »: coral marks what needs the user, green what succeeded. */
   --color-coral: light-dark(#e2512f, #ff7b5e);
   --color-coral-soft: light-dark(#fbe6df, #3a211c);
@@ -74,7 +75,7 @@
   --color-claude: light-dark(#d97757, #e08a6c);
   --shadow-lift: 0 10px 30px -12px light-dark(#16151d33, #000c);
   --shadow-pop: 0 24px 70px -20px light-dark(#16151d55, #000);
-  --color-bubble: light-dark(#16151d, #2b2a44);
+  --color-bubble: light-dark(#16151d, #21354c);
   --color-on-bubble: light-dark(#f4f2ec, #f3f2f7);
 }
 

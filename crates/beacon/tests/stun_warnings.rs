@@ -29,8 +29,7 @@ async fn repeated_receive_errors_are_counted_without_flooding_logs_and_binding_r
     let subscriber = tracing_subscriber::registry().with(WarningCounter(warnings.clone()));
     let status = cairn_beacon::stun::Status::default();
     let task = tokio::spawn(
-        cairn_beacon::stun::serve_with_status(socket, status.clone())
-            .with_subscriber(subscriber),
+        cairn_beacon::stun::serve_with_status(socket, status.clone()).with_subscriber(subscriber),
     );
     for count in 1..=3 {
         sender.send(&[0]).unwrap();

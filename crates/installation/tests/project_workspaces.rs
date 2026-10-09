@@ -1,6 +1,5 @@
 mod common;
 
-use common::reconfigure;
 use cairn_installation::{
     config::{Config, MAIN_AGENT_ID, id},
     execution, outcome, project_git, project_workspaces, run_output,
@@ -8,6 +7,7 @@ use cairn_installation::{
     service::{Service, covers},
     validation::text,
 };
+use common::reconfigure;
 use serde_json::{Value, json};
 use std::{
     os::unix::fs::PermissionsExt,

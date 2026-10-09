@@ -1,6 +1,5 @@
 mod common;
 
-use common::eventually;
 use cairn_installation::{
     accounts::{
         KIND, Lease, broker,
@@ -14,6 +13,7 @@ use cairn_installation::{
     rpc::Session,
     service::Service,
 };
+use common::eventually;
 use serde_json::{Value, json};
 use std::{collections::HashSet, sync::Arc, time::Duration};
 use tempfile::TempDir;
@@ -58,7 +58,7 @@ async fn chat_binary_correlates_native_rpc_and_activity_without_changing_stdout_
                 plan["runId"] = FIRST_RUN.into();
                 plan["attemptId"] = SECOND_RUN.into();
             }
-            let mut child = tokio::process::Command::new(env!("CARGO_BIN_EXE_leo"))
+            let mut child = tokio::process::Command::new(env!("CARGO_BIN_EXE_cairn"))
                 .args(["chat", &common::fixture(&format!("{provider}.mjs"))])
                 .env("CAIRN_CONFIG", &config_file)
                 .env("CODEX_HOME", &home)

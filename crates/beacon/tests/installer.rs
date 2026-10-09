@@ -39,15 +39,10 @@ async fn official_service_serves_a_root_installer_without_putting_claim_codes_in
 
 #[tokio::test]
 async fn release_is_unavailable_until_the_operator_approves_an_immutable_image() {
-    let image = format!(
-        "ghcr.io/leo91000/cairn@sha256:{}",
-        "1".repeat(64)
-    );
+    let image = format!("ghcr.io/leo91000/cairn@sha256:{}", "1".repeat(64));
     assert!(
-        cairn_beacon::installer::release_router(Some(
-            "ghcr.io/leo91000/cairn:latest".into()
-        ))
-        .is_err()
+        cairn_beacon::installer::release_router(Some("ghcr.io/leo91000/cairn:latest".into()))
+            .is_err()
     );
     for approved in [None, Some(image.clone())] {
         let router = cairn_beacon::installer::release_router(approved.clone()).unwrap();

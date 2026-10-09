@@ -4,15 +4,15 @@ Cairn permet de conduire des conversations avec des agents et de retrouver leur 
 
 ## Language
 
-**Service officiel** :
+**Beacon** :
 Le service hébergé par Cairn qui fournit l’interface web et mobile, les comptes Cairn et l’accès à toutes les installations d’un compte. Il ne conserve pas le travail des agents.
 
 **Compte Cairn** :
-L’identité d’une personne sur le service officiel, définie par une adresse e-mail vérifiée. Le code par e-mail, Google, GitHub et les passkeys ne sont que des moyens de s’y connecter. C’est la seule manière d’accéder à une installation.
+L’identité d’une personne sur le Beacon, définie par une adresse e-mail vérifiée. Le code par e-mail, Google, GitHub et les passkeys ne sont que des moyens de s’y connecter. C’est la seule manière d’accéder à une installation.
 _Avoid_ : utilisateur GitHub, compte d’agent de code
 
 **Installation** :
-Un ensemble autonome déployé par une personne sur ses machines, avec ses nodes d’exécution. Il conserve les conversations, les projets, les comptes d’agent de code et les secrets ; ces données ne quittent pas l’installation pour être conservées par le service officiel.
+Un ensemble autonome déployé par une personne sur ses machines, avec ses nodes d’exécution. Il conserve les conversations, les projets, les comptes d’agent de code et les secrets ; ces données ne quittent pas l’installation pour être conservées par le Beacon.
 _Avoid_ : node, set de nodes, instance, serveur
 
 **Revendication d’une installation** :
@@ -37,18 +37,18 @@ _Avoid_ : invité, collaborateur
 L’installation dans laquelle on travaille dans l’interface ; on n’en voit qu’une à la fois et on passe de l’une à l’autre.
 
 **Relais** :
-Le passage par le service officiel des échanges entre l’interface et une installation, sur la connexion sortante ouverte par l’installation. C’est la voie de secours quand la connexion directe est impossible ou interrompue ; il transporte le travail des agents sans le conserver.
+Le passage par le Beacon des échanges entre l’interface et une installation, sur la connexion sortante ouverte par l’installation. C’est la voie de secours quand la connexion directe est impossible ou interrompue ; il transporte le travail des agents sans le conserver.
 _Avoid_ : tunnel (qui désigne la connexion technique de l’installation)
 
 **Connexion directe** :
-L’échange entre l’interface et une installation sans passer par le service officiel, établi quand le réseau le permet et autorisé par l’installation pour un compte Cairn, une session et un rôle. Elle transporte les mêmes échanges que le relais et bascule sur lui si elle tombe.
+L’échange entre l’interface et une installation sans passer par le Beacon, établi quand le réseau le permet et autorisé par l’installation pour un compte Cairn, une session et un rôle. Elle transporte les mêmes échanges que le relais et bascule sur lui si elle tombe.
 _Avoid_ : accès local, P2P
 
 **Signalisation** :
-La mise en relation par le service officiel d’une interface et d’une installation pour établir une connexion directe. Elle transporte l’autorisation et les paramètres de connexion, jamais le contenu des conversations.
+La mise en relation par le Beacon d’une interface et d’une installation pour établir une connexion directe. Elle transporte l’autorisation et les paramètres de connexion, jamais le contenu des conversations.
 
 **Autorisation de connexion directe** :
-La permission signée par le service officiel, limitée à une installation, un compte, une session et quelques minutes, sans laquelle l’installation refuse une connexion directe. Sa révocation ou son échéance ferme la connexion.
+La permission signée par le Beacon, limitée à une installation, un compte, une session et quelques minutes, sans laquelle l’installation refuse une connexion directe. Sa révocation ou son échéance ferme la connexion.
 
 **Node d’exécution** :
 Machine rattachée à une installation pour y effectuer le travail d’un agent, selon ses capacités et les autorisations accordées. Une node peut être disponible de manière intermittente.

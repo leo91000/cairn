@@ -97,7 +97,9 @@ class AccountsJourneyTest {
                     vm.state.first { it.ready }
                     vm.connect(mock.url("/").toString())
                 }
-                CairnTheme("light") { if (state.session.authenticated) ConnectionsScreen(vm, state) }
+                CairnTheme("light") {
+                    if (state.session.authenticated) ConnectionsScreen(vm, state)
+                }
             }
             body(vm)
         }

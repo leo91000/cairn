@@ -14,12 +14,12 @@ import os from 'node:os'
 import path from 'node:path'
 import { performance } from 'node:perf_hooks'
 import process from 'node:process'
-import { Auth } from '../tests/legacy/server/auth.ts'
-import { Store } from '../tests/legacy/server/store.ts'
+import { Auth } from '../tests/fixtures/legacy/server/auth.ts'
+import { Store } from '../tests/fixtures/legacy/server/store.ts'
 
 async function main() {
   if (process.argv[2] === '--node-server') {
-    const { buildApp } = await import('../tests/legacy/server/app.ts')
+    const { buildApp } = await import('../tests/fixtures/legacy/server/app.ts')
     const config = JSON.parse(await readFile(process.env.CAIRN_CONFIG, 'utf8'))
     const { app } = await buildApp(config)
     const url = await app.listen({ port: 0, host: '127.0.0.1' })

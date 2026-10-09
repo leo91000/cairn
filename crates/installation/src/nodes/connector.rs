@@ -83,7 +83,8 @@ fn client() -> Result<reqwest::Client> {
 }
 
 fn runtime() -> String {
-    std::env::var("APP_RUNTIME_ID").unwrap_or_else(|_| format!("cairn-{}", env!("CARGO_PKG_VERSION")))
+    std::env::var("APP_RUNTIME_ID")
+        .unwrap_or_else(|_| format!("cairn-{}", env!("CARGO_PKG_VERSION")))
 }
 
 fn mi_b(blocks: libc::fsblkcnt_t, block_size: libc::c_ulong) -> u64 {

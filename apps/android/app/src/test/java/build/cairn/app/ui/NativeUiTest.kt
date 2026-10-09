@@ -23,7 +23,10 @@ class NativeUiTest {
     @get:Rule val compose = createComposeRule()
 
     private fun model() =
-        CairnViewModel(ApplicationProvider.getApplicationContext<Application>(), officialOrigin = "")
+        CairnViewModel(
+            ApplicationProvider.getApplicationContext<Application>(),
+            officialOrigin = "",
+        )
 
     private val workspace =
         Workspace(

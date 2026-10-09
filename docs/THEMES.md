@@ -73,3 +73,17 @@ Representative reviewed captures:
 The complete per-screen captures are retained in the `browser-evidence` CI artifact
 for 14 days. Screenshots and automated layout checks are review evidence, not a
 pixel-diff baseline or a claim to have tested every possible user-generated value.
+
+## Cairn · Balise palette
+
+The approved B identity uses Prussian blue `#14365A`, a light-mode primary
+button with white text, and `#8DB8E8` with dark ink `#0F0F14` in dark mode.
+Links use the same primary pair. The ocher flame `#F2A93B` belongs only to the
+logo; attention, warning and success retain their existing semantic colors.
+
+WCAG AA contrast ratios: white on Prussian blue **12.32:1**; Prussian blue on
+paper `#F4F2EC` **11.00:1**; dark ink on `#8DB8E8` **9.24:1**. The dark icon
+outline `#346AA3` distinguishes the mark from the dark canvas. Sources live in
+`apps/web/public/brand`; `uv run scripts/generate-brand-icons.py` regenerates
+PNG icons and social/email images. Icons at 16/32 px use the optical mark without
+arcs. Android uses the same geometry within the adaptive-icon safe zone.

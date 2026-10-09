@@ -254,7 +254,7 @@ async fn push_registration_rechecks_proof_and_session_after_waiting_for_all_lock
 }
 
 #[tokio::test]
-async fn web_push_devices_belong_to_the_signed_in_leo_account() {
+async fn web_push_devices_belong_to_the_signed_in_cairn_account() {
     let app = Fixture::new().await;
     let (cookie, session) = login(&app, "owner@example.test").await;
     let (other_cookie, other_session) = login(&app, "other@example.test").await;
@@ -1701,8 +1701,8 @@ async fn native_push_reuses_current_membership_and_drops_removed_members_immedia
 
 #[tokio::test]
 async fn one_android_device_receives_both_installations_without_installation_subscriptions() {
-    use futures_util::{SinkExt, StreamExt};
     use cairn_protocol::{Frame, NotificationEvent, NotificationKind};
+    use futures_util::{SinkExt, StreamExt};
     use tokio_tungstenite::tungstenite::{Message, client::IntoClientRequest};
 
     let mail = std::sync::Arc::new(PushMailbox::default());

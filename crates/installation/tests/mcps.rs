@@ -428,7 +428,9 @@ async fn agents_manage_connections_through_the_self_gateway_without_deadlocks_or
         .await
         .unwrap();
     let configuration = s.mcps.run_configuration(&s, &run).await.unwrap();
-    let token = configuration["env"]["CAIRN_MCP_RUN_TOKEN"].as_str().unwrap();
+    let token = configuration["env"]["CAIRN_MCP_RUN_TOKEN"]
+        .as_str()
+        .unwrap();
     let endpoint = format!(
         "{origin}/mcp-gateway/{}",
         connection["id"].as_str().unwrap()

@@ -1,6 +1,6 @@
 import { writeFile } from 'node:fs/promises'
 import path from 'node:path'
-import { limits } from '../codex-account-fixture'
+import { limits } from '../fixtures/codex-account-fixture'
 import { codexSignInMode, seedCodexAccount } from './accounts'
 import {
   signIn as authenticateWorkspace,

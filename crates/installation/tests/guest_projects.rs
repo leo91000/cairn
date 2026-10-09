@@ -82,7 +82,10 @@ fn slow_down_mount(bin: &Path) {
 #[ignore = "requires root and a private mount namespace with isolated /var/lib"]
 async fn read_only_publication_never_exposes_writable_data_and_recovers_after_restart() {
     assert_eq!(unsafe { libc::geteuid() }, 0);
-    assert_eq!(std::env::var("CAIRN_PROJECT_MOUNT_TEST").as_deref(), Ok("1"));
+    assert_eq!(
+        std::env::var("CAIRN_PROJECT_MOUNT_TEST").as_deref(),
+        Ok("1")
+    );
     let root = tempfile::tempdir().unwrap();
     let path = root.path();
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();

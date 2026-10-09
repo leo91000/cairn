@@ -1,8 +1,8 @@
 mod common;
 
+use cairn_protocol::{ApiResponse, Frame};
 use common::RelayedInstallation;
 use futures_util::{SinkExt, StreamExt};
-use cairn_protocol::{ApiResponse, Frame};
 use reqwest::StatusCode;
 use std::time::Duration;
 use tokio_tungstenite::tungstenite::{Message, client::IntoClientRequest};

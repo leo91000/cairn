@@ -296,7 +296,10 @@ abstract class CairnAccountCases {
                                     )
                                     signedIn = false
                                     return MockResponse()
-                                        .addHeader("Set-Cookie", "cairn_session=; Path=/; Max-Age=0")
+                                        .addHeader(
+                                            "Set-Cookie",
+                                            "cairn_session=; Path=/; Max-Age=0",
+                                        )
                                         .setBody("{}")
                                 }
                                 else -> {

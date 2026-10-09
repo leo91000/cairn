@@ -380,7 +380,12 @@ private fun AgentEditor(vm: CairnViewModel, state: Workspace, initial: Agent, cl
 }
 
 @Composable
-private fun ProjectEditor(vm: CairnViewModel, state: Workspace, initial: Project, close: () -> Unit) {
+private fun ProjectEditor(
+    vm: CairnViewModel,
+    state: Workspace,
+    initial: Project,
+    close: () -> Unit,
+) {
     var form by rememberForm(initial)
     var mode by rememberSaveable { mutableStateOf("local") }
     var repository by rememberSaveable { mutableStateOf("") }
