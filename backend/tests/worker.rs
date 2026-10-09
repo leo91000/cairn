@@ -1213,9 +1213,13 @@ async fn failed_provider_startup_can_retry_without_replaying_an_uncertain_launch
                         && path.trim_matches('/').split('/').count() == 2;
                     let reject_start = rejected && starting;
                     let lose_output = !rejected && path.ends_with("/logs");
-                    if request.method() == "DELETE"
-                        && fence_failures.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| remaining.checked_sub(1)).is_ok()
-                    {
+                    let fence_failed = request.method() == "DELETE"
+                        && fence_failures
+                            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
+                                remaining.checked_sub(1)
+                            })
+                            .is_ok();
+                    if fence_failed {
                         return StatusCode::SERVICE_UNAVAILABLE.into_response();
                     }
                     if failing.load(Ordering::SeqCst) && (reject_start || lose_output) {
@@ -1250,7 +1254,11 @@ async fn failed_provider_startup_can_retry_without_replaying_an_uncertain_launch
             .unwrap();
         tokio::fs::write(
             s.config.data_dir.join("storage-s3.json"),
-            json!({ "bucket": "fixture-storage", "endpoint": "https://127.0.0.1:1" }).to_string(),
+            json!({
+                "bucket": "fixture-storage",
+                "endpoint": "https://127.0.0.1:1",
+            })
+            .to_string(),
         )
         .await
         .unwrap();
@@ -1304,8 +1312,8 @@ async fn failed_provider_startup_can_retry_without_replaying_an_uncertain_launch
             .await;
 
         failing.store(false, Ordering::SeqCst);
-        let router = leo_agent_manager::http::router(s.clone()).await.unwrap();
-        let session = common::Session::new(&s.auth.session().await.unwrap());
+        let router = common::relay_fixture::router(s.clone()).await.unwrap();
+        let session = common::RelayContext::new(&common::relay_fixture::context(&s).await);
         let request = session
             .authorize(common::request(
                 "POST",
@@ -1333,7 +1341,21 @@ async fn failed_provider_startup_can_retry_without_replaying_an_uncertain_launch
                 .await;
             assert_eq!(completed["workspace"], first["workspace"]);
             assert_eq!(std::fs::read_to_string(&marker).unwrap(), "completed work");
+
+            let chat = s.chat_detail(&chat_id).await.unwrap();
+            assert_eq!(chat["messages"].as_array().unwrap().len(), 2);
+            assert_eq!(chat["messages"][1]["id"], next["id"]);
+            assert_eq!(chat["messages"][1]["status"], "delivered");
+
             let plans = controller.plans.lock().await;
+            let accepted_attempts = plans
+                .iter()
+                .filter(|plan| plan["chat"]["execution"]["messageId"] == next["id"])
+                .count();
+            assert_eq!(
+                accepted_attempts, 1,
+                "The interrupted message must be accepted exactly once",
+            );
             let retried = plans.last().unwrap();
             assert_eq!(retried["chat"]["sessionId"].is_null(), new_session);
             assert_eq!(retried["chat"]["execution"]["recovery"], !new_session);

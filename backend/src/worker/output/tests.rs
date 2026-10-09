@@ -76,9 +76,9 @@ impl Fixture {
     async fn output(&mut self, output: Output) {
         record(
             &self.service,
-            &self.id,
             &output,
             &self.checkpoint,
+            false,
             &["sensitive-tool-credential".into()],
             &mut self.log_total,
             &mut self.activity,
