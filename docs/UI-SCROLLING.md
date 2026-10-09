@@ -22,7 +22,7 @@ interaction. The sidebar can scroll independently from the content.
 
 Tailwind layout utilities in `App.vue`, `Tasks.vue`, `RunWorkspace.vue`, and
 `ActivityFeed.vue` own the shrinking viewport chain. Contextual and short-screen
-rules live in `src/styles/shell.css`, `tasks.css`, and `runs.css`. Keep `min-h-0`
+rules live in `apps/web/src/styles/shell.css`, `tasks.css`, and `runs.css`. Keep `min-h-0`
 throughout shrinking flex/grid chains, including the Activity mount used for
 fullscreen teleportation. Do not give a nested content region its own `dvh`
 height: it cannot account for the title, controls, or mobile navigation above it.

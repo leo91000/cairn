@@ -1,7 +1,7 @@
 # Storage hot path: first optimization cycle
 
 Measured on 2026-09-30, against the implementation in PR #25. The harness is
-`backend/examples/storage-benchmark.rs`; run it in release mode. Integrity
+`crates/installation/examples/storage-benchmark.rs`; run it in release mode. Integrity
 assertions check all returned bytes. No S3 or FUSE is involved in this microbenchmark.
 
 ## Local working set
@@ -50,7 +50,7 @@ their trigger was not recorded, so they are not the baseline of this fresh-chat 
 direct disk interface, the segmented journal, and the controller's journal with
 write admission enabled. Each acknowledged write is followed by a checked read.
 Three samples rotate their order. Temporary files are created in the current
-directory, or `LEO_BENCH_ROOT`, rather than implicitly using `/tmp`.
+directory, or `CAIRN_BENCH_ROOT`, rather than implicitly using `/tmp`.
 
 The recorded run used ext4 on `/var/tmp`. The median of the three samples' write
 medians was:

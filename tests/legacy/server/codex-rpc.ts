@@ -104,7 +104,7 @@ export function codexSession(config: Config, options: {
       }),
     }
     try {
-      await rpc.request('initialize', { clientInfo: { name: 'leo_agent_manager', version: '1.0.0' }, capabilities: { experimentalApi: true } })
+      await rpc.request('initialize', { clientInfo: { name: 'cairn_installation', version: '1.0.0' }, capabilities: { experimentalApi: true } })
       child.stdin.write(`${JSON.stringify({ method: 'initialized' })}\n`)
       return await operation(rpc)
     }

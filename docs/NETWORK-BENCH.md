@@ -14,11 +14,11 @@ both real binaries and uses an in-memory email adapter. Agent workers are disabl
 
 ```sh
 pnpm install --frozen-lockfile
-CARGO_PROFILE_DEV_DEBUG=0 CARGO_BUILD_JOBS=4 cargo build --locked --workspace --bin leo --bin leo-official --example network_direct_client --example network_stun_server
+CARGO_PROFILE_DEV_DEBUG=0 CARGO_BUILD_JOBS=4 cargo build --locked --workspace --bin cairn --bin cairn-beacon --example network_direct_client --example network_stun_server
 pnpm build
 pnpm exec playwright install --with-deps chromium
-docker run -d --name leo-network-postgres -e POSTGRES_USER=leo -e POSTGRES_PASSWORD=test-only -e POSTGRES_DB=leo_official_test -p 127.0.0.1:5432:5432 postgres:17-alpine
-export LEO_OFFICIAL_TEST_DATABASE_URL=postgres://leo:test-only@127.0.0.1:5432/leo_official_test
+docker run -d --name cairn-network-postgres -e POSTGRES_USER=cairn -e POSTGRES_PASSWORD=test-only -e POSTGRES_DB=cairn_official_test -p 127.0.0.1:5432:5432 postgres:17-alpine
+export CAIRN_BEACON_TEST_DATABASE_URL=postgres://cairn:test-only@127.0.0.1:5432/cairn_official_test
 python3 tests/network_probe_test.py
 python3 tests/network_bench_test.py
 python3 tests/stun_docker_test.py
@@ -44,10 +44,10 @@ Run sequentially; the bench holds a lock and refuses overlapping runs. It uses
 198.18.102.0/24 and 198.18.103.0/30 for its private internet and 10.102.1.0/24 and
 10.102.2.0/24 for participants. The only host change is a temporary veth address;
 all forwarding, NAT and filtering rules live in disposable namespaces. Processes
-running Chromium, Leo and the Rust session client use the caller's UID; only
+running Chromium, Cairn and the Rust session client use the caller's UID; only
 network configuration and the TUN packet router require root. Finally blocks
 stop processes, remove namespaces/links and delete private fixture data. Stop the
-disposable database when finished: `docker rm -f leo-network-postgres`.
+disposable database when finished: `docker rm -f cairn-network-postgres`.
 
 Add `--probe-only` to any command for a fast network-only check without Postgres
 or browsers. The Rust probe is compiled directly with the pinned `rustc`; it uses
@@ -87,9 +87,9 @@ content and are not a WebRTC peer or an anonymous local installation interface.
 The JSON report contains the topology probes, expected route and successful
 application observations: browser send, Rust read, and stream resume after a
 network change. Each includes `route`, `operation` and monotonic `elapsedMs`.
-Browser evidence comes from the web transport's `leo-transport-observation`
+Browser evidence comes from the web transport's `cairn-transport-observation`
 events after successful API responses and accepted live batches, followed by
-visible conversation data. Finite relay responses use `x-leo-transport: relay`;
+visible conversation data. Finite relay responses use `x-cairn-transport: relay`;
 direct responses arrive through the real authorized DataChannel. The observer
 contains no payload or credentials. The default-route indicator alone is not
 evidence of a successful application request.
@@ -224,7 +224,7 @@ and namespace in `finally`, and saves `test-results/network/docker-stun.json`.
 The namespace bench now uses this same official Rust responder, rather than
 only the Python fixture. Its report identifies `stunResponder: official-rust`.
 Real UDP integration tests also cover receive-error recovery and IPv4/IPv6 mappings.
-The authenticated bench deliberately sets `LEO_DIRECT_STUN_URLS=""` to verify
+The authenticated bench deliberately sets `CAIRN_DIRECT_STUN_URLS=""` to verify
 that the installation uses the official STUN source and still connects directly.
 The production host must repeat source-preservation and firewall validation
 before release (#113/#105); this ticket performs no deployment or host firewall
@@ -247,12 +247,12 @@ real emulator, `adb`, built debug/application-test APKs and the same disposable
 Postgres database. The launcher isolates live agent credentials. For example:
 
 ```sh
-leo-android emulator start 30 --accept-licenses --aosp
-mise exec -- android/gradlew -p android assembleDebug assembleDebugAndroidTest
+cairn-android emulator start 30 --accept-licenses --aosp
+mise exec -- apps/android/gradlew -p android assembleDebug assembleDebugAndroidTest
 ANDROID_SERIAL=emulator-5580 python3 tests/network-bench.py same-lan --android --output test-results/android-direct/same-lan.json
 ANDROID_SERIAL=emulator-5580 python3 tests/network-bench.py udp-blocked --android --output test-results/android-direct/udp-blocked.json
 ANDROID_SERIAL=emulator-5580 python3 tests/network-bench.py network-change --android --output test-results/android-direct/network-change.json
-leo-android emulator stop
+cairn-android emulator stop
 ```
 
 The emulator runs outside the Linux client namespace. Temporary host routes

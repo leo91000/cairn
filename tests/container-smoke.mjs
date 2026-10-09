@@ -8,7 +8,7 @@ import { promisify } from 'node:util'
 import { startOfficial } from './official-smoke.mjs'
 
 const exec = promisify(execFile)
-const name = `leo-smoke-${randomUUID().slice(0, 8)}`
+const name = `cairn-smoke-${randomUUID().slice(0, 8)}`
 const volumes = ['data', 'home', 'workspaces'].map(
   suffix => `${name}-${suffix}`,
 )
@@ -21,8 +21,8 @@ async function main() {
       timeout: args[0] === 'run' ? 180000 : 60000,
       env: {
         ...process.env,
-        LEO_OFFICIAL_ORIGIN: official.origin,
-        LEO_INSTALLATION_CLAIM_CODE: official.claimCode,
+        CAIRN_BEACON_ORIGIN: official.origin,
+        CAIRN_INSTALLATION_CLAIM_CODE: official.claimCode,
       },
     })
   }
@@ -41,16 +41,16 @@ async function main() {
       '-e',
       'HOST=127.0.0.1',
       '-e',
-      'LEO_OFFICIAL_ORIGIN',
+      'CAIRN_BEACON_ORIGIN',
       '-e',
-      'LEO_INSTALLATION_CLAIM_CODE',
+      'CAIRN_INSTALLATION_CLAIM_CODE',
       '-v',
       `${volumes[0]}:/data`,
       '-v',
       `${volumes[1]}:/home/node`,
       '-v',
       `${volumes[2]}:/workspaces`,
-      process.argv[2] || 'leo-agent-manager:test',
+      process.argv[2] || 'cairn-installation:test',
     )
     const url = 'http://127.0.0.1:4310'
 
@@ -152,7 +152,7 @@ async function main() {
     assert.equal(page.status, 401)
     const officialPage = await fetch(official.origin)
     assert.equal(officialPage.status, 200)
-    assert.match(await officialPage.text(), /Leo/)
+    assert.match(await officialPage.text(), /Cairn/)
     process.stdout.write(
       'Container smoke passed: non-root, CLI tools, Chromium/Firefox/WebKit, relay-only access and persistent data through the official service across restart.\n',
     )

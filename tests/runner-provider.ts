@@ -64,7 +64,7 @@ export async function runnerProvider(directory: string) {
           for (const output of attempt.streams)
             output.end()
         })
-        child.stdin.end(plan.chat ? JSON.stringify({ ...plan.chat, inputDirectory: plan.mounts.find((mount: { target: string }) => mount.target === '/run/leo-chat').source }) : plan.prompt)
+        child.stdin.end(plan.chat ? JSON.stringify({ ...plan.chat, inputDirectory: plan.mounts.find((mount: { target: string }) => mount.target === '/run/cairn-chat').source }) : plan.prompt)
         response.end('{}')
         return
       }

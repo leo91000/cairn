@@ -2,13 +2,13 @@ services:
   postgres:
     image: postgres:17-alpine@sha256:b0f9560a2de083e2cc7382e75f808c7381a32852a7ec49117deedb300e552b24
     environment:
-      POSTGRES_USER: leo
+      POSTGRES_USER: cairn
       POSTGRES_PASSWORD: development-only
-      POSTGRES_DB: leo_official
+      POSTGRES_DB: cairn_official
     ports: ['127.0.0.1:5433:5432']
     volumes: [official-postgres:/var/lib/postgresql/data]
     healthcheck:
-      test: [CMD-SHELL, pg_isready -U leo -d leo_official]
+      test: [CMD-SHELL, pg_isready -U cairn -d cairn_official]
       interval: 5s
       timeout: 5s
       retries: 10
@@ -20,18 +20,18 @@ services:
   official:
     image: rust:1.97.1-bookworm
     working_dir: /app
-    command: [cargo, run, --locked, --bin, leo-official]
+    command: [cargo, run, --locked, --bin, cairn-beacon]
     environment:
-      LEO_OFFICIAL_DATABASE_URL: postgres://leo:development-only@postgres/leo_official
-      LEO_OFFICIAL_ORIGIN: http://localhost:4311
-      LEO_OFFICIAL_LISTEN: 0.0.0.0:4311
-      LEO_OFFICIAL_EMAIL_ENDPOINT: http://mail:8025/emails
-      LEO_OFFICIAL_EMAIL_KEY: development-only
-      LEO_OFFICIAL_EMAIL_FROM: Leo <leo@example.test>
-      LEO_OFFICIAL_GOOGLE_CLIENT_ID: ${LEO_OFFICIAL_GOOGLE_CLIENT_ID:-}
-      LEO_OFFICIAL_GOOGLE_CLIENT_SECRET: ${LEO_OFFICIAL_GOOGLE_CLIENT_SECRET:-}
-      LEO_OFFICIAL_GITHUB_CLIENT_ID: ${LEO_OFFICIAL_GITHUB_CLIENT_ID:-}
-      LEO_OFFICIAL_GITHUB_CLIENT_SECRET: ${LEO_OFFICIAL_GITHUB_CLIENT_SECRET:-}
+      CAIRN_BEACON_DATABASE_URL: postgres://cairn:development-only@postgres/cairn_official
+      CAIRN_BEACON_ORIGIN: http://localhost:4311
+      CAIRN_BEACON_LISTEN: 0.0.0.0:4311
+      CAIRN_BEACON_EMAIL_ENDPOINT: http://mail:8025/emails
+      CAIRN_BEACON_EMAIL_KEY: development-only
+      CAIRN_BEACON_EMAIL_FROM: Cairn <cairn@example.test>
+      CAIRN_BEACON_GOOGLE_CLIENT_ID: ${CAIRN_BEACON_GOOGLE_CLIENT_ID:-}
+      CAIRN_BEACON_GOOGLE_CLIENT_SECRET: ${CAIRN_BEACON_GOOGLE_CLIENT_SECRET:-}
+      CAIRN_BEACON_GITHUB_CLIENT_ID: ${CAIRN_BEACON_GITHUB_CLIENT_ID:-}
+      CAIRN_BEACON_GITHUB_CLIENT_SECRET: ${CAIRN_BEACON_GITHUB_CLIENT_SECRET:-}
     volumes:
       - ../..:/app
       - official-cargo:/usr/local/cargo

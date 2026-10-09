@@ -13,7 +13,7 @@
   `cargo clippy --locked --workspace --all-targets -- -D warnings` as applicable.
   Use the backend test launcher to isolate tests from live agent credentials.
   For Android, run `./gradlew spotlessCheck testDebugUnitTest lintDebug` from
-  `android/`; UI behavior changes also need the relevant browser or device tests.
+  `apps/android/`; UI behavior changes also need the relevant browser or device tests.
 
 ## Agent skills
 

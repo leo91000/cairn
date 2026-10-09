@@ -65,7 +65,7 @@ La revue ne remplace pas les tests et mesures consignés dans le document de val
   arithmétique créerait une interface presque aussi complexe que son calcul.
   Ces différences sont maintenant explicites près des deux implémentations.
 
-## Revue indépendante via Leo Agent Manager — 28 septembre 2026
+## Revue indépendante via Cairn — 28 septembre 2026
 
 Révisions examinées : nodes `43b9140`, stockage `ab6cf20`, base `c1e402f`.
 Le run indépendant `f4908bd7-bd5a-4db7-af0d-562346390f4c` a reproduit quatre

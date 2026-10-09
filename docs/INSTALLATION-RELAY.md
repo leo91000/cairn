@@ -4,13 +4,13 @@ The official account API and its Postgres database remain those introduced in
 ticket #46. Sign in to the official web app, choose **Add an installation**, and use the
 claim code within ten minutes. The app includes this code in the command served
 at `/install.sh`; see [One-command installation](INSTALLATION.md). The fallback
-`leo claim` command is described below.
+`cairn claim` command is described below.
 
-For a manager deployment, provide `LEO_OFFICIAL_ORIGIN`,
-`LEO_INSTALLATION_CLAIM_CODE`, and optionally `LEO_INSTALLATION_NAME` in its
+For a manager deployment, provide `CAIRN_BEACON_ORIGIN`,
+`CAIRN_INSTALLATION_CLAIM_CODE`, and optionally `CAIRN_INSTALLATION_NAME` in its
 private environment. The origin must be HTTPS; HTTP is permitted on loopback
 for development. The existing manager data and agent-home directories must
-already exist. Start the usual `leo serve` command. No public installation URL
+already exist. Start the usual `cairn serve` command. No public installation URL
 or inbound browser connection is needed. Installation browser routes accept only
 the trusted in-process identity from the authenticated relay. Remove the claim code from deployment configuration after success.
 If a claim is refused, misconfigured or cannot reach the official service, the
@@ -23,14 +23,14 @@ The installation stores its identity in
 The file contains the official origin, installation ID and bearer credential.
 Do not copy it into logs or source control. Later starts use that file and need
 no new claim code. Startup never overwrites an existing identity; an approved
-`leo claim` can replace it after detachment, and `leo rotate-token` can renew its
+`cairn claim` can replace it after detachment, and `cairn rotate-token` can renew its
 credential while keeping its ownership.
 Postgres stores only a hash of the credential and claim code. Consuming a claim
 code and attaching the installation to its owner form one transaction.
 
 ## Renewing a machine credential
 
-Run `leo rotate-token` on the machine with its usual `DATA_DIR`. The command uses
+Run `cairn rotate-token` on the machine with its usual `DATA_DIR`. The command uses
 the origin in its private identity. It closes the previous tunnel and invalidates
 both the previous credential and any old recovery proof, preserving the installation
 ID, sharing and all data. Restart the manager after success to use the new identity.
@@ -47,12 +47,12 @@ app, including for an offline or orphaned installation. Confirmation permanently
 invalidates the machine credential and recovery proofs, removes sharing and the
 official record, and closes active tunnels. Data stays on the machine. To return,
 stop the manager, back up its entire private identity directory outside its data
-volume, remove that directory, then run `leo claim` with the official origin.
+volume, remove that directory, then run `cairn claim` with the official origin.
 The new claim creates a new installation ID with the same existing local data.
 Detachment below remains the option for recovering the same installation ID.
 
 If a machine credential is stolen, its holder can win the race to rotate it and
-prevent `leo rotate-token` from authenticating. Rotation alone is therefore not
+prevent `cairn rotate-token` from authenticating. Rotation alone is therefore not
 a recovery guarantee after theft. Use **Revoke and forget installation** from
 the owner's official session to revoke that record independently of the machine
 credential, then reclaim the trusted machine as above. Investigate the compromise
@@ -60,12 +60,12 @@ and renew any secrets that may have passed through the stolen tunnel.
 
 ## Fallback claim and detachment
 
-Run `leo claim` on the installation with its usual `DATA_DIR` and
-`LEO_OFFICIAL_ORIGIN` (the latter defaults to the origin of an existing private
+Run `cairn claim` on the installation with its usual `DATA_DIR` and
+`CAIRN_BEACON_ORIGIN` (the latter defaults to the origin of an existing private
 identity). It prints the official `/claim` URL and a temporary code. Sign in to
 that official app and enter the code under **Device claim code**, then choose
 **Review installation**. Compare its name and public fingerprint with the
-fingerprint printed by `leo claim` on a machine you control before choosing
+fingerprint printed by `cairn claim` on a machine you control before choosing
 **Claim this installation**. Cancel if they differ or someone sent you the code.
 The name is supplied by the machine (or the existing installation record during
 recovery), not a verified hostname. The fingerprint identifies the installation
@@ -92,7 +92,7 @@ claim for the same installation invalidates its previous pending challenge.
 
 Choose **Detach installation** inside the installation and confirm explicitly.
 The owner is cleared and the active relay is cut; local data and the official
-installation row remain. Deleting its owning Leo account through Account security also clears sharing
+installation row remain. Deleting its owning Cairn account through Account security also clears sharing
 and closes its tunnel immediately, preserving the installation record and data.
 Deletion performed directly by an operator in Postgres clears ownership
 rather than cascading deletion of the installation. Active relays recheck the persisted machine identity every 30 seconds, covering
@@ -123,7 +123,7 @@ for TLS and network setup.
 The installation initiates a TLS WebSocket at
 `/api/relay/{installation}/connect` with its bearer credential. `Hello` offers
 protocol versions; `Welcome` chooses a supported version before API traffic.
-An incompatible peer is disconnected before API traffic; its authenticated installation is marked `updateRequired` in the official database. The shared `leo-relay-protocol` crate
+An incompatible peer is disconnected before API traffic; its authenticated installation is marked `updateRequired` in the official database. The shared `cairn-protocol` crate
 owns the frames, limits and transport header rules. Version 1 multiplexes finite
 API requests and responses by request ID, carrying method, encoded path/query,
 selected headers and binary bodies. Account identity and owner/member role come from the official
@@ -145,7 +145,7 @@ An expired or revoked browser session redirects to sign-in at the current URL
 and stops availability polling, including in other tabs after logout.
 The connector retries with exponential backoff from 250 ms to 15 seconds;
 WebSocket ping/pong detects dead peers. A revoked identity (HTTP 401) stops
-reconnection; run `leo claim`, approve it, and restart the manager. Existing agent execution is independent
+reconnection; run `cairn claim`, approve it, and restart the manager. Existing agent execution is independent
 of the connector's availability.
 
 Finite request and response bodies are limited to 8 MB, with at most 32 requests
@@ -221,8 +221,8 @@ The detachment, member removal and departure endpoints commit their access
 change before revoking the real official HTTP bodies. Detachment also forgets
 all memberships and invitations; reclaiming never restores previous sharing.
 
-Validation: run `pnpm test:backend -p leo-official-service --test relay` with a
-disposable `LEO_OFFICIAL_TEST_DATABASE_URL`; this uses the isolated backend
+Validation: run `pnpm test:backend -p cairn-beacon --test relay` with a
+disposable `CAIRN_BEACON_TEST_DATABASE_URL`; this uses the isolated backend
 launcher and a real installation router. The Playwright project
 `journeys-official-relay` uses both real binaries and checks reconnection after
 restarting each process. Build those binaries and the web bundle first.
@@ -239,7 +239,7 @@ not request the installation's browser session or sign-in endpoints.
 With one installation the header shows its name. With several, an accessible
 selector changes the current installation. Switching opens a fresh document at
 that installation's home, keeping transient workspace state separate. The last
-installation is remembered in this browser per Leo account; a valid explicit
+installation is remembered in this browser per Cairn account; a valid explicit
 installation URL takes precedence. An inaccessible installation URL displays an
 account-level message instead of silently opening another installation.
 
@@ -255,13 +255,13 @@ retains its reconnect backoff and history cache.
 
 ## Shared-installation limits
 
-Installation HTTP rate limits use the trusted Leo account identity for relayed
+Installation HTTP rate limits use the trusted Cairn account identity for relayed
 requests (300 requests per minute per account), while machine traffic retains
 its existing peer-based limits. Browser headers cannot select an identity or
 quota. Installation rename requests are limited separately at the official
 account level.
 
-Each Leo account may hold at most eight browser SSE requests across all of its
+Each Cairn account may hold at most eight browser SSE requests across all of its
 installations and sessions in the official process. Additional requests receive
 503; cancellation and revocation release both allowances. MCP/public capabilities
 retain their independent limits.
@@ -435,7 +435,7 @@ the waiting connection. Complete member frames fitting in one packet (at most
 A fragmented member transfer short of capacity, or an owner transfer whose ordered
 channel already holds an incomplete assembly, is rejected with a 503
 for its bounded request ID and drained, allowing the existing upload to finish.
-The 503 carries `x-leo-direct-rejection: reassembly-busy`, a reserved protocol
+The 503 carries `x-cairn-direct-rejection: reassembly-busy`, a reserved protocol
 marker guaranteeing that the dispatcher never received that request. Application
 response headers on direct and relay cannot emit this marker. The web treats
 only this exact status/marker pair as unsent and retries once over the

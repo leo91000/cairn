@@ -7,14 +7,14 @@ import { expect, test } from '@playwright/test'
 test('official pages deny framing and enable HSTS only for an HTTPS official origin', async ({ page, request }) => {
   const url = 'http://localhost:4398'
   for (const origin of [url, 'https://localhost:4398']) {
-    const child = spawn('target/debug/leo-official', [], {
+    const child = spawn('target/debug/cairn-beacon', [], {
       env: {
         ...process.env,
-        LEO_OFFICIAL_DATABASE_URL: process.env.LEO_OFFICIAL_TEST_DATABASE_URL,
-        LEO_OFFICIAL_ORIGIN: origin,
-        LEO_OFFICIAL_LISTEN: '127.0.0.1:4398',
-        LEO_OFFICIAL_EMAIL_KEY: 'fixture-only',
-        LEO_OFFICIAL_EMAIL_FROM: 'Leo <leo@example.test>',
+        CAIRN_BEACON_DATABASE_URL: process.env.CAIRN_BEACON_TEST_DATABASE_URL,
+        CAIRN_BEACON_ORIGIN: origin,
+        CAIRN_BEACON_LISTEN: '127.0.0.1:4398',
+        CAIRN_BEACON_EMAIL_KEY: 'fixture-only',
+        CAIRN_BEACON_EMAIL_FROM: 'Cairn <cairn@example.test>',
       },
       stdio: ['ignore', 'ignore', 'pipe'],
     })
@@ -66,15 +66,15 @@ test('email sign-in works after a third party exhausts their challenge, persists
   await once(mail, 'listening')
   const mailPort = (mail.address() as { port: number }).port
   const url = 'http://localhost:4398'
-  const child = spawn('target/debug/leo-official', [], {
+  const child = spawn('target/debug/cairn-beacon', [], {
     env: {
       ...process.env,
-      LEO_OFFICIAL_DATABASE_URL: process.env.LEO_OFFICIAL_TEST_DATABASE_URL,
-      LEO_OFFICIAL_ORIGIN: url,
-      LEO_OFFICIAL_LISTEN: '127.0.0.1:4398',
-      LEO_OFFICIAL_EMAIL_ENDPOINT: `http://127.0.0.1:${mailPort}/emails`,
-      LEO_OFFICIAL_EMAIL_KEY: 'fixture-only',
-      LEO_OFFICIAL_EMAIL_FROM: 'Leo <leo@example.test>',
+      CAIRN_BEACON_DATABASE_URL: process.env.CAIRN_BEACON_TEST_DATABASE_URL,
+      CAIRN_BEACON_ORIGIN: url,
+      CAIRN_BEACON_LISTEN: '127.0.0.1:4398',
+      CAIRN_BEACON_EMAIL_ENDPOINT: `http://127.0.0.1:${mailPort}/emails`,
+      CAIRN_BEACON_EMAIL_KEY: 'fixture-only',
+      CAIRN_BEACON_EMAIL_FROM: 'Cairn <cairn@example.test>',
     },
     stdio: ['ignore', 'ignore', 'pipe'],
   })

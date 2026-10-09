@@ -1,6 +1,6 @@
-# Official service and Leo accounts
+# Official service and Cairn accounts
 
-The `leo-official` binary is distinct from the installation's `leo` binary. It
+The `cairn-beacon` binary is distinct from the installation's `cairn` binary. It
 owns a separate Postgres database and serves the web application. This first
 account slice provides email, Google, GitHub and web passkey sign-in, management
 of sign-in methods, and an empty installation screen. Installation access,
@@ -20,19 +20,19 @@ logs codes. Both ports are bound to loopback. The first Rust compilation takes
 a few minutes. `docker compose -f deploy/official/compose.yaml down` stops it;
 add `-v` to discard the development database and build caches.
 
-The default `index.html` and the official `official.html` both enter the Leo
+The default `apps/web/index.html` and the official `apps/web/beacon.html` both enter the Cairn
 account shell. There is no installation password/setup screen. For hot reload,
 run `pnpm dev` with the official configuration variables below, including
-`LEO_OFFICIAL_ORIGIN=http://localhost:5178`. Vite serves the application at that
+`CAIRN_BEACON_ORIGIN=http://localhost:5178`. Vite serves the application at that
 origin and proxies account requests, OAuth callbacks and relay WebSockets to
-`127.0.0.1:4311`. Run the installation separately with `cargo run --bin leo` and
+`127.0.0.1:4311`. Run the installation separately with `cargo run --bin cairn` and
 claim it through the official account; its HTTP listener never hosts the web
 application. `PUBLIC_URL` continues to describe private installation traffic.
 
-Browser tests use the production `leo-official` and `leo` binaries, a separate
+Browser tests use the production `cairn-beacon` and `cairn` binaries, a separate
 Postgres schema per worker, a real email proof and installation claim, and the
 real authenticated relay. Only email delivery and external agent/provider
-fixtures are synthetic. Set `LEO_OFFICIAL_TEST_DATABASE_URL` to a disposable
+fixtures are synthetic. Set `CAIRN_BEACON_TEST_DATABASE_URL` to a disposable
 Postgres database and build both binaries plus the web output before
 `pnpm test:e2e`. Handler and worker integration tests retain a test-only relay
 transport and task-author authority (`relay_fixture` / `worker_fixture`); these
@@ -56,23 +56,23 @@ validated build identity.
 
 ## Configuration
 
-Production runs `cargo build --locked --release --bin leo-official`, then the
+Production runs `cargo build --locked --release --bin cairn-beacon`, then the
 binary with the `dist/` produced by `pnpm build`. Configure the following env
 variables through the operator's secret management:
 
 | Variable | Meaning |
 | --- | --- |
-| `LEO_OFFICIAL_DATABASE_URL` | Required Postgres URL, separate from installation SQLite |
-| `LEO_OFFICIAL_ORIGIN` | Required browser origin, HTTPS except localhost/loopback development; no path, query, or fragment |
-| `LEO_OFFICIAL_LISTEN` | Bind address, default `127.0.0.1:4311` |
-| `LEO_OFFICIAL_TRUSTED_PROXIES` | Comma-separated proxy IPs/CIDRs; empty by default |
-| `LEO_OFFICIAL_WEB_DIR` | Frontend output directory, default `dist` |
-| `LEO_INSTALLATION_IMAGE` | Tested immutable `ghcr.io/leo91000/leo-agent-manager@sha256:<64 lowercase hex>` approved for new and automatic installation updates; unset returns 503 from `/install/release` |
-| `LEO_OFFICIAL_EMAIL_FROM` | Required sender address on a verified email domain |
-| `LEO_OFFICIAL_EMAIL_KEY` | Required email provider bearer key; never logged |
-| `LEO_OFFICIAL_EMAIL_ENDPOINT` | Default `https://api.resend.com/emails`; override only for the loopback development setup |
-| `LEO_OFFICIAL_GOOGLE_CLIENT_ID`, `LEO_OFFICIAL_GOOGLE_CLIENT_SECRET` | Optional pair, enables Google sign-in |
-| `LEO_OFFICIAL_GITHUB_CLIENT_ID`, `LEO_OFFICIAL_GITHUB_CLIENT_SECRET` | Optional pair, enables GitHub sign-in |
+| `CAIRN_BEACON_DATABASE_URL` | Required Postgres URL, separate from installation SQLite |
+| `CAIRN_BEACON_ORIGIN` | Required browser origin, HTTPS except localhost/loopback development; no path, query, or fragment |
+| `CAIRN_BEACON_LISTEN` | Bind address, default `127.0.0.1:4311` |
+| `CAIRN_BEACON_TRUSTED_PROXIES` | Comma-separated proxy IPs/CIDRs; empty by default |
+| `CAIRN_BEACON_WEB_DIR` | Frontend output directory, default `dist` |
+| `CAIRN_INSTALLATION_IMAGE` | Tested immutable `ghcr.io/leo91000/cairn@sha256:<64 lowercase hex>` approved for new and automatic installation updates; unset returns 503 from `/install/release` |
+| `CAIRN_BEACON_EMAIL_FROM` | Required sender address on a verified email domain |
+| `CAIRN_BEACON_EMAIL_KEY` | Required email provider bearer key; never logged |
+| `CAIRN_BEACON_EMAIL_ENDPOINT` | Default `https://api.resend.com/emails`; override only for the loopback development setup |
+| `CAIRN_BEACON_GOOGLE_CLIENT_ID`, `CAIRN_BEACON_GOOGLE_CLIENT_SECRET` | Optional pair, enables Google sign-in |
+| `CAIRN_BEACON_GITHUB_CLIENT_ID`, `CAIRN_BEACON_GITHUB_CLIENT_SECRET` | Optional pair, enables GitHub sign-in |
 
 The production adapter uses [Resend's send-email contract](https://resend.com/docs/api-reference/emails/send-email)
 (`from`, `to`, `subject`, `text` over HTTP). `EmailSender` is the replaceable
@@ -101,7 +101,7 @@ notifications are implemented. [ADR-0032](adr/0032-single-official-relay-process
 records this restriction of spec #43 and the persisted-check tolerance trade-off.
 Terminate TLS at the public origin with a reverse proxy. The service checks the
 configured origin on every account mutation. IP limits use the TCP peer unless
-it matches `LEO_OFFICIAL_TRUSTED_PROXIES`. In that case they use the rightmost
+it matches `CAIRN_BEACON_TRUSTED_PROXIES`. In that case they use the rightmost
 `X-Forwarded-For` address outside the trusted proxy ranges, across all account
 and machine endpoints. Each trusted proxy must append its actual peer address.
 Trust only your controlled proxy hops; headers from other peers are ignored.
@@ -156,7 +156,7 @@ the cookie. Login also requires the exact origin to prevent login CSRF.
 ## OAuth and web passkeys
 
 Register a web OAuth client with Google and an OAuth app with GitHub. Register
-these exact callback URLs, using the configured `LEO_OFFICIAL_ORIGIN`:
+these exact callback URLs, using the configured `CAIRN_BEACON_ORIGIN`:
 
 - `/api/account/oauth/google/callback`
 - `/api/account/oauth/github/callback`
@@ -170,7 +170,7 @@ stored; no refresh tokens are requested. After reading a GitHub identity,
 including a rejected identity, the provider module calls
 [Delete an app token](https://docs.github.com/en/rest/apps/oauth-applications#delete-an-app-token)
 with the application's HTTP Basic credentials. It requires the documented 204
-acknowledgement before issuing a Leo session; redirects and other responses fail
+acknowledgement before issuing a Cairn session; redirects and other responses fail
 closed. The endpoint uses the API prefix of the configured GitHub `/user` URL,
 followed by `/applications/{client_id}/token`. Loopback provider fixtures use the
 same rule. Google identification tokens are discarded locally. A failed GitHub
@@ -183,14 +183,14 @@ GitHub requests only `user:email` and uses its
 [verified primary email](https://docs.github.com/en/rest/users/emails), ignoring
 the public profile's email. GitHub sign-in provides no repository access to
 agents. Verified emails are normalized exactly like email-code sign-in and
-can create a new Leo account. For an existing account, a new Google identity is
+can create a new Cairn account. For an existing account, a new Google identity is
 automatically attached only when Google is
 [authoritative for the email](https://developers.google.com/identity/sign-in/web/backend-auth):
 `@gmail.com`, or a verified Workspace `hd` matching the email's domain. Other
-Google emails and GitHub require a confirmed Leo session to link. Once linked,
+Google emails and GitHub require a confirmed Cairn session to link. Once linked,
 the identity remains a normal sign-in method. Lookups use `(kind, subject)` before
-the provider's mutable email, so an email change preserves the original Leo
-account and installation access even if that new email belongs to another Leo
+the provider's mutable email, so an email change preserves the original Cairn
+account and installation access even if that new email belongs to another Cairn
 account. Removed methods remain unusable until explicitly re-linked. An identity
 already attached to a different account is rejected; a new identity linked while
 signed in must match the current account's verified email. Re-linking an identity
@@ -200,8 +200,8 @@ method without a uniqueness error.
 
 Default endpoints are the official Google and GitHub endpoints. Tests replace
 only their HTTP endpoints. Operators can override
-`LEO_OFFICIAL_{GOOGLE,GITHUB}_{AUTHORIZATION_URL,TOKEN_URL,USERINFO_URL}` and
-`LEO_OFFICIAL_GITHUB_EMAILS_URL`; endpoints require HTTPS, except HTTP loopback
+`CAIRN_BEACON_{GOOGLE,GITHUB}_{AUTHORIZATION_URL,TOKEN_URL,USERINFO_URL}` and
+`CAIRN_BEACON_GITHUB_EMAILS_URL`; endpoints require HTTPS, except HTTP loopback
 endpoints when the official origin is also loopback. OAuth uses authorization
 codes, S256 PKCE and a five-minute, single-use state bound to an HttpOnly browser
 cookie. Explicit linking checks the initiating session and CSRF token and requires
@@ -216,7 +216,7 @@ OAuth cancellation or invalid identity returns a generic sign-in error. An
 existing email that needs explicit linking instead directs the user to email
 sign-in and Sign-in methods. An expired linking proof returns to Sign-in methods
 to reconfirm. Provider outages return HTTP 503 with a safe retry page and no
-provider response body or new Leo session. The retry returns to the app with a
+provider response body or new Cairn session. The retry returns to the app with a
 distinct unavailable message.
 OAuth and passkey browser cookies are cleared after completion or rejection.
 
@@ -257,10 +257,10 @@ Use a disposable Postgres database that can create schemas. Each Rust test owns
 an isolated schema. Use the backend launcher to isolate live agent credentials:
 
 ```sh
-LEO_OFFICIAL_TEST_DATABASE_URL=postgres://leo:test-only@localhost/leo_official_test pnpm test:backend -p leo-official-service
-LEO_OFFICIAL_TEST_DATABASE_URL=postgres://leo:test-only@localhost/leo_official_test pnpm test:backend
-cargo build --locked --bin leo-official
-LEO_OFFICIAL_TEST_DATABASE_URL=postgres://leo:test-only@localhost/leo_official_test pnpm test:e2e --project=journeys-official-account
+CAIRN_BEACON_TEST_DATABASE_URL=postgres://cairn:test-only@localhost/cairn_official_test pnpm test:backend -p cairn-beacon
+CAIRN_BEACON_TEST_DATABASE_URL=postgres://cairn:test-only@localhost/cairn_official_test pnpm test:backend
+cargo build --locked --bin cairn-beacon
+CAIRN_BEACON_TEST_DATABASE_URL=postgres://cairn:test-only@localhost/cairn_official_test pnpm test:e2e --project=journeys-official-account
 ```
 
 CI supplies Postgres for both integration and browser tests. Browser tests run
@@ -283,7 +283,7 @@ or an account that already has access. Delivery failure removes the invitation
 so the owner can retry.
 
 The email links to `/?invitations=1`, where a recipient can sign in or create a
-Leo account and accept invitations addressed to that verified email. Invitations
+Cairn account and accept invitations addressed to that verified email. Invitations
 are also available from the installation options menu, including for people who
 already have an installation. A member can choose **Leave installation** and
 confirm; returning requires a new invitation.
@@ -330,7 +330,7 @@ finite relay frame. The service never persists their contents.
 External MCP clients use the official `/mcp` URL. Discovery is at
 `/.well-known/oauth-protected-resource/mcp` and
 `/.well-known/oauth-authorization-server`; `/oauth/register` registers public
-clients. Authorization uses the Leo account session, an explicit installation
+clients. Authorization uses the Cairn account session, an explicit installation
 choice and S256 PKCE. Codes expire after five minutes; access tokens after an
 hour. Refresh tokens rotate, expire after 30 days and revoke their entire
 authorization when a used token is replayed. A resource parameter, when supplied,
@@ -413,7 +413,7 @@ MCP grants, authorization codes and device claims, removes the account's other
 memberships, invitations, pending email proofs, sign-in methods and sessions.
 Every affected tunnel or member/session body is closed immediately after commit.
 No request deletes installation data or stops admitted work. Owned installations
-remain unclaimed under their existing IDs; run `leo claim` on each machine and
+remain unclaimed under their existing IDs; run `cairn claim` on each machine and
 restart its manager to recover access. Members never inherit ownership.
 Deleting a member preserves other people's installations and sessions.
 Account deletion, installation detachment, definitive installation revocation,
@@ -519,7 +519,7 @@ GitHub repository discovery is reserved to its owner, like its coding accounts.
 Members can read the agent list and avatars, while individual agent management
 routes remain owner-only.
 
-Browser streams have eight simultaneous slots per Leo account in the official
+Browser streams have eight simultaneous slots per Cairn account in the official
 process, across installations and sessions. This complements the existing
 24-stream/32-request limits per installation; cancellation, expiry and revocation
 release the allowance together with the remote subscription. Extra streams return
@@ -529,7 +529,7 @@ installation slots for the owner's live views and ordinary requests.
 
 ## Web push notifications
 
-Devices belong to a Leo account, not an installation. Open **Notifications** in
+Devices belong to a Cairn account, not an installation. Open **Notifications** in
 the official account screen or the installation options menu to enable or
 disable this browser once for all owned and shared installations. Installation
 settings no longer contain device registration. Android native push is handled
@@ -551,8 +551,8 @@ endpoint has one current account. Registering it after switching accounts moves
 it to the new account. A foreign account cannot inspect or remove a device.
 Only supported HTTPS browser push endpoints are accepted.
 
-Configure `LEO_OFFICIAL_VAPID_PRIVATE_KEY` (the base64url P-256 private key) and
-`LEO_OFFICIAL_VAPID_SUBJECT` (an operator contact, `mailto:…` or an HTTPS URL) in
+Configure `CAIRN_BEACON_VAPID_PRIVATE_KEY` (the base64url P-256 private key) and
+`CAIRN_BEACON_VAPID_SUBJECT` (an operator contact, `mailto:…` or an HTTPS URL) in
 the official service's private operator environment. The public key is derived
 from that private key and is the only VAPID material returned to browsers. Keys
 are never generated or stored by an installation. With no VAPID configuration,
@@ -615,20 +615,20 @@ GitHub uses a Custom Tab because Credential Manager has no GitHub provider.
 launcher URL and an exchange secret. The launcher sets the browser challenge
 cookie, then uses the existing PKCE authorization-code callback and `user:email`
 scope. The callback shows an explicit confirmation naming the verified account
-and **Leo for Android**, warning against links received from another person.
+and **Cairn for Android**, warning against links received from another person.
 Opening the launcher and completing GitHub authorization alone neither links
-the identity nor makes a Leo session available to the initiating device.
+the identity nor makes a Cairn session available to the initiating device.
 `POST /api/account/oauth/github/native/confirm` consumes the form's one-use proof,
 bound to a separate HttpOnly browser cookie and protected by the exact official
 origin. Only confirmation applies the shared linking policy and releases the
 handover. The page forbids framing, scripts and foreign form destinations.
 This is explicit consent, not a cryptographic device attestation; only approve
-a flow you just initiated in Leo on your own device.
+a flow you just initiated in Cairn on your own device.
 Android polls `POST /api/account/oauth/github/native/finish` with the
-challenge and secret: 202 means pending; success creates the ordinary Leo session.
+challenge and secret: 202 means pending; success creates the ordinary Cairn session.
 The launcher and completed exchange are each one-use and expire in five minutes.
 The handover stores no session or provider access tokens, and authenticated linking
-requires the original Leo session's recent independent email/passkey proof.
+requires the original Cairn session's recent independent email/passkey proof.
 The app session is checked before the provider callback and again under the
 account lock at consent, then at the final exchange. Browser consent does not
 replace this proof. Google native linking applies the same checks before its
@@ -636,18 +636,18 @@ quota, before JWT/JWKS verification and after the account lock. The additive
 consent migration invalidates older in-flight handovers. Never log handover URLs,
 confirmation proofs or secrets.
 
-Set `LEO_OFFICIAL_ANDROID_CERTIFICATES` to comma-separated SHA-256 fingerprints
+Set `CAIRN_BEACON_ANDROID_CERTIFICATES` to comma-separated SHA-256 fingerprints
 of approved APK signing certificates (colon-separated hex is accepted). Only
 these exact native passkey origins are trusted. The same RP publishes
-`/.well-known/assetlinks.json` for `dev.leo.manager`; without certificates it
+`/.well-known/assetlinks.json` for `build.cairn.app`; without certificates it
 advertises no Android association. Registration, login, reauthentication and
 method removal keep their existing start/finish contracts and proof requirements.
 
-Production Compose uses `LEO_OFFICIAL_FCM_SERVICE_ACCOUNT_JSON`, the complete
+Production Compose uses `CAIRN_BEACON_FCM_SERVICE_ACCOUNT_JSON`, the complete
 private service-account JSON supplied through the operator's secret environment,
 so it needs no credential file mount. Never configure both JSON and file sources.
 The existing file configuration remains supported for other deployments:
-set `LEO_OFFICIAL_FCM_SERVICE_ACCOUNT` to a private service-account JSON **file
+set `CAIRN_BEACON_FCM_SERVICE_ACCOUNT` to a private service-account JSON **file
 path** on the official server. The file must contain `project_id`, `client_email`
 and the signing `private_key`; never distribute it to Android or installations.
 The sender uses FCM HTTP v1, caches a short-lived OAuth access token and sends

@@ -17,9 +17,9 @@ import { setTimeout as sleep } from 'node:timers/promises'
 import { prepareStorageOrigin } from './runner-storage-smoke.mjs'
 
 async function main() {
-  const image = process.argv[2] || 'leo-audit:test'
-  const root = await mkdtemp(path.join(process.env.VM_TEST_ROOT || '/var/tmp', 'leo-android-vm-'))
-  const name = `leo-android-test-${randomUUID().slice(0, 8)}`
+  const image = process.argv[2] || 'cairn-audit:test'
+  const root = await mkdtemp(path.join(process.env.VM_TEST_ROOT || '/var/tmp', 'cairn-android-vm-'))
+  const name = `cairn-android-test-${randomUUID().slice(0, 8)}`
   const docker = (...args) => execFileSync('docker', ['--context', 'default', ...args], { encoding: 'utf8', timeout: 180000 }).trim()
   const results = []
   let evidence
@@ -80,7 +80,7 @@ async function main() {
     await writeFile(path.join(root, 'data/runner-secret'), 'fixture-android-token')
     await writeFile(path.join(source, 'workspace/probe.mjs'), await readFile(new URL('./fixtures/android-device-probe.mjs', import.meta.url)))
     await writeFile(path.join(source, 'workspace/nested-kvm.c'), await readFile(new URL('./fixtures/nested-kvm.c', import.meta.url)))
-    docker('run', '-d', '--name', name, '--user', '0:0', '--read-only', '--cap-drop', 'ALL', ...['SYS_ADMIN', 'NET_ADMIN', 'SYS_CHROOT', 'SETUID', 'SETGID', 'MKNOD', 'CHOWN', 'FOWNER', 'KILL', 'DAC_OVERRIDE'].flatMap(cap => ['--cap-add', cap]), '--security-opt', 'apparmor=unconfined', '--security-opt', 'seccomp=unconfined', '--device', '/dev/kvm', '--device', '/dev/net/tun', '--device', '/dev/fuse', '--sysctl', 'net.ipv4.ip_forward=1', '--sysctl', 'net.ipv6.conf.all.disable_ipv6=1', '--tmpfs', '/run', '--tmpfs', '/tmp', '-v', `${root}/data:/data`, '-v', `${root}/state:/runner-state`, '-p', '127.0.0.1::4311', '--memory', '7g', '--cpus', '3', '--entrypoint', '/usr/local/bin/leo', image, 'runner-broker')
+    docker('run', '-d', '--name', name, '--user', '0:0', '--read-only', '--cap-drop', 'ALL', ...['SYS_ADMIN', 'NET_ADMIN', 'SYS_CHROOT', 'SETUID', 'SETGID', 'MKNOD', 'CHOWN', 'FOWNER', 'KILL', 'DAC_OVERRIDE'].flatMap(cap => ['--cap-add', cap]), '--security-opt', 'apparmor=unconfined', '--security-opt', 'seccomp=unconfined', '--device', '/dev/kvm', '--device', '/dev/net/tun', '--device', '/dev/fuse', '--sysctl', 'net.ipv4.ip_forward=1', '--sysctl', 'net.ipv6.conf.all.disable_ipv6=1', '--tmpfs', '/run', '--tmpfs', '/tmp', '-v', `${root}/data:/data`, '-v', `${root}/state:/runner-state`, '-p', '127.0.0.1::4311', '--memory', '7g', '--cpus', '3', '--entrypoint', '/usr/local/bin/cairn', image, 'runner-broker')
     url = `http://${docker('port', name, '4311/tcp')}`
     await until(() => fetch(`${url}/health`).then(r => r.ok).catch(() => false))
     // This device probe has no manager publishing while the SDK is installed.
@@ -126,7 +126,7 @@ async function main() {
             const capture = await api(`/runs/${id}/artifact`, 'POST', { runId, path: `${runRoot}/workspace/device.png` })
             const png = Buffer.from(await capture.arrayBuffer())
             assert.equal(png.subarray(1, 4).toString(), 'PNG')
-            const screenshots = process.env.ANDROID_SCREENSHOTS || '/var/tmp/leo-android-screenshots'
+            const screenshots = process.env.ANDROID_SCREENSHOTS || '/var/tmp/cairn-android-screenshots'
             await mkdir(screenshots, { recursive: true })
             await writeFile(path.join(screenshots, `${mode}.png`), png)
             // Export is acknowledged by an on-demand project import, never by mounting the guest disk.

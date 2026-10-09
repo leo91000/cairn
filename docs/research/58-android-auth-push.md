@@ -32,7 +32,7 @@ signing certificate fingerprint. The service must allow only configured trusted
 signing certificates; never accept a caller-provided arbitrary origin.
 `WebauthnBuilder::append_allowed_origin` explicitly supports native origins.
 The official HTTPS RP host must publish `/.well-known/assetlinks.json` containing
-`dev.leo.manager`, trusted SHA-256 certificate fingerprints and
+`build.cairn.app`, trusted SHA-256 certificate fingerprints and
 `delegate_permission/common.get_login_creds`. Native passkeys require Android 9
 (API 28) or later, despite the app's API 26 minimum; retain alternative sign-in
 methods below 28. [Native passkey creation](https://developer.android.com/identity/passkeys/create-passkeys),

@@ -21,7 +21,7 @@ import { executeOfficialSql, expireAccountProof } from './official-relay-fixture
 
 test('owner shares an installation and member works without management controls', async ({ page, browser }) => {
   test.setTimeout(120000)
-  const root = await mkdtemp(join(tmpdir(), 'leo-sharing-'))
+  const root = await mkdtemp(join(tmpdir(), 'cairn-sharing-'))
   const children: ChildProcess[] = []
   const diagnostics: string[] = []
   const messages: Array<{ to: string[], text: string }> = []
@@ -37,7 +37,7 @@ test('owner shares an installation and member works without management controls'
   await once(mail, 'listening')
   // Each account journey keeps its real limiter without consuming another
   // journey's delivery budget when projects run concurrently.
-  const database = new URL(process.env.LEO_OFFICIAL_TEST_DATABASE_URL!)
+  const database = new URL(process.env.CAIRN_BEACON_TEST_DATABASE_URL!)
   const schema = `sharing_${randomUUID().replaceAll('-', '')}`
   executeOfficialSql(database, `CREATE SCHEMA ${schema}`)
   const isolatedDatabase = new URL(database)
@@ -72,13 +72,13 @@ test('owner shares an installation and member works without management controls'
     await target.getByRole('button', { name: 'Sign in', exact: true }).click()
   }
 
-  const official = start('target/debug/leo-official', {
-    LEO_OFFICIAL_DATABASE_URL: isolatedDatabase.toString(),
-    LEO_OFFICIAL_ORIGIN: url,
-    LEO_OFFICIAL_LISTEN: '127.0.0.1:4397',
-    LEO_OFFICIAL_EMAIL_ENDPOINT: `http://127.0.0.1:${(mail.address() as { port: number }).port}/emails`,
-    LEO_OFFICIAL_EMAIL_KEY: 'fixture-only',
-    LEO_OFFICIAL_EMAIL_FROM: 'leo@example.test',
+  const official = start('target/debug/cairn-beacon', {
+    CAIRN_BEACON_DATABASE_URL: isolatedDatabase.toString(),
+    CAIRN_BEACON_ORIGIN: url,
+    CAIRN_BEACON_LISTEN: '127.0.0.1:4397',
+    CAIRN_BEACON_EMAIL_ENDPOINT: `http://127.0.0.1:${(mail.address() as { port: number }).port}/emails`,
+    CAIRN_BEACON_EMAIL_KEY: 'fixture-only',
+    CAIRN_BEACON_EMAIL_FROM: 'cairn@example.test',
   })
   try {
     await expect.poll(() => {
@@ -98,16 +98,16 @@ test('owner shares an installation and member works without management controls'
       workerEnabled: false,
       logger: false,
     }))
-    const installation = start('target/debug/leo', {
+    const installation = start('target/debug/cairn', {
       DATA_DIR: join(root, 'data'),
       AGENT_HOME: join(root, 'home'),
       WORKSPACE_ROOTS: root,
       WORKER_ENABLED: 'false',
       NODE_ENV: 'test',
       PORT: '0',
-      LEO_OFFICIAL_ORIGIN: url,
-      LEO_INSTALLATION_CLAIM_CODE: code,
-      LEO_INSTALLATION_NAME: 'Shared home',
+      CAIRN_BEACON_ORIGIN: url,
+      CAIRN_INSTALLATION_CLAIM_CODE: code,
+      CAIRN_INSTALLATION_NAME: 'Shared home',
     })
     await expect.poll(async () => {
       if (installation.exitCode !== null)

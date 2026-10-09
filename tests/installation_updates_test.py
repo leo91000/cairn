@@ -9,8 +9,8 @@ import threading
 import unittest
 
 REPO = Path(__file__).resolve().parents[1]
-OLD = 'ghcr.io/leo91000/leo-agent-manager@sha256:' + '1' * 64
-NEW = 'ghcr.io/leo91000/leo-agent-manager@sha256:' + '2' * 64
+OLD = 'ghcr.io/leo91000/cairn@sha256:' + '1' * 64
+NEW = 'ghcr.io/leo91000/cairn@sha256:' + '2' * 64
 
 
 class Updates(unittest.TestCase):
@@ -22,7 +22,7 @@ class Updates(unittest.TestCase):
                     def do_GET(self):
                         self.send_response(200)
                         self.end_headers()
-                        self.wfile.write(json.dumps({'image': NEW if failure != 'unapproved' else 'ghcr.io/leo91000/leo-agent-manager:latest'}).encode())
+                        self.wfile.write(json.dumps({'image': NEW if failure != 'unapproved' else 'ghcr.io/leo91000/cairn:latest'}).encode())
 
                     def log_message(self, *_):
                         pass
@@ -42,9 +42,9 @@ class Updates(unittest.TestCase):
                 (root / '.env').write_text('')
                 initial_image = NEW if failure in ('interrupted-unhealthy', 'interrupted-exec-once', 'interrupted-created') else OLD
                 (root / 'compose.json').write_text(json.dumps({
-                    'name': 'leo-installation',
+                    'name': 'cairn-installation',
                     'services': {
-                        'manager': {'image': initial_image, 'environment': {'LEO_NODE_IMAGE': initial_image}, 'mem_limit': '6g'},
+                        'manager': {'image': initial_image, 'environment': {'CAIRN_NODE_IMAGE': initial_image}, 'mem_limit': '6g'},
                         'runner': {'image': initial_image, 'mem_limit': '18g'},
                         'garage': {'image': 'retained-storage'},
                     },
@@ -54,7 +54,7 @@ class Updates(unittest.TestCase):
                 docker = binaries / 'docker'
                 docker.write_text('''#!/usr/bin/env python3
 import json, os, pathlib, sys
-root = pathlib.Path(os.environ['LEO_INSTALLATION_ROOT'])
+root = pathlib.Path(os.environ['CAIRN_INSTALLATION_ROOT'])
 args = sys.argv[1:]
 with (root / 'events').open('a') as events:
     events.write(json.dumps(args) + '\\n')
@@ -71,7 +71,7 @@ if 'ps' in args:
     failure = os.environ['FAILURE']
     if failure != 'interrupted-missing':
         state = 'restarting' if 'restarting' in failure else 'exited' if failure == 'interrupted-stopped' else 'created' if failure == 'interrupted-created' else 'running'
-        image = 'ghcr.io/leo91000/leo-agent-manager@sha256:' + ('2' if failure in ('interrupted-restarting', 'interrupted-unhealthy', 'interrupted-exec-once', 'interrupted-created') else '1') * 64
+        image = 'ghcr.io/leo91000/cairn@sha256:' + ('2' if failure in ('interrupted-restarting', 'interrupted-unhealthy', 'interrupted-exec-once', 'interrupted-created') else '1') * 64
         if failure in ('up-once', 'runner-unhealthy'):
             image = json.loads((root / 'compose.json').read_text())['services'][args[-1]]['image']
             state = 'created' if failure == 'runner-unhealthy' and args[-1] == 'manager' else 'running'
@@ -102,12 +102,12 @@ if 'exec' in args:
                 try:
                     result = subprocess.run(['python3', str(REPO / 'deploy/installations/host.py'), origin, '--update'],
                                             env={**os.environ, 'PATH': str(binaries) + ':' + os.environ['PATH'],
-                                                 'LEO_INSTALLATION_ROOT': directory, 'FAILURE': failure},
+                                                 'CAIRN_INSTALLATION_ROOT': directory, 'FAILURE': failure},
                                             capture_output=True, text=True, timeout=90)
                     if failure in ('lease', 'expired-lease'):
                         result = subprocess.run(['python3', str(REPO / 'deploy/installations/host.py'), origin, '--update'],
                                                 env={**os.environ, 'PATH': str(binaries) + ':' + os.environ['PATH'],
-                                                     'LEO_INSTALLATION_ROOT': directory, 'FAILURE': failure},
+                                                     'CAIRN_INSTALLATION_ROOT': directory, 'FAILURE': failure},
                                                 capture_output=True, text=True, timeout=90)
                     self.assertEqual(result.returncode, 0 if failure in ('', 'health', 'runner-unhealthy', 'stop-once', 'up-once', 'exec-once', 'interrupted', 'interrupted-stopped', 'interrupted-created', 'interrupted-missing', 'interrupted-restarting', 'interrupted-unhealthy') else 1, result.stderr)
                     updated = json.loads((root / 'installation.json').read_text())
@@ -134,7 +134,7 @@ if 'exec' in args:
                         for _ in range(2):
                             retry = subprocess.run(['python3', str(REPO / 'deploy/installations/host.py'), origin, '--update'],
                                                    env={**os.environ, 'PATH': str(binaries) + ':' + os.environ['PATH'],
-                                                        'LEO_INSTALLATION_ROOT': directory, 'FAILURE': ''},
+                                                        'CAIRN_INSTALLATION_ROOT': directory, 'FAILURE': ''},
                                                    capture_output=True, text=True, timeout=90)
                             self.assertEqual(retry.returncode, 0, retry.stderr)
                         recovered = json.loads((root / 'installation.json').read_text())

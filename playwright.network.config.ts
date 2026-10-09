@@ -11,6 +11,6 @@ export default defineConfig({
   retries: 0,
   timeout: 120000,
   expect: { timeout: 10000 },
-  outputDir: process.env.LEO_NETWORK_PLAYWRIGHT_OUTPUT,
+  outputDir: process.env.CAIRN_NETWORK_PLAYWRIGHT_OUTPUT,
   reporter: [['list']],
 })

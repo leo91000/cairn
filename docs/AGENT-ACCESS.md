@@ -84,7 +84,7 @@ running environments are unchanged.
 
 ## Runner deployment
 
-Use both services in compose.yaml with the same immutable LEO_IMAGE. The runner
+Use both services in compose.yaml with the same immutable CAIRN_IMAGE. The runner
 needs Linux x86-64, hardware virtualization, /dev/kvm and /dev/net/tun. It owns
 persistent runner-state storage and launches Firecracker through its jailer.
 Its infrastructure capabilities stay outside the guest. The agent never receives

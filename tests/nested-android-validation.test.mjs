@@ -25,7 +25,7 @@ describe('external nested Android release qualification', () => {
     expect(status.state).toBe('success')
     expect(status.context).toContain(config.digest.slice(7))
     expect(status.target_url).toBe(url)
-    for (const changed of [{ cpuVendor: 'AuthenticAMD' }, { system: 'google-apis' }, { api: '29' }, { commit: 'main' }, { image: 'ghcr.io/leo91000/leo-agent-manager:latest' }, { repository: 'elsewhere/repo' }, { results: [{ mode: 'first', status: 'passed' }] }, { results: [{ mode: 'first', status: 'passed' }, { mode: 'resume', status: 'failed' }] }])
+    for (const changed of [{ cpuVendor: 'AuthenticAMD' }, { system: 'google-apis' }, { api: '29' }, { commit: 'main' }, { image: 'ghcr.io/leo91000/cairn:latest' }, { repository: 'elsewhere/repo' }, { results: [{ mode: 'first', status: 'passed' }] }, { results: [{ mode: 'first', status: 'passed' }, { mode: 'resume', status: 'failed' }] }])
       expect(() => evidenceStatus({ ...evidence, ...changed }, url)).toThrow()
     expect(() => evidenceStatus(evidence, 'http://insecure.test')).toThrow()
   })

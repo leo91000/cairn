@@ -9,10 +9,10 @@ import { dockerJson, dockerOutput, dockerRequest } from './docker.ts'
 import { RunnerLifecycle } from './runner-lifecycle.ts'
 import sandboxSeccomp from './runner-seccomp.json' with { type: 'json' }
 
-const label = 'leo.agent-run'
+const label = 'cairn.agent-run'
 const dataDirectory = process.env.DATA_DIR || '/data'
-const manager = process.env.RUNNER_MANAGER_CONTAINER || 'leo-manager'
-const containerName = (id: string) => `leo-run-${id}`
+const manager = process.env.RUNNER_MANAGER_CONTAINER || 'cairn-manager'
+const containerName = (id: string) => `cairn-run-${id}`
 
 export function translateMount(source: string, mounts: { Source: string, Destination: string }[]) {
   const mount = [...mounts].sort((a, b) => b.Destination.length - a.Destination.length).find(mount => source === mount.Destination || source.startsWith(`${mount.Destination}/`))
@@ -35,7 +35,7 @@ async function createRun(id: string) {
   const binds = plan.mounts.map(mount => `${translateMount(mount.source, host.Mounts)}:${mount.target}:${mount.readOnly ? 'ro' : 'rw'}`)
   const inputSource = path.join(dataDirectory, 'runner-plans', `${id}.json`)
   // Only the prompt file is visible; the broker's authentication and other plans stay outside.
-  binds.push(`${translateMount(inputSource, host.Mounts)}:/run/leo-plan.json:ro`)
+  binds.push(`${translateMount(inputSource, host.Mounts)}:/run/cairn-plan.json:ro`)
   await dockerJson('POST', `/containers/create?name=${containerName(id)}`, {
     Image: host.Image,
     User: '1000:1000',
@@ -43,7 +43,7 @@ async function createRun(id: string) {
     Cmd: [],
     Env: ['HOME=/home/node', 'CODEX_HOME=/home/node/.codex', 'NODE_ENV=production', 'PATH=/pnpm/bin:/pnpm:/usr/local/bin:/usr/bin:/bin'],
     WorkingDir: '/app',
-    Labels: { [label]: 'true', 'leo.expires': `${plan.expires}` },
+    Labels: { [label]: 'true', 'cairn.expires': `${plan.expires}` },
     Healthcheck: { Test: ['NONE'] },
     HostConfig: {
       Binds: binds,
@@ -146,7 +146,7 @@ async function main() {
     try {
       const containers = await dockerJson('GET', `/containers/json?all=1&filters=${encodeURIComponent(JSON.stringify({ label: [`${label}=true`] }))}`)
       for (const container of containers) {
-        if (container.Labels['leo.expires'] !== 'null' && Number(container.Labels['leo.expires']) + 30000 < Date.now())
+        if (container.Labels['cairn.expires'] !== 'null' && Number(container.Labels['cairn.expires']) + 30000 < Date.now())
           await dockerJson('DELETE', `/containers/${container.Id}?force=true&v=true`)
       }
     }

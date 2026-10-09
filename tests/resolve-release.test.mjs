@@ -92,7 +92,7 @@ describe('release validation reuse', () => {
     expect(trustedRun(pullRequestRun, config)).toBe(true)
     for (const mutation of [{ event: 'workflow_dispatch' }, { head_branch: 'other' }, { head_repository: { full_name: 'other/repo' } }, { path: '.github/workflows/other.yaml' }])
       expect(trustedRun({ ...mainRun, ...mutation }, config)).toBe(false)
-    expect(trustedRun({ ...pullRequestRun, head_repository: { full_name: 'fork/leo-agent-manager' } }, config)).toBe(false)
+    expect(trustedRun({ ...pullRequestRun, head_repository: { full_name: 'fork/cairn-installation' } }, config)).toBe(false)
   })
 
   it('requires the official digest alongside the installation before reusing a release', () => {
@@ -140,7 +140,7 @@ describe('release validation reuse', () => {
   })
 
   it('never reuses failed, unfinished or forked validation', async () => {
-    for (const run of [{ ...pullRequestRun, conclusion: 'failure' }, { ...pullRequestRun, status: 'in_progress', conclusion: null }, { ...pullRequestRun, head_repository: { full_name: 'fork/leo-agent-manager' } }]) {
+    for (const run of [{ ...pullRequestRun, conclusion: 'failure' }, { ...pullRequestRun, status: 'in_progress', conclusion: null }, { ...pullRequestRun, head_repository: { full_name: 'fork/cairn-installation' } }]) {
       expect(await resolveRelease(config, {
         gh: github({ runs: () => [run], evidence: { [run.id]: evidenceFor(run, pullRequestCommit) } }),
         wait: false,

@@ -11,7 +11,7 @@ import { expect, it } from 'vitest'
 import { awaitProjectImport } from './fixtures/vm-policy.mjs'
 
 it('keeps the guest alive after publication until the host confirms the import', async () => {
-  const root = await mkdtemp(path.join(os.tmpdir(), 'leo-policy-'))
+  const root = await mkdtemp(path.join(os.tmpdir(), 'cairn-policy-'))
   const project = path.join(root, 'project')
   const inbox = path.join(root, 'messages.json')
   await writeFile(inbox, '[]')

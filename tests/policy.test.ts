@@ -7,8 +7,8 @@ import {
   expect,
   it,
 } from 'vitest'
-import { MAIN_AGENT_ID } from '../shared/contracts.ts'
-import { LOCAL_NODE_ID } from '../shared/nodes.ts'
+import { MAIN_AGENT_ID } from '../packages/contracts/contracts.ts'
+import { LOCAL_NODE_ID } from '../packages/contracts/nodes.ts'
 import { fixture } from './helpers.ts'
 import { prepareExecution } from './legacy/server/execution.ts'
 import { isolated } from './legacy/server/policy.ts'

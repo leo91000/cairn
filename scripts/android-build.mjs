@@ -8,7 +8,7 @@ export const artifactName = 'validated-android-release'
 const firebaseKeys = ['APP_ID', 'PROJECT_ID', 'API_KEY', 'SENDER_ID']
 
 export function firebaseConfigurationFromEnvironment(environment = process.env) {
-  return Object.fromEntries(firebaseKeys.map(key => [key, environment[`LEO_ANDROID_FIREBASE_${key}`] || '']))
+  return Object.fromEntries(firebaseKeys.map(key => [key, environment[`CAIRN_ANDROID_FIREBASE_${key}`] || '']))
 }
 
 function firebaseBuildConfiguration(configuration = {}) {
@@ -77,7 +77,7 @@ if (import.meta.main) {
     commit: process.env.GITHUB_SHA,
     runId: Number(process.env.VALIDATED_RUN_ID || process.env.GITHUB_RUN_ID),
     tag: process.env.RELEASE_TAG || undefined,
-    officialOrigin: process.env.LEO_OFFICIAL_ORIGIN,
+    officialOrigin: process.env.CAIRN_BEACON_ORIGIN,
     firebaseConfiguration: firebaseConfigurationFromEnvironment(),
   }
   if (command === 'record')

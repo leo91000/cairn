@@ -44,7 +44,7 @@
       "id": "command-1",
       "type": "command_execution",
       "command": "rg -n 'sibling-(count|index)' src tests",
-      "aggregated_output": "src/values/functions.ts:48: sibling-count: { arguments: 0 }\nsrc/values/functions.ts:49: sibling-index: { arguments: 0 }",
+      "aggregated_output": "apps/web/src/values/functions.ts:48: sibling-count: { arguments: 0 }\nsrc/values/functions.ts:49: sibling-index: { arguments: 0 }",
       "exit_code": 0,
       "status": "completed"
     }
@@ -62,7 +62,7 @@
     "item": {
       "id": "read-typescript",
       "type": "command_execution",
-      "command": "/bin/zsh -lc 'sed -n \"1,80p\" src/values/functions.ts'",
+      "command": "/bin/zsh -lc 'sed -n \"1,80p\" apps/web/src/values/functions.ts'",
       "aggregated_output": "import type { FunctionDefinition } from './types'\n\nexport const siblingFunctions: FunctionDefinition[] = [\n  { name: 'sibling-count', arguments: 0 },\n  { name: 'sibling-index', arguments: 0 },\n]\n",
       "exit_code": 0,
       "status": "completed",

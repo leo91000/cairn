@@ -33,15 +33,15 @@ async function docker(...args) {
 }
 
 async function main() {
-  const directory = await mkdtemp(join(tmpdir(), 'leo-official-backup-test-'))
+  const directory = await mkdtemp(join(tmpdir(), 'cairn-beacon-backup-test-'))
   const dump = join(directory, 'official.dump')
 
   try {
-    await docker('run', '-d', '--name', name, '-e', 'POSTGRES_USER=leo', '-e', 'POSTGRES_PASSWORD=fixture-only', '-e', 'POSTGRES_DB=leo_official', image)
+    await docker('run', '-d', '--name', name, '-e', 'POSTGRES_USER=cairn', '-e', 'POSTGRES_PASSWORD=fixture-only', '-e', 'POSTGRES_DB=cairn_official', image)
     for (let attempt = 0; ; attempt++) {
       assert.ok(attempt < 60, 'Disposable backup database did not start')
       try {
-        await docker('exec', name, 'pg_isready', '-h', '127.0.0.1', '-U', 'leo', '-d', 'leo_official')
+        await docker('exec', name, 'pg_isready', '-h', '127.0.0.1', '-U', 'cairn', '-d', 'cairn_official')
         break
       }
       catch {
@@ -49,7 +49,7 @@ async function main() {
       }
     }
 
-    const sql = command => docker('exec', name, 'psql', '-U', 'leo', '-d', 'leo_official', '-v', 'ON_ERROR_STOP=1', '-Atc', command)
+    const sql = command => docker('exec', name, 'psql', '-U', 'cairn', '-d', 'cairn_official', '-v', 'ON_ERROR_STOP=1', '-Atc', command)
     await sql('CREATE TABLE backup_fixture (id integer PRIMARY KEY, value text NOT NULL); INSERT INTO backup_fixture VALUES (113, \'known restore value\');')
     await exec('bash', [script, 'backup', name, dump])
     assert.equal((await stat(dump)).mode & 0o777, 0o600, 'Dump must remain private')

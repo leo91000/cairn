@@ -57,10 +57,10 @@ export async function deploy(config, { timeoutMs = 600000, intervalMs = 2000 } =
     const officialService = document?.services?.official
     // Reject the old manager target before changing any environment values.
     // eslint-disable-next-line no-template-curly-in-string -- Coolify must retain these Compose expressions.
-    if (!officialService || document.services.manager || document.services.runner || officialService.image !== '${LEO_OFFICIAL_IMAGE:?Set the validated official image digest}'
+    if (!officialService || document.services.manager || document.services.runner || officialService.image !== '${CAIRN_BEACON_IMAGE:?Set the validated official image digest}'
       || Number(officialService.deploy?.replicas) !== 1 || officialService.deploy?.update_config?.order !== 'stop-first'
       // eslint-disable-next-line no-template-curly-in-string -- This must be operator-configured, not baked into Compose.
-      || officialService.environment?.LEO_INSTALLATION_IMAGE !== '${LEO_INSTALLATION_IMAGE:?Set the paired installation digest}') {
+      || officialService.environment?.CAIRN_INSTALLATION_IMAGE !== '${CAIRN_INSTALLATION_IMAGE:?Set the paired installation digest}') {
       throw new Error('Coolify must target the single-process official production Compose, not the old manager')
     }
   }
@@ -75,8 +75,8 @@ export async function deploy(config, { timeoutMs = 600000, intervalMs = 2000 } =
 
   if (official) {
     const data = [
-      { key: 'LEO_OFFICIAL_IMAGE', value: image, is_literal: true },
-      { key: 'LEO_INSTALLATION_IMAGE', value: config.installationImage, is_literal: true },
+      { key: 'CAIRN_BEACON_IMAGE', value: image, is_literal: true },
+      { key: 'CAIRN_INSTALLATION_IMAGE', value: config.installationImage, is_literal: true },
     ]
     const previousEnvironment = await api(`${servicePath}/envs`, 'GET', undefined, true)
     const previous = data.map(({ key }) => {
@@ -118,7 +118,7 @@ export async function deploy(config, { timeoutMs = 600000, intervalMs = 2000 } =
   }
   else {
     await api(`${servicePath}/envs`, 'PATCH', {
-      key: 'LEO_IMAGE',
+      key: 'CAIRN_IMAGE',
       value: image,
       is_literal: true,
     })
@@ -178,13 +178,13 @@ export async function deploy(config, { timeoutMs = 600000, intervalMs = 2000 } =
 }
 
 function configuration() {
-  const names = ['COOLIFY_URL', 'COOLIFY_SERVICE_UUID', 'COOLIFY_TOKEN', 'LEO_OFFICIAL_ORIGIN', 'DEPLOY_IMAGE', 'DEPLOY_INSTALLATION_IMAGE', 'DEPLOY_COMMIT']
+  const names = ['COOLIFY_URL', 'COOLIFY_SERVICE_UUID', 'COOLIFY_TOKEN', 'CAIRN_BEACON_ORIGIN', 'DEPLOY_IMAGE', 'DEPLOY_INSTALLATION_IMAGE', 'DEPLOY_COMMIT']
   for (const name of names) {
     if (!process.env[name])
       throw new Error(`Missing ${name}`)
   }
 
-  for (const name of ['COOLIFY_URL', 'LEO_OFFICIAL_ORIGIN']) {
+  for (const name of ['COOLIFY_URL', 'CAIRN_BEACON_ORIGIN']) {
     const url = new URL(process.env[name])
     if (url.protocol !== 'https:' || url.username || url.password || url.pathname !== '/' || url.search || url.hash)
       throw new Error(`${name} must be an HTTPS origin`)
@@ -205,7 +205,7 @@ function configuration() {
     commit: process.env.DEPLOY_COMMIT,
     runtimeId: process.env.DEPLOY_COMMIT,
     installationImage: process.env.DEPLOY_INSTALLATION_IMAGE,
-    publicUrl: process.env.LEO_OFFICIAL_ORIGIN,
+    publicUrl: process.env.CAIRN_BEACON_ORIGIN,
   }
 }
 

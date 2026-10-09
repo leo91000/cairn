@@ -5,7 +5,7 @@ import path from 'node:path'
 import { buildApp } from './legacy/server/app.ts'
 
 export async function fixture(overrides: Partial<Config> = {}) {
-  const directory = await mkdtemp(path.join(os.tmpdir(), 'leo-manager-test-'))
+  const directory = await mkdtemp(path.join(os.tmpdir(), 'cairn-manager-test-'))
   const home = path.join(directory, 'home')
   const projectPath = path.join(directory, 'project')
   await Promise.all([mkdir(home), mkdir(projectPath)])

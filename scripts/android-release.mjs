@@ -16,7 +16,7 @@ export function androidVersion(tag) {
 
 export function updateManifest(tag, bytes, metadata) {
   const version = androidVersion(tag)
-  if (metadata.applicationId !== 'dev.leo.manager' || metadata.elements?.length !== 1
+  if (metadata.applicationId !== 'build.cairn.app' || metadata.elements?.length !== 1
     || metadata.elements[0].versionCode !== version.versionCode
     || metadata.elements[0].versionName !== version.versionName) {
     throw new Error('Built APK metadata does not match the release tag')
@@ -28,7 +28,7 @@ export function updateManifest(tag, bytes, metadata) {
     schema: 1,
     ...version,
     minSdk: 26,
-    url: `https://github.com/leo91000/leo-agent-manager/releases/download/${tag}/leo-android.apk`,
+    url: `https://github.com/leo91000/leo-agent-manager/releases/download/${tag}/cairn-android.apk`,
     sha256: createHash('sha256').update(bytes).digest('hex'),
     size: bytes.length,
   }

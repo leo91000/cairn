@@ -15,9 +15,9 @@ const image = process.argv[2]
 const commit = process.env.SMOKE_COMMIT || process.env.GITHUB_SHA
 assert.ok(image, 'Pass the exact official image under test')
 assert.match(commit || '', /^[a-f0-9]{40}$/, 'Set SMOKE_COMMIT to the image build commit')
-const name = `leo-official-image-${randomUUID().slice(0, 8)}`
+const name = `cairn-beacon-image-${randomUUID().slice(0, 8)}`
 const postgresImage = readFileSync(new URL('../deploy/official/compose.production.yaml', import.meta.url), 'utf8').match(/image: (postgres:17-alpine(?:@sha256:[a-f0-9]{64})?)/)[1]
-const installationImage = process.env.SMOKE_INSTALLATION_IMAGE || `ghcr.io/leo91000/leo-agent-manager@sha256:${'a'.repeat(64)}`
+const installationImage = process.env.SMOKE_INSTALLATION_IMAGE || `ghcr.io/leo91000/cairn@sha256:${'a'.repeat(64)}`
 
 async function docker(...args) {
   try {
@@ -71,7 +71,7 @@ async function main() {
       new Promise(resolve => databaseReservation.close(resolve)),
     ])
     origin = `http://localhost:${port}`
-    await docker('run', '-d', '--name', `${name}-db`, '-p', `127.0.0.1:${databasePort}:5432`, '-e', 'POSTGRES_USER=leo', '-e', 'POSTGRES_PASSWORD=fixture-only', '-e', 'POSTGRES_DB=leo_official', '-v', `${name}-data:/var/lib/postgresql/data`, '--health-cmd', 'pg_isready -h 127.0.0.1 -U leo -d leo_official', '--health-interval', '1s', '--health-retries', '30', postgresImage, '-c', 'shared_preload_libraries=pg_stat_statements')
+    await docker('run', '-d', '--name', `${name}-db`, '-p', `127.0.0.1:${databasePort}:5432`, '-e', 'POSTGRES_USER=cairn', '-e', 'POSTGRES_PASSWORD=fixture-only', '-e', 'POSTGRES_DB=cairn_official', '-v', `${name}-data:/var/lib/postgresql/data`, '--health-cmd', 'pg_isready -h 127.0.0.1 -U cairn -d cairn_official', '--health-interval', '1s', '--health-retries', '30', postgresImage, '-c', 'shared_preload_libraries=pg_stat_statements')
     for (let attempt = 0; ; attempt++) {
       assert.ok(attempt < 60, 'Disposable Postgres did not become ready')
       const result = await docker('inspect', '--format', '{{.State.Health.Status}}', `${name}-db`)
@@ -80,7 +80,7 @@ async function main() {
       await setTimeout(500)
     }
 
-    await docker('run', '-d', '--name', name, '--network', 'host', '-e', `LEO_OFFICIAL_DATABASE_URL=postgres://leo:fixture-only@127.0.0.1:${databasePort}/leo_official`, '-e', `LEO_OFFICIAL_ORIGIN=${origin}`, '-e', `LEO_OFFICIAL_LISTEN=127.0.0.1:${port}`, '-e', `LEO_OFFICIAL_EMAIL_ENDPOINT=http://127.0.0.1:${mail.address().port}/emails`, '-e', 'LEO_OFFICIAL_EMAIL_KEY=fixture-only', '-e', 'LEO_OFFICIAL_EMAIL_FROM=leo@example.test', '-e', `LEO_INSTALLATION_IMAGE=${installationImage}`, '-e', `LEO_OFFICIAL_FCM_SERVICE_ACCOUNT_JSON=${fcmAccount}`, image)
+    await docker('run', '-d', '--name', name, '--network', 'host', '-e', `CAIRN_BEACON_DATABASE_URL=postgres://cairn:fixture-only@127.0.0.1:${databasePort}/cairn_official`, '-e', `CAIRN_BEACON_ORIGIN=${origin}`, '-e', `CAIRN_BEACON_LISTEN=127.0.0.1:${port}`, '-e', `CAIRN_BEACON_EMAIL_ENDPOINT=http://127.0.0.1:${mail.address().port}/emails`, '-e', 'CAIRN_BEACON_EMAIL_KEY=fixture-only', '-e', 'CAIRN_BEACON_EMAIL_FROM=cairn@example.test', '-e', `CAIRN_INSTALLATION_IMAGE=${installationImage}`, '-e', `CAIRN_BEACON_FCM_SERVICE_ACCOUNT_JSON=${fcmAccount}`, image)
     const healthResponse = await ready()
     assert.match(healthResponse.headers.get('cache-control'), /no-store/)
     assert.deepEqual(await healthResponse.json(), {
@@ -91,7 +91,7 @@ async function main() {
     })
     const user = (await docker('exec', name, 'id', '-u')).stdout.trim()
     assert.equal(user, '1000', 'Official process must run unprivileged')
-    const databaseSql = sql => docker('exec', `${name}-db`, 'psql', '-U', 'leo', '-d', 'leo_official', '-v', 'ON_ERROR_STOP=1', '-Atc', sql)
+    const databaseSql = sql => docker('exec', `${name}-db`, 'psql', '-U', 'cairn', '-d', 'cairn_official', '-v', 'ON_ERROR_STOP=1', '-Atc', sql)
     await databaseSql('CREATE EXTENSION pg_stat_statements; SELECT pg_stat_statements_reset();')
     for (let request = 0; request < 100; request++) {
       const probe = await fetch(`${origin}/health`)
@@ -123,7 +123,7 @@ async function main() {
     assert.deepEqual(await release.json(), { image: installationImage })
     const installer = await fetch(`${origin}/install.sh`).then(response => response.text())
     assert.ok(installer.includes(origin), 'Installer must use the configured official origin')
-    assert.ok(!installer.includes('__LEO_'), 'Embedded installer assets must be complete')
+    assert.ok(!installer.includes('__CAIRN_'), 'Embedded installer assets must be complete')
 
     const post = (path, body) => fetch(`${origin}${path}`, {
       method: 'POST',

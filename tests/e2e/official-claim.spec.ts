@@ -26,7 +26,7 @@ test('claims, detaches and reclaims the same private installation through the ap
   })
   mail.listen(0, '127.0.0.1')
   await once(mail, 'listening')
-  const root = await mkdtemp(join(tmpdir(), 'leo-device-claim-'))
+  const root = await mkdtemp(join(tmpdir(), 'cairn-device-claim-'))
   await Promise.all([mkdir(join(root, 'home')), mkdir(join(root, 'data'))])
   const url = 'http://localhost:4401'
   const children: ChildProcess[] = []
@@ -38,13 +38,13 @@ test('claims, detaches and reclaims the same private installation through the ap
     WORKER_ENABLED: 'false',
     HOST: '127.0.0.1',
     PORT: '4402',
-    LEO_OFFICIAL_ORIGIN: url,
-    LEO_INSTALLATION_NAME: 'Claimed machine',
+    CAIRN_BEACON_ORIGIN: url,
+    CAIRN_INSTALLATION_NAME: 'Claimed machine',
   }
 
   function start(binary: string, args: string[], env: NodeJS.ProcessEnv) {
     const child = spawn(binary, args, {
-      env: { ...process.env, ...env, LEO_INSTALLATION_CLAIM_CODE: '' },
+      env: { ...process.env, ...env, CAIRN_INSTALLATION_CLAIM_CODE: '' },
       stdio: ['ignore', 'pipe', 'pipe'],
     })
     children.push(child)
@@ -60,11 +60,11 @@ test('claims, detaches and reclaims the same private installation through the ap
   }
 
   async function claim() {
-    const child = start('target/debug/leo', ['claim'], managerEnv)
+    const child = start('target/debug/cairn', ['claim'], managerEnv)
     let output = ''
     child.stdout!.on('data', chunk => output += chunk)
     await expect(async () => {
-      expect(child.exitCode, 'leo claim must wait for browser approval').toBeNull()
+      expect(child.exitCode, 'cairn claim must wait for browser approval').toBeNull()
       expect(output).toContain(`${url}/claim`)
       expect(output).toMatch(/[A-F0-9]{4}-[A-F0-9]{4}-[A-F0-9]{4}/)
     }).toPass({ timeout: 15000 })
@@ -89,13 +89,13 @@ test('claims, detaches and reclaims the same private installation through the ap
     return JSON.parse(await readFile(path, 'utf8'))
   }
 
-  start('target/debug/leo-official', [], {
-    LEO_OFFICIAL_DATABASE_URL: process.env.LEO_OFFICIAL_TEST_DATABASE_URL,
-    LEO_OFFICIAL_ORIGIN: url,
-    LEO_OFFICIAL_LISTEN: '127.0.0.1:4401',
-    LEO_OFFICIAL_EMAIL_ENDPOINT: `http://127.0.0.1:${(mail.address() as { port: number }).port}/emails`,
-    LEO_OFFICIAL_EMAIL_KEY: 'fixture-only',
-    LEO_OFFICIAL_EMAIL_FROM: 'leo@example.test',
+  start('target/debug/cairn-beacon', [], {
+    CAIRN_BEACON_DATABASE_URL: process.env.CAIRN_BEACON_TEST_DATABASE_URL,
+    CAIRN_BEACON_ORIGIN: url,
+    CAIRN_BEACON_LISTEN: '127.0.0.1:4401',
+    CAIRN_BEACON_EMAIL_ENDPOINT: `http://127.0.0.1:${(mail.address() as { port: number }).port}/emails`,
+    CAIRN_BEACON_EMAIL_KEY: 'fixture-only',
+    CAIRN_BEACON_EMAIL_FROM: 'cairn@example.test',
   })
   try {
     await expect.poll(() => fetch(`${url}/health`).then(response => response.ok).catch(() => false)).toBe(true)
@@ -129,11 +129,11 @@ test('claims, detaches and reclaims the same private installation through the ap
       data: { code: otherCode, name: 'Other machine', protocol: 1 },
     })
     expect(other.status()).toBe(201)
-    const unclaimed = start('target/debug/leo', [], managerEnv)
+    const unclaimed = start('target/debug/cairn', [], managerEnv)
     await expect.poll(() => fetch('http://localhost:4402/api/chats').then(response => response.status).catch(() => 0)).toBe(401)
     await stop(unclaimed)
     const old = await claim()
-    let manager = start('target/debug/leo', [], managerEnv)
+    let manager = start('target/debug/cairn', [], managerEnv)
     await page.getByRole('button', { name: /^Claimed machine · (Online|Offline)$/ }).click()
     await expect(async () => {
       await page.reload()
@@ -146,7 +146,7 @@ test('claims, detaches and reclaims the same private installation through the ap
     await expect(page.getByRole('heading', { name: 'Data survives detachment', exact: true })).toBeVisible()
     const conversationUrl = page.url()
     // A failed replacement must leave the current private identity intact.
-    const refused = start('target/debug/leo', ['claim'], managerEnv)
+    const refused = start('target/debug/cairn', ['claim'], managerEnv)
     await expect.poll(() => refused.exitCode).toBe(1)
     expect(JSON.stringify(JSON.parse(await readFile(join(root, 'data/installation-relay/identity.json'), 'utf8'))) === JSON.stringify(old)).toBe(true)
     await page.getByRole('button', { name: 'Installation settings', exact: true }).click()
@@ -170,7 +170,7 @@ test('claims, detaches and reclaims the same private installation through the ap
     const renewed = await claim()
     expect(renewed.installationId).toBe(old.installationId)
     expect(renewed.token !== old.token).toBe(true)
-    manager = start('target/debug/leo', [], managerEnv)
+    manager = start('target/debug/cairn', [], managerEnv)
     await page.getByRole('button', { name: /^Claimed machine · (Online|Offline)$/ }).click()
     await expect(async () => {
       await page.goto(conversationUrl)

@@ -103,7 +103,7 @@ Hosting follows the [Claude Code hosting and credential rules](https://code.clau
 
 ## Validation
 
-`backend/tests/claude.rs` exercises the streaming adapter and account lifecycle with
+`crates/installation/tests/claude.rs` exercises the streaming adapter and account lifecycle with
 a synthetic executable. `tests/e2e/claude.spec.ts` exercises the native backend from
 Chromium and WebKit, including mobile layouts and resumed conversations.
 `AccountsJourneyTest` covers Android’s code-entry flow and provider serialization.

@@ -58,7 +58,7 @@ async function validatedImage(config, gh) {
     if (head.tree?.sha !== config.tree)
       continue
 
-    const directory = await mkdtemp(path.join(os.tmpdir(), 'leo-release-'))
+    const directory = await mkdtemp(path.join(os.tmpdir(), 'cairn-release-'))
     try {
       await gh(['run', 'download', run.id.toString(), '--repo', config.repository, '--name', name, '--dir', directory])
       const evidence = JSON.parse(await readFile(path.join(directory, 'image.json'), 'utf8'))

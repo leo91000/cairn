@@ -189,7 +189,7 @@ Android now archives the optimized unsigned APK after successful validation and
 can reuse it for the exact commit and version. A tag verifies the artifact, signs
 it with the existing key and publishes it without invoking Gradle. Missing or
 incompatible evidence still requires the full pipeline. See
-[Android updates](../android/docs/UPDATES.md#fast-tag-publication) for the guards.
+[Android updates](../apps/android/docs/UPDATES.md#fast-tag-publication) for the guards.
 The Gradle task-output cache is enabled separately from the dependency cache.
 
 These changes remove duplicated work; a new hosted tag duration has **not yet

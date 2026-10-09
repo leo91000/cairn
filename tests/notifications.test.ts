@@ -1,4 +1,4 @@
-import type { ChatQuestion } from '../shared/chats.ts'
+import type { ChatQuestion } from '../packages/contracts/chats.ts'
 import { createECDH, randomBytes } from 'node:crypto'
 import {
   afterEach,

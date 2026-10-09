@@ -1,6 +1,6 @@
 # Shared select
 
-`src/components/VirtualSelect.vue` is the single-select combobox used for task
+`apps/web/src/components/VirtualSelect.vue` is the single-select combobox used for task
 agents, projects and schedules, agent reasoning, run status, skill scopes, and
 supporting files, installations (including MCP consent), execution nodes and
 conversation views. New select fields should reuse it.
@@ -38,7 +38,7 @@ combobox when missing a selection.
 
 Options are rendered in a virtual window with overscan. Described options are
 62 pixels tall, simple options 44, and group headings 30. Keep these dimensions
-aligned with `src/styles/select.css`; descriptions are single-line and truncated
+aligned with `apps/web/src/styles/select.css`; descriptions are single-line and truncated
 visually, while the full description remains available to assistive technology.
 
 Arrow keys, Home/End, Page Up/Down, Enter, Escape, and Tab support keyboard use.

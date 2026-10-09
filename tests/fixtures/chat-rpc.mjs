@@ -139,7 +139,7 @@ export function chatFixture() {
         const command = {
           id: `command-${active.id}`,
           type: 'commandExecution',
-          command: 'rg --files src/components',
+          command: 'rg --files apps/web/src/components',
           status: 'completed',
           exitCode: 0,
           aggregatedOutput: 'ChatComposer.vue\nActivityFeed.vue\nVirtualSelect.vue',

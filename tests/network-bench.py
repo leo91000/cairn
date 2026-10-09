@@ -294,7 +294,7 @@ def main():
     run("sudo", "-n", "true")
     network = Network()
     # Private /24s are fixed for reproducibility. Fail rather than overlap a second bench.
-    lock = open("/tmp/leo-network-bench.lock", "a")
+    lock = open("/tmp/cairn-network-bench.lock", "a")
     try:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except BlockingIOError:
@@ -302,10 +302,10 @@ def main():
     if "198.18.103.0/30" in run("ip", "route", "show"):
         parser.error("Another network bench is active; run scenarios sequentially")
     try:
-        with tempfile.TemporaryDirectory(prefix="leo-network-") as directory:
+        with tempfile.TemporaryDirectory(prefix="cairn-network-") as directory:
             binary = str(Path(directory) / "network-client")
             network.directory = Path(directory)
-            run("rustc", "--edition=2024", "backend/examples/network_client.rs", "-o", binary)
+            run("rustc", "--edition=2024", "crates/installation/examples/network_client.rs", "-o", binary)
             network.setup(args.scenario)
             for port in [49001, 49002]:
                 network.listen(binary, network.internet, "198.18.102.1", port)
@@ -367,8 +367,8 @@ def main():
 
 
 def android(network, directory, args, report):
-    if not os.environ.get("LEO_OFFICIAL_TEST_DATABASE_URL"):
-        raise RuntimeError("Set LEO_OFFICIAL_TEST_DATABASE_URL to a disposable Postgres database")
+    if not os.environ.get("CAIRN_BEACON_TEST_DATABASE_URL"):
+        raise RuntimeError("Set CAIRN_BEACON_TEST_DATABASE_URL to a disposable Postgres database")
     devices = [line.split()[0] for line in run("adb", "devices").splitlines()[1:] if line.endswith("\tdevice")]
     serial = os.environ.get("ANDROID_SERIAL")
     if not serial:
@@ -395,13 +395,13 @@ def android(network, directory, args, report):
                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     network.children.append(proxy)
     wrapper = directory / "installation"
-    command = namespace_command(installation["namespace"], str(Path("target/debug/leo").resolve()))
-    command.insert(2, "--preserve-env=DATA_DIR,AGENT_HOME,WORKSPACE_ROOTS,NODE_ENV,WORKER_ENABLED,HOST,PORT,LEO_OFFICIAL_ORIGIN,LEO_INSTALLATION_CLAIM_CODE,LEO_INSTALLATION_NAME,LEO_DIRECT_STUN_URLS,LEO_DIRECT_PUBLIC_IP")
+    command = namespace_command(installation["namespace"], str(Path("target/debug/cairn").resolve()))
+    command.insert(2, "--preserve-env=DATA_DIR,AGENT_HOME,WORKSPACE_ROOTS,NODE_ENV,WORKER_ENABLED,HOST,PORT,CAIRN_BEACON_ORIGIN,CAIRN_INSTALLATION_CLAIM_CODE,CAIRN_INSTALLATION_NAME,CAIRN_DIRECT_STUN_URLS,CAIRN_DIRECT_PUBLIC_IP")
     wrapper.write_text("#!/bin/sh\nexec " + shlex.join(command) + ' "$@"\n')
     wrapper.chmod(0o700)
     env = os.environ.copy()
-    env.update(LEO_NETWORK_INSTALLATION_BINARY=str(wrapper), LEO_NETWORK_ANDROID="true",
-               LEO_OFFICIAL_STUN_URL="stun:" + network.stun_address)
+    env.update(CAIRN_NETWORK_INSTALLATION_BINARY=str(wrapper), CAIRN_NETWORK_ANDROID="true",
+               CAIRN_BEACON_STUN_URL="stun:" + network.stun_address)
     private = directory / "direct-fixture.json"
     fixture_log = directory / "fixture.log"
     with fixture_log.open("w") as output:
@@ -411,32 +411,32 @@ def android(network, directory, args, report):
     network.groups.append(fixture.pid)
     wait_ready(private, fixture, "Authenticated Android installation fixture", seconds=60)
     adb("reverse", "tcp:4398", "tcp:4398")
-    for path in ["android/app/build/outputs/apk/debug/app-debug.apk",
-                 "android/app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk"]:
+    for path in ["apps/android/app/build/outputs/apk/debug/app-debug.apk",
+                 "apps/android/app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk"]:
         adb("install", "-r", "-t", path)
-    adb("shell", "run-as", "dev.leo.manager", "mkdir", "-p", "files")
+    adb("shell", "run-as", "build.cairn.app", "mkdir", "-p", "files")
     try:
-        adb("shell", "run-as", "dev.leo.manager", "sh", "-c", "'cat > files/direct-fixture.json'", input=private.read_bytes())
-        result = adb("shell", "am", "instrument", "-w", "-e", "class", "dev.leo.manager.data.DirectTransportDeviceTest",
-                     "-e", "leoDirectScenario", args.scenario, "dev.leo.manager.test/androidx.test.runner.AndroidJUnitRunner", text=True, timeout=360)
+        adb("shell", "run-as", "build.cairn.app", "sh", "-c", "'cat > files/direct-fixture.json'", input=private.read_bytes())
+        result = adb("shell", "am", "instrument", "-w", "-e", "class", "build.cairn.app.data.DirectTransportDeviceTest",
+                     "-e", "cairnDirectScenario", args.scenario, "build.cairn.app.test/androidx.test.runner.AndroidJUnitRunner", text=True, timeout=360)
         args.output.with_suffix(".instrumentation.txt").write_text(result.stdout)
         if "OK (1 test)" not in result.stdout:
             raise RuntimeError("Native Android transport scenario failed; see instrumentation result")
-        evidence = json.loads(adb("exec-out", "run-as", "dev.leo.manager", "cat", "files/direct-evidence.json", text=True).stdout)
+        evidence = json.loads(adb("exec-out", "run-as", "build.cairn.app", "cat", "files/direct-evidence.json", text=True).stdout)
         expected = "relay" if args.scenario == "udp-blocked" else "direct"
         if evidence["route"] != expected:
             raise RuntimeError("Android's observed application response used the wrong route")
         report["android"] = evidence
         args.output.write_text(json.dumps(report) + "\n")
     finally:
-        adb("shell", "am", "force-stop", "dev.leo.manager")
-        adb("shell", "run-as", "dev.leo.manager", "rm", "-f", "files/direct-fixture.json")
+        adb("shell", "am", "force-stop", "build.cairn.app")
+        adb("shell", "run-as", "build.cairn.app", "rm", "-f", "files/direct-fixture.json")
         adb("reverse", "--remove", "tcp:4398")
 
 
 def browser(network, binary, directory, args, report):
-    if not os.environ.get("LEO_OFFICIAL_TEST_DATABASE_URL"):
-        raise RuntimeError("Set LEO_OFFICIAL_TEST_DATABASE_URL to a disposable Postgres database")
+    if not os.environ.get("CAIRN_BEACON_TEST_DATABASE_URL"):
+        raise RuntimeError("Set CAIRN_BEACON_TEST_DATABASE_URL to a disposable Postgres database")
     python = os.sys.executable
     script = str(Path(__file__).resolve())
     chromium = run("pnpm", "exec", "node", "--input-type=module", "-e",
@@ -448,7 +448,7 @@ def browser(network, binary, directory, args, report):
         network.exec(network.participants["client"]["namespace"], "iptables", "-A", "OUTPUT",
                      "-p", "udp", "--dport", "3478", "-j", "DROP")
     env = os.environ.copy()
-    for key in ["LEO_AUTH_SOCKET", "CLAUDE_SECURESTORAGE_CONFIG_DIR", "LEO_MCP_RUN_TOKEN",
+    for key in ["CAIRN_AUTH_SOCKET", "CLAUDE_SECURESTORAGE_CONFIG_DIR", "CAIRN_MCP_RUN_TOKEN",
                 "CODEX_HOME", "OPENAI_API_KEY", "CODEX_API_KEY", "CLAUDE_CONFIG_DIR",
                 "CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"]:
         env.pop(key, None)
@@ -470,17 +470,17 @@ def browser(network, binary, directory, args, report):
         path.chmod(0o700)
         return str(path)
 
-    env["LEO_OFFICIAL_STUN_URL"] = "stun:" + network.stun_address
+    env["CAIRN_BEACON_STUN_URL"] = "stun:" + network.stun_address
     # Empty operator override must use authenticated official STUN, not disable direct.
-    env["LEO_DIRECT_STUN_URLS"] = ""
+    env["CAIRN_DIRECT_STUN_URLS"] = ""
     if args.scenario == "same-server":
-        env["LEO_DIRECT_PUBLIC_IP"] = "198.18.102.3"
+        env["CAIRN_DIRECT_PUBLIC_IP"] = "198.18.102.3"
     # The production Rust Binding responder runs before host-facing masquerade.
-    env["LEO_NETWORK_DIRECT_CLIENT"] = wrapper(
+    env["CAIRN_NETWORK_DIRECT_CLIENT"] = wrapper(
         "direct-client", "client", str(Path("target/debug/examples/network_direct_client").resolve()), "")
-    env["LEO_NETWORK_INSTALLATION_BINARY"] = wrapper(
-        "installation", "installation", str(Path("target/debug/leo").resolve()),
-        "DATA_DIR,AGENT_HOME,WORKSPACE_ROOTS,NODE_ENV,WORKER_ENABLED,HOST,PORT,LEO_OFFICIAL_ORIGIN,LEO_INSTALLATION_CLAIM_CODE,LEO_INSTALLATION_NAME,LEO_DIRECT_ENABLED,LEO_DIRECT_STUN_URLS,LEO_DIRECT_PUBLIC_IP")
+    env["CAIRN_NETWORK_INSTALLATION_BINARY"] = wrapper(
+        "installation", "installation", str(Path("target/debug/cairn").resolve()),
+        "DATA_DIR,AGENT_HOME,WORKSPACE_ROOTS,NODE_ENV,WORKER_ENABLED,HOST,PORT,CAIRN_BEACON_ORIGIN,CAIRN_INSTALLATION_CLAIM_CODE,CAIRN_INSTALLATION_NAME,CAIRN_DIRECT_ENABLED,CAIRN_DIRECT_STUN_URLS,CAIRN_DIRECT_PUBLIC_IP")
     # sudo closes inherited descriptors, including Playwright's CDP pipes (3/4).
     # Transfer those descriptors over a private Unix socket after entering the
     # namespace; browser traffic still traverses the real network topology.
@@ -488,15 +488,15 @@ def browser(network, binary, directory, args, report):
     browser_command = [python, script, "browser-pipe", network.participants["client"]["namespace"], chromium, str(directory)]
     browser_wrapper.write_text("#!/bin/sh\nexec " + shlex.join(browser_command) + ' "$@"\n')
     browser_wrapper.chmod(0o700)
-    env["LEO_NETWORK_CHROMIUM"] = str(browser_wrapper)
-    env["LEO_NETWORK_RUST_CLIENT"] = wrapper("rust-client", "client", binary)
-    env["LEO_NETWORK_LOCAL_CLIENT"] = wrapper("local-client", "installation", binary)
-    env["LEO_NETWORK_SCENARIO"] = args.scenario
-    env["LEO_NETWORK_EXPECT_ROUTE"] = args.expect_route
-    env["LEO_NETWORK_EXPECT_RUST_ROUTE"] = args.expect_rust_route
-    env["LEO_NETWORK_OUTPUT"] = str(args.output.resolve())
-    env["LEO_NETWORK_FIXTURE_DIRECTORY"] = str(directory)
-    env["LEO_NETWORK_PLAYWRIGHT_OUTPUT"] = str(args.output.parent.resolve() / (args.scenario + "-playwright"))
+    env["CAIRN_NETWORK_CHROMIUM"] = str(browser_wrapper)
+    env["CAIRN_NETWORK_RUST_CLIENT"] = wrapper("rust-client", "client", binary)
+    env["CAIRN_NETWORK_LOCAL_CLIENT"] = wrapper("local-client", "installation", binary)
+    env["CAIRN_NETWORK_SCENARIO"] = args.scenario
+    env["CAIRN_NETWORK_EXPECT_ROUTE"] = args.expect_route
+    env["CAIRN_NETWORK_EXPECT_RUST_ROUTE"] = args.expect_rust_route
+    env["CAIRN_NETWORK_OUTPUT"] = str(args.output.resolve())
+    env["CAIRN_NETWORK_FIXTURE_DIRECTORY"] = str(directory)
+    env["CAIRN_NETWORK_PLAYWRIGHT_OUTPUT"] = str(args.output.parent.resolve() / (args.scenario + "-playwright"))
     participant = network.participants["client"]
     change = directory / "change-network"
     command = [python, script, "change-network", participant["namespace"], participant["link"], str(directory / "client-proxy")]
@@ -512,9 +512,9 @@ def browser(network, binary, directory, args, report):
             commands.append(shlex.join(command))
         path.write_text("#!/bin/sh\nset -e\n" + "\n".join(commands) + "\n")
         path.chmod(0o700)
-    env["LEO_NETWORK_CUT_DIRECT"] = str(cut)
-    env["LEO_NETWORK_RESTORE_DIRECT"] = str(restore)
-    env["LEO_NETWORK_CHANGE"] = str(change)
+    env["CAIRN_NETWORK_CUT_DIRECT"] = str(cut)
+    env["CAIRN_NETWORK_RESTORE_DIRECT"] = str(restore)
+    env["CAIRN_NETWORK_CHANGE"] = str(change)
     process = subprocess.Popen(["pnpm", "exec", "playwright", "test", "--config", "playwright.network.config.ts"], env=env, start_new_session=True)
     network.children.append(process)
     network.groups.append(process.pid)

@@ -28,7 +28,7 @@ class Installer(unittest.TestCase):
             docker = binaries / 'docker'
             docker.write_text("""#!/usr/bin/env python3
 import os, pathlib, sys
-root = pathlib.Path(os.environ['LEO_INSTALLATION_ROOT'])
+root = pathlib.Path(os.environ['CAIRN_INSTALLATION_ROOT'])
 if 'up' in sys.argv:
     if '--no-deps' not in sys.argv:
         sys.exit(1)
@@ -37,14 +37,14 @@ if 'up' in sys.argv:
 """)
             docker.chmod(0o755)
             (root / 'installation.json').write_text(json.dumps({
-                'origin': 'https://leo.example.test',
-                'image': 'ghcr.io/leo91000/leo-agent-manager@sha256:' + '1' * 64,
+                'origin': 'https://cairn.example.test',
+                'image': 'ghcr.io/leo91000/cairn@sha256:' + '1' * 64,
             }))
             result = subprocess.run(
                 ['python3', str(REPO / 'deploy/installations/host.py'),
-                 'https://leo.example.test', '--claim-code', 'a' * 64],
+                 'https://cairn.example.test', '--claim-code', 'a' * 64],
                 env={**os.environ, 'PATH': str(binaries) + ':' + os.environ['PATH'],
-                     'LEO_INSTALLATION_ROOT': directory}, capture_output=True, text=True)
+                     'CAIRN_INSTALLATION_ROOT': directory}, capture_output=True, text=True)
             self.assertNotEqual(result.returncode, 0)
             self.assertTrue((root / 'cleaned').exists())
             self.assertFalse((root / 'claim.env').exists())
@@ -60,14 +60,14 @@ if 'up' in sys.argv:
             installation = root / 'installation'
             installation.mkdir()
             (installation / 'installation.json').write_text(json.dumps({
-                'origin': 'https://leo.example.test',
-                'image': 'ghcr.io/leo91000/leo-agent-manager@sha256:' + '1' * 64,
+                'origin': 'https://cairn.example.test',
+                'image': 'ghcr.io/leo91000/cairn@sha256:' + '1' * 64,
             }))
             result = subprocess.run(
                 ['python3', str(REPO / 'deploy/installations/host.py'),
-                 'https://leo.example.test', '--claim-code', 'a' * 64],
+                 'https://cairn.example.test', '--claim-code', 'a' * 64],
                 env={**os.environ, 'PATH': str(binaries) + ':' + os.environ['PATH'],
-                     'LEO_INSTALLATION_ROOT': str(installation)}, capture_output=True, text=True)
+                     'CAIRN_INSTALLATION_ROOT': str(installation)}, capture_output=True, text=True)
             self.assertNotEqual(result.returncode, 0)
             self.assertFalse((installation / 'claim.env').exists())
             self.assertNotIn('a' * 64, result.stdout + result.stderr)
@@ -80,8 +80,8 @@ if 'up' in sys.argv:
             identity.touch(mode=0o600)
             result = subprocess.run(
                 ['python3', str(REPO / 'deploy/installations/host.py'),
-                 'https://leo.example.test', '--claim-code', 'a' * 64],
-                env={**os.environ, 'LEO_INSTALLATION_ROOT': directory},
+                 'https://cairn.example.test', '--claim-code', 'a' * 64],
+                env={**os.environ, 'CAIRN_INSTALLATION_ROOT': directory},
                 capture_output=True, text=True)
             self.assertNotEqual(result.returncode, 0)
             self.assertIn('incomplete', result.stderr)
@@ -93,8 +93,8 @@ if 'up' in sys.argv:
         with tempfile.TemporaryDirectory() as directory:
             result = subprocess.run(
                 ['python3', str(REPO / 'deploy/installations/host.py'),
-                 'https://leo.example.test', '--claim-code', 'invalid'],
-                env={**os.environ, 'LEO_INSTALLATION_ROOT': directory},
+                 'https://cairn.example.test', '--claim-code', 'invalid'],
+                env={**os.environ, 'CAIRN_INSTALLATION_ROOT': directory},
                 capture_output=True, text=True)
             self.assertNotEqual(result.returncode, 0)
             self.assertIn('Copy a new command', result.stderr)
@@ -103,9 +103,9 @@ if 'up' in sys.argv:
     def test_non_root_explains_sudo_before_writing_data(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            script = (REPO / 'deploy/installations/install.sh').read_text().replace('__LEO_OFFICIAL_ORIGIN__', "'https://leo.example.test'")
+            script = (REPO / 'deploy/installations/install.sh').read_text().replace('__CAIRN_BEACON_ORIGIN__', "'https://cairn.example.test'")
             result = subprocess.run(['bash', '-s'], input=script, text=True, capture_output=True,
-                                    env={**os.environ, 'LEO_INSTALLATION_ROOT': str(root / 'installation')})
+                                    env={**os.environ, 'CAIRN_INSTALLATION_ROOT': str(root / 'installation')})
             self.assertNotEqual(result.returncode, 0)
             self.assertIn('sudo', result.stderr)
             self.assertFalse((root / 'installation').exists())
@@ -116,7 +116,7 @@ if 'up' in sys.argv:
             def do_GET(self):
                 self.send_response(200)
                 self.end_headers()
-                self.wfile.write(json.dumps({'image': 'ghcr.io/leo91000/leo-agent-manager@sha256:' + '1' * 64}).encode())
+                self.wfile.write(json.dumps({'image': 'ghcr.io/leo91000/cairn@sha256:' + '1' * 64}).encode())
 
             def log_message(self, *_):
                 pass
@@ -128,7 +128,7 @@ if 'up' in sys.argv:
             docker = binaries / 'docker'
             docker.write_text("""#!/usr/bin/env python3
 import json, os, pathlib, sys
-root = pathlib.Path(os.environ['LEO_INSTALLATION_ROOT'])
+root = pathlib.Path(os.environ['CAIRN_INSTALLATION_ROOT'])
 args = sys.argv[1:]
 if 'up' in args:
     # Docker refuses a NanoCPUs limit exceeding the fixture host's two CPUs.
@@ -138,7 +138,7 @@ if 'up' in args:
     identity.parent.mkdir(parents=True, exist_ok=True)
     if not identity.exists():
         claim = dict(line.split('=', 1) for line in (root / 'claim.env').read_text().splitlines())
-        assert claim['LEO_INSTALLATION_CLAIM_CODE'] == 'a' * 64
+        assert claim['CAIRN_INSTALLATION_CLAIM_CODE'] == 'a' * 64
         identity.touch(mode=0o600)
         identity.write_text(json.dumps({'origin': os.environ['FIXTURE_OFFICIAL_ORIGIN'], 'installationId': '00000000-0000-4000-8000-000000000001', 'token': 'fixture-only'}))
 if 'exec' in args:
@@ -150,7 +150,7 @@ if 'exec' in args:
             thread.start()
             try:
                 env = {**os.environ, 'PATH': str(binaries) + ':' + os.environ['PATH'],
-                       'LEO_INSTALLATION_ROOT': str(root / 'installation'),
+                       'CAIRN_INSTALLATION_ROOT': str(root / 'installation'),
                        'FIXTURE_OFFICIAL_ORIGIN': f'http://127.0.0.1:{server.server_port}'}
                 command = ['python3', str(REPO / 'deploy/installations/host.py'),
                            f'http://127.0.0.1:{server.server_port}', '--claim-code', 'a' * 64]
@@ -159,7 +159,7 @@ if 'exec' in args:
                 installation = root / 'installation'
                 config = json.loads((installation / 'data/storage-s3.json').read_text())
                 self.assertEqual(config['endpoint'], 'http://garage:3900')
-                self.assertEqual(config['bucket'], 'leo-disks')
+                self.assertEqual(config['bucket'], 'cairn-disks')
                 self.assertEqual((installation / 'data/storage-s3.json').stat().st_mode & 0o777, 0o600)
                 compose = json.loads((installation / 'compose.json').read_text())
                 self.assertFalse(any('ports' in service for service in compose['services'].values()))

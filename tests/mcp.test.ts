@@ -1,5 +1,5 @@
-import type { Agent } from '../shared/contracts.ts'
-import type { McpView } from '../shared/mcp.ts'
+import type { Agent } from '../packages/contracts/contracts.ts'
+import type { McpView } from '../packages/contracts/mcp.ts'
 import path from 'node:path'
 import process from 'node:process'
 import {
@@ -213,7 +213,7 @@ describe('stateless MCP over real HTTP', () => {
     const config = ctx.service.mcps.runConfiguration(run)
     const client = new Client({ name: 'gateway-agent', version: '1' })
     clients.push(client)
-    await client.connect(new StreamableHTTPClientTransport(new URL(`${address}/mcp-gateway/${self.id}`), { requestInit: { headers: { Authorization: `Bearer ${config.env.LEO_MCP_RUN_TOKEN}` } } }))
+    await client.connect(new StreamableHTTPClientTransport(new URL(`${address}/mcp-gateway/${self.id}`), { requestInit: { headers: { Authorization: `Bearer ${config.env.CAIRN_MCP_RUN_TOKEN}` } } }))
     const created = toolResult<McpView>(await client.callTool({ name: 'create_mcp', arguments: { name: 'Other tools', url: 'https://example.com/mcp', enabled: false } }))
     expect(created.state).toBe('untested')
     for (const [name, args] of [

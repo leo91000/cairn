@@ -1,6 +1,6 @@
 # Appearance
 
-Leo defaults to the device's preferred color scheme. Choose **System**, **Light**,
+Cairn defaults to the device's preferred color scheme. Choose **System**, **Light**,
 or **Dark** from the navigation rail, on the sign-in/setup screen, or in
 **Atelier → Appearance** and **Settings → Appearance**. The preference belongs to this browser and origin;
 it does not change another person's device or workspace settings.
@@ -12,18 +12,18 @@ browser privacy settings block storage, selection still works for the current pa
 
 ## Implementation
 
-`public/theme.js` is a small, same-origin, blocking head script. It resolves the
+`apps/web/public/theme.js` is a small, same-origin, blocking head script. It resolves the
 preference before Vue starts, sets the document's theme and native `color-scheme`,
 and updates the browser's theme-color metadata. The initial document also provides
 a matching background before the main styles arrive. The bootstrap is revalidated
 along with the HTML, so an old cached controller cannot outlive a new deployment.
 No inline JavaScript, additional dependency, or CSP relaxation is required.
 
-`src/theme.ts` connects that controller to Vue. `ThemeControl.vue` uses native radio
+`apps/web/src/theme.ts` connects that controller to Vue. `ThemeControl.vue` uses native radio
 semantics, a keyboard-accessible popover, focus restoration, and viewport bounds.
 The same control renders as three preview cards in Settings.
 
-The « Signal » palette in `src/styles/theme.css` (paper and ink with the Leo blue as
+The « Signal » palette in `apps/web/src/styles/theme.css` (paper and ink with the Cairn blue as
 the single accent and coral for what needs attention, see [Signal](UI-SIGNAL.md))
 defines canvas, panels, raised surfaces,
 inset code/inputs, borders, text, and semantic colors. Tailwind utilities such as

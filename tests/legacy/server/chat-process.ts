@@ -1,9 +1,9 @@
-import type { ChatExecution, ChatMessage } from '../../../shared/chats.ts'
+import type { ChatExecution, ChatMessage } from '../../../packages/contracts/chats.ts'
 import type { Config } from './config.ts'
 import { createHash } from 'node:crypto'
 import { readFile, writeFile } from 'node:fs/promises'
 import process from 'node:process'
-import { questionFields } from '../../../shared/chats.ts'
+import { questionFields } from '../../../packages/contracts/chats.ts'
 import { codexSession } from './codex-rpc.ts'
 
 export interface ChatPlan {

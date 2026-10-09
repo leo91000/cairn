@@ -54,8 +54,8 @@ def wait(check):
 
 
 def main():
-    database = os.environ['LEO_OFFICIAL_TEST_DATABASE_URL']
-    name = 'leo-update-' + uuid.uuid4().hex[:12]
+    database = os.environ['CAIRN_BEACON_TEST_DATABASE_URL']
+    name = 'cairn-update-' + uuid.uuid4().hex[:12]
     images = []
     official = None
     messages = []
@@ -92,7 +92,7 @@ def main():
             for folder in ('data', 'home', 'workspaces', 'runner-state', 'bin', 'build'):
                 (root / folder).mkdir()
             build = root / 'build'
-            shutil.copy(REPO / 'target/debug/leo', build / 'leo')
+            shutil.copy(REPO / 'target/debug/cairn', build / 'cairn')
             node = command(['node', '-p', 'process.execPath']).decode().strip()
             shutil.copy(node, build / 'node')
             (build / 'runner.py').write_text('''import http.server, json, os, signal, sys
@@ -110,7 +110,7 @@ class Ready(http.server.BaseHTTPRequestHandler):
 http.server.HTTPServer(('127.0.0.1', int(os.environ['PORT'])), Ready).serve_forever()
 ''')
             (build / 'Dockerfile').write_text(f'''FROM {BASE}
-COPY leo node /usr/local/bin/
+COPY cairn node /usr/local/bin/
 COPY runner.py /runner.py
 ARG RUNTIME
 ENV APP_RUNTIME_ID=$RUNTIME
@@ -123,13 +123,13 @@ ENV APP_RUNTIME_ID=$RUNTIME
                 metadata = json.loads(command([DOCKER, 'image', 'inspect', tag]))[0]
                 # Only the private fixture registry is substituted; the supervisor
                 # still requires the production repository and an immutable digest.
-                reference = 'ghcr.io/leo91000/leo-agent-manager@' + metadata['Id']
+                reference = 'ghcr.io/leo91000/cairn@' + metadata['Id']
                 registry[reference] = metadata['Id']
             previous, approved, failed, failed_http = registry
             (root / 'registry.json').write_text(json.dumps(registry))
             (root / 'bin/docker').write_text('''#!/usr/bin/env python3
 import json, os, pathlib, subprocess, sys
-root = pathlib.Path(os.environ['LEO_INSTALLATION_ROOT'])
+root = pathlib.Path(os.environ['CAIRN_INSTALLATION_ROOT'])
 registry = json.loads((root / 'registry.json').read_text())
 args = sys.argv[1:]
 if args[0] == 'pull':
@@ -173,12 +173,12 @@ sys.exit(subprocess.run([os.environ['FIXTURE_DOCKER'], *args]).returncode)
             config = {'name': name, 'services': {
                 'manager': {
                     'image': previous, 'network_mode': 'host', 'user': f'{os.getuid()}:{os.getgid()}',
-                    'entrypoint': ['/usr/local/bin/leo', 'serve'],
+                    'entrypoint': ['/usr/local/bin/cairn', 'serve'],
                     'environment': {'DATA_DIR': '/data', 'AGENT_HOME': '/home/node',
                         'HOST': '127.0.0.1', 'PORT': str(manager_port), 'WORKER_ENABLED': 'false',
                         'WORKSPACE_ROOTS': '/workspaces', 'PUBLIC_URL': f'http://127.0.0.1:{manager_port}',
-                        'RUNNER_URL': f'http://127.0.0.1:{runner_port}', 'LEO_OFFICIAL_ORIGIN': origin,
-                        'LEO_NODE_IMAGE': previous},
+                        'RUNNER_URL': f'http://127.0.0.1:{runner_port}', 'CAIRN_BEACON_ORIGIN': origin,
+                        'CAIRN_NODE_IMAGE': previous},
                     'volumes': [f'{root}/data:/data', f'{root}/home:/home/node', f'{root}/workspaces:/workspaces'],
                 },
                 'runner': {
@@ -190,17 +190,17 @@ sys.exit(subprocess.run([os.environ['FIXTURE_DOCKER'], *args]).returncode)
             (root / 'compose.json').write_text(json.dumps(config))
             (root / 'installation.json').write_text(json.dumps({'origin': origin, 'image': previous}))
             env = {'PATH': str(root / 'bin') + ':' + os.environ['PATH'],
-                   'LEO_INSTALLATION_ROOT': str(root), 'FIXTURE_DOCKER': DOCKER,
+                   'CAIRN_INSTALLATION_ROOT': str(root), 'FIXTURE_DOCKER': DOCKER,
                    'FIXTURE_MANAGER_PORT': str(manager_port)}
 
             def service(image):
-                return subprocess.Popen([str(REPO / 'target/debug/leo-official')],
+                return subprocess.Popen([str(REPO / 'target/debug/cairn-beacon')],
                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env={
-                        'LEO_OFFICIAL_DATABASE_URL': database, 'LEO_OFFICIAL_ORIGIN': origin,
-                        'LEO_OFFICIAL_LISTEN': f'127.0.0.1:{official_port}',
-                        'LEO_OFFICIAL_EMAIL_FROM': 'fixture@example.test', 'LEO_OFFICIAL_EMAIL_KEY': 'fixture-only',
-                        'LEO_OFFICIAL_EMAIL_ENDPOINT': f'http://127.0.0.1:{mailbox.server_port}/emails',
-                        'LEO_INSTALLATION_IMAGE': image,
+                        'CAIRN_BEACON_DATABASE_URL': database, 'CAIRN_BEACON_ORIGIN': origin,
+                        'CAIRN_BEACON_LISTEN': f'127.0.0.1:{official_port}',
+                        'CAIRN_BEACON_EMAIL_FROM': 'fixture@example.test', 'CAIRN_BEACON_EMAIL_KEY': 'fixture-only',
+                        'CAIRN_BEACON_EMAIL_ENDPOINT': f'http://127.0.0.1:{mailbox.server_port}/emails',
+                        'CAIRN_INSTALLATION_IMAGE': image,
                     })
 
             official = service(approved)
@@ -210,7 +210,7 @@ sys.exit(subprocess.run([os.environ['FIXTURE_DOCKER'], *args]).returncode)
             session, headers = request('/api/account/verify', {'challenge': challenge['challenge'], 'code': code})
             cookie, csrf = headers['Set-Cookie'].split(';')[0], session['csrf']
             claim, _ = request('/api/installations/claim-code', {})
-            config['services']['manager']['environment']['LEO_INSTALLATION_CLAIM_CODE'] = claim['code']
+            config['services']['manager']['environment']['CAIRN_INSTALLATION_CLAIM_CODE'] = claim['code']
             (root / 'compose.json').write_text(json.dumps(config))
             command([str(root / 'bin/docker'), 'compose', '-f', str(root / 'compose.json'), 'up', '-d', '--wait'], env=env)
             installation = wait(lambda: request('/api/installations')[0])[0]['id']
@@ -222,7 +222,7 @@ sys.exit(subprocess.run([os.environ['FIXTURE_DOCKER'], *args]).returncode)
             (root / 'home/kept').write_text('synthetic coding-agent credential')
             (root / 'runner-state/kept').write_text('retained runner state')
             # No one-use claim code remains in recreated containers.
-            del config['services']['manager']['environment']['LEO_INSTALLATION_CLAIM_CODE']
+            del config['services']['manager']['environment']['CAIRN_INSTALLATION_CLAIM_CODE']
             (root / 'compose.json').write_text(json.dumps(config))
 
             for image, interrupted in ((approved, False), (failed, False), (failed, True), (failed_http, True)):

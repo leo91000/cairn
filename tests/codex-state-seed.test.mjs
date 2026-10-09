@@ -7,7 +7,7 @@ import { expect, it } from 'vitest'
 import { emptyDatabase } from '../deploy/codex-state/prepare.mjs'
 
 it('copies migrated schemas while removing every runtime row and retaining migration checksums', async () => {
-  const root = await mkdtemp(path.join(os.tmpdir(), 'leo-schema-test-'))
+  const root = await mkdtemp(path.join(os.tmpdir(), 'cairn-schema-test-'))
   const source = path.join(root, 'source.sqlite')
   const destination = path.join(root, 'template.sqlite')
   const original = new DatabaseSync(source)

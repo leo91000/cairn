@@ -59,7 +59,7 @@ forwarding. A reverse proxy must preserve streaming and allow keep-alives.
 
 ## Verification
 
-`backend/tests/live.rs` exercises real HTTP streams: concurrent clients, paginated
+`crates/installation/tests/live.rs` exercises real HTTP streams: concurrent clients, paginated
 replay, writes during replay, slow readers, rollback, cursor precedence/reset,
 server restart, session revocation, invalid requests, metadata-only updates, and
 Unicode text baselines/deltas. The local 25-sample write-to-HTTP measurement was

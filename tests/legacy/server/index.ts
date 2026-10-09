@@ -20,7 +20,7 @@ async function main() {
   const { app } = await buildApp(settings)
   await app.listen({ host: settings.host, port: settings.port })
   app.log.info(
-    `Leo Agent Manager: ${settings.publicUrl}. First-run setup token is in ${path.join(settings.dataDir, 'setup-token')} (or SETUP_TOKEN).`,
+    `Cairn: ${settings.publicUrl}. First-run setup token is in ${path.join(settings.dataDir, 'setup-token')} (or SETUP_TOKEN).`,
   )
   for (const signal of ['SIGINT', 'SIGTERM'] as const)
     process.once(signal, () => void app.close())

@@ -7,12 +7,12 @@ async function main() {
   // Device adapter for the existing real installation/control-plane fixture.
   // The output contains synthetic session credentials: never upload it as evidence.
   const output = process.argv[2]
-  if (!output || !process.env.LEO_OFFICIAL_TEST_DATABASE_URL)
+  if (!output || !process.env.CAIRN_BEACON_TEST_DATABASE_URL)
     throw new Error('Provide a private output file and a disposable PostgreSQL database')
 
-  process.env.LEO_OFFICIAL_STUN_LISTEN ||= '0.0.0.0:3478'
-  process.env.LEO_OFFICIAL_STUN_URL ||= 'stun:10.0.2.2:3478'
-  const network = process.env.LEO_NETWORK_ANDROID === 'true'
+  process.env.CAIRN_BEACON_STUN_LISTEN ||= '0.0.0.0:3478'
+  process.env.CAIRN_BEACON_STUN_URL ||= 'stun:10.0.2.2:3478'
+  const network = process.env.CAIRN_NETWORK_ANDROID === 'true'
   const fixture = await officialRelayFixture(4398, network ? '198.18.103.1' : '127.0.0.1')
   let cookie = ''
   let csrf = ''
@@ -30,7 +30,7 @@ async function main() {
     })
     if (!response.ok)
       throw new Error(`Fixture ${path} returned ${response.status}`)
-    const session = response.headers.get('set-cookie')?.match(/leo_session=[^;]+/)
+    const session = response.headers.get('set-cookie')?.match(/cairn_session=[^;]+/)
     if (session)
       cookie = session[0]
     return response.json()
@@ -59,7 +59,7 @@ async function main() {
     const session = await request('/account/verify', { challenge: challenge.challenge, code })
     csrf = session.csrf
     const claim = await request('/installations/claim-code', {})
-    const installation = fixture.start('target/debug/leo', {
+    const installation = fixture.start('target/debug/cairn', {
       DATA_DIR: join(fixture.root, 'data'),
       AGENT_HOME: join(fixture.root, 'home'),
       WORKSPACE_ROOTS: fixture.root,
@@ -67,15 +67,15 @@ async function main() {
       WORKER_ENABLED: 'false',
       HOST: '127.0.0.1',
       PORT: '4399',
-      LEO_OFFICIAL_ORIGIN: fixture.url,
-      LEO_INSTALLATION_CLAIM_CODE: claim.code,
-      LEO_INSTALLATION_NAME: 'Android direct transport fixture',
-      LEO_DIRECT_STUN_URLS: process.env.LEO_DIRECT_STUN_URLS || (network ? process.env.LEO_OFFICIAL_STUN_URL : 'stun:127.0.0.1:3478'),
+      CAIRN_BEACON_ORIGIN: fixture.url,
+      CAIRN_INSTALLATION_CLAIM_CODE: claim.code,
+      CAIRN_INSTALLATION_NAME: 'Android direct transport fixture',
+      CAIRN_DIRECT_STUN_URLS: process.env.CAIRN_DIRECT_STUN_URLS || (network ? process.env.CAIRN_BEACON_STUN_URL : 'stun:127.0.0.1:3478'),
       // The emulator gateway forwards host UDP ports without changing their numbers.
-      ...(network && !process.env.LEO_DIRECT_PUBLIC_IP
+      ...(network && !process.env.CAIRN_DIRECT_PUBLIC_IP
         ? {}
         : {
-            LEO_DIRECT_PUBLIC_IP: process.env.LEO_DIRECT_PUBLIC_IP || '10.0.2.2',
+            CAIRN_DIRECT_PUBLIC_IP: process.env.CAIRN_DIRECT_PUBLIC_IP || '10.0.2.2',
           }),
     })
     const installations = await until(() => request('/installations'), values => values.some((value: { online: boolean }) => value.online))

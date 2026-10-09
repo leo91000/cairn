@@ -1,4 +1,4 @@
-import type { Skill } from '../../../shared/contracts.ts'
+import type { Skill } from '../../../packages/contracts/contracts.ts'
 import { randomUUID } from 'node:crypto'
 import {
   lstat,

@@ -26,8 +26,8 @@ describe('cLI update deployment and rollback', () => {
   let releases
   let restarts
   let hideImage
-  const previous = `ghcr.io/owner/leo@sha256:${'a'.repeat(64)}`
-  const candidate = `ghcr.io/owner/leo@sha256:${'b'.repeat(64)}`
+  const previous = `ghcr.io/owner/cairn@sha256:${'a'.repeat(64)}`
+  const candidate = `ghcr.io/owner/cairn@sha256:${'b'.repeat(64)}`
   beforeEach(async () => {
     activeRuns = 0
     selectedImage = previous
@@ -55,7 +55,7 @@ describe('cLI update deployment and rollback', () => {
       else if (request.url.endsWith('/envs')) {
         if (request.method === 'PATCH')
           selectedImage = input.value
-        response.end(JSON.stringify([{ key: 'LEO_IMAGE', ...(!hideImage && { value: selectedImage }) }]))
+        response.end(JSON.stringify([{ key: 'CAIRN_IMAGE', ...(!hideImage && { value: selectedImage }) }]))
       }
       else if (request.url.endsWith('/restart')) {
         restarts++
@@ -80,7 +80,7 @@ describe('cLI update deployment and rollback', () => {
       coolifyUrl: origin,
       publicUrl: origin,
       serviceUuid: 'service',
-      repository: 'owner/leo',
+      repository: 'owner/cairn',
       token: 'test-token',
       maintenanceToken: 'test-maintenance',
       runtimeId: 'cli-123-1',
@@ -115,7 +115,7 @@ describe('cLI update deployment and rollback', () => {
     expect(releases).toBe(1)
   })
   it('does not overwrite an application release that happened during the build', async () => {
-    selectedImage = `ghcr.io/owner/leo@sha256:${'c'.repeat(64)}`
+    selectedImage = `ghcr.io/owner/cairn@sha256:${'c'.repeat(64)}`
     expect(await deployUpdate(config, plan, candidate)).toMatchObject({ deployed: false })
     expect(restarts).toBe(0)
     expect(releases).toBe(0)
@@ -203,7 +203,7 @@ describe('standalone tool workflow', () => {
   it('only explains the supported update path without reading production configuration or running updates', () => {
     const source = readFileSync('.github/workflows/cli-updates.yaml', 'utf8')
     const workflow = parse(source)
-    expect(source).not.toMatch(/COOLIFY_|LEO_PUBLIC_URL|LEO_IMAGE|secrets\.|\$\{\{/)
+    expect(source).not.toMatch(/COOLIFY_|CAIRN_PUBLIC_URL|CAIRN_IMAGE|secrets\.|\$\{\{/)
     expect(Object.values(workflow.permissions).every(permission => permission === 'read')).toBe(true)
     for (const job of Object.values(workflow.jobs)) {
       expect(job.environment).toBeUndefined()

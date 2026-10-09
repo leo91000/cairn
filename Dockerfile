@@ -8,10 +8,10 @@ WORKDIR /app
 FROM base AS build
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
 RUN --mount=type=cache,id=pnpm-store,target=/pnpm/store pnpm install --frozen-lockfile
-COPY tsconfig.json vite.config.ts index.html official.html ./
-COPY src ./src
-COPY shared ./shared
-COPY public ./public
+COPY apps/web/tsconfig.json apps/web/vite.config.ts apps/web/index.html apps/web/beacon.html ./
+COPY src ./apps/web/src
+COPY shared ./packages/contracts
+COPY public ./apps/web/public
 RUN pnpm build
 
 FROM rust:1.97.1-bookworm AS backend
@@ -19,65 +19,65 @@ RUN apt-get update && apt-get install -y --no-install-recommends clang libclang-
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /build
 COPY Cargo.toml Cargo.lock ./
-COPY backend/Cargo.toml ./backend/Cargo.toml
-COPY official-service/Cargo.toml ./official-service/Cargo.toml
-COPY relay-protocol/Cargo.toml ./relay-protocol/Cargo.toml
+COPY crates/installation/Cargo.toml ./crates/installation/Cargo.toml
+COPY crates/beacon/Cargo.toml ./crates/beacon/Cargo.toml
+COPY crates/protocol/Cargo.toml ./crates/protocol/Cargo.toml
 # A separate dependency layer survives application edits in remote BuildKit
 # caches. Cargo cache mounts alone do not persist on fresh GitHub runners.
 RUN --mount=type=cache,id=cargo-registry,target=/usr/local/cargo/registry \
-    mkdir -p backend/src backend/examples official-service/src relay-protocol/src \
-    && printf 'fn main() {}\n' > backend/src/main.rs \
-    && printf 'fn main() {}\n' > backend/examples/ublk_probe.rs \
-    && printf '' > backend/src/lib.rs \
-    && printf 'fn main() {}\n' > official-service/src/main.rs \
-    && printf '' > relay-protocol/src/lib.rs \
-    && printf '' > official-service/src/lib.rs && cargo build --locked --release --bin leo --features ublk
-COPY backend ./backend
-COPY relay-protocol ./relay-protocol
+    mkdir -p crates/installation/src crates/installation/examples crates/beacon/src crates/protocol/src \
+    && printf 'fn main() {}\n' > crates/installation/src/main.rs \
+    && printf 'fn main() {}\n' > crates/installation/examples/ublk_probe.rs \
+    && printf '' > crates/installation/src/lib.rs \
+    && printf 'fn main() {}\n' > crates/beacon/src/main.rs \
+    && printf '' > crates/protocol/src/lib.rs \
+    && printf '' > crates/beacon/src/lib.rs && cargo build --locked --release --bin cairn --features ublk
+COPY backend ./crates/installation
+COPY relay-protocol ./crates/protocol
 COPY deploy/nodes ./deploy/nodes
 RUN --mount=type=cache,id=cargo-registry,target=/usr/local/cargo/registry \
-    touch backend/src/main.rs backend/src/lib.rs relay-protocol/src/lib.rs && \
-    cargo build --locked --release --bin leo --features ublk && cp target/release/leo /usr/local/bin/leo
+    touch crates/installation/src/main.rs crates/installation/src/lib.rs crates/protocol/src/lib.rs && \
+    cargo build --locked --release --bin cairn --features ublk && cp target/release/cairn /usr/local/bin/cairn
 
 # Official service builds independently: no worker CLI, VM or kernel layers.
 FROM rust:1.97.1-bookworm AS official-backend
 ENV CARGO_BUILD_JOBS=4
 WORKDIR /build
 COPY Cargo.toml Cargo.lock ./
-COPY backend/Cargo.toml ./backend/Cargo.toml
-COPY official-service/Cargo.toml ./official-service/Cargo.toml
-COPY relay-protocol/Cargo.toml ./relay-protocol/Cargo.toml
+COPY crates/installation/Cargo.toml ./crates/installation/Cargo.toml
+COPY crates/beacon/Cargo.toml ./crates/beacon/Cargo.toml
+COPY crates/protocol/Cargo.toml ./crates/protocol/Cargo.toml
 RUN --mount=type=cache,id=cargo-registry,target=/usr/local/cargo/registry \
-    mkdir -p backend/src backend/examples official-service/src relay-protocol/src \
-    && printf 'fn main() {}\n' > backend/src/main.rs \
-    && printf '' > backend/src/lib.rs \
-    && printf 'fn main() {}\n' > backend/examples/ublk_probe.rs \
-    && printf 'fn main() {}\n' > official-service/src/main.rs \
-    && printf '' > official-service/src/lib.rs \
-    && printf '' > relay-protocol/src/lib.rs \
-    && cargo build --locked --release --bin leo-official
-COPY official-service ./official-service
-COPY relay-protocol ./relay-protocol
+    mkdir -p crates/installation/src crates/installation/examples crates/beacon/src crates/protocol/src \
+    && printf 'fn main() {}\n' > crates/installation/src/main.rs \
+    && printf '' > crates/installation/src/lib.rs \
+    && printf 'fn main() {}\n' > crates/installation/examples/ublk_probe.rs \
+    && printf 'fn main() {}\n' > crates/beacon/src/main.rs \
+    && printf '' > crates/beacon/src/lib.rs \
+    && printf '' > crates/protocol/src/lib.rs \
+    && cargo build --locked --release --bin cairn-beacon
+COPY official-service ./crates/beacon
+COPY relay-protocol ./crates/protocol
 COPY deploy/installations ./deploy/installations
 COPY deploy/nodes ./deploy/nodes
 RUN --mount=type=cache,id=cargo-registry,target=/usr/local/cargo/registry \
-    touch official-service/src/main.rs official-service/src/lib.rs relay-protocol/src/lib.rs \
-    && cargo build --locked --release --bin leo-official \
-    && cp target/release/leo-official /usr/local/bin/leo-official
+    touch crates/beacon/src/main.rs crates/beacon/src/lib.rs crates/protocol/src/lib.rs \
+    && cargo build --locked --release --bin cairn-beacon \
+    && cp target/release/cairn-beacon /usr/local/bin/cairn-beacon
 
 FROM debian:bookworm-slim AS official
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl \
     && rm -rf /var/lib/apt/lists/* \
-    && groupadd --gid 1000 leo && useradd --uid 1000 --gid leo leo
+    && groupadd --gid 1000 cairn && useradd --uid 1000 --gid cairn cairn
 WORKDIR /app
-COPY --from=official-backend /usr/local/bin/leo-official /usr/local/bin/leo-official
+COPY --from=official-backend /usr/local/bin/cairn-beacon /usr/local/bin/cairn-beacon
 COPY --from=build /app/dist ./dist
 ARG VCS_REF=development
-ENV APP_COMMIT=$VCS_REF APP_RUNTIME_ID=$VCS_REF LEO_OFFICIAL_LISTEN=0.0.0.0:4311 LEO_OFFICIAL_WEB_DIR=/app/dist
-USER leo
+ENV APP_COMMIT=$VCS_REF APP_RUNTIME_ID=$VCS_REF CAIRN_BEACON_LISTEN=0.0.0.0:4311 CAIRN_BEACON_WEB_DIR=/app/dist
+USER cairn
 EXPOSE 4311
 HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --start-interval=1s CMD curl --fail --silent --output /dev/null http://127.0.0.1:4311/health
-CMD ["/usr/local/bin/leo-official"]
+CMD ["/usr/local/bin/cairn-beacon"]
 
 # The direct block backend shares guest RAM with Firecracker. Upstream 1.17.0
 # does not reclaim MAP_SHARED memfd pages on balloon/free-page reporting.
@@ -130,21 +130,21 @@ RUN arch="${TARGETARCH:-amd64}" \
 # Claude's pinned postinstall places the native executable; pnpm otherwise skips it.
 RUN pnpm add --global --allow-build @anthropic-ai/claude-code "@openai/codex@${CODEX_VERSION}" "@anthropic-ai/claude-code@${CLAUDE_VERSION}" \
     && claude --version
-COPY deploy/codex-state/prepare.mjs /opt/leo-codex-state-builder.mjs
-RUN --network=none node /opt/leo-codex-state-builder.mjs /opt/leo-codex-state
-COPY deploy/toolkit /opt/leo-toolkit
-RUN chmod +x /opt/leo-toolkit/android.mjs && ln -s /opt/leo-toolkit/android.mjs /usr/local/bin/leo-android
-RUN --mount=type=secret,id=github_token,env=GITHUB_TOKEN /usr/local/bin/node /opt/leo-toolkit/manage.mjs install
+COPY deploy/codex-state/prepare.mjs /opt/cairn-codex-state-builder.mjs
+RUN --network=none node /opt/cairn-codex-state-builder.mjs /opt/cairn-codex-state
+COPY deploy/toolkit /opt/cairn-toolkit
+RUN chmod +x /opt/cairn-toolkit/android.mjs && ln -s /opt/cairn-toolkit/android.mjs /usr/local/bin/cairn-android
+RUN --mount=type=secret,id=github_token,env=GITHUB_TOKEN /usr/local/bin/node /opt/cairn-toolkit/manage.mjs install
 # Keep the Codex npm launcher on the manager runtime even in older Node projects.
 RUN ln -s /usr/local/bin/node /pnpm/bin/node
-COPY deploy/toolkit/profile.sh /etc/profile.d/leo-toolkit.sh
-ENV LEO_TOOLKIT_DIR=/opt/leo-toolkit
+COPY deploy/toolkit/profile.sh /etc/profile.d/cairn-toolkit.sh
+ENV CAIRN_TOOLKIT_DIR=/opt/cairn-toolkit
 ENV PATH=/usr/local/bin:/home/node/.local/share/mise/shims:/usr/local/share/mise/shims:$PATH
 # Pin and verify the server-side 1Password CLI used by scoped workspace tools.
 RUN curl -fsSL https://cache.agilebits.com/dist/1P/op2/pkg/v2.39.0/op_linux_amd64_v2.39.0.zip -o /tmp/op.zip \
     && echo '6fba7f376b6c6dec49f41b06408930a43ad064cce103c6a2ce5b3d0413a86434  /tmp/op.zip' | sha256sum -c - \
     && unzip /tmp/op.zip op -d /usr/local/bin && chmod 755 /usr/local/bin/op && rm /tmp/op.zip
-COPY --from=backend /usr/local/bin/leo /usr/local/bin/leo
+COPY --from=backend /usr/local/bin/cairn /usr/local/bin/cairn
 COPY --from=build --chown=node:node /app/dist ./dist
 COPY --from=build --chown=node:node /app/package.json ./package.json
 RUN install -d -o node -g node /data /workspaces /home/node/.agents /home/node/.agents/skills /home/node/.codex \
@@ -155,7 +155,7 @@ USER node
 VOLUME ["/data", "/home/node", "/workspaces"]
 EXPOSE 4310
 HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --start-interval=1s CMD /usr/local/bin/node -e "fetch('http://127.0.0.1:4310/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
-CMD ["/usr/local/bin/leo", "serve"]
+CMD ["/usr/local/bin/cairn", "serve"]
 
 # Guest kernel is built from a pinned upstream LTS source, not demo VM assets.
 FROM debian:bookworm-slim AS guest-kernel
@@ -164,9 +164,9 @@ WORKDIR /kernel
 RUN curl -fsSL https://cdn.kernel.org/pub/linux/kernel/v6.x/linux-6.12.109.tar.xz -o linux.tar.xz \
     && echo '5484e552a334e15019f4aeba89e5b58f04651cf2f4e24e04de9f152f1c38e3fa  linux.tar.xz' | sha256sum -c - \
     && tar -xf linux.tar.xz --strip-components=1 && rm linux.tar.xz
-COPY deploy/microvm/kernel.config /tmp/leo.config
+COPY deploy/microvm/kernel.config /tmp/cairn.config
 # Guests use virtio and a serial console; omit unused physical-device families.
-RUN make x86_64_defconfig && scripts/kconfig/merge_config.sh -m .config /tmp/leo.config \
+RUN make x86_64_defconfig && scripts/kconfig/merge_config.sh -m .config /tmp/cairn.config \
     && scripts/config --disable USB --disable DRM --disable FB --disable SOUND --disable MEDIA_SUPPORT \
         --disable WLAN --disable WIRELESS --disable BT --disable HID --disable INPUT \
         --disable SCSI --disable ATA --disable BLK_DEV_MD --disable MMC --disable FIREWIRE \
@@ -174,13 +174,13 @@ RUN make x86_64_defconfig && scripts/kconfig/merge_config.sh -m .config /tmp/leo
     && make olddefconfig \
     && for option in KVM KVM_INTEL KVM_AMD VMGENID; do grep -qx "CONFIG_${option}=y" .config || exit 1; done \
     && make -j8 vmlinux && strip --strip-debug vmlinux \
-    && mv vmlinux /tmp/leo-vmlinux && make clean && mv /tmp/leo-vmlinux vmlinux
+    && mv vmlinux /tmp/cairn-vmlinux && make clean && mv /tmp/cairn-vmlinux vmlinux
 
 FROM runtime AS guest
 USER root
-COPY --chmod=755 deploy/microvm/install-docker /opt/leo-vm/install-docker
-RUN /opt/leo-vm/install-docker
-COPY --chmod=755 deploy/microvm/init /sbin/leo-init
+COPY --chmod=755 deploy/microvm/install-docker /opt/cairn-vm/install-docker
+RUN /opt/cairn-vm/install-docker
+COPY --chmod=755 deploy/microvm/init /sbin/cairn-init
 COPY --chmod=755 deploy/microvm/docker /usr/local/bin/docker
 
 FROM debian:bookworm-slim AS guest-disk
@@ -198,11 +198,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends iptables e2fspr
     && cp /tmp/release-v1.17.0-x86_64/jailer-v1.17.0-x86_64 /usr/local/bin/jailer \
     && rm -rf /tmp/firecracker.tgz /tmp/release-v1.17.0-x86_64
 COPY --from=firecracker /usr/local/bin/firecracker /usr/local/bin/firecracker
-COPY --from=guest-kernel /kernel/vmlinux /opt/leo-vm/vmlinux
-COPY --from=guest-kernel /kernel/.config /opt/leo-vm/kernel.config
-COPY --from=guest-kernel /kernel/COPYING /opt/leo-vm/KERNEL-COPYING
-COPY --from=guest-kernel /kernel/LICENSES /opt/leo-vm/kernel-licenses
-COPY --from=guest-disk /root.ext4.zst /opt/leo-vm/root.ext4.zst
-COPY --chmod=755 deploy/microvm/init deploy/microvm/docker deploy/microvm/install-docker /opt/leo-vm/
-COPY --chmod=755 deploy/nodes /opt/leo-node
+COPY --from=guest-kernel /kernel/vmlinux /opt/cairn-vm/vmlinux
+COPY --from=guest-kernel /kernel/.config /opt/cairn-vm/kernel.config
+COPY --from=guest-kernel /kernel/COPYING /opt/cairn-vm/KERNEL-COPYING
+COPY --from=guest-kernel /kernel/LICENSES /opt/cairn-vm/kernel-licenses
+COPY --from=guest-disk /root.ext4.zst /opt/cairn-vm/root.ext4.zst
+COPY --chmod=755 deploy/microvm/init deploy/microvm/docker deploy/microvm/install-docker /opt/cairn-vm/
+COPY --chmod=755 deploy/nodes /opt/cairn-node
 USER node

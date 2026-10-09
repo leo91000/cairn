@@ -196,8 +196,8 @@ async function main() {
         }
       }
 
-      if (request.method === 'account/rateLimits/read' && process.env.LEO_FIXTURE_USAGE)
-        result = JSON.parse(readFileSync(process.env.LEO_FIXTURE_USAGE, 'utf8'))[id] ?? result
+      if (request.method === 'account/rateLimits/read' && process.env.CAIRN_FIXTURE_USAGE)
+        result = JSON.parse(readFileSync(process.env.CAIRN_FIXTURE_USAGE, 'utf8'))[id] ?? result
       process.stdout.write(`${JSON.stringify({ id: request.id, result })}\n`)
     }
 
@@ -274,8 +274,8 @@ async function main() {
       const url = JSON.parse(configuration.match(/"url"=("[^"]+")/)[1])
       const client = new Client({ name: 'fixture-worker', version: '1' })
       try {
-        await client.connect(new StreamableHTTPClientTransport(new URL(url), { requestInit: { headers: { Authorization: `Bearer ${process.env.LEO_MCP_RUN_TOKEN}` } } }))
-        const result = await client.callTool({ name: 'echo', arguments: { message: `MCP subprocess passed: ${process.env.LEO_MCP_RUN_TOKEN}` } })
+        await client.connect(new StreamableHTTPClientTransport(new URL(url), { requestInit: { headers: { Authorization: `Bearer ${process.env.CAIRN_MCP_RUN_TOKEN}` } } }))
+        const result = await client.callTool({ name: 'echo', arguments: { message: `MCP subprocess passed: ${process.env.CAIRN_MCP_RUN_TOKEN}` } })
         emit({ type: 'item.completed', item: { text: result.content[0].text } })
         writeFileSync(args[args.indexOf('--output-last-message') + 1], result.content[0].text)
       }

@@ -16,7 +16,7 @@ it('shows private notifications, focuses the matching chat and dismisses answere
     registration: { showNotification, getNotifications: vi.fn().mockResolvedValue([{ close }]) },
     clients: { matchAll: vi.fn().mockResolvedValue([{ url: `${origin}/tasks`, navigate, focus }]), openWindow: vi.fn() },
   }
-  runInNewContext(await readFile('public/sw.js', 'utf8'), context)
+  runInNewContext(await readFile('apps/web/public/sw.js', 'utf8'), context)
   const pending: Promise<unknown>[] = []
   const waitUntil = (promise: Promise<unknown>) => pending.push(promise)
   const chatId = '00000000-0000-4000-8000-000000000001'

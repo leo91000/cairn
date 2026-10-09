@@ -82,26 +82,26 @@ test('Google and GitHub reuse an account, manage sign-in methods and preserve cl
   await once(provider, 'listening')
   const providerUrl = `http://127.0.0.1:${(provider.address() as { port: number }).port}`
   const url = 'http://localhost:4399'
-  const child = spawn('target/debug/leo-official', [], {
+  const child = spawn('target/debug/cairn-beacon', [], {
     env: {
       ...process.env,
-      LEO_OFFICIAL_DATABASE_URL: process.env.LEO_OFFICIAL_TEST_DATABASE_URL,
-      LEO_OFFICIAL_ORIGIN: url,
-      LEO_OFFICIAL_LISTEN: '127.0.0.1:4399',
-      LEO_OFFICIAL_EMAIL_ENDPOINT: `${providerUrl}/email`,
-      LEO_OFFICIAL_EMAIL_KEY: 'test-only',
-      LEO_OFFICIAL_EMAIL_FROM: 'Leo <leo@example.test>',
-      LEO_OFFICIAL_GOOGLE_CLIENT_ID: 'google-test',
-      LEO_OFFICIAL_GOOGLE_CLIENT_SECRET: 'test-only',
-      LEO_OFFICIAL_GOOGLE_AUTHORIZATION_URL: `${providerUrl}/authorize`,
-      LEO_OFFICIAL_GOOGLE_TOKEN_URL: `${providerUrl}/token`,
-      LEO_OFFICIAL_GOOGLE_USERINFO_URL: `${providerUrl}/google/userinfo`,
-      LEO_OFFICIAL_GITHUB_CLIENT_ID: 'github-test',
-      LEO_OFFICIAL_GITHUB_CLIENT_SECRET: 'test-only',
-      LEO_OFFICIAL_GITHUB_AUTHORIZATION_URL: `${providerUrl}/authorize`,
-      LEO_OFFICIAL_GITHUB_TOKEN_URL: `${providerUrl}/token`,
-      LEO_OFFICIAL_GITHUB_USERINFO_URL: `${providerUrl}/github/user`,
-      LEO_OFFICIAL_GITHUB_EMAILS_URL: `${providerUrl}/github/emails`,
+      CAIRN_BEACON_DATABASE_URL: process.env.CAIRN_BEACON_TEST_DATABASE_URL,
+      CAIRN_BEACON_ORIGIN: url,
+      CAIRN_BEACON_LISTEN: '127.0.0.1:4399',
+      CAIRN_BEACON_EMAIL_ENDPOINT: `${providerUrl}/email`,
+      CAIRN_BEACON_EMAIL_KEY: 'test-only',
+      CAIRN_BEACON_EMAIL_FROM: 'Cairn <cairn@example.test>',
+      CAIRN_BEACON_GOOGLE_CLIENT_ID: 'google-test',
+      CAIRN_BEACON_GOOGLE_CLIENT_SECRET: 'test-only',
+      CAIRN_BEACON_GOOGLE_AUTHORIZATION_URL: `${providerUrl}/authorize`,
+      CAIRN_BEACON_GOOGLE_TOKEN_URL: `${providerUrl}/token`,
+      CAIRN_BEACON_GOOGLE_USERINFO_URL: `${providerUrl}/google/userinfo`,
+      CAIRN_BEACON_GITHUB_CLIENT_ID: 'github-test',
+      CAIRN_BEACON_GITHUB_CLIENT_SECRET: 'test-only',
+      CAIRN_BEACON_GITHUB_AUTHORIZATION_URL: `${providerUrl}/authorize`,
+      CAIRN_BEACON_GITHUB_TOKEN_URL: `${providerUrl}/token`,
+      CAIRN_BEACON_GITHUB_USERINFO_URL: `${providerUrl}/github/user`,
+      CAIRN_BEACON_GITHUB_EMAILS_URL: `${providerUrl}/github/emails`,
     },
     stdio: ['ignore', 'ignore', 'pipe'],
   })
@@ -119,7 +119,7 @@ test('Google and GitHub reuse an account, manage sign-in methods and preserve cl
     denyNextAuthorization = true
     await page.getByRole('button', { name: 'Continue with Google' }).click()
     await expect(page.getByRole('alert')).toContainText('Sign-in was cancelled')
-    expect((await page.context().cookies(url)).some(cookie => cookie.name === 'leo_oauth')).toBe(false)
+    expect((await page.context().cookies(url)).some(cookie => cookie.name === 'cairn_oauth')).toBe(false)
     failNextToken = true
     await page.getByRole('button', { name: 'Continue with Google' }).click()
     await expect(page.getByRole('heading', { name: 'Sign-in provider unavailable' })).toBeVisible()
@@ -292,7 +292,7 @@ test('Google and GitHub reuse an account, manage sign-in methods and preserve cl
       data: { native: true },
     })).json()
     await page.goto(native.url)
-    await expect(page.getByRole('heading', { name: 'Autoriser l’application Leo pour Android' })).toBeVisible()
+    await expect(page.getByRole('heading', { name: 'Autoriser l’application Cairn pour Android' })).toBeVisible()
     await expect(page.getByText(email, { exact: true })).toBeVisible()
     await expect(page.getByRole('alert')).toContainText('Ne confirmez pas un lien reçu')
     const finish = () => request.post(`${url}/api/account/oauth/github/native/finish`, {
@@ -302,7 +302,7 @@ test('Google and GitHub reuse an account, manage sign-in methods and preserve cl
     expect((await finish()).status()).toBe(202)
     expect((await request.get(`${url}/api/account/session`).then(response => response.json())).authenticated).toBe(false)
     await page.getByRole('button', { name: 'Autoriser sur cet appareil', exact: true }).click()
-    await expect(page.getByText('Connexion réussie. Revenez dans l’application Leo.')).toBeVisible()
+    await expect(page.getByText('Connexion réussie. Revenez dans l’application Cairn.')).toBeVisible()
     const nativeSession = await finish()
     expect(nativeSession.status()).toBe(200)
     expect((await nativeSession.json()).account).toEqual(first.account)

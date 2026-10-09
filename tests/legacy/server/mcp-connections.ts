@@ -1,13 +1,13 @@
 import type { OAuthClientProvider } from '@modelcontextprotocol/client'
-import type { McpConnection, McpView } from '../../../shared/mcp.ts'
+import type { McpConnection, McpView } from '../../../packages/contracts/mcp.ts'
 import type { Config } from './config.ts'
 import type { Agent, Run } from './contracts.ts'
 import type { Store } from './store.ts'
 import { createHash, randomBytes, randomUUID } from 'node:crypto'
 import { Client, StreamableHTTPClientTransport, UnauthorizedError } from '@modelcontextprotocol/client'
 import { StdioClientTransport } from '@modelcontextprotocol/client/stdio'
-import { mcpInput } from '../../../shared/mcp.ts'
-import { version } from '../../../shared/version.ts'
+import { mcpInput } from '../../../packages/contracts/mcp.ts'
+import { version } from '../../../packages/contracts/version.ts'
 import { AppError, requireValue } from './errors.ts'
 import { mcpFetch } from './mcp-fetch.ts'
 import { McpVault } from './mcp-vault.ts'
@@ -47,7 +47,7 @@ interface Grant {
 }
 
 export const digest = (value: string) => createHash('sha256').update(value).digest('hex')
-const serverKey = (id: string) => `leo_${id.replaceAll('-', '_')}`
+const serverKey = (id: string) => `cairn_${id.replaceAll('-', '_')}`
 
 function toml(value: unknown): string {
   if (Array.isArray(value))
@@ -122,7 +122,7 @@ export class McpConnections {
         delete nextSecrets.env?.[key]
       if (settings.auth === 'bearer' && !nextSecrets.token)
         throw new AppError(400, 'Enter a bearer token.')
-      if (settings.transport === 'stdio' && Object.keys(nextSecrets.env || {}).some(key => /^(?:HOME|CODEX_HOME|PATH|LD_PRELOAD|LD_LIBRARY_PATH|NODE_OPTIONS)$|^(?:LEO_|RUNNER_)/.test(key)))
+      if (settings.transport === 'stdio' && Object.keys(nextSecrets.env || {}).some(key => /^(?:HOME|CODEX_HOME|PATH|LD_PRELOAD|LD_LIBRARY_PATH|NODE_OPTIONS)$|^(?:CAIRN_|RUNNER_)/.test(key)))
         throw new AppError(400, 'Environment variables cannot override the agent runtime or home.')
       const item: McpConnection = {
         ...settings,
@@ -189,7 +189,7 @@ export class McpConnections {
     return {
       redirectUrl: `${this.config.publicUrl}/oauth/mcp/callback`,
       clientMetadata: {
-        client_name: 'Leo Agent Manager',
+        client_name: 'Cairn',
         redirect_uris: [`${this.config.publicUrl}/oauth/mcp/callback`],
         grant_types: ['authorization_code', 'refresh_token'],
         response_types: ['code'],
@@ -254,7 +254,7 @@ export class McpConnections {
     nonce: string
     redirect?: string
   }) {
-    const client = new Client({ name: 'leo-mcp-client', version })
+    const client = new Client({ name: 'cairn-mcp-client', version })
     const env = item.transport === 'stdio' ? await toolkitEnvironment(this.config.home) : undefined
     const transport = item.transport === 'http'
       ? this.transport(item, interactive)
@@ -427,7 +427,7 @@ export class McpConnections {
       const tools = selected === undefined ? item.enabledTools : selected.filter(name => item.enabledTools === null || item.enabledTools.includes(name))
       if (item.transport === 'http') {
         servers[item.id] = { revision: item.revision, tools }
-        configs[serverKey(item.id)] = { url: `${this.config.publicUrl}/mcp-gateway/${item.id}`, bearer_token_env_var: 'LEO_MCP_RUN_TOKEN', ...(tools !== null ? { enabled_tools: tools } : {}) }
+        configs[serverKey(item.id)] = { url: `${this.config.publicUrl}/mcp-gateway/${item.id}`, bearer_token_env_var: 'CAIRN_MCP_RUN_TOKEN', ...(tools !== null ? { enabled_tools: tools } : {}) }
       }
       else {
         configs[serverKey(item.id)] = {
@@ -441,7 +441,7 @@ export class McpConnections {
 
     if (Object.keys(servers).length)
       this.store.set(`mcp-grant:${digest(token)}`, { runId: run.id, servers }, run.snapshot.agent.timeoutMinutes > 0 ? Date.now() + run.snapshot.agent.timeoutMinutes * 60000 : undefined)
-    return { redactions: [token, ...items.flatMap(item => Object.values(this.secrets(item.id).env || {}))].filter(value => value.length > 3), args: Object.entries(configs).flatMap(([key, value]) => ['-c', `mcp_servers.${key}=${toml(value)}`]), env: Object.keys(servers).length ? { LEO_MCP_RUN_TOKEN: token } : {} }
+    return { redactions: [token, ...items.flatMap(item => Object.values(this.secrets(item.id).env || {}))].filter(value => value.length > 3), args: Object.entries(configs).flatMap(([key, value]) => ['-c', `mcp_servers.${key}=${toml(value)}`]), env: Object.keys(servers).length ? { CAIRN_MCP_RUN_TOKEN: token } : {} }
   }
 
   grant(id: string, bearer: string | undefined) {

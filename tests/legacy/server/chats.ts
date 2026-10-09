@@ -3,14 +3,14 @@ import type {
   ChatDetail,
   ChatQuestion,
   ChatView,
-} from '../../../shared/chats.ts'
+} from '../../../packages/contracts/chats.ts'
 import type { Service } from './service.ts'
 import type { Worker } from './worker.ts'
 import { randomUUID } from 'node:crypto'
 import { mkdir, rename, writeFile } from 'node:fs/promises'
 import path from 'node:path'
-import { chatInput, chatMessageInput } from '../../../shared/chats.ts'
-import { taskInput } from '../../../shared/contracts.ts'
+import { chatInput, chatMessageInput } from '../../../packages/contracts/chats.ts'
+import { taskInput } from '../../../packages/contracts/contracts.ts'
 import { AppError, requireValue } from './errors.ts'
 import { taskProjects } from './policy.ts'
 

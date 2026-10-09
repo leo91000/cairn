@@ -20,7 +20,7 @@ import { Store } from '../legacy/server/store'
 
 test('selects installations, remembers the last one and honours deep workspace URLs', async ({ page }) => {
   test.setTimeout(120000)
-  const root = await mkdtemp(join(tmpdir(), 'leo-selector-'))
+  const root = await mkdtemp(join(tmpdir(), 'cairn-selector-'))
   const children: ChildProcess[] = []
   const messages: string[] = []
   let installationLog = ''
@@ -56,13 +56,13 @@ test('selects installations, remembers the last one and honours deep workspace U
     return child
   }
 
-  start('target/debug/leo-official', {
-    LEO_OFFICIAL_DATABASE_URL: process.env.LEO_OFFICIAL_TEST_DATABASE_URL,
-    LEO_OFFICIAL_ORIGIN: url,
-    LEO_OFFICIAL_LISTEN: '127.0.0.1:4396',
-    LEO_OFFICIAL_EMAIL_ENDPOINT: `http://127.0.0.1:${mailPort}/emails`,
-    LEO_OFFICIAL_EMAIL_KEY: 'fixture-only',
-    LEO_OFFICIAL_EMAIL_FROM: 'leo@example.test',
+  start('target/debug/cairn-beacon', {
+    CAIRN_BEACON_DATABASE_URL: process.env.CAIRN_BEACON_TEST_DATABASE_URL,
+    CAIRN_BEACON_ORIGIN: url,
+    CAIRN_BEACON_LISTEN: '127.0.0.1:4396',
+    CAIRN_BEACON_EMAIL_ENDPOINT: `http://127.0.0.1:${mailPort}/emails`,
+    CAIRN_BEACON_EMAIL_KEY: 'fixture-only',
+    CAIRN_BEACON_EMAIL_FROM: 'cairn@example.test',
   })
   try {
     await expect.poll(() => fetch(`${url}/health`).then(response => response.ok).catch(() => false)).toBe(true)
@@ -78,17 +78,17 @@ test('selects installations, remembers the last one and honours deep workspace U
     const code = await page.getByLabel('Installation claim code').inputValue()
     await expect(page.getByLabel('Installation command', { exact: true })).toHaveValue(`curl -fsSL '${url}/install.sh' | sudo bash -s -- --claim-code '${code}'`)
     expect((await page.request.get(`${url}/install.sh`)).status()).toBe(200)
-    start('target/debug/leo', {
+    start('target/debug/cairn', {
       DATA_DIR: join(root, 'data'),
       AGENT_HOME: join(root, 'home'),
       WORKSPACE_ROOTS: root,
       WORKER_ENABLED: 'false',
       NODE_ENV: 'test',
       PORT: '0',
-      LEO_OFFICIAL_ORIGIN: url,
-      LEO_INSTALLATION_CLAIM_CODE: code,
-      LEO_INSTALLATION_NAME: 'Home',
-      LEO_NODE_IMAGE: `registry.example/leo@sha256:${'1'.repeat(64)}`,
+      CAIRN_BEACON_ORIGIN: url,
+      CAIRN_INSTALLATION_CLAIM_CODE: code,
+      CAIRN_INSTALLATION_NAME: 'Home',
+      CAIRN_NODE_IMAGE: `registry.example/cairn@sha256:${'1'.repeat(64)}`,
     })
     await expect.poll(async () => {
       const session = await (await page.request.get(`${url}/api/account/session`)).json()
@@ -140,11 +140,11 @@ test('selects installations, remembers the last one and honours deep workspace U
       WORKER_ENABLED: 'false',
       NODE_ENV: 'test',
       PORT: '0',
-      LEO_OFFICIAL_ORIGIN: url,
-      LEO_INSTALLATION_CLAIM_CODE: secondCode,
-      LEO_INSTALLATION_NAME: 'Office',
+      CAIRN_BEACON_ORIGIN: url,
+      CAIRN_INSTALLATION_CLAIM_CODE: secondCode,
+      CAIRN_INSTALLATION_NAME: 'Office',
     }
-    let office = start('target/debug/leo', officeEnvironment)
+    let office = start('target/debug/cairn', officeEnvironment)
     await expect.poll(async () => {
       const session = await (await page.request.get(`${url}/api/account/session`)).json()
       return session.installations.length
@@ -173,7 +173,7 @@ test('selects installations, remembers the last one and honours deep workspace U
     await selector.press('Enter')
     await expect(page).toHaveURL(firstUrl.replace(/agents$/, ''))
     await expect(selector).toHaveValue('Home')
-    office = start('target/debug/leo', officeEnvironment)
+    office = start('target/debug/cairn', officeEnvironment)
     await expect.poll(async () => (await (await page.request.get(`${url}/api/installations`)).json())
       .find((entry: { name: string }) => entry.name === 'Office')
       ?.online).toBe(true)
@@ -390,13 +390,13 @@ test('selects installations, remembers the last one and honours deep workspace U
     await expect(selector).toHaveValue(homeName)
     await selector.click()
     await page.getByRole('option', { name: 'Office', exact: true }).click()
-    const rotation = start('target/debug/leo', officeEnvironment, ['rotate-token'])
+    const rotation = start('target/debug/cairn', officeEnvironment, ['rotate-token'])
     const [rotationStatus] = await once(rotation, 'exit')
     expect(rotationStatus, installationLog).toBe(0)
     const officeStopped = once(office, 'exit')
     office.kill('SIGTERM')
     await officeStopped
-    start('target/debug/leo', officeEnvironment)
+    start('target/debug/cairn', officeEnvironment)
     await expect.poll(async () => (await (await page.request.get(`${url}/api/installations`)).json())
       .find((entry: { name: string }) => entry.name === 'Office')
       ?.online).toBe(true)

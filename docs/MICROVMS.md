@@ -20,9 +20,9 @@ while live inbox updates are delivered.
 `microvm/pool.rs` owns execution slots (initially `CONCURRENCY`, default four).
 It can prepare anonymous VMs with native Codex initialized, within those same
 slots and shared budgets. The manager can update both through authenticated
-`/node-budget`. `LEO_READY_VM_POOL=false` disables speculative preparation;
+`/node-budget`. `CAIRN_READY_VM_POOL=false` disables speculative preparation;
 the default is `true`. Guests without the readiness capability keep booting cold.
-`LEO_READY_VM_POOL_SIZE=1..4` controls the target size (default one). The node
+`CAIRN_READY_VM_POOL_SIZE=1..4` controls the target size (default one). The node
 supervisor preserves the equivalent `readyVmPoolSize` in its `config.json`.
 The same file accepts `readyVmPool: false` to disable preparation entirely.
 Setting `cacheApprovedRuntimes` to `false` in that file disables background
@@ -52,7 +52,7 @@ If all slots are occupied or shared memory/disk headroom is low, new work waits.
 `/health` exposes capacity, occupied slots, applied budgets, usage and pressure.
 
 Successful Codex conversations may retain their own CPU-paused VM for
-180 seconds (`LEO_VM_RETENTION_SECONDS=0..300`; zero disables retention). A
+180 seconds (`CAIRN_VM_RETENTION_SECONDS=0..300`; zero disables retention). A
 retained VM is never assigned to another conversation. Its balloon reclaims
 available pages before pausing, with free-page reporting returning shared memfd
 pages to the host. Admission counts allocated memfd pages once, plus the VMM's
@@ -108,7 +108,7 @@ without a selected project start in an empty workspace. Chats and scheduled task
 with a selected project seed only that repository. The prompt lists the authorized
 project IDs and loaded paths; it never advertises host paths for unopened projects.
 
-Every new VM run receives a built-in `leo_workspace.open_project` MCP tool, even
+Every new VM run receives a built-in `cairn_workspace.open_project` MCP tool, even
 when the agent has no external MCP connections. Its short-lived bearer grant is
 limited to that run and revoked when the run ends. `project_workspaces.rs` checks
 the current agent policy and snapshotted project catalog, then prepares a private

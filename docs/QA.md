@@ -205,12 +205,12 @@ record the palette, behavior, and detailed coverage.
 
 The application's connection checker detected local `codex-cli 0.153.4` logged in
 with a ChatGPT subscription and `gh 2.100.0` logged in as the repository owner.
-A minimal task through the actual worker returned `LEO_MANAGER_SMOKE_OK` with a
+A minimal task through the actual worker returned `CAIRN_MANAGER_SMOKE_OK` with a
 successful CLI exit and usage data, without modifying a project.
 
 A live container test ran Codex with `--dangerously-bypass-approvals-and-sandbox`.
-Its shell tool ran `pwd`, created/read/removed `/tmp/leo-yolo-probe`, and exited 0;
-the final response was `LEO_CONTAINER_YOLO_OK /app`. The existing subscription auth
+Its shell tool ran `pwd`, created/read/removed `/tmp/cairn-yolo-probe`, and exited 0;
+the final response was `CAIRN_CONTAINER_YOLO_OK /app`. The existing subscription auth
 file was mounted read-only for this ephemeral test. No credentials were copied
 into the image. Docker used its normal isolation without privileged mode.
 

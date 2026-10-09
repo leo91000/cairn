@@ -5,14 +5,14 @@ import { runChat } from './chat-process.ts'
 import { toolkitEnvironment } from './toolkit.ts'
 
 async function main() {
-  const plan = JSON.parse(await readFile('/run/leo-plan.json', 'utf8'))
+  const plan = JSON.parse(await readFile('/run/cairn-plan.json', 'utf8'))
   if (plan.chat) {
     Object.assign(process.env, await toolkitEnvironment('/home/node'), plan.mcpEnv ?? {})
     await runChat(plan.chat)
     return
   }
 
-  const child = spawn('codex', plan.args, { cwd: plan.cwd, env: { ...await toolkitEnvironment('/home/node'), ...(plan.mcpEnv?.LEO_MCP_RUN_TOKEN ? { LEO_MCP_RUN_TOKEN: plan.mcpEnv.LEO_MCP_RUN_TOKEN } : {}) }, stdio: ['pipe', 'inherit', 'inherit'] })
+  const child = spawn('codex', plan.args, { cwd: plan.cwd, env: { ...await toolkitEnvironment('/home/node'), ...(plan.mcpEnv?.CAIRN_MCP_RUN_TOKEN ? { CAIRN_MCP_RUN_TOKEN: plan.mcpEnv.CAIRN_MCP_RUN_TOKEN } : {}) }, stdio: ['pipe', 'inherit', 'inherit'] })
   child.stdin.on('error', () => {})
   child.stdin.end(plan.prompt)
   child.on('error', (error) => {

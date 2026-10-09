@@ -21,7 +21,7 @@ import urllib.request
 
 ROOT = Path('/fixture/installation')
 ORIGIN = 'http://127.0.0.1:48151'
-IMAGE = 'ghcr.io/leo91000/leo-agent-manager@sha256:' + '1' * 64
+IMAGE = 'ghcr.io/leo91000/cairn@sha256:' + '1' * 64
 MAIL = []
 R2_HOST = '1' * 32 + '.r2.cloudflarestorage.com'
 
@@ -60,16 +60,16 @@ def run_installer(code=''):
         import hashlib
         checksum = hashlib.sha256(Path('deploy/installations/host.py').read_bytes()).hexdigest()
         script = Path('deploy/installations/install.sh').read_text().replace(
-            '__LEO_OFFICIAL_ORIGIN__', repr(ORIGIN)).replace('__LEO_HOST_SHA256__', checksum).replace(
-                '__LEO_NODE_HOST_SHA256__', hashlib.sha256(Path('deploy/nodes/host.py').read_bytes()).hexdigest())
+            '__CAIRN_BEACON_ORIGIN__', repr(ORIGIN)).replace('__CAIRN_HOST_SHA256__', checksum).replace(
+                '__CAIRN_NODE_HOST_SHA256__', hashlib.sha256(Path('deploy/nodes/host.py').read_bytes()).hexdigest())
     # Compressed swap is a host setting covered by compressed_swap_test.py.
     swaps = Path('/fixture/swaps')
     swaps.write_text('Filename Type Size Used Priority\n/dev/zram0 partition 1024 0 100\n')
     result = subprocess.run(['bash', '-s', '--', '--claim-code', code], input=script,
                             capture_output=True, text=True, timeout=240, env={
-                                **os.environ, 'LEO_INSTALLATION_ROOT': str(ROOT),
+                                **os.environ, 'CAIRN_INSTALLATION_ROOT': str(ROOT),
                                 'PATH': '/fixture/bin:' + os.environ['PATH'],
-                                'LEO_PROC_SWAPS': str(swaps),
+                                'CAIRN_PROC_SWAPS': str(swaps),
                             })
     assert code == '' or code not in result.stdout + result.stderr, 'Claim leaked in output'
     return result
@@ -80,10 +80,10 @@ def main(mode):
         config = json.loads(subprocess.check_output([
             '/usr/local/bin/docker-compose', '--project-directory', str(ROOT),
             '-f', str(ROOT / 'compose.json'), 'config', '--format', 'json',
-        ], env={**os.environ, 'LEO_INSTALLATION_CLAIM_CODE': 'a' * 64}))
+        ], env={**os.environ, 'CAIRN_INSTALLATION_CLAIM_CODE': 'a' * 64}))
         services = config['services']
-        assert services['garage']['healthcheck']['test'] == ['CMD', '/garage', 'bucket', 'info', 'leo-disks']
-        assert services['manager']['environment']['LEO_INSTALLATION_CLAIM_CODE'] == 'a' * 64
+        assert services['garage']['healthcheck']['test'] == ['CMD', '/garage', 'bucket', 'info', 'cairn-disks']
+        assert services['manager']['environment']['CAIRN_INSTALLATION_CLAIM_CODE'] == 'a' * 64
         assert services['manager']['user'] == '1000:1000'
         assert services['manager']['depends_on']['garage']['condition'] == 'service_healthy'
         assert services['manager']['depends_on']['runner']['condition'] == 'service_healthy'
@@ -126,20 +126,20 @@ if 'up' in args and os.environ.get('INSTALLER_VERIFY'):
     code = ''
     claim = root / 'claim.env'
     if claim.exists():
-        code = dict(line.split('=', 1) for line in claim.read_text().splitlines()).get('LEO_INSTALLATION_CLAIM_CODE', '')
+        code = dict(line.split('=', 1) for line in claim.read_text().splitlines()).get('CAIRN_INSTALLATION_CLAIM_CODE', '')
     env = {**os.environ, 'DATA_DIR': str(root / 'data'), 'AGENT_HOME': str(root / 'home'),
            'WORKSPACE_ROOTS': str(root / 'workspaces'), 'WORKER_ENABLED': 'false', 'NODE_ENV': 'test',
-           'HOST': '127.0.0.1', 'PORT': '48152', 'LEO_OFFICIAL_ORIGIN': 'http://127.0.0.1:48151',
-           'LEO_INSTALLATION_CLAIM_CODE': code,
+           'HOST': '127.0.0.1', 'PORT': '48152', 'CAIRN_BEACON_ORIGIN': 'http://127.0.0.1:48151',
+           'CAIRN_INSTALLATION_CLAIM_CODE': code,
            'APP_RUNTIME_ID': json.loads((root / 'compose.json').read_text())['services']['manager']['image'].split(':')[-1]}
     if os.environ.get('INSTALLER_FAIL_IMAGE') == env['APP_RUNTIME_ID']:
         env['APP_RUNTIME_ID'] = 'wrong-runtime'
     # Synthetic child credentials only; isolate from any controller agent broker.
     for name in list(env):
-        if name.startswith(('LEO_AUTH_', 'CODEX_', 'OPENAI_', 'ANTHROPIC_')):
+        if name.startswith(('CAIRN_AUTH_', 'CODEX_', 'OPENAI_', 'ANTHROPIC_')):
             env.pop(name)
     log = open(root / 'manager.log', 'ab')
-    process = subprocess.Popen(['/repo/target/debug/leo', 'serve'], env=env, stdout=log, stderr=log, start_new_session=True)
+    process = subprocess.Popen(['/repo/target/debug/cairn', 'serve'], env=env, stdout=log, stderr=log, start_new_session=True)
     pid_file.write_text(str(process.pid))
     if '--wait' in args:
         for attempt in range(100):
@@ -228,8 +228,8 @@ sys.exit(subprocess.run(['/usr/bin/curl', *args]).returncode)
             assert not any('ports' in service for service in config['services'].values())
             assert not (ROOT / 'claim.env').exists()
             assert (ROOT / 'node-host.py').read_bytes() == Path('deploy/nodes/host.py').read_bytes()
-            assert 'OnUnitActiveSec=5min' in Path('/etc/systemd/system/leo-installation-update.timer').read_text()
-            assert '--update' in Path('/etc/systemd/system/leo-installation-update.service').read_text()
+            assert 'OnUnitActiveSec=5min' in Path('/etc/systemd/system/cairn-installation-update.timer').read_text()
+            assert '--update' in Path('/etc/systemd/system/cairn-installation-update.service').read_text()
             os.chown(ROOT / 'data/storage-s3.json', 0, 0)
             result = run_installer()
             assert result.returncode == 0, result.stderr
@@ -245,12 +245,12 @@ sys.exit(subprocess.run(['/usr/bin/curl', *args]).returncode)
     tls_extensions.write_text(f'basicConstraints=critical,CA:FALSE\nkeyUsage=digitalSignature,keyEncipherment\nextendedKeyUsage=serverAuth\nsubjectAltName=DNS:localhost,DNS:{R2_HOST}\n')
     for command in [
         ['openssl', 'req', '-x509', '-newkey', 'rsa:2048', '-nodes',
-         '-keyout', '/fixture/ca.key', '-out', '/usr/local/share/ca-certificates/leo-fixture.crt',
-         '-days', '1', '-subj', '/CN=Leo fixture CA', '-addext', 'basicConstraints=critical,CA:TRUE'],
+         '-keyout', '/fixture/ca.key', '-out', '/usr/local/share/ca-certificates/cairn-fixture.crt',
+         '-days', '1', '-subj', '/CN=Cairn fixture CA', '-addext', 'basicConstraints=critical,CA:TRUE'],
         ['openssl', 'req', '-new', '-newkey', 'rsa:2048', '-nodes',
          '-keyout', '/fixture/external.key', '-out', '/fixture/external.csr', '-subj', '/CN=localhost'],
         ['openssl', 'x509', '-req', '-in', '/fixture/external.csr',
-         '-CA', '/usr/local/share/ca-certificates/leo-fixture.crt', '-CAkey', '/fixture/ca.key',
+         '-CA', '/usr/local/share/ca-certificates/cairn-fixture.crt', '-CAkey', '/fixture/ca.key',
          '-CAserial', '/fixture/ca.srl', '-CAcreateserial', '-out', '/fixture/external.crt',
          '-days', '1', '-extfile', str(tls_extensions)],
     ]:
@@ -259,14 +259,14 @@ sys.exit(subprocess.run(['/usr/bin/curl', *args]).returncode)
     with open('/etc/hosts', 'a') as hosts:
         hosts.write(f'\n127.0.0.1 {R2_HOST}\n')
     env = {**os.environ,
-           'LEO_OFFICIAL_DATABASE_URL': os.environ['LEO_OFFICIAL_TEST_DATABASE_URL'],
-           'LEO_OFFICIAL_ORIGIN': ORIGIN, 'LEO_OFFICIAL_LISTEN': '127.0.0.1:48151',
-           'LEO_OFFICIAL_WEB_DIR': '/repo/dist', 'LEO_INSTALLATION_IMAGE': IMAGE,
-           'LEO_OFFICIAL_EMAIL_FROM': 'fixture@example.test', 'LEO_OFFICIAL_EMAIL_KEY': 'fixture-only',
-           'LEO_OFFICIAL_EMAIL_ENDPOINT': f'http://127.0.0.1:{mailbox.server_port}/emails'}
+           'CAIRN_BEACON_DATABASE_URL': os.environ['CAIRN_BEACON_TEST_DATABASE_URL'],
+           'CAIRN_BEACON_ORIGIN': ORIGIN, 'CAIRN_BEACON_LISTEN': '127.0.0.1:48151',
+           'CAIRN_BEACON_WEB_DIR': '/repo/dist', 'CAIRN_INSTALLATION_IMAGE': IMAGE,
+           'CAIRN_BEACON_EMAIL_FROM': 'fixture@example.test', 'CAIRN_BEACON_EMAIL_KEY': 'fixture-only',
+           'CAIRN_BEACON_EMAIL_ENDPOINT': f'http://127.0.0.1:{mailbox.server_port}/emails'}
     os.environ['INSTALLER_VERIFY'] = '1'
     os.environ['AWS_CA_BUNDLE'] = '/etc/ssl/certs/ca-certificates.crt'
-    official = subprocess.Popen(['/repo/target/debug/leo-official'], env=env,
+    official = subprocess.Popen(['/repo/target/debug/cairn-beacon'], env=env,
                                 stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
 
     def official_ready():
@@ -310,8 +310,8 @@ sys.exit(subprocess.run(['/usr/bin/curl', *args]).returncode)
         external_client = boto3.client('s3', endpoint_url=f'http://{host}:{port}',
                                       region_name='us-east-1', aws_access_key_id='external-fixture',
                                       aws_secret_access_key='external-fixture-secret')
-        external_client.create_bucket(Bucket='leo-external')
-        external_client.put_public_access_block(Bucket='leo-external', PublicAccessBlockConfiguration={
+        external_client.create_bucket(Bucket='cairn-external')
+        external_client.put_public_access_block(Bucket='cairn-external', PublicAccessBlockConfiguration={
             'BlockPublicAcls': True, 'IgnorePublicAcls': True,
             'BlockPublicPolicy': True, 'RestrictPublicBuckets': True})
 
@@ -355,7 +355,7 @@ sys.exit(subprocess.run(['/usr/bin/curl', *args]).returncode)
         threading.Thread(target=proxy.serve_forever, daemon=True).start()
         endpoint = f'https://localhost:{proxy.server_port}'
         saved, _ = request(base + '/settings/storage', {
-            'bucket': 'leo-external', 'endpoint': endpoint, 'region': 'us-east-1',
+            'bucket': 'cairn-external', 'endpoint': endpoint, 'region': 'us-east-1',
             'accessKeyId': 'external-fixture', 'secretAccessKey': 'external-fixture-secret',
         }, cookie, csrf, method='PUT')
         assert saved['endpoint'] == endpoint and not saved['integrated']
@@ -370,13 +370,13 @@ sys.exit(subprocess.run(['/usr/bin/curl', *args]).returncode)
                         'existing_disks_keep_publishing_reading_and_purging_on_their_original_storage',
                         '--nocapture'], check=True, env={
                             **os.environ,
-                            'LEO_INSTALLER_TEST_STORAGE_CONFIG': str(ROOT / 'data/storage-s3.json.integrated'),
-                            'LEO_INSTALLER_TEST_EXTERNAL_ENDPOINT': endpoint,
+                            'CAIRN_INSTALLER_TEST_STORAGE_CONFIG': str(ROOT / 'data/storage-s3.json.integrated'),
+                            'CAIRN_INSTALLER_TEST_EXTERNAL_ENDPOINT': endpoint,
                         })
         print('Container: retained disk publication, remote reads and purge on original Garage passed', flush=True)
         r2_endpoint = f'https://{R2_HOST}:{proxy.server_port}'
         r2_settings = {
-            'bucket': 'leo-external', 'endpoint': r2_endpoint, 'region': 'auto',
+            'bucket': 'cairn-external', 'endpoint': r2_endpoint, 'region': 'auto',
             'accessKeyId': 'external-fixture', 'secretAccessKey': 'external-fixture-secret',
         }
         try:
@@ -408,15 +408,15 @@ sys.exit(subprocess.run(['/usr/bin/curl', *args]).returncode)
         # The Docker lifecycle adapter replaces only container orchestration.
         # The supervisor executes real Node health/lease calls against the manager.
         for digit, fail in [('b', False), ('c', True)]:
-            candidate = 'ghcr.io/leo91000/leo-agent-manager@sha256:' + digit * 64
+            candidate = 'ghcr.io/leo91000/cairn@sha256:' + digit * 64
             official.terminate()
             official.wait(timeout=15)
-            official = subprocess.Popen(['/repo/target/debug/leo-official'],
-                                        env={**env, 'LEO_INSTALLATION_IMAGE': candidate},
+            official = subprocess.Popen(['/repo/target/debug/cairn-beacon'],
+                                        env={**env, 'CAIRN_INSTALLATION_IMAGE': candidate},
                                         stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
             wait_for(official_ready)
             update_env = {**os.environ, 'PATH': '/fixture/bin:' + os.environ['PATH'],
-                          'LEO_INSTALLATION_ROOT': str(ROOT)}
+                          'CAIRN_INSTALLATION_ROOT': str(ROOT)}
             if fail:
                 update_env['INSTALLER_FAIL_IMAGE'] = digit * 64
             result = subprocess.run(['python3', str(ROOT / 'host.py'), ORIGIN, '--update'],

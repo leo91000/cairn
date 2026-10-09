@@ -1,0 +1,16 @@
+[Unit]
+Description=Check Cairn Codex and GitHub CLI updates
+Requires=docker.service
+After=docker.service network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=600
+StartLimitBurst=5
+
+[Service]
+Type=oneshot
+Environment=CAIRN_MANAGER_CONTAINER=cairn-manager
+Environment=CAIRN_REPOSITORY=leo91000/leo-agent-manager
+ExecStart=/usr/bin/docker exec ${CAIRN_MANAGER_CONTAINER} gh workflow run cli-updates.yaml --repo ${CAIRN_REPOSITORY} --ref main
+TimeoutStartSec=120
+Restart=on-failure
+RestartSec=60

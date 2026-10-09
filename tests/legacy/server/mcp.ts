@@ -10,9 +10,9 @@ import {
   agentUpdate,
   projectInput,
   taskInput,
-} from '../../../shared/contracts.ts'
-import { mcpInput } from '../../../shared/mcp.ts'
-import { version } from '../../../shared/version.ts'
+} from '../../../packages/contracts/contracts.ts'
+import { mcpInput } from '../../../packages/contracts/mcp.ts'
+import { version } from '../../../packages/contracts/version.ts'
 import { AppError, requireValue } from './errors.ts'
 
 export function mountMcp(
@@ -37,7 +37,7 @@ export function mountMcp(
     const handler = createMcpHandler(
       () => {
         const server = new McpServer({
-          name: 'leo-agent-manager',
+          name: 'cairn-installation',
           version,
         })
         const tool = <Shape extends z.ZodRawShape>(

@@ -17,7 +17,7 @@ const output = value => process.stdout.write(`${value}\n`)
 const exec = promisify(execFile)
 const port = 5580
 const serial = `emulator-${port}`
-const stateFile = env => path.join(env.ANDROID_USER_HOME, 'leo-emulator.json')
+const stateFile = env => path.join(env.ANDROID_USER_HOME, 'cairn-emulator.json')
 
 async function identity(pid) {
   const fields = (await readFile(`/proc/${pid}/stat`, 'utf8')).split(') ').at(-1).split(' ')
@@ -103,7 +103,7 @@ export async function emulator(action, args, env, setup, run) {
   }
 
   if (action !== 'start')
-    throw new Error('Usage: leo-android emulator start <API> [--aosp] [--accept-licenses] | status | stop')
+    throw new Error('Usage: cairn-android emulator start <API> [--aosp] [--accept-licenses] | status | stop')
   const api = apiLevel(args[0])
   if (args.slice(1).some(arg => !['--accept-licenses', '--aosp'].includes(arg)))
     throw new Error('Unknown emulator option.')
@@ -115,7 +115,7 @@ export async function emulator(action, args, env, setup, run) {
     const system = `system-images;android-${api};${image === 'aosp' ? 'default' : 'google_apis'};x86_64`
     await setup(['emulator', system, ...args.slice(1).filter(arg => arg === '--accept-licenses')], env)
     await mkdir(env.ANDROID_USER_HOME, { recursive: true })
-    const avd = `leo_api_${api}${image === 'aosp' ? '_aosp' : ''}`
+    const avd = `cairn_api_${api}${image === 'aosp' ? '_aosp' : ''}`
     const avdHome = path.join(env.ANDROID_USER_HOME, 'avd')
     env = { ...env, ANDROID_AVD_HOME: avdHome }
     await mkdir(avdHome, { recursive: true })
@@ -132,7 +132,7 @@ export async function emulator(action, args, env, setup, run) {
     }
 
     const acceleration = await access('/dev/kvm', 6).then(() => 'kvm', () => 'software')
-    const logPath = path.join(env.ANDROID_USER_HOME, 'leo-emulator.log')
+    const logPath = path.join(env.ANDROID_USER_HOME, 'cairn-emulator.log')
     const log = await open(logPath, 'w', 0o600)
     const child = spawn(path.join(env.ANDROID_HOME, 'emulator/emulator'), ['-avd', avd, '-port', `${port}`, '-accel', acceleration === 'kvm' ? 'on' : 'off', '-gpu', 'swiftshader', '-feature', '-Vulkan', '-skin', '720x1280', '-memory', '1536', '-cores', '2', '-no-window', '-no-audio', '-no-snapshot', '-no-boot-anim', '-no-metrics'], { env, detached: true, stdio: ['ignore', log.fd, log.fd] })
     await new Promise((resolve, reject) => {

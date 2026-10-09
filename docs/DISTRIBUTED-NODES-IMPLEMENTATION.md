@@ -13,7 +13,7 @@ has not been merged, deployed or released.
   tags, per-agent grants including Main, and web/Android management.
 - Outbound controller transport, private workspace staging, project/artifact
   routing (artifact responses preserve the channel’s snapshot `length` in
-  `X-Leo-Artifact-Size` independently of HTTP framing; no node upgrade is needed), chat/inbox streaming and scoped native-auth relays. Provider account
+  `X-Cairn-Artifact-Size` independently of HTTP framing; no node upgrade is needed), chat/inbox streaming and scoped native-auth relays. Provider account
   refresh and 1Password access stay under master control.
 - Atomic slot admission, shared CPU/RAM/disk budgets including retained stale disks,
   resource pressure, preferred/strict placement, bounded capacity waits and
@@ -92,7 +92,7 @@ The repeatable checks live beside the implementation:
   existing Node-generated credential fixture remains compatible.
   Transport tests cover ownership, truncation with/without a length, bounded backpressure,
   consumer cancellation and legacy JSON responses.
-- `backend/tests/node_performance.rs`: opt-in benchmarks for initial, unchanged
+- `crates/installation/tests/node_performance.rs`: opt-in benchmarks for initial, unchanged
   and 4 MiB delta publication; real outbound relay with
   0/50 ms injected request latency. Build with `CARGO_PROFILE_RELEASE_LTO=false
   CARGO_PROFILE_RELEASE_CODEGEN_UNITS=16 cargo test --locked --release --test
@@ -120,7 +120,7 @@ The repeatable checks live beside the implementation:
   included in Android CI; JVM results alone are not device evidence.
 - `node tests/runner-smoke.mjs <image>` also verifies active capture and block
   integrity on the exact image built by CI.
-- `node tests/node-recovery-smoke.mjs <assets> <leo-binary>`: real KVM cold restore
+- `node tests/node-recovery-smoke.mjs <assets> <cairn-binary>`: real KVM cold restore
   between separately stopped/started controllers. Untracked files, an installed
   tool, a Docker volume and real native Codex/Claude sessions survive. The native
   CLIs use a local model-response fixture and synthetic credentials; both session
@@ -148,7 +148,7 @@ acceptance checks on the user's machines, rather than claims made by these tests
 
 ## Delivery gate
 
-Final lint/typechecking, complete backend/web suites, Android checks and PR CI
+Final lint/typechecking, complete crates/installation/web suites, Android checks and PR CI
 must pass on the delivered revision. The review found no remaining documented
 standard violations or definite movement/recovery defects after corrections;
 one optional repeated-connection-argument maintainability observation remains.
@@ -156,14 +156,14 @@ one optional repeated-connection-argument maintainability observation remains.
 ## Try the connector from a matching build
 
 Create an enrollment code in Atelier → Nodes. On a trusted Linux x86-64 machine
-with the matching `leo` binary, use Bash to read the code without putting it in
+with the matching `cairn` binary, use Bash to read the code without putting it in
 shell history or process arguments:
 
 ```bash
-read -rs -p 'Enrollment code: ' LEO_ENROLLMENT_CODE
-printf '%s' "$LEO_ENROLLMENT_CODE" | leo node-enroll https://your-master.example "$HOME/.local/state/leo-node"
-unset LEO_ENROLLMENT_CODE
-leo node-connect "$HOME/.local/state/leo-node"
+read -rs -p 'Enrollment code: ' CAIRN_ENROLLMENT_CODE
+printf '%s' "$CAIRN_ENROLLMENT_CODE" | cairn node-enroll https://your-master.example "$HOME/.local/state/cairn-node"
+unset CAIRN_ENROLLMENT_CODE
+cairn node-connect "$HOME/.local/state/cairn-node"
 ```
 
 The state directory is private and the identity file uses mode 0600. Enrollment

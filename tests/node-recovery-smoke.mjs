@@ -19,8 +19,8 @@ import { blockDigest } from './block-digest.mjs'
 
 async function main() {
   const assets = path.resolve(process.argv[2] || '')
-  const binary = path.resolve(process.argv[3] || 'target/debug/leo')
-  const root = await mkdtemp(path.join(process.env.VM_TEST_ROOT || path.dirname(assets), 'leo-node-kvm-'))
+  const binary = path.resolve(process.argv[3] || 'target/debug/cairn')
+  const root = await mkdtemp(path.join(process.env.VM_TEST_ROOT || path.dirname(assets), 'cairn-node-kvm-'))
   const children = []
   const headers = { 'authorization': 'Bearer fixture-node-controller', 'content-type': 'application/json' }
   const run = randomUUID()
@@ -58,7 +58,7 @@ async function main() {
     await mkdir(image, { recursive: true })
     await link(path.join(assets, 'root.ext4'), path.join(image, 'root.ext4'))
     await link(path.join(assets, 'vmlinux'), path.join(image, 'vmlinux'))
-    const child = spawn('sudo', ['-n', 'unshare', '--mount', '--pid', '--fork', '--mount-proc', '--kill-child', 'sh', '-c', 'mount --bind "$1" /tmp; shift; exec "$@"', 'leo-kvm-fixture', state, 'env', `DATA_DIR=${data}`, 'RUNNER_STATE_DIR=/tmp', `RUNNER_BIND=127.0.0.1:${port}`, 'APP_RUNTIME_ID=nodes-integration', 'CONCURRENCY=1', binary, 'runner-broker'], { detached: true, stdio: ['ignore', 'pipe', 'pipe'] })
+    const child = spawn('sudo', ['-n', 'unshare', '--mount', '--pid', '--fork', '--mount-proc', '--kill-child', 'sh', '-c', 'mount --bind "$1" /tmp; shift; exec "$@"', 'cairn-kvm-fixture', state, 'env', `DATA_DIR=${data}`, 'RUNNER_STATE_DIR=/tmp', `RUNNER_BIND=127.0.0.1:${port}`, 'APP_RUNTIME_ID=nodes-integration', 'CONCURRENCY=1', binary, 'runner-broker'], { detached: true, stdio: ['ignore', 'pipe', 'pipe'] })
     children.push(child)
     let errors = ''
     child.stderr.on('data', b => errors += b.toString())
@@ -80,7 +80,7 @@ async function main() {
     for (let depth = 0; depth < 5; depth++) {
       const row = processes.find(row => Number(row[0]) === pid)
       assert.ok(row, 'Controller supervisor is missing')
-      if (row[2] === 'leo')
+      if (row[2] === 'cairn')
         break
       const next = processes.find(row => Number(row[1]) === pid)
       assert.ok(next, 'Controller process must still be supervised')
@@ -118,7 +118,7 @@ async function main() {
     await copyFile(path.join(assets, 'busybox.tar'), path.join(workspace, 'busybox.tar'))
     await copyFile(new URL('./fixtures/native-sessions.mjs', import.meta.url), path.join(workspace, 'native-sessions.mjs'))
     const source = await controller('source', 44311)
-    const first = await start(44311, `const fs=require('fs'); const cp=require('child_process');fs.mkdirSync('/home/node/.local/bin',{recursive:true});fs.writeFileSync('/home/node/.local/bin/installed-tool','retained tool');fs.mkdirSync('/home/node/.codex/sessions',{recursive:true});fs.writeFileSync('/home/node/.codex/sessions/fixture.json','native session bytes');fs.writeFileSync('untracked.bin',Buffer.alloc(100000,73));cp.execFileSync('docker',['load','-i','busybox.tar'],{timeout:30000});cp.execFileSync('docker',['run','--rm','--network=none','-v','leo-recovery-fixture:/state','busybox:1.37','sh','-c','echo docker-volume-survived > /state/probe'],{timeout:120000});cp.execFileSync('/usr/local/bin/node',['native-sessions.mjs','start','.'],{timeout:150000,stdio:'inherit'});let counter=0;setInterval(()=>fs.writeFileSync('counter',String(++counter)),100);console.log('fixture.ready');`)
+    const first = await start(44311, `const fs=require('fs'); const cp=require('child_process');fs.mkdirSync('/home/node/.local/bin',{recursive:true});fs.writeFileSync('/home/node/.local/bin/installed-tool','retained tool');fs.mkdirSync('/home/node/.codex/sessions',{recursive:true});fs.writeFileSync('/home/node/.codex/sessions/fixture.json','native session bytes');fs.writeFileSync('untracked.bin',Buffer.alloc(100000,73));cp.execFileSync('docker',['load','-i','busybox.tar'],{timeout:30000});cp.execFileSync('docker',['run','--rm','--network=none','-v','cairn-recovery-fixture:/state','busybox:1.37','sh','-c','echo docker-volume-survived > /state/probe'],{timeout:120000});cp.execFileSync('/usr/local/bin/node',['native-sessions.mjs','start','.'],{timeout:150000,stdio:'inherit'});let counter=0;setInterval(()=>fs.writeFileSync('counter',String(++counter)),100);console.log('fixture.ready');`)
     let logs = ''
     let ended = false
     const reading = (async () => {
@@ -198,7 +198,7 @@ async function main() {
     const idle = await (await request(44312, `/disks/${run}/snapshot`, 'POST')).json()
     assert.equal(idle.manifest.size, snapshot.manifest.size)
     await request(44312, `/snapshots/${idle.id}/discard`, 'DELETE')
-    const second = await start(44312, `const fs=require('fs');const assert=require('assert/strict');const cp=require('child_process');assert.equal(fs.readFileSync('/home/node/.local/bin/installed-tool','utf8'),'retained tool');assert.equal(fs.readFileSync('/home/node/.codex/sessions/fixture.json','utf8'),'native session bytes');assert.equal(fs.readFileSync('untracked.bin').length,100000);assert.ok(Number(fs.readFileSync('counter','utf8'))>0);assert.match(cp.execFileSync('docker',['run','--rm','--network=none','-v','leo-recovery-fixture:/state','busybox:1.37','cat','/state/probe'],{encoding:'utf8',timeout:30000}),/docker-volume-survived/);cp.execFileSync('/usr/local/bin/node',['native-sessions.mjs','resume','.'],{timeout:150000,stdio:'inherit'});console.log('restore.verified');`)
+    const second = await start(44312, `const fs=require('fs');const assert=require('assert/strict');const cp=require('child_process');assert.equal(fs.readFileSync('/home/node/.local/bin/installed-tool','utf8'),'retained tool');assert.equal(fs.readFileSync('/home/node/.codex/sessions/fixture.json','utf8'),'native session bytes');assert.equal(fs.readFileSync('untracked.bin').length,100000);assert.ok(Number(fs.readFileSync('counter','utf8'))>0);assert.match(cp.execFileSync('docker',['run','--rm','--network=none','-v','cairn-recovery-fixture:/state','busybox:1.37','cat','/state/probe'],{encoding:'utf8',timeout:30000}),/docker-volume-survived/);cp.execFileSync('/usr/local/bin/node',['native-sessions.mjs','resume','.'],{timeout:150000,stdio:'inherit'});console.log('restore.verified');`)
     const restored = await (await request(44312, `/runs/${second}/wait`, 'POST')).json()
     assert.equal(restored.StatusCode, 0, JSON.stringify(restored))
     const leased = await start(44312, `setInterval(()=>console.log('leased.tick'),100)`, true)

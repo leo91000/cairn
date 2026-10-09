@@ -68,7 +68,7 @@ describe('durable storage and API boundaries', () => {
     }
   })
   it('persists sessions, rolls back transactions, expires credentials, and refuses database downgrade', async () => {
-    const dir = await mkdtemp(path.join(os.tmpdir(), 'leo-store-'))
+    const dir = await mkdtemp(path.join(os.tmpdir(), 'cairn-store-'))
     const store = new Store(dir)
     store.set('persistent', { value: 42 })
     expect(() =>

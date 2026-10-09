@@ -114,7 +114,7 @@ async function main() {
   if (args[0] === 'emulator' && args[1] === '--locked')
     return emulator(args[2], args.slice(3), env, setup, run)
   if (!['setup', 'emulator'].includes(args[0]))
-    throw new Error('Usage: leo-android setup [--accept-licenses] [SDK packages...] | status')
+    throw new Error('Usage: cairn-android setup [--accept-licenses] [SDK packages...] | status')
   if (args[0] === 'setup' && args[1] === '--locked')
     return setup(args.slice(2), env)
   const directory = path.join(env.HOME, '.local/share/android')

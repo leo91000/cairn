@@ -60,7 +60,7 @@ process.send('ready');
       await mkdir(path.join(env.ANDROID_HOME, 'platform-tools'), { recursive: true })
       const boot = (await readFile('/proc/sys/kernel/random/boot_id', 'utf8')).trim()
       const start = (await readFile(`/proc/${child.pid}/stat`, 'utf8')).split(') ').at(-1).split(' ')[19]
-      await writeFile(path.join(env.ANDROID_USER_HOME, 'leo-emulator.json'), JSON.stringify({ pid: child.pid, boot, start }))
+      await writeFile(path.join(env.ANDROID_USER_HOME, 'cairn-emulator.json'), JSON.stringify({ pid: child.pid, boot, start }))
       await writeFile(path.join(env.ANDROID_HOME, 'platform-tools/adb'), `#!/usr/bin/env node
 const graceful = process.argv.slice(4).join(' ') === 'shell reboot -p';
 process.kill(${child.pid}, graceful ? 'SIGUSR1' : 'SIGTERM');
@@ -96,7 +96,7 @@ process.exitCode = graceful ? ${adbExit} : 0;
     const output = vi.spyOn(process.stdout, 'write').mockReturnValue(true)
     try {
       await mkdir(env.ANDROID_USER_HOME)
-      await writeFile(path.join(env.ANDROID_USER_HOME, 'leo-emulator.json'), JSON.stringify({ pid: process.pid, boot: 'earlier-VM-boot', start: '1' }))
+      await writeFile(path.join(env.ANDROID_USER_HOME, 'cairn-emulator.json'), JSON.stringify({ pid: process.pid, boot: 'earlier-VM-boot', start: '1' }))
       await emulator('stop', [], env)
       expect(kill).not.toHaveBeenCalled()
     }

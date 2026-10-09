@@ -18,11 +18,11 @@ import unittest
 from unittest.mock import patch
 
 SOURCE = Path(__file__).resolve().parents[1] / 'deploy/nodes/host.py'
-OLD = 'registry.example/leo@sha256:' + '1' * 64
-NEW = 'registry.example/leo@sha256:' + '2' * 64
+OLD = 'registry.example/cairn@sha256:' + '1' * 64
+NEW = 'registry.example/cairn@sha256:' + '2' * 64
 DOCKER = r'''#!/usr/bin/env python3
 import json,os,sys,pathlib,shutil
-root=pathlib.Path(os.environ['LEO_NODE_ROOT']);state=root/'docker.json';args=sys.argv[1:]
+root=pathlib.Path(os.environ['CAIRN_NODE_ROOT']);state=root/'docker.json';args=sys.argv[1:]
 with open(root/'commands.jsonl','a') as f:f.write(json.dumps(args)+'\n')
 value=json.loads(state.read_text()) if state.exists() else None
 if args[0]=='inspect':
@@ -34,7 +34,7 @@ elif args[0]=='run' and '--network=none' in args:
  cache=root/'state/images/retained-runtime';cache.mkdir(parents=True);(cache/'root.ext4').write_bytes(b'fixture');(cache/'vmlinux').write_bytes(b'fixture')
 elif args[0]=='run':
  image=args[-3];healthy=not (image.endswith('2'*64) and os.environ.get('FAIL_CANDIDATE')=='1')
- state.write_text(json.dumps({'Config':{'Image':image,'Labels':{'dev.leo.node.owner':'fixture-node'}},'State':{'Running':healthy}}))
+ state.write_text(json.dumps({'Config':{'Image':image,'Labels':{'dev.cairn.node.owner':'fixture-node'}},'State':{'Running':healthy}}))
 elif args[0]=='exec':
  sys.exit(0 if value and value['State']['Running'] else 1)
 elif args[0]=='cp':
@@ -50,9 +50,9 @@ class Supervisor(unittest.TestCase):
         host = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(host)
         self.assertEqual(host.vm_arguments({}), [])
-        self.assertEqual(host.vm_arguments({'readyVmPool': False}), ['-e', 'LEO_READY_VM_POOL=false'])
+        self.assertEqual(host.vm_arguments({'readyVmPool': False}), ['-e', 'CAIRN_READY_VM_POOL=false'])
         config = {'blockTransport': 'ublk', 'vmSnapshots': True}
-        self.assertEqual(host.vm_arguments(config), ['-e', 'LEO_DISK_LAYOUT=paired-ext4-v1', '-e', 'LEO_VM_SNAPSHOTS=true'])
+        self.assertEqual(host.vm_arguments(config), ['-e', 'CAIRN_DISK_LAYOUT=paired-ext4-v1', '-e', 'CAIRN_VM_SNAPSHOTS=true'])
         config['readyVmPoolSize'] = 4
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -62,11 +62,11 @@ class Supervisor(unittest.TestCase):
             with patch.object(host, 'ROOT', root), patch.object(host, 'remove'), patch.object(host, 'block_device_arguments', return_value=[]), patch.object(host, 'command') as command:
                 host.launch(NEW)
             launch = command.call_args_list[0].args[0]
-            self.assertIn('LEO_DISK_LAYOUT=paired-ext4-v1', launch)
-            self.assertIn('LEO_VM_SNAPSHOTS=true', launch)
-            self.assertIn('LEO_READY_VM_POOL_SIZE=4', launch)
+            self.assertIn('CAIRN_DISK_LAYOUT=paired-ext4-v1', launch)
+            self.assertIn('CAIRN_VM_SNAPSHOTS=true', launch)
+            self.assertIn('CAIRN_READY_VM_POOL_SIZE=4', launch)
         config.update({'vmSnapshots': False, 'diskLayout': 'paired-ext4-v1'})
-        self.assertEqual(host.vm_arguments(config), ['-e', 'LEO_READY_VM_POOL_SIZE=4', '-e', 'LEO_DISK_LAYOUT=paired-ext4-v1', '-e', 'LEO_VM_SNAPSHOTS=false'])
+        self.assertEqual(host.vm_arguments(config), ['-e', 'CAIRN_READY_VM_POOL_SIZE=4', '-e', 'CAIRN_DISK_LAYOUT=paired-ext4-v1', '-e', 'CAIRN_VM_SNAPSHOTS=false'])
 
     def test_incompatible_snapshot_configuration_never_removes_the_running_node(self):
         spec = importlib.util.spec_from_file_location('node_supervisor', SOURCE)
@@ -94,7 +94,7 @@ class Supervisor(unittest.TestCase):
         with patch.object(host, 'command') as command, patch.object(Path, 'is_dir', return_value=False), patch.object(Path, 'stat', return_value=control), patch.object(Path, 'read_text', read):
             arguments = host.block_device_arguments('ublk')
         self.assertEqual(command.call_args.args[0], ['modprobe', 'ublk_drv'])
-        self.assertEqual(arguments, ['--cap-add=SYS_RESOURCE', '--device=/dev/ublk-control', '--device-cgroup-rule=c 507:* rwm', '--device-cgroup-rule=b 260:* rwm', '-e', 'LEO_BLOCK_TRANSPORT=ublk'])
+        self.assertEqual(arguments, ['--cap-add=SYS_RESOURCE', '--device=/dev/ublk-control', '--device-cgroup-rule=c 507:* rwm', '--device-cgroup-rule=b 260:* rwm', '-e', 'CAIRN_BLOCK_TRANSPORT=ublk'])
         self.assertEqual(host.block_device_arguments('vhost-user'), [])
 
         with patch.object(host, 'command'), patch.object(Path, 'stat', return_value=control), patch.object(Path, 'read_text', lambda path: '2' if path.name == 'io_uring_disabled' else devices):
@@ -163,7 +163,7 @@ class Supervisor(unittest.TestCase):
             (root / 'data/node/identity.json').write_text(json.dumps({'nodeId': 'fixture-node', 'token': 'fixture-token'}))
             (root / 'docker').write_text(DOCKER)
             (root / 'docker').chmod(0o755)
-            (root / 'docker.json').write_text(json.dumps({'Config': {'Image': OLD, 'Labels': {'dev.leo.node.owner': 'fixture-node'}}, 'State': {'Running': True}}))
+            (root / 'docker.json').write_text(json.dumps({'Config': {'Image': OLD, 'Labels': {'dev.cairn.node.owner': 'fixture-node'}}, 'State': {'Running': True}}))
             completed = queue.Queue()
             completion_attempts = []
             runtime_requests = []
@@ -200,7 +200,7 @@ class Supervisor(unittest.TestCase):
             thread = threading.Thread(target=server.serve_forever, daemon=True)
             thread.start()
             (root / 'config.json').write_text(json.dumps({'image': OLD, 'master': f'http://127.0.0.1:{server.server_port}', 'cacheApprovedRuntimes': cache}))
-            env = {**os.environ, 'PATH': str(root) + os.pathsep + os.environ['PATH'], 'LEO_NODE_ROOT': str(root), 'FAIL_CANDIDATE': str(int(fail)), 'FIXTURE_SUPERVISOR': str(SOURCE)}
+            env = {**os.environ, 'PATH': str(root) + os.pathsep + os.environ['PATH'], 'CAIRN_NODE_ROOT': str(root), 'FAIL_CANDIDATE': str(int(fail)), 'FIXTURE_SUPERVISOR': str(SOURCE)}
             process = subprocess.Popen([sys.executable, str(SOURCE), 'run'], env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
             try:
                 value = completed.get(timeout=40)

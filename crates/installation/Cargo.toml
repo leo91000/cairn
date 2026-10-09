@@ -1,0 +1,125 @@
+[package]
+name = "cairn-installation"
+version = "0.52.3"
+edition = "2024"
+rust-version = "1.97"
+publish = false
+
+[[bin]]
+name = "cairn"
+path = "src/main.rs"
+
+[[example]]
+name = "ublk_probe"
+required-features = [ "ublk-prototype" ]
+
+[features]
+ublk = [ "dep:libublk" ]
+ublk-prototype = [ "ublk" ]
+
+[dependencies]
+cairn-protocol = { path = "../protocol" }
+axum = { version = "0.8.9", features = [
+  "macros",
+  "form"
+] }
+tokio = { version = "1", features = [ "full" ] }
+tokio-util = { version = "0.7", features = [
+  "rt",
+  "io"
+] }
+tower-http = { version = "0.6", features = [
+  "fs",
+  "compression-br",
+  "compression-gzip",
+  "trace"
+] }
+serde = { version = "1", features = [ "derive" ] }
+serde_json = { version = "1", features = [ "raw_value" ] }
+serde_urlencoded = "0.7"
+serde_yaml_ng = "0.10"
+jsonschema = { version = "0.56", default-features = false }
+rusqlite = { version = "0.40", features = [
+  "bundled",
+  "serde_json"
+] }
+reqwest = { version = "0.13", default-features = false, features = [
+  "json",
+  "stream",
+  "rustls"
+] }
+futures-util = "0.3"
+http-body-util = "0.1"
+bytes = "1"
+tempfile = "3"
+uuid = { version = "1", features = [
+  "v4",
+  "serde"
+] }
+rand = "0.9"
+sha2 = "0.10"
+md-5 = "0.11"
+aws-lc-rs = { version = "1.18.1", default-features = false, features = [
+  "non-fips",
+  "alloc"
+] }
+subtle = "2"
+base64 = "0.22"
+aes-gcm = "0.10"
+hex = "0.4"
+url = "2"
+regex = "1"
+chrono = { version = "0.4", features = [ "serde" ] }
+chrono-tz = "0.10"
+croner = "4"
+libc = "0.2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = [
+  "env-filter",
+  "json"
+] }
+tokio-vsock = "0.7.2"
+image = { version = "0.25", default-features = false, features = [
+  "png",
+  "jpeg",
+  "webp"
+] }
+async-trait = "0.1.92"
+fuser = { version = "=0.18.0", default-features = false }
+aws-config = "1.12.0"
+aws-sdk-s3 = "1.150.0"
+blake3 = "1.8.7"
+lru = "0.18.5"
+vhost = { version = "=0.17.0", features = [ "vhost-user-backend" ] }
+vhost-user-backend = "=0.23.0"
+virtio-bindings = "=0.2.7"
+virtio-queue = "=0.18.0"
+vm-memory = { version = "=0.18.0", features = [
+  "backend-mmap",
+  "backend-atomic",
+  "backend-bitmap"
+] }
+vmm-sys-util = "=0.15.0"
+libublk = { git = "https://github.com/ublk-org/libublk-rs", rev = "0d172817b3737079477337b39538ccdc91766e6e", optional = true }
+tokio-tungstenite = { version = "0.29", features = [ "rustls-tls-webpki-roots" ] }
+tower = { version = "0.5", features = [ "util" ] }
+webrtc = { version = "=0.21.0", default-features = false, features = [
+  "runtime-tokio",
+  "crypto-aws-lc-rs"
+] }
+rtc = { version = "=0.21.0", default-features = false, features = [ "crypto-aws-lc-rs" ] }
+
+[dev-dependencies]
+tempfile = "3"
+tower = { version = "0.5", features = [ "util" ] }
+tokio = { version = "1", features = [ "test-util" ] }
+
+[lints.clippy]
+default_trait_access = "warn"
+ignored_unit_patterns = "warn"
+items_after_statements = "warn"
+manual_let_else = "warn"
+map_unwrap_or = "warn"
+needless_pass_by_value = "warn"
+redundant_closure_for_method_calls = "warn"
+semicolon_if_nothing_returned = "warn"

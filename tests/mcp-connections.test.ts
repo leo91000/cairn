@@ -3,7 +3,7 @@ import path from 'node:path'
 import process from 'node:process'
 import { Client, StreamableHTTPClientTransport } from '@modelcontextprotocol/client'
 import { describe, expect, it } from 'vitest'
-import { MAIN_AGENT_ID } from '../shared/contracts.ts'
+import { MAIN_AGENT_ID } from '../packages/contracts/contracts.ts'
 import { fixture } from './helpers.ts'
 import { isPrivateAddress, mcpFetch } from './legacy/server/mcp-fetch.ts'
 import { isolated, policy } from './legacy/server/policy.ts'
@@ -157,8 +157,8 @@ describe('outbound MCP connection lifecycle', () => {
       ctx.service.store.updateRun(run.id, { status: 'running' })
       const config = ctx.service.mcps.runConfiguration(run)
       expect(config.args.join(' ')).not.toContain('fixture-access-token')
-      expect(config.args.join(' ')).toContain('LEO_MCP_RUN_TOKEN')
-      const transport = new StreamableHTTPClientTransport(new URL(`${origin}/mcp-gateway/${item.id}`), { requestInit: { headers: { Authorization: `Bearer ${config.env.LEO_MCP_RUN_TOKEN}` } } })
+      expect(config.args.join(' ')).toContain('CAIRN_MCP_RUN_TOKEN')
+      const transport = new StreamableHTTPClientTransport(new URL(`${origin}/mcp-gateway/${item.id}`), { requestInit: { headers: { Authorization: `Bearer ${config.env.CAIRN_MCP_RUN_TOKEN}` } } })
       await client.connect(transport)
       expect((await client.listTools()).tools.map(tool => tool.name)).toEqual(['echo'])
       expect(await client.callTool({ name: 'echo', arguments: { message: 'works' } })).toMatchObject({ content: [{ text: 'works' }] })
@@ -172,12 +172,12 @@ describe('outbound MCP connection lifecycle', () => {
       expect((await ctx.app.inject({
         method: 'POST',
         url: `/mcp-gateway/${item.id}`,
-        headers: { authorization: `Bearer ${config.env.LEO_MCP_RUN_TOKEN}` },
+        headers: { authorization: `Bearer ${config.env.CAIRN_MCP_RUN_TOKEN}` },
         payload: {},
       })).statusCode).toBe(401)
       ctx.service.store.updateRun(run.id, { status: 'running' })
       await ctx.service.mcps.save({ ...item, enabled: false }, item.id)
-      expect(() => ctx.service.mcps.grant(item.id, config.env.LEO_MCP_RUN_TOKEN)).toThrow()
+      expect(() => ctx.service.mcps.grant(item.id, config.env.CAIRN_MCP_RUN_TOKEN)).toThrow()
       expect(() => ctx.service.agent({ name: 'Main', access: { mcps: [] } }, MAIN_AGENT_ID)).toThrow()
       ctx.service.mcps.revokeRun(run.id)
       expect(ctx.service.store.keys('mcp-grant:')).toEqual([])

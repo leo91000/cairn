@@ -74,7 +74,7 @@ async function main() {
   const input = JSON.parse(await readFile(process.argv[3] || path.join(directory, 'versions.json'), 'utf8'))
   const plan = validate(input.toolkit || input)
   await installMise(plan.mise)
-  const temporary = '/tmp/leo-toolkit-build'
+  const temporary = '/tmp/cairn-toolkit-build'
   const env = {
     ...process.env,
     HOME: temporary,

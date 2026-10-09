@@ -577,7 +577,7 @@ test('installation push registration is removed in favor of the official account
   await authenticateWorkspace(page)
   await page.getByRole('button', { name: 'Question notifications' }).click()
   await expect(page.getByText('Know when your agent needs your input, across all your installations, even with the app closed. Question content stays private.')).toBeVisible()
-  await expect(page.getByText('Sign in to your Leo account to manage push notifications on this device.')).toHaveCount(0)
+  await expect(page.getByText('Sign in to your Cairn account to manage push notifications on this device.')).toHaveCount(0)
   expect((await page.request.get(`${workspace.url}/api/installations/${workspace.installationId}/api/notifications`)).status()).toBe(404)
 })
 

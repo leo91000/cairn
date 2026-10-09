@@ -13,7 +13,7 @@ import { deploy } from '../scripts/deploy-coolify.mjs'
 import { firecrackerRunnerCompose, nativeRunnerCompose, persistentRunnerCompose } from '../scripts/runner-compose.mjs'
 
 // eslint-disable-next-line no-template-curly-in-string -- Compose resolves this expression at deployment time.
-const nodeImage = '${LEO_IMAGE:-}'
+const nodeImage = '${CAIRN_IMAGE:-}'
 
 describe('coolify deployment over HTTP', () => {
   let server
@@ -39,8 +39,8 @@ describe('coolify deployment over HTTP', () => {
     bulkFailures = []
     environmentResponse = undefined
     environment = [
-      { key: 'LEO_OFFICIAL_IMAGE', value: `ghcr.io/owner/leo-official@sha256:${'c'.repeat(64)}`, is_literal: true },
-      { key: 'LEO_INSTALLATION_IMAGE', value: `ghcr.io/owner/leo@sha256:${'d'.repeat(64)}`, is_literal: true },
+      { key: 'CAIRN_BEACON_IMAGE', value: `ghcr.io/owner/cairn-beacon@sha256:${'c'.repeat(64)}`, is_literal: true },
+      { key: 'CAIRN_INSTALLATION_IMAGE', value: `ghcr.io/owner/cairn@sha256:${'d'.repeat(64)}`, is_literal: true },
     ]
     healthResponses = [{ status: 'ok', commit: 'new-commit' }]
     server = createServer(async (request, response) => {
@@ -54,11 +54,11 @@ describe('coolify deployment over HTTP', () => {
         body: body ? JSON.parse(body) : undefined,
       })
       response.setHeader('content-type', 'application/json')
-      if (request.url === '/api/v1/services/leo-service') {
+      if (request.url === '/api/v1/services/cairn-service') {
         if (request.method === 'PATCH' && patchStatus < 300 && persistCompose) {
           compose = Buffer.from(JSON.parse(body).docker_compose_raw, 'base64').toString()
           if (normalizeCompose)
-            compose = compose.replace('entrypoint: [/usr/local/bin/leo, runner-broker]', 'entrypoint:\n      - /usr/local/bin/leo\n      - runner-broker')
+            compose = compose.replace('entrypoint: [/usr/local/bin/cairn, runner-broker]', 'entrypoint:\n      - /usr/local/bin/cairn\n      - runner-broker')
         }
 
         response.statusCode = request.method === 'PATCH' ? patchStatus : 200
@@ -66,12 +66,12 @@ describe('coolify deployment over HTTP', () => {
         return
       }
 
-      if (request.url === '/api/v1/services/leo-service/envs' && request.method === 'GET') {
+      if (request.url === '/api/v1/services/cairn-service/envs' && request.method === 'GET') {
         response.end(environmentResponse ?? JSON.stringify(environment))
         return
       }
 
-      if (request.url === '/api/v1/services/leo-service/envs/bulk') {
+      if (request.url === '/api/v1/services/cairn-service/envs/bulk') {
         const failure = bulkFailures.shift()
         const data = JSON.parse(body).data
         if (failure === 'partial') {
@@ -114,9 +114,9 @@ describe('coolify deployment over HTTP', () => {
     config = {
       coolifyUrl: origin,
       publicUrl: origin,
-      serviceUuid: 'leo-service',
+      serviceUuid: 'cairn-service',
       token: 'test-token',
-      image: `ghcr.io/owner/leo@sha256:${'a'.repeat(64)}`,
+      image: `ghcr.io/owner/cairn@sha256:${'a'.repeat(64)}`,
       commit: 'new-commit',
     }
   })
@@ -128,17 +128,17 @@ describe('coolify deployment over HTTP', () => {
 
   it('deploys the official image and approves the paired installation without touching a runner', async () => {
     compose = readFileSync(new URL('../deploy/official/compose.production.yaml', import.meta.url), 'utf8')
-    config.installationImage = `ghcr.io/leo91000/leo-agent-manager@sha256:${'b'.repeat(64)}`
+    config.installationImage = `ghcr.io/leo91000/cairn@sha256:${'b'.repeat(64)}`
     healthResponses = [{ status: 'ok', commit: 'old-commit' }, { status: 'ok', commit: config.commit }]
     await deploy(config, { intervalMs: 0, timeoutMs: 1000 })
     expect(requests.filter(request => request.method !== 'GET').map(request => [request.method, request.path, request.body])).toEqual([
-      ['PATCH', '/api/v1/services/leo-service/envs/bulk', {
+      ['PATCH', '/api/v1/services/cairn-service/envs/bulk', {
         data: [
-          { key: 'LEO_OFFICIAL_IMAGE', value: config.image, is_literal: true },
-          { key: 'LEO_INSTALLATION_IMAGE', value: config.installationImage, is_literal: true },
+          { key: 'CAIRN_BEACON_IMAGE', value: config.image, is_literal: true },
+          { key: 'CAIRN_INSTALLATION_IMAGE', value: config.installationImage, is_literal: true },
         ],
       }],
-      ['POST', '/api/v1/services/leo-service/restart', undefined],
+      ['POST', '/api/v1/services/cairn-service/restart', undefined],
     ])
     expect(environment.map(env => env.value)).toEqual([config.image, config.installationImage])
     expect(requests.some(request => request.path === '/internal/nodes/release')).toBe(false)
@@ -147,21 +147,21 @@ describe('coolify deployment over HTTP', () => {
 
   it('repairs a half-applied bulk update before restarting', async () => {
     compose = readFileSync(new URL('../deploy/official/compose.production.yaml', import.meta.url), 'utf8')
-    config.installationImage = `ghcr.io/leo91000/leo-agent-manager@sha256:${'b'.repeat(64)}`
+    config.installationImage = `ghcr.io/leo91000/cairn@sha256:${'b'.repeat(64)}`
     bulkFailures = ['partial']
     await deploy(config, { intervalMs: 0, timeoutMs: 1000 })
     expect(environment.map(env => env.value)).toEqual([config.image, config.installationImage])
     const mutations = requests.filter(request => request.method !== 'GET')
     expect(mutations.map(request => request.path)).toEqual([
-      '/api/v1/services/leo-service/envs/bulk',
-      '/api/v1/services/leo-service/envs/bulk',
-      '/api/v1/services/leo-service/restart',
+      '/api/v1/services/cairn-service/envs/bulk',
+      '/api/v1/services/cairn-service/envs/bulk',
+      '/api/v1/services/cairn-service/restart',
     ])
   })
 
   it('refuses masked previous values before any mutation', async () => {
     compose = readFileSync(new URL('../deploy/official/compose.production.yaml', import.meta.url), 'utf8')
-    config.installationImage = `ghcr.io/leo91000/leo-agent-manager@sha256:${'b'.repeat(64)}`
+    config.installationImage = `ghcr.io/leo91000/cairn@sha256:${'b'.repeat(64)}`
     environment[0].value = '********'
     await expect(deploy(config)).rejects.toThrow('read:sensitive')
     expect(requests.every(request => request.method === 'GET')).toBe(true)
@@ -169,7 +169,7 @@ describe('coolify deployment over HTTP', () => {
 
   it('restores the previous pair if a half-applied update cannot be repaired', async () => {
     compose = readFileSync(new URL('../deploy/official/compose.production.yaml', import.meta.url), 'utf8')
-    config.installationImage = `ghcr.io/leo91000/leo-agent-manager@sha256:${'b'.repeat(64)}`
+    config.installationImage = `ghcr.io/leo91000/cairn@sha256:${'b'.repeat(64)}`
     const previous = structuredClone(environment)
     bulkFailures = ['partial', 'reject']
     await expect(deploy(config)).rejects.toThrow('Previous image pair restored')
@@ -179,7 +179,7 @@ describe('coolify deployment over HTTP', () => {
 
   it('reports that restarts must stay frozen when repair and restoration both fail', async () => {
     compose = readFileSync(new URL('../deploy/official/compose.production.yaml', import.meta.url), 'utf8')
-    config.installationImage = `ghcr.io/leo91000/leo-agent-manager@sha256:${'b'.repeat(64)}`
+    config.installationImage = `ghcr.io/leo91000/cairn@sha256:${'b'.repeat(64)}`
     bulkFailures = ['partial', 'reject', 'reject']
     await expect(deploy(config)).rejects.toThrow('freeze restarts and repair both values manually')
     expect(requests.some(request => request.path.endsWith('/restart'))).toBe(false)
@@ -187,21 +187,21 @@ describe('coolify deployment over HTTP', () => {
 
   it('never includes a malformed environment response in an error', async () => {
     compose = readFileSync(new URL('../deploy/official/compose.production.yaml', import.meta.url), 'utf8')
-    config.installationImage = `ghcr.io/leo91000/leo-agent-manager@sha256:${'b'.repeat(64)}`
+    config.installationImage = `ghcr.io/leo91000/cairn@sha256:${'b'.repeat(64)}`
     environmentResponse = 'fixture-sensitive-env'
-    await expect(deploy(config)).rejects.toMatchObject({ message: 'Coolify GET /api/v1/services/leo-service/envs returned invalid JSON' })
+    await expect(deploy(config)).rejects.toMatchObject({ message: 'Coolify GET /api/v1/services/cairn-service/envs returned invalid JSON' })
     expect(requests.every(request => request.method === 'GET')).toBe(true)
   })
 
   it('never includes malformed Compose contents in an error', async () => {
     compose = 'services: [fixture-sensitive-compose'
-    config.installationImage = `ghcr.io/leo91000/leo-agent-manager@sha256:${'b'.repeat(64)}`
+    config.installationImage = `ghcr.io/leo91000/cairn@sha256:${'b'.repeat(64)}`
     await expect(deploy(config)).rejects.toMatchObject({ message: 'Coolify returned invalid official production Compose' })
     expect(requests.every(request => request.method === 'GET')).toBe(true)
   })
 
   it.each(['old-manager', 'two-replicas', 'start-first'])('refuses unsafe official target %s before any mutation', async (target) => {
-    config.installationImage = `ghcr.io/leo91000/leo-agent-manager@sha256:${'b'.repeat(64)}`
+    config.installationImage = `ghcr.io/leo91000/cairn@sha256:${'b'.repeat(64)}`
     if (target !== 'old-manager') {
       const document = parse(readFileSync(new URL('../deploy/official/compose.production.yaml', import.meta.url), 'utf8'))
       if (target === 'two-replicas')
@@ -217,14 +217,14 @@ describe('coolify deployment over HTTP', () => {
 
   it('fails when official health is current but installation approval is stale', async () => {
     compose = readFileSync(new URL('../deploy/official/compose.production.yaml', import.meta.url), 'utf8')
-    config.installationImage = `ghcr.io/leo91000/leo-agent-manager@sha256:${'b'.repeat(64)}`
-    releaseImage = `ghcr.io/leo91000/leo-agent-manager@sha256:${'c'.repeat(64)}`
+    config.installationImage = `ghcr.io/leo91000/cairn@sha256:${'b'.repeat(64)}`
+    releaseImage = `ghcr.io/leo91000/cairn@sha256:${'c'.repeat(64)}`
     await expect(deploy(config, { intervalMs: 0, timeoutMs: 25 })).rejects.toThrow('installation image')
   })
 
   it('fails on an official environment update without restarting or leaking API bodies', async () => {
     compose = readFileSync(new URL('../deploy/official/compose.production.yaml', import.meta.url), 'utf8')
-    config.installationImage = `ghcr.io/leo91000/leo-agent-manager@sha256:${'b'.repeat(64)}`
+    config.installationImage = `ghcr.io/leo91000/cairn@sha256:${'b'.repeat(64)}`
     patchStatus = 401
     await expect(deploy(config)).rejects.toThrow('HTTP 401')
     expect(requests.some(request => request.method === 'POST')).toBe(false)
@@ -236,13 +236,13 @@ describe('coolify deployment over HTTP', () => {
     expect(requests.filter(request => request.method !== 'GET')).toEqual([
       {
         method: 'PATCH',
-        path: '/api/v1/services/leo-service/envs',
+        path: '/api/v1/services/cairn-service/envs',
         authorization: 'Bearer test-token',
-        body: { key: 'LEO_IMAGE', value: config.image, is_literal: true },
+        body: { key: 'CAIRN_IMAGE', value: config.image, is_literal: true },
       },
       {
         method: 'POST',
-        path: '/api/v1/services/leo-service/restart',
+        path: '/api/v1/services/cairn-service/restart',
         authorization: 'Bearer test-token',
         body: undefined,
       },
@@ -283,21 +283,21 @@ describe('coolify deployment over HTTP', () => {
 
   it.each(['mapping', 'list'])('preserves the operator pool setting across deployment (%s)', async (shape) => {
     const document = parse(compose)
-    const environment = { ...document.services.runner.environment, LEO_READY_VM_POOL: 'false', LEO_READY_VM_POOL_SIZE: '4' }
+    const environment = { ...document.services.runner.environment, CAIRN_READY_VM_POOL: 'false', CAIRN_READY_VM_POOL_SIZE: '4' }
     document.services.runner.environment = shape === 'list'
       ? Object.entries(environment).map(([key, value]) => `${key}=${value}`)
       : environment
     compose = stringify(document)
     await deploy(config, { intervalMs: 0, timeoutMs: 1000 })
-    expect(parse(compose).services.runner.environment.LEO_READY_VM_POOL).toBe('false')
-    expect(parse(compose).services.runner.environment.LEO_READY_VM_POOL_SIZE).toBe('4')
+    expect(parse(compose).services.runner.environment.CAIRN_READY_VM_POOL).toBe('false')
+    expect(parse(compose).services.runner.environment.CAIRN_READY_VM_POOL_SIZE).toBe('4')
     expect(firecrackerRunnerCompose(compose)).toBe(compose)
   })
 
   it.each(['mapping', 'list'])('preserves explicitly configured ublk transport and device classes (%s)', async (shape) => {
     const document = parse(compose)
     const runner = document.services.runner
-    const environment = { ...runner.environment, LEO_BLOCK_TRANSPORT: 'ublk' }
+    const environment = { ...runner.environment, CAIRN_BLOCK_TRANSPORT: 'ublk' }
     runner.environment = shape === 'list'
       ? Object.entries(environment).map(([key, value]) => `${key}=${value}`)
       : environment
@@ -306,7 +306,7 @@ describe('coolify deployment over HTTP', () => {
     compose = stringify(document)
     await deploy(config, { intervalMs: 0, timeoutMs: 1000 })
     const result = parse(compose).services.runner
-    expect(result.environment.LEO_BLOCK_TRANSPORT).toBe('ublk')
+    expect(result.environment.CAIRN_BLOCK_TRANSPORT).toBe('ublk')
     expect(result.devices).toContain('/dev/ublk-control:/dev/ublk-control')
     expect(result.device_cgroup_rules).toEqual(runner.device_cgroup_rules)
     expect(result.cap_add).toContain('SYS_RESOURCE')
@@ -317,7 +317,7 @@ describe('coolify deployment over HTTP', () => {
   it('does not grant the ublk flusher capability to a vhost-user runner', async () => {
     const document = parse(compose)
     document.services.runner.cap_add.push('SYS_RESOURCE')
-    document.services.runner.environment.LEO_BLOCK_TRANSPORT = 'vhost-user'
+    document.services.runner.environment.CAIRN_BLOCK_TRANSPORT = 'vhost-user'
     compose = stringify(document)
     await deploy(config, { intervalMs: 0, timeoutMs: 1000 })
     expect(parse(compose).services.runner.cap_add).not.toContain('SYS_RESOURCE')
@@ -329,9 +329,9 @@ describe('coolify deployment over HTTP', () => {
     const runner = document.services.runner
     const environment = {
       ...runner.environment,
-      LEO_BLOCK_TRANSPORT: 'ublk',
-      LEO_DISK_LAYOUT: 'paired-ext4-v1',
-      LEO_VM_SNAPSHOTS: 'true',
+      CAIRN_BLOCK_TRANSPORT: 'ublk',
+      CAIRN_DISK_LAYOUT: 'paired-ext4-v1',
+      CAIRN_VM_SNAPSHOTS: 'true',
     }
     runner.environment = shape === 'list'
       ? Object.entries(environment).map(([key, value]) => `${key}=${value}`)
@@ -340,22 +340,22 @@ describe('coolify deployment over HTTP', () => {
     runner.device_cgroup_rules = ['c 238:* rwm', 'b 259:* rwm']
     compose = stringify(document)
     await deploy(config, { intervalMs: 0, timeoutMs: 1000 })
-    expect(parse(compose).services.runner.environment).toMatchObject({ LEO_BLOCK_TRANSPORT: 'ublk', LEO_DISK_LAYOUT: 'paired-ext4-v1', LEO_VM_SNAPSHOTS: 'true' })
+    expect(parse(compose).services.runner.environment).toMatchObject({ CAIRN_BLOCK_TRANSPORT: 'ublk', CAIRN_DISK_LAYOUT: 'paired-ext4-v1', CAIRN_VM_SNAPSHOTS: 'true' })
     expect(firecrackerRunnerCompose(compose)).toBe(compose)
     // Disabling new clones must retain the ability to boot existing paired disks.
     const disabled = parse(compose)
-    disabled.services.runner.environment.LEO_VM_SNAPSHOTS = 'false'
+    disabled.services.runner.environment.CAIRN_VM_SNAPSHOTS = 'false'
     compose = stringify(disabled)
     await deploy(config, { intervalMs: 0, timeoutMs: 1000 })
-    expect(parse(compose).services.runner.environment).toMatchObject({ LEO_DISK_LAYOUT: 'paired-ext4-v1', LEO_VM_SNAPSHOTS: 'false' })
+    expect(parse(compose).services.runner.environment).toMatchObject({ CAIRN_DISK_LAYOUT: 'paired-ext4-v1', CAIRN_VM_SNAPSHOTS: 'false' })
   })
 
   it.each([
-    { LEO_VM_SNAPSHOTS: 'true' },
-    { LEO_DISK_LAYOUT: 'paired-ext4-v1' },
-    { LEO_VM_SNAPSHOTS: 'yes' },
-    { LEO_DISK_LAYOUT: 'unknown' },
-    { LEO_VM_SNAPSHOTS: 'true', LEO_BLOCK_TRANSPORT: 'ublk', LEO_DISK_LAYOUT: 'flat-ext4-v1' },
+    { CAIRN_VM_SNAPSHOTS: 'true' },
+    { CAIRN_DISK_LAYOUT: 'paired-ext4-v1' },
+    { CAIRN_VM_SNAPSHOTS: 'yes' },
+    { CAIRN_DISK_LAYOUT: 'unknown' },
+    { CAIRN_VM_SNAPSHOTS: 'true', CAIRN_BLOCK_TRANSPORT: 'ublk', CAIRN_DISK_LAYOUT: 'flat-ext4-v1' },
   ])('rejects incompatible snapshot configuration before mutating the service (%j)', async (settings) => {
     const document = parse(compose)
     Object.assign(document.services.runner.environment, settings)
@@ -366,7 +366,7 @@ describe('coolify deployment over HTTP', () => {
 
   it('rejects incomplete ublk permissions before changing or restarting the service', async () => {
     const document = parse(compose)
-    document.services.runner.environment.LEO_BLOCK_TRANSPORT = 'ublk'
+    document.services.runner.environment.CAIRN_BLOCK_TRANSPORT = 'ublk'
     compose = stringify(document)
     await expect(deploy(config, { intervalMs: 0, timeoutMs: 1000 })).rejects.toThrow('ublk')
     expect(requests.some(request => request.method === 'PATCH' || request.method === 'POST')).toBe(false)
@@ -377,7 +377,7 @@ describe('coolify deployment over HTTP', () => {
     document.services.runner.devices = document.services.runner.devices.filter(device => !device.startsWith('/dev/fuse:'))
     compose = stringify(document)
     await deploy(config, { intervalMs: 0, timeoutMs: 1000 })
-    const patched = requests.find(request => request.method === 'PATCH' && request.path === '/api/v1/services/leo-service')
+    const patched = requests.find(request => request.method === 'PATCH' && request.path === '/api/v1/services/cairn-service')
     expect(patched).toBeDefined()
     expect(parse(compose).services.runner.devices).toContain('/dev/fuse:/dev/fuse')
     expect(requests.some(request => request.path.endsWith('/restart'))).toBe(true)
@@ -385,13 +385,13 @@ describe('coolify deployment over HTTP', () => {
 
   it.each(['mapping', 'list'])('enables remote node updates in a legacy %s manager environment', async (shape) => {
     const document = parse(compose)
-    delete document.services.manager.environment.LEO_NODE_IMAGE
+    delete document.services.manager.environment.CAIRN_NODE_IMAGE
     if (shape === 'list')
       document.services.manager.environment = Object.entries(document.services.manager.environment).map(([key, value]) => `${key}=${value}`)
     compose = stringify(document)
     await deploy(config, { intervalMs: 0, timeoutMs: 1000 })
     const environment = parse(compose).services.manager.environment
-    expect(shape === 'list' ? environment : [`LEO_NODE_IMAGE=${environment.LEO_NODE_IMAGE}`]).toContain(`LEO_NODE_IMAGE=${nodeImage}`)
+    expect(shape === 'list' ? environment : [`CAIRN_NODE_IMAGE=${environment.CAIRN_NODE_IMAGE}`]).toContain(`CAIRN_NODE_IMAGE=${nodeImage}`)
   })
 
   it('fails if a healthy service keeps serving the previous commit', async () => {
@@ -401,7 +401,7 @@ describe('coolify deployment over HTTP', () => {
   })
 
   it('does not report success while nodes would receive an old image', async () => {
-    releaseImage = `ghcr.io/owner/leo@sha256:${'b'.repeat(64)}`
+    releaseImage = `ghcr.io/owner/cairn@sha256:${'b'.repeat(64)}`
     await expect(deploy(config, { intervalMs: 0, timeoutMs: 25 })).rejects.toThrow('node image')
     expect(requests.some(request => request.path === '/internal/nodes/release')).toBe(true)
   })
@@ -410,21 +410,21 @@ describe('coolify deployment over HTTP', () => {
     compose = compose.replace('      - runner-state:/runner-state\n', '').replace('  runner-state:\n', '')
     const original = compose
     await deploy(config, { intervalMs: 0, timeoutMs: 1000 })
-    const migration = requests.find(request => request.method === 'PATCH' && request.path === '/api/v1/services/leo-service')
+    const migration = requests.find(request => request.method === 'PATCH' && request.path === '/api/v1/services/cairn-service')
     expect(Buffer.from(migration.body.docker_compose_raw, 'base64').toString()).toBe(firecrackerRunnerCompose(original))
     expect(compose).toContain('data:/data')
     expect(compose).toContain('      - runner-state:/runner-state')
     expect(compose).toContain('\nvolumes:\n  runner-state:')
     expect(requests.slice(0, 4).map(request => [request.method, request.path])).toEqual([
-      ['GET', '/api/v1/services/leo-service'],
-      ['PATCH', '/api/v1/services/leo-service'],
-      ['GET', '/api/v1/services/leo-service'],
-      ['PATCH', '/api/v1/services/leo-service/envs'],
+      ['GET', '/api/v1/services/cairn-service'],
+      ['PATCH', '/api/v1/services/cairn-service'],
+      ['GET', '/api/v1/services/cairn-service'],
+      ['PATCH', '/api/v1/services/cairn-service/envs'],
     ])
   })
 
   it('accepts Coolify reformatting the migrated entrypoint before deploying', async () => {
-    compose = compose.replace('entrypoint: [/usr/local/bin/leo, runner-broker]', 'entrypoint: [node, --import, tsx, /app/server/runner-broker.ts]')
+    compose = compose.replace('entrypoint: [/usr/local/bin/cairn, runner-broker]', 'entrypoint: [node, --import, tsx, /app/server/runner-broker.ts]')
     normalizeCompose = true
     await deploy(config, { intervalMs: 0, timeoutMs: 1000 })
     expect(firecrackerRunnerCompose(compose)).toBe(compose)
@@ -438,8 +438,8 @@ describe('coolify deployment over HTTP', () => {
     const migrated = firecrackerRunnerCompose(stringify(document))
     const result = parse(migrated)
     expect(result.services.manager.environment).toEqual(Array.isArray(environment)
-      ? [...environment, `LEO_NODE_IMAGE=${nodeImage}`]
-      : { ...environment, LEO_NODE_IMAGE: nodeImage })
+      ? [...environment, `CAIRN_NODE_IMAGE=${nodeImage}`]
+      : { ...environment, CAIRN_NODE_IMAGE: nodeImage })
     expect(result.services.runner.environment.CONCURRENCY).toBe('12')
     expect(firecrackerRunnerCompose(migrated)).toBe(migrated)
   })
@@ -464,7 +464,7 @@ describe('coolify deployment over HTTP', () => {
   ])('migrates the stored runner entrypoint and preserves the manager configuration', (entrypoint) => {
     const input = `services:\n  manager:\n    command: keep-this\n  runner:\n${entrypoint}\n    environment:\n      RUNNER_MANAGER_CONTAINER: unchanged\n    volumes:\n      - state:/runner-state\n`
     const migrated = nativeRunnerCompose(input)
-    expect(migrated).toContain('    entrypoint: [/usr/local/bin/leo, runner-broker]')
+    expect(migrated).toContain('    entrypoint: [/usr/local/bin/cairn, runner-broker]')
     expect(migrated).toContain('command: keep-this')
     expect(migrated).toContain('RUNNER_MANAGER_CONTAINER: unchanged')
     expect(migrated).not.toContain('tsx')
@@ -472,9 +472,9 @@ describe('coolify deployment over HTTP', () => {
   })
 
   it.each([
-    '    entrypoint: ["/usr/local/bin/leo", "runner-broker"]',
-    '    entrypoint:\n      - \'/usr/local/bin/leo\'\n      - \'runner-broker\'',
-    '    entrypoint: \'/usr/local/bin/leo runner-broker\'',
+    '    entrypoint: ["/usr/local/bin/cairn", "runner-broker"]',
+    '    entrypoint:\n      - \'/usr/local/bin/cairn\'\n      - \'runner-broker\'',
+    '    entrypoint: \'/usr/local/bin/cairn runner-broker\'',
   ])('preserves equivalent native entrypoints', (entrypoint) => {
     const compose = `services:\n  runner:\n${entrypoint}\n    volumes:\n      - state:/runner-state\n`
     expect(nativeRunnerCompose(compose)).toBe(compose)

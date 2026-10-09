@@ -18,7 +18,7 @@ import time
 import urllib.parse
 import urllib.request
 
-ROOT = Path(os.environ.get('LEO_INSTALLATION_ROOT', '/var/lib/leo-installation'))
+ROOT = Path(os.environ.get('CAIRN_INSTALLATION_ROOT', '/var/lib/cairn-installation'))
 GARAGE_IMAGE = 'dxflrs/garage@sha256:866bd13ed2038ba7e7190e840482bc27234c4afaf77be8cfa439ae088c1e4690'
 IMAGE = re.compile(r'^ghcr\.io/leo91000/leo-agent-manager@sha256:[a-f0-9]{64}$')
 
@@ -49,7 +49,7 @@ def run(args, timeout=120):
     result = subprocess.run(args, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                             stderr=subprocess.DEVNULL, timeout=timeout, check=False,
                             env={key: value for key, value in os.environ.items()
-                                 if key != 'LEO_INSTALLATION_CLAIM_CODE'})
+                                 if key != 'CAIRN_INSTALLATION_CLAIM_CODE'})
     if result.returncode:
         operation = next((arg for arg in args if arg in ('pull', 'up', 'exec')), 'operation')
         raise RuntimeError(f'Docker {operation} failed (exit {result.returncode}). Check the daemon and outbound registry connectivity; existing data is retained.')
@@ -84,7 +84,7 @@ def release(origin):
 def compose(image, origin):
     logs = {'driver': 'json-file', 'options': {'max-size': '10m', 'max-file': '3'}}
     return {
-        'name': 'leo-installation',
+        'name': 'cairn-installation',
         'services': {
             'garage': {
                 'image': GARAGE_IMAGE, 'restart': 'unless-stopped',
@@ -92,7 +92,7 @@ def compose(image, origin):
                 'env_file': ['garage.env'],
                 'volumes': ['./garage.toml:/etc/garage.toml:ro', './garage:/var/lib/garage'],
                 'healthcheck': {
-                    'test': ['CMD', '/garage', 'bucket', 'info', 'leo-disks'],
+                    'test': ['CMD', '/garage', 'bucket', 'info', 'cairn-disks'],
                     'interval': '5s', 'timeout': '5s', 'retries': 24,
                 },
                 'logging': logs,
@@ -109,8 +109,8 @@ def compose(image, origin):
                     'HOST': '0.0.0.0', 'WORKSPACE_ROOTS': '/workspaces',
                     'PUBLIC_URL': 'http://manager:4310',
                     'RUNNER_URL': 'http://runner:4311',
-                    'LEO_OFFICIAL_ORIGIN': origin, 'LEO_NODE_IMAGE': image,
-                    'LEO_INSTALLATION_CLAIM_CODE': '${LEO_INSTALLATION_CLAIM_CODE:-}',
+                    'CAIRN_BEACON_ORIGIN': origin, 'CAIRN_NODE_IMAGE': image,
+                    'CAIRN_INSTALLATION_CLAIM_CODE': '${CAIRN_INSTALLATION_CLAIM_CODE:-}',
                 },
                 'volumes': ['./data:/data', './home:/home/node', './workspaces:/workspaces'],
                 'mem_limit': '4g', 'logging': logs,
@@ -121,7 +121,7 @@ def compose(image, origin):
             },
             'runner': {
                 'image': image, 'user': '0:0', 'restart': 'unless-stopped',
-                'entrypoint': ['/usr/local/bin/leo', 'runner-broker'],
+                'entrypoint': ['/usr/local/bin/cairn', 'runner-broker'],
                 'stop_grace_period': '30s', 'read_only': True,
                 'environment': {'DATA_DIR': '/data'},
                 'cap_drop': ['ALL'],
@@ -162,9 +162,9 @@ def install(origin, code):
     origin = official_origin(origin)
     if code and not re.fullmatch('[a-f0-9]{64}', code):
         raise RuntimeError('Invalid claim code. Copy a new command from Add an installation.')
-    cli = Path('/usr/local/bin/leo')
-    if os.getuid() == 0 and cli.exists() and not cli.read_bytes().startswith(b'#!/usr/bin/env bash\n# Leo installation wrapper\n'):
-        raise RuntimeError('An unrelated /usr/local/bin/leo already exists. Move it before installing Leo; it will not be overwritten.')
+    cli = Path('/usr/local/bin/cairn')
+    if os.getuid() == 0 and cli.exists() and not cli.read_bytes().startswith(b'#!/usr/bin/env bash\n# Cairn installation wrapper\n'):
+        raise RuntimeError('An unrelated /usr/local/bin/cairn already exists. Move it before installing Cairn; it will not be overwritten.')
     ROOT.mkdir(parents=True, exist_ok=True, mode=0o700)
     os.chmod(ROOT, 0o700)
     claimed = claimed_identity(origin)
@@ -190,7 +190,7 @@ def install(origin, code):
     if not garage_env.exists():
         access = 'GK' + secrets.token_hex(16)
         secret = secrets.token_hex(32)
-        atomic(garage_env, f'GARAGE_DEFAULT_ACCESS_KEY={access}\nGARAGE_DEFAULT_SECRET_KEY={secret}\nGARAGE_DEFAULT_BUCKET=leo-disks\n')
+        atomic(garage_env, f'GARAGE_DEFAULT_ACCESS_KEY={access}\nGARAGE_DEFAULT_SECRET_KEY={secret}\nGARAGE_DEFAULT_BUCKET=cairn-disks\n')
     values = dict(line.split('=', 1) for line in garage_env.read_text().splitlines())
     garage_config = ROOT / 'garage.toml'
     if not garage_config.exists():
@@ -208,7 +208,7 @@ api_bind_addr = "0.0.0.0:3900"
     storage = ROOT / 'data/storage-s3.json'
     if not storage.exists():
         atomic(storage, json.dumps({
-            'bucket': 'leo-disks', 'endpoint': 'http://garage:3900', 'region': 'garage',
+            'bucket': 'cairn-disks', 'endpoint': 'http://garage:3900', 'region': 'garage',
             'integrated': True,
             'accessKeyId': values['GARAGE_DEFAULT_ACCESS_KEY'],
             'secretAccessKey': values['GARAGE_DEFAULT_SECRET_KEY'],
@@ -220,9 +220,9 @@ api_bind_addr = "0.0.0.0:3900"
     claim_file = ROOT / 'claim.env'
     identity = ROOT / 'data/installation-relay/identity.json'
     # Always replace a claim left by an interrupted install with the current code.
-    atomic(claim_file, 'LEO_INSTALLATION_CLAIM_CODE=' + (code if not claimed else '') + '\n')
+    atomic(claim_file, 'CAIRN_INSTALLATION_CLAIM_CODE=' + (code if not claimed else '') + '\n')
     docker = ['docker', 'compose', '--project-directory', str(ROOT), '--env-file', str(claim_file), '-f', str(ROOT / 'compose.json')]
-    print('Downloading Leo and Garage images…', flush=True)
+    print('Downloading Cairn and Garage images…', flush=True)
     startup_attempted = False
     try:
         run(docker + ['pull'], timeout=1200)
@@ -255,18 +255,18 @@ api_bind_addr = "0.0.0.0:3900"
         atomic(ROOT / '.env', '')
     if os.getuid() == 0:
         wrapper = '''#!/usr/bin/env bash
-# Leo installation wrapper
+# Cairn installation wrapper
 set -euo pipefail
-[[ $(id -u) == 0 ]] || { echo 'Run sudo leo claim.' >&2; exit 1; }
-[[ "$*" == claim ]] || { echo 'Usage: sudo leo claim' >&2; exit 1; }
-exec docker compose --project-directory ROOT -f COMPOSE exec -T manager /usr/local/bin/leo claim
+[[ $(id -u) == 0 ]] || { echo 'Run sudo cairn claim.' >&2; exit 1; }
+[[ "$*" == claim ]] || { echo 'Usage: sudo cairn claim' >&2; exit 1; }
+exec docker compose --project-directory ROOT -f COMPOSE exec -T manager /usr/local/bin/cairn claim
 '''.replace('ROOT', shlex.quote(str(ROOT))).replace('COMPOSE', shlex.quote(str(ROOT / 'compose.json')))
-        atomic(Path('/usr/local/bin/leo'), wrapper)
-        os.chmod('/usr/local/bin/leo', 0o755)
+        atomic(Path('/usr/local/bin/cairn'), wrapper)
+        os.chmod('/usr/local/bin/cairn', 0o755)
     if claimed_identity(origin):
-        print('Leo installed and claimed. Open the official app and refresh installations.')
+        print('Cairn installed and claimed. Open the official app and refresh installations.')
     else:
-        print('Leo installed but unclaimed. Copy a fresh command from Add an installation and rerun it.')
+        print('Cairn installed but unclaimed. Copy a fresh command from Add an installation and rerun it.')
 
 
 def docker_output(args):
@@ -353,7 +353,7 @@ fetch('http://127.0.0.1:4310/health', {{ signal: AbortSignal.timeout(5000) }}).t
         runtime = inspect(image)
         deployment = json.loads((ROOT / 'compose.json').read_text())
         deployment['services']['manager']['image'] = image
-        deployment['services']['manager']['environment']['LEO_NODE_IMAGE'] = image
+        deployment['services']['manager']['environment']['CAIRN_NODE_IMAGE'] = image
         deployment['services']['runner']['image'] = image
 
         # The manager saves checkpoints before the runner is stopped. Persistent
@@ -463,7 +463,7 @@ fetch('http://127.0.0.1:4310/health', {{ signal: AbortSignal.timeout(5000) }}).t
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('origin')
-    parser.add_argument('--claim-code', default=os.environ.pop('LEO_INSTALLATION_CLAIM_CODE', ''))
+    parser.add_argument('--claim-code', default=os.environ.pop('CAIRN_INSTALLATION_CLAIM_CODE', ''))
     parser.add_argument('--update', action='store_true')
     args = parser.parse_args()
     try:
@@ -472,7 +472,7 @@ if __name__ == '__main__':
             try:
                 fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
             except BlockingIOError:
-                raise RuntimeError('Another Leo installer is running. Wait for it to finish and retry.') from None
+                raise RuntimeError('Another Cairn installer is running. Wait for it to finish and retry.') from None
             if args.update:
                 update(args.origin)
             else:
@@ -481,5 +481,5 @@ if __name__ == '__main__':
         print(str(error), file=sys.stderr)
         sys.exit(1)
     except (OSError, ValueError, subprocess.TimeoutExpired):
-        print('Leo installation failed. Check prerequisites, outbound connectivity and Docker. Existing identity and storage are retained.', file=sys.stderr)
+        print('Cairn installation failed. Check prerequisites, outbound connectivity and Docker. Existing identity and storage are retained.', file=sys.stderr)
         sys.exit(1)

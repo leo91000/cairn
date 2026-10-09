@@ -9,7 +9,7 @@ import {
   expect,
   it,
 } from 'vitest'
-import { MAIN_AGENT_ID } from '../shared/constants.ts'
+import { MAIN_AGENT_ID } from '../packages/contracts/constants.ts'
 import { accountFixture } from './codex-account-fixture.ts'
 import { fixture } from './helpers.ts'
 import { Worker } from './legacy/server/worker.ts'

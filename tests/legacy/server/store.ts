@@ -1,5 +1,5 @@
-import type { Chat, ChatMessage } from '../../../shared/chats.ts'
-import type { McpConnection } from '../../../shared/mcp.ts'
+import type { Chat, ChatMessage } from '../../../packages/contracts/chats.ts'
+import type { McpConnection } from '../../../packages/contracts/mcp.ts'
 import type { CodexAccount } from './codex-account-types.ts'
 import type {
   Agent,

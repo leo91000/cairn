@@ -21,7 +21,7 @@ const config = {
   commit: 'a'.repeat(40),
   tag: 'v0.31.0',
   runId: 123,
-  officialOrigin: 'https://leo.example',
+  officialOrigin: 'https://cairn.example',
 }
 const run = {
   id: config.runId,
@@ -38,7 +38,7 @@ const directories = []
 async function fixture(directory, context = config) {
   await writeFile(path.join(directory, 'app-release-unsigned.apk'), 'compiled APK bytes')
   await writeFile(path.join(directory, 'output-metadata.json'), JSON.stringify({
-    applicationId: 'dev.leo.manager',
+    applicationId: 'build.cairn.app',
     elements: [{ ...androidVersion(context.tag), outputFile: 'app-release-unsigned.apk' }],
   }))
   return recordBuild(directory, context)
@@ -73,7 +73,7 @@ describe('validated Android build reuse', () => {
     const directory = await temporaryBuild()
     const firebaseConfiguration = {
       APP_ID: '1:123:android:abc',
-      PROJECT_ID: 'leo-project',
+      PROJECT_ID: 'cairn-project',
       API_KEY: 'public-key',
       SENDER_ID: '123',
     }

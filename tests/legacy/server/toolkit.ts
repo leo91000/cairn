@@ -14,9 +14,9 @@ import process from 'node:process'
 import { promisify } from 'node:util'
 
 export async function toolkitEnvironment(home: string, base: NodeJS.ProcessEnv = process.env): Promise<NodeJS.ProcessEnv> {
-  if (!base.LEO_TOOLKIT_DIR)
+  if (!base.CAIRN_TOOLKIT_DIR)
     return { ...base }
-  const directory = base.LEO_TOOLKIT_DIR
+  const directory = base.CAIRN_TOOLKIT_DIR
   const rustup = path.join(home, '.rustup')
   const cargo = path.join(home, '.cargo')
   await mkdir(path.join(rustup, 'toolchains'), { recursive: true })

@@ -14,9 +14,9 @@ import { Service as SeedService } from '../legacy/server/service'
 import { Store } from '../legacy/server/store'
 import { expireAccountProof } from './official-relay-fixture'
 
-test('a browser registers once for all Leo installations and can disable account push', async ({ page, context }) => {
+test('a browser registers once for all Cairn installations and can disable account push', async ({ page, context }) => {
   test.setTimeout(120000)
-  const root = await mkdtemp(join(tmpdir(), 'leo-notifications-'))
+  const root = await mkdtemp(join(tmpdir(), 'cairn-notifications-'))
   const children: ChildProcess[] = []
   const diagnostics: string[] = []
   const messages: Array<{ to: string[], text: string }> = []
@@ -102,15 +102,15 @@ test('a browser registers once for all Leo installations and can disable account
     }
   }, subscription)
 
-  const official = start('target/debug/leo-official', {
-    LEO_OFFICIAL_DATABASE_URL: process.env.LEO_OFFICIAL_TEST_DATABASE_URL,
-    LEO_OFFICIAL_ORIGIN: url,
-    LEO_OFFICIAL_LISTEN: '127.0.0.1:4394',
-    LEO_OFFICIAL_EMAIL_ENDPOINT: `http://127.0.0.1:${(mail.address() as { port: number }).port}/emails`,
-    LEO_OFFICIAL_EMAIL_KEY: 'fixture-only',
-    LEO_OFFICIAL_EMAIL_FROM: 'leo@example.test',
-    LEO_OFFICIAL_VAPID_PRIVATE_KEY: curve.getPrivateKey().toString('base64url'),
-    LEO_OFFICIAL_VAPID_SUBJECT: 'mailto:fixture@example.test',
+  const official = start('target/debug/cairn-beacon', {
+    CAIRN_BEACON_DATABASE_URL: process.env.CAIRN_BEACON_TEST_DATABASE_URL,
+    CAIRN_BEACON_ORIGIN: url,
+    CAIRN_BEACON_LISTEN: '127.0.0.1:4394',
+    CAIRN_BEACON_EMAIL_ENDPOINT: `http://127.0.0.1:${(mail.address() as { port: number }).port}/emails`,
+    CAIRN_BEACON_EMAIL_KEY: 'fixture-only',
+    CAIRN_BEACON_EMAIL_FROM: 'cairn@example.test',
+    CAIRN_BEACON_VAPID_PRIVATE_KEY: curve.getPrivateKey().toString('base64url'),
+    CAIRN_BEACON_VAPID_SUBJECT: 'mailto:fixture@example.test',
   })
   try {
     await expect.poll(() => {
@@ -132,16 +132,16 @@ test('a browser registers once for all Leo installations and can disable account
       workerEnabled: false,
       logger: false,
     }))
-    const installation = start('target/debug/leo', {
+    const installation = start('target/debug/cairn', {
       DATA_DIR: join(root, 'data'),
       AGENT_HOME: join(root, 'home'),
       WORKSPACE_ROOTS: root,
       WORKER_ENABLED: 'false',
       NODE_ENV: 'test',
       PORT: '0',
-      LEO_OFFICIAL_ORIGIN: url,
-      LEO_INSTALLATION_CLAIM_CODE: code,
-      LEO_INSTALLATION_NAME: 'Shared home',
+      CAIRN_BEACON_ORIGIN: url,
+      CAIRN_INSTALLATION_CLAIM_CODE: code,
+      CAIRN_INSTALLATION_NAME: 'Shared home',
     })
     await expect.poll(async () => {
       if (installation.exitCode !== null)
@@ -156,7 +156,7 @@ test('a browser registers once for all Leo installations and can disable account
     await page.getByRole('menuitem', { name: 'Account settings', exact: true }).click()
     await expect(page.getByRole('heading', { name: 'Notifications', exact: true })).toBeVisible()
     await expect(page.getByText('Google or GitHub sign-in alone doesn’t confirm this action.', { exact: false })).toBeVisible()
-    expireAccountProof(new URL(process.env.LEO_OFFICIAL_TEST_DATABASE_URL!), email)
+    expireAccountProof(new URL(process.env.CAIRN_BEACON_TEST_DATABASE_URL!), email)
     await page.getByRole('button', { name: 'Enable on this device' }).click()
     await expect(page.getByRole('alert')).toContainText('Confirm your identity')
     expect(await page.evaluate(async () => (await navigator.serviceWorker.getRegistration())?.pushManager.getSubscription())).toBeNull()
@@ -181,16 +181,16 @@ test('a browser registers once for all Leo installations and can disable account
     await page.getByRole('button', { name: 'Installation settings', exact: true }).click()
     await page.getByRole('button', { name: 'Add an installation', exact: true }).click()
     const secondCode = await page.getByLabel('Installation claim code').inputValue()
-    start('target/debug/leo', {
+    start('target/debug/cairn', {
       DATA_DIR: join(root, 'second-data'),
       AGENT_HOME: join(root, 'second-home'),
       WORKSPACE_ROOTS: root,
       WORKER_ENABLED: 'false',
       NODE_ENV: 'test',
       PORT: '0',
-      LEO_OFFICIAL_ORIGIN: url,
-      LEO_INSTALLATION_CLAIM_CODE: secondCode,
-      LEO_INSTALLATION_NAME: 'Second home',
+      CAIRN_BEACON_ORIGIN: url,
+      CAIRN_INSTALLATION_CLAIM_CODE: secondCode,
+      CAIRN_INSTALLATION_NAME: 'Second home',
     })
     await expect.poll(async () => (await (await page.request.get(`${url}/api/account/session`)).json()).installations.length, { timeout: 30000 }).toBe(2)
     await page.getByRole('button', { name: 'Refresh installations', exact: true }).click()
@@ -202,7 +202,7 @@ test('a browser registers once for all Leo installations and can disable account
     await expect(page.getByRole('heading', { name: 'Notifications', exact: true })).toBeVisible()
     await expect(page.getByText('Notifications on', { exact: true })).toBeVisible()
     expect(registrations).toHaveLength(2)
-    const id = (await page.evaluate(() => Object.entries(localStorage).find(([key]) => key.startsWith('leo-push-device:'))?.[1]))!
+    const id = (await page.evaluate(() => Object.entries(localStorage).find(([key]) => key.startsWith('cairn-push-device:'))?.[1]))!
     expect(id).toMatch(/^[a-f0-9]{64}$/)
     const session = await (await page.request.get(`${url}/api/account/session`)).json()
     const path = `${url}/api/account/notifications/subscriptions/${id}`

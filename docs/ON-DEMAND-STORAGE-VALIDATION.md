@@ -19,7 +19,7 @@ et synchronisation.
 
 - Firecracker et jailer : 1.17.0, archive vérifiée avec le SHA-256 du Dockerfile.
 - Noyau : 6.12.109 extrait de l'image publiée
-  `ghcr.io/leo91000/leo-agent-manager@sha256:2db85ce1611e073a4fc6ee292a13aeb25bf10a219130c37975b25c8df2bc12e7`.
+  `ghcr.io/leo91000/cairn@sha256:2db85ce1611e073a4fc6ee292a13aeb25bf10a219130c37975b25c8df2bc12e7`.
 - Couche noyau vérifiée :
   `sha256:66155c1a271c7d0c39f1c3bdb5749a677290633711f4eb918d4f5f1496880144`.
 - Invité minimal BusyBox avec ext4, données inutilisées de 32 Mio, cache initial vide.

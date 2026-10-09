@@ -7,7 +7,7 @@ accent and motion that only means an agent is working.
 
 - **Fil** (`/`): what needs you (questions, failed conversations, failed missions,
   missions blocked or waiting for input), live work (running and queued
-  conversations and missions) and recent conversations. `src/signal.ts` groups
+  conversations and missions) and recent conversations. `apps/web/src/signal.ts` groups
   them; only the latest run of each mission counts and chat runs stay with their
   conversation. On wide screens the Fil stays beside the open conversation, like a
   mail client.
@@ -32,11 +32,11 @@ while reading a conversation or a run; conversations go back to the Fil.
 | Enter, Shift+Enter, Alt+Enter | Send or queue, new line, steer |
 | ? | Shortcut sheet |
 
-Single keys never fire while typing or while a dialog is open (`src/shortcuts.ts`).
+Single keys never fire while typing or while a dialog is open (`apps/web/src/shortcuts.ts`).
 
 ## Motion
 
-`src/styles/signal.css` holds the shared primitives:
+`apps/web/src/styles/signal.css` holds the shared primitives:
 
 - **Souffle** (`WorkingIndicator.vue`): a breathing halo, a light sweep across the
   step in progress (with its command) and the elapsed time to the second. It is

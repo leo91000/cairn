@@ -34,8 +34,8 @@ class CompressedSwap(unittest.TestCase):
         script = function(INSTALLERS[0]) + '\nensure_compressed_swap\n'
         result = subprocess.run(
             [shutil.which('bash'), '-c', script],
-            env={'PATH': str(binaries), 'LEO_PROC_SWAPS': str(root / 'swaps'),
-                 'LEO_ETC_DIR': str(root / 'etc')},
+            env={'PATH': str(binaries), 'CAIRN_PROC_SWAPS': str(root / 'swaps'),
+                 'CAIRN_ETC_DIR': str(root / 'etc')},
             capture_output=True, text=True)
         calls = log.read_text() if log.exists() else ''
         return result, calls
@@ -53,7 +53,7 @@ class CompressedSwap(unittest.TestCase):
             self.assertIn('apt-get install -y -qq zram-tools', calls)
             self.assertIn('systemctl restart zramswap', calls)
             self.assertEqual((root / 'etc/default/zramswap').read_text(), 'ALGO=zstd\nPERCENT=25\nPRIORITY=100\n')
-            self.assertEqual((root / 'etc/sysctl.d/99-leo-zram.conf').read_text(), 'vm.swappiness=100\n')
+            self.assertEqual((root / 'etc/sysctl.d/99-cairn-zram.conf').read_text(), 'vm.swappiness=100\n')
 
     def test_an_existing_zram_swap_is_left_untouched(self):
         with tempfile.TemporaryDirectory() as directory:

@@ -16,11 +16,11 @@ import path from 'node:path'
 import process from 'node:process'
 
 async function main() {
-  const directory = await mkdtemp(path.join(tmpdir(), 'leo-toolkit-probe-'))
+  const directory = await mkdtemp(path.join(tmpdir(), 'cairn-toolkit-probe-'))
   const stale = path.join(process.env.HOME, '.local/share/mise/installs/node/0.0.0')
   await mkdir(path.dirname(stale), { recursive: true })
   await symlink('/usr/local/share/mise/installs/node/0.0.0', stale)
-  const env = JSON.parse(execFileSync('/usr/local/bin/leo', ['toolkit-env'], { encoding: 'utf8', timeout: 60000 }))
+  const env = JSON.parse(execFileSync('/usr/local/bin/cairn', ['toolkit-env'], { encoding: 'utf8', timeout: 60000 }))
   await assert.rejects(lstat(stale), { code: 'ENOENT' })
   const run = (binary, args = ['--version'], cwd = directory) => execFileSync(binary, args, {
     env,
@@ -29,11 +29,11 @@ async function main() {
     timeout: 120000,
   }).trim()
   try {
-    const manifest = JSON.parse(await readFile('/opt/leo-toolkit/manifest.json', 'utf8'))
+    const manifest = JSON.parse(await readFile('/opt/cairn-toolkit/manifest.json', 'utf8'))
     assert.ok(run('java').includes(manifest.tools.java.replace('temurin-', '').split('+')[0]))
     assert.equal(env.ANDROID_HOME, path.join(process.env.HOME, '.local/share/android/sdk'))
     assert.equal(env.GRADLE_USER_HOME, path.join(process.env.HOME, '.gradle'))
-    assert.equal(JSON.parse(run('leo-android', ['status'])).sdkInstalled, false)
+    assert.equal(JSON.parse(run('cairn-android', ['status'])).sdkInstalled, false)
     for (const [tool, binary] of Object.entries({
       'node': 'node',
       'pnpm': 'pnpm',

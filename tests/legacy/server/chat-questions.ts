@@ -1,7 +1,7 @@
-import type { ChatQuestion } from '../../../shared/chats.ts'
+import type { ChatQuestion } from '../../../packages/contracts/chats.ts'
 import type { Service } from './service.ts'
 import { z } from 'zod'
-import { questionAnswerInput, questionFields } from '../../../shared/chats.ts'
+import { questionAnswerInput, questionFields } from '../../../packages/contracts/chats.ts'
 import { AppError, requireValue } from './errors.ts'
 
 const incoming = z.object({ id: z.string().regex(/^[a-f0-9]{64}$/), blocking: z.boolean(), fields: questionFields })

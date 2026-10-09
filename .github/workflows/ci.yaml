@@ -78,15 +78,15 @@ jobs:
           restore-keys: rust-${{ runner.os }}-1.97.1-debug0-
       - name: Build the browser-test backend and frontend
         run: |
-          cargo build --locked --bin leo --example worker_fixture --example network_direct_client --features ublk
-          cargo build --locked -p leo-official-service --bin leo-official --example network_stun_server
+          cargo build --locked --bin cairn --example worker_fixture --example network_direct_client --features ublk
+          cargo build --locked -p cairn-beacon --bin cairn-beacon --example network_stun_server
           pnpm exec vite build
       - uses: actions/upload-artifact@v7.0.1
         with:
           name: browser-backend
           path: |
-            target/debug/leo
-            target/debug/leo-official
+            target/debug/cairn
+            target/debug/cairn-beacon
             target/debug/examples/worker_fixture
             target/debug/examples/network_direct_client
             target/debug/examples/network_stun_server
@@ -101,12 +101,12 @@ jobs:
       postgres:
         image: postgres:17-alpine@sha256:b0f9560a2de083e2cc7382e75f808c7381a32852a7ec49117deedb300e552b24
         env:
-          POSTGRES_USER: leo
+          POSTGRES_USER: cairn
           POSTGRES_PASSWORD: test-only
-          POSTGRES_DB: leo_official_test
+          POSTGRES_DB: cairn_official_test
         ports: ['5432:5432']
         options: >-
-          --health-cmd "pg_isready -U leo -d leo_official_test"
+          --health-cmd "pg_isready -U cairn -d cairn_official_test"
           --health-interval 5s --health-timeout 5s --health-retries 10
     needs: resolve
     # Main still runs these checks after reusing a pull request image: they report
@@ -118,7 +118,7 @@ jobs:
     env:
       CARGO_PROFILE_DEV_DEBUG: '0'
       CARGO_INCREMENTAL: '0'
-      LEO_OFFICIAL_TEST_DATABASE_URL: postgres://leo:test-only@localhost:5432/leo_official_test
+      CAIRN_BEACON_TEST_DATABASE_URL: postgres://cairn:test-only@localhost:5432/cairn_official_test
     steps:
       - uses: actions/checkout@v7.0.1
       - uses: ./.github/actions/setup-pnpm
@@ -142,12 +142,12 @@ jobs:
         run: pnpm check
       - run: |
           node --import tsx scripts/backend-schemas.mjs
-          git diff --exit-code -- backend/schemas/inputs.json
+          git diff --exit-code -- crates/installation/schemas/inputs.json
           cargo clippy --locked --workspace --all-targets --features ublk-prototype -- -D warnings
           node scripts/test-backend.mjs --features ublk-prototype
           # Also compile the browser-test binaries into the cache that later build jobs restore.
-          cargo build --locked --bin leo --example worker_fixture --example network_direct_client --features ublk
-          cargo build --locked -p leo-official-service --bin leo-official --example network_stun_server
+          cargo build --locked --bin cairn --example worker_fixture --example network_direct_client --features ublk
+          cargo build --locked -p cairn-beacon --bin cairn-beacon --example network_stun_server
       - name: Validate node supervisor and S3 recovery
         run: |
           python3 tests/guest_projects_test.py
@@ -165,14 +165,14 @@ jobs:
       postgres:
         image: postgres:17-alpine@sha256:b0f9560a2de083e2cc7382e75f808c7381a32852a7ec49117deedb300e552b24
         env:
-          POSTGRES_USER: leo
+          POSTGRES_USER: cairn
           POSTGRES_PASSWORD: test-only
-          POSTGRES_DB: leo_official_test
+          POSTGRES_DB: cairn_official_test
         options: >-
-          --health-cmd "pg_isready -U leo -d leo_official_test"
+          --health-cmd "pg_isready -U cairn -d cairn_official_test"
           --health-interval 5s --health-timeout 5s --health-retries 10
     env:
-      LEO_OFFICIAL_TEST_DATABASE_URL: postgres://leo:test-only@postgres:5432/leo_official_test
+      CAIRN_BEACON_TEST_DATABASE_URL: postgres://cairn:test-only@postgres:5432/cairn_official_test
     name: browser (${{ matrix.group }})
     needs: [resolve, build]
     if: needs.resolve.outputs.reuse != 'true'
@@ -230,7 +230,7 @@ jobs:
         with:
           name: browser-backend
           path: target/debug/
-      - run: chmod +x target/debug/leo target/debug/leo-official target/debug/examples/network_direct_client target/debug/examples/worker_fixture
+      - run: chmod +x target/debug/cairn target/debug/cairn-beacon target/debug/examples/network_direct_client target/debug/examples/worker_fixture
       - name: Install Postgres client for official account fixtures
         run: apt-get update -qq && apt-get install -y --no-install-recommends postgresql-client
       - run: |
@@ -262,17 +262,17 @@ jobs:
       postgres:
         image: postgres:17-alpine@sha256:b0f9560a2de083e2cc7382e75f808c7381a32852a7ec49117deedb300e552b24
         env:
-          POSTGRES_USER: leo
+          POSTGRES_USER: cairn
           POSTGRES_PASSWORD: test-only
-          POSTGRES_DB: leo_official_test
+          POSTGRES_DB: cairn_official_test
         ports: ['5432:5432']
         options: >-
-          --health-cmd "pg_isready -U leo -d leo_official_test"
+          --health-cmd "pg_isready -U cairn -d cairn_official_test"
           --health-interval 5s --health-timeout 5s --health-retries 10
     env:
       CARGO_PROFILE_DEV_DEBUG: '0'
       CARGO_BUILD_JOBS: '4'
-      LEO_OFFICIAL_TEST_DATABASE_URL: postgres://leo:test-only@127.0.0.1:5432/leo_official_test
+      CAIRN_BEACON_TEST_DATABASE_URL: postgres://cairn:test-only@127.0.0.1:5432/cairn_official_test
     steps:
       - uses: actions/checkout@v7.0.1
       - uses: ./.github/actions/setup-pnpm
@@ -289,7 +289,7 @@ jobs:
         with:
           name: browser-backend
           path: target/debug/
-      - run: chmod +x target/debug/leo target/debug/leo-official target/debug/examples/network_direct_client target/debug/examples/network_stun_server
+      - run: chmod +x target/debug/cairn target/debug/cairn-beacon target/debug/examples/network_direct_client target/debug/examples/network_stun_server
       - name: Validate real network topology and authenticated sessions
         run: |
           python3 tests/network_probe_test.py
@@ -314,17 +314,17 @@ jobs:
       postgres:
         image: postgres:17-alpine@sha256:b0f9560a2de083e2cc7382e75f808c7381a32852a7ec49117deedb300e552b24
         env:
-          POSTGRES_USER: leo
+          POSTGRES_USER: cairn
           POSTGRES_PASSWORD: test-only
-          POSTGRES_DB: leo_official_test
+          POSTGRES_DB: cairn_official_test
         ports: ['5432:5432']
         options: >-
-          --health-cmd "pg_isready -U leo -d leo_official_test"
+          --health-cmd "pg_isready -U cairn -d cairn_official_test"
           --health-interval 5s --health-timeout 5s --health-retries 10
     env:
       CARGO_PROFILE_DEV_DEBUG: '0'
       CARGO_BUILD_JOBS: '4'
-      LEO_OFFICIAL_TEST_DATABASE_URL: postgres://leo:test-only@127.0.0.1:5432/leo_official_test
+      CAIRN_BEACON_TEST_DATABASE_URL: postgres://cairn:test-only@127.0.0.1:5432/cairn_official_test
     steps:
       - uses: actions/checkout@v7.0.1
       - uses: ./.github/actions/setup-pnpm
@@ -340,7 +340,7 @@ jobs:
         with:
           name: browser-backend
           path: target/debug/
-      - run: chmod +x target/debug/leo target/debug/leo-official target/debug/examples/network_direct_client target/debug/examples/network_stun_server
+      - run: chmod +x target/debug/cairn target/debug/cairn-beacon target/debug/examples/network_direct_client target/debug/examples/network_stun_server
       - uses: actions/setup-java@v5
         with:
           distribution: temurin
@@ -454,8 +454,8 @@ jobs:
             echo "destination=type=image,name=$image:pull-request,push=true" >> "$GITHUB_OUTPUT"
             echo "local=$image:pull-request" >> "$GITHUB_OUTPUT"
           else
-            echo "destination=type=docker,name=leo-agent-manager:test" >> "$GITHUB_OUTPUT"
-            echo "local=leo-agent-manager:test" >> "$GITHUB_OUTPUT"
+            echo "destination=type=docker,name=cairn-installation:test" >> "$GITHUB_OUTPUT"
+            echo "local=cairn-installation:test" >> "$GITHUB_OUTPUT"
           fi
       - uses: docker/build-push-action@v7.3.0
         id: build
@@ -505,45 +505,45 @@ jobs:
         with:
           name: browser-build
           path: dist/
-      - run: chmod +x official-smoke-bin/leo-official
+      - run: chmod +x official-smoke-bin/cairn-beacon
       - name: Start the disposable official database
         # The PR job changes Docker's image store above. Start this database
         # afterwards so restarting Docker cannot discard a service container.
         # TCP health waits for the final server, beyond socket-only initialization.
         run: |
-          docker run --detach --name leo-official-smoke-db \
+          docker run --detach --name cairn-beacon-smoke-db \
             --network host \
-            --env POSTGRES_USER=leo --env POSTGRES_PASSWORD=test-only \
-            --env POSTGRES_DB=leo_official_test \
-            --health-cmd "pg_isready -h 127.0.0.1 -U leo -d leo_official_test" \
+            --env POSTGRES_USER=cairn --env POSTGRES_PASSWORD=test-only \
+            --env POSTGRES_DB=cairn_official_test \
+            --health-cmd "pg_isready -h 127.0.0.1 -U cairn -d cairn_official_test" \
             --health-interval 1s --health-timeout 5s --health-retries 30 \
             postgres:17-alpine@sha256:b0f9560a2de083e2cc7382e75f808c7381a32852a7ec49117deedb300e552b24 postgres -c listen_addresses=127.0.0.1
           for attempt in $(seq 1 30); do
-            if test "$(docker inspect --format '{{.State.Health.Status}}' leo-official-smoke-db)" = healthy; then
+            if test "$(docker inspect --format '{{.State.Health.Status}}' cairn-beacon-smoke-db)" = healthy; then
               break
             fi
             sleep 1
           done
-          test "$(docker inspect --format '{{.State.Health.Status}}' leo-official-smoke-db)" = healthy
+          test "$(docker inspect --format '{{.State.Health.Status}}' cairn-beacon-smoke-db)" = healthy
       - name: Smoke-test the exact image
         env:
           GITHUB_TOKEN: ${{ github.token }}
-          LEO_OFFICIAL_TEST_DATABASE_URL: postgres://leo:test-only@127.0.0.1:5432/leo_official_test
-          LEO_SMOKE_OFFICIAL_BINARY: official-smoke-bin/leo-official
+          CAIRN_BEACON_TEST_DATABASE_URL: postgres://cairn:test-only@127.0.0.1:5432/cairn_official_test
+          CAIRN_SMOKE_OFFICIAL_BINARY: official-smoke-bin/cairn-beacon
         run: |
           node tests/container-smoke.mjs "$SMOKE_IMAGE"
           node tests/runner-smoke.mjs "$SMOKE_IMAGE"
       - name: Remove the disposable official database
         if: always()
-        run: docker rm --force leo-official-smoke-db
+        run: docker rm --force cairn-beacon-smoke-db
       - name: Verify retained conversation memory, crash recovery and active admission
         env:
-          LEO_RETENTION_MEMORY_GIB: 4
-          LEO_RETENTION_TURNS: 4
-          LEO_RETENTION_CRASH_AFTER: 2
-          LEO_RETENTION_ADMISSION: 'true'
-          LEO_RETENTION_PUBLISH: 'true'
-          LEO_RETENTION_ASYNC_PUBLISH: 'true'
+          CAIRN_RETENTION_MEMORY_GIB: 4
+          CAIRN_RETENTION_TURNS: 4
+          CAIRN_RETENTION_CRASH_AFTER: 2
+          CAIRN_RETENTION_ADMISSION: 'true'
+          CAIRN_RETENTION_PUBLISH: 'true'
+          CAIRN_RETENTION_ASYNC_PUBLISH: 'true'
         run: node tests/runner-retention-smoke.mjs "$SMOKE_IMAGE"
       - name: Report remaining disk space
         if: always()
@@ -584,7 +584,7 @@ jobs:
           if [[ "$PUBLISH" == true ]]; then
             echo "destination=type=image,name=ghcr.io/${GITHUB_REPOSITORY}-official,push-by-digest=true,name-canonical=true,push=true" >> "$GITHUB_OUTPUT"
           else
-            echo "destination=type=docker,name=leo-official:test" >> "$GITHUB_OUTPUT"
+            echo "destination=type=docker,name=cairn-beacon:test" >> "$GITHUB_OUTPUT"
           fi
       - uses: docker/build-push-action@v7.3.0
         id: build
@@ -610,7 +610,7 @@ jobs:
           if [[ "$PUBLISH" == true ]]; then
             image="ghcr.io/${GITHUB_REPOSITORY}-official@${IMAGE_DIGEST}"
           else
-            image=leo-official:test
+            image=cairn-beacon:test
           fi
           node tests/official-container-smoke.mjs "$image"
           node tests/official-postgres-backup.mjs
@@ -731,7 +731,7 @@ jobs:
     timeout-minutes: 15
     environment:
       name: production
-      url: ${{ vars.LEO_OFFICIAL_ORIGIN }}
+      url: ${{ vars.CAIRN_BEACON_ORIGIN }}
     concurrency:
       group: coolify-production
       cancel-in-progress: false
@@ -745,7 +745,7 @@ jobs:
           COOLIFY_URL: ${{ vars.COOLIFY_URL }}
           COOLIFY_SERVICE_UUID: ${{ vars.COOLIFY_SERVICE_UUID }}
           COOLIFY_TOKEN: ${{ secrets.COOLIFY_TOKEN }}
-          LEO_OFFICIAL_ORIGIN: ${{ vars.LEO_OFFICIAL_ORIGIN }}
+          CAIRN_BEACON_ORIGIN: ${{ vars.CAIRN_BEACON_ORIGIN }}
           DEPLOY_IMAGE: ghcr.io/${{ github.repository }}-official@${{ needs.resolve.outputs.official-digest || needs.official-image.outputs.digest }}
           DEPLOY_INSTALLATION_IMAGE: ghcr.io/${{ github.repository }}@${{ needs.resolve.outputs.digest || needs.image.outputs.digest }}
           # A reused image reports the commit it was validated at, with this tag's tree.

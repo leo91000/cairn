@@ -8,7 +8,7 @@ import process from 'node:process'
 import { setTimeout } from 'node:timers/promises'
 
 export async function startOfficial() {
-  assert.ok(process.env.LEO_OFFICIAL_TEST_DATABASE_URL, 'Use a disposable official Postgres database for the container smoke test')
+  assert.ok(process.env.CAIRN_BEACON_TEST_DATABASE_URL, 'Use a disposable official Postgres database for the container smoke test')
   const messages = []
   const mail = createServer(async (request, response) => {
     let body = ''
@@ -25,15 +25,15 @@ export async function startOfficial() {
   const port = reservation.address().port
   await new Promise(resolve => reservation.close(resolve))
   const origin = `http://localhost:${port}`
-  const child = spawn(process.env.LEO_SMOKE_OFFICIAL_BINARY || 'target/debug/leo-official', [], {
+  const child = spawn(process.env.CAIRN_SMOKE_OFFICIAL_BINARY || 'target/debug/cairn-beacon', [], {
     env: {
       ...process.env,
-      LEO_OFFICIAL_DATABASE_URL: process.env.LEO_OFFICIAL_TEST_DATABASE_URL,
-      LEO_OFFICIAL_ORIGIN: origin,
-      LEO_OFFICIAL_LISTEN: `127.0.0.1:${port}`,
-      LEO_OFFICIAL_EMAIL_ENDPOINT: `http://127.0.0.1:${mail.address().port}/emails`,
-      LEO_OFFICIAL_EMAIL_KEY: 'fixture-only',
-      LEO_OFFICIAL_EMAIL_FROM: 'leo@example.test',
+      CAIRN_BEACON_DATABASE_URL: process.env.CAIRN_BEACON_TEST_DATABASE_URL,
+      CAIRN_BEACON_ORIGIN: origin,
+      CAIRN_BEACON_LISTEN: `127.0.0.1:${port}`,
+      CAIRN_BEACON_EMAIL_ENDPOINT: `http://127.0.0.1:${mail.address().port}/emails`,
+      CAIRN_BEACON_EMAIL_KEY: 'fixture-only',
+      CAIRN_BEACON_EMAIL_FROM: 'cairn@example.test',
     },
     stdio: ['ignore', 'pipe', 'pipe'],
   })
@@ -61,7 +61,7 @@ export async function startOfficial() {
       const startupDiagnostic = [
         'Could not connect to the official Postgres database',
         'Build the web application with pnpm build before starting the official service',
-        'Could not bind LEO_OFFICIAL_LISTEN',
+        'Could not bind CAIRN_BEACON_LISTEN',
         'Official database migration failed',
       ].find(message => startupOutput.includes(message)) || 'No safe startup diagnostic'
       assert.ok(child.exitCode === null && attempt < 100, `Official smoke service did not become ready (exit ${child.exitCode}; ${startupDiagnostic})`)

@@ -5,7 +5,7 @@ import { expect, it, vi } from 'vitest'
 import { RunnerLifecycle } from './legacy/server/runner-lifecycle.ts'
 
 it('fences in-flight starts, rejects delayed starts across broker restarts, and propagates removal failures', async () => {
-  const directory = await mkdtemp(path.join(os.tmpdir(), 'leo-runner-lifecycle-'))
+  const directory = await mkdtemp(path.join(os.tmpdir(), 'cairn-runner-lifecycle-'))
   let release!: () => void
   const gate = new Promise<void>(resolve => release = resolve)
   const create = vi.fn(() => gate)

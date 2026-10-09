@@ -1,7 +1,7 @@
 # Measuring agent execution latency
 
-Agent timings use the existing `leo_performance` tracing target, enabled by the
-default binary filter. With a custom filter, include `leo_performance=info` in
+Agent timings use the existing `cairn_performance` tracing target, enabled by the
+default binary filter. With a custom filter, include `cairn_performance=info` in
 `RUST_LOG`. These records do not change database schema or restart policy.
 
 ## Correlation

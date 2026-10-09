@@ -1,0 +1,356 @@
+//! Direct authorization and signaling over the existing authenticated tunnel.
+//! The WebRTC peer consumes this interface; no anonymous local listener is added.
+pub mod peer;
+
+use crate::{
+    auth::{InstallationIdentity, InstallationRole},
+    error::{Error, Result},
+};
+use cairn_protocol::{
+    Frame, Role,
+    direct::{
+        DirectAuthorization, DirectClaims, DirectRevocation, DirectSignal, DirectVerifier,
+        SignalBudget, has_direct_capacity, unix_time,
+    },
+};
+use sha2::{Digest, Sha256};
+use std::{
+    collections::HashMap,
+    sync::{Arc, Mutex},
+};
+use tokio::sync::{broadcast, mpsc};
+use tokio_util::sync::CancellationToken;
+
+#[derive(Clone, Debug)]
+pub enum DirectEvent {
+    Signal { id: String, signal: DirectSignal },
+    Revoked(DirectRevocation),
+}
+
+#[derive(Clone)]
+pub struct DirectLease {
+    pub claims: DirectClaims,
+    pub closed: CancellationToken,
+}
+
+impl DirectLease {
+    pub fn identity(&self) -> InstallationIdentity {
+        InstallationIdentity::trusted(
+            match self.claims.role {
+                Role::Owner => InstallationRole::Owner,
+                Role::Member => InstallationRole::Member,
+            },
+            &self.claims.account_id,
+        )
+    }
+}
+
+struct Authorized {
+    authorization: DirectAuthorization,
+    closed: CancellationToken,
+    connected: bool,
+}
+
+#[derive(Default)]
+struct State {
+    verifier: Option<DirectVerifier>,
+    authorizations: HashMap<String, Authorized>,
+    output: Option<mpsc::Sender<Frame>>,
+    signals: SignalBudget,
+    disabled: bool,
+    stun_url: Option<String>,
+}
+
+#[derive(Clone)]
+pub struct DirectConnections {
+    state: Arc<Mutex<State>>,
+    events: broadcast::Sender<DirectEvent>,
+}
+
+impl Default for DirectConnections {
+    fn default() -> Self {
+        Self {
+            state: Arc::new(Mutex::new(State::default())),
+            events: broadcast::channel(64).0,
+        }
+    }
+}
+
+impl DirectConnections {
+    pub(crate) fn configure_stun(&self, url: Option<String>) -> Result<()> {
+        if url
+            .as_ref()
+            .is_some_and(|value| !value.starts_with("stun:") || value.len() > 256)
+        {
+            return Err(Error::bad("Invalid official STUN configuration."));
+        }
+        self.state.lock().unwrap().stun_url = url;
+        Ok(())
+    }
+
+    pub(crate) fn stun_urls(&self) -> Vec<String> {
+        self.state
+            .lock()
+            .unwrap()
+            .stun_url
+            .clone()
+            .into_iter()
+            .collect()
+    }
+
+    pub(crate) fn set_enabled(&self, enabled: bool) {
+        self.state.lock().unwrap().disabled = !enabled;
+    }
+
+    pub(crate) fn pending_peer(
+        &self,
+        id: &str,
+    ) -> Option<(DirectAuthorization, CancellationToken)> {
+        let state = self.state.lock().unwrap();
+        let peer = state.authorizations.get(id)?;
+        (!peer.closed.is_cancelled()).then(|| (peer.authorization.clone(), peer.closed.clone()))
+    }
+
+    pub(crate) fn release_peer(&self, id: &str) {
+        if let Some(peer) = self.state.lock().unwrap().authorizations.remove(id) {
+            peer.closed.cancel();
+        }
+    }
+
+    pub fn subscribe(&self) -> broadcast::Receiver<DirectEvent> {
+        self.events.subscribe()
+    }
+
+    pub(crate) fn attach(&self, output: mpsc::Sender<Frame>) {
+        self.state.lock().unwrap().output = Some(output);
+    }
+
+    pub(crate) fn detach(&self) {
+        let mut state = self.state.lock().unwrap();
+        state.output = None;
+        state.verifier = None;
+        // Established peers retain only their finite lease while the tunnel is down.
+        // A reconnect's new key closes them in set_key, even after normal shutdown.
+    }
+
+    pub(crate) fn set_key(&self, installation: &str, public_key: &str) -> Result<()> {
+        let verifier =
+            DirectVerifier::new(installation.to_owned(), public_key).map_err(Error::bad)?;
+        let mut state = self.state.lock().unwrap();
+        // The new official tunnel no longer tracks the old leases for revocation.
+        // Close them so clients fall back to the relay and obtain fresh grants.
+        for (_, authorization) in state.authorizations.drain() {
+            authorization.closed.cancel();
+        }
+        state.verifier = Some(verifier);
+        Ok(())
+    }
+
+    pub(crate) fn authorize(&self, authorization: DirectAuthorization, renewal: bool) -> bool {
+        let mut state = self.state.lock().unwrap();
+        if state.disabled {
+            return false;
+        }
+        let Some(verifier) = state.verifier.as_mut() else {
+            return false;
+        };
+        let Ok(claims) = verifier.verify(&authorization) else {
+            return false;
+        };
+
+        state.authorizations.retain(|_, lease| {
+            if lease.authorization.claims.expires_at <= unix_time() {
+                lease.closed.cancel();
+            }
+            !lease.closed.is_cancelled()
+        });
+
+        let existing = state.authorizations.get(&claims.connection_id);
+        let (closed, connected) = if renewal {
+            let Some(existing) = existing else {
+                return false;
+            };
+            let previous = &existing.authorization.claims;
+            if previous.account_id != claims.account_id
+                || previous.session_id != claims.session_id
+                || previous.role != claims.role
+                || previous.generation != claims.generation
+                || previous.fingerprint != claims.fingerprint
+            {
+                return false;
+            }
+            (existing.closed.clone(), existing.connected)
+        } else {
+            let capacity_available = has_direct_capacity(
+                &claims,
+                state
+                    .authorizations
+                    .values()
+                    .map(|lease| &lease.authorization.claims),
+            );
+            if existing.is_some() || !capacity_available {
+                return false;
+            }
+
+            (CancellationToken::new(), false)
+        };
+
+        let id = claims.connection_id.clone();
+        let nonce = claims.nonce.clone();
+        let deadline = claims.expires_at;
+        state.authorizations.insert(
+            id.clone(),
+            Authorized {
+                authorization,
+                closed: closed.clone(),
+                connected,
+            },
+        );
+        drop(state);
+
+        let state = Arc::downgrade(&self.state);
+        tokio::spawn(async move {
+            tokio::select! {
+                () = closed.cancelled() => {},
+                () = tokio::time::sleep(cairn_protocol::direct::until_expiry(deadline)) => {
+                    if let Some(state) = state.upgrade() {
+                        let mut state = state.lock().unwrap();
+                        let current_nonce = state.authorizations.get(&id)
+                            .map(|lease| &lease.authorization.claims.nonce);
+                        if current_nonce == Some(&nonce) {
+                            closed.cancel();
+                            state.authorizations.remove(&id);
+                        }
+                    }
+                }
+            }
+        });
+        true
+    }
+
+    /// Compare the actual DTLS certificate with the current verified grant.
+    /// This application check is independent of the SDK's SDP fingerprint check.
+    pub fn accept_certificate(&self, id: &str, certificate: &[u8]) -> Result<DirectLease> {
+        if certificate.is_empty() {
+            return Err(Error::unauthorized("No observed DTLS certificate."));
+        }
+        let fingerprint = format!(
+            "sha-256 {}",
+            Sha256::digest(certificate)
+                .iter()
+                .map(|byte| format!("{byte:02X}"))
+                .collect::<Vec<_>>()
+                .join(":"),
+        );
+        let (current, _) = self
+            .pending_peer(id)
+            .ok_or_else(|| Error::unauthorized("Direct authorization closed."))?;
+        self.accept_peer(&current, &current.claims.session_id, &fingerprint)
+    }
+
+    /// Call once after DTLS using the certificate fingerprint observed by the peer.
+    /// Never use a client-supplied HTTP/header identity to dispatch direct frames.
+    pub fn accept_peer(
+        &self,
+        authorization: &DirectAuthorization,
+        session: &str,
+        fingerprint: &str,
+    ) -> Result<DirectLease> {
+        let mut state = self.state.lock().unwrap();
+        if state.output.is_none() || state.verifier.is_none() {
+            return Err(Error::unauthorized("Official tunnel unavailable."));
+        }
+        let Some(lease) = state
+            .authorizations
+            .get_mut(&authorization.claims.connection_id)
+        else {
+            return Err(Error::unauthorized("Unknown direct authorization."));
+        };
+        if lease.authorization != *authorization
+            || lease.connected
+            || lease.closed.is_cancelled()
+            || lease.authorization.claims.expires_at <= unix_time()
+            || lease.authorization.claims.session_id != session
+            || lease.authorization.claims.fingerprint != fingerprint
+        {
+            return Err(Error::unauthorized("Invalid direct peer."));
+        }
+        lease.connected = true;
+        Ok(DirectLease {
+            claims: lease.authorization.claims.clone(),
+            closed: lease.closed.clone(),
+        })
+    }
+
+    pub(crate) fn revoke(&self, scope: DirectRevocation) {
+        let mut state = self.state.lock().unwrap();
+        if let Some(verifier) = state.verifier.as_mut() {
+            verifier.revoke(&scope);
+        }
+        state.authorizations.retain(|_, lease| {
+            let claims = &lease.authorization.claims;
+            let matches = match &scope {
+                DirectRevocation::Account { account_id, .. } => claims.account_id == *account_id,
+                DirectRevocation::Session { session_id } => claims.session_id == *session_id,
+                DirectRevocation::Installation => true,
+            };
+            if matches {
+                lease.closed.cancel();
+            }
+            !matches
+        });
+        let _ = self.events.send(DirectEvent::Revoked(scope));
+    }
+
+    pub(crate) fn receive_signal(&self, id: String, signal: DirectSignal) -> bool {
+        let Ok(signal) = signal.sanitize_candidates() else {
+            return false;
+        };
+        let mut state = self.state.lock().unwrap();
+        let allowed = state.authorizations.get(&id).is_some_and(|lease| {
+            signal.as_ref().is_none_or(|signal| {
+                signal.matches_client_fingerprint(&lease.authorization.claims.fingerprint)
+            })
+        }) && Self::signal_allowed(&mut state, &id);
+        drop(state);
+        if allowed && let Some(signal) = signal {
+            let _ = self.events.send(DirectEvent::Signal { id, signal });
+        }
+        allowed
+    }
+
+    /// Return connection metadata to the originating official session via the tunnel.
+    pub fn send_signal(&self, id: &str, signal: DirectSignal) -> Result<()> {
+        let signal = signal.sanitize_candidates().map_err(Error::bad)?;
+        let mut state = self.state.lock().unwrap();
+        if !Self::signal_allowed(&mut state, id) {
+            return Err(Error::bad("Invalid direct signal."));
+        }
+        let Some(signal) = signal else {
+            return Ok(());
+        };
+        let output = state
+            .output
+            .as_ref()
+            .ok_or_else(|| Error::unavailable("Official tunnel unavailable."))?;
+        output
+            .try_send(Frame::DirectSignal {
+                id: id.to_owned(),
+                signal,
+                request_id: None,
+            })
+            .map_err(|_| Error::unavailable("Signaling busy."))
+    }
+
+    fn signal_allowed(state: &mut State, id: &str) -> bool {
+        if state.output.is_none() {
+            return false;
+        }
+        let Some(lease) = state.authorizations.get(id) else {
+            return false;
+        };
+        !lease.closed.is_cancelled()
+            && lease.authorization.claims.expires_at > unix_time()
+            && state.signals.consume(&lease.authorization.claims)
+    }
+}

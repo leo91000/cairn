@@ -1,5 +1,5 @@
 {
-  "name": "leo-agent-manager",
+  "name": "cairn-installation",
   "type": "module",
   "version": "0.52.3",
   "private": true,
@@ -10,9 +10,9 @@
   },
   "scripts": {
     "prepare": "simple-git-hooks",
-    "dev": "concurrently -k 'cargo run --bin leo-official' 'vite --host 127.0.0.1'",
+    "dev": "concurrently -k 'cargo run --bin cairn-beacon' 'vite --host 127.0.0.1'",
     "build": "vue-tsc --noEmit && vite build",
-    "start": "target/release/leo",
+    "start": "target/release/cairn",
     "typecheck": "vue-tsc --noEmit",
     "test": "vitest run",
     "test:e2e": "playwright test",
@@ -23,7 +23,7 @@
     "lint:android": "cd android && ./gradlew spotlessCheck --no-daemon",
     "lint": "eslint . && node scripts/rust-format.mjs --check",
     "lint:fix": "eslint . --fix && node scripts/rust-format.mjs",
-    "build:backend": "cargo build --release --bin leo",
+    "build:backend": "cargo build --release --bin cairn",
     "test:backend": "node scripts/test-backend.mjs"
   },
   "dependencies": {

@@ -4,7 +4,7 @@ import type {
   Run,
   Task,
 } from './contracts.ts'
-import { accessPolicy, MAIN_AGENT_ID } from '../../../shared/contracts.ts'
+import { accessPolicy, MAIN_AGENT_ID } from '../../../packages/contracts/contracts.ts'
 import { AppError } from './errors.ts'
 
 export function policy(agent: Agent) {

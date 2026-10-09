@@ -30,18 +30,18 @@ test('claims an installation and sends after relay restarts and official session
     const code = await page.getByLabel('Installation claim code').inputValue()
     expect(code.length).toBeGreaterThanOrEqual(32)
     expect(await page.getByText('This code expires in 10 minutes.')).toBeVisible()
-    const installation = start('target/debug/leo', {
+    const installation = start('target/debug/cairn', {
       DATA_DIR: join(root, 'data'),
       AGENT_HOME: join(root, 'home'),
       WORKSPACE_ROOTS: root,
       NODE_ENV: 'test',
       WORKER_ENABLED: 'false',
       // This journey deliberately exercises HTTP relay restart/history contracts.
-      LEO_DIRECT_ENABLED: 'false',
+      CAIRN_DIRECT_ENABLED: 'false',
       PORT: '0',
-      LEO_OFFICIAL_ORIGIN: url,
-      LEO_INSTALLATION_CLAIM_CODE: code,
-      LEO_INSTALLATION_NAME: 'Browser installation',
+      CAIRN_BEACON_ORIGIN: url,
+      CAIRN_INSTALLATION_CLAIM_CODE: code,
+      CAIRN_INSTALLATION_NAME: 'Browser installation',
     })
     await expect(async () => {
       expect(installation.exitCode, 'installation must remain running').toBeNull()
@@ -67,14 +67,14 @@ test('claims an installation and sends after relay restarts and official session
     await expect(page.getByRole('heading', { name: 'A message through the relay', exact: true })).toBeVisible()
     await stop(installation)
     await expect(availability).toHaveText('Offline', { timeout: 15000 })
-    start('target/debug/leo', {
+    start('target/debug/cairn', {
       DATA_DIR: join(root, 'data'),
       AGENT_HOME: join(root, 'home'),
       WORKSPACE_ROOTS: root,
       NODE_ENV: 'test',
       WORKER_ENABLED: 'false',
       // This journey deliberately exercises HTTP relay restart/history contracts.
-      LEO_DIRECT_ENABLED: 'false',
+      CAIRN_DIRECT_ENABLED: 'false',
       PORT: '0',
     })
     await expect(availability).toHaveText('Online', { timeout: 15000 })

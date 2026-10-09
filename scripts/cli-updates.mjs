@@ -36,7 +36,7 @@ async function json(url, options = {}) {
 
 export async function currentImage(config) {
   const envs = await json(`${config.coolifyUrl}/api/v1/services/${encodeURIComponent(config.serviceUuid)}/envs`, { headers: { authorization: `Bearer ${config.token}` } })
-  const image = envs.find(entry => entry.key === 'LEO_IMAGE')
+  const image = envs.find(entry => entry.key === 'CAIRN_IMAGE')
   if (image && !Object.hasOwn(image, 'value'))
     throw new Error('Coolify hides environment values. The deployment token needs read:sensitive permission.')
   return validImage(image?.value, config.repository)
@@ -138,12 +138,12 @@ export function toolkitUpdate(plan, available, now = Date.now()) {
 }
 
 function configuration() {
-  for (const key of ['COOLIFY_URL', 'COOLIFY_SERVICE_UUID', 'COOLIFY_TOKEN', 'LEO_PUBLIC_URL', 'GITHUB_REPOSITORY']) {
+  for (const key of ['COOLIFY_URL', 'COOLIFY_SERVICE_UUID', 'COOLIFY_TOKEN', 'CAIRN_PUBLIC_URL', 'GITHUB_REPOSITORY']) {
     if (!process.env[key])
       throw new Error(`Missing ${key}`)
   }
 
-  for (const key of ['COOLIFY_URL', 'LEO_PUBLIC_URL']) {
+  for (const key of ['COOLIFY_URL', 'CAIRN_PUBLIC_URL']) {
     const url = new URL(process.env[key])
     if (url.protocol !== 'https:' || url.username || url.password || url.pathname !== '/' || url.search || url.hash)
       throw new Error(`${key} must be an HTTPS origin.`)
@@ -153,10 +153,10 @@ function configuration() {
     coolifyUrl: process.env.COOLIFY_URL.replace(/\/$/, ''),
     serviceUuid: process.env.COOLIFY_SERVICE_UUID,
     token: process.env.COOLIFY_TOKEN,
-    publicUrl: process.env.LEO_PUBLIC_URL.replace(/\/$/, ''),
+    publicUrl: process.env.CAIRN_PUBLIC_URL.replace(/\/$/, ''),
     repository: process.env.GITHUB_REPOSITORY.toLowerCase(),
     githubToken: process.env.GH_TOKEN,
-    maintenanceToken: process.env.LEO_MAINTENANCE_TOKEN,
+    maintenanceToken: process.env.CAIRN_MAINTENANCE_TOKEN,
     runtimeId: process.env.UPDATE_ID,
   }
 }
@@ -174,7 +174,7 @@ if (import.meta.main) {
       if (process.argv[2] === 'check') {
         const plan = await discover(config)
         if (plan.installedToolkit) {
-          const available = JSON.parse(execFileSync('docker', ['run', '--rm', '--env', 'GITHUB_TOKEN', '--entrypoint', '/usr/local/bin/node', plan.image, '/opt/leo-toolkit/manage.mjs', 'resolve'], {
+          const available = JSON.parse(execFileSync('docker', ['run', '--rm', '--env', 'GITHUB_TOKEN', '--entrypoint', '/usr/local/bin/node', plan.image, '/opt/cairn-toolkit/manage.mjs', 'resolve'], {
             env: { ...process.env, GITHUB_TOKEN: config.githubToken || '' },
             encoding: 'utf8',
             timeout: 240000,

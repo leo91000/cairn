@@ -31,11 +31,11 @@ for directory in docker containerd; do
   mount --bind /oldroot/run/data/$directory /var/lib/$directory
 done
 ip link set lo up
-printf '127.0.0.1 localhost leo\n' > /etc/hosts
+printf '127.0.0.1 localhost cairn\n' > /etc/hosts
 printf 'nameserver 1.1.1.1\noptions single-request-reopen\n' > /etc/resolv.conf
 export HOME=/home/node CODEX_HOME=/home/node/.codex
-export LEO_TOOLKIT_DIR=/opt/leo-toolkit PNPM_HOME=/pnpm
+export CAIRN_TOOLKIT_DIR=/opt/cairn-toolkit PNPM_HOME=/pnpm
 export PATH=/usr/local/bin:/home/node/.local/share/mise/shims:/usr/local/share/mise/shims:/pnpm/bin:/pnpm:/usr/bin:/bin:/usr/sbin:/sbin
-/usr/local/bin/leo guest
+/usr/local/bin/cairn guest
 sync
 exec /sbin/reboot -f

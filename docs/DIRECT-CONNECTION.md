@@ -67,7 +67,7 @@ official service's memory and logs; it is not end-to-end encryption against it.
 
 ## Authorization and revocation
 
-- A grant names the installation, Leo account, role, session, access generation,
+- A grant names the installation, Cairn account, role, session, access generation,
   client DTLS fingerprint and an expiry of a few minutes.
 - Renewal goes through the official service, which re-checks session and role.
 - The official service pushes revocation over the installation tunnel for
@@ -201,7 +201,7 @@ client frames cannot grant MCP or anonymous-artifact access. Renewal and
 revocation use the #100 verifier and cancellation tokens. Disconnecting a
 transport cancels that transport's requests, never agent execution.
 
-The peer requires exactly one reliable, ordered DataChannel named `leo.v4`.
+The peer requires exactly one reliable, ordered DataChannel named `cairn.v4`.
 Trickle candidates use the existing authenticated signal routes. A failed peer,
 malformed frame, saturated ingress or duplicate channel closes only that direct
 connection; the HTTPS relay remains available. Clients negotiate a fresh grant
@@ -211,22 +211,22 @@ after a closed connection; the web applies safe retry and route selection (#103)
 
 The official service hosts a Binding-only STUN responder in its single process.
 The source defaults to `stun:<official-origin-host>:3478`, or the dedicated
-`LEO_OFFICIAL_STUN_URL`. Authorize/renew responses expose `iceServers`; the
+`CAIRN_BEACON_STUN_URL`. Authorize/renew responses expose `iceServers`; the
 installation receives the same URL in the authenticated `DirectKey` frame.
 No public third-party STUN dependency or additional IP disclosure is introduced.
 STUN carries address-discovery metadata only, never account credentials or
 application content. TURN remains deferred. UDP 3478 is published directly by
 the official Compose definition; Traefik routes HTTPS only.
 
-- `LEO_DIRECT_ENABLED=false` disables installation direct authorization and peers.
+- `CAIRN_DIRECT_ENABLED=false` disables installation direct authorization and peers.
   The default is `true`; the authenticated tunnel and relay keep working.
-- `LEO_DIRECT_STUN_URLS=stun:host:port[,stun:host:port]` overrides the official STUN
+- `CAIRN_DIRECT_STUN_URLS=stun:host:port[,stun:host:port]` overrides the official STUN
   source, at most four URLs of 256 bytes each. TURN URLs are rejected.
-- `LEO_DIRECT_PUBLIC_IP` optionally announces the installation host's public
+- `CAIRN_DIRECT_PUBLIC_IP` optionally announces the installation host's public
   unicast address for an explicitly verified port-preserving NAT. It avoids the
   same-host STUN hairpin trap without publishing any installation port; see the
   [production runbook](PRODUCTION-CAIRN.md#stun-and-direct-installation-connectivity-101).
-- An unset or empty `LEO_DIRECT_STUN_URLS` uses the authenticated official STUN
+- An unset or empty `CAIRN_DIRECT_STUN_URLS` uses the authenticated official STUN
   source. An empty override logs this choice explicitly; it does not disable direct.
 - Invalid configuration disables the direct peer and logs a fixed reason naming
   the setting while retaining the relay. No configuration value or signaling
@@ -268,7 +268,7 @@ so it cannot hold that ordered channel ahead of later small frames. Owner channe
 already holding assemblies also reject a new excess transfer, since waiting would
 prevent completion of their own assemblies. Only that new transfer is rejected:
 a request receives a 503 using its initial fragment's bounded request ID, with
-the reserved response header `x-leo-direct-rejection: reassembly-busy`.
+the reserved response header `x-cairn-direct-rejection: reassembly-busy`.
 This marker is emitted only by the DataChannel reader before dispatch: the
 request was not executed and its remaining fragments will be drained. It is
 excluded from the application response-header allowlist on both routes, so an
@@ -297,7 +297,7 @@ before shutting down UDP sockets.
 
 The Rust network client records `direct` only after an authenticated API response
 arrives over this DataChannel and a selected UDP ICE candidate pair is observed.
-Relay observations come from the official response's `x-leo-transport: relay`
+Relay observations come from the official response's `x-cairn-transport: relay`
 header. The web reports successful API/stream traffic through its transport observer (#103); this distinction prevents the
 bench from mistaking UDP probe reachability for an authorized direct connection.
 
@@ -345,11 +345,11 @@ so a failed/panicking job releases its authorization and peer registry entry.
 ## Delivered web transport (#103)
 
 The official document starts every request and live subscription on the existing
-HTTPS relay. Native `RTCPeerConnection` establishes one reliable ordered `leo.v4`
+HTTPS relay. Native `RTCPeerConnection` establishes one reliable ordered `cairn.v4`
 channel in the background, using the official grant, signal routes and STUN URLs.
 A discreet **Direct / Relais** indicator describes the current default route;
 individual successful API responses and accepted live batches emit a
-`leo-transport-observation` event containing only route, method, path and cursor.
+`cairn-transport-observation` event containing only route, method, path and cursor.
 The bench observes these application events, never infers a route from ICE state.
 Binary resource URLs and non-JSON uploads continue through the relay.
 

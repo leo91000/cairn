@@ -1,13 +1,13 @@
-import type { ExecutionNode } from '../shared/nodes'
+import type { ExecutionNode } from '../packages/contracts/nodes'
 import { expect, it } from 'vitest'
-import { agentInput, agentUpdate } from '../shared/contracts'
+import { agentInput, agentUpdate } from '../packages/contracts/contracts'
 import {
   formatBytes,
   formatMiB,
   LOCAL_NODE_ID,
   nodeDiagnostics,
   relativeAge,
-} from '../shared/nodes'
+} from '../packages/contracts/nodes'
 
 it('new agents retain the current runner but partial updates do not grant it', () => {
   expect(agentInput.parse({ name: 'New agent' }).access.nodes).toEqual([LOCAL_NODE_ID])

@@ -12,7 +12,7 @@ describe('android tag distribution', () => {
     expect(() => androidVersion(tag)).toThrow()
   })
   it('publishes a checksum and refuses a stale or different APK', () => {
-    const metadata = { applicationId: 'dev.leo.manager', elements: [androidVersion('v0.29.0')] }
+    const metadata = { applicationId: 'build.cairn.app', elements: [androidVersion('v0.29.0')] }
     const result = updateManifest('v0.29.0', Buffer.from('abc'), metadata)
     expect(result.sha256).toBe('ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad')
     expect(result.size).toBe(3)

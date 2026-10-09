@@ -10,7 +10,7 @@ import rateLimit from '@fastify/rate-limit'
 import staticFiles from '@fastify/static'
 import Fastify from 'fastify'
 import { z, ZodError } from 'zod'
-import { version } from '../../../shared/version.ts'
+import { version } from '../../../packages/contracts/version.ts'
 import { Auth, OAuthError, safeEqual } from './auth.ts'
 import { config as loadConfig } from './config.ts'
 import { Connections } from './connections.ts'
@@ -32,7 +32,7 @@ export async function buildApp(overrides: Partial<Config> = {}) {
   const auth = new Auth(store, config.publicUrl)
   const connections = new Connections(config)
   const updateToken = await maintenanceToken(config.dataDir)
-  const toolkit = process.env.LEO_TOOLKIT_DIR ? JSON.parse(await readFile(path.join(process.env.LEO_TOOLKIT_DIR, 'manifest.json'), 'utf8')) : null
+  const toolkit = process.env.CAIRN_TOOLKIT_DIR ? JSON.parse(await readFile(path.join(process.env.CAIRN_TOOLKIT_DIR, 'manifest.json'), 'utf8')) : null
   const app = Fastify({
     logger: config.logger
       ? {
@@ -100,7 +100,7 @@ export async function buildApp(overrides: Partial<Config> = {}) {
       url.startsWith('/api/')
       && !['/api/session', '/api/setup', '/api/login'].includes(url)
     ) {
-      const session = auth.read(request.cookies.leo_session)
+      const session = auth.read(request.cookies.cairn_session)
       if (!session)
         throw new AppError(401, 'Please sign in.')
       if (
@@ -129,7 +129,7 @@ export async function buildApp(overrides: Partial<Config> = {}) {
     reply: FastifyReply,
     session: ReturnType<Auth['session']>,
   ) => {
-    reply.setCookie('leo_session', session.value, {
+    reply.setCookie('cairn_session', session.value, {
       httpOnly: true,
       sameSite: 'lax',
       secure: origin.protocol === 'https:',
@@ -163,7 +163,7 @@ export async function buildApp(overrides: Partial<Config> = {}) {
     },
   })
   app.get('/api/session', (request) => {
-    const session = auth.read(request.cookies.leo_session)
+    const session = auth.read(request.cookies.cairn_session)
     return {
       authenticated: !!session,
       csrf: session?.csrf,
@@ -198,9 +198,9 @@ export async function buildApp(overrides: Partial<Config> = {}) {
     },
   )
   app.post('/api/logout', (request, reply) => {
-    if (request.cookies.leo_session)
-      auth.logout(request.cookies.leo_session)
-    reply.clearCookie('leo_session', { path: '/' })
+    if (request.cookies.cairn_session)
+      auth.logout(request.cookies.cairn_session)
+    reply.clearCookie('cairn_session', { path: '/' })
     return { ok: true }
   })
   app.get('/api/notifications', () => service.notifications.configuration())
@@ -468,7 +468,7 @@ export async function buildApp(overrides: Partial<Config> = {}) {
     authorization_servers: [config.publicUrl],
     scopes_supported: ['read', 'run', 'manage'],
     bearer_methods_supported: ['header'],
-    resource_name: 'Leo Agent Manager',
+    resource_name: 'Cairn',
   })
   app.get('/.well-known/oauth-protected-resource/mcp', resourceMetadata)
   app.get('/.well-known/oauth-protected-resource', resourceMetadata)
@@ -522,13 +522,13 @@ export async function buildApp(overrides: Partial<Config> = {}) {
   mountMcpConnections(app, service.mcps, auth)
   mountMcp(app, service, worker, auth)
   const dist = path.resolve('dist')
-  if (existsSync(path.join(dist, 'index.html'))) {
+  if (existsSync(path.join(dist, 'apps/web/index.html'))) {
     await app.register(staticFiles, {
       root: dist,
       prefix: '/',
       maxAge: '1h',
       setHeaders(response, filePath) {
-        if (['index.html', 'theme.js', 'sw.js', 'manifest.webmanifest'].includes(path.basename(filePath)))
+        if (['apps/web/index.html', 'theme.js', 'sw.js', 'manifest.webmanifest'].includes(path.basename(filePath)))
           response.header('Cache-Control', 'no-cache')
       },
     })
@@ -539,7 +539,7 @@ export async function buildApp(overrides: Partial<Config> = {}) {
         && !request.url.startsWith('/oauth/')
         && !request.url.startsWith('/.well-known/')
       ) {
-        return reply.header('Cache-Control', 'no-cache').sendFile('index.html')
+        return reply.header('Cache-Control', 'no-cache').sendFile('apps/web/index.html')
       }
 
       return reply.code(404).send({ error: 'Not found' })

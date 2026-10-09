@@ -57,14 +57,14 @@ export const test = base.extend<object, { workspace: Workspace }>({
   // Playwright requires a destructuring pattern even with no fixture dependencies.
   // eslint-disable-next-line no-empty-pattern
   workspace: [async ({}, use, workerInfo) => {
-    const directory = await mkdtemp(path.join(os.tmpdir(), 'leo-browser-'))
+    const directory = await mkdtemp(path.join(os.tmpdir(), 'cairn-browser-'))
     const home = path.join(directory, 'home')
     const projectPath = path.join(directory, 'project')
     const port = 4322 + workerInfo.parallelIndex
     const managerUrl = `http://127.0.0.1:${port}`
     const official = await officialRelayFixture(4422 + workerInfo.parallelIndex)
     const url = official.url
-    const database = new URL(process.env.LEO_OFFICIAL_TEST_DATABASE_URL!)
+    const database = new URL(process.env.CAIRN_BEACON_TEST_DATABASE_URL!)
     const schema = `browser_${crypto.randomUUID().replaceAll('-', '')}`
     executeOfficialSql(database, `CREATE SCHEMA ${schema}`)
     const isolatedDatabase = new URL(database)
@@ -93,19 +93,19 @@ export const test = base.extend<object, { workspace: Workspace }>({
     await writeFile(usageFile, '{}')
     // A developer may rebuild Cargo while this fixture is active. Keep the
     // supervisor's current executable stable for the entire browser journey.
-    const binary = path.join(directory, 'leo')
-    await copyFile(process.env.LEO_TEST_BINARY || path.resolve('target/debug/leo'), binary)
+    const binary = path.join(directory, 'cairn')
+    await copyFile(process.env.CAIRN_TEST_BINARY || path.resolve('target/debug/cairn'), binary)
     let log = ''
     let claimCode = ''
     const start = () => {
       const child = spawn(binary, [], {
         env: {
           ...process.env,
-          LEO_CONFIG: configuration,
-          LEO_FIXTURE_USAGE: usageFile,
-          LEO_OFFICIAL_ORIGIN: url,
-          LEO_INSTALLATION_CLAIM_CODE: claimCode,
-          LEO_INSTALLATION_NAME: 'Browser workspace',
+          CAIRN_CONFIG: configuration,
+          CAIRN_FIXTURE_USAGE: usageFile,
+          CAIRN_BEACON_ORIGIN: url,
+          CAIRN_INSTALLATION_CLAIM_CODE: claimCode,
+          CAIRN_INSTALLATION_NAME: 'Browser workspace',
         },
         stdio: ['ignore', 'pipe', 'pipe'],
       })

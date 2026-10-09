@@ -1,5 +1,5 @@
 import type { PushSubscription } from 'web-push'
-import type { ChatQuestion } from '../../../shared/chats.ts'
+import type { ChatQuestion } from '../../../packages/contracts/chats.ts'
 import type { Config } from './config.ts'
 import type { Store } from './store.ts'
 import { Buffer } from 'node:buffer'

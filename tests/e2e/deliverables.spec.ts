@@ -1,4 +1,4 @@
-import type { Deliverable } from '../../shared/artifacts'
+import type { Deliverable } from '../../packages/contracts/artifacts'
 import { randomUUID } from 'node:crypto'
 import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import path from 'node:path'

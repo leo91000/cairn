@@ -20,13 +20,13 @@ local login need the separate official sign-in/client migration (#57).
 Do not deploy this as a transparent upgrade of the old public site.
 **The `.env.example` default follows `:latest`. Pulling that tag after this
 release removes local browser access immediately.** Before any pull or automated
-upgrade, pin `LEO_IMAGE` to the currently verified immutable digest and complete
+upgrade, pin `CAIRN_IMAGE` to the currently verified immutable digest and complete
 the migration preparation below. Keep that digest for rollback.
 
 Before upgrading, back up the volumes below and deploy the official service
 with its own Postgres database, email delivery, HTTPS origin and web bundle
 ([official service setup](OFFICIAL-SERVICE.md)). Upgrade its binary and web bundle
-together before running the new `leo claim`: earlier official binaries do not
+together before running the new `cairn claim`: earlier official binaries do not
 provide the device-review confirmation step. Sign in there. The installation
 and official service must use compatible relay protocols. Keep one relay process,
 and route account/access mutations, installation API requests and relay
@@ -36,15 +36,15 @@ replicas are unsupported even with sticky installation routing. See
 [ADR-0032](adr/0032-single-official-relay-process.md) for this explicit restriction
 of spec #43 and the tolerance of persisted revocation checks.
 
-For an existing installation, preserve all volumes, add `LEO_OFFICIAL_ORIGIN`
+For an existing installation, preserve all volumes, add `CAIRN_BEACON_ORIGIN`
 to the manager environment, upgrade the image, then run:
 
 ```sh
-docker compose exec manager leo claim
+docker compose exec manager cairn claim
 ```
 
 The command prints the official `/claim` URL and a temporary device code. Open
-that URL, sign in to the Leo account that will own the installation, and approve
+that URL, sign in to the Cairn account that will own the installation, and approve
 only the code displayed on your own machine. Wait for the command to confirm
 success, then restart the manager to load its new relay identity:
 
@@ -82,16 +82,16 @@ in its confirmation form.
 
 Detaching an installation revokes access and disconnects the active tunnel while
 preserving the official installation record and its local data. Deleting its
-owner account has the same effect. To claim it again, run `leo claim` on its
+owner account has the same effect. To claim it again, run `cairn claim` on its
 machine; successful approval rotates and atomically replaces the private identity
 file. A still-owned installation cannot be claimed by another account. A failed
 or expired claim keeps the existing identity file intact. Remove a used
-`LEO_INSTALLATION_CLAIM_CODE` from the environment. Protect
+`CAIRN_INSTALLATION_CLAIM_CODE` from the environment. Protect
 `/data/installation-relay/identity.json` like node credentials and never publish it.
 
 If recovery is interrupted after the service attached the owner but before the
 machine saved its new token, detach that installation in the app and run
-`leo claim` again with the existing private file. The service retains the proof
+`cairn claim` again with the existing private file. The service retains the proof
 used to start recovery separately from the tunnel credential, so the same
 installation record remains recoverable; that proof never reconnects a tunnel.
 A still-owned installation must be detached before any recovery attempt.
@@ -101,24 +101,24 @@ before any identity was saved), choose **Revoke and forget installation** in the
 official app. This also works when it is offline and permanently invalidates old
 credentials and recovery proofs. Stop the manager, back up the entire private
 `installation-relay` directory outside the deployment volumes, remove that
-directory, and run `leo claim` with `LEO_OFFICIAL_ORIGIN`. This creates a new
+directory, and run `cairn claim` with `CAIRN_BEACON_ORIGIN`. This creates a new
 official installation ID while preserving existing data volumes.
 Retain backups until access has been verified. Use this **Revoke and forget**
 path after machine-token theft too: the thief may rotate first, making the old
-local token unusable for `leo rotate-token`.
+local token unusable for `cairn rotate-token`.
 
 To renew a credential while retaining the installation ID and its sharing,
-run `leo rotate-token` with the deployment's usual `DATA_DIR`, then restart the
+run `cairn rotate-token` with the deployment's usual `DATA_DIR`, then restart the
 manager. Retry the same command if its response is lost; retain `rotation.json`
 until the command succeeds. See [credential renewal](INSTALLATION-RELAY.md#renewing-a-machine-credential).
 
 ### Roll back this access migration
 
 This ticket makes **no installation SQLite schema migration**. To restore the
-previous access model, stop the new manager, set `LEO_IMAGE` back to the exact
+previous access model, stop the new manager, set `CAIRN_IMAGE` back to the exact
 previous verified image digest for both manager and runner, then run
 `docker compose pull && docker compose up -d`. Keep all four existing volumes.
-For Coolify, restore that same digest in `LEO_IMAGE` and restart the service.
+For Coolify, restore that same digest in `CAIRN_IMAGE` and restart the service.
 Restore the previous manager origin/proxy and its old setup configuration if
 removed; the previous image reads the preserved administrator/session records.
 Check its `/health` commit and local sign-in before declaring rollback complete.
@@ -164,8 +164,8 @@ this authenticated connection address for disk preparation and restoration,
 even if the manager’s internal origin is loopback. The manager’s optional
 `PUBLIC_URL` remains a fallback for older enrollment clients and
 manager-local calls; it need not be the browser’s origin. Installers require
-`LEO_NODE_IMAGE` to pin the manager’s approved image digest. Without it, use the
-matching `leo node-enroll` binary with the address and temporary code shown in
+`CAIRN_NODE_IMAGE` to pin the manager’s approved image digest. Without it, use the
+matching `cairn node-enroll` binary with the address and temporary code shown in
 the app. Changes of address after installation require updating the node’s
 private identity and supervisor configuration together while its service is
 stopped; no credential is displayed by the app.
@@ -179,10 +179,10 @@ serve only the node channel, not an installation browser interface.
 ## Docker on a VPS
 
 Install Docker Engine and the Compose plugin. Clone this repository on the server,
-copy `.env.example` to `.env`, and configure `LEO_OFFICIAL_ORIGIN`.
+copy `.env.example` to `.env`, and configure `CAIRN_BEACON_ORIGIN`.
 Keep one manager replica per SQLite data volume. If using a prefilled claim code,
-set `LEO_INSTALLATION_CLAIM_CODE` and `LEO_INSTALLATION_NAME` before first startup;
-otherwise use `leo claim` as above.
+set `CAIRN_INSTALLATION_CLAIM_CODE` and `CAIRN_INSTALLATION_NAME` before first startup;
+otherwise use `cairn claim` as above.
 
 For a local build, resolve current stable CLI versions and pass them to Docker:
 
@@ -194,8 +194,8 @@ docker compose up -d
 ```
 
 For published images, use
-`docker compose pull && docker compose up -d` and pin `LEO_IMAGE` to a verified
-`ghcr.io/leo91000/leo-agent-manager:sha-<full-commit>` tag for controlled upgrades.
+`docker compose pull && docker compose up -d` and pin `CAIRN_IMAGE` to a verified
+`ghcr.io/leo91000/cairn:sha-<full-commit>` tag for controlled upgrades.
 Port 4310 is private machine traffic. The official service terminates browser
 access and receives the installation's outbound relay connection.
 
@@ -213,10 +213,10 @@ The image runs as UID/GID 1000. Bind mounts need matching ownership. Do not run
 The Compose defaults give the application two CPUs and 4 GB of memory; adjust these
 for the projects your agents build. Container logs rotate independently of run logs.
 
-## Leo account and CLI accounts
+## Cairn account and CLI accounts
 
-Complete the claim above, then open the installation from your Leo account on the
-official site. Agent CLI accounts remain separate from your Leo account. Keep
+Complete the claim above, then open the installation from your Cairn account on the
+official site. Agent CLI accounts remain separate from your Cairn account. Keep
 tokens and account files out of Git, images, screenshots and support logs.
 
 The **Connections** screen provides official CLI device sign-in. If a provider
@@ -278,8 +278,8 @@ hosts deployed by hand, such as Docker on a VPS or Coolify, enable it once as ro
 ```sh
 apt-get install -y zram-tools
 printf 'ALGO=zstd\nPERCENT=25\nPRIORITY=100\n' > /etc/default/zramswap
-echo 'vm.swappiness=100' > /etc/sysctl.d/99-leo-zram.conf
-sysctl -p /etc/sysctl.d/99-leo-zram.conf
+echo 'vm.swappiness=100' > /etc/sysctl.d/99-cairn-zram.conf
+sysctl -p /etc/sysctl.d/99-cairn-zram.conf
 systemctl enable zramswap && systemctl restart zramswap
 swapon --show
 ```
@@ -318,11 +318,11 @@ Main, PR and manual workflows never deploy.
 
 The GitHub `production` environment requires the secret `COOLIFY_TOKEN` and
 variables `COOLIFY_URL`, `COOLIFY_SERVICE_UUID` (**new official service UUID**)
-and `LEO_OFFICIAL_ORIGIN=https://cairn.build`. Require Léo’s environment approval.
-The obsolete `LEO_PUBLIC_URL` and standalone-manager deployment target are no
+and `CAIRN_BEACON_ORIGIN=https://cairn.build`. Require Léo’s environment approval.
+The obsolete `CAIRN_PUBLIC_URL` and standalone-manager deployment target are no
 longer used by the CLI. The script refuses a manager/runner Compose target.
 
-The deployment sends `LEO_OFFICIAL_IMAGE` and `LEO_INSTALLATION_IMAGE` together
+The deployment sends `CAIRN_BEACON_IMAGE` and `CAIRN_INSTALLATION_IMAGE` together
 to Coolify’s bulk environment endpoint, re-reads both literal values, and repairs
 a partial write before restarting. If repair fails, it restores the previous
 pair and fails without restart; an unrecoverable API failure requires freezing
@@ -367,7 +367,7 @@ cleanup refuses changes, including ignored/untracked files, and keeps Git branch
 - **Recovering:** active conversations resume after the previous process/container stops. If the runner is unavailable, recovery waits and retains project/account locks. **Interrupted:** older runs without a checkpoint need review and an explicit retry. See [restart recovery](RESTART-RECOVERY.md).
 - **No CLI installed/signed in:** use Connections and the commands above; provider account credentials are separate from the manager password.
 - **MCP rejects initialization:** verify the client uses Streamable HTTP and the deployed image includes stateless compatibility. Both 2026-07-28 and older 2025 clients are supported; standalone HTTP+SSE and stateful sessions are not.
-- **Installation detached or owner account deleted:** run `leo claim` on the machine, approve its device code on the official site, then restart the manager. Old local passwords and sessions cannot restore access.
+- **Installation detached or owner account deleted:** run `cairn claim` on the machine, approve its device code on the official site, then restart the manager. Old local passwords and sessions cannot restore access.
 
 See [Docker's volume documentation](https://docs.docker.com/engine/storage/volumes/)
 and [Codex authentication](https://learn.chatgpt.com/docs/auth) for the underlying tools.
@@ -407,7 +407,7 @@ ANDROID_TEST_COMMIT=<full-commit-sha> \
 ANDROID_TEST_SYSTEM=aosp \
 ANDROID_EVIDENCE=/absolute/private/path/intel.json \
 ANDROID_SCREENSHOTS=/absolute/private/path/screenshots \
-node tests/android-runner-smoke.mjs ghcr.io/leo91000/leo-agent-manager@sha256:<digest>
+node tests/android-runner-smoke.mjs ghcr.io/leo91000/cairn@sha256:<digest>
 ```
 
 This command requires Node and Docker on the test controller; the controller may

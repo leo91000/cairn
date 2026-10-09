@@ -266,7 +266,7 @@ test('cached history survives reload before a delayed stream, then clear on logo
   await authenticateWorkspace(page)
   await expect(page.locator('.activity-message').filter({ hasText: 'Cache persistence proof' }).first()).toBeVisible()
   const count = () => page.evaluate(() => new Promise<number>((resolve, reject) => {
-    const request = indexedDB.open('leo-history-v1', 1)
+    const request = indexedDB.open('cairn-history-v1', 1)
     request.onsuccess = () => {
       const db = request.result
       const tx = db.transaction('entries', 'readonly')
@@ -329,7 +329,7 @@ test('a cached run restores the reading offset while its stream is still connect
   await scroller.evaluate(element => element.scrollTop = 300)
   await expect.poll(() => scroller.evaluate(element => element.scrollTop)).toBe(300)
   await expect.poll(() => page.evaluate(() => new Promise<number>((resolve) => {
-    const request = indexedDB.open('leo-history-v1', 1)
+    const request = indexedDB.open('cairn-history-v1', 1)
     request.onsuccess = () => {
       const db = request.result
       const tx = db.transaction('entries', 'readonly')
@@ -341,7 +341,7 @@ test('a cached run restores the reading offset while its stream is still connect
   // A previous visit may have cached "running" just before the run completed.
   await page.goto(workspacePath(`${workspace.url}/agents`))
   await page.evaluate(() => new Promise<void>((resolve, reject) => {
-    const request = indexedDB.open('leo-history-v1', 1)
+    const request = indexedDB.open('cairn-history-v1', 1)
     request.onsuccess = () => {
       const db = request.result
       const tx = db.transaction('entries', 'readwrite')
@@ -436,7 +436,7 @@ test('recent history loads older pages without moving the reader and survives a 
   await page.getByLabel('Follow output').check()
   await expect(page.locator('.activity-message').filter({ hasText: 'Paged line 349' })).toBeVisible()
   await expect.poll(() => page.evaluate(() => new Promise<number>((resolve) => {
-    const open = indexedDB.open('leo-history-v1', 1)
+    const open = indexedDB.open('cairn-history-v1', 1)
     open.onsuccess = () => {
       const db = open.result
       const tx = db.transaction('entries')

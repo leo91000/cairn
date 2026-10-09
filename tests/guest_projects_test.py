@@ -17,7 +17,7 @@ def main():
     )
     subprocess.run(
         ["sudo", "-n", "unshare", "--mount", "--propagation", "private", "sh", "-c",
-         'mount -t tmpfs tmpfs /var/lib && export LEO_PROJECT_MOUNT_TEST=1 && exec "$1" --ignored --nocapture --test-threads=1',
+         'mount -t tmpfs tmpfs /var/lib && export CAIRN_PROJECT_MOUNT_TEST=1 && exec "$1" --ignored --nocapture --test-threads=1',
          "guest-project-test", executable],
         cwd=root, check=True,
     )

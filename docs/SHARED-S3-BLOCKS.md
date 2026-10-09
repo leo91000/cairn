@@ -57,7 +57,7 @@ Reproduce with `moto[server]==5.2.3` and the AWS CLI installed:
 ```sh
 pnpm check
 node --import tsx scripts/backend-schemas.mjs
-git diff --exit-code -- backend/schemas/inputs.json
+git diff --exit-code -- crates/installation/schemas/inputs.json
 cargo clippy --locked --workspace --all-targets -- -D warnings
 node scripts/test-backend.mjs --no-fail-fast -- --test-threads=1
 python tests/node_s3_test.py
@@ -65,4 +65,4 @@ CARGO_TARGET_DIR=/tmp/shared-candidate-target python tests/node_s3_test.py --ben
 CARGO_TARGET_DIR=/tmp/shared-baseline-target python tests/node_s3_test.py --benchmark --repo /path/to/baseline
 ```
 
-Copy the updated `backend/tests/node_performance.rs` fixture into the baseline checkout too. It supports batched source requests and uses the fixture's `AWS_ENDPOINT_URL_S3` environment override instead of an explicit loopback HTTP endpoint; production endpoint validation remains unchanged.
+Copy the updated `crates/installation/tests/node_performance.rs` fixture into the baseline checkout too. It supports batched source requests and uses the fixture's `AWS_ENDPOINT_URL_S3` environment override instead of an explicit loopback HTTP endpoint; production endpoint validation remains unchanged.

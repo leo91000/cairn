@@ -1,4 +1,4 @@
-# Leo Agent Manager — delivery plan
+# Cairn — delivery plan
 
 ## Product promise
 

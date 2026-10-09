@@ -37,9 +37,9 @@ need an explicitly enabled local API socket. Guest readiness uses 50-ms polling.
 The guest starts an execution process for each attempt, and `chat_process::run`
 starts and closes its Codex app-server session for that attempt. Keeping only the
 guest kernel alive therefore does not eliminate Codex initialization or login.
-Sources: [host](../backend/src/microvm/host.rs),
-[guest](../backend/src/microvm/guest.rs),
-[chat process](../backend/src/chat_process.rs), [RPC](../backend/src/rpc.rs).
+Sources: [host](../crates/installation/src/microvm/host.rs),
+[guest](../crates/installation/src/microvm/guest.rs),
+[chat process](../crates/installation/src/chat_process.rs), [RPC](../crates/installation/src/rpc.rs).
 
 Persistent disks already provide restart correctness, and projects are opened on
 demand. Retain both properties; memory retention must remain an optional cache.
@@ -71,7 +71,7 @@ costs absent from a restore-only chart. Diff snapshots are marked developer
 preview. Compatibility depends on the software/hardware environment.
 [Snapshot lifecycle](https://github.com/firecracker-microvm/firecracker/blob/v1.17.0/docs/snapshotting/snapshot-support.md).
 
-For Leo, reconnect the auth relay and output stream after restoration. Pair the
+For Cairn, reconnect the auth relay and output stream after restoration. Pair the
 memory snapshot with its matching private disk state. Never restore several
 clones against one writable disk. Benchmark after touching the useful guest
 working set, and include snapshot preparation/storage separately.
@@ -102,7 +102,7 @@ an explicit post-restore readiness barrier before starting account-bound code.
 
 The project merges an x86 defconfig with its own fragment: absence of an option
 in that fragment does not prove absence from the built kernel. Inspect the image's
-`/opt/leo-vm/kernel.config`.
+`/opt/cairn-vm/kernel.config`.
 [Kernel build](../Dockerfile), [configuration fragment](../deploy/microvm/kernel.config).
 
 ## Practical retention design
@@ -128,15 +128,15 @@ and violate the existing highest-capacity selection rule.
 In the current implementation, thread setup carries model, reasoning, working
 directory, sandbox, instructions and writable roots. MCP URLs, tool allowlists
 and stdio server configuration instead enter through `-c mcp_servers…` process
-arguments; the short-lived gateway grant enters through `LEO_MCP_RUN_TOKEN` in
+arguments; the short-lived gateway grant enters through `CAIRN_MCP_RUN_TOKEN` in
 the process environment. Calling `thread/start` or changing model settings does
 not, in this code, replace those process arguments or its inherited environment.
 A retained Codex process therefore needs an explicitly tested grant/configuration
 rebinding mechanism, or must restart when these change. The fresh-process option
 already preserves this boundary and is the recommended initial experiment winner.
-Sources: [MCP run configuration](../backend/src/mcps.rs),
-[process setup](../backend/src/main.rs),
-[thread setup](../backend/src/chat_process.rs), [RPC launch](../backend/src/rpc.rs).
+Sources: [MCP run configuration](../crates/installation/src/mcps.rs),
+[process setup](../crates/installation/src/main.rs),
+[thread setup](../crates/installation/src/chat_process.rs), [RPC launch](../crates/installation/src/rpc.rs).
 
 Memory ballooning can reclaim pages, but needs a configured device/guest driver
 and an explicit target policy; shrinking a guest can fail to reclaim the target

@@ -24,7 +24,7 @@ export async function officialRelayFixture(port = 4395, listen = '127.0.0.1', di
   mail.listen(0, '127.0.0.1')
   await once(mail, 'listening')
   const mailPort = (mail.address() as { port: number }).port
-  const root = await mkdtemp(join(directory, 'leo-official-relay-'))
+  const root = await mkdtemp(join(directory, 'cairn-beacon-relay-'))
   await Promise.all([mkdir(join(root, 'data')), mkdir(join(root, 'home'))])
   const url = `http://localhost:${port}`
   const children: ChildProcess[] = []
@@ -39,7 +39,7 @@ export async function officialRelayFixture(port = 4395, listen = '127.0.0.1', di
   }))
 
   function start(binary: string, env: NodeJS.ProcessEnv) {
-    const executable = binary === 'target/debug/leo' ? process.env.LEO_NETWORK_INSTALLATION_BINARY || binary : binary
+    const executable = binary === 'target/debug/cairn' ? process.env.CAIRN_NETWORK_INSTALLATION_BINARY || binary : binary
     const child = spawn(executable, [], { env: { ...process.env, ...env }, stdio: ['ignore', 'ignore', 'ignore'] })
     children.push(child)
     return child
@@ -59,14 +59,14 @@ export async function officialRelayFixture(port = 4395, listen = '127.0.0.1', di
     }
   }
 
-  function official(databaseUrl = process.env.LEO_OFFICIAL_TEST_DATABASE_URL) {
-    return start('target/debug/leo-official', {
-      LEO_OFFICIAL_DATABASE_URL: databaseUrl,
-      LEO_OFFICIAL_ORIGIN: url,
-      LEO_OFFICIAL_LISTEN: `${listen}:${port}`,
-      LEO_OFFICIAL_EMAIL_ENDPOINT: `http://127.0.0.1:${mailPort}/emails`,
-      LEO_OFFICIAL_EMAIL_KEY: 'fixture-only',
-      LEO_OFFICIAL_EMAIL_FROM: 'leo@example.test',
+  function official(databaseUrl = process.env.CAIRN_BEACON_TEST_DATABASE_URL) {
+    return start('target/debug/cairn-beacon', {
+      CAIRN_BEACON_DATABASE_URL: databaseUrl,
+      CAIRN_BEACON_ORIGIN: url,
+      CAIRN_BEACON_LISTEN: `${listen}:${port}`,
+      CAIRN_BEACON_EMAIL_ENDPOINT: `http://127.0.0.1:${mailPort}/emails`,
+      CAIRN_BEACON_EMAIL_KEY: 'fixture-only',
+      CAIRN_BEACON_EMAIL_FROM: 'cairn@example.test',
     })
   }
 
@@ -110,7 +110,7 @@ export function expireAccountProof(database: URL, email: string) {
   const emailDigest = createHash('sha256').update(email).digest('hex')
   executeOfficialSql(database, `
     UPDATE web_sessions SET last_proof_at = NULL
-    WHERE account_id IN (SELECT id FROM leo_accounts WHERE email = '${emailLiteral}');
+    WHERE account_id IN (SELECT id FROM cairn_accounts WHERE email = '${emailLiteral}');
     UPDATE account_rate_limits SET resets_at = now() - interval '1 second'
     WHERE key = 'email:${emailDigest}'
   `)

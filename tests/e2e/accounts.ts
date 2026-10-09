@@ -1,4 +1,4 @@
-import type { Provider } from '../../shared/accounts'
+import type { Provider } from '../../packages/contracts/accounts'
 import type { AccountLimits } from '../legacy/server/codex-account-types'
 import type { Workspace } from './fixtures'
 import { randomUUID } from 'node:crypto'

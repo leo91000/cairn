@@ -24,7 +24,7 @@ test('reads and creates conversations through the previous relay protocol', asyn
   })
   mail.listen(0, '127.0.0.1')
   await once(mail, 'listening')
-  const root = await mkdtemp(join(tmpdir(), 'leo-relay-v1-'))
+  const root = await mkdtemp(join(tmpdir(), 'cairn-relay-v1-'))
   await Promise.all([mkdir(join(root, 'data')), mkdir(join(root, 'home'))])
   const url = 'http://localhost:4495'
   const children: ChildProcess[] = []
@@ -43,13 +43,13 @@ test('reads and creates conversations through the previous relay protocol', asyn
     return child
   }
 
-  start('target/debug/leo-official', {
-    LEO_OFFICIAL_DATABASE_URL: process.env.LEO_OFFICIAL_TEST_DATABASE_URL,
-    LEO_OFFICIAL_ORIGIN: url,
-    LEO_OFFICIAL_LISTEN: '127.0.0.1:4495',
-    LEO_OFFICIAL_EMAIL_ENDPOINT: `http://127.0.0.1:${(mail.address() as { port: number }).port}/emails`,
-    LEO_OFFICIAL_EMAIL_KEY: 'fixture-only',
-    LEO_OFFICIAL_EMAIL_FROM: 'leo@example.test',
+  start('target/debug/cairn-beacon', {
+    CAIRN_BEACON_DATABASE_URL: process.env.CAIRN_BEACON_TEST_DATABASE_URL,
+    CAIRN_BEACON_ORIGIN: url,
+    CAIRN_BEACON_LISTEN: '127.0.0.1:4495',
+    CAIRN_BEACON_EMAIL_ENDPOINT: `http://127.0.0.1:${(mail.address() as { port: number }).port}/emails`,
+    CAIRN_BEACON_EMAIL_KEY: 'fixture-only',
+    CAIRN_BEACON_EMAIL_FROM: 'cairn@example.test',
   })
   try {
     await expect.poll(() => fetch(`${url}/health`).then(response => response.ok).catch(() => false)).toBe(true)
@@ -61,16 +61,16 @@ test('reads and creates conversations through the previous relay protocol', asyn
     await page.getByRole('button', { name: 'Sign in', exact: true }).click()
     await page.getByRole('button', { name: 'Add an installation', exact: true }).click()
     const code = await page.getByLabel('Installation claim code').inputValue()
-    start('target/debug/leo', {
+    start('target/debug/cairn', {
       DATA_DIR: join(root, 'data'),
       AGENT_HOME: join(root, 'home'),
       WORKSPACE_ROOTS: root,
       WORKER_ENABLED: 'false',
       NODE_ENV: 'test',
       PORT: '0',
-      LEO_OFFICIAL_ORIGIN: url,
-      LEO_INSTALLATION_CLAIM_CODE: code,
-      LEO_INSTALLATION_NAME: 'Current protocol installation',
+      CAIRN_BEACON_ORIGIN: url,
+      CAIRN_INSTALLATION_CLAIM_CODE: code,
+      CAIRN_INSTALLATION_NAME: 'Current protocol installation',
     })
     await expect(async () => {
       await page.getByRole('button', { name: 'Refresh installations', exact: true }).click()

@@ -1,5 +1,5 @@
 // Real native Codex/ublk, four simultaneous guests, publication and crash recovery.
-// Compare with LEO_VM_SNAPSHOTS=false. Requires a host with KVM and ublk_drv.
+// Compare with CAIRN_VM_SNAPSHOTS=false. Requires a host with KVM and ublk_drv.
 import assert from 'node:assert/strict'
 import { Buffer } from 'node:buffer'
 import { execFileSync, spawnSync } from 'node:child_process'
@@ -22,17 +22,17 @@ import { prepareStorageOrigin } from './runner-storage-smoke.mjs'
 async function main() {
   const image = process.argv[2]
   assert.ok(image, 'Provide the runner image')
-  const snapshots = process.env.LEO_VM_SNAPSHOTS !== 'false'
-  const poolSize = Number(process.env.LEO_READY_VM_POOL_SIZE ?? 1)
-  const memoryGiB = Number(process.env.LEO_SNAPSHOT_TEST_MEMORY_GIB ?? 16)
-  const cpuQuota = Number(process.env.LEO_SNAPSHOT_TEST_CPU ?? 4)
-  const slots = Number(process.env.LEO_SNAPSHOT_TEST_SLOTS ?? 4)
+  const snapshots = process.env.CAIRN_VM_SNAPSHOTS !== 'false'
+  const poolSize = Number(process.env.CAIRN_READY_VM_POOL_SIZE ?? 1)
+  const memoryGiB = Number(process.env.CAIRN_SNAPSHOT_TEST_MEMORY_GIB ?? 16)
+  const cpuQuota = Number(process.env.CAIRN_SNAPSHOT_TEST_CPU ?? 4)
+  const slots = Number(process.env.CAIRN_SNAPSHOT_TEST_SLOTS ?? 4)
   assert.ok(Number.isInteger(poolSize) && poolSize >= 1 && poolSize <= 4)
   assert.ok([memoryGiB, cpuQuota, slots].every(value => Number.isInteger(value) && value > 0))
   const docker = (...args) => execFileSync('docker', ['--context', 'default', ...args], { encoding: 'utf8', timeout: 180000 }).trim()
   const imageId = docker('image', 'inspect', '--format', '{{.Id}}', image)
-  const root = await mkdtemp(path.join(process.env.VM_TEST_ROOT || '/var/tmp', 'leo-snapshots-'))
-  const name = `leo-snapshots-${randomUUID().slice(0, 8)}`
+  const root = await mkdtemp(path.join(process.env.VM_TEST_ROOT || '/var/tmp', 'cairn-snapshots-'))
+  const name = `cairn-snapshots-${randomUUID().slice(0, 8)}`
   const peer = `${name}-peer`
   const network = `${name}-public`
   const endpoint = 'http://203.0.113.3:8080'
@@ -111,7 +111,7 @@ async function main() {
     docker('network', 'connect', '--ip', '203.0.113.3', network, peer)
     // SYS_PTRACE is observer-only: it permits smaps inspection of other UIDs.
     const capabilities = ['SYS_RESOURCE', 'SYS_PTRACE', 'SYS_ADMIN', 'NET_ADMIN', 'SYS_CHROOT', 'SETUID', 'SETGID', 'MKNOD', 'CHOWN', 'FOWNER', 'KILL', 'DAC_OVERRIDE']
-    docker('run', '-d', '--name', name, '--user', '0:0', '--no-healthcheck', '--read-only', '--cap-drop', 'ALL', ...capabilities.flatMap(value => ['--cap-add', value]), '--security-opt', 'apparmor=unconfined', '--security-opt', 'seccomp=unconfined', '--device', '/dev/kvm', '--device', '/dev/fuse', '--device', '/dev/ublk-control', '--device-cgroup-rule', `c ${charMajor}:* rwm`, '--device-cgroup-rule', `b ${blockMajor}:* rwm`, '--device', '/dev/net/tun', '--sysctl', 'net.ipv4.ip_forward=1', '--sysctl', 'net.ipv6.conf.all.disable_ipv6=1', '--tmpfs', '/run', '--tmpfs', '/tmp', '-v', `${root}/data:/data`, '-v', `${root}/state:/runner-state`, '-p', '127.0.0.1::4311', '--memory', `${memoryGiB}g`, '--cpus', `${cpuQuota}`, '-e', `CONCURRENCY=${slots}`, '-e', `APP_RUNTIME_ID=snapshots-test-${imageId.slice(7)}`, '-e', 'LEO_READY_VM_POOL=true', '-e', `LEO_READY_VM_POOL_SIZE=${poolSize}`, '-e', 'LEO_BLOCK_TRANSPORT=ublk', '-e', 'LEO_DISK_LAYOUT=paired-ext4-v1', '-e', `LEO_VM_SNAPSHOTS=${snapshots}`, '-e', 'RUST_LOG=warn,leo_performance=info', '--entrypoint', '/usr/local/bin/leo', imageId, 'runner-broker')
+    docker('run', '-d', '--name', name, '--user', '0:0', '--no-healthcheck', '--read-only', '--cap-drop', 'ALL', ...capabilities.flatMap(value => ['--cap-add', value]), '--security-opt', 'apparmor=unconfined', '--security-opt', 'seccomp=unconfined', '--device', '/dev/kvm', '--device', '/dev/fuse', '--device', '/dev/ublk-control', '--device-cgroup-rule', `c ${charMajor}:* rwm`, '--device-cgroup-rule', `b ${blockMajor}:* rwm`, '--device', '/dev/net/tun', '--sysctl', 'net.ipv4.ip_forward=1', '--sysctl', 'net.ipv6.conf.all.disable_ipv6=1', '--tmpfs', '/run', '--tmpfs', '/tmp', '-v', `${root}/data:/data`, '-v', `${root}/state:/runner-state`, '-p', '127.0.0.1::4311', '--memory', `${memoryGiB}g`, '--cpus', `${cpuQuota}`, '-e', `CONCURRENCY=${slots}`, '-e', `APP_RUNTIME_ID=snapshots-test-${imageId.slice(7)}`, '-e', 'CAIRN_READY_VM_POOL=true', '-e', `CAIRN_READY_VM_POOL_SIZE=${poolSize}`, '-e', 'CAIRN_BLOCK_TRANSPORT=ublk', '-e', 'CAIRN_DISK_LAYOUT=paired-ext4-v1', '-e', `CAIRN_VM_SNAPSHOTS=${snapshots}`, '-e', 'RUST_LOG=warn,cairn_performance=info', '--entrypoint', '/usr/local/bin/cairn', imageId, 'runner-broker')
     docker('network', 'connect', '--ip', '203.0.113.2', network, name)
     await reconnect()
     const fixture = await prepareStorageOrigin({
@@ -131,7 +131,7 @@ async function main() {
       for (const directory of ['workspace', 'home/.codex', 'output', 'chat-input'])
         await mkdir(path.join(source, directory), { recursive: true })
       await writeFile(path.join(source, 'home/.codex/config.toml'), 'cli_auth_credentials_store = "file"\n')
-      await writeFile(path.join(source, 'home/.codex/leo-managed-auth'), '1')
+      await writeFile(path.join(source, 'home/.codex/cairn-managed-auth'), '1')
       await writeFile(path.join(source, 'chat-input/messages.json'), '[]')
       await copyFile(new URL('./fixtures/nested-kvm.c', import.meta.url), path.join(source, 'workspace/nested-kvm.c'))
       let credentials = 0
@@ -141,7 +141,7 @@ async function main() {
         client.end(`${JSON.stringify({ accessToken: `eyJhbGciOiJub25lIn0.${claims}.synthetic`, chatgptAccountId: marker, chatgptPlanType: 'plus' })}\n`)
       }))
       brokers.push(broker)
-      await new Promise(resolve => broker.listen(path.join(source, 'home/.codex/leo-auth.sock'), resolve))
+      await new Promise(resolve => broker.listen(path.join(source, 'home/.codex/cairn-auth.sock'), resolve))
       const provider = {
         name: 'Fixture',
         base_url: endpoint,
@@ -154,7 +154,7 @@ async function main() {
         provider: 'codex',
         execution: { messageId: randomUUID(), text: `Execute the durable marker test ${marker}. HOLD_SNAPSHOT`, recovery: false },
         instructions: 'Execute the requested tool and report its result.',
-        inputDirectory: '/run/leo-chat',
+        inputDirectory: '/run/cairn-chat',
         output: `${runRoot}/output/result.md`,
         cwd: `${runRoot}/workspace`,
         model: 'gpt-5.4',
@@ -178,7 +178,7 @@ async function main() {
           resources: { cpu: cpuQuota, memoryMiB: memoryGiB * 1024 - 512, diskMiB: 32768 },
           storage: fixture.storage,
           chat,
-          imports: [{ source: `${runRoot}/workspace`, target: chat.cwd }, { source: `${runRoot}/home`, target: '/home/node' }, { source: `${runRoot}/output`, target: `${runRoot}/output` }, { source: `${runRoot}/chat-input`, target: '/run/leo-chat', readOnly: true }],
+          imports: [{ source: `${runRoot}/workspace`, target: chat.cwd }, { source: `${runRoot}/home`, target: '/home/node' }, { source: `${runRoot}/output`, target: `${runRoot}/output` }, { source: `${runRoot}/chat-input`, target: '/run/cairn-chat', readOnly: true }],
         },
       })
     }

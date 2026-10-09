@@ -144,8 +144,8 @@ Le nouveau processus Codex conserve le fonctionnement actuel du choix de compte
 MCP : aujourd'hui leur configuration passe dans les arguments du processus et le
 jeton de l'exécution dans son environnement. Garder le processus demanderait une
 gestion explicite et testée de ces changements. Sources :
-[configuration MCP](../backend/src/mcps.rs),
-[session de chat](../backend/src/chat_process.rs).
+[configuration MCP](../crates/installation/src/mcps.rs),
+[session de chat](../crates/installation/src/chat_process.rs).
 
 La rétention du processus Codex reste une optimisation supplémentaire possible
 pour les conversations compatibles. Réduire la RAM à 1 Gio ne gagne qu'environ
@@ -160,9 +160,9 @@ sont pas nécessaires pour le premier chemin rapide proposé.
 - [Mesures agrégées et échantillons complets](https://github.com/leo91000/leo-agent-manager/releases/download/v0.50.6/startup-strategies-2026-09-12.json).
 - [Mesures précédentes sur le transfert des dépôts](STARTUP-PERFORMANCE.md).
 - Banc d'essai exploratoire conservé sur la machine de développement dans
-  `/var/tmp/leo-startup-strategies/` : `bench.mjs`, `guest.mjs`,
+  `/var/tmp/cairn-startup-strategies/` : `bench.mjs`, `guest.mjs`,
   `drop-file-cache.rs` et `summarize.mjs`. Il utilise exclusivement un contrôleur
-  jetable avec `LEO_DISPOSABLE_BENCHMARK=1`, `/bench` pointant sur son propre dossier,
+  jetable avec `CAIRN_DISPOSABLE_BENCHMARK=1`, `/bench` pointant sur son propre dossier,
   sans données ni identifiants de production. Les phases sont `snapshot`,
   `restore-cache` et `pool` ; sans phase il exécute la comparaison initiale.
 - Image testée : `sha256:c8153869dbeeeb42cebc88168aa3c4acb594bc1d9711f6617db8e3df558bd8cd`,

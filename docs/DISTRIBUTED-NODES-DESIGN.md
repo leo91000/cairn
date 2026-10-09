@@ -10,7 +10,7 @@ avant l’implémentation. Voir [la synthèse](DISTRIBUTED-NODES-SPEC.md).
 
 ## Objectif
 
-Utiliser des PC et serveurs enregistrés dans Leo pour le travail des agents.
+Utiliser des PC et serveurs enregistrés dans Cairn pour le travail des agents.
 La première version conserve Firecracker et couvre les exécutions CPU ; le GPU
 est différé jusqu’à un accès direct pris en charge dans les VM Firecracker.
 Les nodes ne sont pas nécessairement
@@ -138,13 +138,13 @@ de nodes par agent, le traitement de Main devra être rendu explicite et cohére
 entre le backend, le web et Android.
 
 L’export actuel refuse une VM active et produit une archive complète du disque
-(`backend/src/runner.rs`, opérations `disks/export`). Il ne fournit ni sauvegarde
+(`crates/installation/src/runner.rs`, opérations `disks/export`). Il ne fournit ni sauvegarde
 en activité ni transfert incrémental. Le mécanisme d’archivage S3 chiffre et
 vérifie les archives, mais concerne des conversations inactives
-(`backend/src/conversation_archive.rs`) ; il ne fournit pas encore de sauvegardes
+(`crates/installation/src/conversation_archive.rs`) ; il ne fournit pas encore de sauvegardes
 périodiques de reprise. La sauvegarde doit coordonner le disque et la session.
 L’image de base compatible doit rester disponible : le démarrage du runner
-supprime actuellement les anciens caches d’images (`backend/src/microvm/host.rs`).
+supprime actuellement les anciens caches d’images (`crates/installation/src/microvm/host.rs`).
 
 Le renouvellement des comptes Codex et Claude est centralisé ; l’intégration
 1Password exécute les lectures côté serveur. Ces mécanismes constituent une base
@@ -161,8 +161,8 @@ l’état conservé. Voir `.github/workflows/ci.yaml`, `scripts/cli-updates.mjs`
 et `deploy/microvm/init` à la racine du dépôt.
 
 Sources locales : `MICROVMS.md`, `ONEPASSWORD.md`, `CLAUDE-CODE.md`,
-`../backend/src/runner.rs`, `../backend/src/project_workspaces.rs`,
-`../backend/src/claude_tokens.rs` et `../compose.yaml`.
+`../crates/installation/src/runner.rs`, `../crates/installation/src/project_workspaces.rs`,
+`../crates/installation/src/claude_tokens.rs` et `../compose.yaml`.
 
 ## Vérifications externes — GPU et arrêt Linux
 

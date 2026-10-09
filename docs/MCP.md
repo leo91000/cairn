@@ -34,7 +34,7 @@ still be verified separately on the final hosted endpoint.
 Add the HTTPS endpoint with native OAuth dynamic client registration:
 
 ```sh
-codex mcp add leo-agent-manager \
+codex mcp add cairn-installation \
   --url https://agents.example.com/mcp \
   --oauth-client-registration dcr \
   --oauth-resource https://agents.example.com/mcp
@@ -47,7 +47,7 @@ handshake without an adapter or server-side transport sessions.
 ## Authorization
 
 The public `/mcp`, OAuth discovery and token endpoints belong to the official
-service. Sign in with a Leo account and choose one owned installation on the
+service. Sign in with a Cairn account and choose one owned installation on the
 consent screen. Tools execute on that installation through its outbound relay.
 Its local `/mcp`, OAuth endpoints and personal tokens have been removed.
 An offline installation returns 503 without replaying a tool call.
@@ -130,7 +130,7 @@ HTTP+SSE transport are outside this project's scope.
 
 ## Before submitting to a directory or marketplace
 
-The repository supplies the implementation, icon (`public/favicon.svg`), screenshots,
+The repository supplies the implementation, icon (`apps/web/public/favicon.svg`), screenshots,
 installation instructions, and the following evaluation prompts:
 
 1. “List my agents and scheduled tasks.” — read-only tools, no execution.

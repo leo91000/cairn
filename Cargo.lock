@@ -3013,7 +3013,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "830d08ce1d1d941e6b30645f1a0eb5643013d835ce3779a5fc208261dbe10f55"
 
 [[package]]
-name = "leo-agent-manager"
+name = "cairn-installation"
 version = "0.52.3"
 dependencies = [
  "aes-gcm 0.10.3",
@@ -3034,7 +3034,7 @@ dependencies = [
  "http-body-util",
  "image",
  "jsonschema",
- "leo-relay-protocol",
+ "cairn-protocol",
  "libc",
  "libublk",
  "lru",
@@ -3071,7 +3071,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "leo-official-service"
+name = "cairn-beacon"
 version = "0.1.0"
 dependencies = [
  "async-trait",
@@ -3084,8 +3084,8 @@ dependencies = [
  "hex",
  "ipnet",
  "jwt-simple",
- "leo-agent-manager",
- "leo-relay-protocol",
+ "cairn-installation",
+ "cairn-protocol",
  "p256",
  "rand 0.9.5",
  "reqwest",
@@ -3115,7 +3115,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "leo-relay-protocol"
+name = "cairn-protocol"
 version = "0.1.0"
 dependencies = [
  "base64 0.22.1",

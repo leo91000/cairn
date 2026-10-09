@@ -12,7 +12,7 @@ const test = base.extend<{ installation: InstallationFixture }>({
     const fixture = await officialRelayFixture(4394)
     const { root, url, messages } = fixture
     const schema = `sensitive_${randomUUID().replaceAll('-', '')}`
-    const database = new URL(process.env.LEO_OFFICIAL_TEST_DATABASE_URL!)
+    const database = new URL(process.env.CAIRN_BEACON_TEST_DATABASE_URL!)
     executeOfficialSql(database, `CREATE SCHEMA ${schema}`)
     database.searchParams.set('options', `-csearch_path=${schema}`)
     fixture.official(database.toString())
@@ -27,16 +27,16 @@ const test = base.extend<{ installation: InstallationFixture }>({
       await page.getByRole('button', { name: 'Sign in', exact: true }).click()
       await page.getByRole('button', { name: 'Add an installation', exact: true }).click()
       const code = await page.getByLabel('Installation claim code').inputValue()
-      fixture.start('target/debug/leo', {
+      fixture.start('target/debug/cairn', {
         DATA_DIR: join(root, 'data'),
         AGENT_HOME: join(root, 'home'),
         WORKSPACE_ROOTS: root,
         NODE_ENV: 'test',
         WORKER_ENABLED: 'false',
         PORT: '0',
-        LEO_OFFICIAL_ORIGIN: url,
-        LEO_INSTALLATION_CLAIM_CODE: code,
-        LEO_INSTALLATION_NAME: 'Security installation',
+        CAIRN_BEACON_ORIGIN: url,
+        CAIRN_INSTALLATION_CLAIM_CODE: code,
+        CAIRN_INSTALLATION_NAME: 'Security installation',
       })
       await expect(async () => {
         await page.getByRole('button', { name: 'Refresh installations', exact: true }).click()
@@ -51,7 +51,7 @@ const test = base.extend<{ installation: InstallationFixture }>({
     }
     finally {
       await fixture.close()
-      executeOfficialSql(new URL(process.env.LEO_OFFICIAL_TEST_DATABASE_URL!), `DROP SCHEMA ${schema} CASCADE`)
+      executeOfficialSql(new URL(process.env.CAIRN_BEACON_TEST_DATABASE_URL!), `DROP SCHEMA ${schema} CASCADE`)
     }
   },
 })
@@ -167,7 +167,7 @@ test('confirming identity keeps other devices signed in until explicit revocatio
     await expect(page.getByText('Lost phone browser', { exact: true })).toBeVisible()
     await other.reload()
     await expect(other).toHaveURL(/\/installations\/[^/]+\/$/)
-    await expect(other.getByRole('region', { name: 'Leo account' })).toHaveCount(0)
+    await expect(other.getByRole('region', { name: 'Cairn account' })).toHaveCount(0)
     await page.getByRole('button', { name: 'Revoke other devices', exact: true }).click()
     await expect(page.getByText('Lost phone browser', { exact: true })).toHaveCount(0)
     await other.reload()

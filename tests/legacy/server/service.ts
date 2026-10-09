@@ -15,7 +15,7 @@ import {
   MAIN_AGENT_ID,
   projectInput,
   taskInput,
-} from '../../../shared/contracts.ts'
+} from '../../../packages/contracts/contracts.ts'
 import { ChatQuestions } from './chat-questions.ts'
 import { Chats } from './chats.ts'
 import { CodexAccounts } from './codex-accounts.ts'

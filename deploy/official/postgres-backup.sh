@@ -22,7 +22,7 @@ if [[ $action == backup ]]; then
   # Only publish the completed dump. Failure removes the partial private file.
   temporary_dump=$(mktemp "${dump_path}.partial.XXXXXX")
   trap 'rm -f -- "$temporary_dump"' EXIT
-  if ! docker exec "$postgres_container" pg_dump -U leo -d leo_official --format=custom > "$temporary_dump" 2>/dev/null; then
+  if ! docker exec "$postgres_container" pg_dump -U cairn -d cairn_official --format=custom > "$temporary_dump" 2>/dev/null; then
     echo 'Postgres backup failed; no completed dump written' >&2
     exit 1
   fi
@@ -34,7 +34,7 @@ if [[ $action == backup ]]; then
 else
   # Restore only into an empty database with the official process stopped.
   # Abort on the first SQL error: an existing schema is never silently merged.
-  if ! docker exec -i "$postgres_container" pg_restore -U leo -d leo_official --exit-on-error --no-owner --no-privileges < "$dump_path" 2>/dev/null; then
+  if ! docker exec -i "$postgres_container" pg_restore -U cairn -d cairn_official --exit-on-error --no-owner --no-privileges < "$dump_path" 2>/dev/null; then
     echo 'Postgres restore failed; keep official stopped and recreate the empty recovery database before retrying' >&2
     exit 1
   fi

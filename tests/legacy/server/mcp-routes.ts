@@ -4,7 +4,7 @@ import type { McpConnections } from './mcp-connections.ts'
 import { toNodeHandler } from '@modelcontextprotocol/node'
 import { createMcpHandler, McpServer } from '@modelcontextprotocol/server'
 import { z } from 'zod'
-import { version } from '../../../shared/version.ts'
+import { version } from '../../../packages/contracts/version.ts'
 import { AppError } from './errors.ts'
 
 export function mountMcpConnections(app: FastifyInstance, connections: McpConnections, auth: Auth) {
@@ -21,14 +21,14 @@ export function mountMcpConnections(app: FastifyInstance, connections: McpConnec
     return { ok: true }
   })
   app.post('/api/mcps/:id/test', request => connections.test(params.parse(request.params).id))
-  app.post('/api/mcps/:id/connect', request => connections.connect(params.parse(request.params).id, auth.read(request.cookies.leo_session)!.csrf))
+  app.post('/api/mcps/:id/connect', request => connections.connect(params.parse(request.params).id, auth.read(request.cookies.cairn_session)!.csrf))
   app.post('/api/mcps/:id/disconnect', async (request) => {
     await connections.disconnect(params.parse(request.params).id)
     return { ok: true }
   })
   app.get('/oauth/mcp/callback', { logLevel: 'silent' }, async (request, reply) => {
     reply.header('Cache-Control', 'no-store').header('Referrer-Policy', 'no-referrer')
-    const session = auth.read(request.cookies.leo_session)
+    const session = auth.read(request.cookies.cairn_session)
     if (!session)
       return reply.redirect('/mcps?oauth=expired')
     try {
@@ -45,7 +45,7 @@ export function mountMcpConnections(app: FastifyInstance, connections: McpConnec
     connections.grant(id, bearer)
     reply.header('Cache-Control', 'no-store')
     const handler = createMcpHandler(() => {
-      const server = new McpServer({ name: 'leo-mcp-gateway', version }, { capabilities: { tools: {}, resources: {}, prompts: {} } })
+      const server = new McpServer({ name: 'cairn-mcp-gateway', version }, { capabilities: { tools: {}, resources: {}, prompts: {} } })
       server.server.setRequestHandler('tools/list', () => connections.proxy(id, bearer, async (client, allowed) => {
         const tools = await connections.discover(client)
         return { tools: tools.filter(tool => allowed === null || allowed.includes(tool.name)) }
