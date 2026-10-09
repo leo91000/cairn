@@ -56,6 +56,85 @@ fn idle_balloon_target(memory_mib: u64, actual: u64, available: u64, resident_by
         .min(memory_mib.saturating_sub(1024))
 }
 
+fn balloon_client(jail: &Path) -> Result<reqwest::Client> {
+    reqwest::Client::builder()
+        .unix_socket(jail.join("api.sock"))
+        .timeout(Duration::from_millis(500))
+        .build()
+        .map_err(Error::internal)
+}
+
+/// Inflates the idle balloon of the VM in `vm` and waits until its guest
+/// acknowledges the returned target. Hold the returned ownership until the
+/// CPUs pause: pressure rebalancing may otherwise lower the target first.
+async fn reclaim_idle_memory(
+    vm: &Path,
+    memory_mib: u64,
+    active_bytes: u64,
+) -> Result<(crate::file_lock::Guard, u64)> {
+    // Pressure rebalancing locks the same VM directory for at most one
+    // bounded API exchange.
+    let owner = crate::file_lock::exclusive_directory_after_release(vm).await?;
+
+    let started = std::time::Instant::now();
+    let vm_id = vm
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("unknown");
+    let client = balloon_client(&vm.join("root"))?;
+
+    let stats: Value = client
+        .get("http://localhost/balloon/statistics")
+        .send()
+        .await
+        .map_err(Error::internal)?
+        .error_for_status()
+        .map_err(Error::internal)?
+        .json()
+        .await
+        .map_err(Error::internal)?;
+    let actual = stats["actual_mib"].as_u64().unwrap_or(0);
+    let available = stats["available_memory"].as_u64().unwrap_or(0) / 1_048_576;
+    // Keep guest working-memory headroom, but reclaim only a bounded physical
+    // working set. Free-page reporting returns unused backing independently
+    // of the remaining virtual size; admission still measures actual bytes.
+    let target = idle_balloon_target(memory_mib, actual, available, active_bytes);
+    if target > actual {
+        client
+            .patch("http://localhost/balloon")
+            .json(&json!({ "amount_mib": target }))
+            .send()
+            .await
+            .map_err(Error::internal)?
+            .error_for_status()
+            .map_err(Error::internal)?;
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+        loop {
+            let stats: Value = client
+                .get("http://localhost/balloon/statistics")
+                .send()
+                .await
+                .map_err(Error::internal)?
+                .error_for_status()
+                .map_err(Error::internal)?
+                .json()
+                .await
+                .map_err(Error::internal)?;
+            if stats["actual_mib"].as_u64().unwrap_or(0) >= target.saturating_sub(16) {
+                break;
+            }
+            if tokio::time::Instant::now() >= deadline {
+                tracing::warn!(target: "cairn_performance", operation = "vm_retention", event = "balloon_unacknowledged", vm_id, requested_mib = target, actual_mib = stats["actual_mib"].as_u64(), active_bytes, elapsed_ms = started.elapsed().as_millis() as u64);
+                return Err(Error::unavailable(
+                    "Idle balloon reclamation was not acknowledged.",
+                ));
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    }
+    Ok((owner, target))
+}
+
 /// `{attempt}.vm.json`: which VM executes an attempt, for pause and erasure.
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -622,56 +701,10 @@ impl Vm {
             .resident_bytes()
             .ok_or_else(|| Error::unavailable("VM resident memory is unavailable."))?;
         let started = std::time::Instant::now();
-        let client = self.balloon_client()?;
-        let stats: Value = client
-            .get("http://localhost/balloon/statistics")
-            .send()
-            .await
-            .map_err(Error::internal)?
-            .error_for_status()
-            .map_err(Error::internal)?
-            .json()
-            .await
-            .map_err(Error::internal)?;
-        let actual = stats["actual_mib"].as_u64().unwrap_or(0);
-        let available = stats["available_memory"].as_u64().unwrap_or(0) / 1_048_576;
-        // Keep guest working-memory headroom, but reclaim only a bounded physical
-        // working set. Free-page reporting returns unused backing independently
-        // of the remaining virtual size; admission still measures actual bytes.
-        let target = idle_balloon_target(self.memory_mib, actual, available, active_bytes);
-        if target > actual {
-            client
-                .patch("http://localhost/balloon")
-                .json(&json!({ "amount_mib": target }))
-                .send()
-                .await
-                .map_err(Error::internal)?
-                .error_for_status()
-                .map_err(Error::internal)?;
-            let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
-            loop {
-                let stats: Value = client
-                    .get("http://localhost/balloon/statistics")
-                    .send()
-                    .await
-                    .map_err(Error::internal)?
-                    .error_for_status()
-                    .map_err(Error::internal)?
-                    .json()
-                    .await
-                    .map_err(Error::internal)?;
-                if stats["actual_mib"].as_u64().unwrap_or(0) >= target.saturating_sub(16) {
-                    break;
-                }
-                if tokio::time::Instant::now() >= deadline {
-                    tracing::warn!(target: "cairn_performance", operation = "vm_retention", event = "balloon_unacknowledged", vm_id = self.id(), requested_mib = target, actual_mib = stats["actual_mib"].as_u64(), active_bytes, elapsed_ms = started.elapsed().as_millis() as u64);
-                    return Err(Error::unavailable(
-                        "Idle balloon reclamation was not acknowledged.",
-                    ));
-                }
-                tokio::time::sleep(Duration::from_millis(25)).await;
-            }
-        }
+        // Ownership of the balloon is held until the CPUs pause.
+        let (_owner, target) =
+            reclaim_idle_memory(self.jail.parent().unwrap(), self.memory_mib, active_bytes).await?;
+
         self.idle = true;
         host::set_vm_state(&self.jail.join("api.sock"), "Paused").await?;
         let retained_bytes = self
@@ -684,7 +717,7 @@ impl Vm {
     pub(super) async fn resume_idle(&mut self) -> Result<()> {
         // Restore usable guest address space on demand. This does not reserve
         // the whole virtual size in RAM; the shared cgroup remains the ceiling.
-        self.balloon_client()?
+        balloon_client(&self.jail)?
             .patch("http://localhost/balloon")
             .json(&json!({ "amount_mib": 0 }))
             .send()
@@ -695,14 +728,6 @@ impl Vm {
         host::set_vm_state(&self.jail.join("api.sock"), "Resumed").await?;
         self.idle = false;
         Ok(())
-    }
-
-    fn balloon_client(&self) -> Result<reqwest::Client> {
-        reqwest::Client::builder()
-            .unix_socket(self.jail.join("api.sock"))
-            .timeout(Duration::from_millis(500))
-            .build()
-            .map_err(Error::internal)
     }
 
     /// Allocated shared guest pages plus the VMM's other resident pages. Plain
@@ -993,6 +1018,7 @@ impl Inbox {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::microvm::budget;
     use std::os::unix::process::CommandExt;
 
     #[test]
@@ -1014,6 +1040,71 @@ mod tests {
         assert_eq!(idle_balloon_target(2048, 256, 2000, physical_bytes), 1024);
         assert_eq!(idle_balloon_target(4096, 256, 3500, 0), 256);
         assert_eq!(idle_balloon_target(1024, 0, 1000, physical_bytes), 0);
+    }
+
+    /// Firecracker's balloon API with a guest that applies each target at once.
+    #[derive(Default)]
+    struct Balloon {
+        target_mib: u64,
+        actual_mib: u64,
+        monitored: bool,
+    }
+
+    #[tokio::test]
+    async fn pressure_rebalancing_never_replaces_an_unacknowledged_idle_target() {
+        use axum::{
+            Json, Router,
+            extract::State,
+            http::StatusCode,
+            routing::{get, patch},
+        };
+        use std::sync::Mutex;
+
+        let state = tempfile::tempdir().unwrap();
+        let vm = state
+            .path()
+            .join("jails/firecracker")
+            .join(uuid::Uuid::new_v4().to_string());
+        std::fs::create_dir_all(vm.join("root")).unwrap();
+        let listener = UnixListener::bind(vm.join("root/api.sock")).unwrap();
+        let balloon = Arc::new(Mutex::new(Balloon::default()));
+        let monitor_state = state.path().to_owned();
+
+        let statistics = |State(balloon): State<Arc<Mutex<Balloon>>>| async move {
+            let balloon = balloon.lock().unwrap();
+            Json(json!({
+                "target_mib": balloon.target_mib,
+                "actual_mib": balloon.actual_mib,
+                "available_memory": 3u64 << 30,
+            }))
+        };
+        let resize = move |State(balloon): State<Arc<Mutex<Balloon>>>, Json(body): Json<Value>| async move {
+            let first = {
+                let mut balloon = balloon.lock().unwrap();
+                balloon.target_mib = body["amount_mib"].as_u64().unwrap();
+                balloon.actual_mib = balloon.target_mib;
+                !std::mem::replace(&mut balloon.monitored, true)
+            };
+
+            // A monitor tick lands after the guest reaches the idle target,
+            // before retention reads that acknowledgement back.
+            if first {
+                budget::rebalance(&monitor_state, 0, 4096).await.unwrap();
+            }
+            StatusCode::NO_CONTENT
+        };
+        let app = Router::new()
+            .route("/", get(|| async { Json(json!({ "state": "Running" })) }))
+            .route("/balloon/statistics", get(statistics))
+            .route("/balloon", patch(resize))
+            .with_state(balloon.clone());
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        let reclaimed = reclaim_idle_memory(&vm, 3584, 600 * 1_048_576).await;
+
+        assert_eq!(reclaimed.unwrap().1, 600);
+        assert_eq!(balloon.lock().unwrap().target_mib, 600);
+        server.abort();
     }
 
     #[test]

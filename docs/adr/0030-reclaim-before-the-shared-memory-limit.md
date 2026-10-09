@@ -93,3 +93,20 @@ plein : les VM gelaient de 70 à 280 s puis étaient interrompues. Un swap zram
 (zstd, un quart de la RAM) y a été activé et ramené l’usage sous le seuil. Les
 installateurs de node et d’installation l’activent désormais sur les hôtes apt ;
 les autres hôtes suivent la procédure de DEPLOYMENT.md.
+
+## Complément du 2026-10-09 : la rétention possède le ballon jusqu’à la pause
+
+La garantie précédente reposait sur des statistiques lues avant d’agir. Dès que
+le guest atteint la cible de rétention, le ballon n’est plus « en train de
+gonfler », alors que la VM tourne encore jusqu’au sondage suivant de la
+rétention. Un tick de surveillance tombé dans cet intervalle dégonflait de
+256 Mio, puis jusqu’à zéro : la rétention échouait faute d’acquittement et la VM
+était détruite (#152).
+
+La rétention verrouille désormais le répertoire de la VM (`flock`), de sa
+lecture des statistiques jusqu’à la pause des CPU. La surveillance saute une
+VM dont le ballon est ainsi possédé et garde ce verrou pendant son propre
+échange avec l’API, borné par ses délais de requête. Verrouiller le répertoire
+lui-même n’y crée aucune entrée, qui pourrait sinon empêcher sa suppression au
+démontage. Le délai d’acquittement de 3 s et les seuils de pression sont
+inchangés.

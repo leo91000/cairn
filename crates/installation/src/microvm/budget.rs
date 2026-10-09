@@ -328,6 +328,14 @@ pub async fn rebalance(state: &Path, used_mib: u64, limit_mib: u64) -> Result<()
         if !socket.exists() {
             continue;
         }
+        // Idle retention owns a VM's balloon from its statistics read until
+        // the CPUs pause. A decision from statistics read here must not replace
+        // the target that retention waits for the guest to acknowledge.
+        let Ok(_owner) = crate::file_lock::exclusive_directory(&entry.path(), "Balloon is owned.")
+        else {
+            continue;
+        };
+
         let client = reqwest::Client::builder()
             .unix_socket(socket)
             .timeout(Duration::from_millis(500))
@@ -349,8 +357,8 @@ pub async fn rebalance(state: &Path, used_mib: u64, limit_mib: u64) -> Result<()
             continue;
         };
 
-        // Idle retention inflates the balloon before pausing a VM and expects
-        // it to stay inflated; never deflate during or after that.
+        // Never deflate a paused retained VM, nor a balloon whose earlier
+        // target is still being reached.
         if target < actual {
             let inflating = stats["target_mib"].as_u64().unwrap_or(0) > actual + 16;
             let paused = match client.get("http://localhost/").send().await {
