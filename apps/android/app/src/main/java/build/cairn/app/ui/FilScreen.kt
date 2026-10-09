@@ -1,6 +1,7 @@
 package build.cairn.app.ui
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -355,6 +356,11 @@ internal fun Wordmark() {
                 Modifier.size(40.dp)
                     .background(
                         androidx.compose.ui.graphics.Color(0xFF14365A),
+                        androidx.compose.foundation.shape.RoundedCornerShape(10.dp),
+                    )
+                    .border(
+                        1.dp,
+                        Color(0xFF346AA3),
                         androidx.compose.foundation.shape.RoundedCornerShape(10.dp),
                     ),
         )
