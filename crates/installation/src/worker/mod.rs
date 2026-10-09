@@ -131,7 +131,7 @@ impl Worker {
     }
 }
 
-/// Official author checks and snapshot preparation never hold the launch tick.
+/// Beacon author checks and snapshot preparation never hold the launch tick.
 async fn schedule_tasks(s: Arc<Service>) {
     let mut timer = tokio::time::interval(Duration::from_secs(1));
     timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);

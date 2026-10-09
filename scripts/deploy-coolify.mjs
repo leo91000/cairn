@@ -44,28 +44,28 @@ export async function deploy(config, { timeoutMs = 600000, intervalMs = 2000 } =
 
   const started = Date.now()
   const service = await api(servicePath, 'GET', undefined, true)
-  const official = !!config.installationImage
-  if (official) {
+  const beacon = !!config.installationImage
+  if (beacon) {
     let document
     try {
       document = parse(service.docker_compose_raw)
     }
     catch {
-      throw new Error('Coolify returned invalid official production Compose')
+      throw new Error('Coolify returned invalid beacon production Compose')
     }
 
-    const officialService = document?.services?.official
+    const beaconService = document?.services?.beacon
     // Reject the old manager target before changing any environment values.
     // eslint-disable-next-line no-template-curly-in-string -- Coolify must retain these Compose expressions.
-    if (!officialService || document.services.manager || document.services.runner || officialService.image !== '${CAIRN_BEACON_IMAGE:?Set the validated official image digest}'
-      || Number(officialService.deploy?.replicas) !== 1 || officialService.deploy?.update_config?.order !== 'stop-first'
+    if (!beaconService || document.services.manager || document.services.runner || beaconService.image !== '${CAIRN_BEACON_IMAGE:?Set the validated beacon image digest}'
+      || Number(beaconService.deploy?.replicas) !== 1 || beaconService.deploy?.update_config?.order !== 'stop-first'
       // eslint-disable-next-line no-template-curly-in-string -- This must be operator-configured, not baked into Compose.
-      || officialService.environment?.CAIRN_INSTALLATION_IMAGE !== '${CAIRN_INSTALLATION_IMAGE:?Set the paired installation digest}') {
-      throw new Error('Coolify must target the single-process official production Compose, not the old manager')
+      || beaconService.environment?.CAIRN_INSTALLATION_IMAGE !== '${CAIRN_INSTALLATION_IMAGE:?Set the paired installation digest}') {
+      throw new Error('Coolify must target the single-process beacon production Compose, not the old manager')
     }
   }
 
-  const compose = official ? service.docker_compose_raw : firecrackerRunnerCompose(service.docker_compose_raw)
+  const compose = beacon ? service.docker_compose_raw : firecrackerRunnerCompose(service.docker_compose_raw)
   if (compose !== service.docker_compose_raw) {
     await api(servicePath, 'PATCH', { docker_compose_raw: Buffer.from(compose).toString('base64') })
     const updatedService = await api(servicePath, 'GET', undefined, true)
@@ -73,7 +73,7 @@ export async function deploy(config, { timeoutMs = 600000, intervalMs = 2000 } =
       throw new Error('Coolify did not persist the runner configuration.')
   }
 
-  if (official) {
+  if (beacon) {
     const data = [
       { key: 'CAIRN_BEACON_IMAGE', value: image, is_literal: true },
       { key: 'CAIRN_INSTALLATION_IMAGE', value: config.installationImage, is_literal: true },
@@ -141,14 +141,14 @@ export async function deploy(config, { timeoutMs = 600000, intervalMs = 2000 } =
       if (response.ok) {
         const health = await response.json()
         if (health.status === 'ok' && health.commit === commit && (!config.runtimeId || health.runtimeId === config.runtimeId)) {
-          const releaseResponse = await fetch(new URL(official ? '/install/release' : '/internal/nodes/release', publicUrl), {
+          const releaseResponse = await fetch(new URL(beacon ? '/install/release' : '/internal/nodes/release', publicUrl), {
             cache: 'no-store',
             redirect: 'error',
             signal: AbortSignal.timeout(10000),
           })
           if (releaseResponse.ok) {
             const release = await releaseResponse.json()
-            if (official ? release.image === config.installationImage : release.protocol === 2 && release.commit === commit && release.image === image) {
+            if (beacon ? release.image === config.installationImage : release.protocol === 2 && release.commit === commit && release.image === image) {
               return {
                 updateMs: updated - started,
                 restartMs: restarted - updated,
@@ -174,7 +174,7 @@ export async function deploy(config, { timeoutMs = 600000, intervalMs = 2000 } =
     await setTimeout(intervalMs)
   }
 
-  throw new Error(`Deployment did not serve commit ${commit} with ${official ? 'installation' : 'node'} image ${config.installationImage || image} before the timeout`)
+  throw new Error(`Deployment did not serve commit ${commit} with ${beacon ? 'installation' : 'node'} image ${config.installationImage || image} before the timeout`)
 }
 
 function configuration() {

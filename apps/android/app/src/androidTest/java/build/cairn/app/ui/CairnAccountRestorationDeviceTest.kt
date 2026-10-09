@@ -40,7 +40,7 @@ class CairnAccountRestorationDeviceTest {
             val origin = server.url("/").toString()
             val vault = KeystoreSessionVault(application)
             vault.write(origin, "cairn_session=restore-fixture; Path=/; Max-Age=3600; HttpOnly")
-            val model = mutableStateOf(CairnViewModel(application, vault, officialOrigin = origin))
+            val model = mutableStateOf(CairnViewModel(application, vault, beaconOrigin = origin))
             compose.setContent {
                 val vm = model.value
                 key(vm) { CairnTheme { CairnApp(vm = vm) } }
@@ -79,7 +79,7 @@ class CairnAccountRestorationDeviceTest {
                 )
             }
             compose.runOnIdle {
-                model.value = CairnViewModel(application, vault, officialOrigin = origin)
+                model.value = CairnViewModel(application, vault, beaconOrigin = origin)
             }
             awaitRestoredInstallation()
             val restored = runBlocking { model.value.historyCache.read(cacheKey) }

@@ -17,7 +17,7 @@ import { expect, test } from '@playwright/test'
 import { config as loadConfig } from '../fixtures/legacy/server/config'
 import { Service as SeedService } from '../fixtures/legacy/server/service'
 import { Store } from '../fixtures/legacy/server/store'
-import { executeOfficialSql, expireAccountProof } from './official-relay-fixture'
+import { executeBeaconSql, expireAccountProof } from './beacon-relay-fixture'
 
 test('owner shares an installation and member works without management controls', async ({ page, browser }) => {
   test.setTimeout(120000)
@@ -39,7 +39,7 @@ test('owner shares an installation and member works without management controls'
   // journey's delivery budget when projects run concurrently.
   const database = new URL(process.env.CAIRN_BEACON_TEST_DATABASE_URL!)
   const schema = `sharing_${randomUUID().replaceAll('-', '')}`
-  executeOfficialSql(database, `CREATE SCHEMA ${schema}`)
+  executeBeaconSql(database, `CREATE SCHEMA ${schema}`)
   const isolatedDatabase = new URL(database)
   isolatedDatabase.searchParams.set('options', `-c search_path=${schema}`)
   const url = 'http://localhost:4397'
@@ -72,7 +72,7 @@ test('owner shares an installation and member works without management controls'
     await target.getByRole('button', { name: 'Sign in', exact: true }).click()
   }
 
-  const official = start('target/debug/cairn-beacon', {
+  const beacon = start('target/debug/cairn-beacon', {
     CAIRN_BEACON_DATABASE_URL: isolatedDatabase.toString(),
     CAIRN_BEACON_ORIGIN: url,
     CAIRN_BEACON_LISTEN: '127.0.0.1:4397',
@@ -82,8 +82,8 @@ test('owner shares an installation and member works without management controls'
   })
   try {
     await expect.poll(() => {
-      if (official.exitCode !== null)
-        throw new Error(diagnostics.join('') || `Official service exited: ${official.exitCode}`)
+      if (beacon.exitCode !== null)
+        throw new Error(diagnostics.join('') || `Beacon exited: ${beacon.exitCode}`)
       return fetch(`${url}/health`).then(response => response.ok).catch(() => false)
     }, { timeout: 30000 }).toBe(true)
     await signIn(page, ownerEmail)
@@ -311,6 +311,6 @@ test('owner shares an installation and member works without management controls'
     seed?.store.close()
     await new Promise<void>(resolve => mail.close(() => resolve()))
     await rm(root, { recursive: true, force: true })
-    executeOfficialSql(database, `DROP SCHEMA ${schema} CASCADE`)
+    executeBeaconSql(database, `DROP SCHEMA ${schema} CASCADE`)
   }
 })

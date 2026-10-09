@@ -2,11 +2,11 @@
 
 **Historical standalone-manager workflow:** the entire **Update agent tools**
 workflow is
-explicitly disabled after the official-service cutover (#113). Manual dispatch
+explicitly disabled after the beacon cutover (#113). Manual dispatch
 only explains the supported release path; it reads no production environment,
 queries no manager or Coolify API, and builds/deploys no candidate. Do not enable
 its host dispatch timer on
-the new deployment or reuse the official service UUID for it. New installations
+the new deployment or reuse the Beacon UUID for it. New installations
 follow the approved immutable image through `cairn-installation-update.timer`;
 application CI resolves stable CLI versions before validating those images.
 See [the production runbook](PRODUCTION-CAIRN.md). The setup below describes the
@@ -25,7 +25,7 @@ not change. Deriving from the original base prevents update layers accumulating.
 The manager and isolated agents use the same updated tools.
 
 Candidates retain exact CLI versions. GitHub CLI downloads are checked against
-its release checksums; Codex is installed from its versioned official npm package.
+its release checksums; Codex is installed from its versioned beacon npm package.
 Container CI checks actual CLI versions against runtime metadata, launches all
 three browser engines, and exercises runner authentication, isolation, sandbox
 write denial, output streaming, and cancellation. Failed candidates are not deployed.
@@ -53,7 +53,7 @@ inspect the failed workflow before retrying.
 The update workflow also maintains mise, global runtimes and the agent toolbox.
 See [Agent toolkit](TOOLKIT.md) for the catalogue, project overrides and update policy.
 
-## Historical setup (do not enable on the official deployment)
+## Historical setup (do not enable on the beacon deployment)
 
 First deploy an application version that supports runtime metadata and deployment
 leases (0.2.1 or newer). The manager creates `/data/maintenance-token`, mode 0600.

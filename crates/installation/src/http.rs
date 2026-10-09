@@ -96,9 +96,7 @@ pub async fn router(service: Arc<Service>) -> Result<Router> {
         .route("/mcp-workspace", any(crate::mcp_server::handle))
         .route("/mcp-gateway/{id}", any(crate::mcp_server::handle))
         .route("/api/{*path}", any(api))
-        .fallback(|| async {
-            Error::unauthorized("Access this installation through the official service.")
-        })
+        .fallback(|| async { Error::unauthorized("Access this installation through the Beacon.") })
         .layer(CompressionLayer::new())
         .merge(internal)
         .layer(middleware::from_fn_with_state(app.clone(), security))
@@ -281,7 +279,7 @@ fn check_security(
 
 /// Browser credentials never authenticate an installation. Only the outbound
 /// relay attaches verified in-process context; machine channels keep their own
-/// credentials and remain independent of official-account availability.
+/// credentials and remain independent of beacon-account availability.
 fn authenticate_installation(request: &Request) -> Result<()> {
     let path = request.uri().path();
     let machine = path == "/health"
@@ -298,9 +296,7 @@ fn authenticate_installation(request: &Request) -> Result<()> {
     let identity = request
         .extensions()
         .get::<InstallationIdentity>()
-        .ok_or_else(|| {
-            Error::unauthorized("Access this installation through the official service.")
-        })?;
+        .ok_or_else(|| Error::unauthorized("Access this installation through the Beacon."))?;
     if let Some(token) = &identity.public_artifact {
         if path == format!("/api/shared-artifacts/{token}")
             && crate::artifacts::sharing::public_read(path, request.method().as_str())

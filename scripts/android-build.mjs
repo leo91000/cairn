@@ -21,7 +21,7 @@ function fixedOrigin(value) {
   const url = new URL(value)
   if (!['https:', 'http:'].includes(url.protocol) || url.username || url.password
     || url.pathname !== '/' || url.search || url.hash) {
-    throw new Error('The official service must be an HTTP(S) origin without credentials or a path')
+    throw new Error('Beacon must be an HTTP(S) origin without credentials or a path')
   }
 
   return url.origin
@@ -39,7 +39,7 @@ export async function recordBuild(directory, config) {
   const manifest = await buildManifest(directory, config.tag)
   const evidence = {
     schema: 1,
-    officialOrigin: fixedOrigin(config.officialOrigin),
+    beaconOrigin: fixedOrigin(config.beaconOrigin),
     firebaseConfiguration: firebaseBuildConfiguration(config.firebaseConfiguration),
     repository: config.repository.toLowerCase(),
     commit: config.commit,
@@ -54,13 +54,13 @@ export async function recordBuild(directory, config) {
 }
 
 export async function verifyBuild(directory, config) {
-  const officialOrigin = fixedOrigin(config.officialOrigin)
-  if (!officialOrigin.startsWith('https://'))
-    throw new Error('Android distribution requires the fixed HTTPS official service origin')
+  const beaconOrigin = fixedOrigin(config.beaconOrigin)
+  if (!beaconOrigin.startsWith('https://'))
+    throw new Error('Android distribution requires the fixed HTTPS Beacon origin')
   const evidence = JSON.parse(await readFile(path.join(directory, 'validation.json'), 'utf8'))
   const manifest = await buildManifest(directory, config.tag)
   if (JSON.stringify(evidence.firebaseConfiguration) !== JSON.stringify(firebaseBuildConfiguration(config.firebaseConfiguration))
-    || evidence.schema !== 1 || evidence.officialOrigin !== officialOrigin || evidence.repository !== config.repository.toLowerCase()
+    || evidence.schema !== 1 || evidence.beaconOrigin !== beaconOrigin || evidence.repository !== config.repository.toLowerCase()
     || evidence.commit !== config.commit || evidence.runId !== config.runId
     || evidence.versionName !== manifest.versionName || evidence.versionCode !== manifest.versionCode
     || evidence.sha256 !== manifest.sha256 || evidence.size !== manifest.size) {
@@ -77,7 +77,7 @@ if (import.meta.main) {
     commit: process.env.GITHUB_SHA,
     runId: Number(process.env.VALIDATED_RUN_ID || process.env.GITHUB_RUN_ID),
     tag: process.env.RELEASE_TAG || undefined,
-    officialOrigin: process.env.CAIRN_BEACON_ORIGIN,
+    beaconOrigin: process.env.CAIRN_BEACON_ORIGIN,
     firebaseConfiguration: firebaseConfigurationFromEnvironment(),
   }
   if (command === 'record')

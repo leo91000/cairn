@@ -2,6 +2,7 @@ package build.cairn.app.ui
 
 import android.app.Application
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asAndroidBitmap
 import androidx.compose.ui.test.*
 import androidx.compose.ui.test.junit4.v2.createComposeRule
@@ -27,6 +28,11 @@ import org.robolectric.annotation.GraphicsMode
 @Config(sdk = [36], qualifiers = "w412dp-h915dp-mdpi")
 @GraphicsMode(GraphicsMode.Mode.NATIVE)
 class SignalJourneyTest {
+    @Test
+    fun identityPaletteStartsWithBalisePrussianBlue() {
+        assertEquals(Color(0xFF14365A), identityColor("h"))
+    }
+
     @get:Rule val compose = createComposeRule()
 
     private val calls = CopyOnWriteArrayList<Triple<String, String, String>>()
@@ -127,9 +133,8 @@ class SignalJourneyTest {
                         val path = request.path!!.substringBefore('?')
                         calls += Triple(request.method!!, request.path!!, request.body.readUtf8())
                         return when {
-                            path == "/api/installations" -> json(officialInstallationsFixture())
-                            path == "/api/account/session" ->
-                                json(officialAccountFixture("fixture"))
+                            path == "/api/installations" -> json(beaconInstallationsFixture())
+                            path == "/api/account/session" -> json(beaconAccountFixture("fixture"))
                             path == "/api/installations/fixture/api/agents" ->
                                 json(wireJson.encodeToString(listOf(main, designer)))
                             path == "/api/installations/fixture/api/projects" ->
@@ -228,7 +233,7 @@ class SignalJourneyTest {
                 CairnViewModel(
                     ApplicationProvider.getApplicationContext<Application>(),
                     MemoryVault(),
-                    officialOrigin = "",
+                    beaconOrigin = "",
                 )
             compose.setContent {
                 LaunchedEffect(Unit) {

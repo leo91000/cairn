@@ -440,7 +440,7 @@ it('resets connection backoff after successful reconnection before another trans
   expect(Peer.all).toHaveLength(3)
 })
 
-it('renews before expiry and keeps the current channel only after official acceptance', async () => {
+it('renews before expiry and keeps the current channel only after beacon acceptance', async () => {
   const { state, channel } = await direct()
   vi.mocked(fetch).mockImplementation(() => Promise.resolve(Response.json({
     available: true,

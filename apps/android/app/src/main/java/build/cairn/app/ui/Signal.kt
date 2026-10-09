@@ -46,7 +46,7 @@ import java.util.Locale
 // Distinct, readable on white text in both themes; assigned deterministically per agent/project.
 private val IdentityColors =
     listOf(
-        Color(0xFF4545EF),
+        CairnLightColors.primary,
         Color(0xFFD9542F),
         Color(0xFFB23F8C),
         Color(0xFF12806F),

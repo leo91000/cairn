@@ -13,7 +13,7 @@ describe('persistent Android tooling', () => {
   })
   it('installs only requested stable SDK packages', () => {
     expect(packages(['--accept-licenses', 'platforms;android-36', 'build-tools;36.0.0', 'platform-tools'])).toEqual(['platform-tools', 'platforms;android-36', 'build-tools;36.0.0'])
-    for (const option of ['--update', '--sdk_root=/tmp/foo', '../../foo', 'system-images;android-36;google_apis;x86_64;evil'])
+    for (const option of ['--update', '--sdk_root=/tmp/foo', '../foo', 'system-images;android-36;google_apis;x86_64;evil'])
       expect(() => packages([option])).toThrow(/SDK package/)
   })
   it('compares Temurin patch and build releases without downgrading or accepting EA', () => {

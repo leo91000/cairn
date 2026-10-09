@@ -98,7 +98,7 @@ responsible for project tests and releases requested by an agent.
 ### 6. Execution and run history
 
 - Durable states: queued, running, succeeded, failed, cancelled, interrupted.
-- Worker launches official `codex exec --json` using stdin instructions, captures
+- Worker launches beacon `codex exec --json` using stdin instructions, captures
   progress and final response, records session ID and usage when available.
 - Paginated run history and incremental log polling; readable event timeline,
   final answer, duration, trigger, workspace, and task/settings snapshot.

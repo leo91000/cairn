@@ -223,7 +223,7 @@ async fn audit_failure_rolls_back_access_changes_and_retention_is_enforced_witho
     let app = &relay.app;
     let id = relay.session["installations"][0]["id"].as_str().unwrap();
     // Inject a write failure at the external Postgres boundary. Observe only
-    // official HTTP sharing/audit responses, not persisted implementation state.
+    // beacon HTTP sharing/audit responses, not persisted implementation state.
     sqlx_core::query::query("ALTER TABLE account_audit ADD CONSTRAINT fixture_failure CHECK (action <> 'invitation.created')")
         .execute(&app.pool).await.unwrap();
     let rejected = app

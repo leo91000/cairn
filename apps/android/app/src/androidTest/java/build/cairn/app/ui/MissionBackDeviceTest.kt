@@ -86,9 +86,8 @@ class MissionBackDeviceTest {
                                 .setBody(body)
                         }
                         return when {
-                            path == "/api/installations" -> json(officialInstallationsFixture())
-                            path == "/api/account/session" ->
-                                json(officialAccountFixture("fixture"))
+                            path == "/api/installations" -> json(beaconInstallationsFixture())
+                            path == "/api/account/session" -> json(beaconAccountFixture("fixture"))
                             path == "/api/installations/fixture/api/agents" ->
                                 json(wireJson.encodeToString(listOf(main)))
                             path == "/api/installations/fixture/api/tasks" ->
@@ -113,7 +112,7 @@ class MissionBackDeviceTest {
             val origin = server.url("/").toString()
             val app = ApplicationProvider.getApplicationContext<Application>()
 
-            val vm = CairnViewModel(app, MissionBackVault(), officialOrigin = "")
+            val vm = CairnViewModel(app, MissionBackVault(), beaconOrigin = "")
             compose.setContent {
                 LaunchedEffect(Unit) {
                     vm.state.first { it.ready }

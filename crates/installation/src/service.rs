@@ -440,8 +440,8 @@ impl Service {
             return Ok(());
         }
 
-        // No new scheduled work is admitted without the current official authority.
-        // Already admitted work continues through a temporary official outage.
+        // No new scheduled work is admitted without the current beacon authority.
+        // Already admitted work continues through a temporary beacon outage.
         let authority_wait_reason = match self.synchronize_task_authors_locked().await {
             Ok(Some(_)) => None,
             Ok(None) => Some(

@@ -83,7 +83,7 @@ class ActivityViewsTest {
                 "activity-diff" to
                     item(
                         10,
-                        """{"type":"file_change","status":"completed","changes":[{"path":"apps/android/ui/Chat.kt","kind":"update","diff":"@@ -12,3 +12,4 @@\n-Text(rawJson)\n+ActivityCard(event)\n+ArtifactGallery(files)\n Spacer(12.dp)"}]}""",
+                        """{"type":"file_change","status":"completed","changes":[{"path":"android/ui/Chat.kt","kind":"update","diff":"@@ -12,3 +12,4 @@\n-Text(rawJson)\n+ActivityCard(event)\n+ArtifactGallery(files)\n Spacer(12.dp)"}]}""",
                     ),
                 "activity-plan" to
                     item(

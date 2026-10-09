@@ -127,7 +127,7 @@ async fn direct_read(
         if config.stun_urls.is_empty() {
             let stun = response["iceServers"][0]["urls"][0]
                 .as_str()
-                .ok_or("Official STUN missing")?;
+                .ok_or("Beacon STUN missing")?;
             peer.set_configuration(
                 RTCConfigurationBuilder::default()
                     .with_ice_servers(vec![RTCIceServer {

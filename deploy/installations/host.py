@@ -55,19 +55,19 @@ def run(args, timeout=120):
         raise RuntimeError(f'Docker {operation} failed (exit {result.returncode}). Check the daemon and outbound registry connectivity; existing data is retained.')
 
 
-def official_origin(value):
+def beacon_origin(value):
     parsed = urllib.parse.urlsplit(value)
     loopback = parsed.hostname in ('localhost', '127.0.0.1', '::1')
     if not (parsed.scheme == 'https' or parsed.scheme == 'http' and loopback):
-        raise RuntimeError('The official service requires HTTPS (HTTP only on loopback).')
+        raise RuntimeError('The Beacon requires HTTPS (HTTP only on loopback).')
     if not parsed.hostname or parsed.username or parsed.password or parsed.path not in ('', '/') or parsed.query or parsed.fragment:
-        raise RuntimeError('Invalid official service origin.')
+        raise RuntimeError('Invalid Beacon origin.')
     return value.rstrip('/')
 
 
 class NoRedirect(urllib.request.HTTPRedirectHandler):
     def redirect_request(self, req, fp, code, msg, headers, newurl):
-        raise RuntimeError('Official service redirects are not accepted.')
+        raise RuntimeError('Beacon redirects are not accepted.')
 
 
 def release(origin):
@@ -77,7 +77,7 @@ def release(origin):
             raise RuntimeError('Invalid installation release response.')
         image = json.loads(body).get('image', '')
         if not IMAGE.fullmatch(image):
-            raise RuntimeError('The official service must approve an immutable installation image.')
+            raise RuntimeError('Beacon must approve an immutable installation image.')
         return image
 
 
@@ -154,12 +154,12 @@ def claimed_identity(origin):
         if data['origin'] != origin or not isinstance(data['token'], str) or not data['token']:
             raise ValueError('Invalid identity')
     except (OSError, ValueError, KeyError, TypeError, AttributeError):
-        raise RuntimeError('The saved installation identity is incomplete or unsafe. Restore its private backup, or detach the previous installation in the official app before recovering it. The file is retained.') from None
+        raise RuntimeError('The saved installation identity is incomplete or unsafe. Restore its private backup, or detach the previous installation in the beacon app before recovering it. The file is retained.') from None
     return True
 
 
 def install(origin, code):
-    origin = official_origin(origin)
+    origin = beacon_origin(origin)
     if code and not re.fullmatch('[a-f0-9]{64}', code):
         raise RuntimeError('Invalid claim code. Copy a new command from Add an installation.')
     cli = Path('/usr/local/bin/cairn')
@@ -172,7 +172,7 @@ def install(origin, code):
     if config_file.exists():
         config = json.loads(config_file.read_text())
         if config['origin'] != origin:
-            raise RuntimeError('This installation belongs to another official origin; its identity is retained.')
+            raise RuntimeError('This installation belongs to another beacon origin; its identity is retained.')
         image = config['image']
     else:
         image = release(origin)
@@ -264,7 +264,7 @@ exec docker compose --project-directory ROOT -f COMPOSE exec -T manager /usr/loc
         atomic(Path('/usr/local/bin/cairn'), wrapper)
         os.chmod('/usr/local/bin/cairn', 0o755)
     if claimed_identity(origin):
-        print('Cairn installed and claimed. Open the official app and refresh installations.')
+        print('Cairn installed and claimed. Open the beacon app and refresh installations.')
     else:
         print('Cairn installed but unclaimed. Copy a fresh command from Add an installation and rerun it.')
 
@@ -279,7 +279,7 @@ def docker_output(args):
 
 
 def update(origin):
-    origin = official_origin(origin)
+    origin = beacon_origin(origin)
     config_file = ROOT / 'installation.json'
     config = json.loads(config_file.read_text())
     if config['origin'] != origin or not IMAGE.fullmatch(config['image']):

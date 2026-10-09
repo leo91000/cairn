@@ -17,7 +17,7 @@ require(versionParts[0] in 0..1999 && versionParts[1] in 0..999 && versionParts[
 val releaseCode =
     100_000_000 + versionParts[0] * 1_000_000 + versionParts[1] * 1000 + versionParts[2]
 val releaseKeystore = providers.environmentVariable("CAIRN_ANDROID_KEYSTORE").orNull
-val officialOrigin = providers.environmentVariable("CAIRN_BEACON_ORIGIN").orElse("").get()
+val beaconOrigin = providers.environmentVariable("CAIRN_BEACON_ORIGIN").orElse("").get()
 val firebaseConfiguration =
     listOf("APP_ID", "PROJECT_ID", "API_KEY", "SENDER_ID").associateWith {
         providers.environmentVariable("CAIRN_ANDROID_FIREBASE_$it").orElse("").get()
@@ -34,8 +34,8 @@ require(firebaseConfiguration.values.all { Regex("[A-Za-z0-9_:.\\-]*").matches(i
     "Invalid public Firebase configuration."
 }
 
-if (officialOrigin.isNotEmpty()) {
-    val origin = URI(officialOrigin)
+if (beaconOrigin.isNotEmpty()) {
+    val origin = URI(beaconOrigin)
     require(
         origin.host != null &&
             origin.rawUserInfo == null &&
@@ -50,7 +50,7 @@ if (officialOrigin.isNotEmpty()) {
     }
 }
 
-require(releaseKeystore == null || officialOrigin.startsWith("https://")) {
+require(releaseKeystore == null || beaconOrigin.startsWith("https://")) {
     "Signed distribution requires the fixed HTTPS CAIRN_BEACON_ORIGIN."
 }
 
@@ -65,8 +65,8 @@ android {
         versionName = releaseVersion
         buildConfigField(
             "String",
-            "OFFICIAL_SERVICE_ORIGIN",
-            "\"${officialOrigin.removeSuffix("/")}\"",
+            "BEACON_SERVICE_ORIGIN",
+            "\"${beaconOrigin.removeSuffix("/")}\"",
         )
         firebaseConfiguration.forEach { (name, value) ->
             buildConfigField("String", "FIREBASE_$name", "\"$value\"")

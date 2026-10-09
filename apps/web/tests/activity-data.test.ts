@@ -35,9 +35,9 @@ describe('structured activity content', () => {
   it('identifies incomplete saved JSON without pretending nested fragments are complete results', () => {
     for (const source of ['[{"jobs":[{"name":"test"}]}', '{"outer":{"complete":true},"unfinished":'])
       expect(contentParts(source)).toEqual([{ kind: 'incomplete', source }])
-    expect(contentParts('implementation-pr {"files":["apps/web/src/a.ts"')).toEqual([
+    expect(contentParts('implementation-pr {"files":["src/a.ts"')).toEqual([
       { kind: 'text', text: 'implementation-pr ' },
-      { kind: 'incomplete', source: '{"files":["apps/web/src/a.ts"' },
+      { kind: 'incomplete', source: '{"files":["src/a.ts"' },
     ])
     expect(contentParts('```json\n{"x":')).toEqual([{ kind: 'incomplete', source: '{"x":' }])
     expect(contentParts('```json\n{"x":\n```')).toEqual([{ kind: 'incomplete', source: '{"x":\n' }])

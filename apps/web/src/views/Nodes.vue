@@ -241,7 +241,7 @@ function statusLabel(node: ExecutionNode) {
             required
           ></label>
           <p id="node-manager-address-help" class="text-sm text-muted">
-            Use HTTPS with a certificate trusted by the node. HTTP is allowed only on loopback for local tests. This is the manager’s address, not the official app’s address.
+            Use HTTPS with a certificate trusted by the node. HTTP is allowed only on loopback for local tests. This is the manager’s address, not the beacon app’s address.
           </p>
           <UiButton type="submit" :disabled="busy">
             Create enrollment code

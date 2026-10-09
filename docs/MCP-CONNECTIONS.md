@@ -47,7 +47,7 @@ select no authentication, a bearer token, or OAuth. Save, then use **Test** to
 discover tools or **Connect** to sign in. OAuth returns to the manager in the
 same browser, including on a phone; no terminal callback or laptop is needed.
 
-The callback uses the official service and the current installation. Register
+The callback uses the Beacon and the current installation. Register
 the URL shown under **OAuth settings** when your provider requires a pre-created client:
 
 ```text

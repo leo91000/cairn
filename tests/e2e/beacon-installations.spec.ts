@@ -106,7 +106,7 @@ test('selects installations, remembers the last one and honours deep workspace U
     await expect(page.getByRole('heading', { name: 'Agents', exact: true })).toBeVisible()
     await page.reload()
     await expect(page.getByRole('heading', { name: 'Agents', exact: true })).toBeVisible()
-    // Node administration travels through the official relay; the machine itself
+    // Node administration travels through the beacon relay; the machine itself
     // needs a separately configured direct manager address, even on a LAN or VPN.
     await page.getByRole('link', { name: 'Nodes', exact: true }).click()
     await page.getByRole('button', { name: 'Add a machine', exact: true }).click()

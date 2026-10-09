@@ -52,11 +52,11 @@ pub(crate) async fn task_author_policy(
     let Some(identity) = read_identity(&directory).await? else {
         return Ok(None);
     };
-    let official = origin(&identity.origin)?;
+    let beacon = origin(&identity.origin)?;
     let response = service
         .http
         .get(
-            official
+            beacon
                 .join(&format!(
                     "api/relay/{}/task-authors",
                     identity.installation_id
@@ -90,7 +90,7 @@ struct Claimed {
 }
 
 fn origin(value: &str) -> Result<url::Url> {
-    let url = url::Url::parse(value).map_err(|_| Error::bad("Invalid official origin."))?;
+    let url = url::Url::parse(value).map_err(|_| Error::bad("Invalid beacon origin."))?;
     let loopback = url.host_str().is_some_and(|host| {
         host == "localhost"
             || host
@@ -105,15 +105,15 @@ fn origin(value: &str) -> Result<url::Url> {
         || url.password().is_some()
     {
         return Err(Error::bad(
-            "Use an HTTPS official origin (HTTP only on loopback).",
+            "Use an HTTPS beacon origin (HTTP only on loopback).",
         ));
     }
     Ok(url)
 }
 
 /// The claim code is supplied in memory, never logged or included in a URL.
-pub async fn claim(official: &str, directory: &Path, code: &str, name: &str) -> Result<()> {
-    let official = origin(official)?;
+pub async fn claim(beacon: &str, directory: &Path, code: &str, name: &str) -> Result<()> {
+    let beacon = origin(beacon)?;
     private_dir(directory).await?;
     let path = directory.join("identity.json");
     let mut file = tokio::fs::OpenOptions::new()
@@ -131,7 +131,7 @@ pub async fn claim(official: &str, directory: &Path, code: &str, name: &str) -> 
             .build()
             .map_err(Error::internal)?;
         let response = client
-            .post(official.join("api/relay/claim").map_err(Error::internal)?)
+            .post(beacon.join("api/relay/claim").map_err(Error::internal)?)
             .json(&serde_json::json!({
                 "code": code,
                 "name": name,
@@ -139,7 +139,7 @@ pub async fn claim(official: &str, directory: &Path, code: &str, name: &str) -> 
             }))
             .send()
             .await
-            .map_err(|_| Error::unavailable("Cannot reach the official service."))?;
+            .map_err(|_| Error::unavailable("Cannot reach the Beacon."))?;
         if !response.status().is_success() {
             return Err(Error::bad(
                 "Installation claim refused; obtain a new claim code.",
@@ -153,7 +153,7 @@ pub async fn claim(official: &str, directory: &Path, code: &str, name: &str) -> 
         uuid::Uuid::parse_str(&claimed.installation_id)
             .map_err(|_| Error::bad("Invalid installation identity."))?;
         let identity = Identity {
-            origin: official.origin().ascii_serialization(),
+            origin: beacon.origin().ascii_serialization(),
             installation_id: claimed.installation_id,
             token: claimed.token,
         };
@@ -232,7 +232,7 @@ pub async fn rotate_token(directory: &Path) -> Result<()> {
     let current = read_identity(directory)
         .await?
         .ok_or_else(|| Error::bad("Claim this installation before rotating its credential."))?;
-    let official = origin(&current.origin)?;
+    let beacon = origin(&current.origin)?;
     uuid::Uuid::parse_str(&current.installation_id)
         .map_err(|_| Error::bad("Invalid installation identity."))?;
     let path = directory.join("rotation.json");
@@ -281,7 +281,7 @@ pub async fn rotate_token(directory: &Path) -> Result<()> {
             .map_err(Error::internal)?;
         let response = client
             .post(
-                official
+                beacon
                     .join(&format!(
                         "api/relay/{}/rotate-token",
                         current.installation_id,
@@ -295,7 +295,7 @@ pub async fn rotate_token(directory: &Path) -> Result<()> {
             .send()
             .await
             .map_err(|_| {
-                Error::unavailable("Cannot reach the official service. Retry cairn rotate-token.")
+                Error::unavailable("Cannot reach the Beacon. Retry cairn rotate-token.")
             })?;
         if response.status() != reqwest::StatusCode::NO_CONTENT {
             return Err(Error::unavailable(
@@ -312,10 +312,10 @@ pub async fn rotate_token(directory: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Approve through the official app before atomically replacing a private identity.
+/// Approve through the beacon app before atomically replacing a private identity.
 /// `display` receives the URL, human code, name and public fingerprint, never a token.
 pub async fn device_claim(
-    official: Option<&str>,
+    beacon: Option<&str>,
     directory: &Path,
     name: &str,
     stop: CancellationToken,
@@ -324,17 +324,17 @@ pub async fn device_claim(
     private_dir(directory).await?;
     let _lock = identity_lock(directory)?;
     let previous = read_identity(directory).await?;
-    let official = origin(
-        official
+    let beacon = origin(
+        beacon
             .or_else(|| previous.as_ref().map(|identity| identity.origin.as_str()))
             .ok_or_else(|| Error::bad("Set CAIRN_BEACON_ORIGIN to claim this installation."))?,
     )?;
     if previous
         .as_ref()
-        .is_some_and(|identity| identity.origin != official.origin().ascii_serialization())
+        .is_some_and(|identity| identity.origin != beacon.origin().ascii_serialization())
     {
         return Err(Error::bad(
-            "Official origin differs from the private identity. Detach and back up that identity before changing origins.",
+            "Beacon origin differs from the private identity. Detach and back up that identity before changing origins.",
         ));
     }
     let client = reqwest::Client::builder()
@@ -344,7 +344,7 @@ pub async fn device_claim(
         .map_err(Error::internal)?;
     let start = client
         .post(
-            official
+            beacon
                 .join("api/relay/device-claim/start")
                 .map_err(Error::internal)?,
         )
@@ -355,22 +355,22 @@ pub async fn device_claim(
         }))
         .send()
         .await
-        .map_err(|_| Error::unavailable("Cannot reach the official service."))?;
+        .map_err(|_| Error::unavailable("Cannot reach the Beacon."))?;
     if start.status() == reqwest::StatusCode::CONFLICT {
         return Err(Error::conflict(
-            "Detach the installation in the official app before running cairn claim.",
+            "Detach the installation in the beacon app before running cairn claim.",
         ));
     }
     if !start.status().is_success() {
         return Err(Error::bad(
-            "Installation claim refused. Check the official origin and private identity.",
+            "Installation claim refused. Check the beacon origin and private identity.",
         ));
     }
     let started: DeviceStarted = start
         .json()
         .await
         .map_err(|_| Error::bad("Invalid device claim response."))?;
-    let browser = official.join("claim").map_err(Error::internal)?;
+    let browser = beacon.join("claim").map_err(Error::internal)?;
     if started.user_code.len() != 14
         || !started
             .user_code
@@ -403,7 +403,7 @@ pub async fn device_claim(
         loop {
             let response = client
                 .post(
-                    official
+                    beacon
                         .join("api/relay/device-claim/poll")
                         .map_err(Error::internal)?,
                 )
@@ -411,7 +411,7 @@ pub async fn device_claim(
                 .send()
                 .await
                 .map_err(|_| {
-                    Error::unavailable("Cannot reach the official service; run cairn claim again.")
+                    Error::unavailable("Cannot reach the Beacon; run cairn claim again.")
                 })?;
             if response.status() == reqwest::StatusCode::ACCEPTED {
                 tokio::time::sleep(Duration::from_secs(2)).await;
@@ -441,7 +441,7 @@ pub async fn device_claim(
         return Err(Error::bad("Invalid installation credential."));
     }
     let identity = Identity {
-        origin: official.origin().ascii_serialization(),
+        origin: beacon.origin().ascii_serialization(),
         installation_id: claimed.installation_id,
         token: claimed.token,
     };
@@ -504,7 +504,7 @@ pub async fn connect_with_direct(
     let identity = read_identity(&directory)
         .await?
         .ok_or_else(|| Error::bad("Run cairn claim before starting the relay."))?;
-    let official = origin(&identity.origin)?;
+    let beacon = origin(&identity.origin)?;
     let mut delay = Duration::from_millis(250);
     loop {
         let started = tokio::time::Instant::now();
@@ -513,7 +513,7 @@ pub async fn connect_with_direct(
                 direct.detach();
                 return Ok(());
             },
-            result = connected(&identity, &official, router.clone(), &service, direct.clone()) => {
+            result = connected(&identity, &beacon, router.clone(), &service, direct.clone()) => {
                 direct.detach();
                 if let Err(error) = result {
                     if error.status == 401 {
@@ -545,16 +545,16 @@ struct NotificationSchedule {
 
 async fn connected(
     identity: &Identity,
-    official: &url::Url,
+    beacon: &url::Url,
     router: Router,
     service: &crate::service::Service,
     direct: crate::direct::DirectConnections,
 ) -> Result<()> {
     service.synchronize_task_authors().await?;
-    let mut url = official
+    let mut url = beacon
         .join(&format!("api/relay/{}/connect", identity.installation_id))
         .map_err(Error::internal)?;
-    let scheme = if official.scheme() == "https" {
+    let scheme = if beacon.scheme() == "https" {
         "wss"
     } else {
         "ws"
@@ -1000,14 +1000,14 @@ async fn dispatch(
 }
 
 /// Public addressing comes from the claimed identity, never from PUBLIC_URL.
-pub async fn official_address(data_dir: &Path) -> Result<Option<(String, String)>> {
+pub async fn beacon_address(data_dir: &Path) -> Result<Option<(String, String)>> {
     let Some(identity) = read_identity(&data_dir.join("installation-relay")).await? else {
         return Ok(None);
     };
-    let official = origin(&identity.origin)?;
+    let beacon = origin(&identity.origin)?;
     crate::validation::uuid(&identity.installation_id)?;
     Ok(Some((
-        official.origin().ascii_serialization(),
+        beacon.origin().ascii_serialization(),
         identity.installation_id,
     )))
 }

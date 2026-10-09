@@ -203,8 +203,8 @@ class NativeParityPreviewTest {
                                 .setBody("# Compte rendu\n\nLa revue est terminée.")
                         val body =
                             when (request.path!!.substringBefore('?')) {
-                                "/api/installations" -> officialInstallationsFixture()
-                                "/api/account/session" -> officialAccountFixture("fixture")
+                                "/api/installations" -> beaconInstallationsFixture()
+                                "/api/account/session" -> beaconAccountFixture("fixture")
                                 "/api/installations/fixture/api/agents" ->
                                     wireJson.encodeToString(
                                         listOf(Agent("custom", "Agent spécialisé"), agent)
@@ -248,7 +248,7 @@ class NativeParityPreviewTest {
                 CairnViewModel(
                     ApplicationProvider.getApplicationContext<Application>(),
                     MemoryVault(),
-                    officialOrigin = "",
+                    beaconOrigin = "",
                 )
             lateinit var activity: ComponentActivity
             compose.setContent {

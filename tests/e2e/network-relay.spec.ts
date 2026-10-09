@@ -6,17 +6,17 @@ import { readFile, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import process from 'node:process'
 import { chromium, expect, test } from '@playwright/test'
-import { officialRelayFixture } from './official-relay-fixture'
+import { beaconRelayFixture } from './beacon-relay-fixture'
 
 test('authenticated browser and Rust client keep using the observed route under network constraints', async () => {
   test.setTimeout(240000)
-  const fixture = await officialRelayFixture(4398, '198.18.103.1', process.env.CAIRN_NETWORK_FIXTURE_DIRECTORY)
+  const fixture = await beaconRelayFixture(4398, '198.18.103.1', process.env.CAIRN_NETWORK_FIXTURE_DIRECTORY)
   const {
     root,
     url,
     messages,
     start,
-    official,
+    beacon,
   } = fixture
   let browser: Browser | undefined
   const evidence: {
@@ -46,7 +46,7 @@ test('authenticated browser and Rust client keep using the observed route under 
   }
 
   try {
-    let service = official()
+    let service = beacon()
     // Exercise numeric ICE paths deterministically; the separate mDNS-only client
     // case preserves Chromium's default privacy behavior and expects the relay.
     browser = await chromium.launch({
@@ -117,7 +117,7 @@ test('authenticated browser and Rust client keep using the observed route under 
       await route.continue()
     })
     await expect.poll(() => {
-      expect(service.exitCode, 'official binary must remain running').toBeNull()
+      expect(service.exitCode, 'beacon binary must remain running').toBeNull()
       return fetch(`${url}/health`).then(response => response.ok).catch(() => false)
     }).toBe(true)
     await expect.poll(() => fetch(`${url}/health`).then(response => response.json()).then(health => health.stun.status)).toBe('running')
@@ -256,7 +256,7 @@ test('authenticated browser and Rust client keep using the observed route under 
       const oldLease = leases.at(-1)
       const leaseCount = leases.length
       await fixture.stop(service)
-      service = official()
+      service = beacon()
       await expect.poll(() => fetch(`${url}/health`).then(response => response.ok).catch(() => false)).toBe(true)
       await expect(page.getByRole('status', { name: 'Connection route' })).toHaveAttribute('data-transport-route', 'direct', { timeout: 40000 })
       await expect.poll(() => leases.length, { timeout: 40000 }).toBeGreaterThan(leaseCount)

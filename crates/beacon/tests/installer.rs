@@ -3,7 +3,7 @@ mod common;
 use sha2::{Digest, Sha256};
 
 #[tokio::test]
-async fn official_service_serves_a_root_installer_without_putting_claim_codes_in_urls() {
+async fn beacon_service_serves_a_root_installer_without_putting_claim_codes_in_urls() {
     let app = common::Fixture::new().await;
     let response = app
         .client

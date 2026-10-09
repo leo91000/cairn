@@ -13,7 +13,7 @@ async fn an_idle_stream_is_closed_immediately_when_the_installation_is_detached(
     let id = relay.session["installations"][0]["id"].as_str().unwrap();
     // Detachment's account-management endpoint belongs to another ticket.
     // Its committed ownership removal and transport hook are exercised here;
-    // assertions still observe only the official HTTP API and its open body.
+    // assertions still observe only the beacon HTTP API and its open body.
     sqlx_core::query::query("DELETE FROM installations WHERE id = $1")
         .bind(id)
         .execute(&relay.app.pool)

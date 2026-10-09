@@ -61,11 +61,11 @@ async function toggle() {
     const key = Uint8Array.from(atob(publicKey.replace(/-/g, '+').replace(/_/g, '/')), c => c.charCodeAt(0))
     const currentKey = subscription?.options.applicationServerKey
     const currentKeyBytes = currentKey ? new Uint8Array(currentKey) : undefined
-    const usesOfficialKey = !!currentKeyBytes
+    const usesBeaconKey = !!currentKeyBytes
       && currentKeyBytes.length === key.length
       && currentKeyBytes.every((byte, index) => byte === key[index])
 
-    if (subscription && !usesOfficialKey) {
+    if (subscription && !usesBeaconKey) {
       await subscription.unsubscribe()
       subscription = null
     }

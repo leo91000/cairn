@@ -67,8 +67,8 @@ class AccountsJourneyTest {
                         val result =
                             respond(request, payload)
                                 ?: when (path) {
-                                    "/api/installations" -> officialInstallationsFixture()
-                                    "/api/account/session" -> officialAccountFixture("fixture")
+                                    "/api/installations" -> beaconInstallationsFixture()
+                                    "/api/account/session" -> beaconAccountFixture("fixture")
                                     "/api/installations/fixture/api/accounts" ->
                                         """{"accounts":[${server.accounts.joinToString(",")}],"signIn":${server.signIn}}"""
                                     "/api/installations/fixture/api/connections" ->
@@ -89,7 +89,7 @@ class AccountsJourneyTest {
                 CairnViewModel(
                     ApplicationProvider.getApplicationContext<Application>(),
                     MemoryVault(),
-                    officialOrigin = "",
+                    beaconOrigin = "",
                 )
             compose.setContent {
                 val state by vm.state.collectAsStateWithLifecycle()

@@ -56,7 +56,7 @@ class CairnViewModel
 constructor(
     application: Application,
     private val vault: SessionVault = KeystoreSessionVault(application),
-    private val officialOrigin: String = BuildConfig.OFFICIAL_SERVICE_ORIGIN,
+    private val beaconOrigin: String = BuildConfig.BEACON_SERVICE_ORIGIN,
 ) : AndroidViewModel(application) {
     val historyCache = HistoryCache.encrypted(application)
     private val retentionPreferences = application.getSharedPreferences("conversation-cache", 0)
@@ -107,7 +107,7 @@ constructor(
 
     init {
         perform {
-            val origin = officialOrigin
+            val origin = beaconOrigin
             if (origin.isNotBlank()) connect(origin)
             else notify("Beacon n’est pas configuré dans cette version de l’application.")
         }
@@ -189,7 +189,7 @@ constructor(
         }
     }
 
-    // The shipped app supplies only BuildConfig.OFFICIAL_SERVICE_ORIGIN. Tests inject an HTTP
+    // The shipped app supplies only BuildConfig.BEACON_SERVICE_ORIGIN. Tests inject an HTTP
     // fixture.
     internal suspend fun connect(input: String) {
         val origin = serverOrigin(input, BuildConfig.DEBUG)
@@ -307,7 +307,7 @@ constructor(
     }
 
     suspend fun setNativeNotifications(enabled: Boolean) {
-        val registrar = NativeDeviceRegistrar(getApplication(), vault, officialOrigin)
+        val registrar = NativeDeviceRegistrar(getApplication(), vault, beaconOrigin)
         if (enabled) registrar.enable() else registrar.disable()
     }
 
@@ -485,7 +485,7 @@ constructor(
         schedule(getApplication(), false)
         try {
             try {
-                NativeDeviceRegistrar(getApplication(), vault, officialOrigin).disable()
+                NativeDeviceRegistrar(getApplication(), vault, beaconOrigin).disable()
             } catch (error: CancellationException) {
                 throw error
             } catch (_: Exception) {

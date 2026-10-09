@@ -39,12 +39,12 @@ codex_version=$(npm view @openai/codex version)
 gh_version=$(gh api repos/cli/cli/releases/latest --jq '.tag_name | ltrimstr("v")')
 docker compose build --build-arg CODEX_VERSION="$codex_version" --build-arg GH_VERSION="$gh_version"
 docker compose up -d
-# Approve the printed device code in the official app.
+# Approve the printed device code in the beacon app.
 docker compose exec manager cairn claim
 docker compose restart manager
 ```
 
-Open the official app, sign in to your Cairn account, and claim the installation.
+Open the beacon app, sign in to your Cairn account, and claim the installation.
 The manager port is private machine traffic; local passwords, pages and sessions
 no longer grant access. Existing deployments must follow the explicit migration
 in [DEPLOYMENT.md](docs/DEPLOYMENT.md) before upgrading.
@@ -79,7 +79,7 @@ Install Rust through rustup; `rust-toolchain.toml` pins the compiler and checks.
 ```sh
 pnpm install --frozen-lockfile
 pnpm build
-docker compose -f deploy/official/compose.yaml up
+docker compose -f deploy/beacon/compose.yaml up
 ```
 
 `pnpm install` installs a pre-commit hook that runs `pnpm lint:fix` across the
@@ -92,10 +92,10 @@ examples. Lint errors, compiler errors, and Clippy warnings block the commit.
 Run `pnpm prepare` to reinstall the hook.
 See [formatting and readability](docs/FORMATTING.md) for setup, commands, and CI checks.
 
-The official app is at `http://localhost:4311` with a development mailbox at
-`http://localhost:8025`; see [Beacon setup](docs/OFFICIAL-SERVICE.md).
+The beacon app is at `http://localhost:4311` with a development mailbox at
+`http://localhost:8025`; see [Beacon setup](docs/BEACON.md).
 Build the web bundle after edits, and claim a separately running installation
-with `cairn claim`. `pnpm dev` runs the official binary and Vite; configure its database, email
+with `cairn claim`. `pnpm dev` runs the beacon binary and Vite; configure its database, email
 delivery and `CAIRN_BEACON_ORIGIN=http://localhost:5178` as described in that
 guide. Browser journeys use both production binaries and the real account and
 installation relay, with synthetic email delivery. Local password sign-in and
@@ -114,7 +114,7 @@ pnpm test:backend                # Native backend integration and migration test
 cargo clippy --all-targets -- -D warnings
 cargo build --locked --workspace --bin cairn --bin cairn-beacon --example worker_fixture # Browser and worker test binaries
 pnpm exec playwright install chromium
-pnpm test:e2e                    # Real official + installation binaries (disposable Postgres URL required)
+pnpm test:e2e                    # Real beacon + installation binaries (disposable Postgres URL required)
 pnpm build:backend               # Optimized native production binary
 node --import tsx scripts/benchmark-backend.mjs # Node/Rust comparison
 pnpm lint:fix                    # ESLint fixes and Rust formatting

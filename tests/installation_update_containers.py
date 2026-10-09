@@ -1,7 +1,7 @@
 """Real manager/runner container replacement and rollback through the supervisor CLI.
 
 The registry seam maps approved references to locally built fixture images. Docker
-Compose, mounts, image runtime metadata, health, leases and the official relay are
+Compose, mounts, image runtime metadata, health, leases and the beacon relay are
 real. The runner serves readiness only: this test requires no KVM or agent login.
 """
 import http.server
@@ -57,10 +57,10 @@ def main():
     database = os.environ['CAIRN_BEACON_TEST_DATABASE_URL']
     name = 'cairn-update-' + uuid.uuid4().hex[:12]
     images = []
-    official = None
+    beacon = None
     messages = []
-    manager_port, runner_port, official_port = port(), port(), port()
-    origin = f'http://127.0.0.1:{official_port}'
+    manager_port, runner_port, beacon_port = port(), port(), port()
+    origin = f'http://127.0.0.1:{beacon_port}'
     cookie, csrf = '', ''
 
     def request(route, body=None):
@@ -197,13 +197,13 @@ sys.exit(subprocess.run([os.environ['FIXTURE_DOCKER'], *args]).returncode)
                 return subprocess.Popen([str(REPO / 'target/debug/cairn-beacon')],
                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env={
                         'CAIRN_BEACON_DATABASE_URL': database, 'CAIRN_BEACON_ORIGIN': origin,
-                        'CAIRN_BEACON_LISTEN': f'127.0.0.1:{official_port}',
+                        'CAIRN_BEACON_LISTEN': f'127.0.0.1:{beacon_port}',
                         'CAIRN_BEACON_EMAIL_FROM': 'fixture@example.test', 'CAIRN_BEACON_EMAIL_KEY': 'fixture-only',
                         'CAIRN_BEACON_EMAIL_ENDPOINT': f'http://127.0.0.1:{mailbox.server_port}/emails',
                         'CAIRN_INSTALLATION_IMAGE': image,
                     })
 
-            official = service(approved)
+            beacon = service(approved)
             wait(lambda: request('/api/account/options'))
             challenge, _ = request('/api/account/email-code', {'email': f'{name}@example.test'})
             code = re.search(r'\b\d{8}\b', messages[-1]['text'])[0]
@@ -227,9 +227,9 @@ sys.exit(subprocess.run([os.environ['FIXTURE_DOCKER'], *args]).returncode)
 
             for image, interrupted in ((approved, False), (failed, False), (failed, True), (failed_http, True)):
                 if image in (failed, failed_http):
-                    official.terminate()
-                    official.wait(timeout=15)
-                    official = service(image)
+                    beacon.terminate()
+                    beacon.wait(timeout=15)
+                    beacon = service(image)
                     wait(lambda: request('/api/account/options'))
                 before = command(docker + ['ps', '-q', 'manager', 'runner'])
                 if interrupted:
@@ -273,9 +273,9 @@ fetch('http://127.0.0.1:%d/internal/deployment-lease', {
         finally:
             if compose_file.exists():
                 subprocess.run(docker + ['down', '--timeout', '10'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=30)
-            if official:
-                official.terminate()
-                official.wait(timeout=15)
+            if beacon:
+                beacon.terminate()
+                beacon.wait(timeout=15)
             for image in images:
                 subprocess.run([DOCKER, 'image', 'rm', image], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=30)
             subprocess.run([DOCKER, 'run', '--rm', '-v', f'{root}:/fixture', BASE,

@@ -82,12 +82,12 @@ It reopens the last installation used by that account. Members can read agents,
 projects and skills and work in conversations; owner management is hidden.
 Appearance, app updates and notification permissions remain available to members.
 The selector shows each installation’s role and availability. With no installation,
-the app links to the official claim page to add or associate one.
+the app links to the beacon claim page to add or associate one.
 If Beacon is temporarily unreachable, the app preserves the stored
 session and offers a retry; an explicit rejection returns to email sign-in.
 There is no server-address, owner-password or bootstrap-token form.
 
-Set `CAIRN_BEACON_ORIGIN` to the fixed official HTTPS origin when building the
+Set `CAIRN_BEACON_ORIGIN` to the fixed beacon HTTPS origin when building the
 app. The repository does not choose a production hostname; without this build
 setting the app reports that Beacon is not configured. Signed
 distribution requires this setting and HTTPS. The Android workflow reads the
@@ -95,7 +95,7 @@ repository variable of the same name. This value is an origin, not a credential.
 
 For local development, use `adb reverse tcp:4310 tcp:4310` and
 `CAIRN_BEACON_ORIGIN=http://127.0.0.1:4310` when building a **debug** app. Run the
-official service on that port. HTTP is limited to localhost,
+Beacon on that port. HTTP is limited to localhost,
 127.0.0.1 and the emulator host alias 10.0.2.2; the server still validates Host
 against PUBLIC_URL. Prefer adb reverse so the existing localhost server config
 works unchanged. Release builds require HTTPS and normal certificate validation.
@@ -123,7 +123,7 @@ are configured; tag CI uses a persistent release key. Never commit a signing key
 - Kotlin serialization models mirror `packages/contracts/contracts.ts` and the API response
   shapes. OkHttp requests support cancellation, enforce a 30-second timeout,
   refuse redirects, and send the existing cookie plus CSRF token.
-- Appearance and the last installation per Cairn account are stored in DataStore. The official origin is fixed at build time. The session cookie is encrypted
+- Appearance and the last installation per Cairn account are stored in DataStore. The beacon origin is fixed at build time. The session cookie is encrypted
   with an AES-GCM Android Keystore key, bound to the origin with authenticated
   associated data, and written atomically outside Android backups. Cookies are
   checked against scheme, host, port, path and expiry. No password is persisted.
@@ -219,7 +219,7 @@ No deployment is performed by the Android build or CI.
 
 The current web API has no conversation rename/delete endpoints; those actions
 are not invented by the native client. Scheduled jobs continue on the server;
-there is no offline mutation queue. Native notifications use the official
+there is no offline mutation queue. Native notifications use the beacon
 service’s account/device subscriptions; previous periodic notification work is
 cancelled on upgrade. Browser Web Push continues to use its existing transport.
 
@@ -334,7 +334,7 @@ one-use handover requires an explicit browser confirmation naming the verified
 account and Cairn for Android before returning to the initiating app session.
 Only approve a connection you just requested in Cairn on your own device; opening
 a link sent by someone else must never authorize their app. The browser receives no
-Cairn session or repository access. The official `user:email` scope, verified-email
+Cairn session or repository access. The beacon `user:email` scope, verified-email
 linking policy and passkey store are shared with the web client.
 
 Account settings let an authenticated member link Google or GitHub, create a
@@ -350,9 +350,9 @@ Android app configuration from Firebase, not a service-account private key. With
 all four unset, account sign-in still works and push opt-in reports unavailable.
 The SDK does not create an FCM registration until notifications are enabled.
 Release evidence binds the compiled APK to these public Firebase values as well
-as its official origin, commit and version; changing them requires revalidation.
+as its beacon origin, commit and version; changing them requires revalidation.
 Configure the same project's private FCM sender only on Beacon;
-see [official configuration](../../docs/OFFICIAL-SERVICE.md).
+see [beacon configuration](../../docs/BEACON.md).
 
 For native passkeys, configure trusted APK SHA-256 signing certificate hashes on
 Beacon and serve its `/.well-known/assetlinks.json` over the HTTPS

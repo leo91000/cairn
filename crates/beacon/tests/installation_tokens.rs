@@ -105,7 +105,7 @@ async fn rotating_a_machine_token_closes_old_streams_and_can_retry_a_lost_respon
 }
 
 #[tokio::test]
-async fn the_machine_resumes_rotation_after_the_official_response_is_lost() {
+async fn the_machine_resumes_rotation_after_the_beacon_response_is_lost() {
     use axum::{
         Json,
         extract::State,

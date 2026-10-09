@@ -227,7 +227,7 @@ pub async fn http(s: Arc<Service>, kind: &str, id: &str, input: Input) -> Result
     }
     let after = cursor(&input)?;
     if input.identity.is_none() {
-        return Err(Error::unauthorized("Access through the official service."));
+        return Err(Error::unauthorized("Access through the Beacon."));
     }
     let scope = Scope::new(kind, id);
     // Subscribe before reading: commits during replay remain observable.

@@ -154,8 +154,8 @@ internal class ParityDeviceCases(private val compose: ComposeContentTestRule) {
                     }
                     val body =
                         when (path) {
-                            "/api/installations" -> officialInstallationsFixture()
-                            "/api/account/session" -> officialAccountFixture("fixture")
+                            "/api/installations" -> beaconInstallationsFixture()
+                            "/api/account/session" -> beaconAccountFixture("fixture")
                             "/api/installations/fixture/api/agents" ->
                                 wireJson.encodeToString(
                                     listOf(Agent(MAIN_AGENT_ID, "Agent principal"))
@@ -181,7 +181,7 @@ internal class ParityDeviceCases(private val compose: ComposeContentTestRule) {
             }
         val application = ApplicationProvider.getApplicationContext<Application>()
 
-        return CairnViewModel(application, officialOrigin = "").also { vm ->
+        return CairnViewModel(application, beaconOrigin = "").also { vm ->
             runBlocking {
                 vm.state.first { it.ready }
                 vm.connect(server.url("/").toString())

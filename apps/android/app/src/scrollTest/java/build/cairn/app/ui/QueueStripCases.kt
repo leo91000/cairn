@@ -111,8 +111,8 @@ abstract class QueueStripCases {
                                     return stream(LiveState(chat = neighbour))
                                 "/api/installations/fixture/api/chats/chat/stream" ->
                                     return stream(LiveState(chat = chat, run = chat.run), events)
-                                "/api/installations" -> officialInstallationsFixture()
-                                "/api/account/session" -> officialAccountFixture("fixture")
+                                "/api/installations" -> beaconInstallationsFixture()
+                                "/api/account/session" -> beaconAccountFixture("fixture")
                                 "/api/installations/fixture/api/agents" ->
                                     wireJson.encodeToString(
                                         listOf(Agent(MAIN_AGENT_ID, "Agent principal"))
@@ -134,7 +134,7 @@ abstract class QueueStripCases {
                 CairnViewModel(
                     ApplicationProvider.getApplicationContext<Application>(),
                     QueueVault(),
-                    officialOrigin = "",
+                    beaconOrigin = "",
                 )
             compose.setContent {
                 val state by vm.state.collectAsStateWithLifecycle()

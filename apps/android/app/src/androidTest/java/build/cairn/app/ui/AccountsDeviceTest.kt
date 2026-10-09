@@ -32,8 +32,8 @@ class AccountsDeviceTest {
                     override fun dispatch(request: RecordedRequest): MockResponse {
                         val result =
                             when ("${request.method} ${request.path?.substringBefore('?')}") {
-                                "GET /api/installations" -> officialInstallationsFixture()
-                                "GET /api/account/session" -> officialAccountFixture("fixture")
+                                "GET /api/installations" -> beaconInstallationsFixture()
+                                "GET /api/account/session" -> beaconAccountFixture("fixture")
                                 "GET /api/installations/fixture/api/accounts" ->
                                     """{"accounts":[${accounts.get()}],"signIn":${signIn.get()}}"""
                                 "POST /api/installations/fixture/api/accounts" -> {
@@ -66,7 +66,7 @@ class AccountsDeviceTest {
                 CairnViewModel(
                     ApplicationProvider.getApplicationContext<Application>(),
                     DeviceAccountsVault(),
-                    officialOrigin = "",
+                    beaconOrigin = "",
                 )
             compose.setContent {
                 val state by vm.state.collectAsStateWithLifecycle()

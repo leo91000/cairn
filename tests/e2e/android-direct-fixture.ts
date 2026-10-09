@@ -1,7 +1,7 @@
 import { chmod, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import process from 'node:process'
-import { officialRelayFixture } from './official-relay-fixture'
+import { beaconRelayFixture } from './beacon-relay-fixture'
 
 async function main() {
   // Device adapter for the existing real installation/control-plane fixture.
@@ -13,7 +13,7 @@ async function main() {
   process.env.CAIRN_BEACON_STUN_LISTEN ||= '0.0.0.0:3478'
   process.env.CAIRN_BEACON_STUN_URL ||= 'stun:10.0.2.2:3478'
   const network = process.env.CAIRN_NETWORK_ANDROID === 'true'
-  const fixture = await officialRelayFixture(4398, network ? '198.18.103.1' : '127.0.0.1')
+  const fixture = await beaconRelayFixture(4398, network ? '198.18.103.1' : '127.0.0.1')
   let cookie = ''
   let csrf = ''
 
@@ -49,10 +49,10 @@ async function main() {
   }
 
   try {
-    const service = fixture.official()
+    const service = fixture.beacon()
     await until(() => fetch(`${fixture.url}/health`).then(response => response.ok).catch(() => false), Boolean)
     if (service.exitCode !== null)
-      throw new Error('Official fixture exited')
+      throw new Error('Beacon fixture exited')
     const challenge = await request('/account/email-code', { email: `android-direct-${Date.now()}@example.test` })
     await until(async () => fixture.messages.length, value => value > 0)
     const code = fixture.messages[0]!.match(/\b\d{8}\b/)![0]

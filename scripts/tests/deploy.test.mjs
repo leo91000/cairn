@@ -126,8 +126,8 @@ describe('coolify deployment over HTTP', () => {
     await new Promise(resolve => server.close(resolve))
   })
 
-  it('deploys the official image and approves the paired installation without touching a runner', async () => {
-    compose = readFileSync(new URL('../../deploy/official/compose.production.yaml', import.meta.url), 'utf8')
+  it('deploys the beacon image and approves the paired installation without touching a runner', async () => {
+    compose = readFileSync(new URL('../../deploy/beacon/compose.production.yaml', import.meta.url), 'utf8')
     config.installationImage = `ghcr.io/leo91000/cairn@sha256:${'b'.repeat(64)}`
     healthResponses = [{ status: 'ok', commit: 'old-commit' }, { status: 'ok', commit: config.commit }]
     await deploy(config, { intervalMs: 0, timeoutMs: 1000 })
@@ -146,7 +146,7 @@ describe('coolify deployment over HTTP', () => {
   })
 
   it('repairs a half-applied bulk update before restarting', async () => {
-    compose = readFileSync(new URL('../../deploy/official/compose.production.yaml', import.meta.url), 'utf8')
+    compose = readFileSync(new URL('../../deploy/beacon/compose.production.yaml', import.meta.url), 'utf8')
     config.installationImage = `ghcr.io/leo91000/cairn@sha256:${'b'.repeat(64)}`
     bulkFailures = ['partial']
     await deploy(config, { intervalMs: 0, timeoutMs: 1000 })
@@ -160,7 +160,7 @@ describe('coolify deployment over HTTP', () => {
   })
 
   it('refuses masked previous values before any mutation', async () => {
-    compose = readFileSync(new URL('../../deploy/official/compose.production.yaml', import.meta.url), 'utf8')
+    compose = readFileSync(new URL('../../deploy/beacon/compose.production.yaml', import.meta.url), 'utf8')
     config.installationImage = `ghcr.io/leo91000/cairn@sha256:${'b'.repeat(64)}`
     environment[0].value = '********'
     await expect(deploy(config)).rejects.toThrow('read:sensitive')
@@ -168,7 +168,7 @@ describe('coolify deployment over HTTP', () => {
   })
 
   it('restores the previous pair if a half-applied update cannot be repaired', async () => {
-    compose = readFileSync(new URL('../../deploy/official/compose.production.yaml', import.meta.url), 'utf8')
+    compose = readFileSync(new URL('../../deploy/beacon/compose.production.yaml', import.meta.url), 'utf8')
     config.installationImage = `ghcr.io/leo91000/cairn@sha256:${'b'.repeat(64)}`
     const previous = structuredClone(environment)
     bulkFailures = ['partial', 'reject']
@@ -178,7 +178,7 @@ describe('coolify deployment over HTTP', () => {
   })
 
   it('reports that restarts must stay frozen when repair and restoration both fail', async () => {
-    compose = readFileSync(new URL('../../deploy/official/compose.production.yaml', import.meta.url), 'utf8')
+    compose = readFileSync(new URL('../../deploy/beacon/compose.production.yaml', import.meta.url), 'utf8')
     config.installationImage = `ghcr.io/leo91000/cairn@sha256:${'b'.repeat(64)}`
     bulkFailures = ['partial', 'reject', 'reject']
     await expect(deploy(config)).rejects.toThrow('freeze restarts and repair both values manually')
@@ -186,7 +186,7 @@ describe('coolify deployment over HTTP', () => {
   })
 
   it('never includes a malformed environment response in an error', async () => {
-    compose = readFileSync(new URL('../../deploy/official/compose.production.yaml', import.meta.url), 'utf8')
+    compose = readFileSync(new URL('../../deploy/beacon/compose.production.yaml', import.meta.url), 'utf8')
     config.installationImage = `ghcr.io/leo91000/cairn@sha256:${'b'.repeat(64)}`
     environmentResponse = 'fixture-sensitive-env'
     await expect(deploy(config)).rejects.toMatchObject({ message: 'Coolify GET /api/v1/services/cairn-service/envs returned invalid JSON' })
@@ -196,34 +196,34 @@ describe('coolify deployment over HTTP', () => {
   it('never includes malformed Compose contents in an error', async () => {
     compose = 'services: [fixture-sensitive-compose'
     config.installationImage = `ghcr.io/leo91000/cairn@sha256:${'b'.repeat(64)}`
-    await expect(deploy(config)).rejects.toMatchObject({ message: 'Coolify returned invalid official production Compose' })
+    await expect(deploy(config)).rejects.toMatchObject({ message: 'Coolify returned invalid beacon production Compose' })
     expect(requests.every(request => request.method === 'GET')).toBe(true)
   })
 
-  it.each(['old-manager', 'two-replicas', 'start-first'])('refuses unsafe official target %s before any mutation', async (target) => {
+  it.each(['old-manager', 'two-replicas', 'start-first'])('refuses unsafe beacon target %s before any mutation', async (target) => {
     config.installationImage = `ghcr.io/leo91000/cairn@sha256:${'b'.repeat(64)}`
     if (target !== 'old-manager') {
-      const document = parse(readFileSync(new URL('../../deploy/official/compose.production.yaml', import.meta.url), 'utf8'))
+      const document = parse(readFileSync(new URL('../../deploy/beacon/compose.production.yaml', import.meta.url), 'utf8'))
       if (target === 'two-replicas')
-        document.services.official.deploy.replicas = 2
+        document.services.beacon.deploy.replicas = 2
       else
-        document.services.official.deploy.update_config.order = 'start-first'
+        document.services.beacon.deploy.update_config.order = 'start-first'
       compose = stringify(document)
     }
 
-    await expect(deploy(config, { intervalMs: 0, timeoutMs: 1000 })).rejects.toThrow('single-process official')
+    await expect(deploy(config, { intervalMs: 0, timeoutMs: 1000 })).rejects.toThrow('single-process beacon')
     expect(requests.every(request => request.method === 'GET')).toBe(true)
   })
 
-  it('fails when official health is current but installation approval is stale', async () => {
-    compose = readFileSync(new URL('../../deploy/official/compose.production.yaml', import.meta.url), 'utf8')
+  it('fails when beacon health is current but installation approval is stale', async () => {
+    compose = readFileSync(new URL('../../deploy/beacon/compose.production.yaml', import.meta.url), 'utf8')
     config.installationImage = `ghcr.io/leo91000/cairn@sha256:${'b'.repeat(64)}`
     releaseImage = `ghcr.io/leo91000/cairn@sha256:${'c'.repeat(64)}`
     await expect(deploy(config, { intervalMs: 0, timeoutMs: 25 })).rejects.toThrow('installation image')
   })
 
-  it('fails on an official environment update without restarting or leaking API bodies', async () => {
-    compose = readFileSync(new URL('../../deploy/official/compose.production.yaml', import.meta.url), 'utf8')
+  it('fails on an beacon environment update without restarting or leaking API bodies', async () => {
+    compose = readFileSync(new URL('../../deploy/beacon/compose.production.yaml', import.meta.url), 'utf8')
     config.installationImage = `ghcr.io/leo91000/cairn@sha256:${'b'.repeat(64)}`
     patchStatus = 401
     await expect(deploy(config)).rejects.toThrow('HTTP 401')

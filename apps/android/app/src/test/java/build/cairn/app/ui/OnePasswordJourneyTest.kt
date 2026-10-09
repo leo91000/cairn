@@ -56,8 +56,8 @@ class OnePasswordJourneyTest {
                     override fun dispatch(request: RecordedRequest): MockResponse {
                         val result =
                             when (request.path) {
-                                "/api/installations" -> officialInstallationsFixture()
-                                "/api/account/session" -> officialAccountFixture("fixture-csrf")
+                                "/api/installations" -> beaconInstallationsFixture()
+                                "/api/account/session" -> beaconAccountFixture("fixture-csrf")
                                 "/api/installations/fixture/api/agents" ->
                                     wireJson.encodeToString(
                                         listOf(Agent(id = MAIN_AGENT_ID, name = "Cairn"))
@@ -81,7 +81,7 @@ class OnePasswordJourneyTest {
                 CairnViewModel(
                     ApplicationProvider.getApplicationContext<Application>(),
                     MemoryVault(),
-                    officialOrigin = "",
+                    beaconOrigin = "",
                 )
             compose.setContent {
                 val state by vm.state.collectAsStateWithLifecycle()

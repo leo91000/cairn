@@ -21,7 +21,7 @@ class MemoryVault : SessionVault {
 
 class CairnApiTest {
     @Test
-    fun `sign in challenges stay in memory and on the fixed official origin`() {
+    fun `sign in challenges stay in memory and on the fixed beacon origin`() {
         val origin = "https://cairn.example/".toHttpUrl()
         val vault = MemoryVault()
         val cookies = SessionCookies(origin, vault)
@@ -38,7 +38,7 @@ class CairnApiTest {
     }
 
     @Test
-    fun `official MCP grants and consent stay on the official service`() = runTest {
+    fun `beacon MCP grants and consent stay on the Beacon`() = runTest {
         MockWebServer().use { server ->
             repeat(2) { server.enqueue(MockResponse().setBody("{}")) }
             server.start()
@@ -56,7 +56,7 @@ class CairnApiTest {
     }
 
     @Test
-    fun `anonymous official session accepts null account and csrf`() {
+    fun `anonymous beacon session accepts null account and csrf`() {
         val session =
             wireJson.decodeFromString<Session>(
                 """{"authenticated":false,"csrf":null,"account":null,"installations":[]}"""
@@ -103,7 +103,7 @@ class CairnApiTest {
         }
 
     @Test
-    fun `email code uses the official origin and restores the account cookie`() = runTest {
+    fun `email code uses the beacon origin and restores the account cookie`() = runTest {
         MockWebServer().use { server ->
             server.enqueue(MockResponse().setBody("{}"))
             server.enqueue(

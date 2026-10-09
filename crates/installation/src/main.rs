@@ -121,11 +121,11 @@ where
         }
         "claim" => {
             let config = Config::load()?;
-            let official = std::env::var("CAIRN_BEACON_ORIGIN").ok();
+            let beacon = std::env::var("CAIRN_BEACON_ORIGIN").ok();
             let name = std::env::var("CAIRN_INSTALLATION_NAME")
                 .unwrap_or_else(|_| "My installation".into());
             cairn_installation::relay::device_claim(
-                official.as_deref(),
+                beacon.as_deref(),
                 &config.data_dir.join("installation-relay"),
                 &name,
                 stop,
@@ -328,7 +328,7 @@ where
         if let Err(error) = claimed {
             tracing::warn!(
                 error = %error,
-                "Installation claim failed; continuing without a relay. Check the official origin and obtain a new claim code before restarting"
+                "Installation claim failed; continuing without a relay. Check the beacon origin and obtain a new claim code before restarting"
             );
         }
     }

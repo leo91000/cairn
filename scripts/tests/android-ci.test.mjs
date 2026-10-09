@@ -21,7 +21,7 @@ const config = {
   commit: 'a'.repeat(40),
   tag: 'v0.31.0',
   runId: 123,
-  officialOrigin: 'https://cairn.example',
+  beaconOrigin: 'https://cairn.example',
 }
 const run = {
   id: config.runId,
@@ -63,10 +63,10 @@ describe('validated Android build reuse', () => {
       await expect(verifyBuild(directory, { ...config, ...change })).rejects.toThrow()
   })
 
-  it('refuses an APK compiled for another official service or without a production HTTPS origin', async () => {
+  it('refuses an APK compiled for another Beacon or without a production HTTPS origin', async () => {
     const directory = await temporaryBuild()
-    for (const officialOrigin of ['https://other.example', '', 'http://localhost:4310'])
-      await expect(verifyBuild(directory, { ...config, officialOrigin })).rejects.toThrow()
+    for (const beaconOrigin of ['https://other.example', '', 'http://localhost:4310'])
+      await expect(verifyBuild(directory, { ...config, beaconOrigin })).rejects.toThrow()
   })
 
   it('refuses cached APKs with different public Firebase configuration', async () => {

@@ -38,8 +38,8 @@ class NotificationsTest {
                             return MockResponse()
                                 .setBody(
                                     when (request.path) {
-                                        "/api/installations" -> officialInstallationsFixture()
-                                        "/api/account/session" -> officialAccountFixture("fixture")
+                                        "/api/installations" -> beaconInstallationsFixture()
+                                        "/api/account/session" -> beaconAccountFixture("fixture")
                                         "/api/installations/fixture/api/chats" ->
                                             if (pending) """[{"id":"chat","pendingQuestions":1}]"""
                                             else "[]"
@@ -120,8 +120,8 @@ class NotificationsTest {
                         MockResponse()
                             .setBody(
                                 when (request.path) {
-                                    "/api/installations" -> officialInstallationsFixture()
-                                    "/api/account/session" -> officialAccountFixture("fixture")
+                                    "/api/installations" -> beaconInstallationsFixture()
+                                    "/api/account/session" -> beaconAccountFixture("fixture")
                                     "/api/installations/fixture/api/nodes/alerts" -> alerts
                                     else -> "[]"
                                 }

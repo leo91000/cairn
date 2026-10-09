@@ -49,13 +49,13 @@ function artifacts(events: RunEvent[], chat = true) {
 
 describe('agent steps', () => {
   it('summarises the actions between two messages in one sentence', () => {
-    const items = artifacts([command('sed -n 1,80p apps/web/src/cart.ts', 0), command('sed -n 1,40p apps/web/src/cart.test.ts', 0), command('rg -n discount src', 0), edit('apps/web/src/cart.ts', 'apps/web/src/cart.test.ts'), command('pnpm test', 1), command('pnpm test', 0)])
+    const items = artifacts([command('sed -n 1,80p src/cart.ts', 0), command('sed -n 1,40p src/cart.test.ts', 0), command('rg -n discount src', 0), edit('src/cart.ts', 'src/cart.test.ts'), command('pnpm test', 1), command('pnpm test', 0)])
     expect(actionSentence(items)).toBe('Read 2 files, searched once, edited 2 files, ran 2 commands')
     expect(actionSentence([])).toBe('Followed the run')
   })
 
   it('folds consecutive reads and keeps failures and running steps apart', () => {
-    const steps = agentSteps(artifacts([command('sed -n 1,80p apps/web/src/cart.ts', 0), command('cat apps/web/src/cart.test.ts', 0), edit('apps/web/src/cart.ts'), command('pnpm test', 1), command('cat README.md', null, 'item.started')]))
+    const steps = agentSteps(artifacts([command('sed -n 1,80p src/cart.ts', 0), command('cat src/cart.test.ts', 0), edit('src/cart.ts'), command('pnpm test', 1), command('cat README.md', null, 'item.started')]))
     expect(steps.map(({
       title,
       detail,

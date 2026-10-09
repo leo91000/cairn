@@ -13,7 +13,7 @@ import okhttp3.mockwebserver.*
 import org.junit.Rule
 import org.junit.Test
 
-/** The official session and relayed stream reach the same conversation UI on JVM and device. */
+/** The beacon session and relayed stream reach the same conversation UI on JVM and device. */
 abstract class BackgroundWaitCases {
     @get:Rule val compose = createComposeRule()
 
@@ -113,8 +113,8 @@ abstract class BackgroundWaitCases {
 
                         val body =
                             when (path) {
-                                "/api/account/session" -> officialAccountFixture()
-                                "/api/installations" -> officialInstallationsFixture()
+                                "/api/account/session" -> beaconAccountFixture()
+                                "/api/installations" -> beaconInstallationsFixture()
                                 "/api/installations/fixture/api/agents" ->
                                     wireJson.encodeToString(
                                         listOf(Agent(MAIN_AGENT_ID, "Agent principal"))
@@ -134,7 +134,7 @@ abstract class BackgroundWaitCases {
                 CairnViewModel(
                     ApplicationProvider.getApplicationContext<Application>(),
                     BackgroundWaitVault(),
-                    officialOrigin = "",
+                    beaconOrigin = "",
                 )
             compose.setContent {
                 val state by vm.state.collectAsStateWithLifecycle()

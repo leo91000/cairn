@@ -93,7 +93,7 @@ const installationOptions = computed<SelectOption[]>(() => (session.value?.insta
     tone: item.updateRequired ? 'warning' : item.online ? 'success' : 'muted',
   },
 })))
-const officialReturnKey = 'cairn-installation-return'
+const beaconReturnKey = 'cairn-installation-return'
 const authorizePage = window.location.pathname === '/authorize'
 const claimPage = window.location.pathname === '/claim'
 
@@ -406,10 +406,10 @@ async function oauth(provider: 'google' | 'github') {
   try {
     const start = await accountRequest(`oauth/${provider}/start`, {})
     try {
-      sessionStorage.removeItem(officialReturnKey)
+      sessionStorage.removeItem(beaconReturnKey)
       if (state.installationId || claimPage || authorizePage) {
         const destination = claimPage ? '/claim' : `${window.location.pathname}${window.location.search}${window.location.hash}`
-        sessionStorage.setItem(officialReturnKey, destination)
+        sessionStorage.setItem(beaconReturnKey, destination)
       }
     }
     catch {}
@@ -554,12 +554,12 @@ function changeEmail() {
 
 onMounted(async () => {
   const url = new URL(window.location.href)
-  // OAuth callbacks return to the official root. Restore this tab's explicit
+  // OAuth callbacks return to the beacon root. Restore this tab's explicit
   // account or installation page before the session chooses an installation.
   try {
-    const destination = sessionStorage.getItem(officialReturnKey)
+    const destination = sessionStorage.getItem(beaconReturnKey)
     if (url.pathname === '/' && destination) {
-      sessionStorage.removeItem(officialReturnKey)
+      sessionStorage.removeItem(beaconReturnKey)
       if (destination === '/claim' || /^\/authorize(?:\?|$)/.test(destination) || /^\/installations\/[\w-]+\//.test(destination)) {
         const target = new URL(destination, url.origin)
         const signInError = url.searchParams.get('sign_in_error')

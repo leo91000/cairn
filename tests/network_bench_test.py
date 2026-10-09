@@ -41,7 +41,7 @@ class NetworkBenchTest(unittest.TestCase):
             )
             report = json.loads(output.read_text())
             self.assertEqual(report["scenario"], "same-lan")
-            self.assertEqual(report["stunResponder"], "official-rust")
+            self.assertEqual(report["stunResponder"], "beacon-rust")
             self.assertEqual(report["probe"]["received"], 10)
             self.assertEqual(report["probe"]["sent"], 10)
             self.assertFalse(report["probe"]["translated"])

@@ -419,13 +419,7 @@ async fn native_confirmation(
     mut identity: VerifiedIdentity,
 ) -> Result<Response, ApiError> {
     identity.email = normalized_email(&identity.email).map_err(|_| rejected())?;
-    let displayed_email = identity
-        .email
-        .replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
-        .replace('\'', "&#39;");
+    let displayed_email = crate::html::escape_html(&identity.email);
 
     // GitHub's public profile is unnecessary for its verified-email policy.
     identity.profile = Value::Null;

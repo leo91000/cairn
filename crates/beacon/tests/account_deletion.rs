@@ -347,7 +347,7 @@ async fn deleting_a_member_preserves_the_owners_installation_and_requires_curren
     relay.close().await;
 }
 
-// Fixture locks only coordinate HTTP callers; verdicts stay at the official API.
+// Fixture locks only coordinate HTTP callers; verdicts stay at the beacon API.
 async fn wait_for_account_lock(app: &common::Fixture, account: &str) {
     tokio::time::timeout(Duration::from_secs(3), async {
         loop {

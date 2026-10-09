@@ -28,6 +28,7 @@ class MainActivity : ComponentActivity() {
     private var sharedUrl by mutableStateOf("")
 
     override fun onCreate(savedInstanceState: Bundle?) {
+        setTheme(R.style.Theme_Cairn)
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
         receive(intent)

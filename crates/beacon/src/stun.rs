@@ -1,4 +1,4 @@
-//! Binding-only address discovery, in the single official process. No TURN or content.
+//! Binding-only address discovery, in the single beacon process. No TURN or content.
 use std::{
     collections::HashMap,
     io,
@@ -85,7 +85,7 @@ pub async fn serve_with_status(socket: UdpSocket, status: Status) -> io::Result<
                 status.0.receive_errors.fetch_add(1, Ordering::Relaxed);
                 if last_receive_warning.is_none_or(|last| last.elapsed() >= Duration::from_secs(30))
                 {
-                    tracing::warn!("Official STUN receive failed; retrying");
+                    tracing::warn!("Beacon STUN receive failed; retrying");
                     last_receive_warning = Some(Instant::now());
                 }
                 tokio::time::sleep(Duration::from_millis(100)).await;
@@ -181,7 +181,7 @@ pub async fn serve_with_status(socket: UdpSocket, status: Status) -> io::Result<
         if socket.send_to(&response, source).await.is_err() {
             status.0.send_errors.fetch_add(1, Ordering::Relaxed);
             if last_send_warning.is_none_or(|last| last.elapsed() >= Duration::from_secs(30)) {
-                tracing::warn!("Official STUN send failed; continuing");
+                tracing::warn!("Beacon STUN send failed; continuing");
                 last_send_warning = Some(Instant::now());
             }
         }

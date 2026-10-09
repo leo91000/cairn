@@ -59,8 +59,8 @@ abstract class SkillMentionCases {
                         }
                         val body =
                             when (path) {
-                                "/api/installations" -> officialInstallationsFixture()
-                                "/api/account/session" -> officialAccountFixture("fixture")
+                                "/api/installations" -> beaconInstallationsFixture()
+                                "/api/account/session" -> beaconAccountFixture("fixture")
                                 "/api/installations/fixture/api/agents" ->
                                     wireJson.encodeToString(listOf(agent))
                                 "/api/installations/fixture/api/skills" ->
@@ -84,7 +84,7 @@ abstract class SkillMentionCases {
                 CairnViewModel(
                     ApplicationProvider.getApplicationContext<Application>(),
                     SkillVault(),
-                    officialOrigin = "",
+                    beaconOrigin = "",
                 )
             var backDispatcher: OnBackPressedDispatcher? = null
             compose.setContent {

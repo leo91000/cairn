@@ -18,7 +18,7 @@ class Updates(unittest.TestCase):
         for failure in ('', 'health', 'runner-unhealthy', 'stop-once', 'up-once', 'exec-once', 'digest', 'unapproved', 'interrupted', 'interrupted-stopped', 'interrupted-created', 'interrupted-missing', 'interrupted-restarting', 'interrupted-unhealthy', 'interrupted-exec-once', 'interrupted-foreign-restarting', 'lease', 'expired-lease'):
             with self.subTest(failure=failure), tempfile.TemporaryDirectory() as directory:
                 root = Path(directory)
-                class Official(http.server.BaseHTTPRequestHandler):
+                class Beacon(http.server.BaseHTTPRequestHandler):
                     def do_GET(self):
                         self.send_response(200)
                         self.end_headers()
@@ -27,7 +27,7 @@ class Updates(unittest.TestCase):
                     def log_message(self, *_):
                         pass
 
-                server = http.server.ThreadingHTTPServer(('127.0.0.1', 0), Official)
+                server = http.server.ThreadingHTTPServer(('127.0.0.1', 0), Beacon)
                 threading.Thread(target=server.serve_forever, daemon=True).start()
                 origin = f'http://127.0.0.1:{server.server_port}'
                 config = {'image': OLD, 'origin': origin}

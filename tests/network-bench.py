@@ -313,9 +313,9 @@ def main():
             stun_namespace = network.internet
             listen_address = network.stun_address
             if args.scenario == "same-server":
-                # Official STUN is a second container on the installation host.
+                # Beacon STUN is a second container on the installation host.
                 router = network.participants["installation"]["router"]
-                stun_namespace = network.namespace("official-stun")
+                stun_namespace = network.namespace("beacon-stun")
                 local, remote = network.pair(router, stun_namespace, "s")
                 run("ip", "-n", router, "link", "set", local, "master", "lan")
                 network.address(stun_namespace, remote, "10.102.2.3/24")
@@ -330,7 +330,7 @@ def main():
                                  str(Path("target/debug/examples/network_stun_server").resolve()),
                                  listen_address, str(ready))
             wait_ready(ready, stun, "STUN listener before host masquerading")
-            report = {"scenario": args.scenario, "stunResponder": "official-rust",
+            report = {"scenario": args.scenario, "stunResponder": "beacon-rust",
                       "browserHostPolicy": "mdns" if args.scenario == "mdns-only-client" else "numeric",
                       "probe": network.probe(binary, "client"),
                       "installationProbe": network.probe(binary, "installation")}
@@ -471,7 +471,7 @@ def browser(network, binary, directory, args, report):
         return str(path)
 
     env["CAIRN_BEACON_STUN_URL"] = "stun:" + network.stun_address
-    # Empty operator override must use authenticated official STUN, not disable direct.
+    # Empty operator override must use authenticated beacon STUN, not disable direct.
     env["CAIRN_DIRECT_STUN_URLS"] = ""
     if args.scenario == "same-server":
         env["CAIRN_DIRECT_PUBLIC_IP"] = "198.18.102.3"

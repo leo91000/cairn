@@ -87,7 +87,7 @@ class WorkspaceJourneyTest {
                             launched = true
                         val data =
                             when (path) {
-                                "/api/installations" -> officialInstallationsFixture()
+                                "/api/installations" -> beaconInstallationsFixture()
                                 "/api/account/session" ->
                                     """{"authenticated":false,"csrf":null,"account":null,"installations":[]}"""
                                 "/api/account/email-code" ->
@@ -98,7 +98,7 @@ class WorkspaceJourneyTest {
                                             "Set-Cookie",
                                             "cairn_session=test-cookie; Path=/; Max-Age=3600; HttpOnly",
                                         )
-                                        .setBody(officialAccountFixture("test-csrf"))
+                                        .setBody(beaconAccountFixture("test-csrf"))
                                 "/api/installations/fixture/api/agents" ->
                                     """[{"id":"agent","name":"Reviewer"}]"""
                                 "/api/installations/fixture/api/projects" ->
@@ -237,7 +237,7 @@ class WorkspaceJourneyTest {
                 CairnViewModel(
                     ApplicationProvider.getApplicationContext<Application>(),
                     MemoryVault(),
-                    officialOrigin = "",
+                    beaconOrigin = "",
                 )
             compose.setContent {
                 val theme by vm.theme.collectAsStateWithLifecycle(initialValue = "system")

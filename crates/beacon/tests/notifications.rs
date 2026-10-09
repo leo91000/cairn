@@ -459,7 +459,7 @@ async fn chat_run(relay: &common::RelayedInstallation) -> (String, String) {
     let chat_id = chat["id"].as_str().unwrap().to_owned();
     let run_id = uuid::Uuid::new_v4().to_string();
     chat["runId"] = run_id.clone().into();
-    // The execution adapter supplies a running turn; assertions cross the official API or push provider.
+    // The execution adapter supplies a running turn; assertions cross the beacon API or push provider.
     relay.installation.store.put("chats", chat).await.unwrap();
     let run = json!({
         "id": run_id,
@@ -502,7 +502,7 @@ async fn wait_pushes(mail: &PushMailbox, count: usize) {
         }
     })
     .await
-    .expect("the official service must deliver the installation event through the push provider");
+    .expect("Beacon must deliver the installation event through the push provider");
     assert_eq!(mail.messages.lock().unwrap().len(), count);
 }
 

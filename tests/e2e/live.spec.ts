@@ -206,7 +206,7 @@ test('two independent clients follow deltas, recover offline, refresh mid-answer
     await workspace.api(`/api/chats/${chat.id}/messages`, 'POST', { id: randomUUID(), text: 'fixture:stream' })
     await expect(message(page)).toContainText('005')
     await expect(message(other)).toContainText('005')
-    // The official transport permits one finite read before its first live batch.
+    // The beacon transport permits one finite read before its first live batch.
     // Once connected, deltas must arrive without recurring history/metadata reads.
     requests.length = 0
     await second.setOffline(true)

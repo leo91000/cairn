@@ -1,10 +1,10 @@
 # One-command installation
 
-For an installation sharing the official `https://cairn.build` production server,
+For an installation sharing the beacon `https://cairn.build` production server,
 follow the [same-server runbook](PRODUCTION-CAIRN.md). Reserve memory/disk for the
-official process, Postgres and proxy before assigning installation VM budgets.
+beacon process, Postgres and proxy before assigning installation VM budgets.
 
-Sign in to the official service and choose **Add an installation**. Copy the
+Sign in to the Beacon and choose **Add an installation**. Copy the
 complete `curl … | sudo bash` command onto a trusted Linux x86-64 machine. Its
 single-use code lasts ten minutes and is passed by the launcher through a private
 environment to `host.py`, never in a download URL. The copied shell command can
@@ -32,7 +32,7 @@ rerun with recovery instructions and is retained rather than overwritten. The on
 claim environment is cleared after success or failure; after startup the manager
 is recreated without it. A refused or expired code leaves Cairn running unclaimed.
 Obtain a new command and rerun it, or run `sudo cairn claim` and confirm its code in
-the official app. After the fallback command confirms success, restart the manager
+the beacon app. After the fallback command confirms success, restart the manager
 to load its new relay identity:
 
 ```sh
@@ -85,11 +85,11 @@ explicit server confirmation replaces the form confirmation; `false` refuses R2.
 ## Automatic approved updates
 
 The installer enables `cairn-installation-update.timer` on the host. It checks the
-saved official origin's `/install/release` every five minutes, with up to thirty
+saved beacon origin's `/install/release` every five minutes, with up to thirty
 seconds of jitter, and two minutes after boot. The operator selects the tested
 immutable image using `CAIRN_INSTALLATION_IMAGE`; no mutable tag is accepted.
 Downloads are verified against Docker's repository digest before any restart.
-If the official service or registry is unavailable, the current image keeps running.
+If the Beacon or registry is unavailable, the current image keeps running.
 The update channel is independent of the relay, so an incompatible installation
 can still update.
 
@@ -124,7 +124,7 @@ sudo journalctl -u cairn-installation-update.service
 ```
 
 The timer and installer share the same nonblocking host lock. Containers receive
-no Docker socket. Rerun the current official installation command to refresh the
+no Docker socket. Rerun the current beacon installation command to refresh the
 checksum-verified host supervisors on an existing one-command installation. Recovery
 renews the recorded deployment lease before stopping a running manager, because
 a durable acknowledgement may outlive the lease. If the interrupted replacement
@@ -143,7 +143,7 @@ sudo docker compose --project-directory /var/lib/cairn-installation \
 ```
 
 For a disposable test, build the current binaries and web output, then run
-`bash tests/installation-installer-container.sh`. It uses the real official
+`bash tests/installation-installer-container.sh`. It uses the real beacon
 service, manager, Postgres and Garage. All Docker lifecycle commands (pull,
 startup, recreation and container health execution) are simulated by an adapter
 that starts the manager binary as a fixture process. The generated configuration

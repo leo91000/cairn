@@ -49,7 +49,7 @@ def wait_for(check):
         except (OSError, urllib.error.HTTPError, KeyError, AssertionError):
             pass
         time.sleep(0.2)
-    raise AssertionError('The real official service or installation did not become ready')
+    raise AssertionError('The real Beacon or installation did not become ready')
 
 
 def run_installer(code=''):
@@ -176,7 +176,7 @@ sys.exit(subprocess.run(['/usr/bin/curl', *args]).returncode)
         binary.write_text(contents)
         binary.chmod(0o755)
 
-    class Official(http.server.BaseHTTPRequestHandler):
+    class Beacon(http.server.BaseHTTPRequestHandler):
         def do_GET(self):
             self.send_response(200)
             self.end_headers()
@@ -191,7 +191,7 @@ sys.exit(subprocess.run(['/usr/bin/curl', *args]).returncode)
         def log_message(self, *_):
             pass
 
-    class Mailbox(Official):
+    class Mailbox(Beacon):
         def do_POST(self):
             MAIL.append(json.loads(self.rfile.read(int(self.headers['Content-Length']))))
             self.send_response(200)
@@ -199,7 +199,7 @@ sys.exit(subprocess.run(['/usr/bin/curl', *args]).returncode)
             self.wfile.write(b'{}')
 
     if mode == 'prepare':
-        server = http.server.ThreadingHTTPServer(('127.0.0.1', 48151), Official)
+        server = http.server.ThreadingHTTPServer(('127.0.0.1', 48151), Beacon)
         threading.Thread(target=server.serve_forever, daemon=True).start()
         try:
             for variable, value, message in [('INSTALLER_OS', 'Darwin', 'Linux'),
@@ -266,18 +266,18 @@ sys.exit(subprocess.run(['/usr/bin/curl', *args]).returncode)
            'CAIRN_BEACON_EMAIL_ENDPOINT': f'http://127.0.0.1:{mailbox.server_port}/emails'}
     os.environ['INSTALLER_VERIFY'] = '1'
     os.environ['AWS_CA_BUNDLE'] = '/etc/ssl/certs/ca-certificates.crt'
-    official = subprocess.Popen(['/repo/target/debug/cairn-beacon'], env=env,
+    beacon = subprocess.Popen(['/repo/target/debug/cairn-beacon'], env=env,
                                 stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
 
-    def official_ready():
-        if official.poll() is not None:
-            raise RuntimeError('Fixture official service exited: ' + official.communicate()[1].decode())
+    def beacon_ready():
+        if beacon.poll() is not None:
+            raise RuntimeError('Fixture Beacon exited: ' + beacon.communicate()[1].decode())
         return request('/api/account/options')[0] is not None
 
     external = None
     proxy = None
     try:
-        wait_for(official_ready)
+        wait_for(beacon_ready)
         challenge, _ = request('/api/account/email-code', {'email': 'installer@example.test'})
         import re
         code = re.search(r'\b\d{8}\b', MAIL[-1]['text'])[0]
@@ -409,12 +409,12 @@ sys.exit(subprocess.run(['/usr/bin/curl', *args]).returncode)
         # The supervisor executes real Node health/lease calls against the manager.
         for digit, fail in [('b', False), ('c', True)]:
             candidate = 'ghcr.io/leo91000/cairn@sha256:' + digit * 64
-            official.terminate()
-            official.wait(timeout=15)
-            official = subprocess.Popen(['/repo/target/debug/cairn-beacon'],
+            beacon.terminate()
+            beacon.wait(timeout=15)
+            beacon = subprocess.Popen(['/repo/target/debug/cairn-beacon'],
                                         env={**env, 'CAIRN_INSTALLATION_IMAGE': candidate},
                                         stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
-            wait_for(official_ready)
+            wait_for(beacon_ready)
             update_env = {**os.environ, 'PATH': '/fixture/bin:' + os.environ['PATH'],
                           'CAIRN_INSTALLATION_ROOT': str(ROOT)}
             if fail:
@@ -439,8 +439,8 @@ sys.exit(subprocess.run(['/usr/bin/curl', *args]).returncode)
         pid = ROOT / 'manager.pid'
         if pid.exists():
             os.kill(int(pid.read_text()), signal.SIGTERM)
-        official.terminate()
-        official.wait(timeout=15)
+        beacon.terminate()
+        beacon.wait(timeout=15)
         mailbox.shutdown()
         if proxy:
             proxy.shutdown()

@@ -4,7 +4,7 @@ use common::RelayedInstallation;
 use serde_json::json;
 
 #[tokio::test]
-async fn owner_reads_storage_settings_through_the_official_api_without_credentials() {
+async fn owner_reads_storage_settings_through_the_beacon_api_without_credentials() {
     let fixture = RelayedInstallation::new(axum::Router::new()).await;
     let response = fixture.get("/settings/storage").send().await.unwrap();
     assert_eq!(response.status(), 200);

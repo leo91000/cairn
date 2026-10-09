@@ -571,7 +571,7 @@ test('answers in-flight questions with choices or free text on desktop and mobil
   await page.screenshot({ path: test.info().outputPath('notifications-mobile.png'), animations: 'disabled' })
 })
 
-test('installation push registration is removed in favor of the official account', async ({ page, workspace }) => {
+test('installation push registration is removed in favor of the beacon account', async ({ page, workspace }) => {
   await workspace.restart()
   await page.goto(workspacePath('/chats'))
   await authenticateWorkspace(page)

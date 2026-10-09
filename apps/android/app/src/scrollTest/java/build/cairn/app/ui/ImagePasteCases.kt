@@ -73,8 +73,8 @@ abstract class ImagePasteCases {
                         }
                         val body =
                             when (path) {
-                                "/api/installations" -> officialInstallationsFixture()
-                                "/api/account/session" -> officialAccountFixture("fixture")
+                                "/api/installations" -> beaconInstallationsFixture()
+                                "/api/account/session" -> beaconAccountFixture("fixture")
                                 "/api/installations/fixture/api/agents" ->
                                     wireJson.encodeToString(listOf(agent))
                                 "/api/installations/fixture/api/chats/chat/messages" -> {
@@ -92,7 +92,7 @@ abstract class ImagePasteCases {
                     }
                 }
             server.start()
-            val vm = CairnViewModel(app, PasteVault(), officialOrigin = "")
+            val vm = CairnViewModel(app, PasteVault(), beaconOrigin = "")
             compose.setContent {
                 val state by vm.state.collectAsStateWithLifecycle()
                 LaunchedEffect(Unit) {

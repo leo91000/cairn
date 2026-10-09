@@ -197,9 +197,9 @@ describe('tasks, schedules, and skills', () => {
     await ctx.service.skills.save('review', skill)
     const root = path.join(ctx.home, '.agents/skills/review')
     for (const file of [
-      '../../secret',
+      '../secret',
       '/tmp/file',
-      'references/../../secret',
+      'references/../secret',
       'a\\..\\secret',
     ]) {
       await expect(

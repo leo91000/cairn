@@ -88,14 +88,14 @@ class ArtifactLinksTest {
                                                 else null,
                                         )
                                     )
-                                "/api/installations" -> officialInstallationsFixture()
+                                "/api/installations" -> beaconInstallationsFixture()
                                 "/api/account/session" ->
                                     return MockResponse()
                                         .setHeader(
                                             "Set-Cookie",
                                             "cairn_session=fixture; Path=/; HttpOnly",
                                         )
-                                        .setBody(officialAccountFixture("fixture"))
+                                        .setBody(beaconAccountFixture("fixture"))
                                 "/api/installations/fixture/api/runs/older/artifacts" ->
                                     wireJson.encodeToString(listOf(file, sibling))
                                 "/api/installations/fixture/api/runs/older/artifacts/file?download=1" ->
@@ -121,7 +121,7 @@ class ArtifactLinksTest {
                 CairnViewModel(
                     ApplicationProvider.getApplicationContext<Application>(),
                     MemoryVault(),
-                    officialOrigin = "",
+                    beaconOrigin = "",
                 )
             compose.setContent {
                 val state by vm.state.collectAsStateWithLifecycle()

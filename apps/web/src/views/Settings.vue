@@ -4,9 +4,9 @@ import { computed, onMounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import {
   api,
+  beaconEntry,
   date,
   notify,
-  officialEntry,
   state,
 } from '../api'
 import AccountConfirmation from '../components/AccountConfirmation.vue'
@@ -49,7 +49,7 @@ async function load() {
       api('/tokens'),
       api('/audit'),
     ])
-    if (officialEntry)
+    if (beaconEntry)
       settings.value.mcpUrl = `${location.origin}/mcp`
   }
   catch (e) {
@@ -333,7 +333,7 @@ async function copy(value: string) {
         <UiAlert v-if="error">
           {{ error }}
         </UiAlert>
-        <UiButton v-if="officialEntry" @click="confirmingIdentity = true">
+        <UiButton v-if="beaconEntry" @click="confirmingIdentity = true">
           Confirm identity
         </UiButton>
         <UiButton variant="primary" type="submit" :disabled="!scopes.length">

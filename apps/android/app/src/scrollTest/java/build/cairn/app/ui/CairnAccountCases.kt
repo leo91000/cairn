@@ -94,7 +94,7 @@ abstract class CairnAccountCases {
             val origin = server.url("/").toString()
             val vault = sessionVault(application)
             vault.write(origin, "cairn_session=selection-fixture; Path=/; Max-Age=3600; HttpOnly")
-            val model = mutableStateOf(CairnViewModel(application, vault, officialOrigin = ""))
+            val model = mutableStateOf(CairnViewModel(application, vault, beaconOrigin = ""))
             val updates = build.cairn.app.update.UpdateViewModel(application)
             compose.setContent {
                 val vm = model.value
@@ -176,7 +176,7 @@ abstract class CairnAccountCases {
             val previouslyNotified = setOf("existing-question")
             runBlocking { model.value.notifications.setSeen(previouslyNotified) }
             compose.runOnIdle {
-                model.value = CairnViewModel(application, vault, officialOrigin = "")
+                model.value = CairnViewModel(application, vault, beaconOrigin = "")
             }
             compose.waitUntil(30000) {
                 compose
@@ -306,7 +306,7 @@ abstract class CairnAccountCases {
                                     if (!path.startsWith("/api/installations/home/api/"))
                                         return MockResponse()
                                             .setResponseCode(404)
-                                            .setBody("""{"error":"Not an official endpoint"}""")
+                                            .setBody("""{"error":"Not an beacon endpoint"}""")
                                     assertEquals(
                                         "cairn_session=account-fixture",
                                         request.getHeader("Cookie"),
@@ -333,7 +333,7 @@ abstract class CairnAccountCases {
             val application = ApplicationProvider.getApplicationContext<Application>()
             val vault = sessionVault(application)
             vault.write(server.url("/").toString(), null)
-            val vm = CairnViewModel(application, vault, officialOrigin = "")
+            val vm = CairnViewModel(application, vault, beaconOrigin = "")
             compose.setContent {
                 LaunchedEffect(Unit) {
                     vm.state.first { it.ready }
@@ -396,7 +396,7 @@ abstract class CairnAccountCases {
         }
     }
 
-    fun unavailableOfficialServiceRetriesTheStoredSessionAndOnlyRejectionSignsOut() {
+    fun unavailableBeaconServiceRetriesTheStoredSessionAndOnlyRejectionSignsOut() {
         MockWebServer().use { server ->
             val rejected = java.util.concurrent.atomic.AtomicBoolean(false)
             val installations =
@@ -409,7 +409,7 @@ abstract class CairnAccountCases {
             val origin = server.url("/").toString()
             val vault = sessionVault(application)
             vault.write(origin, "cairn_session=retry-fixture; Path=/; Max-Age=3600; HttpOnly")
-            val vm = CairnViewModel(application, vault, officialOrigin = "")
+            val vm = CairnViewModel(application, vault, beaconOrigin = "")
             compose.setContent {
                 LaunchedEffect(Unit) {
                     vm.state.first { it.ready }

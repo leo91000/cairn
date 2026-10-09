@@ -1658,7 +1658,7 @@ async fn an_authority_wait_never_delays_already_admitted_work() {
     relay.installation.worker.close().await;
     proxy.close().await;
     relay.close().await;
-    launching.expect("The official authority delayed launching already admitted work");
+    launching.expect("The beacon authority delayed launching already admitted work");
 }
 
 #[tokio::test]
@@ -2085,7 +2085,7 @@ impl AuthorPolicyProxy {
 }
 
 #[tokio::test]
-async fn task_pause_and_archive_need_no_official_round_trip() {
+async fn task_pause_and_archive_need_no_beacon_round_trip() {
     let relay = RelayedInstallation::new(axum::Router::new()).await;
     let (cookie, session) = member(&relay, "pause-author@example.test").await;
     let id = relay.session["installations"][0]["id"].as_str().unwrap();

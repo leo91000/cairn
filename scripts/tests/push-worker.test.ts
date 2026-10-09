@@ -45,6 +45,6 @@ it('shows private notifications, focuses the matching chat and dismisses answere
   expect(close).toHaveBeenCalledTimes(2)
   handlers.notificationclick({ notification: { close, data: { url: 'https://evil.test/' } }, waitUntil })
   expect(navigate).toHaveBeenCalledTimes(1)
-  handlers.push({ data: { json: () => ({ chatId: '../../settings', questionId }) }, waitUntil })
+  handlers.push({ data: { json: () => ({ chatId: '../settings', questionId }) }, waitUntil })
   expect(showNotification).toHaveBeenCalledTimes(1)
 })

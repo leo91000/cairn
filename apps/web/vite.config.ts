@@ -41,7 +41,7 @@ export default defineConfig({
     rolldownOptions: {
       input: { default: fileURLToPath(new URL('index.html', import.meta.url)), beacon: fileURLToPath(new URL('beacon.html', import.meta.url)) },
       output: {
-        // Both documents enter the same official account shell. Keep its initial dependencies
+        // Both documents enter the same beacon account shell. Keep its initial dependencies
         // together so each document loads one shared bundle; views stay lazy.
         codeSplitting: { groups: [{ name: 'workspace', tags: ['$initial'], minShareCount: 2 }] },
       },

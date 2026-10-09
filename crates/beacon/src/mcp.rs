@@ -1,4 +1,4 @@
-//! Official MCP grants. Content and tool execution remain on the installation.
+//! Beacon MCP grants. Content and tool execution remain on the installation.
 use super::{ApiError, Service, digest, installations, random_token, relay};
 use axum::{
     Json,
@@ -698,7 +698,7 @@ pub(super) async fn public_security(request: Request, next: axum::middleware::Ne
         .path()
         .starts_with("/api/public/installations/");
     let mut response = next.run(request).await;
-    let official_offline_page = response
+    let beacon_offline_page = response
         .extensions()
         .get::<relay::PublicOfflinePage>()
         .is_some();
@@ -725,7 +725,7 @@ pub(super) async fn public_security(request: Request, next: axum::middleware::Ne
                 media_type.trim().eq_ignore_ascii_case("text/html")
                     || media_type.trim().eq_ignore_ascii_case("image/svg+xml")
             });
-        if active_content && !official_offline_page {
+        if active_content && !beacon_offline_page {
             headers.insert(
                 "content-disposition",
                 HeaderValue::from_static("attachment"),

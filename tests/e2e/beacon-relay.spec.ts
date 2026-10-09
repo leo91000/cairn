@@ -2,11 +2,11 @@ import { Buffer } from 'node:buffer'
 import { once } from 'node:events'
 import { join } from 'node:path'
 import { expect, test } from '@playwright/test'
-import { officialRelayFixture } from './official-relay-fixture'
+import { beaconRelayFixture } from './beacon-relay-fixture'
 
-test('claims an installation and sends after relay restarts and official session renewal', async ({ page }) => {
+test('claims an installation and sends after relay restarts and beacon session renewal', async ({ page }) => {
   test.setTimeout(120000)
-  const fixture = await officialRelayFixture()
+  const fixture = await beaconRelayFixture()
   const {
     root,
     url,
@@ -14,10 +14,10 @@ test('claims an installation and sends after relay restarts and official session
     seed,
     start,
     stop,
-    official,
+    beacon,
   } = fixture
   let hostilePeer: WebSocket | undefined
-  let service = official()
+  let service = beacon()
   try {
     await expect.poll(() => fetch(`${url}/health`).then(response => response.ok).catch(() => false)).toBe(true)
     await page.goto(url)
@@ -60,7 +60,7 @@ test('claims an installation and sends after relay restarts and official session
     // A process restart really closes every relay socket, unlike stopping a listener.
     const resumedStream = page.waitForResponse(response => response.url().includes('/api/installations/') && /\/stream\?/.test(response.url()) && response.status() === 200, { timeout: 20000 })
     await stop(service)
-    service = official()
+    service = beacon()
     await expect.poll(() => fetch(`${url}/health`).then(response => response.ok).catch(() => false)).toBe(true)
     await resumedStream
     await expect(page.getByRole('alert')).toHaveCount(0)
@@ -83,7 +83,7 @@ test('claims an installation and sends after relay restarts and official session
     await page.getByLabel('Message', { exact: true }).fill('After reconnection')
     await page.getByRole('button', { name: /^(Send|Queue)$/, exact: true }).click()
     await expect(page.getByText('After reconnection', { exact: true })).toBeVisible()
-    // Renew the official session while keeping the same installation selected.
+    // Renew the beacon session while keeping the same installation selected.
     // Use the existing account UI and a resident authenticator, as in #52.
     const cdp = await page.context().newCDPSession(page)
     await cdp.send('WebAuthn.enable')
@@ -122,7 +122,7 @@ test('claims an installation and sends after relay restarts and official session
     await expect(page.getByText('After session renewal', { exact: true })).toBeVisible()
 
     // Seed a finished run using the same fixture module as the native browser
-    // journeys. Its detail is then read through the real official HTTP relay.
+    // journeys. Its detail is then read through the real beacon HTTP relay.
     const chat = seed.store.list('chats')[0]!
     const task = seed.task({ name: 'Finished conversation', prompt: 'Review the workspace', agentId: chat.agentId })
     const run = await seed.enqueue(task.id)
@@ -178,7 +178,7 @@ test('claims an installation and sends after relay restarts and official session
     incompatible.send(JSON.stringify({ type: 'hello', versions: [99] }))
     await refused
     await stop(service)
-    service = official()
+    service = beacon()
     await expect.poll(() => fetch(`${url}/health`).then(response => response.ok).catch(() => false)).toBe(true)
     await page.goto(`${url}/installations/${identity.installationId}/`)
     await expect(page.getByRole('status', { name: 'Installation availability' })).toHaveText('Mise à jour nécessaire')
@@ -228,8 +228,8 @@ test('claims an installation and sends after relay restarts and official session
 
     const navigation = await page.goto(`${url}/api/installations/${identity.installationId}/api/hostile`)
     expect(navigation?.status()).toBe(200)
-    // Chromium chooses the final content type; the official policy must still
-    // prevent this document's script from executing on the official origin.
+    // Chromium chooses the final content type; the beacon policy must still
+    // prevent this document's script from executing on the beacon origin.
     expect(await page.evaluate(() => document.contentType)).toBe('text/html')
     await expect(page.locator('body')).toContainText('Hostile fixture')
     expect(await page.locator('body').getAttribute('data-executed')).toBeNull()

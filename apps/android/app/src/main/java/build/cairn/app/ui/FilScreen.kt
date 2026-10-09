@@ -1,10 +1,12 @@
 package build.cairn.app.ui
 
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
@@ -14,11 +16,14 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.res.colorResource
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.semantics.heading
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import build.cairn.app.R
 import build.cairn.app.data.*
 import kotlinx.coroutines.delay
 
@@ -349,19 +354,19 @@ internal fun Wordmark() {
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(8.dp),
     ) {
-        androidx.compose.foundation.Image(
-            painter = androidx.compose.ui.res.painterResource(build.cairn.app.R.drawable.ic_cairn),
+        Image(
+            painter = painterResource(R.drawable.ic_cairn),
             contentDescription = null,
             modifier =
                 Modifier.size(40.dp)
                     .background(
-                        androidx.compose.ui.graphics.Color(0xFF14365A),
-                        androidx.compose.foundation.shape.RoundedCornerShape(10.dp),
+                        CairnLightColors.primary,
+                        RoundedCornerShape(10.dp),
                     )
                     .border(
                         1.dp,
-                        Color(0xFF346AA3),
-                        androidx.compose.foundation.shape.RoundedCornerShape(10.dp),
+                        colorResource(R.color.cairn_icon_outline),
+                        RoundedCornerShape(10.dp),
                     ),
         )
         Text(

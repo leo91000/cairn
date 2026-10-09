@@ -9,7 +9,7 @@ type FrameFilter =
     Arc<dyn Fn(cairn_protocol::Frame, bool) -> Option<cairn_protocol::Frame> + Send + Sync>;
 
 // Perturb only the wire between both real peers, as packet loss or an old
-// service would. Authorization still crosses the official HTTP interface.
+// service would. Authorization still crosses the beacon HTTP interface.
 async fn filter_tunnel(
     relay: &mut RelayedInstallation,
     filter: FrameFilter,
@@ -33,14 +33,14 @@ async fn filter_tunnel_with_pause(
     relay.stop.cancel();
     (&mut relay.connector).await.unwrap().unwrap();
     let policy_origin = relay.app.url.clone();
-    let official = relay.app.url.replace("http:", "ws:");
+    let beacon = relay.app.url.replace("http:", "ws:");
     let routes = axum::Router::new().route("/api/relay/{installation}/connect", get(move |Path(id): Path<String>, headers: HeaderMap, upgrade: WebSocketUpgrade| {
-        let official = official.clone();
+        let beacon = beacon.clone();
         let filter = filter.clone();
         let mut paused = paused.clone();
         async move {
             upgrade.on_upgrade(move |mut installation| async move {
-                let mut request = format!("{official}/api/relay/{id}/connect").into_client_request().unwrap();
+                let mut request = format!("{beacon}/api/relay/{id}/connect").into_client_request().unwrap();
                 request.headers_mut().insert("authorization", headers["authorization"].clone());
                 let (mut upstream, _) = tokio_tungstenite::connect_async(request).await.unwrap();
                 loop {
@@ -153,8 +153,8 @@ async fn signaling_keeps_early_answers_and_admits_only_one_reader_per_connection
     let observed = sent.clone();
     let proxy = filter_tunnel(
         &mut relay,
-        Arc::new(move |frame, official| {
-            if !official && matches!(&frame, Frame::DirectSignal { .. }) {
+        Arc::new(move |frame, beacon| {
+            if !beacon && matches!(&frame, Frame::DirectSignal { .. }) {
                 observed.notify_one();
             }
             Some(frame)
@@ -176,7 +176,7 @@ async fn signaling_keeps_early_answers_and_admits_only_one_reader_per_connection
         .await
         .unwrap();
     // Its acknowledgement crosses the same ordered socket after the answer,
-    // proving the official peer received the answer before an SSE reader opens.
+    // proving the beacon peer received the answer before an SSE reader opens.
     authorization(&relay, &relay.cookie, &relay.session).await;
     let route = format!(
         "{}/api/installations/{}/direct/{}/events",
@@ -944,8 +944,8 @@ async fn older_tunnel_versions_keep_api_and_stream_contracts_without_direct_fram
         let mut relay = RelayedInstallation::new(axum::Router::new()).await;
         let proxy = filter_tunnel(
             &mut relay,
-            Arc::new(move |frame, official| {
-                if !official && matches!(&frame, Frame::Hello { .. }) {
+            Arc::new(move |frame, beacon| {
+                if !beacon && matches!(&frame, Frame::Hello { .. }) {
                     return Some(Frame::Hello {
                         versions: vec![version],
                     });
@@ -1124,7 +1124,7 @@ async fn tunnel_loss_denies_new_peers_and_existing_leases_expire_without_renewal
         events.try_recv().is_err(),
         "no revocation frame can arrive on a lost tunnel"
     );
-    // The signed expiry is rounded down to whole seconds; the official session
+    // The signed expiry is rounded down to whole seconds; the beacon session
     // can have a remaining fraction of a second after its last direct lease ends.
     tokio::time::sleep(cairn_protocol::direct::until_expiry(
         grant.claims.expires_at + 1,
@@ -1452,8 +1452,8 @@ async fn a_lost_renewal_acknowledgement_does_not_hide_the_peer_from_logout() {
     let losing = lose_ack.clone();
     let proxy = filter_tunnel(
         &mut relay,
-        Arc::new(move |frame, official| {
-            if !official
+        Arc::new(move |frame, beacon| {
+            if !beacon
                 && losing.load(std::sync::atomic::Ordering::SeqCst)
                 && matches!(&frame, Frame::DirectAuthorized { .. })
             {
@@ -1614,7 +1614,7 @@ async fn tunnel_loss_without_reconnection_keeps_established_peers_until_grant_ex
 }
 
 #[tokio::test]
-async fn official_restart_closes_old_leases_and_new_grants_remain_revocable() {
+async fn beacon_restart_closes_old_leases_and_new_grants_remain_revocable() {
     use cairn_installation::direct::DirectEvent;
     use cairn_protocol::direct::DirectRevocation;
 
@@ -1641,7 +1641,7 @@ async fn official_restart_closes_old_leases_and_new_grants_remain_revocable() {
     );
 
     // Keep the persisted accounts, sessions and machine credential, but recreate
-    // the official process's relay state at the same origin. The real connector
+    // the beacon process's relay state at the same origin. The real connector
     // must reconnect without restarting the installation or replacing its leases.
     let port = reqwest::Url::parse(&relay.app.url).unwrap().port().unwrap();
     let listener = tokio::net::TcpListener::bind(("127.0.0.1", port))
@@ -1677,7 +1677,7 @@ async fn official_restart_closes_old_leases_and_new_grants_remain_revocable() {
         }
     })
     .await
-    .expect("the fallback relay must recover after the official restart");
+    .expect("the fallback relay must recover after the beacon restart");
     assert!(
         relay
             .direct
@@ -1757,8 +1757,8 @@ async fn installation_accepts_bounded_signing_clock_skew_but_rejects_long_lived_
         let key = key.clone();
         let offset = offset.clone();
         let signed = signed.clone();
-        Arc::new(move |frame, official| {
-            if !official {
+        Arc::new(move |frame, beacon| {
+            if !beacon {
                 return Some(frame);
             }
             match frame {

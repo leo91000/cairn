@@ -154,7 +154,7 @@ fn bearer(request: &Request) -> String {
 async fn resource_metadata(s: &Service) -> String {
     format!(
         "{}/.well-known/oauth-protected-resource/mcp",
-        crate::relay::official_address(&s.config.data_dir)
+        crate::relay::beacon_address(&s.config.data_dir)
             .await
             .ok()
             .flatten()
@@ -174,7 +174,7 @@ async fn authenticate(s: &Service, endpoint: &Endpoint, bearer: &str) -> Result<
             s.mcps.grant(s, id, bearer).await?;
         }
         Endpoint::Management => {
-            return Err(Error::unauthorized("Use the official MCP endpoint."));
+            return Err(Error::unauthorized("Use the beacon MCP endpoint."));
         }
     }
     Ok(None)
@@ -214,7 +214,7 @@ pub async fn handle(State(app): State<App>, request: Request) -> Result<Response
     if relayed_management {
         if scopes.is_none() {
             return Err(Error::unauthorized(
-                "A verified official MCP grant is required.",
+                "A verified beacon MCP grant is required.",
             ));
         }
     } else if let Some(challenge) = authenticate(s, &endpoint, &bearer).await? {
@@ -467,7 +467,7 @@ async fn call(
             }
         } else {
             return Err(Error::unauthorized(
-                "A verified official MCP grant is required.",
+                "A verified beacon MCP grant is required.",
             ));
         }
         let args = parse(&format!("mcp:{name}"), args)?;
@@ -689,7 +689,7 @@ async fn skills_tool(s: &Service, name: &str, args: &Value) -> Result<Value> {
 }
 
 async fn connection_tool(s: &Service, name: &str, args: Value) -> Result<Value> {
-    let management_url = crate::relay::official_address(&s.config.data_dir)
+    let management_url = crate::relay::beacon_address(&s.config.data_dir)
         .await?
         .map(|(origin, installation)| format!("{origin}/installations/{installation}/mcps"));
     let with_management_url = |mut result: Value| {

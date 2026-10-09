@@ -18,7 +18,7 @@ import UiAlert from './UiAlert.vue'
 import UiButton from './UiButton.vue'
 
 // Adds an account or signs one in again, with the same steps for every coding agent: the
-// official page opens in a new tab and this window follows until the account is verified.
+// beacon page opens in a new tab and this window follows until the account is verified.
 const props = defineProps<{ accounts: AccountsState, provider?: Provider }>()
 const emit = defineEmits<{ close: [] }>()
 const chosen = ref<Provider>(props.provider ?? 'codex')

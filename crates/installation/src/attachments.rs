@@ -373,7 +373,7 @@ mod tests {
     fn file_names_preserve_dotfiles_and_bound_utf8_bytes_without_path_components() {
         assert_eq!(filename(".env"), ".env");
         assert_eq!(filename(".."), "attachment");
-        assert!(!filename("../../../private\r\nfile").contains('/'));
+        assert!(!filename("../../private\r\nfile").contains('/'));
         assert!(filename(&"日本語".repeat(100)).len() <= 180);
     }
 }

@@ -34,11 +34,11 @@ export function verifiedImage(value, { repository, tree }, runId) {
     || value.repository !== repository.toLowerCase()
     || !/^[a-f0-9]{40}$/.test(value.commit)
     || !/^sha256:[a-f0-9]{64}$/.test(value.digest)
-    || !/^sha256:[a-f0-9]{64}$/.test(value.officialDigest)) {
+    || !/^sha256:[a-f0-9]{64}$/.test(value.beaconDigest)) {
     throw new Error('Image evidence does not match this release')
   }
 
-  return { digest: value.digest, officialDigest: value.officialDigest, commit: value.commit }
+  return { digest: value.digest, beaconDigest: value.beaconDigest, commit: value.commit }
 }
 
 async function validatedImage(config, gh) {
@@ -141,7 +141,7 @@ if (import.meta.main) {
     }
   }
 
-  const output = `reuse=${!!result}\ndigest=${result?.digest || ''}\nofficial-digest=${result?.officialDigest || ''}\ncommit=${result?.commit || config.commit}\ntree=${config.tree}\nartifact=${evidenceArtifact(config.tree)}\n`
+  const output = `reuse=${!!result}\ndigest=${result?.digest || ''}\nbeacon-digest=${result?.beaconDigest || ''}\ncommit=${result?.commit || config.commit}\ntree=${config.tree}\nartifact=${evidenceArtifact(config.tree)}\n`
   await appendFile(process.env.GITHUB_OUTPUT, output)
   const summary = result
     ? `Reusing the verified image for tree ${config.tree} from https://github.com/${config.repository}/actions/runs/${result.runId}.\n`

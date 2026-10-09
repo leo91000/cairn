@@ -13,13 +13,13 @@ Choose a fully successful `Quality and container` run for the intended Git tree.
 Its schema-3 `validated-image-<tree>/image.json` records both immutable digests,
 the tested commit, tree, repository, run ID and installation CLI versions. Use:
 
-- `CAIRN_BEACON_IMAGE=ghcr.io/leo91000/cairn-beacon@sha256:<official digest>`;
+- `CAIRN_BEACON_IMAGE=ghcr.io/leo91000/cairn-beacon@sha256:<beacon digest>`;
 - `CAIRN_INSTALLATION_IMAGE=ghcr.io/leo91000/cairn@sha256:<installation digest>`.
 
 Take both from **the same evidence**, never from a moving candidate, `latest`, or
 two independently chosen releases. A reused PR image reports its tested merge
 commit, whose Git tree matches the release, rather than a later tag commit.
-The official image contains `cairn-beacon` and the matching `pnpm build` output;
+The beacon image contains `cairn-beacon` and the matching `pnpm build` output;
 it has no worker CLI or VM layers. `/health` returns no-store JSON with `status`,
 `commit`, `runtimeId` and `stun` (`status`, `receiveErrors`, `sendErrors`). STUN
 status is independent of HTTP/database readiness: `running`, `retrying` after a
@@ -33,8 +33,8 @@ one-second query timeout; HTTP probes read the cached result without querying
 Postgres. Database loss is reported within six seconds, and recovery at the next
 successful sample. It is unavailable until the first sample succeeds.
 
-Reserve capacity for Coolify/Traefik, the official process, Postgres and Garage
-before assigning VM budgets. The official Compose caps each of official and
+Reserve capacity for Coolify/Traefik, the beacon process, Postgres and Garage
+before assigning VM budgets. The beacon Compose caps each of beacon and
 Postgres at 1 GiB and one CPU. These are initial limits, not measured production
 capacity guarantees. The installer currently caps its manager at 4 GiB and its
 runner at 20 GiB; Garage, Docker caches, guest disks and host services also use
@@ -48,7 +48,7 @@ The installation host needs Linux x86-64, systemd, Docker Engine/Compose,
 Python 3, curl, working `/dev/kvm`, `/dev/net/tun`, `/dev/fuse`, and at least
 16 GiB free **in addition to** Postgres/backups and conversation disks. See
 [installation prerequisites](INSTALLATION.md). KVM is for the installation,
-not the official process. Do not give the official container privileged mode,
+not the beacon process. Do not give the beacon container privileged mode,
 KVM, the Docker socket or installation volumes.
 
 ## 2. Remove the old public manager (explicit data loss)
@@ -56,7 +56,7 @@ KVM, the Docker socket or installation volumes.
 Schedule downtime and record the old service UUID, image digest and its exact
 volume/bind-mount names. Disable the old tag deployment target before the first
 new release: replace the GitHub `production` environment's
-`COOLIFY_SERVICE_UUID` with the **new official** service UUID in step 5.
+`COOLIFY_SERVICE_UUID` with the **new beacon** service UUID in step 5.
 Disable `cairn-cli-update.timer` and any other old host dispatch/update timers
 while dismantling the old installation. The historical **Update agent tools**
 workflow is entirely disabled in code for this cutover: manual dispatch only
@@ -70,7 +70,7 @@ Deleting these volumes permanently deletes conversations, project checkouts,
 agent sign-ins, private credentials and disks. Retain a private encrypted backup
 first if any recovery may be needed. Never prune all Docker volumes or remove
 Coolify/Traefik volumes. Do not reuse those old volumes for the new installation.
-The new official Postgres volume is separate and must not be deleted here.
+The new beacon Postgres volume is separate and must not be deleted here.
 
 ## 3. Cloudflare DNS and TLS
 
@@ -149,15 +149,15 @@ Verify opt-in native delivery on a real configured device; CI's controlled FCM
 adapter is not live-provider evidence. With FCM unset, native push is unavailable
 but sign-in remains usable. See [Android setup](../apps/android/README.md#native-account-providers-and-push).
 
-## 5. Create the official Coolify service
+## 5. Create the Beacon Coolify service
 
-Use `deploy/official/compose.production.yaml`, distinct from the development
-`compose.yaml`. It runs official + Postgres, a persistent Postgres volume,
-healthchecks, rotated logs, explicit budgets and **one official process**.
-Keep stop-first replacement; never run old and new official processes together
+Use `deploy/beacon/compose.production.yaml`, distinct from the development
+`compose.yaml`. It runs beacon + Postgres, a persistent Postgres volume,
+healthchecks, rotated logs, explicit budgets and **one beacon process**.
+Keep stop-first replacement; never run old and new beacon processes together
 or add a second application replica (ADR-0032).
 
-Connect only official to the dedicated external proxy Docker network configured
+Connect only beacon to the dedicated external proxy Docker network configured
 below, using `COOLIFY_PROXY_NETWORK`. Check the actual Traefik
 configuration before using the labels: defaults are HTTPS entrypoint `https`
 and resolver `letsencrypt`, overridable with `CAIRN_PROXY_HTTPS_ENTRYPOINT` and
@@ -170,23 +170,23 @@ Set these values in the service environment, without committing an `.env` file:
 
 | Variable | Value/action |
 | --- | --- |
-| `CAIRN_BEACON_IMAGE` | Validated official digest from step 1 |
+| `CAIRN_BEACON_IMAGE` | Validated beacon digest from step 1 |
 | `CAIRN_INSTALLATION_IMAGE` | Paired installation digest from the same evidence |
 | `CAIRN_BEACON_POSTGRES_PASSWORD` | Strong generated private password |
-| `CAIRN_BEACON_DATABASE_URL` | `postgres://cairn:<URL-encoded same password>@postgres:5432/cairn_official` |
+| `CAIRN_BEACON_DATABASE_URL` | `postgres://cairn:<URL-encoded same password>@postgres:5432/cairn_beacon` |
 | `COOLIFY_PROXY_NETWORK` | Dedicated external bridge with persisted static proxy IP, configured below |
 | `CAIRN_BEACON_TRUSTED_PROXIES` | The persisted static Traefik peer IP (`/32` or `/128`), plus only necessary controlled proxy hops |
 | `CAIRN_BEACON_EMAIL_FROM`, `CAIRN_BEACON_EMAIL_KEY` | Verified sender and private Resend key |
 | Optional OAuth/VAPID pairs and Android/FCM | Step 4, or leave empty |
 
-The official browser origin is fixed to `https://cairn.build` by Compose.
-Postgres is on a separate internal network, with no published port. Official has
+The beacon browser origin is fixed to `https://cairn.build` by Compose.
+Postgres is on a separate internal network, with no published port. Beacon has
 only `expose: 4311`, no host port.
 
 ### Persist a fixed Traefik peer across recreation
 
 Do not copy today's dynamic IP from the shared `coolify` network into trust.
-Use a dedicated external bridge for the official/proxy connection, and persist
+Use a dedicated external bridge for the beacon/proxy connection, and persist
 Traefik's static address in its **saved main proxy Compose configuration**
 (`/data/coolify/proxy/docker-compose.yml`, editable in Coolify's server Proxy
 configuration). Keep its existing networks, ports, command, labels and volumes.
@@ -222,7 +222,7 @@ In Beacon set `COOLIFY_PROXY_NETWORK=cairn-beacon-proxy` and
 `CAIRN_BEACON_TRUSTED_PROXIES=172.30.113.2/32` (adapt both to the selected network).
 The Compose's network label selects this exact network for backend traffic.
 Never trust `172.30.113.0/24`, the entire shared `coolify` network, or workers.
-Only official and the controlled proxy should join the dedicated bridge;
+Only beacon and the controlled proxy should join the dedicated bridge;
 Postgres stays on its internal database network. Leave Traefik's incoming
 forwarded-header trust at its secure default for this DNS-only deployment.
 
@@ -235,7 +235,7 @@ docker inspect --format '{{with index .NetworkSettings.Networks "cairn-beacon-pr
 ```
 
 The output must equal the saved host address (`172.30.113.2` in this example).
-Verify the official container is on that bridge and its network label selects
+Verify the beacon container is on that bridge and its network label selects
 it. Verify sign-in and rate limits through HTTPS. Repeat this check after every
 proxy recreation, network change or Coolify update; if Coolify regenerates its
 main proxy configuration, reapply the saved static attachment **before** Cairn
@@ -255,7 +255,7 @@ Configure GitHub's **production** environment:
 | --- | --- | --- |
 | `COOLIFY_TOKEN` | Secret | Dedicated API token with read, read:sensitive, write and deploy abilities |
 | `COOLIFY_URL` | Variable | Existing Coolify HTTPS origin |
-| `COOLIFY_SERVICE_UUID` | Variable | **New official Compose service** UUID |
+| `COOLIFY_SERVICE_UUID` | Variable | **New beacon Compose service** UUID |
 | `CAIRN_BEACON_ORIGIN` | Variable | `https://cairn.build` |
 
 Protect this environment with Léo as required reviewer so a future `v*` tag
@@ -267,7 +267,7 @@ back, and repairs partial updates before restart. Failed repair restores the
 previous pair without restart; if even restoration fails, freeze all manual
 restarts and repair both values to one validated pair before retrying. The script
 then verifies both
-its build identity and approved installation release. No automatic official
+its build identity and approved installation release. No automatic beacon
 rollback is attempted after a failed rollout; use step 7.
 
 ## 6. Install and claim on the same server
@@ -279,9 +279,9 @@ complete one-command installer on this same host within ten minutes. It creates
 manager/runner/Garage communicate over their private Compose network.
 
 The host **and its containers** must resolve and reach `https://cairn.build:443`
-via the server's public address and TLS proxy, even though official is on the
+via the server's public address and TLS proxy, even though beacon is on the
 same machine. Verify DNS, firewall/hairpin routing and the certificate from both
-contexts. Do not replace the official origin with `localhost`, `http://official`
+contexts. Do not replace the beacon origin with `localhost`, `http://beacon`
 or a container address: authentication, passkeys and origin checks use the public
 HTTPS origin. Permit outbound registry HTTPS and mail/OAuth/push provider access
 as needed. Permit outbound UDP for direct WebRTC when possible; blocked UDP uses
@@ -301,18 +301,18 @@ and access returns after restart. There is no anonymous local access, local
 password or old manager web login. Connect agent accounts separately through
 Connections. The installation update timer follows `/install/release` every five
 minutes; it drains/checkpoints and replaces manager+runner together, with its
-existing health verification and rollback. Updating official does not directly
+existing health verification and rollback. Updating beacon does not directly
 restart the installation. Do not start a second old installation on these mounts.
 
 ## 7. Backups and rollback
 
-Before **each** official upgrade, record the current official **and approved
-installation** digests and health commit. Back up Postgres while official is
+Before **each** beacon upgrade, record the current beacon **and approved
+installation** digests and health commit. Back up Postgres while beacon is
 stopped (short downtime). Use the actual Coolify service UUID to list containers,
-then select the current official and Postgres container IDs by role and image:
+then select the current beacon and Postgres container IDs by role and image:
 
 ```sh
-service_uuid='the-official-coolify-service-uuid'
+service_uuid='the-beacon-coolify-service-uuid'
 docker ps -a --filter "label=com.docker.compose.project=$service_uuid" \
   --format '{{.ID}}  {{.Names}}  {{.Image}}  {{.Label "com.docker.compose.service"}}'
 ```
@@ -330,13 +330,13 @@ operator connection and never pass a password through shell arguments:
 
 ```sh
 umask 077
-official_container='selected-official-container-id'
+beacon_container='selected-beacon-container-id'
 postgres_container='selected-postgres-container-id'
-backup_path='/private/backup/official-before-release.dump'
+backup_path='/private/backup/beacon-before-release.dump'
 # Each step runs only if its predecessor succeeded; on error investigate.
-docker stop --time 60 "$official_container" && \
-  bash deploy/official/postgres-backup.sh backup "$postgres_container" "$backup_path" && \
-  docker start "$official_container"
+docker stop --time 60 "$beacon_container" && \
+  bash deploy/beacon/postgres-backup.sh backup "$postgres_container" "$backup_path" && \
+  docker start "$beacon_container"
 ```
 
 The helper writes a private custom-format dump to a temporary adjacent file,
@@ -351,45 +351,45 @@ be attached to GitHub or published. The installation separately needs stopped
 backups of **its whole directory including Garage and private identity**; a
 Postgres backup does not include conversations, disk objects or agent accounts.
 
-If official deployment fails, freeze further release approvals/tags, stop
-**official**, and restore `CAIRN_BEACON_IMAGE` to the previous verified digest.
+If beacon deployment fails, freeze further release approvals/tags, stop
+**beacon**, and restore `CAIRN_BEACON_IMAGE` to the previous verified digest.
 Restore `CAIRN_INSTALLATION_IMAGE` to its previous paired digest too. An already
 updated installation will see that approved rollback via its existing timer;
 only approve it if its database remains compatible, otherwise restore its
 matching stopped backup as described in [installation recovery](INSTALLATION.md).
 
-For official, startup migrations can be incompatible with the older binary.
+For beacon, startup migrations can be incompatible with the older binary.
 Restore the **matching pre-release Postgres backup** into an empty database while
-official is stopped; preserve the failed database privately for investigation.
-Use a fresh isolated volume/database, or explicitly recreate `cairn_official` only
+beacon is stopped; preserve the failed database privately for investigation.
+Use a fresh isolated volume/database, or explicitly recreate `cairn_beacon` only
 after retaining a backup of the failed database. Rediscover the current container
 IDs after a failed deployment; never restart a stale container from before it.
 Set the **previous paired digests** in Coolify while stopped. For the explicitly
-chosen database container, with every official process stopped:
+chosen database container, with every beacon process stopped:
 
 ```sh
 # Destructive recovery: only after preserving the failed database privately.
-docker exec "$postgres_container" dropdb -U cairn --force cairn_official && \
-  docker exec "$postgres_container" createdb -U cairn -O cairn cairn_official && \
-  bash deploy/official/postgres-backup.sh restore "$postgres_container" "$backup_path"
+docker exec "$postgres_container" dropdb -U cairn --force cairn_beacon && \
+  docker exec "$postgres_container" createdb -U cairn -O cairn cairn_beacon && \
+  bash deploy/beacon/postgres-backup.sh restore "$postgres_container" "$backup_path"
 ```
 
 The helper invokes `pg_restore --exit-on-error --no-owner --no-privileges` into
 that empty database. The schema/data are owned by the current `cairn` operator
 role; database roles and grants must be provisioned separately if that changes.
-A failed restore keeps official stopped; recreate the empty recovery database
+A failed restore keeps beacon stopped; recreate the empty recovery database
 before retrying rather than continuing on a partial schema. This loses account,
 claim and sharing changes made after the backup; reconcile installation identities
 using [claim recovery](INSTALLATION-RELAY.md) if necessary. Never start the older
 binary against a newer schema or reuse a backup from an unrelated release.
 
-`node tests/official-postgres-backup.mjs` exercises this exact helper against
+`node tests/beacon-postgres-backup.mjs` exercises this exact helper against
 pinned, disposable Postgres, including a renamed container, file permissions,
 known-data round trip, refusal to overwrite a previous backup, rejection of a
 nonempty target/invalid dump, and cleanup
 of a failed backup. It uses synthetic data and never connects to production.
 
-Restart the single official process, verify `/health`'s previous commit,
+Restart the single beacon process, verify `/health`'s previous commit,
 `/install/release`'s previous digest, email sign-in, claim/relay reconnection and
 conversation access. TLS/DNS do not need changing for this rollback. Keep the
 failed release, backups and previous digests until recovery is confirmed.
@@ -408,12 +408,12 @@ approval. Do not approve that deployment until:
       record both candidate and previous image digests privately.
 - [ ] Verify the saved proxy static IP and actual peer still match the exact
       `/32` or `/128` trusted address; no shared Docker CIDR is trusted.
-- [ ] Stop official, take the pre-release Postgres backup using step 7, restore
+- [ ] Stop beacon, take the pre-release Postgres backup using step 7, restore
       it on isolated Postgres 17, encrypt/copy it off-host and record its release.
       Never publish this production dump as a CI artifact.
 - [ ] Check installation schema rollback compatibility; otherwise retain a
       matching stopped backup of the entire installation, including Garage.
-- [ ] Resume the previous single official process, verify health/sign-in, then
+- [ ] Resume the previous single Beacon process, verify health/sign-in, then
       explicitly approve the tag's `production` job. This preparation task
       creates no tag and performs no deployment.
 - [ ] After rollout, verify the exact health identity, paired installer digest,
@@ -452,7 +452,7 @@ especially against a symmetric-NAT client; HTTPS relay fallback is expected.
 with destination-dependent mappings. No host-network or fixed-port opt-in is
 introduced, preserving ADR-0028's no-incoming-port decision.
 
-When installation and official STUN share a host, the installation's query to
+When installation and beacon STUN share a host, the installation's query to
 `cairn.build:3478` may hairpin through Docker and expose a Docker gateway as its
 reflexive address. `same-server` reproduces that error: the external client sees
 its actual NAT address, while the installation sees `10.102.2.1`. For an explicitly
@@ -464,8 +464,8 @@ mapping. The bench verifies a successful authorized DataChannel with this settin
 It cannot repair a NAT that changes the public port; leave direct disabled or use
 the relay on such a host until qualification establishes a supported mapping.
 A wrong setting only makes direct fail; it never relaxes grant or DTLS validation.
-`CAIRN_DIRECT_STUN_URLS` can also select a dedicated official STUN endpoint, useful
-where a distinct reachable official address avoids hairpinning. It must remain
+`CAIRN_DIRECT_STUN_URLS` can also select a dedicated beacon STUN endpoint, useful
+where a distinct reachable beacon address avoids hairpinning. It must remain
 operator-controlled; no automatic third-party fallback is configured.
 
 
@@ -498,6 +498,10 @@ After review and #105 qualification, before the first approved release:
   `ghcr.io/leo91000/cairn` and `ghcr.io/leo91000/cairn-beacon`; approve only validated
   digests from the same Git tree. Replace the old service and timers as described
   in step 2; no production configuration is changed by this PR.
+- GHCR: verify that both new packages `ghcr.io/leo91000/cairn` and
+  `ghcr.io/leo91000/cairn-beacon` have **public** visibility, then check an
+  anonymous pull of each validated digest. Installations pull without registry
+  credentials (`deploy/installations/host.py`); a private package prevents setup.
 - Resend: verify `cairn.build`, authorize the new sender `Cairn <cairn@cairn.build>`
   and put its sending key in `CAIRN_BEACON_EMAIL_KEY`. The email wordmark is served
   by Beacon at `/brand/cairn-wordmark.png`.

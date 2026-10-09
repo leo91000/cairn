@@ -71,7 +71,7 @@ if (import.meta.main) {
       repository: process.env.GITHUB_REPOSITORY,
       commit: process.env.GITHUB_SHA,
       tag: process.env.GITHUB_REF_NAME,
-      officialOrigin: process.env.CAIRN_BEACON_ORIGIN,
+      beaconOrigin: process.env.CAIRN_BEACON_ORIGIN,
       firebaseConfiguration: firebaseConfigurationFromEnvironment(),
     }
     androidVersion(config.tag)

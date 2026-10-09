@@ -91,7 +91,7 @@ test('reads and creates conversations through the previous relay protocol', asyn
       data: { code: claim.code, name: 'Previous protocol installation', protocol: 1 },
     })).json()
     // Only the transport is adapted. All finite responses come from the real
-    // installation through the official API, and v1 still refuses SSE.
+    // installation through the beacon API, and v1 still refuses SSE.
     previousPeer = Reflect.construct(WebSocket, [
       `${url.replace('http:', 'ws:')}/api/relay/${identity.installationId}/connect`,
       { headers: { authorization: `Bearer ${identity.token}` } },

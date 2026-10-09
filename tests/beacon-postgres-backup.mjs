@@ -18,10 +18,10 @@ import { setTimeout } from 'node:timers/promises'
 import { promisify } from 'node:util'
 
 const exec = promisify(execFile)
-const compose = readFileSync(new URL('../deploy/official/compose.production.yaml', import.meta.url), 'utf8')
+const compose = readFileSync(new URL('../deploy/beacon/compose.production.yaml', import.meta.url), 'utf8')
 const image = compose.match(/image: (postgres:17-alpine(?:@sha256:[a-f0-9]{64})?)/)[1]
-const name = `renamed-official-backup-${randomUUID().slice(0, 8)}`
-const script = new URL('../deploy/official/postgres-backup.sh', import.meta.url).pathname
+const name = `renamed-beacon-backup-${randomUUID().slice(0, 8)}`
+const script = new URL('../deploy/beacon/postgres-backup.sh', import.meta.url).pathname
 
 async function docker(...args) {
   try {
@@ -34,14 +34,14 @@ async function docker(...args) {
 
 async function main() {
   const directory = await mkdtemp(join(tmpdir(), 'cairn-beacon-backup-test-'))
-  const dump = join(directory, 'official.dump')
+  const dump = join(directory, 'beacon.dump')
 
   try {
-    await docker('run', '-d', '--name', name, '-e', 'POSTGRES_USER=cairn', '-e', 'POSTGRES_PASSWORD=fixture-only', '-e', 'POSTGRES_DB=cairn_official', image)
+    await docker('run', '-d', '--name', name, '-e', 'POSTGRES_USER=cairn', '-e', 'POSTGRES_PASSWORD=fixture-only', '-e', 'POSTGRES_DB=cairn_beacon', image)
     for (let attempt = 0; ; attempt++) {
       assert.ok(attempt < 60, 'Disposable backup database did not start')
       try {
-        await docker('exec', name, 'pg_isready', '-h', '127.0.0.1', '-U', 'cairn', '-d', 'cairn_official')
+        await docker('exec', name, 'pg_isready', '-h', '127.0.0.1', '-U', 'cairn', '-d', 'cairn_beacon')
         break
       }
       catch {
@@ -49,7 +49,7 @@ async function main() {
       }
     }
 
-    const sql = command => docker('exec', name, 'psql', '-U', 'cairn', '-d', 'cairn_official', '-v', 'ON_ERROR_STOP=1', '-Atc', command)
+    const sql = command => docker('exec', name, 'psql', '-U', 'cairn', '-d', 'cairn_beacon', '-v', 'ON_ERROR_STOP=1', '-Atc', command)
     await sql('CREATE TABLE backup_fixture (id integer PRIMARY KEY, value text NOT NULL); INSERT INTO backup_fixture VALUES (113, \'known restore value\');')
     await exec('bash', [script, 'backup', name, dump])
     assert.equal((await stat(dump)).mode & 0o777, 0o600, 'Dump must remain private')
@@ -65,7 +65,7 @@ async function main() {
     await assert.rejects(exec('bash', [script, 'restore', name, join(directory, 'invalid.dump')]))
     await assert.rejects(exec('bash', [script, 'backup', `${name}-missing`, join(directory, 'failed.dump')]))
     await assert.rejects(stat(join(directory, 'failed.dump')), 'A failed backup must not leave a usable-looking dump')
-    console.warn('Official Postgres backup/restore passed: renamed container, private dump, round trip and failure handling')
+    console.warn('Beacon Postgres backup/restore passed: renamed container, private dump, round trip and failure handling')
   }
   finally {
     await docker('rm', '-fv', name).catch(() => {})

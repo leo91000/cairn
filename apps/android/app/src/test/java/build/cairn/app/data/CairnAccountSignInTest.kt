@@ -11,64 +11,62 @@ import org.junit.Test
 
 class CairnAccountSignInTest {
     @Test
-    fun `GitHub opens the official browser handover and exchanges its one use proof`() =
-        runBlocking {
-            MockWebServer().use { server ->
-                server.start()
-                val launcher =
-                    server
-                        .url(
-                            "/api/account/oauth/github/native/browser?challenge=one-use&opener=launcher"
-                        )
-                        .toString()
-                server.enqueue(
-                    MockResponse()
-                        .setBody(
-                            """{"challenge":"one-use","secret":"native-secret","url":"$launcher"}"""
-                        )
-                )
-                server.enqueue(MockResponse().setResponseCode(202).setBody("""{"pending":true}"""))
-                server.enqueue(
-                    MockResponse()
-                        .setBody(
-                            """{"authenticated":true,"csrf":"csrf","account":{"id":"account","email":"alice@example.test"}}"""
-                        )
-                        .addHeader("Set-Cookie", "cairn_session=cairn; Path=/; HttpOnly")
-                )
-                val vault = MemoryVault()
-                val api = CairnApi(server.url("/"), vault, installationId = "selected")
-                val credentials =
-                    object : CairnCredentials {
-                        override suspend fun google(clientId: String, nonce: String): String =
-                            error("unused")
-
-                        override suspend fun authenticatePasskey(options: String): String =
-                            error("unused")
-
-                        override suspend fun createPasskey(options: String): String =
-                            error("unused")
-
-                        override fun openGitHub(url: String) {
-                            assertEquals(launcher, url)
-                        }
-                    }
-                assertTrue(CairnAccountSignIn(api, credentials).github().authenticated)
-                assertEquals("/api/account/oauth/github/start", server.takeRequest().path)
-                repeat(2) {
-                    val finish = server.takeRequest()
-                    assertEquals("/api/account/oauth/github/native/finish", finish.path)
-                    assertEquals(
-                        "native-secret",
-                        wireJson
-                            .parseToJsonElement(finish.body.readUtf8())
-                            .jsonObject["secret"]
-                            ?.jsonPrimitive
-                            ?.content,
+    fun `GitHub opens the beacon browser handover and exchanges its one use proof`() = runBlocking {
+        MockWebServer().use { server ->
+            server.start()
+            val launcher =
+                server
+                    .url(
+                        "/api/account/oauth/github/native/browser?challenge=one-use&opener=launcher"
                     )
+                    .toString()
+            server.enqueue(
+                MockResponse()
+                    .setBody(
+                        """{"challenge":"one-use","secret":"native-secret","url":"$launcher"}"""
+                    )
+            )
+            server.enqueue(MockResponse().setResponseCode(202).setBody("""{"pending":true}"""))
+            server.enqueue(
+                MockResponse()
+                    .setBody(
+                        """{"authenticated":true,"csrf":"csrf","account":{"id":"account","email":"alice@example.test"}}"""
+                    )
+                    .addHeader("Set-Cookie", "cairn_session=cairn; Path=/; HttpOnly")
+            )
+            val vault = MemoryVault()
+            val api = CairnApi(server.url("/"), vault, installationId = "selected")
+            val credentials =
+                object : CairnCredentials {
+                    override suspend fun google(clientId: String, nonce: String): String =
+                        error("unused")
+
+                    override suspend fun authenticatePasskey(options: String): String =
+                        error("unused")
+
+                    override suspend fun createPasskey(options: String): String = error("unused")
+
+                    override fun openGitHub(url: String) {
+                        assertEquals(launcher, url)
+                    }
                 }
-                assertFalse(vault.values.values.single().contains("native-secret"))
+            assertTrue(CairnAccountSignIn(api, credentials).github().authenticated)
+            assertEquals("/api/account/oauth/github/start", server.takeRequest().path)
+            repeat(2) {
+                val finish = server.takeRequest()
+                assertEquals("/api/account/oauth/github/native/finish", finish.path)
+                assertEquals(
+                    "native-secret",
+                    wireJson
+                        .parseToJsonElement(finish.body.readUtf8())
+                        .jsonObject["secret"]
+                        ?.jsonPrimitive
+                        ?.content,
+                )
             }
+            assertFalse(vault.values.values.single().contains("native-secret"))
         }
+    }
 
     @Test
     fun `passkey creation sign in and confirmation reuse web contracts with native options`() =
@@ -144,7 +142,7 @@ class CairnAccountSignInTest {
         }
 
     @Test
-    fun `Google credential is exchanged only with the official service and becomes a Cairn session`() =
+    fun `Google credential is exchanged only with the Beacon and becomes a Cairn session`() =
         runTest {
             MockWebServer().use { server ->
                 server.enqueue(

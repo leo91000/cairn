@@ -270,7 +270,7 @@ describe('artifact identities', () => {
         runId: 'old',
         createdAt: 20,
         type: 'item.completed',
-        text: '{"files":["apps/web/src/a.ts"]}',
+        text: '{"files":["src/a.ts"]}',
       },
     ])
     expect(entries).toHaveLength(1)
@@ -281,7 +281,7 @@ describe('artifact identities', () => {
       title: 'Structured result',
       subtitle: '1 field',
       status: 'info',
-      blocks: [{ label: 'Output', code: '{"files":["apps/web/src/a.ts"]}', language: 'plaintext' }],
+      blocks: [{ label: 'Output', code: '{"files":["src/a.ts"]}', language: 'plaintext' }],
     })
   })
   it('labels historical output honestly instead of leaving a completed Working card', () => {
@@ -337,8 +337,8 @@ describe('operation cards', () => {
   }
 
   it('recognizes simple shell file reads and highlights the file language', () => {
-    const artifact = command('/bin/zsh -lc \'sed -n "1,80p" apps/web/src/activity.ts\'', 'export const value = 1')
-    expect(artifact).toMatchObject({ kind: 'read', title: 'Read activity.ts', subtitle: 'apps/web/src/activity.ts' })
+    const artifact = command('/bin/zsh -lc \'sed -n "1,80p" src/activity.ts\'', 'export const value = 1')
+    expect(artifact).toMatchObject({ kind: 'read', title: 'Read activity.ts', subtitle: 'src/activity.ts' })
     expect(artifact.blocks.find(block => block.label === 'File content')?.language).toBe('typescript')
   })
   it('distinguishes repository searches and directory listings from commands', () => {
@@ -347,7 +347,7 @@ describe('operation cards', () => {
     expect(command('pnpm test')).toMatchObject({ kind: 'command', title: 'Run tests' })
   })
   it('does not call compound or mutating commands a file read', () => {
-    for (const value of ['cat apps/web/src/a.ts && rm temp', 'cat apps/web/src/a.ts > copy.ts', 'sed -i s/old/new/ apps/web/src/a.ts', 'cat $(get-path)', 'cat apps/web/src/a.ts | sh', 'cat apps/web/src/[ab].ts', 'cat apps/web/src/a.ts # comment'])
+    for (const value of ['cat src/a.ts && rm temp', 'cat src/a.ts > copy.ts', 'sed -i s/old/new/ src/a.ts', 'cat $(get-path)', 'cat src/a.ts | sh', 'cat src/[ab].ts', 'cat src/a.ts # comment'])
       expect(command(value).kind).toBe('command')
   })
   it('keeps operation identity and duration across command lifecycle updates', () => {
@@ -362,7 +362,7 @@ describe('operation cards', () => {
           item: {
             id: 'read',
             type: 'command_execution',
-            command: 'cat apps/web/src/a.ts',
+            command: 'cat src/a.ts',
             status: 'in_progress',
           },
         },
@@ -377,7 +377,7 @@ describe('operation cards', () => {
           item: {
             id: 'read',
             type: 'command_execution',
-            command: 'cat apps/web/src/a.ts',
+            command: 'cat src/a.ts',
             aggregated_output: 'const a = 1',
             exit_code: 0,
             status: 'completed',

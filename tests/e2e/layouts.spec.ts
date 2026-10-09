@@ -369,7 +369,7 @@ async function checkMobileLayouts(page: Page, workspace: Workspace, testInfo: Te
       runId: run.id,
       createdAt: 3500,
       type: 'item.completed',
-      text: 'implementation-pr {"files":["apps/web/src/activity.ts"',
+      text: 'implementation-pr {"files":["src/activity.ts"',
     },
   ])
   await page.goto(workspacePath(`/runs/${run.id}`))
@@ -405,7 +405,7 @@ async function checkMobileLayouts(page: Page, workspace: Workspace, testInfo: Te
   await screenshot('historical-json-results')
   await incomplete.locator('summary').click()
   await expect(incomplete.getByRole('button', { name: 'Copy Saved source' })).toBeVisible()
-  await expect(incomplete.locator('pre')).toContainText('{"files":["apps/web/src/activity.ts"')
+  await expect(incomplete.locator('pre')).toContainText('{"files":["src/activity.ts"')
   await page.keyboard.press('Escape')
   history([
     {

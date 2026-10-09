@@ -11,7 +11,7 @@ use common::RelayedInstallation;
 use reqwest::StatusCode;
 
 #[tokio::test]
-async fn contradictory_content_types_cannot_bypass_the_official_sandbox() {
+async fn contradictory_content_types_cannot_bypass_the_beacon_sandbox() {
     let routes = Router::new().route(
         "/api/fixture/ambiguous",
         get(|| async {
@@ -39,7 +39,7 @@ async fn contradictory_content_types_cannot_bypass_the_official_sandbox() {
 }
 
 #[tokio::test]
-async fn the_official_origin_imposes_security_even_on_a_hostile_installation_response() {
+async fn the_beacon_origin_imposes_security_even_on_a_hostile_installation_response() {
     let routes = Router::new().route(
         "/api/fixture/html",
         get(|| async {

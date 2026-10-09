@@ -1,7 +1,7 @@
 # Installation claims and API relay
 
-The official account API and its Postgres database remain those introduced in
-ticket #46. Sign in to the official web app, choose **Add an installation**, and use the
+The beacon account API and its Postgres database remain those introduced in
+ticket #46. Sign in to the beacon web app, choose **Add an installation**, and use the
 claim code within ten minutes. The app includes this code in the command served
 at `/install.sh`; see [One-command installation](INSTALLATION.md). The fallback
 `cairn claim` command is described below.
@@ -13,14 +13,14 @@ for development. The existing manager data and agent-home directories must
 already exist. Start the usual `cairn serve` command. No public installation URL
 or inbound browser connection is needed. Installation browser routes accept only
 the trusted in-process identity from the authenticated relay. Remove the claim code from deployment configuration after success.
-If a claim is refused, misconfigured or cannot reach the official service, the
+If a claim is refused, misconfigured or cannot reach the Beacon, the
 manager logs the failure and still starts without a relay identity. Obtain a
 new code and restart after fixing connectivity. A lost claim response can mean
 the single-use code was consumed; repeating that code must not cause a crash loop.
 
 The installation stores its identity in
 `DATA_DIR/installation-relay/identity.json` (directory mode 0700, file mode 0600).
-The file contains the official origin, installation ID and bearer credential.
+The file contains the beacon origin, installation ID and bearer credential.
 Do not copy it into logs or source control. Later starts use that file and need
 no new claim code. Startup never overwrites an existing identity; an approved
 `cairn claim` can replace it after detachment, and `cairn rotate-token` can renew its
@@ -35,26 +35,26 @@ the origin in its private identity. It closes the previous tunnel and invalidate
 both the previous credential and any old recovery proof, preserving the installation
 ID, sharing and all data. Restart the manager after success to use the new identity.
 
-The command saves a private `rotation.json` before contacting the official service
+The command saves a private `rotation.json` before contacting the Beacon
 and replaces `identity.json` atomically only after acknowledgement. If connectivity
 fails or the response is lost, run the same command again: it reuses the saved
 replacement. Do not delete `rotation.json` to retry. Claim and rotation share an
 exclusive machine lock. A pending rotation from a different identity generation
 is refused; back it up before recovering that installation.
 
-The owner can instead choose **Revoke and forget installation** in the official
+The owner can instead choose **Revoke and forget installation** in the beacon
 app, including for an offline or orphaned installation. Confirmation permanently
 invalidates the machine credential and recovery proofs, removes sharing and the
-official record, and closes active tunnels. Data stays on the machine. To return,
+beacon record, and closes active tunnels. Data stays on the machine. To return,
 stop the manager, back up its entire private identity directory outside its data
-volume, remove that directory, then run `cairn claim` with the official origin.
+volume, remove that directory, then run `cairn claim` with the beacon origin.
 The new claim creates a new installation ID with the same existing local data.
 Detachment below remains the option for recovering the same installation ID.
 
 If a machine credential is stolen, its holder can win the race to rotate it and
 prevent `cairn rotate-token` from authenticating. Rotation alone is therefore not
 a recovery guarantee after theft. Use **Revoke and forget installation** from
-the owner's official session to revoke that record independently of the machine
+the owner's beacon session to revoke that record independently of the machine
 credential, then reclaim the trusted machine as above. Investigate the compromise
 and renew any secrets that may have passed through the stolen tunnel.
 
@@ -62,8 +62,8 @@ and renew any secrets that may have passed through the stolen tunnel.
 
 Run `cairn claim` on the installation with its usual `DATA_DIR` and
 `CAIRN_BEACON_ORIGIN` (the latter defaults to the origin of an existing private
-identity). It prints the official `/claim` URL and a temporary code. Sign in to
-that official app and enter the code under **Device claim code**, then choose
+identity). It prints the beacon `/claim` URL and a temporary code. Sign in to
+that beacon app and enter the code under **Device claim code**, then choose
 **Review installation**. Compare its name and public fingerprint with the
 fingerprint printed by `cairn claim` on a machine you control before choosing
 **Claim this installation**. Cancel if they differ or someone sent you the code.
@@ -80,18 +80,18 @@ its running connector deliberately does not reload credentials from disk.
 The machine starts `/api/relay/device-claim/start` with its name, protocol and,
 when present, private installation identity. Only a valid machine token can
 reclaim that record. An owned installation refuses reclamation. The browser first reviews through `/api/installations/device-claim/preview`
-with its official session, origin and CSRF token. It receives the name, fingerprint
+with its beacon session, origin and CSRF token. It receives the name, fingerprint
 and a temporary confirmation proof bound to this claim and account. Explicit
 confirmation through `/api/installations/device-claim` requires that proof;
 `/api/relay/device-claim/poll` then attaches the owner and rotates the token in one
 transaction. A fresh start keeps only an expiring challenge, reserving no permanent
-installation row until approval is collected. Expired challenges are removed by the official service’s hourly maintenance. Recovery always preserves the existing installation row. Codes and polling secrets are stored only
+installation row until approval is collected. Expired challenges are removed by the Beacon’s hourly maintenance. Recovery always preserves the existing installation row. Codes and polling secrets are stored only
 as digests, expire after ten minutes and are single-use. Start, approval and
 poll operations use persisted per-peer/account rate limits. Starting another
 claim for the same installation invalidates its previous pending challenge.
 
 Choose **Detach installation** inside the installation and confirm explicitly.
-The owner is cleared and the active relay is cut; local data and the official
+The owner is cleared and the active relay is cut; local data and the beacon
 installation row remain. Deleting its owning Cairn account through Account security also clears sharing
 and closes its tunnel immediately, preserving the installation record and data.
 Deletion performed directly by an operator in Postgres clears ownership
@@ -101,7 +101,7 @@ on that check. Local detachment still closes it immediately. Upgrade and
 post-registration authentication fail closed; an established tunnel tolerates
 temporary database errors and five-second check timeouts until three consecutive
 checks fail (about 95 seconds from the last successful check if each check times out).
-A successful check resets that budget. [ADR-0032](adr/0032-single-official-relay-process.md)
+A successful check resets that budget. [ADR-0032](adr/0032-single-beacon-relay-process.md)
 records the single-process deployment restriction and this tolerance trade-off.
 Checks run separately from the socket loop,
 so database latency cannot delay session expiry or cancellation.
@@ -116,28 +116,28 @@ private identity file, follow [DEPLOYMENT.md](DEPLOYMENT.md). Execution nodes
 continue to use their authenticated direct manager channel.
 Additional execution nodes use the reachable manager address selected during
 enrollment (LAN, VPN or optional public HTTPS origin), independently of the
-official app’s origin. Their disk traffic never uses the official relay.
+beacon app’s origin. Their disk traffic never uses the beacon relay.
 See [additional execution nodes](DEPLOYMENT.md#additional-execution-nodes)
 for TLS and network setup.
 
 The installation initiates a TLS WebSocket at
 `/api/relay/{installation}/connect` with its bearer credential. `Hello` offers
 protocol versions; `Welcome` chooses a supported version before API traffic.
-An incompatible peer is disconnected before API traffic; its authenticated installation is marked `updateRequired` in the official database. The shared `cairn-protocol` crate
+An incompatible peer is disconnected before API traffic; its authenticated installation is marked `updateRequired` in the beacon database. The shared `cairn-protocol` crate
 owns the frames, limits and transport header rules. Version 1 multiplexes finite
 API requests and responses by request ID, carrying method, encoded path/query,
-selected headers and binary bodies. Account identity and owner/member role come from the official
+selected headers and binary bodies. Account identity and owner/member role come from the beacon
 session and installation access record, then enters the installation's
 existing in-memory request extension (#45). HTTP identity headers, browser
 cookies and browser authorization credentials are never forwarded.
 Bodies are base64 strings in the JSON frames, rather than arrays of byte numbers.
-Installation security headers are not trusted: the official service supplies
+Installation security headers are not trusted: the Beacon supplies
 `nosniff`, `no-store` and a `sandbox` CSP for every relayed response, including
-JSON. This prevents ambiguous content types from bypassing the official policy;
+JSON. This prevents ambiguous content types from bypassing the beacon policy;
 the browser can still fetch and read JSON normally.
 
 The browser calls `/api/installations/{installation}/api/...`. Every request
-checks the official session and installation role; mutations also require the official
+checks the beacon session and installation role; mutations also require the beacon
 origin and CSRF token. A foreign or unknown installation returns 404. Local
 browser authentication routes are excluded from the tunnel. Offline requests
 return 503; lost connections fail pending requests, without replaying writes.
@@ -155,7 +155,7 @@ responds, even when the browser has abandoned its request. A timeout cancels the
 installation request and releases its slot through the response. Oversized
 responses return 413, handler/body failures return 502, and saturation returns
 503 for that request alone, preserving the tunnel and other requests. Contents
-are held only in bounded memory, never in Postgres. Only one official relay
+are held only in bounded memory, never in Postgres. Only one beacon relay
 process is supported: route all account/access mutations, installation API
 requests and relay WebSockets to it. Revocation notifications for logout,
 detachment, member removal, rotation and forget reach only that process's
@@ -173,29 +173,29 @@ stream requests return 501 without sending unknown frames or closing its tunnel.
 A peer with no shared version is disconnected before it becomes online.
 
 Each stream gets one credit per downstream body read. Installation body polling
-pauses until credit arrives, chunks are limited to 64 KiB, and each official HTTP
+pauses until credit arrives, chunks are limited to 64 KiB, and each beacon HTTP
 body has a one-chunk queue. Streams can use 24 of the 32 request slots;
 eight slots remain available to finite API requests.
 A slow reader, failed stream or failed handler affects only its own request.
 Closing the browser response records cancellation and wakes the socket loop,
 which cancels the remote subscription and releases its slot. Cancellation is
-kept outside the bounded credit queue, so a full queue cannot lose it. The official service disables reverse-proxy SSE buffering and still imposes
+kept outside the bounded credit queue, so a full queue cannot lose it. The Beacon disables reverse-proxy SSE buffering and still imposes
 its own security headers. Configure proxies to permit long-lived responses.
 
 A lost tunnel ends open browser streams. The existing browser SSE client retries
 with its accepted cursor and history version, and the installation's existing
 stream replays events (or resets when that history is no longer available).
-No events are persisted by the official service. Tunnel loss does not stop an
-installation run. During official shutdown, relay bodies close before HTTP
+No events are persisted by the Beacon. Tunnel loss does not stop an
+installation run. During beacon shutdown, relay bodies close before HTTP
 draining, allowing restart without waiting for infinite SSE bodies.
 
-The official session and authenticated `GET /api/installations` expose `online`
+The beacon session and authenticated `GET /api/installations` expose `online`
 from the local relay registry. Availability changes after successful negotiation
 and on disconnect; dead peers are detected by the existing heartbeat. The web
 shows each installation's status and refreshes only this small account-level
-list while visible, with backoff when the official service is unavailable.
+list while visible, with backoff when the Beacon is unavailable.
 The same list and account session expose `updateRequired`. An incompatible Hello
-persists this state even after the refused socket closes or the official process
+persists this state even after the refused socket closes or the beacon process
 restarts; a compatible authenticated Hello clears it. The web displays
 **Mise à jour nécessaire** and replaces the inaccessible workspace with that
 explanation. The selector and account actions remain available. Protocols 4 and 3
@@ -218,22 +218,22 @@ from the persisted session deadline; an idle or backpressured body cannot keep
 an expired session alive. These changes do not stop agent executions.
 
 The detachment, member removal and departure endpoints commit their access
-change before revoking the real official HTTP bodies. Detachment also forgets
+change before revoking the real beacon HTTP bodies. Detachment also forgets
 all memberships and invitations; reclaiming never restores previous sharing.
 
 Validation: run `pnpm test:backend -p cairn-beacon --test relay` with a
 disposable `CAIRN_BEACON_TEST_DATABASE_URL`; this uses the isolated backend
 launcher and a real installation router. The Playwright project
-`journeys-official-relay` uses both real binaries and checks reconnection after
+`journeys-beacon-relay` uses both real binaries and checks reconnection after
 restarting each process. Build those binaries and the web bundle first.
 
 ## Current installation in the web application
 
-The official web entry point reuses the existing workspace views (Fil,
+The beacon web entry point reuses the existing workspace views (Fil,
 conversations, Agents, Atelier and Settings). Browser routes are rooted at
 `/installations/{installation}/`; API requests, attachment/portrait/file reads
 and SSE connections use `/api/installations/{installation}/api/...`.
-The official account session provides authentication and CSRF; the web does
+The beacon account session provides authentication and CSRF; the web does
 not request the installation's browser session or sign-in endpoints.
 
 With one installation the header shows its name. With several, an accessible
@@ -244,7 +244,7 @@ installation URL takes precedence. An inaccessible installation URL displays an
 account-level message instead of silently opening another installation.
 
 Owners can rename an installation through `PATCH /api/installations/{id}` with
-`{ "name": "New name" }`, an official session, origin and CSRF token. Names use
+`{ "name": "New name" }`, an beacon session, origin and CSRF token. Names use
 the claim contract (trimmed, 1–100 characters, no control characters). Renaming
 works even while the installation is offline and preserves its identity.
 
@@ -258,11 +258,11 @@ retains its reconnect backoff and history cache.
 Installation HTTP rate limits use the trusted Cairn account identity for relayed
 requests (300 requests per minute per account), while machine traffic retains
 its existing peer-based limits. Browser headers cannot select an identity or
-quota. Installation rename requests are limited separately at the official
+quota. Installation rename requests are limited separately at the beacon
 account level.
 
 Each Cairn account may hold at most eight browser SSE requests across all of its
-installations and sessions in the official process. Additional requests receive
+installations and sessions in the beacon process. Additional requests receive
 503; cancellation and revocation release both allowances. MCP/public capabilities
 retain their independent limits.
 
@@ -275,7 +275,7 @@ Cancelling or revoking a stream releases both its stream permit and tunnel slot.
 
 ## Public files and scoped MCP requests
 
-The official service authorizes `/mcp` with an installation-scoped grant and
+The Beacon authorizes `/mcp` with an installation-scoped grant and
 relays it to `/api/mcp`. The relay context carries `mcp_scopes`; the installation
 applies read/run/manage checks using its existing management tools. Browser
 sessions and token secrets never travel to the installation.
@@ -284,7 +284,7 @@ Public URLs at `/api/public/installations/{id}/artifacts/{token}` use a separate
 read capability. The context carries `public_artifact`, no account identity, and
 permits only GET/HEAD of `/api/shared-artifacts/{token}`. Share-token validation
 and revocation stay on the installation. Public files use the existing credited
-streams; the official service overwrites security headers and removes cookies.
+streams; the Beacon overwrites security headers and removes cookies.
 An offline installation returns an explicit public-file availability message.
 
 Detachment removes MCP grants and outstanding authorization codes in the same
@@ -308,8 +308,8 @@ its tunnel permit. The per-grant HTTP rate limit is persisted in Postgres.
 
 ## Notification events (version 3)
 
-Version 3 adds installation-to-official
-`notification` frames and official-to-installation `notification_ack` frames.
+Version 3 adds installation-to-beacon
+`notification` frames and beacon-to-installation `notification_ack` frames.
 Versions 1 and 2 retain their finite API and SSE contracts and never receive
 notification frames.
 
@@ -322,17 +322,17 @@ answered or cancelled before forwarding are dropped. Chat deletion retains its e
 
 The event carries its chat and question or alert identifier; the authenticated
 tunnel supplies the installation identity. It never supplies account IDs or a
-recipient list. The official service selects current access holders itself and
+recipient list. The Beacon selects current access holders itself and
 sends through its operator-configured web push adapter. Push delivery jobs have
 bounded concurrency and run separately from API traffic and heartbeat handling.
-The official service does not persist event payloads or recipient queues.
+The Beacon does not persist event payloads or recipient queues.
 
 The connector reads only as many pending events as there are free push slots.
 It rotates its cursor after each successful frame send, then applies
 retry cooldowns before selecting a bounded notification batch. Completion refills
 available slots immediately. Even a backlog larger than the cooldown window
 cannot keep newer events behind persistently failing deliveries or overflow the
-official service’s notification concurrency.
+Beacon’s notification concurrency.
 
 Every finished push task acknowledges its event, including a task failure.
 A negative acknowledgement releases the connector's slot without deleting its
@@ -348,7 +348,7 @@ Hello now offers `[4, 3, 2, 1]`. A v1/v2/v3 tunnel receives no direct-control fr
 and retains its existing API/stream behavior. Clients that do not advertise v4
 receive `available: false` and keep using the relay.
 
-After Welcome(v4), the official service sends `DirectKey` over the authenticated
+After Welcome(v4), the Beacon sends `DirectKey` over the authenticated
 installation tunnel. Its Ed25519 key is ephemeral and specific to that tunnel;
 no signing credential or conversation data is stored in Postgres. A new tunnel
 uses a new key, invalidating the previous direct leases at the installation.
@@ -362,14 +362,14 @@ only that request, preserving the relay.
 The direct authorization binds a connection ID, installation, account, role,
 **public** session ID, access generation, canonical SHA-256 DTLS fingerprint,
 absolute expiry and single-use nonce. It lasts at most 180 seconds, capped by
-the official session deadline. Verification allows up to 30 seconds of signing
+the beacon session deadline. Verification allows up to 30 seconds of signing
 clock skew in the maximum remaining lifetime; expiry is still strict on the
 installation clock. Revoked-session records cover that tolerance too. Session bearer digests and CSRF credentials never
-leave the official service. The installation's `DirectConnections::accept_peer`
+leave the Beacon. The installation's `DirectConnections::accept_peer`
 checks the observed DTLS fingerprint and session, accepts that grant once, and
 returns the trusted installation identity and a cancellation token. The production
 WebRTC peer (#101) stops application traffic when that token is cancelled. Expiry cancels it
-independently of tunnel/HTTP polling. Only an official `DirectRenew` can extend
+independently of tunnel/HTTP polling. Only an beacon `DirectRenew` can extend
 it; renewal preserves the original connection identity, role and fingerprint.
 
 `DirectSignal` carries offers, answers and ICE candidates in either direction,
@@ -380,11 +380,11 @@ targets a public session, an account plus its next generation, or the whole
 installation. Existing logout/session-revocation/member-removal/access-change
 hooks send the corresponding scope; expiry is scheduled locally, and detachment,
 rotation and definitive revocation notify the whole installation before
-closing its tunnel. A normal official shutdown closes the tunnel without
+closing its tunnel. A normal beacon shutdown closes the tunnel without
 revoking established direct leases at shutdown. While the tunnel is down, new
 direct peers are denied and established leases end at their expiry. Reconnection
 supplies a new key and immediately closes the old leases, including after a normal
-official restart or deployment: the new tunnel no longer tracks the old leases
+beacon restart or deployment: the new tunnel no longer tracks the old leases
 for revocation. Clients fall back to the relay and obtain fresh authorizations,
 following the [switching rules](DIRECT-CONNECTION.md#switching-rules) without loss
 or duplication. Other accounts/devices and admitted agent work survive scoped
@@ -394,7 +394,7 @@ Limits: 30 authorization/renewal attempts per minute per account; 120 client
 signals per minute per account. The installation budgets 120 signals/minute per
 verified account across both directions, with a 960/minute global ceiling and
 120 signals reserved for the owner (all members share an 840/minute ceiling).
-The official installation-to-client budget
+The Beacon installation-to-client budget
 uses the same per-account/global ceilings. Signals sent by the client carry a
 request ID and receive `DirectSignalAck`: HTTP 204 requires installation acceptance;
 refusal returns 429 and a lost acknowledgement returns 503. At most 32 signal
@@ -403,7 +403,7 @@ acknowledgements are pending, with a five-second deadline.
 There are 32 direct leases per installation, eight per account; members may use
 at most 24 leases, leaving eight for the owner. Each lease admits one signaling
 reader with a 16-signal queue. SDP is at most 16 KiB, ICE candidates at most 1 KiB,
-and official JSON control bodies at most 32 KiB. Direct-control frames use a dedicated 16-frame queue in each direction, separate
+and beacon JSON control bodies at most 32 KiB. Direct-control frames use a dedicated 16-frame queue in each direction, separate
 from relay responses and credits. Saturation returns a signaling error without
 closing fallback streams. None consumes or changes the
 existing relay request, credited-stream or public-download allowances.
@@ -412,8 +412,8 @@ The installation WebRTC peer is described in
 [DIRECT-CONNECTION.md](DIRECT-CONNECTION.md#delivered-installation-peer-101),
 including its reliable ordered channel, 16 KiB envelopes, bounded reassembly,
 STUN source and disable setting. `DirectKey` carries an optional `stun_url`
-(backward-compatible metadata), derived from the official origin or configured by
-the official service. Authorize/renew responses expose the same `iceServers`.
+(backward-compatible metadata), derived from the beacon origin or configured by
+the Beacon. Authorize/renew responses expose the same `iceServers`.
 A signal dequeued before its authorization was accepted is refused immediately,
 releasing its acknowledgement slot instead of waiting the five-second deadline.
 
@@ -422,7 +422,7 @@ releasing its acknowledgement slot instead of waiting the five-second deadline.
 The direct application pool is separate from the fallback tunnel pool: each has
 32 request slots and 24 stream slots. Direct pools are shared across all peers
 of one installation, with eight streams per verified account there; the relay's
-eight browser streams per account cover all installations in the official
+eight browser streams per account cover all installations in the beacon
 process. For one installation the combined ceiling is 64 requests / 48 streams,
 and 16 browser streams for one account using both routes. Public downloads keep
 their independent four relay slots. This separation preserves fallback capacity
@@ -464,15 +464,15 @@ disables its scheduled tasks, even if the account rejoins; duplicate a task to
 make a new commitment. Legacy tasks without authors are attributed to the owner.
 Only the author or owner can change or resume a task. A member may pause/archive
 another author's task while preserving all other fields. Pausing/archiving alone
-uses the trusted request identity without an official round-trip.
+uses the trusted request identity without an beacon round-trip.
 
 Scheduled admissions run in their own loop, independently of launching queued
-work. A slow official check cannot delay already admitted work. Authority failures
+work. A slow beacon check cannot delay already admitted work. Authority failures
 preserve the due time and expose `scheduleWaitReason` on the affected tasks;
 recovery clears that status. Preparation errors specific to a task are audited
 and advance its next occurrence, allowing other due tasks to proceed.
 
-The official service can request `POST /api/task-authors/refresh` through the
+The Beacon can request `POST /api/task-authors/refresh` through the
 existing relay request path after changing membership. This path is reserved
 for the owner role and carries no browser session. Author reconciliation and
 scheduled admissions are serialized locally; a lost refresh is recovered by the

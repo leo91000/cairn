@@ -82,7 +82,7 @@ impl DirectConnections {
             .as_ref()
             .is_some_and(|value| !value.starts_with("stun:") || value.len() > 256)
         {
-            return Err(Error::bad("Invalid official STUN configuration."));
+            return Err(Error::bad("Invalid beacon STUN configuration."));
         }
         self.state.lock().unwrap().stun_url = url;
         Ok(())
@@ -137,7 +137,7 @@ impl DirectConnections {
         let verifier =
             DirectVerifier::new(installation.to_owned(), public_key).map_err(Error::bad)?;
         let mut state = self.state.lock().unwrap();
-        // The new official tunnel no longer tracks the old leases for revocation.
+        // The new beacon tunnel no longer tracks the old leases for revocation.
         // Close them so clients fall back to the relay and obtain fresh grants.
         for (_, authorization) in state.authorizations.drain() {
             authorization.closed.cancel();
@@ -258,7 +258,7 @@ impl DirectConnections {
     ) -> Result<DirectLease> {
         let mut state = self.state.lock().unwrap();
         if state.output.is_none() || state.verifier.is_none() {
-            return Err(Error::unauthorized("Official tunnel unavailable."));
+            return Err(Error::unauthorized("Beacon tunnel unavailable."));
         }
         let Some(lease) = state
             .authorizations
@@ -319,7 +319,7 @@ impl DirectConnections {
         allowed
     }
 
-    /// Return connection metadata to the originating official session via the tunnel.
+    /// Return connection metadata to the originating beacon session via the tunnel.
     pub fn send_signal(&self, id: &str, signal: DirectSignal) -> Result<()> {
         let signal = signal.sanitize_candidates().map_err(Error::bad)?;
         let mut state = self.state.lock().unwrap();
@@ -332,7 +332,7 @@ impl DirectConnections {
         let output = state
             .output
             .as_ref()
-            .ok_or_else(|| Error::unavailable("Official tunnel unavailable."))?;
+            .ok_or_else(|| Error::unavailable("Beacon tunnel unavailable."))?;
         output
             .try_send(Frame::DirectSignal {
                 id: id.to_owned(),

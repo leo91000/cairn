@@ -257,7 +257,7 @@ pub async fn login(app: &Fixture, email: &str) -> (String, Value) {
     (cookie, response.json().await.unwrap())
 }
 
-/// A real installation router behind its outbound connector and official HTTP API.
+/// A real installation router behind its outbound connector and beacon HTTP API.
 /// Extra HTTP handlers let tests supply slow or broken responses at the transport seam.
 pub struct RelayedInstallation {
     pub router: axum::Router,

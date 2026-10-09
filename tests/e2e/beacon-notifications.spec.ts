@@ -12,7 +12,7 @@ import { expect, test } from '@playwright/test'
 import { config as loadConfig } from '../fixtures/legacy/server/config'
 import { Service as SeedService } from '../fixtures/legacy/server/service'
 import { Store } from '../fixtures/legacy/server/store'
-import { expireAccountProof } from './official-relay-fixture'
+import { expireAccountProof } from './beacon-relay-fixture'
 
 test('a browser registers once for all Cairn installations and can disable account push', async ({ page, context }) => {
   test.setTimeout(120000)
@@ -102,7 +102,7 @@ test('a browser registers once for all Cairn installations and can disable accou
     }
   }, subscription)
 
-  const official = start('target/debug/cairn-beacon', {
+  const beacon = start('target/debug/cairn-beacon', {
     CAIRN_BEACON_DATABASE_URL: process.env.CAIRN_BEACON_TEST_DATABASE_URL,
     CAIRN_BEACON_ORIGIN: url,
     CAIRN_BEACON_LISTEN: '127.0.0.1:4394',
@@ -114,8 +114,8 @@ test('a browser registers once for all Cairn installations and can disable accou
   })
   try {
     await expect.poll(() => {
-      if (official.exitCode !== null)
-        throw new Error(diagnostics.join('') || `Official service exited: ${official.exitCode}`)
+      if (beacon.exitCode !== null)
+        throw new Error(diagnostics.join('') || `Beacon exited: ${beacon.exitCode}`)
       return fetch(`${url}/health`).then(response => response.ok).catch(() => false)
     }, { timeout: 30000 }).toBe(true)
     await signIn(page, email)

@@ -1,4 +1,4 @@
-# Official service and Cairn accounts
+# Beacon and Cairn accounts
 
 The `cairn-beacon` binary is distinct from the installation's `cairn` binary. It
 owns a separate Postgres database and serves the web application. This first
@@ -11,22 +11,22 @@ claiming, sharing and Android sign-in are separate tickets.
 ```sh
 pnpm install --frozen-lockfile
 pnpm build
-docker compose -f deploy/official/compose.yaml up
+docker compose -f deploy/beacon/compose.yaml up
 ```
 
 Open http://localhost:4311. The development-only mailbox at
 http://localhost:8025 shows the emails in memory; it never sends real email or
 logs codes. Both ports are bound to loopback. The first Rust compilation takes
-a few minutes. `docker compose -f deploy/official/compose.yaml down` stops it;
+a few minutes. `docker compose -f deploy/beacon/compose.yaml down` stops it;
 add `-v` to discard the development database and build caches.
 
-The default `apps/web/index.html` and the official `apps/web/beacon.html` both enter the Cairn
+The default `apps/web/index.html` and the beacon `apps/web/beacon.html` both enter the Cairn
 account shell. There is no installation password/setup screen. For hot reload,
-run `pnpm dev` with the official configuration variables below, including
+run `pnpm dev` with the beacon configuration variables below, including
 `CAIRN_BEACON_ORIGIN=http://localhost:5178`. Vite serves the application at that
 origin and proxies account requests, OAuth callbacks and relay WebSockets to
 `127.0.0.1:4311`. Run the installation separately with `cargo run --bin cairn` and
-claim it through the official account; its HTTP listener never hosts the web
+claim it through the beacon account; its HTTP listener never hosts the web
 application. `PUBLIC_URL` continues to describe private installation traffic.
 
 Browser tests use the production `cairn-beacon` and `cairn` binaries, a separate
@@ -42,10 +42,10 @@ never a shipped server.
 
 ## Production
 
-Use the `official` target in `Dockerfile` and
-`deploy/official/compose.production.yaml`. The image bundles the official binary
+Use the `beacon` target in `Dockerfile` and
+`deploy/beacon/compose.production.yaml`. The image bundles the beacon binary
 and matching web output, runs as UID 1000, and requires environment-only secrets.
-The existing `deploy/official/compose.yaml` remains development-only.
+The existing `deploy/beacon/compose.yaml` remains development-only.
 Follow [the cairn.build runbook](PRODUCTION-CAIRN.md) for the fresh same-server
 installation, proxy trust, email, OAuth, approval gates and Postgres rollback.
 `/health` returns no-store JSON (`status`, `commit`, `runtimeId`) and verifies
@@ -89,15 +89,15 @@ updated to those timestamps before startup (SQL contents/checksums are unchanged
 or replaced with an empty disposable development database. Do not run the old
 binary against the updated ledger. Rate limits are shared through Postgres.
 
-Only **one official relay process** is supported for deployment. Route all browser
+Only **one beacon relay process** is supported for deployment. Route all browser
 account/access mutations, installation API requests and relay WebSockets to that
 process. Logout, detachment, member removal, token rotation and **Revoke and forget**
 notify only its in-memory relay registry; there is no inter-process revocation
 notification. Sticky routing per installation alone does not provide immediate
 session revocation across installations. Persisted checks eventually detect
 machine revocation in another process, but do not make that deployment supported.
-Do not add official replicas until shared connection routing and revocation
-notifications are implemented. [ADR-0032](adr/0032-single-official-relay-process.md)
+Do not add beacon replicas until shared connection routing and revocation
+notifications are implemented. [ADR-0032](adr/0032-single-beacon-relay-process.md)
 records this restriction of spec #43 and the persisted-check tolerance trade-off.
 Terminate TLS at the public origin with a reverse proxy. The service checks the
 configured origin on every account mutation. IP limits use the TCP peer unless
@@ -105,7 +105,7 @@ it matches `CAIRN_BEACON_TRUSTED_PROXIES`. In that case they use the rightmost
 `X-Forwarded-For` address outside the trusted proxy ranges, across all account
 and machine endpoints. Each trusted proxy must append its actual peer address.
 Trust only your controlled proxy hops; headers from other peers are ignored.
-Missing or malformed trusted suffixes fall back to the TCP peer. All official
+Missing or malformed trusted suffixes fall back to the TCP peer. All beacon
 IP quotas then group native IPv6 clients by /64. IPv4 clients (including
 IPv4-mapped IPv6) keep their exact address buckets. Addresses in one /64 share
 the allowance, while distinct prefixes remain independent; rotating interface
@@ -114,9 +114,9 @@ or account/email/grant quotas. Existing IPv6 address buckets expire normally;
 the first request after this upgrade starts the new prefix bucket. Do not expose
 Postgres or the development mailbox publicly.
 
-The official SPA denies embedding with `frame-ancestors 'none'` and
+The beacon SPA denies embedding with `frame-ancestors 'none'` and
 `X-Frame-Options: DENY`, including deep links, to protect account and claim actions
-from clickjacking. HTTPS official origins also send `Strict-Transport-Security:
+from clickjacking. HTTPS beacon origins also send `Strict-Transport-Security:
 max-age=31536000` through the TLS-terminating proxy; loopback HTTP development
 does not set HSTS. Relayed responses keep their existing sandbox policies.
 
@@ -198,11 +198,11 @@ already belonging to that account does not move it or change its verified email.
 Concurrent first sign-ins reuse the same account and
 method without a uniqueness error.
 
-Default endpoints are the official Google and GitHub endpoints. Tests replace
+Default endpoints are the beacon Google and GitHub endpoints. Tests replace
 only their HTTP endpoints. Operators can override
 `CAIRN_BEACON_{GOOGLE,GITHUB}_{AUTHORIZATION_URL,TOKEN_URL,USERINFO_URL}` and
 `CAIRN_BEACON_GITHUB_EMAILS_URL`; endpoints require HTTPS, except HTTP loopback
-endpoints when the official origin is also loopback. OAuth uses authorization
+endpoints when the beacon origin is also loopback. OAuth uses authorization
 codes, S256 PKCE and a five-minute, single-use state bound to an HttpOnly browser
 cookie. Explicit linking checks the initiating session and CSRF token and requires
 an independent email/passkey proof from the last five minutes in that session.
@@ -222,7 +222,7 @@ OAuth and passkey browser cookies are cleared after completion or rejection.
 
 Passkeys use [webauthn-rs](https://docs.rs/webauthn-rs/latest/webauthn_rs/)
 for signature, origin, relying-party and required user-verification checks. The
-relying-party ID is the exact official origin's hostname; changing it invalidates
+relying-party ID is the exact beacon origin's hostname; changing it invalidates
 existing passkeys. Use an HTTPS hostname in production and `http://localhost`
 for local passkey development. IP origins still support email/OAuth sign-in but
 do not offer passkeys. The web uses the browser's WebAuthn JSON methods; older
@@ -257,14 +257,14 @@ Use a disposable Postgres database that can create schemas. Each Rust test owns
 an isolated schema. Use the backend launcher to isolate live agent credentials:
 
 ```sh
-CAIRN_BEACON_TEST_DATABASE_URL=postgres://cairn:test-only@localhost/cairn_official_test pnpm test:backend -p cairn-beacon
-CAIRN_BEACON_TEST_DATABASE_URL=postgres://cairn:test-only@localhost/cairn_official_test pnpm test:backend
+CAIRN_BEACON_TEST_DATABASE_URL=postgres://cairn:test-only@localhost/cairn_beacon_test pnpm test:backend -p cairn-beacon
+CAIRN_BEACON_TEST_DATABASE_URL=postgres://cairn:test-only@localhost/cairn_beacon_test pnpm test:backend
 cargo build --locked --bin cairn-beacon
-CAIRN_BEACON_TEST_DATABASE_URL=postgres://cairn:test-only@localhost/cairn_official_test pnpm test:e2e --project=journeys-official-account
+CAIRN_BEACON_TEST_DATABASE_URL=postgres://cairn:test-only@localhost/cairn_beacon_test pnpm test:e2e --project=journeys-beacon-account
 ```
 
 CI supplies Postgres for both integration and browser tests. Browser tests run
-the real official binary and replace only external email delivery with an HTTP
+the real beacon binary and replace only external email delivery with an HTTP
 mailbox. They cover email sign-in, invalid codes, empty installations, reload,
 responsive widths, sign-out, OAuth linking/removal and passkey registration,
 sign-in/removal with Chromium's virtual authenticator. API tests use HTTP OAuth
@@ -288,7 +288,7 @@ are also available from the installation options menu, including for people who
 already have an installation. A member can choose **Leave installation** and
 confirm; returning requires a new invitation.
 
-The official HTTP routes are:
+The beacon HTTP routes are:
 
 - `GET /api/account/invitations` and `POST /api/account/invitations/{id}/accept`.
 - `GET /api/installations/{id}/sharing` for the owner's member/invitation list.
@@ -297,12 +297,12 @@ The official HTTP routes are:
 - `DELETE /api/installations/{id}/sharing/members/{account}` to remove a member.
 - `DELETE /api/installations/{id}/sharing/membership` to leave.
 
-Mutations require the official session, origin and CSRF token. Accepting an
+Mutations require the beacon session, origin and CSRF token. Accepting an
 invitation and changing membership serialize on the installation record.
 Removal and departure call the existing relay revocation mechanism after commit:
 open chat/run streams close immediately, the next request is denied, and the
 installation's runs and other accounts remain unaffected. The installation
-receives the official account and role through its existing trusted identity.
+receives the beacon account and role through its existing trusted identity.
 
 Members can read agents, projects and skills, and create conversations and work
 with agents. The installation refuses management of agents, projects, skills,
@@ -313,7 +313,7 @@ and offers skills for reading only.
 ## Public deliverables and MCP access
 
 Public deliverable URLs are `/api/public/installations/{id}/artifacts/{token}`
-on the official origin. The installation retains file bytes, share-token
+on the beacon origin. The installation retains file bytes, share-token
 verification and revocation. The public request carries no account identity,
 cookie or bearer credential through the relay, and permits only GET/HEAD of
 that file. Recipients need no session. Revoking visibility or moving a
@@ -327,17 +327,17 @@ anonymous CORS policy (`Access-Control-Allow-Origin: *`, without credentials) an
 existing credit-controlled relay streams, including files larger than a
 finite relay frame. The service never persists their contents.
 
-External MCP clients use the official `/mcp` URL. Discovery is at
+External MCP clients use the beacon `/mcp` URL. Discovery is at
 `/.well-known/oauth-protected-resource/mcp` and
 `/.well-known/oauth-authorization-server`; `/oauth/register` registers public
 clients. Authorization uses the Cairn account session, an explicit installation
 choice and S256 PKCE. Codes expire after five minutes; access tokens after an
 hour. Refresh tokens rotate, expire after 30 days and revoke their entire
 authorization when a used token is replayed. A resource parameter, when supplied,
-must match the official MCP URL. Only credential digests are retained.
+must match the beacon MCP URL. Only credential digests are retained.
 
 Create, list and revoke grants at `/api/installations/{id}/tokens` (DELETE
-`/{grant}`), using the official session, origin and CSRF rules. Personal tokens
+`/{grant}`), using the beacon session, origin and CSRF rules. Personal tokens
 last 30 days and are returned once. Every credential is pinned to that
 installation and its read/run/manage scopes; it stops working after revocation,
 detachment or account deletion. Installation management permissions remain
@@ -432,7 +432,7 @@ records the last independent email/passkey proof, not an OAuth login or session
 activity. A new rename migration preserves existing proof timestamps,
 CSRF, cookie digests and deadlines, leaving historical SQLx checksums intact.
 The rename is a forward-only schema change, not an additive compatibility change.
-Update the official binary with this migration; older binaries still using the
+Update the beacon binary with this migration; older binaries still using the
 previous column name cannot serve that database. Upgrade its web bundle too.
 
 The installation actions expose **Confirm identity** in their confirmation form;
@@ -474,7 +474,7 @@ storage-error response; no relay access is revoked before a successful commit.
 
 `GET /api/account/audit` returns at most the latest 100 events belonging to the
 caller or their installations during their ownership period. Members see only
-their own actions. It requires a current official session and uses no-store.
+their own actions. It requires a current beacon session and uses no-store.
 Audit entries accompany successful claims (including device recovery),
 detachments, definitive revocations, invitations/acceptances/cancellations/delivery failures,
 member removals/departures, session revocations and account deletions in the same
@@ -519,7 +519,7 @@ GitHub repository discovery is reserved to its owner, like its coding accounts.
 Members can read the agent list and avatars, while individual agent management
 routes remain owner-only.
 
-Browser streams have eight simultaneous slots per Cairn account in the official
+Browser streams have eight simultaneous slots per Cairn account in the beacon
 process, across installations and sessions. This complements the existing
 24-stream/32-request limits per installation; cancellation, expiry and revocation
 release the allowance together with the remote subscription. Extra streams return
@@ -530,15 +530,15 @@ installation slots for the owner's live views and ordinary requests.
 ## Web push notifications
 
 Devices belong to a Cairn account, not an installation. Open **Notifications** in
-the official account screen or the installation options menu to enable or
+the beacon account screen or the installation options menu to enable or
 disable this browser once for all owned and shared installations. Installation
 settings no longer contain device registration. Android native push is handled
 separately in #58.
 
-The official routes are `GET /api/account/notifications`,
+The beacon routes are `GET /api/account/notifications`,
 `POST /api/account/notifications/subscriptions`, and
 `GET` / `DELETE /api/account/notifications/subscriptions/{id}`. They require the
-official session; writes also require the official origin and CSRF token.
+beacon session; writes also require the beacon origin and CSRF token.
 Registration requires a recent independent email/passkey proof in the calling
 session, rechecked after waiting for both the account and endpoint locks. Notifications offers the
 existing Confirm identity flow and returns to the panel without automatically
@@ -597,7 +597,7 @@ or sharing subscription values. Endpoint transfer supports explicit account
 switching; it is not performed on sign-in or session changes.
 
 When explicitly enabling notifications, the web app replaces any browser subscription
-whose application server key differs from the official public key (including old
+whose application server key differs from the beacon public key (including old
 installation VAPID subscriptions). Re-enrollment after an operator key rotation uses
 the same flow.
 ## Android sign-in and native notifications
@@ -611,7 +611,7 @@ signature, issuer, audience, expiration, nonce and verified email before applyin
 the existing account policy. Provider tokens never become coding-agent grants.
 
 GitHub uses a Custom Tab because Credential Manager has no GitHub provider.
-`POST /api/account/oauth/github/start` with `{"native":true}` returns an official
+`POST /api/account/oauth/github/start` with `{"native":true}` returns an beacon
 launcher URL and an exchange secret. The launcher sets the browser challenge
 cookie, then uses the existing PKCE authorization-code callback and `user:email`
 scope. The callback shows an explicit confirmation naming the verified account
@@ -619,7 +619,7 @@ and **Cairn for Android**, warning against links received from another person.
 Opening the launcher and completing GitHub authorization alone neither links
 the identity nor makes a Cairn session available to the initiating device.
 `POST /api/account/oauth/github/native/confirm` consumes the form's one-use proof,
-bound to a separate HttpOnly browser cookie and protected by the exact official
+bound to a separate HttpOnly browser cookie and protected by the exact beacon
 origin. Only confirmation applies the shared linking policy and releases the
 handover. The page forbids framing, scripts and foreign form destinations.
 This is explicit consent, not a cryptographic device attestation; only approve
@@ -648,7 +648,7 @@ private service-account JSON supplied through the operator's secret environment,
 so it needs no credential file mount. Never configure both JSON and file sources.
 The existing file configuration remains supported for other deployments:
 set `CAIRN_BEACON_FCM_SERVICE_ACCOUNT` to a private service-account JSON **file
-path** on the official server. The file must contain `project_id`, `client_email`
+path** on the Beacon server. The file must contain `project_id`, `client_email`
 and the signing `private_key`; never distribute it to Android or installations.
 The sender uses FCM HTTP v1, caches a short-lived OAuth access token and sends
 data-only messages containing account/installation/conversation/event IDs.

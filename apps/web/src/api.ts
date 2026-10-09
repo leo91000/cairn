@@ -9,9 +9,9 @@ import { reactive, watch } from 'vue'
 import { clearHistoryCache } from './history-cache'
 import { InstallationTransport } from './installation-transport'
 
-// Resolve the official context before any shared view reads its local cache.
-export const officialEntry = typeof document !== 'undefined' && document.getElementById('app')?.hasAttribute('data-official')
-const installationId = officialEntry ? /^\/installations\/([\w-]+)(?:\/|$)/.exec(window.location.pathname)?.[1] || '' : ''
+// Resolve the beacon context before any shared view reads its local cache.
+export const beaconEntry = typeof document !== 'undefined' && document.getElementById('app')?.hasAttribute('data-beacon')
+const installationId = beaconEntry ? /^\/installations\/([\w-]+)(?:\/|$)/.exec(window.location.pathname)?.[1] || '' : ''
 
 export const state = reactive({
   transportRoute: 'relay' as 'direct' | 'relay',
@@ -39,7 +39,7 @@ watch(() => state.signingOut || (state.ready && !state.authenticated), (clear) =
 export const installationTransport = new InstallationTransport(state)
 watch(() => [state.ready, state.authenticated, state.installationId, state.signingOut, state.installationOnline], () => {
   installationTransport.availabilityChanged(state.installationOnline)
-  if (officialEntry && state.ready && state.authenticated && !state.signingOut)
+  if (beaconEntry && state.ready && state.authenticated && !state.signingOut)
     installationTransport.start()
   else if (typeof window !== 'undefined')
     installationTransport.stop()
@@ -111,7 +111,7 @@ export function accountApi<T = any>(url: string, options: RequestInit = {}): Pro
 }
 
 export function apiUrl(path: string) {
-  if (officialEntry && state.installationId && /^\/tokens(?:\/|$)/.test(path))
+  if (beaconEntry && state.installationId && /^\/tokens(?:\/|$)/.test(path))
     return `/api/installations/${encodeURIComponent(state.installationId)}${path}`
 
   const prefix = state.installationId

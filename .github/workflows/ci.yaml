@@ -11,9 +11,6 @@ on:
         type: choice
         options: ['1', '2']
         default: '2'
-env:
-  CARGO_BUILD_JOBS: '4'
-  CARGO_PROFILE_DEV_DEBUG: '0'
 permissions:
   contents: read
 concurrency:
@@ -29,7 +26,7 @@ jobs:
     outputs:
       reuse: ${{ steps.resolve.outputs.reuse }}
       digest: ${{ steps.resolve.outputs.digest }}
-      official-digest: ${{ steps.resolve.outputs.official-digest }}
+      beacon-digest: ${{ steps.resolve.outputs.beacon-digest }}
       commit: ${{ steps.resolve.outputs.commit }}
       tree: ${{ steps.resolve.outputs.tree }}
       artifact: ${{ steps.resolve.outputs.artifact }}
@@ -106,10 +103,10 @@ jobs:
         env:
           POSTGRES_USER: cairn
           POSTGRES_PASSWORD: test-only
-          POSTGRES_DB: cairn_official_test
+          POSTGRES_DB: cairn_beacon_test
         ports: ['5432:5432']
         options: >-
-          --health-cmd "pg_isready -U cairn -d cairn_official_test"
+          --health-cmd "pg_isready -U cairn -d cairn_beacon_test"
           --health-interval 5s --health-timeout 5s --health-retries 10
     needs: resolve
     # Main still runs these checks after reusing a pull request image: they report
@@ -121,7 +118,7 @@ jobs:
     env:
       CARGO_PROFILE_DEV_DEBUG: '0'
       CARGO_INCREMENTAL: '0'
-      CAIRN_BEACON_TEST_DATABASE_URL: postgres://cairn:test-only@localhost:5432/cairn_official_test
+      CAIRN_BEACON_TEST_DATABASE_URL: postgres://cairn:test-only@localhost:5432/cairn_beacon_test
     steps:
       - uses: actions/checkout@v7.0.1
       - uses: ./.github/actions/setup-pnpm
@@ -170,12 +167,12 @@ jobs:
         env:
           POSTGRES_USER: cairn
           POSTGRES_PASSWORD: test-only
-          POSTGRES_DB: cairn_official_test
+          POSTGRES_DB: cairn_beacon_test
         options: >-
-          --health-cmd "pg_isready -U cairn -d cairn_official_test"
+          --health-cmd "pg_isready -U cairn -d cairn_beacon_test"
           --health-interval 5s --health-timeout 5s --health-retries 10
     env:
-      CAIRN_BEACON_TEST_DATABASE_URL: postgres://cairn:test-only@postgres:5432/cairn_official_test
+      CAIRN_BEACON_TEST_DATABASE_URL: postgres://cairn:test-only@postgres:5432/cairn_beacon_test
     name: browser (${{ matrix.group }})
     needs: [resolve, build]
     if: needs.resolve.outputs.reuse != 'true'
@@ -234,7 +231,7 @@ jobs:
           name: browser-backend
           path: target/debug/
       - run: chmod +x target/debug/cairn target/debug/cairn-beacon target/debug/examples/network_direct_client target/debug/examples/worker_fixture
-      - name: Install Postgres client for official account fixtures
+      - name: Install Postgres client for beacon account fixtures
         run: apt-get update -qq && apt-get install -y --no-install-recommends postgresql-client
       - run: |
           args=(--project="$BROWSER_PROJECTS" --workers="$BROWSER_WORKERS")
@@ -267,15 +264,15 @@ jobs:
         env:
           POSTGRES_USER: cairn
           POSTGRES_PASSWORD: test-only
-          POSTGRES_DB: cairn_official_test
+          POSTGRES_DB: cairn_beacon_test
         ports: ['5432:5432']
         options: >-
-          --health-cmd "pg_isready -U cairn -d cairn_official_test"
+          --health-cmd "pg_isready -U cairn -d cairn_beacon_test"
           --health-interval 5s --health-timeout 5s --health-retries 10
     env:
       CARGO_PROFILE_DEV_DEBUG: '0'
       CARGO_BUILD_JOBS: '4'
-      CAIRN_BEACON_TEST_DATABASE_URL: postgres://cairn:test-only@127.0.0.1:5432/cairn_official_test
+      CAIRN_BEACON_TEST_DATABASE_URL: postgres://cairn:test-only@127.0.0.1:5432/cairn_beacon_test
     steps:
       - uses: actions/checkout@v7.0.1
       - uses: ./.github/actions/setup-pnpm
@@ -319,15 +316,15 @@ jobs:
         env:
           POSTGRES_USER: cairn
           POSTGRES_PASSWORD: test-only
-          POSTGRES_DB: cairn_official_test
+          POSTGRES_DB: cairn_beacon_test
         ports: ['5432:5432']
         options: >-
-          --health-cmd "pg_isready -U cairn -d cairn_official_test"
+          --health-cmd "pg_isready -U cairn -d cairn_beacon_test"
           --health-interval 5s --health-timeout 5s --health-retries 10
     env:
       CARGO_PROFILE_DEV_DEBUG: '0'
       CARGO_BUILD_JOBS: '4'
-      CAIRN_BEACON_TEST_DATABASE_URL: postgres://cairn:test-only@127.0.0.1:5432/cairn_official_test
+      CAIRN_BEACON_TEST_DATABASE_URL: postgres://cairn:test-only@127.0.0.1:5432/cairn_beacon_test
     steps:
       - uses: actions/checkout@v7.0.1
       - uses: ./.github/actions/setup-pnpm
@@ -379,7 +376,7 @@ jobs:
           path: test-results/android-direct/
           retention-days: 14
   image:
-    # The exact-image smoke test uses the official binary and frontend from the
+    # The exact-image smoke test uses the beacon binary and frontend from the
     # build job, which finishes long before the image does; quality never gates it.
     needs: [resolve, build]
     if: needs.resolve.outputs.reuse != 'true'
@@ -503,13 +500,13 @@ jobs:
       - uses: actions/download-artifact@v8.0.1
         with:
           name: browser-backend
-          path: official-smoke-bin/
+          path: beacon-smoke-bin/
       - uses: actions/download-artifact@v8.0.1
         with:
           name: browser-build
           path: dist/
-      - run: chmod +x official-smoke-bin/cairn-beacon
-      - name: Start the disposable official database
+      - run: chmod +x beacon-smoke-bin/cairn-beacon
+      - name: Start the disposable beacon database
         # The PR job changes Docker's image store above. Start this database
         # afterwards so restarting Docker cannot discard a service container.
         # TCP health waits for the final server, beyond socket-only initialization.
@@ -517,8 +514,8 @@ jobs:
           docker run --detach --name cairn-beacon-smoke-db \
             --network host \
             --env POSTGRES_USER=cairn --env POSTGRES_PASSWORD=test-only \
-            --env POSTGRES_DB=cairn_official_test \
-            --health-cmd "pg_isready -h 127.0.0.1 -U cairn -d cairn_official_test" \
+            --env POSTGRES_DB=cairn_beacon_test \
+            --health-cmd "pg_isready -h 127.0.0.1 -U cairn -d cairn_beacon_test" \
             --health-interval 1s --health-timeout 5s --health-retries 30 \
             postgres:17-alpine@sha256:b0f9560a2de083e2cc7382e75f808c7381a32852a7ec49117deedb300e552b24 postgres -c listen_addresses=127.0.0.1
           for attempt in $(seq 1 30); do
@@ -531,12 +528,12 @@ jobs:
       - name: Smoke-test the exact image
         env:
           GITHUB_TOKEN: ${{ github.token }}
-          CAIRN_BEACON_TEST_DATABASE_URL: postgres://cairn:test-only@127.0.0.1:5432/cairn_official_test
-          CAIRN_SMOKE_OFFICIAL_BINARY: official-smoke-bin/cairn-beacon
+          CAIRN_BEACON_TEST_DATABASE_URL: postgres://cairn:test-only@127.0.0.1:5432/cairn_beacon_test
+          CAIRN_SMOKE_BEACON_BINARY: beacon-smoke-bin/cairn-beacon
         run: |
           node tests/container-smoke.mjs "$SMOKE_IMAGE"
           node tests/runner-smoke.mjs "$SMOKE_IMAGE"
-      - name: Remove the disposable official database
+      - name: Remove the disposable beacon database
         if: always()
         run: docker rm --force cairn-beacon-smoke-db
       - name: Verify retained conversation memory, crash recovery and active admission
@@ -551,7 +548,7 @@ jobs:
       - name: Report remaining disk space
         if: always()
         run: df -h /
-  official-image:
+  beacon-image:
     needs: resolve
     if: needs.resolve.outputs.reuse != 'true'
     outputs:
@@ -581,7 +578,7 @@ jobs:
         with:
           images: ghcr.io/${{ github.repository_owner }}/cairn-beacon
           labels: org.opencontainers.image.version=${{ steps.package.outputs.version }}
-      - name: Choose the official image destination
+      - name: Choose the beacon image destination
         id: target
         run: |
           if [[ "$PUBLISH" == true ]]; then
@@ -593,20 +590,20 @@ jobs:
         id: build
         with:
           context: .
-          target: official
+          target: beacon
           outputs: ${{ steps.target.outputs.destination }}
           labels: ${{ steps.meta.outputs.labels }}
           build-args: VCS_REF=${{ github.sha }}
           cache-from: |
             type=registry,ref=ghcr.io/${{ github.repository_owner }}/cairn-beacon:buildcache
-            type=gha,scope=official
+            type=gha,scope=beacon
           cache-to: ${{ github.ref == 'refs/heads/main' && format('type=registry,ref=ghcr.io/{0}/cairn-beacon:buildcache,mode=max,compression=zstd,compression-level=3,ignore-error=true', github.repository_owner) || '' }}
           provenance: ${{ env.PUBLISH == 'true' && 'mode=max' || 'false' }}
           sbom: ${{ env.PUBLISH == 'true' }}
       - uses: ./.github/actions/setup-pnpm
         with:
           install: false
-      - name: Smoke-test the exact official image with disposable Postgres
+      - name: Smoke-test the exact beacon image with disposable Postgres
         env:
           IMAGE_DIGEST: ${{ steps.build.outputs.digest }}
         run: |
@@ -615,8 +612,8 @@ jobs:
           else
             image=cairn-beacon:test
           fi
-          node tests/official-container-smoke.mjs "$image"
-          node tests/official-postgres-backup.mjs
+          node tests/beacon-container-smoke.mjs "$image"
+          node tests/beacon-postgres-backup.mjs
   image-cache:
     # Main reuses a pull request image without building it; refresh the shared
     # layer cache for later pull requests. This never gates a release.
@@ -648,12 +645,12 @@ jobs:
           cache-to: type=registry,ref=ghcr.io/${{ github.repository_owner }}/cairn:buildcache,mode=max,compression=zstd,compression-level=3,ignore-error=true
           secrets: github_token=${{ github.token }}
           provenance: false
-      - name: Refresh the official cache when main reuses validated images
+      - name: Refresh the beacon cache when main reuses validated images
         if: always() && !cancelled()
         uses: docker/build-push-action@v7.3.0
         with:
           context: .
-          target: official
+          target: beacon
           outputs: type=cacheonly
           build-args: VCS_REF=${{ github.sha }}
           cache-from: type=registry,ref=ghcr.io/${{ github.repository_owner }}/cairn-beacon:buildcache
@@ -663,8 +660,8 @@ jobs:
   publish:
     # The Intel nested Android test needs hardware GitHub does not provide; it runs locally
     # before releases when Android or runner changes need it (docs/DEPLOYMENT.md) and does not gate CI.
-    needs: [resolve, quality, browser, network-bench, image, official-image]
-    if: always() && !cancelled() && needs.resolve.outputs.reuse != 'true' && needs.quality.result == 'success' && needs.browser.result == 'success' && needs.network-bench.result == 'success' && needs.image.result == 'success' && needs.image.outputs.published == 'true' && needs.official-image.result == 'success' && needs.official-image.outputs.published == 'true'
+    needs: [resolve, quality, browser, network-bench, image, beacon-image]
+    if: always() && !cancelled() && needs.resolve.outputs.reuse != 'true' && needs.quality.result == 'success' && needs.browser.result == 'success' && needs.network-bench.result == 'success' && needs.image.result == 'success' && needs.image.outputs.published == 'true' && needs.beacon-image.result == 'success' && needs.beacon-image.outputs.published == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
@@ -683,13 +680,13 @@ jobs:
         if: github.event_name != 'pull_request'
         with:
           image: ghcr.io/${{ github.repository_owner }}/cairn-beacon
-          digest: ${{ needs.official-image.outputs.digest }}
+          digest: ${{ needs.beacon-image.outputs.digest }}
           token: ${{ secrets.GITHUB_TOKEN }}
       - name: Record the validated image
         if: github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref == 'refs/heads/main')
         env:
           IMAGE_DIGEST: ${{ needs.image.outputs.digest }}
-          OFFICIAL_IMAGE_DIGEST: ${{ needs.official-image.outputs.digest }}
+          BEACON_IMAGE_DIGEST: ${{ needs.beacon-image.outputs.digest }}
           GIT_TREE: ${{ needs.resolve.outputs.tree }}
           CODEX_VERSION: ${{ needs.resolve.outputs.codex }}
           GH_VERSION: ${{ needs.resolve.outputs.gh }}
@@ -697,7 +694,7 @@ jobs:
           mkdir -p release-evidence
           node --input-type=module <<'JS'
           import { writeFileSync } from 'node:fs'
-          writeFileSync('release-evidence/image.json', JSON.stringify({ schema: 3, officialDigest: process.env.OFFICIAL_IMAGE_DIGEST, repository: process.env.GITHUB_REPOSITORY.toLowerCase(), tree: process.env.GIT_TREE, commit: process.env.GITHUB_SHA, digest: process.env.IMAGE_DIGEST, runId: Number(process.env.GITHUB_RUN_ID), tools: { codex: process.env.CODEX_VERSION, gh: process.env.GH_VERSION } }))
+          writeFileSync('release-evidence/image.json', JSON.stringify({ schema: 3, beaconDigest: process.env.BEACON_IMAGE_DIGEST, repository: process.env.GITHUB_REPOSITORY.toLowerCase(), tree: process.env.GIT_TREE, commit: process.env.GITHUB_SHA, digest: process.env.IMAGE_DIGEST, runId: Number(process.env.GITHUB_RUN_ID), tools: { codex: process.env.CODEX_VERSION, gh: process.env.GH_VERSION } }))
           JS
       - uses: actions/upload-artifact@v7.0.1
         if: github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref == 'refs/heads/main')
@@ -723,11 +720,11 @@ jobs:
       - uses: ./.github/actions/promote-image
         with:
           image: ghcr.io/${{ github.repository_owner }}/cairn-beacon
-          digest: ${{ needs.resolve.outputs.official-digest }}
+          digest: ${{ needs.resolve.outputs.beacon-digest }}
           token: ${{ secrets.GITHUB_TOKEN }}
   deploy:
     if: always() && !cancelled() && github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') && (needs.publish.result == 'success' || needs.promote.result == 'success')
-    needs: [resolve, image, official-image, publish, promote]
+    needs: [resolve, image, beacon-image, publish, promote]
     permissions:
       contents: read
     runs-on: ubuntu-latest
@@ -749,7 +746,7 @@ jobs:
           COOLIFY_SERVICE_UUID: ${{ vars.COOLIFY_SERVICE_UUID }}
           COOLIFY_TOKEN: ${{ secrets.COOLIFY_TOKEN }}
           CAIRN_BEACON_ORIGIN: ${{ vars.CAIRN_BEACON_ORIGIN }}
-          DEPLOY_IMAGE: ghcr.io/${{ github.repository_owner }}/cairn-beacon@${{ needs.resolve.outputs.official-digest || needs.official-image.outputs.digest }}
+          DEPLOY_IMAGE: ghcr.io/${{ github.repository_owner }}/cairn-beacon@${{ needs.resolve.outputs.beacon-digest || needs.beacon-image.outputs.digest }}
           DEPLOY_INSTALLATION_IMAGE: ghcr.io/${{ github.repository_owner }}/cairn@${{ needs.resolve.outputs.digest || needs.image.outputs.digest }}
           # A reused image reports the commit it was validated at, with this tag's tree.
           DEPLOY_COMMIT: ${{ needs.resolve.outputs.commit }}

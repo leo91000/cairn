@@ -3,16 +3,16 @@ import { randomUUID } from 'node:crypto'
 import { join } from 'node:path'
 import process from 'node:process'
 import { chromium, expect, test } from '@playwright/test'
-import { executeOfficialSql, officialRelayFixture } from './official-relay-fixture'
+import { beaconRelayFixture, executeBeaconSql } from './beacon-relay-fixture'
 
 test('a member mutation refused behind another member upload succeeds exactly once through relay', async () => {
   test.setTimeout(120000)
   const database = new URL(process.env.CAIRN_BEACON_TEST_DATABASE_URL!)
   const schema = `capacity_${randomUUID().replaceAll('-', '')}`
-  executeOfficialSql(database, `CREATE SCHEMA ${schema}`)
+  executeBeaconSql(database, `CREATE SCHEMA ${schema}`)
   const isolated = new URL(database)
   isolated.searchParams.set('options', `-c search_path=${schema}`)
-  const fixture = await officialRelayFixture(4431)
+  const fixture = await beaconRelayFixture(4431)
   const browser = await chromium.launch({ args: ['--disable-features=WebRtcHideLocalIpsWithMdns'] })
   const { url, messages } = fixture
   const owner = await (await browser.newContext()).newPage()
@@ -31,9 +31,9 @@ test('a member mutation refused behind another member upload succeeds exactly on
   }
 
   try {
-    const official = fixture.official(isolated.toString())
+    const beacon = fixture.beacon(isolated.toString())
     await expect.poll(() => {
-      expect(official.exitCode).toBeNull()
+      expect(beacon.exitCode).toBeNull()
       return fetch(`${url}/health`).then(response => response.ok).catch(() => false)
     }).toBe(true)
     await signIn(owner, `${schema}-owner@example.test`)
@@ -163,6 +163,6 @@ test('a member mutation refused behind another member upload succeeds exactly on
   finally {
     await browser.close()
     await fixture.close()
-    executeOfficialSql(database, `DROP SCHEMA ${schema} CASCADE`)
+    executeBeaconSql(database, `DROP SCHEMA ${schema} CASCADE`)
   }
 })

@@ -1,4 +1,4 @@
-//! Notification events remain on the installation; only the official service owns devices and sends push.
+//! Notification events remain on the installation; only the Beacon owns devices and sends push.
 use crate::{
     chats::{Question, QuestionStatus},
     config::now,
@@ -13,7 +13,7 @@ use std::collections::HashSet;
 
 const DELIVERY_TTL_MS: i64 = 3_600_000;
 
-/// Local registrations and their encrypted keys cannot authorize official account push.
+/// Local registrations and their encrypted keys cannot authorize beacon account push.
 pub fn remove_local_registrations(db: &mut Db<'_>) -> Result<()> {
     for prefix in ["push-device:", "mcp-secret:push-device:"] {
         for (key, _) in db.keys(prefix)? {
@@ -83,7 +83,7 @@ pub async fn pending(
             pending.rotate_left(start);
 
             for (key, value) in pending {
-                // Old local deliveries are not registrations on the official service.
+                // Old local deliveries are not registrations on the Beacon.
                 let Ok(event) = serde_json::from_value::<NotificationEvent>(value) else {
                     db.delete(&key)?;
                     continue;

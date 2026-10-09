@@ -718,7 +718,7 @@ private fun Stepper(value: Int, enabled: Boolean, change: (Int) -> Unit) {
 }
 
 /**
- * Adds an account or signs one in again, with the same steps for every coding agent: the official
+ * Adds an account or signs one in again, with the same steps for every coding agent: the beacon
  * page opens in the browser and this sheet follows until the account is verified.
  */
 @OptIn(ExperimentalMaterial3Api::class)

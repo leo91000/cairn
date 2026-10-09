@@ -101,7 +101,7 @@ async fn installation_http_accepts_only_trusted_context_and_checks_host_and_orig
     let trusted = json_request("POST", "/api/chats")
         .extension(InstallationIdentity::trusted(
             InstallationRole::Owner,
-            "official-account",
+            "beacon-account",
         ))
         .body(Body::from("{}"))
         .unwrap();
@@ -173,11 +173,11 @@ async fn member_identity_cannot_manage_installation_resources() {
         );
     }
 
-    // Official MCP grants have no installation-local management routes.
+    // Beacon MCP grants have no installation-local management routes.
     for role in [InstallationRole::Owner, InstallationRole::Member] {
         for (method, path) in [("GET", "/api/tokens"), ("POST", "/api/oauth/consent")] {
             let request = json_request(method, path)
-                .extension(InstallationIdentity::trusted(role, "official-account"))
+                .extension(InstallationIdentity::trusted(role, "beacon-account"))
                 .body(Body::from("{}"))
                 .unwrap();
             assert_eq!(

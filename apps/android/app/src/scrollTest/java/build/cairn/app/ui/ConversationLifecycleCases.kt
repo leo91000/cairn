@@ -102,8 +102,8 @@ abstract class ConversationLifecycleCases {
                                     trashed["lifecycle"] = JsonPrimitive("trash")
                                     JsonArray(listOf(JsonObject(trashed))).toString()
                                 }
-                                path == "/api/installations" -> officialInstallationsFixture()
-                                path == "/api/account/session" -> officialAccountFixture("fixture")
+                                path == "/api/installations" -> beaconInstallationsFixture()
+                                path == "/api/account/session" -> beaconAccountFixture("fixture")
                                 path == "/api/installations/fixture/api/agents" ->
                                     wireJson.encodeToString(
                                         listOf(Agent(MAIN_AGENT_ID, "Agent principal"))
@@ -120,7 +120,7 @@ abstract class ConversationLifecycleCases {
                 CairnViewModel(
                     ApplicationProvider.getApplicationContext<Application>(),
                     LifecycleVault(),
-                    officialOrigin = "",
+                    beaconOrigin = "",
                 )
             compose.setContent {
                 val state by vm.state.collectAsStateWithLifecycle()

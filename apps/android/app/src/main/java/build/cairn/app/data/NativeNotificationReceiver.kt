@@ -21,7 +21,7 @@ private val nativeSeenKey = stringSetPreferencesKey("native_push_seen")
 class NativeNotificationReceiver(
     private val context: Context,
     private val vault: SessionVault = KeystoreSessionVault(context),
-    private val officialOrigin: String = BuildConfig.OFFICIAL_SERVICE_ORIGIN,
+    private val beaconOrigin: String = BuildConfig.BEACON_SERVICE_ORIGIN,
 ) {
     suspend fun receive(data: Map<String, String>): Boolean {
         val account = data["accountId"] ?: return false
@@ -39,10 +39,10 @@ class NativeNotificationReceiver(
                 runCatching { UUID.fromString(it).toString() == it }.getOrDefault(false)
             }
         if ((question == null) == (alert == null)) return false
-        if (officialOrigin.isBlank()) return false
+        if (beaconOrigin.isBlank()) return false
         val preferences = NotificationPreferences(context)
         if (!preferences.enabled.first() || !notificationsAllowed(context)) return false
-        val origin = serverOrigin(officialOrigin, BuildConfig.DEBUG)
+        val origin = serverOrigin(beaconOrigin, BuildConfig.DEBUG)
         val originalCookie = vault.read(origin.toString()) ?: return false
         val api = CairnApi(origin, vault)
         val session = api.get<Session>("/account/session")

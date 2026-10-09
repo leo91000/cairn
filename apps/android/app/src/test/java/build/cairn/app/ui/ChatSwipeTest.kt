@@ -348,8 +348,8 @@ class ChatSwipeTest {
                         }
                         val body =
                             when (path) {
-                                "/api/installations" -> officialInstallationsFixture()
-                                "/api/account/session" -> officialAccountFixture("fixture")
+                                "/api/installations" -> beaconInstallationsFixture()
+                                "/api/account/session" -> beaconAccountFixture("fixture")
                                 "/api/installations/fixture/api/agents" ->
                                     wireJson.encodeToString(listOf(agent))
                                 "/api/installations/fixture/api/codex/models",
@@ -373,7 +373,7 @@ class ChatSwipeTest {
                 CairnViewModel(
                     ApplicationProvider.getApplicationContext<Application>(),
                     vault,
-                    officialOrigin = "",
+                    beaconOrigin = "",
                 )
             this.vm = vm
             restoration.setContent {

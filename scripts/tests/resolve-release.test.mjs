@@ -17,7 +17,7 @@ const config = {
   tree,
   tools: { codex: '0.159.0', gh: '2.101.0' },
 }
-const officialDigest = `sha256:${'c'.repeat(64)}`
+const beaconDigest = `sha256:${'c'.repeat(64)}`
 const digest = `sha256:${'b'.repeat(64)}`
 // A pull request run validates GitHub's merge commit, whose tree becomes main's tree.
 const pullRequestCommit = 'd'.repeat(40)
@@ -42,7 +42,7 @@ const mainRun = {
 function evidenceFor(run, commit, changes = {}) {
   return {
     schema: 3,
-    officialDigest,
+    beaconDigest,
     repository,
     tree,
     commit,
@@ -95,16 +95,16 @@ describe('release validation reuse', () => {
     expect(trustedRun({ ...pullRequestRun, head_repository: { full_name: 'fork/cairn-installation' } }, config)).toBe(false)
   })
 
-  it('requires the official digest alongside the installation before reusing a release', () => {
-    const paired = evidenceFor(mainRun, config.commit, { schema: 3, officialDigest: `sha256:${'c'.repeat(64)}` })
-    expect(verifiedImage(paired, config, mainRun.id)).toEqual({ digest, officialDigest: paired.officialDigest, commit: config.commit })
-    for (const mutation of [{ schema: 2 }, { officialDigest: undefined }, { officialDigest: 'latest' }])
+  it('requires the beacon digest alongside the installation before reusing a release', () => {
+    const paired = evidenceFor(mainRun, config.commit, { schema: 3, beaconDigest: `sha256:${'c'.repeat(64)}` })
+    expect(verifiedImage(paired, config, mainRun.id)).toEqual({ digest, beaconDigest: paired.beaconDigest, commit: config.commit })
+    for (const mutation of [{ schema: 2 }, { beaconDigest: undefined }, { beaconDigest: 'latest' }])
       expect(() => verifiedImage({ ...paired, ...mutation }, config, mainRun.id)).toThrow()
   })
 
   it('verifies evidence for the exact tree, run, repository and image digest', () => {
     const evidence = evidenceFor(pullRequestRun, pullRequestCommit)
-    expect(verifiedImage(evidence, config, pullRequestRun.id)).toEqual({ digest, officialDigest, commit: pullRequestCommit })
+    expect(verifiedImage(evidence, config, pullRequestRun.id)).toEqual({ digest, beaconDigest, commit: pullRequestCommit })
     for (const mutation of [{ schema: 1 }, { tree: 'c'.repeat(40) }, { commit: 'main' }, { digest: 'latest' }, { repository: 'other/repo' }, { runId: 999 }])
       expect(() => verifiedImage({ ...evidence, ...mutation }, config, pullRequestRun.id)).toThrow()
   })
@@ -118,7 +118,7 @@ describe('release validation reuse', () => {
     // The image keeps the commit it was built from; deployment verifies that commit.
     expect(result).toEqual({
       digest,
-      officialDigest,
+      beaconDigest,
       commit: pullRequestCommit,
       runId: pullRequestRun.id,
     })
@@ -180,7 +180,7 @@ describe('release validation reuse', () => {
     expect(polls).toBe(2)
     expect(result).toEqual({
       digest,
-      officialDigest,
+      beaconDigest,
       commit: config.commit,
       runId: mainRun.id,
     })

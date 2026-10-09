@@ -11,8 +11,8 @@ import { config as loadConfig } from '../fixtures/legacy/server/config'
 import { Service as SeedService } from '../fixtures/legacy/server/service'
 import { Store } from '../fixtures/legacy/server/store'
 
-// Shared by journeys-official-relay and the network bench: real processes, fake mail only.
-export async function officialRelayFixture(port = 4395, listen = '127.0.0.1', directory = tmpdir()) {
+// Shared by journeys-beacon-relay and the network bench: real processes, fake mail only.
+export async function beaconRelayFixture(port = 4395, listen = '127.0.0.1', directory = tmpdir()) {
   const messages: string[] = []
   const mail = createServer(async (request, response) => {
     let body = ''
@@ -59,7 +59,7 @@ export async function officialRelayFixture(port = 4395, listen = '127.0.0.1', di
     }
   }
 
-  function official(databaseUrl = process.env.CAIRN_BEACON_TEST_DATABASE_URL) {
+  function beacon(databaseUrl = process.env.CAIRN_BEACON_TEST_DATABASE_URL) {
     return start('target/debug/cairn-beacon', {
       CAIRN_BEACON_DATABASE_URL: databaseUrl,
       CAIRN_BEACON_ORIGIN: url,
@@ -85,12 +85,12 @@ export async function officialRelayFixture(port = 4395, listen = '127.0.0.1', di
     seed,
     start,
     stop,
-    official,
+    beacon,
     close,
   }
 }
 
-export function executeOfficialSql(database: URL, sql: string) {
+export function executeBeaconSql(database: URL, sql: string) {
   execFileSync('psql', ['-v', 'ON_ERROR_STOP=1', '-c', sql], {
     env: {
       ...process.env,
@@ -108,7 +108,7 @@ export function executeOfficialSql(database: URL, sql: string) {
 export function expireAccountProof(database: URL, email: string) {
   const emailLiteral = email.replaceAll('\'', '\'\'')
   const emailDigest = createHash('sha256').update(email).digest('hex')
-  executeOfficialSql(database, `
+  executeBeaconSql(database, `
     UPDATE web_sessions SET last_proof_at = NULL
     WHERE account_id IN (SELECT id FROM cairn_accounts WHERE email = '${emailLiteral}');
     UPDATE account_rate_limits SET resets_at = now() - interval '1 second'

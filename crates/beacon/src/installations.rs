@@ -180,7 +180,7 @@ pub(super) async fn claim(
     ))
 }
 
-/// Forget permanently revokes machine proofs and removes only the official record.
+/// Forget permanently revokes machine proofs and removes only the beacon record.
 pub(super) async fn forget(
     State(service): State<Service>,
     Path(installation): Path<String>,

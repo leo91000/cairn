@@ -1,4 +1,4 @@
-// Real official-service adapter for the exact-image deployment smoke test.
+// Real beacon adapter for the exact-image deployment smoke test.
 import assert from 'node:assert/strict'
 import { spawn } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
@@ -7,8 +7,8 @@ import { createServer } from 'node:http'
 import process from 'node:process'
 import { setTimeout } from 'node:timers/promises'
 
-export async function startOfficial() {
-  assert.ok(process.env.CAIRN_BEACON_TEST_DATABASE_URL, 'Use a disposable official Postgres database for the container smoke test')
+export async function startBeacon() {
+  assert.ok(process.env.CAIRN_BEACON_TEST_DATABASE_URL, 'Use a disposable beacon Postgres database for the container smoke test')
   const messages = []
   const mail = createServer(async (request, response) => {
     let body = ''
@@ -25,7 +25,7 @@ export async function startOfficial() {
   const port = reservation.address().port
   await new Promise(resolve => reservation.close(resolve))
   const origin = `http://localhost:${port}`
-  const child = spawn(process.env.CAIRN_SMOKE_OFFICIAL_BINARY || 'target/debug/cairn-beacon', [], {
+  const child = spawn(process.env.CAIRN_SMOKE_BEACON_BINARY || 'target/debug/cairn-beacon', [], {
     env: {
       ...process.env,
       CAIRN_BEACON_DATABASE_URL: process.env.CAIRN_BEACON_TEST_DATABASE_URL,
@@ -59,12 +59,12 @@ export async function startOfficial() {
         throw spawnError
       // Never quote arbitrary child output: a startup error may carry secrets.
       const startupDiagnostic = [
-        'Could not connect to the official Postgres database',
-        'Build the web application with pnpm build before starting the official service',
+        'Could not connect to the beacon Postgres database',
+        'Build the web application with pnpm build before starting Beacon',
         'Could not bind CAIRN_BEACON_LISTEN',
-        'Official database migration failed',
+        'Beacon database migration failed',
       ].find(message => startupOutput.includes(message)) || 'No safe startup diagnostic'
-      assert.ok(child.exitCode === null && attempt < 100, `Official smoke service did not become ready (exit ${child.exitCode}; ${startupDiagnostic})`)
+      assert.ok(child.exitCode === null && attempt < 100, `Beacon smoke service did not become ready (exit ${child.exitCode}; ${startupDiagnostic})`)
       if (await fetch(`${origin}/health`).then(response => response.ok).catch(() => false))
         break
       await setTimeout(200)

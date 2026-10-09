@@ -62,7 +62,7 @@ main() {
   download_supervisor() {
     local asset=$1 checksum=$2 destination=$3
     curl --fail --silent --show-error --proto '=https' --max-time 30 "${CAIRN_BEACON_ORIGIN}/install/${asset}" > "$CAIRN_INSTALL_TEMP" || fail 'Cannot download the supervisor. Check outbound HTTPS connectivity.'
-    python3 - "$CAIRN_INSTALL_TEMP" "$checksum" <<'PYTHON' || fail 'Supervisor checksum mismatch. Download a fresh command from the official app and retry.'
+    python3 - "$CAIRN_INSTALL_TEMP" "$checksum" <<'PYTHON' || fail 'Supervisor checksum mismatch. Download a fresh command from the beacon app and retry.'
 import hashlib
 from pathlib import Path
 import sys
@@ -100,7 +100,7 @@ ExecStart={command}
 TimeoutStartSec=3000
 ''')
 Path('/etc/systemd/system/cairn-installation-update.timer').write_text('''[Unit]
-Description=Check the official approved Cairn installation release
+Description=Check the beacon approved Cairn installation release
 [Timer]
 OnBootSec=2min
 OnUnitActiveSec=5min

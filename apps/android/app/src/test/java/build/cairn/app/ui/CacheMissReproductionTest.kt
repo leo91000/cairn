@@ -172,8 +172,8 @@ class CacheMissReproductionTest {
                             }
                             val body =
                                 when (request.path?.substringBefore('?')) {
-                                    "/api/installations" -> officialInstallationsFixture()
-                                    "/api/account/session" -> officialAccountFixture("fixture")
+                                    "/api/installations" -> beaconInstallationsFixture()
+                                    "/api/account/session" -> beaconAccountFixture("fixture")
                                     "/api/installations/fixture/api/agents",
                                     "/api/installations/fixture/api/projects",
                                     "/api/installations/fixture/api/tasks",
@@ -187,7 +187,7 @@ class CacheMissReproductionTest {
                         }
                     }
                 server.start()
-                val vm = CairnViewModel(app, MemoryVault(), officialOrigin = "")
+                val vm = CairnViewModel(app, MemoryVault(), beaconOrigin = "")
                 var opened by mutableStateOf(true)
                 compose.setContent {
                     val workspace by vm.state.collectAsStateWithLifecycle()

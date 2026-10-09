@@ -19,7 +19,7 @@ async fn session(relay: &RelayedInstallation) -> Value {
 }
 
 #[tokio::test]
-async fn official_session_reports_the_installations_actual_tunnel_availability() {
+async fn beacon_session_reports_the_installations_actual_tunnel_availability() {
     let relay = RelayedInstallation::new(axum::Router::new()).await;
     assert_eq!(session(&relay).await["installations"][0]["online"], true);
 

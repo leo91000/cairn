@@ -40,8 +40,8 @@ abstract class NodePlacementCases {
                                 }
                                 path == "/api/installations/fixture/api/nodes/placement/run" ->
                                     """{"nodes":[{"id":"node","name":"Mon serveur","status":"online"},{"id":"other","name":"Autre serveur","status":"online"}],"pinnedNodeId":null,"preferredNodeId":null}"""
-                                path == "/api/installations" -> officialInstallationsFixture()
-                                path == "/api/account/session" -> officialAccountFixture("fixture")
+                                path == "/api/installations" -> beaconInstallationsFixture()
+                                path == "/api/account/session" -> beaconAccountFixture("fixture")
                                 path == "/api/installations/fixture/api/overview" -> "{}"
                                 else -> "[]"
                             }
@@ -63,7 +63,7 @@ abstract class NodePlacementCases {
                 CairnViewModel(
                     ApplicationProvider.getApplicationContext<Application>(),
                     vault,
-                    officialOrigin = "",
+                    beaconOrigin = "",
                 )
             compose.setContent {
                 val state by vm.state.collectAsStateWithLifecycle()
@@ -187,8 +187,8 @@ abstract class NodePlacementCases {
                                     """[{"id":"node","name":"Serveur test","status":"${if (revoked) "revoked" else "online"}","revoked":$revoked,"accepting":true,"limits":{"cpu":4,"memoryMiB":8192,"diskMiB":65536},"agents":${if (granted) """[{"id":"agent","name":"Agent test"}]""" else "[]"},"staleDisks":{"count":${if (cleaned) 0 else 1},"diskMiB":2048}}]"""
                                 path == "/api/installations/fixture/api/agents" ->
                                     """[{"id":"agent","name":"Agent test"}]"""
-                                path == "/api/installations" -> officialInstallationsFixture()
-                                path == "/api/account/session" -> officialAccountFixture("fixture")
+                                path == "/api/installations" -> beaconInstallationsFixture()
+                                path == "/api/account/session" -> beaconAccountFixture("fixture")
                                 path == "/api/installations/fixture/api/overview" -> "{}"
                                 else -> "[]"
                             }
@@ -222,7 +222,7 @@ abstract class NodePlacementCases {
                 CairnViewModel(
                     ApplicationProvider.getApplicationContext<Application>(),
                     vault,
-                    officialOrigin = "",
+                    beaconOrigin = "",
                 )
             compose.setContent {
                 val state by vm.state.collectAsStateWithLifecycle()

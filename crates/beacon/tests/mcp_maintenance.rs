@@ -46,7 +46,7 @@ async fn rotating_ipv6_addresses_in_one_prefix_cannot_bypass_client_registration
 }
 
 #[tokio::test]
-async fn official_login_claim_and_token_quotas_share_each_ipv6_prefix() {
+async fn beacon_login_claim_and_token_quotas_share_each_ipv6_prefix() {
     let app = Fixture::with_network(Default::default(), 5, "127.0.0.1".parse().unwrap()).await;
     let cases = [
         (

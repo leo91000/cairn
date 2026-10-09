@@ -438,7 +438,7 @@ fn payload(installation: &str, event: &cairn_protocol::NotificationEvent) -> Opt
     Some(payload)
 }
 
-/// No event content or recipient queue is persisted by the official service.
+/// No event content or recipient queue is persisted by the Beacon.
 /// Each send serializes with sharing changes and rechecks the current device owner.
 pub(super) async fn deliver(
     service: &Service,
@@ -569,7 +569,7 @@ pub(super) async fn configuration(
     installations::account(&service, &headers, &Method::GET).await?;
     let sender = service.push.as_ref().ok_or(ApiError::Http(
         StatusCode::SERVICE_UNAVAILABLE,
-        "Push notifications are not configured on the official service",
+        "Push notifications are not configured on the Beacon",
     ))?;
     if sender.public_key().is_empty() {
         return Err(ApiError::Http(
@@ -602,10 +602,10 @@ impl WebPushSender {
         use p256::elliptic_curve::sec1::ToEncodedPoint;
         let bytes = URL_SAFE_NO_PAD
             .decode(private_key.trim_end_matches('='))
-            .map_err(|_| "Invalid official VAPID private key")?;
-        let private = p256::SecretKey::from_slice(&bytes)
-            .map_err(|_| "Invalid official VAPID private key")?;
-        let contact = url::Url::parse(&subject).map_err(|_| "Invalid official VAPID subject")?;
+            .map_err(|_| "Invalid beacon VAPID private key")?;
+        let private =
+            p256::SecretKey::from_slice(&bytes).map_err(|_| "Invalid beacon VAPID private key")?;
+        let contact = url::Url::parse(&subject).map_err(|_| "Invalid beacon VAPID subject")?;
         if !(contact.scheme() == "https" && contact.host_str().is_some()
             || contact.scheme() == "mailto"
                 && email_address::EmailAddress::is_valid(contact.path()))
@@ -613,9 +613,7 @@ impl WebPushSender {
             || contact.password().is_some()
             || contact.fragment().is_some()
         {
-            return Err(
-                "Use an HTTPS URL or mailto operator contact for the official VAPID subject",
-            );
+            return Err("Use an HTTPS URL or mailto operator contact for the beacon VAPID subject");
         }
         Ok(Self {
             private_key: URL_SAFE_NO_PAD.encode(private.to_bytes()),

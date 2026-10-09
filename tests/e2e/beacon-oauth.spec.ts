@@ -111,7 +111,7 @@ test('Google and GitHub reuse an account, manage sign-in methods and preserve cl
   try {
     await expect.poll(async () => {
       if (child.exitCode !== null)
-        throw new Error(`Official service exited: ${log}`)
+        throw new Error(`Beacon exited: ${log}`)
       return fetch(`${url}/health`).then(response => response.ok).catch(() => false)
     }, { timeout: 30000 }).toBe(true)
     await page.goto(url)

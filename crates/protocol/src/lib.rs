@@ -27,7 +27,7 @@ pub enum Role {
     Member,
 }
 
-/// Scheduling eligibility from the official authority, never local request authorization.
+/// Scheduling eligibility from the beacon authority, never local request authorization.
 #[derive(Clone, Serialize, Deserialize)]
 pub struct TaskAuthorGrant {
     pub account_id: String,

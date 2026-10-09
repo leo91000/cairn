@@ -3,19 +3,19 @@ import { createHash, randomUUID } from 'node:crypto'
 import { join } from 'node:path'
 import process from 'node:process'
 import { test as base, expect } from '@playwright/test'
-import { executeOfficialSql, expireAccountProof, officialRelayFixture } from './official-relay-fixture'
+import { beaconRelayFixture, executeBeaconSql, expireAccountProof } from './beacon-relay-fixture'
 
-type InstallationFixture = Awaited<ReturnType<typeof officialRelayFixture>> & { email: string, installationId: string, databaseUrl: string }
+type InstallationFixture = Awaited<ReturnType<typeof beaconRelayFixture>> & { email: string, installationId: string, databaseUrl: string }
 
 const test = base.extend<{ installation: InstallationFixture }>({
   installation: async ({ page }, use) => {
-    const fixture = await officialRelayFixture(4394)
+    const fixture = await beaconRelayFixture(4394)
     const { root, url, messages } = fixture
     const schema = `sensitive_${randomUUID().replaceAll('-', '')}`
     const database = new URL(process.env.CAIRN_BEACON_TEST_DATABASE_URL!)
-    executeOfficialSql(database, `CREATE SCHEMA ${schema}`)
+    executeBeaconSql(database, `CREATE SCHEMA ${schema}`)
     database.searchParams.set('options', `-csearch_path=${schema}`)
-    fixture.official(database.toString())
+    fixture.beacon(database.toString())
     try {
       await expect.poll(() => fetch(`${url}/health`).then(response => response.ok).catch(() => false)).toBe(true)
       const email = `sensitive-${Date.now()}@example.test`
@@ -51,7 +51,7 @@ const test = base.extend<{ installation: InstallationFixture }>({
     }
     finally {
       await fixture.close()
-      executeOfficialSql(new URL(process.env.CAIRN_BEACON_TEST_DATABASE_URL!), `DROP SCHEMA ${schema} CASCADE`)
+      executeBeaconSql(new URL(process.env.CAIRN_BEACON_TEST_DATABASE_URL!), `DROP SCHEMA ${schema} CASCADE`)
     }
   },
 })

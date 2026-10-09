@@ -19,7 +19,7 @@ Binary transfers, account operations and signaling continue over the relay.
 The installation verifier, existing dispatcher, limits and network bench are
 reused. Transport closure cancels subscriptions, never agent executions. Old
 leases close on tunnel reconnection with a new key. Unsupported installations
-keep using the relay. Authorization renews before expiry through the official
+keep using the relay. Authorization renews before expiry through the beacon
 service. No TURN, local password, anonymous local access or deployment is added.
 
 Library selection and the measured universal APK impact are documented in

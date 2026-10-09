@@ -5,6 +5,7 @@ extern crate sqlx_core as sqlx;
 mod account;
 mod audit;
 mod fcm;
+pub mod html;
 mod installations;
 pub mod installer;
 mod mcp;
@@ -89,7 +90,7 @@ impl IntoResponse for ApiError {
             Self::Http(status, message) => (status, message),
             Self::Database(_) => {
                 // Keep database details and bound parameters out of responses/logs.
-                tracing::error!("Official database operation failed");
+                tracing::error!("Beacon database operation failed");
                 (StatusCode::INTERNAL_SERVER_ERROR, "Service unavailable")
             }
         };
@@ -469,7 +470,7 @@ async fn request_code(
     let code_digest = digest(&format!("{challenge}:{code}"));
 
     let mut transaction = service.pool.begin().await?;
-    // Serialize delivery for an address across all official processes. A later
+    // Serialize delivery for an address across all beacon processes. A later
     // request must not invalidate the proof already in the recipient's mailbox.
     lock_email(&mut transaction, &email).await?;
     let pending: Option<(String,)> = query_as(

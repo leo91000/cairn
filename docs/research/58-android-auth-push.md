@@ -8,20 +8,20 @@ live Google, GitHub or FCM validation.
 Credential Manager supports passkeys, passwords and Google ID tokens. Its
 documented provider integration does not include GitHub. GitHub documents
 browser authorization-code and device-authorization flows. Therefore use
-Credential Manager for Google and passkeys, and the existing official GitHub
+Credential Manager for Google and passkeys, and the existing beacon GitHub
 authorization-code flow in a Custom Tab. This is a platform compatibility
 decision; do not invent a GitHub credential type or move provider tokens into
-the Android app. Preserve the official service's explicit `user:email` scope,
+the Android app. Preserve the Beacon's explicit `user:email` scope,
 PKCE, verified-email linking rules and identity lookup. [Credential Manager
 FAQ](https://developer.android.com/identity/sign-in/credential-manager-faq),
 [GitHub OAuth](https://docs.github.com/en/apps/oauth-apps/building-oauth-apps/authorizing-oauth-apps).
 
 Google Credential Manager returns a `GoogleIdTokenCredential`. The relying party
 server must validate it before trusting the identity. Configure its server
-client ID and a one-use nonce; reuse the existing official account-linking
+client ID and a one-use nonce; reuse the existing beacon account-linking
 decision after validating the token's signature, issuer, audience and nonce.
 Native ID-token verification needs a native exchange form of the existing
-official Google authentication contract; the browser callback expects an
+beacon Google authentication contract; the browser callback expects an
 authorization code and cannot consume an ID token unchanged. [Android Google
 integration](https://developer.android.com/identity/sign-in/credential-manager-siwg-implementation).
 
@@ -31,7 +31,7 @@ credential origin is `android:apk-key-hash:` followed by the base64url SHA-256
 signing certificate fingerprint. The service must allow only configured trusted
 signing certificates; never accept a caller-provided arbitrary origin.
 `WebauthnBuilder::append_allowed_origin` explicitly supports native origins.
-The official HTTPS RP host must publish `/.well-known/assetlinks.json` containing
+The beacon HTTPS RP host must publish `/.well-known/assetlinks.json` containing
 `build.cairn.app`, trusted SHA-256 certificate fingerprints and
 `delegate_permission/common.get_login_creds`. Native passkeys require Android 9
 (API 28) or later, despite the app's API 26 minimum; retain alternative sign-in
@@ -53,7 +53,7 @@ Recommendation inferred from the ticket's immediate-revocation contract:
 reuse #56's current-account/current-membership recipient checks and delivery
 serialization; register one FCM token per device/account. Carry only generic
 event kind and identifiers. Before displaying a delayed data message, ask the
-official authenticated interface whether that installation is still accessible;
+beacon authenticated interface whether that installation is still accessible;
 fail closed if the session or membership is gone. This closes the queued-message
 case after removal without an installation-specific subscription.
 
@@ -65,7 +65,7 @@ sign an RS256 JWT with `iss=client_email`, that scope,
 `aud=https://oauth2.googleapis.com/token`, `iat` and `exp` (at most one hour).
 Exchange the assertion at that token endpoint using form grant type
 `urn:ietf:params:oauth:grant-type:jwt-bearer`. Cache access tokens before expiry;
-keep the service-account private key entirely in the official service. Existing
+keep the service-account private key entirely in the Beacon. Existing
 Rust HTTP and cryptography libraries can implement this adapter without an
 Android Firebase Auth dependency. [FCM HTTP v1 authorization](https://firebase.google.com/docs/cloud-messaging/send/v1-api),
 [Google service-account OAuth](https://developers.google.com/identity/protocols/oauth2/service-account).
@@ -96,7 +96,7 @@ deprecated in favor of its opt-in Firebase Installation ID registration mode.
 Firebase currently supports both targeting patterns. This ticket uses the
 registration-token mode with HTTP v1, matching its account/device token rotation
 contract. The SDK token is retrieved on enabled-app synchronization and token
-changes, and the official registration is checked before reusing the local
+changes, and the beacon registration is checked before reusing the local
 receipt. No deprecated diagnostics are suppressed.
 [FCM registration management](https://firebase.google.com/docs/cloud-messaging/manage-tokens),
 [Android SDK token methods](https://firebase.google.com/docs/reference/android/com/google/firebase/messaging/FirebaseMessaging).

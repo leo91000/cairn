@@ -83,7 +83,7 @@ Browsers must support TURN/TCP/TLS themselves ([RFC 8835](https://www.rfc-editor
 - **Network changes.**
   - libwebrtc's NetworkMonitor already registers `ConnectivityManager` callbacks ([NetworkMonitorAutoDetect.java](https://webrtc.googlesource.com/src/+/refs/heads/main/sdk/android/api/org/webrtc/NetworkMonitorAutoDetect.java)).
   - Apps can add `registerDefaultNetworkCallback` to trigger ICE restart; on a default-network change, connections on the old one "are forcefully terminated" ([Android docs](https://developer.android.com/develop/connectivity/network-ops/reading-network-state)).
-- **APK size.** No official figure was found. Measured from the 1.3.10 AAR on Maven Central ([artifact](https://repo1.maven.org/maven2/io/getstream/stream-webrtc-android/1.3.10/)), `libjingle_peerconnection_so.so` is:
+- **APK size.** No beacon figure was found. Measured from the 1.3.10 AAR on Maven Central ([artifact](https://repo1.maven.org/maven2/io/getstream/stream-webrtc-android/1.3.10/)), `libjingle_peerconnection_so.so` is:
 
   | ABI | Uncompressed | Zip-compressed |
   |---|---|---|
@@ -108,7 +108,7 @@ Browsers must support TURN/TCP/TLS themselves ([RFC 8835](https://www.rfc-editor
 
 | | App-level relay (today) | TURN |
 |---|---|---|
-| Where TLS ends | At the official service, so content is plaintext in its memory | DTLS is end-to-end between UI and installation ([RFC 8827 §4.3](https://www.rfc-editor.org/rfc/rfc8827.html)) |
+| Where TLS ends | At the Beacon, so content is plaintext in its memory | DTLS is end-to-end between UI and installation ([RFC 8827 §4.3](https://www.rfc-editor.org/rfc/rfc8827.html)) |
 | What the operator can do | Inspect, rewrite and enforce per request | Sees ciphertext plus metadata: IPs, ports, timing, byte counts, TURN username/user id ([RFC 8656 §21.1.6](https://www.rfc-editor.org/rfc/rfc8656.html)) |
 | Protocol | Any; works over WSS/443 | UDP, or TCP/TLS fallback |
 | Revocation | Operator can cut any request | The service can drop the allocation but cannot police content |
@@ -147,7 +147,7 @@ Browsers must support TURN/TCP/TLS themselves ([RFC 8835](https://www.rfc-editor
    - webrtc-rs 0.21 in the installation, because it has a TURN client, ICE-TCP, mDNS and ICE restart built in.
 
    str0m is the alternative if sans-IO control is preferred (needs a custom TURN client). Use reliable ordered channels, and chunk messages at 16 KB or less, or at `maxMessageSize`.
-3. **Run coturn with REST-style ephemeral credentials** minted by the official service:
+3. **Run coturn with REST-style ephemeral credentials** minted by the Beacon:
    - short TTL;
    - TURN/UDP, TURN/TCP and TURN/TLS, with TLS on 443;
    - `denied-peer-ip` for private ranges.
@@ -161,9 +161,9 @@ Browsers must support TURN/TCP/TLS themselves ([RFC 8835](https://www.rfc-editor
    - Trigger ICE restart on Android default-network callbacks and on `iceconnectionstatechange` failures.
    - Fall back to the tunnel immediately while ICE recovers. Keep requests idempotent or resumable across paths.
 
-**What the official service sees:**
+**What the Beacon sees:**
 
-| Transport | Visible to the official service |
+| Transport | Visible to the Beacon |
 |---|---|
 | Direct | Signaling only: SDP with candidate IPs, ICE credentials and fingerprints, plus auth metadata. No payload. |
 | TURN (if operated by Cairn) | The above, plus 5-tuples, timing, byte counts and the TURN username. Payload is DTLS ciphertext. |

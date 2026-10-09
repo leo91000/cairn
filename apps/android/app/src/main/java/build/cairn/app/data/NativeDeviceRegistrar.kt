@@ -33,11 +33,11 @@ internal val nativeRegistrationRevisionKey =
 class NativeDeviceRegistrar(
     private val context: Context,
     private val vault: SessionVault = KeystoreSessionVault(context),
-    private val officialOrigin: String = BuildConfig.OFFICIAL_SERVICE_ORIGIN,
+    private val beaconOrigin: String = BuildConfig.BEACON_SERVICE_ORIGIN,
     private val tokens: PushTokens = FirebasePushTokens(),
 ) {
     suspend fun enable() {
-        require(tokens.available && officialOrigin.isNotBlank()) {
+        require(tokens.available && beaconOrigin.isNotBlank()) {
             "Les notifications push ne sont pas disponibles dans cette version."
         }
         require(notificationsAllowed(context)) { "Autorisez les notifications dans Android." }
@@ -57,12 +57,12 @@ class NativeDeviceRegistrar(
     suspend fun register() {
         if (!NotificationPreferences(context).enabled.first() || !notificationsAllowed(context))
             return
-        if (!tokens.available || officialOrigin.isBlank()) return
+        if (!tokens.available || beaconOrigin.isBlank()) return
         registerDevice()
     }
 
     private suspend fun registerDevice() {
-        val origin = serverOrigin(officialOrigin, BuildConfig.DEBUG)
+        val origin = serverOrigin(beaconOrigin, BuildConfig.DEBUG)
         val originalCookie =
             vault.read(origin.toString()) ?: error("Connectez-vous à votre compte Cairn.")
         val api = CairnApi(origin, vault)
@@ -130,8 +130,8 @@ class NativeDeviceRegistrar(
         try {
             val stored = context.dataStore.data.first()
             val id = stored[nativeRegistrationKey]
-            if (id != null && officialOrigin.isNotBlank()) {
-                val api = CairnApi(serverOrigin(officialOrigin, BuildConfig.DEBUG), vault)
+            if (id != null && beaconOrigin.isNotBlank()) {
+                val api = CairnApi(serverOrigin(beaconOrigin, BuildConfig.DEBUG), vault)
                 val session = api.get<Session>("/account/session")
                 if (session.authenticated) {
                     api.csrf = session.csrf.orEmpty()

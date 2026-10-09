@@ -1,7 +1,7 @@
 # Direct connection with relay fallback
 
 Decision: [ADR-0033](adr/0033-direct-connection-with-relay-fallback.md). This
-document describes the data path, what the official service observes, the
+document describes the data path, what the Beacon observes, the
 switching rules and the validation plan. Status: installation peer and control plane delivered; web route selection is delivered by #103; Android route selection is delivered by #104 (parent issue
 [#98](https://github.com/leo91000/leo-agent-manager/issues/98)); the existing relay ([INSTALLATION-RELAY.md](INSTALLATION-RELAY.md))
 serves the initial screen and remains the fallback.
@@ -9,8 +9,8 @@ serves the initial screen and remains the fallback.
 ## Data path
 
 ```
-           signaling + authorization (HTTPS, official session, CSRF)
-  UI  ───────────────────────────────►  Official service  ◄──── installation tunnel (WSS, outbound)
+           signaling + authorization (HTTPS, beacon session, CSRF)
+  UI  ───────────────────────────────►  Beacon  ◄──── installation tunnel (WSS, outbound)
   │                                         │  issues signed direct grant,
   │                                         │  forwards offer/answer/ICE candidates,
   │                                         │  pushes renew/revoke to the installation
@@ -24,11 +24,11 @@ serves the initial screen and remains the fallback.
 1. The UI starts on the relay exactly as today, so the first screen never
    waits for connectivity checks.
 2. In the background it requests a direct grant for the current installation.
-   The official service checks the session, role and installation, signs the
+   The Beacon checks the session, role and installation, signs the
    grant and forwards the UI's offer through the installation tunnel.
-3. The installation verifies the grant signature with the official public key
+3. The installation verifies the grant signature with the beacon public key
    received over its authenticated tunnel, answers, and both sides trickle ICE
-   candidates through the official service.
+   candidates through the Beacon.
 4. After DTLS, the installation checks that the peer certificate fingerprint
    equals the one in the grant, then serves relay-protocol frames on the
    DataChannel with the grant's account, role and session as identity.
@@ -38,47 +38,47 @@ serves the initial screen and remains the fallback.
    relay meanwhile.
 
 Storage is unchanged: conversations, projects, files, secrets and disks stay on
-the installation, its nodes and their S3. The official service persists account
+the installation, its nodes and their S3. The Beacon persists account
 metadata, sessions, roles, attachments and audit entries, never relayed or
 direct conversation content.
 
-## What stays on the official service
+## What stays on the Beacon
 
 | Flow | Why it stays |
 | --- | --- |
-| Accounts, sign-in, sessions, claims, sharing, audit, availability, approved version | The official service is the authority (ADR-0028). |
-| Signaling and direct grants | Only the official service can authenticate both sides. |
+| Accounts, sign-in, sessions, claims, sharing, audit, availability, approved version | The Beacon is the authority (ADR-0028). |
+| Signaling and direct grants | Only the Beacon can authenticate both sides. |
 | External MCP clients | They need a public HTTPS URL with OAuth and do not speak WebRTC. |
-| Public deliverable links | Anonymous recipients, stable URL, official security headers. |
-| Push notifications | Web Push/Android keys are held by the official service, which must reach closed apps. |
+| Public deliverable links | Anonymous recipients, stable URL, beacon security headers. |
+| Push notifications | Web Push/Android keys are held by the Beacon, which must reach closed apps. |
 | Binary resources (images, attachments, downloads) in the first delivery | A DataChannel cannot directly back a resource URL; they keep using the relay. |
 | Fallback traffic | When direct is unavailable. |
 
-## What the official service observes
+## What the Beacon observes
 
 | Transport | Content | Metadata |
 | --- | --- | --- |
 | Direct DataChannel | None | Account, installation, timing, DTLS fingerprints, ICE candidates (IP addresses) |
 | Relay fallback | In memory while relaying, never persisted | Same as today |
 
-The official service serves the web application code, so a compromised official
+The Beacon serves the web application code, so a compromised beacon
 service could still substitute code. Direct connection keeps content out of the
-official service's memory and logs; it is not end-to-end encryption against it.
+Beacon's memory and logs; it is not end-to-end encryption against it.
 
 ## Authorization and revocation
 
 - A grant names the installation, Cairn account, role, session, access generation,
   client DTLS fingerprint and an expiry of a few minutes.
-- Renewal goes through the official service, which re-checks session and role.
-- The official service pushes revocation over the installation tunnel for
+- Renewal goes through the Beacon, which re-checks session and role.
+- The Beacon pushes revocation over the installation tunnel for
   logout, session expiry or revocation, member removal, role change, detachment,
   credential rotation and revoke-and-forget; the installation closes matching
   channels immediately, including active streams.
 - While the tunnel is down, no new direct connection can start and existing ones
-  close at grant expiry. A normal official shutdown does not itself revoke them.
-  When the tunnel reconnects with a new key (including after an official restart
+  close at grant expiry. A normal beacon shutdown does not itself revoke them.
+  When the tunnel reconnects with a new key (including after an beacon restart
   or deployment), the installation closes the old leases immediately: the new
-  official tunnel no longer tracks them for revocation. Clients fall back to the
+  Beacon tunnel no longer tracks them for revocation. Clients fall back to the
   relay and negotiate fresh direct grants, applying the switching rules below
   to avoid loss or duplication. Agent executions are never stopped by transport
   changes.
@@ -113,8 +113,8 @@ official service's memory and logs; it is not end-to-end encryption against it.
   direct connection entirely.
 - Older installations or clients without the new protocol version stay on the
   relay.
-- A single official process remains required (ADR-0032).
-- Signaling relays the DTLS fingerprints, so the official service could
+- A single beacon process remains required (ADR-0032).
+- Signaling relays the DTLS fingerprints, so the Beacon could
   impersonate an installation (RFC 8827). This matches the existing trust model:
   it also serves the web application code. Android could later pin an
   installation key obtained at claim time; the web cannot.
@@ -143,9 +143,9 @@ emulator through simulated networks:
 - revocation during a stream on both routes: logout, session expiry, member
   removal, detachment, rotation;
 - an old installation or client: relay only;
-- the official tunnel down: no new direct connection, existing ones end at
+- the beacon tunnel down: no new direct connection, existing ones end at
   grant expiry, agent executions continue.
-- official restart and tunnel reconnection: the new key closes old leases before
+- beacon restart and tunnel reconnection: the new key closes old leases before
   expiry, the relay recovers, fresh grants work and logout still revokes them.
 
 ## Delivered control plane (#100)
@@ -155,7 +155,7 @@ peer is delivered by #101; the web transport is delivered by #103 and Android's 
 browser access or local password is introduced. The current shipped data path
 starts on the relay, with web and Android negotiating direct traffic in the background.
 
-All routes use the official session and installation access checks (foreign,
+All routes use the beacon session and installation access checks (foreign,
 unknown, detached or removed-member installations return 404). POST also requires
 the configured origin and CSRF token:
 
@@ -209,24 +209,24 @@ after a closed connection; the web applies safe retry and route selection (#103)
 
 ### STUN and configuration
 
-The official service hosts a Binding-only STUN responder in its single process.
-The source defaults to `stun:<official-origin-host>:3478`, or the dedicated
+The Beacon hosts a Binding-only STUN responder in its single process.
+The source defaults to `stun:<beacon-origin-host>:3478`, or the dedicated
 `CAIRN_BEACON_STUN_URL`. Authorize/renew responses expose `iceServers`; the
 installation receives the same URL in the authenticated `DirectKey` frame.
 No public third-party STUN dependency or additional IP disclosure is introduced.
 STUN carries address-discovery metadata only, never account credentials or
 application content. TURN remains deferred. UDP 3478 is published directly by
-the official Compose definition; Traefik routes HTTPS only.
+the beacon Compose definition; Traefik routes HTTPS only.
 
 - `CAIRN_DIRECT_ENABLED=false` disables installation direct authorization and peers.
   The default is `true`; the authenticated tunnel and relay keep working.
-- `CAIRN_DIRECT_STUN_URLS=stun:host:port[,stun:host:port]` overrides the official STUN
+- `CAIRN_DIRECT_STUN_URLS=stun:host:port[,stun:host:port]` overrides the beacon STUN
   source, at most four URLs of 256 bytes each. TURN URLs are rejected.
 - `CAIRN_DIRECT_PUBLIC_IP` optionally announces the installation host's public
   unicast address for an explicitly verified port-preserving NAT. It avoids the
   same-host STUN hairpin trap without publishing any installation port; see the
   [production runbook](PRODUCTION-CAIRN.md#stun-and-direct-installation-connectivity-101).
-- An unset or empty `CAIRN_DIRECT_STUN_URLS` uses the authenticated official STUN
+- An unset or empty `CAIRN_DIRECT_STUN_URLS` uses the authenticated beacon STUN
   source. An empty override logs this choice explicitly; it does not disable direct.
 - Invalid configuration disables the direct peer and logs a fixed reason naming
   the setting while retaining the relay. No configuration value or signaling
@@ -297,7 +297,7 @@ before shutting down UDP sockets.
 
 The Rust network client records `direct` only after an authenticated API response
 arrives over this DataChannel and a selected UDP ICE candidate pair is observed.
-Relay observations come from the official response's `x-cairn-transport: relay`
+Relay observations come from the beacon response's `x-cairn-transport: relay`
 header. The web reports successful API/stream traffic through its transport observer (#103); this distinction prevents the
 bench from mistaking UDP probe reachability for an authorized direct connection.
 
@@ -307,7 +307,7 @@ Direct and relay application pools are deliberately **separate**, not one shared
 installation pool. Direct uses 32 requests and 24 streams across all installation
 peers, with eight streams per verified account across those peers. The relay
 retains 32 authenticated requests and 24 streams per installation tunnel, with
-eight browser streams per account across all installations in the official
+eight browser streams per account across all installations in the beacon
 process. For one installation the maximum combined allowance is therefore 64
 requests / 48 streams, and at most 16 browser streams for one account (eight on
 each route). Relay public downloads retain their independent four-slot pool;
@@ -344,9 +344,9 @@ so a failed/panicking job releases its authorization and peer registry entry.
 
 ## Delivered web transport (#103)
 
-The official document starts every request and live subscription on the existing
+The beacon document starts every request and live subscription on the existing
 HTTPS relay. Native `RTCPeerConnection` establishes one reliable ordered `cairn.v4`
-channel in the background, using the official grant, signal routes and STUN URLs.
+channel in the background, using the beacon grant, signal routes and STUN URLs.
 A discreet **Direct / Relais** indicator describes the current default route;
 individual successful API responses and accepted live batches emit a
 `cairn-transport-observation` event containing only route, method, path and cursor.
@@ -366,7 +366,7 @@ authorized channel opens. `available: false`,
 403 and permission denial stop direct attempts until the session or network
 changes; a capacity 503 backs off while the relay remains usable. A recovery
 observed by the existing installation availability check also resumes
-negotiation, covering official restart/tunnel reconnection without polling
+negotiation, covering beacon restart/tunnel reconnection without polling
 incompatible installations through the direct endpoints. Offline and
 hidden documents do not negotiate. An established peer in a hidden document
 closes after a 30-second grace period, stopping signaling, renewal and heartbeat;
@@ -413,7 +413,7 @@ the existing zero-length abandonment envelope before cancellation.
 
 Following the decision recorded in #117, the web ignores mDNS `.local` candidates
 before signaling or passing them to the WebRTC implementation. Numeric host and
-server-reflexive candidates use the existing authenticated verifier and official
+server-reflexive candidates use the existing authenticated verifier and beacon
 STUN module. Loopback, unspecified, link-local, multicast and broadcast
 destinations are filtered too, including their IPv4-mapped IPv6 forms; private
 unicast remains useful on authenticated LAN/VPN paths. The filter applies to

@@ -44,7 +44,7 @@ pub struct Mcps {
 }
 
 pub async fn callback_url(s: &Service) -> Result<String> {
-    let (origin, installation) = crate::relay::official_address(&s.config.data_dir)
+    let (origin, installation) = crate::relay::beacon_address(&s.config.data_dir)
         .await?
         .ok_or_else(|| {
             Error::unavailable("Claim this installation before connecting an MCP server.")
@@ -455,8 +455,8 @@ impl Mcps {
             .await
             .get(id)
             .is_some_and(|lock| lock.try_lock().is_err());
-        let official = crate::relay::official_address(&s.config.data_dir).await?;
-        let self_connection = official.is_some_and(|(origin, _)| {
+        let beacon = crate::relay::beacon_address(&s.config.data_dir).await?;
+        let self_connection = beacon.is_some_and(|(origin, _)| {
             url.origin().ascii_serialization() == origin && url.path() == "/mcp"
         });
         if busy && self_connection {

@@ -288,7 +288,7 @@ async fn run_history_pages_fit_the_mcp_transport_without_losing_events() {
 }
 
 #[tokio::test]
-async fn stdio_discovers_and_calls_the_official_sdk_fixture() {
+async fn stdio_discovers_and_calls_the_beacon_sdk_fixture() {
     let root = TempDir::new().unwrap();
     std::fs::create_dir(root.path().join("home")).unwrap();
     let s = Service::new(config(&root)).await.unwrap();
@@ -409,13 +409,13 @@ async fn agents_manage_connections_through_the_self_gateway_without_deadlocks_or
     let owner = common::relay_fixture::grant(&s, &["read", "manage", "run"]).await;
 
     // Self-management uses the advertised authority so the recursive-call guard applies.
-    let (official_origin, _) = cairn_installation::relay::official_address(&s.config.data_dir)
+    let (beacon_origin, _) = cairn_installation::relay::beacon_address(&s.config.data_dir)
         .await
         .unwrap()
         .unwrap();
     let self_connection = json!({
         "name": "Self",
-        "url": format!("{official_origin}/mcp"),
+        "url": format!("{beacon_origin}/mcp"),
         "auth": "bearer",
         "token": owner,
         "allowPrivateNetwork": true,

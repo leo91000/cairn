@@ -280,7 +280,7 @@ async fn oauth_pkce_registration_rotation_and_reuse_are_bound_to_the_selected_in
 }
 
 #[tokio::test]
-async fn an_external_mcp_connection_returns_through_the_official_installation_and_account() {
+async fn an_external_mcp_connection_returns_through_the_beacon_installation_and_account() {
     use tokio::io::{AsyncBufReadExt, BufReader};
 
     let provider_script = "import { mcpProvider } from './tests/fixtures/mcp-provider.ts'; const p = await mcpProvider(); console.log(p.origin); await new Promise(() => {});";
@@ -1482,7 +1482,7 @@ async fn maintenance_and_concurrent_consent_have_a_consistent_client_lifetime() 
 }
 
 #[tokio::test]
-async fn native_mcp_callback_uses_official_account_authentication_instead_of_local_login() {
+async fn native_mcp_callback_uses_beacon_account_authentication_instead_of_local_login() {
     use cairn_installation::{auth::hex_digest, config::now};
     use std::collections::HashMap;
 

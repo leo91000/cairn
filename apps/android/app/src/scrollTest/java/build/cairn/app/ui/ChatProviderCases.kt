@@ -65,8 +65,8 @@ abstract class ChatProviderCases {
                         }
                         val body =
                             when (path) {
-                                "/api/installations" -> officialInstallationsFixture()
-                                "/api/account/session" -> officialAccountFixture("fixture")
+                                "/api/installations" -> beaconInstallationsFixture()
+                                "/api/account/session" -> beaconAccountFixture("fixture")
                                 "/api/installations/fixture/api/agents" ->
                                     wireJson.encodeToString(listOf(agent))
                                 "/api/installations/fixture/api/claude/models" ->
@@ -83,7 +83,7 @@ abstract class ChatProviderCases {
                 CairnViewModel(
                     ApplicationProvider.getApplicationContext<Application>(),
                     ProviderVault(),
-                    officialOrigin = "",
+                    beaconOrigin = "",
                 )
             compose.setContent {
                 val state by vm.state.collectAsStateWithLifecycle()
@@ -155,8 +155,8 @@ abstract class ChatProviderCases {
                         }
                         val body =
                             when (path) {
-                                "/api/installations" -> officialInstallationsFixture()
-                                "/api/account/session" -> officialAccountFixture("fixture")
+                                "/api/installations" -> beaconInstallationsFixture()
+                                "/api/account/session" -> beaconAccountFixture("fixture")
                                 "/api/installations/fixture/api/agents" ->
                                     wireJson.encodeToString(listOf(agent))
                                 "/api/installations/fixture/api/chats/chat/messages" -> {
@@ -181,7 +181,7 @@ abstract class ChatProviderCases {
                 CairnViewModel(
                     ApplicationProvider.getApplicationContext<Application>(),
                     ProviderVault(),
-                    officialOrigin = "",
+                    beaconOrigin = "",
                 )
             val restoration = StateRestorationTester(compose)
             restoration.setContent {

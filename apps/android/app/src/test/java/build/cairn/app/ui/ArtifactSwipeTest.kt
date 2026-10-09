@@ -317,8 +317,8 @@ class ArtifactSwipeTest {
                     return MockResponse()
                         .setBody(
                             when (path) {
-                                "/api/installations" -> officialInstallationsFixture()
-                                "/api/account/session" -> officialAccountFixture("fixture")
+                                "/api/installations" -> beaconInstallationsFixture()
+                                "/api/account/session" -> beaconAccountFixture("fixture")
                                 "/api/installations/fixture/api/agents" ->
                                     wireJson.encodeToString(listOf(Agent(MAIN_AGENT_ID, "Cairn")))
                                 "/api/installations/fixture/api/overview",
@@ -333,7 +333,7 @@ class ArtifactSwipeTest {
             CairnViewModel(
                 ApplicationProvider.getApplicationContext<Application>(),
                 MemoryVault(),
-                officialOrigin = "",
+                beaconOrigin = "",
             )
         restoration.setContent {
             val state by vm.state.collectAsStateWithLifecycle()

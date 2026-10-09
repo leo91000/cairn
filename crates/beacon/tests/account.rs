@@ -615,7 +615,7 @@ async fn native_github_handover_links_with_the_original_session_and_is_one_use()
                 .iter()
                 .all(|value| !value.to_str().unwrap().starts_with("cairn_session="))
         );
-        // Opening an official URL received from someone else must not authorize
+        // Opening an beacon URL received from someone else must not authorize
         // their Android session, even after GitHub silently authenticates us.
         assert_eq!(
             exchange().send().await.unwrap().status(),

@@ -33,7 +33,7 @@ use tokio::{
 
 /// The real manager runtime in a separate process, with the synthetic relay
 /// transport for installation-only worker tests. Browser access is tested
-/// through the official service and real installation relay.
+/// through the Beacon and real installation relay.
 struct Fixture {
     root: TempDir,
     service: Arc<Service>,

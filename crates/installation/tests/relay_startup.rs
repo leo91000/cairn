@@ -22,7 +22,7 @@ async fn failed_claims_leave_the_installation_running_without_a_relay_identity()
     let unreachable_origin = format!("http://{address}");
     drop(unreachable);
 
-    for official in [Some(refused_origin), Some(unreachable_origin), None] {
+    for beacon in [Some(refused_origin), Some(unreachable_origin), None] {
         let root = tempfile::tempdir().unwrap();
         tokio::fs::create_dir(root.path().join("data"))
             .await
@@ -47,8 +47,8 @@ async fn failed_claims_leave_the_installation_running_without_a_relay_identity()
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
             .kill_on_drop(true);
-        if let Some(official) = official {
-            command.env("CAIRN_BEACON_ORIGIN", official);
+        if let Some(beacon) = beacon {
+            command.env("CAIRN_BEACON_ORIGIN", beacon);
         }
         let mut child = command.spawn().unwrap();
         let mut lines = BufReader::new(child.stdout.take().unwrap()).lines();

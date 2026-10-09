@@ -112,7 +112,7 @@ if 'up' in sys.argv:
 
 
     def test_configuration_hands_claim_code_to_manager_and_preserves_identity_on_rerun(self):
-        class Official(http.server.BaseHTTPRequestHandler):
+        class Beacon(http.server.BaseHTTPRequestHandler):
             def do_GET(self):
                 self.send_response(200)
                 self.end_headers()
@@ -140,18 +140,18 @@ if 'up' in args:
         claim = dict(line.split('=', 1) for line in (root / 'claim.env').read_text().splitlines())
         assert claim['CAIRN_INSTALLATION_CLAIM_CODE'] == 'a' * 64
         identity.touch(mode=0o600)
-        identity.write_text(json.dumps({'origin': os.environ['FIXTURE_OFFICIAL_ORIGIN'], 'installationId': '00000000-0000-4000-8000-000000000001', 'token': 'fixture-only'}))
+        identity.write_text(json.dumps({'origin': os.environ['FIXTURE_BEACON_ORIGIN'], 'installationId': '00000000-0000-4000-8000-000000000001', 'token': 'fixture-only'}))
 if 'exec' in args:
     sys.exit(0)
 """)
             docker.chmod(0o755)
-            server = http.server.ThreadingHTTPServer(('127.0.0.1', 0), Official)
+            server = http.server.ThreadingHTTPServer(('127.0.0.1', 0), Beacon)
             thread = threading.Thread(target=server.serve_forever, daemon=True)
             thread.start()
             try:
                 env = {**os.environ, 'PATH': str(binaries) + ':' + os.environ['PATH'],
                        'CAIRN_INSTALLATION_ROOT': str(root / 'installation'),
-                       'FIXTURE_OFFICIAL_ORIGIN': f'http://127.0.0.1:{server.server_port}'}
+                       'FIXTURE_BEACON_ORIGIN': f'http://127.0.0.1:{server.server_port}'}
                 command = ['python3', str(REPO / 'deploy/installations/host.py'),
                            f'http://127.0.0.1:{server.server_port}', '--claim-code', 'a' * 64]
                 result = subprocess.run(command, env=env, capture_output=True, text=True)

@@ -36,5 +36,5 @@ class CairnAccountJourneyTest : CairnAccountCases() {
 
     @Test
     fun storedSessionSurvivesNetworkFailure() =
-        unavailableOfficialServiceRetriesTheStoredSessionAndOnlyRejectionSignsOut()
+        unavailableBeaconServiceRetriesTheStoredSessionAndOnlyRejectionSignsOut()
 }

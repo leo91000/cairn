@@ -149,8 +149,8 @@ class HistoryScrollDeviceTest {
                                 .throttleBody(13, 1, TimeUnit.SECONDS)
                         val body =
                             when (path) {
-                                "/api/installations" -> officialInstallationsFixture()
-                                "/api/account/session" -> officialAccountFixture("fixture")
+                                "/api/installations" -> beaconInstallationsFixture()
+                                "/api/account/session" -> beaconAccountFixture("fixture")
                                 "/api/installations/fixture/api/agents",
                                 "/api/installations/fixture/api/projects",
                                 "/api/installations/fixture/api/tasks",
@@ -165,7 +165,7 @@ class HistoryScrollDeviceTest {
                 }
             val application = ApplicationProvider.getApplicationContext<Application>()
 
-            val vm = CairnViewModel(application, officialOrigin = "")
+            val vm = CairnViewModel(application, beaconOrigin = "")
             runBlocking {
                 vm.state.first { it.ready }
                 vm.connect(server.url("/").toString())

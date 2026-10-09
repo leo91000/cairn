@@ -5,13 +5,13 @@ services:
     restart: unless-stopped
     environment:
       POSTGRES_USER: cairn
-      POSTGRES_DB: cairn_official
+      POSTGRES_DB: cairn_beacon
       POSTGRES_PASSWORD: ${CAIRN_BEACON_POSTGRES_PASSWORD:?Set the private database password}
     volumes:
-      - official-postgres:/var/lib/postgresql/data
+      - beacon-postgres:/var/lib/postgresql/data
     networks: [database]
     healthcheck:
-      test: [CMD-SHELL, pg_isready -h 127.0.0.1 -U cairn -d cairn_official]
+      test: [CMD-SHELL, pg_isready -h 127.0.0.1 -U cairn -d cairn_beacon]
       interval: 5s
       timeout: 5s
       retries: 10
@@ -22,8 +22,8 @@ services:
       options:
         max-size: 10m
         max-file: '3'
-  official:
-    image: ${CAIRN_BEACON_IMAGE:?Set the validated official image digest}
+  beacon:
+    image: ${CAIRN_BEACON_IMAGE:?Set the validated beacon image digest}
     user: '1000:1000'
     init: true
     restart: unless-stopped
@@ -60,12 +60,12 @@ services:
     labels:
       traefik.enable: 'true'
       traefik.docker.network: ${COOLIFY_PROXY_NETWORK:-coolify}
-      traefik.http.routers.cairn-official.rule: Host(`cairn.build`)
-      traefik.http.routers.cairn-official.entrypoints: ${CAIRN_PROXY_HTTPS_ENTRYPOINT:-https}
-      traefik.http.routers.cairn-official.tls: 'true'
-      traefik.http.routers.cairn-official.tls.certresolver: ${CAIRN_PROXY_CERT_RESOLVER:-letsencrypt}
-      traefik.http.routers.cairn-official.service: cairn-official
-      traefik.http.services.cairn-official.loadbalancer.server.port: '4311'
+      traefik.http.routers.cairn-beacon.rule: Host(`cairn.build`)
+      traefik.http.routers.cairn-beacon.entrypoints: ${CAIRN_PROXY_HTTPS_ENTRYPOINT:-https}
+      traefik.http.routers.cairn-beacon.tls: 'true'
+      traefik.http.routers.cairn-beacon.tls.certresolver: ${CAIRN_PROXY_CERT_RESOLVER:-letsencrypt}
+      traefik.http.routers.cairn-beacon.service: cairn-beacon
+      traefik.http.services.cairn-beacon.loadbalancer.server.port: '4311'
     healthcheck:
       test: [CMD, curl, --fail, --silent, --output, /dev/null, http://127.0.0.1:4311/health]
       interval: 30s
@@ -76,7 +76,7 @@ services:
     cpus: 1
     logging: *logs
 volumes:
-  official-postgres:
+  beacon-postgres:
 networks:
   database:
     internal: true

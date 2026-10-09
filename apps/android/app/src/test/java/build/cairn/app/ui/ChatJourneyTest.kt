@@ -194,8 +194,8 @@ class ChatJourneyTest {
                             )
                         val value =
                             when (path) {
-                                "/api/installations" -> officialInstallationsFixture()
-                                "/api/account/session" -> officialAccountFixture("csrf-fixture")
+                                "/api/installations" -> beaconInstallationsFixture()
+                                "/api/account/session" -> beaconAccountFixture("csrf-fixture")
                                 "/api/installations/fixture/api/agents" ->
                                     wireJson.encodeToString(
                                         listOf(Agent(id = MAIN_AGENT_ID, name = "Cairn"))
@@ -324,7 +324,7 @@ class ChatJourneyTest {
                 CairnViewModel(
                     ApplicationProvider.getApplicationContext<Application>(),
                     vault,
-                    officialOrigin = "",
+                    beaconOrigin = "",
                 )
             var compact by mutableStateOf(false)
             compose.setContent {

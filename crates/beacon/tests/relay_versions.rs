@@ -143,7 +143,7 @@ async fn incompatible_protocol_is_refused_and_v1_rejects_only_the_stream() {
 }
 
 #[tokio::test]
-async fn a_new_installation_can_still_claim_against_a_v1_official_service() {
+async fn a_new_installation_can_still_claim_against_a_v1_beacon_service() {
     use axum::{Json, Router, response::IntoResponse, routing::post};
     use serde_json::{Value, json};
     let app = Router::new().route(

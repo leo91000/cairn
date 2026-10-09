@@ -1,4 +1,4 @@
-// The candidate image supplies both the official binary and the SPA. Only email
+// The candidate image supplies both the beacon binary and the SPA. Only email
 // delivery is replaced; migrations, Postgres, sessions and HTTP routing are real.
 import assert from 'node:assert/strict'
 import { execFile } from 'node:child_process'
@@ -13,10 +13,10 @@ import { promisify } from 'node:util'
 const exec = promisify(execFile)
 const image = process.argv[2]
 const commit = process.env.SMOKE_COMMIT || process.env.GITHUB_SHA
-assert.ok(image, 'Pass the exact official image under test')
+assert.ok(image, 'Pass the exact beacon image under test')
 assert.match(commit || '', /^[a-f0-9]{40}$/, 'Set SMOKE_COMMIT to the image build commit')
 const name = `cairn-beacon-image-${randomUUID().slice(0, 8)}`
-const postgresImage = readFileSync(new URL('../deploy/official/compose.production.yaml', import.meta.url), 'utf8').match(/image: (postgres:17-alpine(?:@sha256:[a-f0-9]{64})?)/)[1]
+const postgresImage = readFileSync(new URL('../deploy/beacon/compose.production.yaml', import.meta.url), 'utf8').match(/image: (postgres:17-alpine(?:@sha256:[a-f0-9]{64})?)/)[1]
 const installationImage = process.env.SMOKE_INSTALLATION_IMAGE || `ghcr.io/leo91000/cairn@sha256:${'a'.repeat(64)}`
 
 async function docker(...args) {
@@ -25,7 +25,7 @@ async function docker(...args) {
   }
   catch {
     // Docker errors can repeat environment arguments. Never echo raw output.
-    throw new Error(`Official smoke Docker ${args[0]} failed`)
+    throw new Error(`Beacon smoke Docker ${args[0]} failed`)
   }
 }
 
@@ -55,7 +55,7 @@ async function ready() {
     await setTimeout(200)
   }
 
-  throw new Error('Exact official image did not become ready')
+  throw new Error('Exact beacon image did not become ready')
 }
 
 async function main() {
@@ -71,7 +71,7 @@ async function main() {
       new Promise(resolve => databaseReservation.close(resolve)),
     ])
     origin = `http://localhost:${port}`
-    await docker('run', '-d', '--name', `${name}-db`, '-p', `127.0.0.1:${databasePort}:5432`, '-e', 'POSTGRES_USER=cairn', '-e', 'POSTGRES_PASSWORD=fixture-only', '-e', 'POSTGRES_DB=cairn_official', '-v', `${name}-data:/var/lib/postgresql/data`, '--health-cmd', 'pg_isready -h 127.0.0.1 -U cairn -d cairn_official', '--health-interval', '1s', '--health-retries', '30', postgresImage, '-c', 'shared_preload_libraries=pg_stat_statements')
+    await docker('run', '-d', '--name', `${name}-db`, '-p', `127.0.0.1:${databasePort}:5432`, '-e', 'POSTGRES_USER=cairn', '-e', 'POSTGRES_PASSWORD=fixture-only', '-e', 'POSTGRES_DB=cairn_beacon', '-v', `${name}-data:/var/lib/postgresql/data`, '--health-cmd', 'pg_isready -h 127.0.0.1 -U cairn -d cairn_beacon', '--health-interval', '1s', '--health-retries', '30', postgresImage, '-c', 'shared_preload_libraries=pg_stat_statements')
     for (let attempt = 0; ; attempt++) {
       assert.ok(attempt < 60, 'Disposable Postgres did not become ready')
       const result = await docker('inspect', '--format', '{{.State.Health.Status}}', `${name}-db`)
@@ -80,7 +80,7 @@ async function main() {
       await setTimeout(500)
     }
 
-    await docker('run', '-d', '--name', name, '--network', 'host', '-e', `CAIRN_BEACON_DATABASE_URL=postgres://cairn:fixture-only@127.0.0.1:${databasePort}/cairn_official`, '-e', `CAIRN_BEACON_ORIGIN=${origin}`, '-e', `CAIRN_BEACON_LISTEN=127.0.0.1:${port}`, '-e', `CAIRN_BEACON_EMAIL_ENDPOINT=http://127.0.0.1:${mail.address().port}/emails`, '-e', 'CAIRN_BEACON_EMAIL_KEY=fixture-only', '-e', 'CAIRN_BEACON_EMAIL_FROM=cairn@example.test', '-e', `CAIRN_INSTALLATION_IMAGE=${installationImage}`, '-e', `CAIRN_BEACON_FCM_SERVICE_ACCOUNT_JSON=${fcmAccount}`, image)
+    await docker('run', '-d', '--name', name, '--network', 'host', '-e', `CAIRN_BEACON_DATABASE_URL=postgres://cairn:fixture-only@127.0.0.1:${databasePort}/cairn_beacon`, '-e', `CAIRN_BEACON_ORIGIN=${origin}`, '-e', `CAIRN_BEACON_LISTEN=127.0.0.1:${port}`, '-e', `CAIRN_BEACON_EMAIL_ENDPOINT=http://127.0.0.1:${mail.address().port}/emails`, '-e', 'CAIRN_BEACON_EMAIL_KEY=fixture-only', '-e', 'CAIRN_BEACON_EMAIL_FROM=cairn@example.test', '-e', `CAIRN_INSTALLATION_IMAGE=${installationImage}`, '-e', `CAIRN_BEACON_FCM_SERVICE_ACCOUNT_JSON=${fcmAccount}`, image)
     const healthResponse = await ready()
     assert.match(healthResponse.headers.get('cache-control'), /no-store/)
     assert.deepEqual(await healthResponse.json(), {
@@ -90,8 +90,8 @@ async function main() {
       stun: { status: 'running', receiveErrors: 0, sendErrors: 0 },
     })
     const user = (await docker('exec', name, 'id', '-u')).stdout.trim()
-    assert.equal(user, '1000', 'Official process must run unprivileged')
-    const databaseSql = sql => docker('exec', `${name}-db`, 'psql', '-U', 'cairn', '-d', 'cairn_official', '-v', 'ON_ERROR_STOP=1', '-Atc', sql)
+    assert.equal(user, '1000', 'Beacon process must run unprivileged')
+    const databaseSql = sql => docker('exec', `${name}-db`, 'psql', '-U', 'cairn', '-d', 'cairn_beacon', '-v', 'ON_ERROR_STOP=1', '-Atc', sql)
     await databaseSql('CREATE EXTENSION pg_stat_statements; SELECT pg_stat_statements_reset();')
     for (let request = 0; request < 100; request++) {
       const probe = await fetch(`${origin}/health`)
@@ -117,12 +117,12 @@ async function main() {
     assert.match(asset.headers.get('content-type'), /javascript/)
     assert.ok((await asset.text()).length > 100)
     const deepLink = await fetch(`${origin}/claim`)
-    assert.equal(await deepLink.text(), html, 'Deep links must serve the bundled official SPA')
+    assert.equal(await deepLink.text(), html, 'Deep links must serve the bundled beacon SPA')
     assert.equal((await fetch(`${origin}/api/unknown`)).status, 404)
     const release = await fetch(`${origin}/install/release`)
     assert.deepEqual(await release.json(), { image: installationImage })
     const installer = await fetch(`${origin}/install.sh`).then(response => response.text())
-    assert.ok(installer.includes(origin), 'Installer must use the configured official origin')
+    assert.ok(installer.includes(origin), 'Installer must use the configured beacon origin')
     assert.ok(!installer.includes('__CAIRN_'), 'Embedded installer assets must be complete')
 
     const post = (path, body) => fetch(`${origin}${path}`, {
@@ -139,7 +139,7 @@ async function main() {
     await docker('restart', name)
     await ready()
     const session = await fetch(`${origin}/api/account/session`, { headers: { cookie } })
-    assert.equal(session.status, 200, 'Sessions must survive official process replacement')
+    assert.equal(session.status, 200, 'Sessions must survive beacon process replacement')
     const nativePush = await fetch(`${origin}/api/account/notifications/android`, { headers: { cookie } })
     assert.equal(nativePush.status, 200)
     assert.deepEqual(await nativePush.json(), { enabled: true }, 'FCM configuration must accept environment-only credentials')
@@ -157,7 +157,7 @@ async function main() {
     assert.ok(unavailable, 'Cached readiness must detect database loss within eight seconds')
     await docker('start', `${name}-db`)
     await ready()
-    console.warn(`Official exact-image smoke passed: ${image}; commit ${commit}; SPA, migrations, sign-in, restart and database readiness`)
+    console.warn(`Beacon exact-image smoke passed: ${image}; commit ${commit}; SPA, migrations, sign-in, restart and database readiness`)
   }
   finally {
     await Promise.all([docker('rm', '-f', name).catch(() => {}), docker('rm', '-f', `${name}-db`).catch(() => {})])

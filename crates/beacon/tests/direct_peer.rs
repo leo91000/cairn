@@ -669,7 +669,7 @@ async fn disabling_direct_refuses_authorization_and_preserves_the_relay() {
 }
 
 #[tokio::test]
-async fn grant_expiry_closes_an_actual_stream_when_the_official_tunnel_is_down() {
+async fn grant_expiry_closes_an_actual_stream_when_the_beacon_tunnel_is_down() {
     let mut relay = RelayedInstallation::new(stream_router()).await;
     production_connector(&mut relay).await;
     sqlx_core::query::query(
@@ -698,14 +698,14 @@ async fn grant_expiry_closes_an_actual_stream_when_the_official_tunnel_is_down()
         ) {}
     })
     .await
-    .expect("local expiry closes the real channel without a live official tunnel");
+    .expect("local expiry closes the real channel without a live beacon tunnel");
     assert!(!relay.installation.shutdown.is_cancelled());
     peer.close().await.unwrap();
     relay.close().await;
 }
 
 #[tokio::test]
-async fn a_new_official_key_closes_real_peers_and_a_fresh_peer_still_works() {
+async fn a_new_beacon_key_closes_real_peers_and_a_fresh_peer_still_works() {
     let mut relay = RelayedInstallation::new(stream_router()).await;
     production_connector(&mut relay).await;
     let (old_peer, old_channel, grant) = client(&relay).await;
@@ -719,7 +719,7 @@ async fn a_new_official_key_closes_real_peers_and_a_fresh_peer_still_works() {
         response(old_channel.as_ref()).await,
         Frame::StreamStart(_)
     ));
-    // Recreate the official process, retaining accounts and the live installation.
+    // Recreate the beacon process, retaining accounts and the live installation.
     relay.app.relay.shutdown();
     relay.app.server.abort();
     let _ = (&mut relay.app.server).await;

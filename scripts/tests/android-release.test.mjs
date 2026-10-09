@@ -8,7 +8,7 @@ describe('android tag distribution', () => {
     expect(androidVersion('v1.0.0').versionCode).toBeGreaterThan(androidVersion('v0.999.999').versionCode)
     expect(androidVersion('v1999.999.999').versionCode).toBeLessThan(2100000000)
   })
-  it.each(['v1.0.0-beta', 'v01.0.0', '1.0.0', 'v2000.0.0', 'v0.1000.0', 'v0.1.1000', '../../bad'])('rejects %s', (tag) => {
+  it.each(['v1.0.0-beta', 'v01.0.0', '1.0.0', 'v2000.0.0', 'v0.1000.0', 'v0.1.1000', '../bad'])('rejects %s', (tag) => {
     expect(() => androidVersion(tag)).toThrow()
   })
   it('publishes a checksum and refuses a stale or different APK', () => {

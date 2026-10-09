@@ -1,4 +1,4 @@
-//! Task commitments are reconciled with the official authority. No member list is stored.
+//! Task commitments are reconciled with the beacon authority. No member list is stored.
 use crate::{
     auth::{InstallationIdentity, InstallationRole},
     error::{Error, Result},

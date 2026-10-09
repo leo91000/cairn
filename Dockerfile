@@ -37,8 +37,8 @@ RUN --mount=type=cache,id=cargo-registry,target=/usr/local/cargo/registry \
     touch crates/installation/src/main.rs crates/installation/src/lib.rs crates/protocol/src/lib.rs && \
     cargo build --locked --release --bin cairn --features ublk && cp target/release/cairn /usr/local/bin/cairn
 
-# Official service builds independently: no worker CLI, VM or kernel layers.
-FROM rust:1.97.1-bookworm AS official-backend
+# Beacon builds independently: no worker CLI, VM or kernel layers.
+FROM rust:1.97.1-bookworm AS beacon-backend
 ENV CARGO_BUILD_JOBS=4
 WORKDIR /build
 COPY Cargo.toml Cargo.lock ./
@@ -63,12 +63,12 @@ RUN --mount=type=cache,id=cargo-registry,target=/usr/local/cargo/registry \
     && cargo build --locked --release --bin cairn-beacon \
     && cp target/release/cairn-beacon /usr/local/bin/cairn-beacon
 
-FROM debian:bookworm-slim AS official
+FROM debian:bookworm-slim AS beacon
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl \
     && rm -rf /var/lib/apt/lists/* \
     && groupadd --gid 1000 cairn && useradd --uid 1000 --gid cairn cairn
 WORKDIR /app
-COPY --from=official-backend /usr/local/bin/cairn-beacon /usr/local/bin/cairn-beacon
+COPY --from=beacon-backend /usr/local/bin/cairn-beacon /usr/local/bin/cairn-beacon
 COPY --from=build /app/dist ./dist
 ARG VCS_REF=development
 ENV APP_COMMIT=$VCS_REF APP_RUNTIME_ID=$VCS_REF CAIRN_BEACON_LISTEN=0.0.0.0:4311 CAIRN_BEACON_WEB_DIR=/app/dist

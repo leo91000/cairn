@@ -4,7 +4,7 @@ import { createServer } from 'node:http'
 import process from 'node:process'
 import { expect, test } from '@playwright/test'
 
-test('official pages deny framing and enable HSTS only for an HTTPS official origin', async ({ page, request }) => {
+test('beacon pages deny framing and enable HSTS only for an HTTPS beacon origin', async ({ page, request }) => {
   const url = 'http://localhost:4398'
   for (const origin of [url, 'https://localhost:4398']) {
     const child = spawn('target/debug/cairn-beacon', [], {
@@ -24,7 +24,7 @@ test('official pages deny framing and enable HSTS only for an HTTPS official ori
     try {
       await expect.poll(async () => {
         if (child.exitCode !== null)
-          throw new Error(`Official service exited: ${log}`)
+          throw new Error(`Beacon exited: ${log}`)
         return fetch(`${url}/health`).then(response => response.ok).catch(() => false)
       }).toBe(true)
 
@@ -84,7 +84,7 @@ test('email sign-in works after a third party exhausts their challenge, persists
   try {
     await expect.poll(async () => {
       if (child.exitCode !== null)
-        throw new Error(`Official service exited: ${log}`)
+        throw new Error(`Beacon exited: ${log}`)
       return fetch(`${url}/health`).then(response => response.ok).catch(() => false)
     }).toBe(true)
     const cdp = await context.newCDPSession(page)

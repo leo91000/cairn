@@ -37,8 +37,8 @@ abstract class ModelCatalogCases {
                     override fun dispatch(request: RecordedRequest): MockResponse {
                         val response =
                             when (request.path) {
-                                "/api/installations" -> officialInstallationsFixture()
-                                "/api/account/session" -> officialAccountFixture("fixture")
+                                "/api/installations" -> beaconInstallationsFixture()
+                                "/api/account/session" -> beaconAccountFixture("fixture")
                                 "/api/installations/fixture/api/$provider/models" -> {
                                     requests.incrementAndGet()
                                     if (unavailable.get())
@@ -66,7 +66,7 @@ abstract class ModelCatalogCases {
                 CairnViewModel(
                     ApplicationProvider.getApplicationContext<Application>(),
                     CatalogVault(),
-                    officialOrigin = "",
+                    beaconOrigin = "",
                 )
             var selection = original to "high"
             compose.setContent {

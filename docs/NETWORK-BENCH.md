@@ -17,8 +17,8 @@ pnpm install --frozen-lockfile
 CARGO_PROFILE_DEV_DEBUG=0 CARGO_BUILD_JOBS=4 cargo build --locked --workspace --bin cairn --bin cairn-beacon --example network_direct_client --example network_stun_server
 pnpm build
 pnpm exec playwright install --with-deps chromium
-docker run -d --name cairn-network-postgres -e POSTGRES_USER=cairn -e POSTGRES_PASSWORD=test-only -e POSTGRES_DB=cairn_official_test -p 127.0.0.1:5432:5432 postgres:17-alpine
-export CAIRN_BEACON_TEST_DATABASE_URL=postgres://cairn:test-only@127.0.0.1:5432/cairn_official_test
+docker run -d --name cairn-network-postgres -e POSTGRES_USER=cairn -e POSTGRES_PASSWORD=test-only -e POSTGRES_DB=cairn_beacon_test -p 127.0.0.1:5432:5432 postgres:17-alpine
+export CAIRN_BEACON_TEST_DATABASE_URL=postgres://cairn:test-only@127.0.0.1:5432/cairn_beacon_test
 python3 tests/network_probe_test.py
 python3 tests/network_bench_test.py
 python3 tests/stun_docker_test.py
@@ -65,14 +65,14 @@ only the standard library and never serves installation data.
 | udp-blocked | Every forwarded UDP datagram is dropped on both routers; TCP remains usable. |
 | symmetric-nat | Both routers allocate UDP source ports per flow/destination and deny unsolicited inbound packets. The two probe destinations have distinct fixed mappings; arbitrary UDP destinations use fresh random port allocation. |
 | symmetric-client | Destination-dependent client NAT faces an installation with ordinary Docker-like NAT/filtering; relay expected, no installation port published. |
-| same-server | Official STUN behind a directly published DNAT port on the installation host; external client source preserved, installation hairpin reports a gateway; explicit public-IP alias restores the authorized direct route. |
+| same-server | Beacon STUN behind a directly published DNAT port on the installation host; external client source preserved, installation hairpin reports a gateway; explicit public-IP alias restores the authorized direct route. |
 | network-change | The client moves to a new source address during a live stream; old-address sockets are closed. |
 | packet-loss | A userspace TUN router drops every fifth outgoing IPv4 packet on both sides, including TCP; no random seed or optional netfilter/netem module. |
 
 UDP probes send fixed sequence markers to two diagnostic listeners. Reports show
 sent/received counts, whether the source was translated and the number of observed
 mappings on both sides. The UDP probe discards delayed replies from earlier
-sequences until the current reply or its deadline. The official Rust Binding responder (via its diagnostic example launcher) listens at
+sequences until the current reply or its deadline. The beacon Rust Binding responder (via its diagnostic example launcher) listens at
 198.18.102.1:3478, before the host-facing masquerade; mapped addresses therefore
 identify each actual NAT router (198.18.102.2/.3), rather than a shared host
 address. Tests assert these reflexive addresses. NAT routers drop unsolicited UDP to their own ports as well as forwarded UDP,
@@ -148,7 +148,7 @@ The network-change scenario measures the real direct-to-relay stream recovery,
 then checks reestablishment of direct and a Rust read. Same-LAN also blocks all
 client UDP during a browser message send: the message must arrive once, the
 live stream must resume on relay within 25 seconds, and the message list must
-contain one client submission. Restoring UDP must reestablish direct. An official
+contain one client submission. Restoring UDP must reestablish direct. An beacon
 restart then replaces the signing key; fresh negotiation and subsequent logout
 revocation are exercised without restarting the browser or installation.
 
@@ -161,7 +161,7 @@ revocation scopes. Anonymous requests and installation loopback access still
 fail. Qualification across Android and production hosts remains #105.
 
 `udp-blocked` demonstrates that the existing relay remains usable even when every
-UDP probe fails. The existing `journeys-official-relay` and Rust relay/security
+UDP probe fails. The existing `journeys-beacon-relay` and Rust relay/security
 suites remain the regression checks for owner/member roles, withdrawal, session
 expiry/revocation, detach, rotation and definitive revocation. The bench does not
 change these contracts, local authentication, storage or central persistence.
@@ -211,7 +211,7 @@ this narrower conclusion; they do not establish general reliability under loss
 or diagnose the remaining ICE/POST/view latency. The 10-second POST/title and
 35-second route assertions are unchanged. Qualification remains #105.
 
-## Published official STUN port
+## Published beacon STUN port
 
 `python3 tests/stun_docker_test.py` publishes a disposable Binding-only Python
 fixture on a Docker UDP port using a pinned image digest. An external Linux
@@ -221,11 +221,11 @@ retain the external client's address and source port (`localPort`). This exercis
 actual Docker DNAT path; a gateway address from a userland proxy fails the check.
 The fixture mounts only the diagnostic script read-only, removes its container
 and namespace in `finally`, and saves `test-results/network/docker-stun.json`.
-The namespace bench now uses this same official Rust responder, rather than
-only the Python fixture. Its report identifies `stunResponder: official-rust`.
+The namespace bench now uses this same beacon Rust responder, rather than
+only the Python fixture. Its report identifies `stunResponder: beacon-rust`.
 Real UDP integration tests also cover receive-error recovery and IPv4/IPv6 mappings.
 The authenticated bench deliberately sets `CAIRN_DIRECT_STUN_URLS=""` to verify
-that the installation uses the official STUN source and still connects directly.
+that the installation uses the beacon STUN source and still connects directly.
 The production host must repeat source-preservation and firewall validation
 before release (#113/#105); this ticket performs no deployment or host firewall
 change. Hairpin behavior and the optional port-preserving public-IP alias are
@@ -241,7 +241,7 @@ separate check succeeds. The local namespace/Docker bench remains IPv4 evidence.
 
 ## Android native adapter (#104)
 
-`--android` reuses this bench's official service, authenticated installation,
+`--android` reuses this bench's Beacon, authenticated installation,
 STUN responder, UDP probes, router filtering and cleanup. It requires a booted
 real emulator, `adb`, built debug/application-test APKs and the same disposable
 Postgres database. The launcher isolates live agent credentials. For example:

@@ -108,7 +108,7 @@ struct StreamAccess {
 impl Relay {
     pub fn set_stun_url(&self, value: String) -> Result<(), &'static str> {
         if !value.starts_with("stun:") || value.len() > 256 {
-            return Err("Invalid official STUN URL");
+            return Err("Invalid beacon STUN URL");
         }
         *self.stun_url.lock().unwrap() = Some(value);
         Ok(())
@@ -119,7 +119,7 @@ impl Relay {
             .lock()
             .unwrap()
             .clone()
-            .unwrap_or_else(|| crate::stun::url(origin).expect("validated official origin"))
+            .unwrap_or_else(|| crate::stun::url(origin).expect("validated beacon origin"))
     }
 
     /// Close only this browser session; other devices keep their access.
@@ -157,7 +157,7 @@ impl Relay {
         }
     }
 
-    /// End live bodies before the official HTTP server drains on shutdown.
+    /// End live bodies before the beacon HTTP server drains on shutdown.
     pub fn shutdown(&self) {
         let mut tunnels = self.connections.lock().unwrap();
         self.closing.store(true, Ordering::SeqCst);
@@ -888,7 +888,7 @@ pub(super) async fn refresh_task_authors(service: &Service, installation: &str) 
     )
     .await;
     if !matches!(refreshed, Ok(Ok(response)) if response.status().is_success()) {
-        tracing::warn!("Task schedules await the next official author check");
+        tracing::warn!("Task schedules await the next beacon author check");
     }
 }
 
@@ -950,7 +950,7 @@ enum Capability {
     PublicArtifact(String),
 }
 
-// Only an official availability page may render inline; relayed HTML stays
+// Only an beacon availability page may render inline; relayed HTML stays
 // an attachment even when an installation sends an error status.
 #[derive(Clone)]
 pub(super) struct PublicOfflinePage;

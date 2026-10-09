@@ -72,7 +72,7 @@ async fn visibility(relay: &RelayedInstallation, run: &str, artifact: &str, valu
 }
 
 #[tokio::test]
-async fn public_file_is_an_official_read_only_link_with_security_headers_revocation_and_offline_message()
+async fn public_file_is_an_beacon_read_only_link_with_security_headers_revocation_and_offline_message()
  {
     let relay = RelayedInstallation::new(axum::Router::new()).await;
     let (run, artifact) = seeded_artifact(&relay, b"<h1>Report</h1>", "text/html").await;
@@ -84,7 +84,7 @@ async fn public_file_is_an_official_read_only_link_with_security_headers_revocat
             "{}/api/public/installations/{id}/artifacts/",
             relay.app.url
         )),
-        "The share URL must use the official service"
+        "The share URL must use the Beacon"
     );
     for method in [reqwest::Method::GET, reqwest::Method::HEAD] {
         let response = relay

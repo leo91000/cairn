@@ -1,6 +1,6 @@
 //! Test transport for installation handlers. This is a synthetic authenticated
 //! relay seam, never a browser login, OAuth authority or application web host.
-//! The browser journeys use the real official and installation binaries.
+//! The browser journeys use the real beacon and installation binaries.
 use axum::{
     Json, Router,
     extract::{Request, State},
@@ -53,7 +53,7 @@ pub async fn router(service: Arc<Service>) -> Result<Router> {
 async fn installation_router(service: Arc<Service>) -> Result<Router> {
     let installation = cairn_installation::http::router(service.clone()).await?;
     let mcp = installation.clone();
-    // The synthetic authority advertises /mcp, just like the official authority.
+    // The synthetic authority advertises /mcp, just like the beacon authority.
     // Dispatch its verified request through the real installation MCP route.
     Ok(installation
         .route(
@@ -103,7 +103,7 @@ async fn transport(
             Err(error) => return error.into_response(),
         }
     }
-    // Test recipients use the same public capability as the official relay.
+    // Test recipients use the same public capability as the beacon relay.
     if path.starts_with("/api/public/installations/") {
         let value = path.rsplit('/').next().unwrap();
         let mut identity = InstallationIdentity::trusted(InstallationRole::Member, "");

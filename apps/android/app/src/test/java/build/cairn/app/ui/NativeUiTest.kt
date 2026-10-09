@@ -25,7 +25,7 @@ class NativeUiTest {
     private fun model() =
         CairnViewModel(
             ApplicationProvider.getApplicationContext<Application>(),
-            officialOrigin = "",
+            beaconOrigin = "",
         )
 
     private val workspace =

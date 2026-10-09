@@ -15,6 +15,7 @@ use axum::{
     http::{HeaderValue, StatusCode, header},
     routing::{any, get},
 };
+use cairn_beacon::html::escape_html;
 use cairn_beacon::{
     AccountPushSender, EmailSender, FcmPushSender, OAuthProvider, OAuthProviders, Relay,
     TrustedProxies, WebPushSender, router_with_network_and_push,
@@ -33,20 +34,13 @@ struct HttpEmailSender {
     endpoint: String,
     key: String,
     from: String,
+    origin: String,
 }
 
-fn escape_html(value: &str) -> String {
-    value
-        .replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
-        .replace('\'', "&#39;")
-}
-
-fn branded_email(body: &str) -> String {
+fn branded_email(origin: &str, body: &str) -> String {
+    let logo = escape_html(&format!("{origin}/brand/cairn-wordmark.png"));
     format!(
-        r#"<html><body style="background:#F4F2EC;color:#16151D;font-family:Arial,sans-serif"><div style="max-width:520px;margin:32px auto;padding:24px"><img src="https://cairn.build/brand/cairn-wordmark.png" width="156" alt="Cairn" style="display:block;margin-bottom:32px">{body}</div></body></html>"#
+        r#"<html><body style="background:#F4F2EC;color:#16151D;font-family:Arial,sans-serif"><div style="max-width:520px;margin:32px auto;padding:24px"><img src="{logo}" width="156" alt="Cairn" style="display:block;margin-bottom:32px">{body}</div></body></html>"#
     )
 }
 
@@ -57,7 +51,7 @@ impl EmailSender for HttpEmailSender {
             "from": self.from,
             "to": [email],
             "subject": "Your Cairn sign-in code",
-            "html": branded_email(&format!("<p>Your Cairn sign-in code is <strong>{code}</strong>.</p><p>It expires in 10 minutes. If you did not request it, ignore this email.</p>")),
+            "html": branded_email(&self.origin, &format!("<p>Your Cairn sign-in code is <strong>{}</strong>.</p><p>It expires in 10 minutes. If you did not request it, ignore this email.</p>", escape_html(code))),
             "text": format!("Your Cairn sign-in code is {code}. It expires in 10 minutes. If you did not request it, ignore this email."),
         });
         self.deliver(message).await
@@ -73,7 +67,7 @@ impl EmailSender for HttpEmailSender {
             "from": self.from,
             "to": [email],
             "subject": "Invitation to a Cairn installation",
-            "html": branded_email(&format!("<p>You have been invited to the Cairn installation <strong>{}</strong>.</p><p><a href=\"{}\">Sign in or create your Cairn account</a> with this email address to accept.</p><p>Members use the owner’s coding-agent accounts and secrets. This invitation expires in 7 days.</p>", escape_html(installation), escape_html(url))),
+            "html": branded_email(&self.origin, &format!("<p>You have been invited to the Cairn installation <strong>{}</strong>.</p><p><a href=\"{}\">Sign in or create your Cairn account</a> with this email address to accept.</p><p>Members use the owner’s coding-agent accounts and secrets. This invitation expires in 7 days.</p>", escape_html(installation), escape_html(url))),
             "text": format!("You have been invited to the Cairn installation \"{installation}\". Sign in or create your Cairn account with this email address to accept: {url}\nMembers use the owner's coding-agent accounts and secrets. This invitation expires in 7 days."),
         })).await
     }
@@ -205,6 +199,7 @@ async fn run() -> Result<(), String> {
         endpoint,
         key: required("CAIRN_BEACON_EMAIL_KEY")?,
         from: required("CAIRN_BEACON_EMAIL_FROM")?,
+        origin: origin.clone(),
     };
 
     let address: SocketAddr = env::var("CAIRN_BEACON_LISTEN")
@@ -214,9 +209,7 @@ async fn run() -> Result<(), String> {
 
     let web = PathBuf::from(env::var("CAIRN_BEACON_WEB_DIR").unwrap_or_else(|_| "dist".into()));
     if !web.join("beacon.html").is_file() {
-        return Err(
-            "Build the web application with pnpm build before starting the official service".into(),
-        );
+        return Err("Build the web application with pnpm build before starting Beacon".into());
     }
 
     let pool = PgPoolOptions::new()
@@ -224,7 +217,7 @@ async fn run() -> Result<(), String> {
         .acquire_timeout(Duration::from_secs(5))
         .connect(&required("CAIRN_BEACON_DATABASE_URL")?)
         .await
-        .map_err(|_| "Could not connect to the official Postgres database")?;
+        .map_err(|_| "Could not connect to the beacon Postgres database")?;
 
     let oauth = OAuthProviders {
         google: configured_oauth("GOOGLE", loopback)?,
@@ -302,7 +295,7 @@ async fn run() -> Result<(), String> {
     });
     let stun_socket = tokio::net::UdpSocket::bind(&stun_address)
         .await
-        .map_err(|_| "Could not bind official STUN listener")?;
+        .map_err(|_| "Could not bind beacon STUN listener")?;
     let stun_status = cairn_beacon::stun::Status::default();
     let stun = tokio::spawn(cairn_beacon::stun::serve_with_status(
         stun_socket,
@@ -323,7 +316,7 @@ async fn run() -> Result<(), String> {
         push,
     )
     .await
-    .map_err(|_| "Official database migration failed")?
+    .map_err(|_| "Beacon database migration failed")?
     .merge(cairn_beacon::installer::release_router(
         env::var("CAIRN_INSTALLATION_IMAGE").ok(),
     )?)
@@ -366,7 +359,7 @@ async fn run() -> Result<(), String> {
         HeaderValue::from_static("DENY"),
     ));
 
-    // TLS terminates at the configured official origin's trusted proxy.
+    // TLS terminates at the configured beacon origin's trusted proxy.
     if origin_url.scheme() == "https" {
         app = app.layer(SetResponseHeaderLayer::overriding(
             header::STRICT_TRANSPORT_SECURITY,
@@ -403,12 +396,12 @@ async fn run() -> Result<(), String> {
         loop {
             interval.tick().await;
             if cairn_beacon::cleanup_expired(&pool).await.is_err() {
-                tracing::warn!("Official expiration cleanup failed; will retry next hour");
+                tracing::warn!("Beacon expiration cleanup failed; will retry next hour");
             }
         }
     });
 
-    tracing::info!("Official service listening");
+    tracing::info!("Beacon listening");
     let result = axum::serve(
         listener,
         app.into_make_service_with_connect_info::<SocketAddr>(),
@@ -424,7 +417,7 @@ async fn run() -> Result<(), String> {
         relay.shutdown();
     })
     .await
-    .map_err(|_| "Official HTTP server stopped unexpectedly".to_owned());
+    .map_err(|_| "Beacon HTTP server stopped unexpectedly".to_owned());
     readiness_probe.abort();
     maintenance.abort();
     stun.abort();
@@ -440,5 +433,79 @@ async fn main() {
         // Configuration and transport errors above never include secrets or provider bodies.
         tracing::error!("{error}");
         std::process::exit(1);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::{Router, extract::State, routing::post};
+    use tokio::sync::mpsc;
+
+    #[tokio::test]
+    async fn email_delivery_uses_configured_origin_escapes_html_and_preserves_text() {
+        let (mailbox, mut messages) = mpsc::channel::<serde_json::Value>(2);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(
+                listener,
+                Router::new()
+                    .route(
+                        "/emails",
+                        post(
+                            |State(mailbox): State<mpsc::Sender<serde_json::Value>>,
+                             Json(message): Json<serde_json::Value>| async move {
+                                mailbox.send(message).await.unwrap();
+                                StatusCode::OK
+                            },
+                        ),
+                    )
+                    .with_state(mailbox),
+            )
+            .await
+            .unwrap();
+        });
+        let sender = HttpEmailSender {
+            client: Client::new(),
+            endpoint: format!("http://{address}/emails"),
+            key: "fixture-only".into(),
+            from: "cairn@example.test".into(),
+            origin: "https://staging.example.test".into(),
+        };
+        sender
+            .send_code("member@example.test", "<code>&\"'")
+            .await
+            .unwrap();
+        let code = messages.recv().await.unwrap();
+        let html = code["html"].as_str().unwrap();
+        assert!(html.contains("https://staging.example.test/brand/cairn-wordmark.png"));
+        assert!(html.contains("<strong>&lt;code&gt;&amp;&quot;&#39;</strong>"));
+        assert_eq!(
+            code["text"],
+            "Your Cairn sign-in code is <code>&\"'. It expires in 10 minutes. If you did not request it, ignore this email."
+        );
+
+        let invitation_url = "https://staging.example.test/?invite=1&name=\"test\"";
+        sender
+            .send_invitation("member@example.test", "<Workshop>&\"'", invitation_url)
+            .await
+            .unwrap();
+        let invitation = messages.recv().await.unwrap();
+        let html = invitation["html"].as_str().unwrap();
+        assert!(html.contains("https://staging.example.test/brand/cairn-wordmark.png"));
+        assert!(html.contains("<strong>&lt;Workshop&gt;&amp;&quot;&#39;</strong>"));
+        assert!(
+            html.contains(
+                "href=\"https://staging.example.test/?invite=1&amp;name=&quot;test&quot;\""
+            )
+        );
+        assert_eq!(
+            invitation["text"],
+            format!(
+                "You have been invited to the Cairn installation \"<Workshop>&\"'\". Sign in or create your Cairn account with this email address to accept: {invitation_url}\nMembers use the owner's coding-agent accounts and secrets. This invitation expires in 7 days."
+            )
+        );
+        server.abort();
     }
 }

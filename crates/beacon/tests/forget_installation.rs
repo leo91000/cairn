@@ -155,7 +155,7 @@ async fn only_the_owner_can_forget_an_installation_and_its_machine_keeps_its_dat
         StatusCode::UNAUTHORIZED
     );
 
-    // Claim the same physical installation anew, through the official API and real connector.
+    // Claim the same physical installation anew, through the beacon API and real connector.
     let code: Value = request(
         Method::POST,
         "/api/installations/claim-code",

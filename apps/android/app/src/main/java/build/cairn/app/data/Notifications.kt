@@ -122,14 +122,14 @@ constructor(
     context: Context,
     params: WorkerParameters,
     private val vault: SessionVault = KeystoreSessionVault(context),
-    private val officialOrigin: String = BuildConfig.OFFICIAL_SERVICE_ORIGIN,
+    private val beaconOrigin: String = BuildConfig.BEACON_SERVICE_ORIGIN,
 ) : CoroutineWorker(context, params) {
     override suspend fun doWork(): Result {
         val context = applicationContext
         val prefs = NotificationPreferences(context)
         if (!prefs.enabled.first() || !notificationsAllowed(context)) return Result.success()
-        if (officialOrigin.isBlank()) return Result.success()
-        val origin = serverOrigin(officialOrigin, BuildConfig.DEBUG).toString()
+        if (beaconOrigin.isBlank()) return Result.success()
+        val origin = serverOrigin(beaconOrigin, BuildConfig.DEBUG).toString()
         val originalCookie = vault.read(origin) ?: return Result.success()
         try {
             val account = CairnApi(serverOrigin(origin, BuildConfig.DEBUG), vault)
