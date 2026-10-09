@@ -200,15 +200,20 @@ abstract class NativeAccountCases {
 
             registered.set(false)
             kotlinx.coroutines.runBlocking {
+                println("[DEBUG-138] renewal starts")
                 try {
                     registrar.register()
                 } catch (error: ApiException) {
                     assertEquals(403, error.status)
                 }
+                println("[DEBUG-138] refusal handled; reading enabled")
                 assertFalse(preferences.enabled.first())
+                println("[DEBUG-138] disabled; reading recovery")
                 assertTrue(NotificationPreferences(application).nativeReenrollmentRequired.first())
+                println("[DEBUG-138] recovery read; disabled callback starts")
                 // A later background token callback must not silently re-enroll this device.
                 registrar.register()
+                println("[DEBUG-138] disabled callback finished")
             }
             assertEquals(2, registrationAttempts.get())
             compose.waitUntil(10_000) {

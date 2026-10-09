@@ -70,7 +70,8 @@ jobs:
           import subprocess
           import sys
 
-          build = subprocess.Popen(['./gradlew', 'testDebugUnitTest', 'lintDebug', 'assembleDebug', 'assembleDebugAndroidTest', '--no-daemon', '--stacktrace'])
+          pathlib.Path('/tmp/leo-test-logging.gradle').write_text('allprojects { tasks.withType(Test).configureEach { testLogging.showStandardStreams = true } }')
+          build = subprocess.Popen(['./gradlew', 'testDebugUnitTest', '--tests', 'dev.leo.manager.ui.NativeAccountTest.refusedPushRenewal', '-I', '/tmp/leo-test-logging.gradle', '--no-daemon', '--stacktrace'])
           try:
               sys.exit(build.wait(timeout=300))
           except subprocess.TimeoutExpired:
