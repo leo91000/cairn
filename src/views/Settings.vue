@@ -1,11 +1,13 @@
 <script setup lang="ts">
 import { twMerge } from 'tailwind-merge'
-import { onMounted, ref } from 'vue'
+import { computed, onMounted, ref } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
 import {
   api,
   date,
   notify,
   officialEntry,
+  state,
 } from '../api'
 import AccountConfirmation from '../components/AccountConfirmation.vue'
 import Icon from '../components/Icon.vue'
@@ -22,6 +24,14 @@ import {
 } from '../icons'
 import { iconButton } from '../ui'
 
+const route = useRoute()
+const router = useRouter()
+const section = computed(() => String(route.params.section || ''))
+const sections = [
+  { id: 'account', label: 'Account' },
+  { id: 'installation', label: 'Installation' },
+  { id: 'sensitive', label: 'Sensitive zone' },
+]
 const settings = ref<any>()
 const grants = ref<any[]>([])
 const audit = ref<any[]>([])
@@ -47,7 +57,10 @@ async function load() {
   }
 }
 
-onMounted(load)
+onMounted(() => {
+  if (section.value === 'installation' && state.installationRole === 'owner')
+    void load()
+})
 
 async function create() {
   try {
@@ -95,123 +108,168 @@ async function copy(value: string) {
   <UiAlert v-if="error">
     {{ error }}
   </UiAlert>
-  <template v-if="settings">
-    <StorageSettings />
-    <section class="panel border-b border-line overflow-hidden settings-section mb-5.5 appearance-section px-0 py-7 phone:py-5">
-      <div class="section-intro flex gap-[17px] items-center mb-6 phone:items-start phone:gap-[13px]">
-        <div><h2>Appearance</h2></div>
-      </div>
-      <ThemeControl />
-      <p class="appearance-hint text-2xs text-muted mt-4">
-        Saved in this browser. System follows your device’s appearance automatically.
-      </p>
-    </section>
-    <section class="panel border-b border-line overflow-hidden settings-section mb-5.5 px-0 py-7 phone:py-5">
-      <div class="section-intro flex gap-[17px] items-center mb-6 phone:items-start phone:gap-[13px]">
-        <span class="resource-avatar w-11.5 h-11.5 bg-soft text-accent grid place-items-center rounded-xl border border-line"><Icon :name="ExternalLink" :size="22" /></span>
-        <div>
-          <h2>Connect from ChatGPT or Claude</h2>
-          <p>
-            Add Leo as a remote MCP server in your assistant’s connector
-            settings.
-          </p>
-        </div>
-      </div>
-      <label>MCP server URL
-        <div class="copy-field flex border border-line rounded-lg items-center pr-[5px]">
-          <input
-            :value="settings.mcpUrl"
-            readonly
-            aria-label="MCP server URL"
-          ><button
-            :class="twMerge(iconButton, 'icon-button')"
-            aria-label="Copy MCP URL"
-            @click="copy(settings.mcpUrl)"
-          >
-            <Icon :name="Copy" :size="17" />
-          </button></div></label>
-      <div class="inline-note bg-surface rounded-lg text-xs leading-[1.7] text-muted px-[15px] py-[13px]">
-        Choose OAuth authentication. You’ll sign in here and approve exactly
-        what the assistant can access. Connect using the Streamable HTTP
-        transport supported by Codex and other compatible MCP clients.
-      </div>
-    </section>
-    <section class="panel border-b border-line overflow-hidden settings-section mb-5.5 px-0 py-7 phone:py-5">
-      <header class="panel-heading flex justify-between items-center gap-[15px] pt-[23px] pb-5 px-6 phone:p-[19px]">
-        <div>
-          <h2>Connected clients & access tokens</h2>
-          <p>
-            Review and revoke access without disconnecting your agent accounts.
-          </p>
-        </div>
-        <UiButton
-          size="small"
-          @click="
-            open = true;
-            created = '';
-            confirmingIdentity = false;
-            label = '';
-            scopes = ['read'];
-          "
-        >
-          <Icon :name="Plus" :size="15" />New token
-        </UiButton>
-      </header>
-      <div v-if="grants.length" class="grants-list">
-        <div v-for="grant in grants" :key="grant.id">
-          <Icon :name="KeyRound" :size="19" />
-          <div class="grow flex-1 min-w-0">
-            <strong>{{ grant.label }}</strong><small>{{ grant.scopes.join(" · ") }} ·
-              {{
-                grant.clientId === "personal"
-                  ? "Personal token"
-                  : "OAuth client"
-              }}</small>
+  <div class="grid min-w-0 grid-cols-[200px_minmax(0,1fr)] gap-10 phone:grid-cols-1 phone:gap-0">
+    <nav aria-label="Settings sections" class="self-start grid gap-1.5 phone:gap-3" :class="section ? 'phone:hidden' : ''">
+      <RouterLink
+        v-for="item in sections"
+        :key="item.id"
+        :to="`/settings/${item.id}`"
+        class="min-h-11 rounded-lg border border-transparent px-4 py-3 text-sm font-semibold phone:border-line phone:bg-raised"
+        :class="section === item.id ? 'bg-soft text-accent' : item.id === 'sensitive' ? 'text-danger hover:bg-danger-surface' : 'text-muted hover:bg-hover hover:text-ink'"
+        :aria-current="section === item.id ? 'page' : undefined"
+      >
+        {{ item.label }}
+      </RouterLink>
+    </nav>
+    <div class="min-w-0" :class="!section ? 'phone:hidden' : ''">
+      <UiButton
+        v-if="section"
+        size="small"
+        class="mb-5 hidden phone:inline-flex"
+        @click="router.push('/settings')"
+      >
+        Back to settings
+      </UiButton>
+      <template v-if="section === 'account' || !section">
+        <h2 class="text-xl font-heading">
+          Account
+        </h2>
+        <slot name="account" />
+        <section class="panel border-b border-line overflow-hidden settings-section mb-5.5 appearance-section px-0 py-7 phone:py-5">
+          <div class="section-intro flex gap-[17px] items-center mb-6 phone:items-start phone:gap-[13px]">
+            <div><h2>Appearance</h2></div>
           </div>
-          <UiButton variant="danger-outline" size="small" @click="revoke(grant.id)">
-            Revoke
-          </UiButton>
-        </div>
-      </div>
-      <p v-else class="muted text-muted">
-        No external clients have access yet.
-      </p>
-    </section>
-    <section class="panel border-b border-line overflow-hidden settings-section mb-5.5 px-0 py-7 phone:py-5">
-      <h2>Worker environment</h2>
-      <dl class="settings-facts grid grid-cols-[160px_1fr] gap-[17px] text-xs phone:grid-cols-[95px_minmax(0,_1fr)] phone:text-xs mx-0 my-[25px]">
-        <dt>Version</dt>
-        <dd>{{ settings.version }}</dd>
-        <dt>Host concurrency (development)</dt>
-        <dd>{{ settings.concurrency }}</dd>
-        <dt>Workspace roots</dt>
-        <dd>
-          <code v-for="root in settings.workspaceRoots" :key="root">{{
-            root
-          }}</code>
-        </dd>
-        <dt>Global skills</dt>
-        <dd>
-          <code>{{ settings.home }}/.agents/skills</code>
-        </dd>
-      </dl>
-      <p class="muted text-muted">
-        Infrastructure settings are configured through your deployment
-        environment.
-      </p>
-    </section>
-    <section class="panel border-b border-line overflow-hidden settings-section mb-5.5 px-0 py-7 phone:py-5">
-      <h2>Recent changes</h2>
-      <div class="audit-list mt-4.5">
-        <div v-for="item in audit.slice(0, 20)" :key="item.id">
-          <span>{{ item.action.replaceAll(".", " · ") }}</span><time>{{ date(item.created_at) }}</time>
-        </div>
-        <p v-if="!audit.length" class="muted text-muted">
-          Workspace changes will be recorded here.
-        </p>
-      </div>
-    </section>
-  </template><Modal
+          <ThemeControl />
+          <p class="appearance-hint text-2xs text-muted mt-4">
+            Saved in this browser. System follows your device’s appearance automatically.
+          </p>
+        </section>
+      </template>
+      <template v-else-if="section === 'sensitive'">
+        <h2 class="mb-5 text-xl font-heading text-danger">
+          Sensitive zone
+        </h2>
+        <slot name="sensitive" />
+      </template>
+      <template v-else-if="section === 'installation'">
+        <slot name="installation-heading">
+          <h2 class="text-xl font-heading">
+            Installation
+          </h2>
+        </slot>
+        <slot name="installation" />
+        <template v-if="settings && state.installationRole === 'owner'">
+          <StorageSettings />
+          <section class="panel border-b border-line overflow-hidden settings-section mb-5.5 px-0 py-7 phone:py-5">
+            <div class="section-intro flex gap-[17px] items-center mb-6 phone:items-start phone:gap-[13px]">
+              <span class="resource-avatar w-11.5 h-11.5 bg-soft text-accent grid place-items-center rounded-xl border border-line"><Icon :name="ExternalLink" :size="22" /></span>
+              <div>
+                <h2>Connect from ChatGPT or Claude</h2>
+                <p>
+                  Add Leo as a remote MCP server in your assistant’s connector
+                  settings.
+                </p>
+              </div>
+            </div>
+            <label>MCP server URL
+              <div class="copy-field flex border border-line rounded-lg items-center pr-[5px]">
+                <input
+                  :value="settings.mcpUrl"
+                  readonly
+                  aria-label="MCP server URL"
+                ><button
+                  :class="twMerge(iconButton, 'icon-button')"
+                  aria-label="Copy MCP URL"
+                  @click="copy(settings.mcpUrl)"
+                >
+                  <Icon :name="Copy" :size="17" />
+                </button></div></label>
+            <div class="inline-note bg-surface rounded-lg text-xs leading-[1.7] text-muted px-[15px] py-[13px]">
+              Choose OAuth authentication. You’ll sign in here and approve exactly
+              what the assistant can access. Connect using the Streamable HTTP
+              transport supported by Codex and other compatible MCP clients.
+            </div>
+          </section>
+          <section class="panel border-b border-line overflow-hidden settings-section mb-5.5 px-0 py-7 phone:py-5">
+            <header class="panel-heading flex justify-between items-center gap-[15px] pt-[23px] pb-5 px-6 phone:p-[19px]">
+              <div>
+                <h2>Connected clients & access tokens</h2>
+                <p>
+                  Review and revoke access without disconnecting your agent accounts.
+                </p>
+              </div>
+              <UiButton
+                size="small"
+                @click="
+                  open = true;
+                  created = '';
+                  confirmingIdentity = false;
+                  label = '';
+                  scopes = ['read'];
+                "
+              >
+                <Icon :name="Plus" :size="15" />New token
+              </UiButton>
+            </header>
+            <div v-if="grants.length" class="grants-list">
+              <div v-for="grant in grants" :key="grant.id">
+                <Icon :name="KeyRound" :size="19" />
+                <div class="grow flex-1 min-w-0">
+                  <strong>{{ grant.label }}</strong><small>{{ grant.scopes.join(" · ") }} ·
+                    {{
+                      grant.clientId === "personal"
+                        ? "Personal token"
+                        : "OAuth client"
+                    }}</small>
+                </div>
+                <UiButton variant="danger-outline" size="small" @click="revoke(grant.id)">
+                  Revoke
+                </UiButton>
+              </div>
+            </div>
+            <p v-else class="muted text-muted">
+              No external clients have access yet.
+            </p>
+          </section>
+          <section class="panel border-b border-line overflow-hidden settings-section mb-5.5 px-0 py-7 phone:py-5">
+            <h2>Worker environment</h2>
+            <dl class="settings-facts grid grid-cols-[160px_1fr] gap-[17px] text-xs phone:grid-cols-[95px_minmax(0,_1fr)] phone:text-xs mx-0 my-[25px]">
+              <dt>Version</dt>
+              <dd>{{ settings.version }}</dd>
+              <dt>Host concurrency (development)</dt>
+              <dd>{{ settings.concurrency }}</dd>
+              <dt>Workspace roots</dt>
+              <dd>
+                <code v-for="root in settings.workspaceRoots" :key="root">{{
+                  root
+                }}</code>
+              </dd>
+              <dt>Global skills</dt>
+              <dd>
+                <code>{{ settings.home }}/.agents/skills</code>
+              </dd>
+            </dl>
+            <p class="muted text-muted">
+              Infrastructure settings are configured through your deployment
+              environment.
+            </p>
+          </section>
+          <section class="panel border-b border-line overflow-hidden settings-section mb-5.5 px-0 py-7 phone:py-5">
+            <h2>Recent changes</h2>
+            <div class="audit-list mt-4.5">
+              <div v-for="item in audit.slice(0, 20)" :key="item.id">
+                <span>{{ item.action.replaceAll(".", " · ") }}</span><time>{{ date(item.created_at) }}</time>
+              </div>
+              <p v-if="!audit.length" class="muted text-muted">
+                Workspace changes will be recorded here.
+              </p>
+            </div>
+          </section>
+        </template>
+      </template>
+    </div>
+  </div>
+  <Modal
     v-if="open"
     :title="created ? 'Save your access token' : 'Create an access token'"
     @close="

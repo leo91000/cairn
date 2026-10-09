@@ -27,7 +27,7 @@ async function checkMobileLayouts(page: Page, workspace: Workspace, testInfo: Te
 
   // The rail (desktop) or the dock (phone) leads to the Fil, Missions and the Atelier.
   async function navigate(url: string) {
-    const destination = url.startsWith('/runs/') ? '/runs' : url
+    const destination = url.startsWith('/runs/') ? '/runs' : url === '/settings/installation' ? '/settings' : url
     const place = destination === '/' ? 'Fil' : destination === '/tasks' ? 'Missions' : 'Atelier'
     const navigation = page.getByRole('navigation', { name: /^(Workspace|Quick) navigation$/ }).filter({ visible: true })
     if (await navigation.count())
@@ -61,6 +61,8 @@ async function checkMobileLayouts(page: Page, workspace: Workspace, testInfo: Te
     }
     if (headings[destination])
       await expect(page.getByRole('heading', { name: headings[destination], exact: true }).first()).toBeVisible()
+    if (url === '/settings/installation')
+      await page.getByRole('navigation', { name: 'Settings sections' }).getByRole('link', { name: 'Installation', exact: true }).click()
     if (url.startsWith('/runs/')) {
       await page.locator(`.run-table a[href="${workspacePath(url)}"]`).first().click()
       await expect(page.locator('.run-title-meta')).toBeVisible()
@@ -105,7 +107,7 @@ async function checkMobileLayouts(page: Page, workspace: Workspace, testInfo: Te
     ['projects', '/projects', '.resource-card'],
     ['skills', '/skills', '.skill-card'],
     ['connections', '/connections', '.connection-card'],
-    ['settings', '/settings', '.settings-section'],
+    ['settings', '/settings/installation', '.settings-section'],
     ['mcps', '/mcps', '.page-heading'],
     ['result', `/runs/${run.id}`, '.run-panel'],
   ]
@@ -214,7 +216,7 @@ async function checkMobileLayouts(page: Page, workspace: Workspace, testInfo: Te
       ['project-editor', '/projects', 'Add project'],
       ['skill-editor', '/skills', 'New skill'],
       ['skill-files', '/skills', 'Edit review'],
-      ['token-editor', '/settings', 'New token'],
+      ['token-editor', '/settings/installation', 'New token'],
     ]) {
       await navigate(url)
       await page.getByRole('button', { name: button, exact: true }).click()

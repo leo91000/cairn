@@ -136,7 +136,7 @@ export function apiResourceUrl(value: string) {
 }
 
 export function ownerPage(path: string) {
-  return ['/mcps', '/connections', '/nodes', '/settings', '/authorize'].includes(path)
+  return ['/mcps', '/connections', '/nodes', '/authorize'].includes(path)
 }
 
 export async function refresh() {

@@ -98,7 +98,7 @@ onBeforeUnmount(() => window.removeEventListener('resize', dismiss))
       :popover="compact ? 'auto' : undefined"
       :class="{ 'theme-popover': compact }"
     >
-      <fieldset class="theme-options border-0 grid grid-cols-3 gap-3 phone:gap-2 p-0 m-0">
+      <fieldset class="theme-options relative border-0 grid grid-cols-3 gap-3 phone:gap-2 p-0 m-0">
         <legend :class="compact ? 'theme-menu-heading' : 'sr-only'">
           Appearance
         </legend>

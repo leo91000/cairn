@@ -62,9 +62,9 @@ function expireProof(installation: InstallationFixture) {
   expireAccountProof(new URL(installation.databaseUrl), installation.email)
 }
 
-async function confirmIdentity(page: Page, installation: InstallationFixture) {
-  await expect(page.getByRole('button', { name: 'Confirm identity', exact: true })).toBeVisible()
-  await page.getByRole('button', { name: 'Confirm identity', exact: true }).click()
+async function confirmIdentity(page: Page, installation: InstallationFixture, confirm = page.getByRole('button', { name: 'Confirm identity', exact: true })) {
+  await expect(confirm).toBeVisible()
+  await confirm.click()
   const previousEmails = installation.messages.length
   await page.getByRole('button', { name: 'Send confirmation code', exact: true }).click()
   await expect.poll(() => installation.messages.slice(previousEmails).find(message => /\b\d{8}\b/.test(message))).toBeTruthy()
@@ -75,7 +75,7 @@ async function confirmIdentity(page: Page, installation: InstallationFixture) {
 
 test('personal token confirmation preserves its name and permissions without creating automatically', async ({ page, installation }) => {
   const { url, installationId } = installation
-  await page.goto(`${url}/installations/${installationId}/settings`)
+  await page.goto(`${url}/installations/${installationId}/settings/installation`)
   await page.getByRole('button', { name: 'New token', exact: true }).click()
   const dialog = page.getByRole('dialog')
   await dialog.getByLabel('Name', { exact: true }).fill('Confirmed personal client')
@@ -114,14 +114,15 @@ test('MCP confirmation preserves the selected installation and waits for explici
     resource: `${url}/mcp`,
   })
   await page.goto(`${url}/oauth/authorize?${parameters}`)
-  await page.getByLabel('Installation', { exact: true }).selectOption(installationId)
+  await page.getByRole('combobox', { name: 'Installation', exact: true }).click()
+  await page.getByRole('option', { name: 'Security installation', exact: true }).click()
   const consentUrl = page.url()
   expect(Object.fromEntries(new URL(consentUrl).searchParams)).toEqual(Object.fromEntries(parameters))
   expireProof(installation)
   await page.getByRole('button', { name: 'Allow access', exact: true }).click()
   await expect(page.getByRole('alert').filter({ hasText: 'Confirm your identity' })).toBeVisible()
   await confirmIdentity(page, installation)
-  await expect(page.getByLabel('Installation', { exact: true })).toHaveValue(installationId)
+  await expect(page.getByRole('combobox', { name: 'Installation', exact: true })).toHaveValue('Security installation')
   await expect(page).toHaveURL(consentUrl)
   expect(await (await page.request.get(`${url}/api/installations/${installationId}/tokens`)).json()).toEqual([])
   await page.getByRole('button', { name: 'Allow access', exact: true }).click()
@@ -154,13 +155,14 @@ test('confirming identity keeps other devices signed in until explicit revocatio
     await other.getByLabel('Email code').fill(messages.at(-1)!.match(/\b\d{8}\b/)![0])
     await other.getByRole('button', { name: 'Sign in', exact: true }).click()
     await expect(other).toHaveURL(/\/installations\/[^/]+\/$/)
-    await page.getByText('Installation options', { exact: true }).click()
-    await page.getByRole('button', { name: 'Account security', exact: true }).click()
+    await page.getByRole('button', { name: 'Account', exact: true }).click()
+    await page.getByRole('menuitem', { name: 'Account settings', exact: true }).click()
+    await expect(page.getByRole('heading', { name: 'Account security', exact: true })).toBeVisible()
     await page.getByRole('button', { name: 'Revoke other devices', exact: true }).click()
     await expect(page.getByRole('alert')).toContainText('Confirm your identity')
     await expect(page.getByText('Lost phone browser', { exact: true })).toBeVisible()
     expireProof(installation)
-    await confirmIdentity(page, installation)
+    await confirmIdentity(page, installation, page.getByRole('region', { name: 'Account security', exact: true }).getByRole('button', { name: 'Confirm identity', exact: true }))
     await expect(page.getByRole('heading', { name: 'Active sessions' })).toBeVisible()
     await expect(page.getByText('Lost phone browser', { exact: true })).toBeVisible()
     await other.reload()

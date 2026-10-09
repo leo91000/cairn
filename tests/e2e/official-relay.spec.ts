@@ -97,8 +97,9 @@ test('claims an installation and sends after relay restarts and official session
         automaticPresenceSimulation: true,
       },
     })
-    await page.getByText('Installation options', { exact: true }).click()
-    await page.getByRole('button', { name: 'Sign-in methods', exact: true }).click()
+    await page.getByRole('button', { name: 'Account', exact: true }).click()
+    await page.getByRole('menuitem', { name: 'Account settings', exact: true }).click()
+    await expect(page.getByRole('heading', { name: 'Sign-in methods', exact: true })).toBeVisible()
     await page.getByRole('button', { name: 'Add passkey', exact: true }).click()
     await expect(page.getByText('My passkey', { exact: true })).toBeVisible()
     await page.getByRole('button', { name: /Remove Email/ }).click()
@@ -112,7 +113,6 @@ test('claims an installation and sends after relay restarts and official session
     await page.getByLabel('Email code').fill(messages[1]!.match(/\b\d{8}\b/)![0])
     await page.getByRole('button', { name: 'Confirm email code', exact: true }).click()
     await expect(page.getByRole('button', { name: /Remove Email/ })).toBeVisible()
-    await page.getByRole('button', { name: 'Back to installations', exact: true }).click()
     await page.goto(conversationUrl)
     await page.getByLabel('Message', { exact: true }).fill('After session renewal')
     const sent = page.waitForResponse(response => response.url().endsWith('/messages') && response.request().method() === 'POST')

@@ -15,6 +15,7 @@ import {
   Check,
   ChevronDown,
   LoaderCircle,
+  Plus,
   Search,
   SearchX,
   X,
@@ -36,12 +37,15 @@ const props = withDefaults(defineProps<{
   compact?: boolean
   variant?: 'default' | 'ghost'
   hideLabel?: boolean
+  actionLabel?: string
 }>(), { placeholder: 'Select an option', emptyText: 'No options available' })
+const emit = defineEmits<{ action: [] }>()
 const model = defineModel<string>({ default: '' })
 const id = useId()
 const root = ref<HTMLElement>()
 const input = ref<HTMLInputElement>()
 const popup = ref<HTMLElement>()
+const action = ref<HTMLButtonElement>()
 const viewport = ref<HTMLElement>()
 const open = ref(false)
 const query = ref('')
@@ -57,6 +61,7 @@ const rows = computed(() => visibleRows(layout.value.rows, scrollTop.value, view
 const activeId = computed(() => rows.value.some(row => row.optionIndex === active.value) ? `${id}-option-${active.value}` : undefined)
 const value = computed(() => open.value ? query.value : selected.value?.label ?? '')
 const leadingIcon = computed(() => open.value ? Search : selected.value?.icon || props.icon)
+const statusTones = { success: 'text-success', warning: 'text-warning', muted: 'text-muted' }
 let resize: ResizeObserver | undefined
 
 function positionPopup() {
@@ -71,11 +76,12 @@ function positionPopup() {
   const popupWidth = Math.min(Math.max(anchor.width, 290), width - 24)
   const below = top + height - anchor.bottom - 14
   const above = anchor.top - top - 14
-  const desired = Math.min(layout.value.height || 96, 280) + 78
+  const fixedHeight = 78 + (props.actionLabel ? 52 : 0)
+  const desired = Math.min(layout.value.height || 96, 280) + fixedHeight
   const upwards = below < Math.min(desired, 210) && above > below
   const available = Math.max(90, upwards ? above : below)
-  viewportHeight.value = Math.max(44, Math.min(layout.value.height || 96, 280, available - 78))
-  const popupHeight = viewportHeight.value + 78
+  viewportHeight.value = Math.max(44, Math.min(layout.value.height || 96, 280, available - fixedHeight))
+  const popupHeight = viewportHeight.value + fixedHeight
   position.value = {
     left: `${Math.max(left + 12, Math.min(anchor.left, left + width - popupWidth - 12))}px`,
     top: `${Math.max(top + 8, upwards ? anchor.top - popupHeight - 6 : anchor.bottom + 6)}px`,
@@ -154,6 +160,12 @@ function keydown(event: KeyboardEvent) {
   if (event.isComposing)
     return
   if (event.key === 'Tab') {
+    if (open.value && props.actionLabel && !event.shiftKey) {
+      event.preventDefault()
+      action.value?.focus({ preventScroll: true })
+      return
+    }
+
     close()
     return
   }
@@ -253,12 +265,21 @@ onBeforeUnmount(() => {
     <label v-if="!hideLabel" :for="`${id}-input`" class="vs-label block mb-2 text-xs font-medium text-muted">{{ label }}</label>
     <div class="vs-control flex items-center gap-2.5 min-h-12 w-full pr-2.5 pl-[13px] bg-raised border border-control rounded-[10px] [transition:border-color_.15s,_box-shadow_.15s] phone:min-h-12 phone:gap-2 [@media(prefers-reduced-motion:_reduce)]:[transition:none] py-0">
       <span v-if="leadingIcon" class="vs-leading grid place-items-center w-[29px] h-[29px] rounded-lg text-muted bg-surface shrink-0"><Icon :name="leadingIcon" :size="17" /></span>
+      <span
+        v-if="!open && selected?.status"
+        class="size-2 shrink-0 rounded-full bg-current"
+        :class="statusTones[selected.status.tone]"
+        :title="selected.status.label"
+        aria-hidden="true"
+      />
       <input
         :id="`${id}-input`"
         ref="input"
         :value="value"
         role="combobox"
         :aria-label="label"
+        :aria-description="selected?.status?.label"
+        :title="!open ? selected?.label : undefined"
         :aria-expanded="open"
         :aria-controls="`${id}-list`"
         :aria-activedescendant="open && !loading ? activeId : undefined"
@@ -360,7 +381,7 @@ onBeforeUnmount(() => {
               :aria-selected="row.option.value === model"
               :aria-disabled="row.option.disabled || undefined"
               :aria-label="row.option.label"
-              :aria-description="[row.option.group, row.option.description].filter(Boolean).join(' · ')"
+              :aria-description="[row.option.group, row.option.description, row.option.status?.label].filter(Boolean).join(' · ')"
               :class="{ 'is-active': active === row.optionIndex, 'is-selected': row.option.value === model, 'is-disabled': row.option.disabled }"
               :style="{ top: `${row.top}px`, height: `${row.height}px` }"
               @pointermove="!row.option.disabled && (active = row.optionIndex!)"
@@ -368,7 +389,13 @@ onBeforeUnmount(() => {
               @click="choose(row.option)"
             >
               <span v-if="row.option.icon || icon" class="vs-option-icon grid place-items-center w-7.5 h-7.5 shrink-0 rounded-[9px] text-muted bg-surface border border-line"><Icon :name="row.option.icon || icon!" :size="17" /></span>
-              <span class="vs-option-copy min-w-0 flex-1"><strong>{{ row.option.label }}</strong><span v-if="row.option.description">{{ row.option.description }}</span></span>
+              <span class="vs-option-copy min-w-0 flex-1"><strong :title="row.option.label">{{ row.option.label }}</strong><span v-if="row.option.description">{{ row.option.description }}</span></span>
+              <span
+                v-if="row.option.status"
+                class="flex shrink-0 items-center gap-1.5 rounded-md bg-inset px-1.5 py-1 text-micro"
+                :class="statusTones[row.option.status.tone]"
+                aria-hidden="true"
+              ><span class="size-1.5 shrink-0 rounded-full bg-current" />{{ row.option.status.label }}</span>
               <Icon
                 v-if="row.option.value === model"
                 :name="Check"
@@ -397,6 +424,18 @@ onBeforeUnmount(() => {
           <kbd>esc</kbd> Close
         </button>
       </footer>
+      <div v-if="actionLabel" class="border-t border-line p-1">
+        <button
+          ref="action"
+          type="button"
+          :disabled="disabled || loading"
+          class="flex min-h-11 w-full items-center gap-2.5 rounded-lg px-3 text-sm text-accent hover:bg-soft focus-visible:bg-soft focus-visible:outline-none"
+          @keydown.tab="close()"
+          @click="close(); input?.focus({ preventScroll: true }); emit('action')"
+        >
+          <Icon :name="Plus" :size="17" />{{ actionLabel }}
+        </button>
+      </div>
       <span class="sr-only" role="status">{{ loading ? 'Loading options' : `${filtered.length} options available` }}</span>
     </div>
   </div>

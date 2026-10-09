@@ -8,6 +8,7 @@ export interface SelectOption {
   keywords?: string[]
   icon?: IconName
   disabled?: boolean
+  status?: { label: string, tone: 'success' | 'warning' | 'muted' }
 }
 export interface SelectRow {
   key: string
