@@ -24,7 +24,7 @@ use std::{
 use tokio::task::{AbortHandle, JoinSet};
 
 // Versioned binary blocks avoid both JSON/base64 layers used by legacy records.
-const BINARY_BLOCK_HEADER: &[u8] = b"CAIRNBLK\x01\0";
+const BINARY_BLOCK_HEADER: &[u8; 8] = b"CAIRNB\x01\0";
 
 const MIB: u64 = 1024 * 1024;
 
