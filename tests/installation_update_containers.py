@@ -154,14 +154,16 @@ def docker(*arguments, **kwargs):
     sys.stderr.write(stderr)
     if result.returncode:
         manager = json.loads(source.read_text())['services']['manager']
-        secrets = [manager['environment'].get('CAIRN_INSTALLATION_CLAIM_CODE', '')]
+        secrets = [manager.get('environment', {}).get('CAIRN_INSTALLATION_CLAIM_CODE', '')]
         token = root / 'data/maintenance-token'
         if token.exists():
             secrets.append(token.read_text().strip())
+
         command, details = ['docker', *arguments], stderr
         for secret in filter(None, secrets):
             command = [argument.replace(secret, '<REDACTED>') for argument in command]
             details = details.replace(secret, '<REDACTED>')
+
         with open(root / 'docker-failures.jsonl', 'a') as log:
             log.write(json.dumps({'args': command, 'exit': result.returncode, 'stderr': details}) + '\\n')
     return result

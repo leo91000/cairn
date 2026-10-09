@@ -252,6 +252,7 @@ async fn writes_serialize_and_failed_transactions_roll_back() {
 #[tokio::test]
 async fn run_patches_from_two_connections_keep_every_field() {
     const PATCHES: usize = 200;
+
     let root = TempDir::new().unwrap();
     let first = Store::open(root.path()).unwrap();
     let second = Store::open(root.path()).unwrap();
