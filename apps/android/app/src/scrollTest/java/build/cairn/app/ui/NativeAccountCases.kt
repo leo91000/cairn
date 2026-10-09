@@ -234,6 +234,8 @@ abstract class NativeAccountCases {
                     finishPreferenceWrite.await()
                 }
             }
+            // Resume pending foreground work before waiting for the forced DataStore write.
+            compose.waitForIdle()
             compose.waitUntil(10_000) { preferenceWriteStarted.isCompleted }
             finishPreferenceWrite.complete(Unit)
 

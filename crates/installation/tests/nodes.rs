@@ -4251,7 +4251,7 @@ async fn corrupted_recovery_ciphertext_is_terminal_and_invalidates_the_baseline(
     let data = b"durable conversation work";
     let hash = hex::encode(Sha256::digest(data));
     let key = format!("node-backups/{run}/blocks/{hash}");
-    let mut encoded = b"CAIRNBLK\x01\0".to_vec();
+    let mut encoded = b"CAIRNB\x01\0".to_vec();
     encoded.extend(owner.service.vault.encrypt_bytes(&key, data).unwrap());
     *encoded.last_mut().unwrap() ^= 1;
     let path = owner.service.config.data_dir.join(&key);
@@ -4902,7 +4902,7 @@ sys.exit(subprocess.call(['aws']+sys.argv[1:]))
         .unwrap()
         .to_owned();
     let old_key = format!("node-backups/{run_id}/blocks/{hash}");
-    let mut encoded = b"CAIRNBLK\x01\0".to_vec();
+    let mut encoded = b"CAIRNB\x01\0".to_vec();
     encoded.extend(s.vault.encrypt_bytes(&old_key, legacy_bytes).unwrap());
     Storage::configured(s)
         .unwrap()

@@ -350,6 +350,9 @@ class ChatJourneyTest {
                     .isNotEmpty()
             }
             compose.onNodeWithContentDescription("Nouvelle conversation").performClick()
+            compose.waitUntil(10_000) {
+                compose.onAllNodes(hasSetTextAction()).fetchSemanticsNodes().isNotEmpty()
+            }
             compose
                 .onNode(hasSetTextAction())
                 .performTextInput("Examiner le projet et préparer un compte rendu")
