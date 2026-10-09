@@ -6,6 +6,7 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.test.*
 import androidx.compose.ui.test.junit4.v2.createComposeRule
 import androidx.datastore.preferences.core.edit
+import androidx.lifecycle.viewModelScope
 import androidx.test.core.app.ApplicationProvider
 import build.cairn.app.data.*
 import kotlinx.coroutines.CompletableDeferred
@@ -207,12 +208,20 @@ abstract class NativeAccountCases {
                 }
             }
 
+            // On Robolectric, waitUntil advances only Compose's scheduler. ViewModel DataStore
+            // edits resume on the main looper while holding the write lock, so drain it too.
+            fun waitForForeground(condition: () -> Boolean) =
+                compose.waitUntil(10_000) {
+                    compose.waitForIdle()
+                    condition()
+                }
+
             fun runPushAction(action: suspend () -> Unit) {
                 val operation = pushScope.async { action() }
                 try {
-                    // Keep Compose's scheduler moving: a foreground DataStore edit may hold
-                    // its write lock while waiting to resume on this same scheduler.
-                    compose.waitUntil(10_000) { operation.isCompleted }
+                    // Keep the foreground moving: a ViewModel DataStore edit may hold its write
+                    // lock while waiting to resume on the main thread.
+                    waitForForeground { operation.isCompleted }
                     kotlinx.coroutines.runBlocking { operation.await() }
                 } finally {
                     operation.cancel()
@@ -224,19 +233,18 @@ abstract class NativeAccountCases {
             }
             compose.onNodeWithText("Notifications push").assertIsOn()
 
-            // Reproduce a foreground preference write whose continuation needs Compose's
-            // scheduler while the background renewal is handling its refusal.
+            // Reproduce a ViewModel preference write whose continuation needs the main looper
+            // while the background renewal is handling its refusal.
             val preferenceWriteStarted = CompletableDeferred<Unit>()
             val finishPreferenceWrite = CompletableDeferred<Unit>()
-            val preferenceWrite = pushScope.async {
-                application.dataStore.edit {
-                    preferenceWriteStarted.complete(Unit)
-                    finishPreferenceWrite.await()
+            val preferenceWrite =
+                vm.viewModelScope.async {
+                    application.dataStore.edit {
+                        preferenceWriteStarted.complete(Unit)
+                        finishPreferenceWrite.await()
+                    }
                 }
-            }
-            // Resume pending foreground work before waiting for the forced DataStore write.
-            compose.waitForIdle()
-            compose.waitUntil(10_000) { preferenceWriteStarted.isCompleted }
+            waitForForeground { preferenceWriteStarted.isCompleted }
             finishPreferenceWrite.complete(Unit)
 
             registered.set(false)
