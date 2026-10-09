@@ -153,6 +153,8 @@ class DirectTransportDeviceTest {
         var backgroundStopped = false
         var suspendedControl = false
         var cappedRenewal = false
+        var foregroundBackoff = false
+        var unavailableRenewal = false
         val started = System.nanoTime()
         lateinit var activity: Activity
         var selectedVm by mutableStateOf<LeoViewModel?>(null)
@@ -270,6 +272,154 @@ class DirectTransportDeviceTest {
                     }
                     awaitDirect()
                     assertTrue(control.count { it == "authorize:200" } > authorizations)
+
+                    // A real foreground transition must retain the capacity-error deadline.
+                    val capacityAttempts = AtomicInteger()
+                    val rejectedAt = AtomicLong()
+                    val retryAt = AtomicLong()
+                    val capacityClient =
+                        OkHttpClient.Builder()
+                            .addInterceptor { chain ->
+                                val request = chain.request()
+                                if (request.url.encodedPath.endsWith("/direct/authorize")) {
+                                    if (capacityAttempts.incrementAndGet() == 1) {
+                                        rejectedAt.set(System.nanoTime())
+                                        return@addInterceptor Response.Builder()
+                                            .request(request)
+                                            .protocol(Protocol.HTTP_1_1)
+                                            .code(503)
+                                            .message("Capacity fixture")
+                                            .body("{}".toResponseBody())
+                                            .build()
+                                    }
+                                    retryAt.set(System.nanoTime())
+                                }
+                                chain.proceed(request)
+                            }
+                            .build()
+                    val capacity = LeoApi(origin, vault, capacityClient, api.installationId)
+                    capacity.csrf = api.csrf
+                    try {
+                        capacity.startDirect(context)
+                        withTimeout(10000) { while (capacityAttempts.get() == 0) delay(100) }
+                        delay(500)
+                        instrumentation.runOnMainSync { assertTrue(activity.moveTaskToBack(true)) }
+                        withTimeout(5000) {
+                            while (api.transport.route.value != "relay") delay(100)
+                        }
+                        delay(1000)
+                        instrumentation.runOnMainSync {
+                            activity.startActivity(
+                                Intent(activity, activity.javaClass)
+                                    .addFlags(Intent.FLAG_ACTIVITY_REORDER_TO_FRONT)
+                            )
+                        }
+                        delay(2000)
+                        assertEquals(
+                            "Foreground must not bypass capacity backoff",
+                            1,
+                            capacityAttempts.get(),
+                        )
+                        withTimeout(25000) {
+                            do {
+                                delay(200)
+                                assertEquals("[]", capacity.request("GET", "/chats"))
+                            } while (capacity.transport.route.value != "direct")
+                        }
+                        assertTrue(
+                            "Retry must retain its fifteen-second deadline",
+                            retryAt.get() - rejectedAt.get() >= 15_000_000_000L,
+                        )
+                        foregroundBackoff = true
+                    } finally {
+                        capacity.closeStreams()
+                    }
+                    awaitDirect()
+
+                    // Keep authorization/DTLS real. Shorten only the client's scheduling input
+                    // so a real acknowledged renewal can return the unavailable control fixture.
+                    val renewalAttempts = AtomicInteger()
+                    val renewalReplies = AtomicInteger()
+                    val renewalClient =
+                        OkHttpClient.Builder()
+                            .addInterceptor { chain ->
+                                val request = chain.request()
+                                val path = request.url.encodedPath
+                                if (path.endsWith("/direct/authorize"))
+                                    renewalAttempts.incrementAndGet()
+                                val response = chain.proceed(request)
+                                if (path.endsWith("/direct/authorize") && response.isSuccessful) {
+                                    val grant =
+                                        wireJson
+                                            .parseToJsonElement(response.body.string())
+                                            .jsonObject
+                                    val signed = grant["grant"]!!.jsonObject
+                                    val claims = signed["claims"]!!.jsonObject
+                                    val scheduling =
+                                        JsonObject(
+                                            grant +
+                                                ("grant" to
+                                                    JsonObject(
+                                                        signed +
+                                                            ("claims" to
+                                                                JsonObject(
+                                                                    claims +
+                                                                        ("expires_at" to
+                                                                            JsonPrimitive(
+                                                                                System
+                                                                                    .currentTimeMillis() /
+                                                                                    1000 + 40
+                                                                            ))
+                                                                ))
+                                                    ))
+                                        )
+                                    response
+                                        .newBuilder()
+                                        .body(
+                                            scheduling
+                                                .toString()
+                                                .toResponseBody(response.body.contentType())
+                                        )
+                                        .build()
+                                } else if (path.endsWith("/renew") && response.isSuccessful) {
+                                    response.close()
+                                    renewalReplies.incrementAndGet()
+                                    response
+                                        .newBuilder()
+                                        .body("{\"available\":false}".toResponseBody())
+                                        .build()
+                                } else response
+                            }
+                            .build()
+                    val renewal = LeoApi(origin, vault, renewalClient, api.installationId)
+                    renewal.csrf = api.csrf
+                    try {
+                        renewal.startDirect(context)
+                        withTimeout(10000) {
+                            do {
+                                delay(100)
+                                assertEquals("[]", renewal.request("GET", "/chats"))
+                            } while (renewal.transport.route.value != "direct")
+                        }
+                        withTimeout(20000) {
+                            while (
+                                renewalReplies.get() == 0 ||
+                                    renewal.transport.route.value != "relay"
+                            ) delay(100)
+                        }
+                        delay(18000)
+                        assertEquals(
+                            "Unavailable renewal must not authorize again",
+                            1,
+                            renewalAttempts.get(),
+                        )
+                        assertEquals(1, renewalReplies.get())
+                        assertEquals("[]", renewal.request("GET", "/chats"))
+                        assertEquals("relay", renewal.transport.route.value)
+                        unavailableRenewal = true
+                    } finally {
+                        renewal.closeStreams()
+                    }
 
                     for (status in listOf(200, 401, 403)) {
                         val attempts = AtomicInteger()
@@ -404,6 +554,8 @@ class DirectTransportDeviceTest {
                         put("backgroundStopped", backgroundStopped)
                         put("controlSuspended", suspendedControl)
                         put("cappedRenewal", cappedRenewal)
+                        put("foregroundBackoff", foregroundBackoff)
+                        put("unavailableRenewal", unavailableRenewal)
                         put("refusedCandidates", refusedCandidates.get())
                         put("sdk", Build.VERSION.SDK_INT)
                         put("abi", Build.SUPPORTED_ABIS.first())

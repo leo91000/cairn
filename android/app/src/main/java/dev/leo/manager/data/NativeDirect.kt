@@ -66,8 +66,8 @@ internal class NativeDirect(private val api: LeoApi, context: Context) {
 
     private val denied = AtomicBoolean()
     private val generation = AtomicLong()
-    private var unavailableAt: Long? = null
-    private var retryMillis = 15000L
+    private val unavailableAt = AtomicLong(-1)
+    private val retry = DirectRetry()
     private val stopped = AtomicBoolean()
     private val application = context.applicationContext
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
@@ -89,7 +89,10 @@ internal class NativeDirect(private val api: LeoApi, context: Context) {
 
     private fun networkChanged(next: Network?) {
         network = next
-        generation.incrementAndGet()
+        synchronized(retry) {
+            generation.incrementAndGet()
+            retry.networkChanged()
+        }
         restart.set(true)
         active.get()?.fail()
         changed.trySend(Unit)
@@ -118,36 +121,44 @@ internal class NativeDirect(private val api: LeoApi, context: Context) {
                 try {
                     while (isActive) {
                         val attemptGeneration = generation.get()
-                        if (denied.get() || unavailableAt == attemptGeneration) {
+                        if (denied.get() || unavailableAt.get() == attemptGeneration) {
                             changed.receive()
                             continue
                         }
-                        val attempt = Attempt()
+                        val remaining = retry.remaining()
+                        if (remaining > 0) {
+                            withTimeoutOrNull(remaining) { changed.receive() }
+                            continue
+                        }
+                        val attempt = Attempt(attemptGeneration)
                         active.set(attempt)
+                        var attemptFailed = false
                         try {
                             attempt.connect(restart.getAndSet(false))
                             attempt.failed.await()
+                            attemptFailed = true
                         } catch (error: CancellationException) {
                             throw error
                         } catch (error: Unavailable) {
-                            unavailableAt = attemptGeneration
+                            unavailableAt.set(attemptGeneration)
                         } catch (error: Exception) {
+                            attemptFailed = true
                             rememberDenial(error)
                             // Direct is optional; the relay reports installation/session failures.
                         } finally {
+                            // Persist failure timing before lifecycle cancellation can interrupt
+                            // cleanup. A deliberate background close does not count as a failure.
+                            synchronized(retry) {
+                                if (
+                                    (attemptFailed || attempt.failed.isCompleted) &&
+                                        generation.get() == attemptGeneration &&
+                                        !denied.get() &&
+                                        unavailableAt.get() != attemptGeneration
+                                )
+                                    retry.failed()
+                            }
                             active.compareAndSet(attempt, null)
                             withContext(NonCancellable) { attempt.close() }
-                        }
-                        if (generation.get() != attemptGeneration) {
-                            retryMillis = 15000L
-                            continue
-                        }
-                        if (!denied.get() && unavailableAt != attemptGeneration) {
-                            val networkChanged =
-                                withTimeoutOrNull(retryMillis) { changed.receive() }
-                            retryMillis =
-                                if (networkChanged != null) 15000L
-                                else minOf(300000L, retryMillis * 2)
                         }
                     }
                 } finally {
@@ -167,7 +178,7 @@ internal class NativeDirect(private val api: LeoApi, context: Context) {
         if (error is ApiException && error.status in setOf(401, 403)) denied.set(true)
     }
 
-    private inner class Attempt {
+    private inner class Attempt(private val attemptGeneration: Long) {
         val failed = CompletableDeferred<Unit>()
         private val opened = CompletableDeferred<Unit>()
         private val expires = AtomicLong()
@@ -176,7 +187,7 @@ internal class NativeDirect(private val api: LeoApi, context: Context) {
             CoroutineScope(SupervisorJob(scope.coroutineContext[Job]) + Dispatchers.IO)
         private val writable = Channel<Unit>(Channel.CONFLATED)
         private val dataLock = Any()
-        private val iceGeneration = AtomicLong()
+        private val iceGrace = DirectIceGrace(workers) { fail() }
         private val events = AtomicReference<Call?>()
         private var factory: PeerConnectionFactory? = null
         private var peer: PeerConnection? = null
@@ -186,6 +197,9 @@ internal class NativeDirect(private val api: LeoApi, context: Context) {
         private var fingerprint = ""
 
         fun fail(error: Exception? = null) {
+            // Renewal unavailability belongs to this network generation, even if a newer
+            // default network was observed while the HTTP request was in flight.
+            if (error is Unavailable) unavailableAt.set(attemptGeneration)
             error?.let(::rememberDenial)
             traffic?.close()
             events.get()?.cancel()
@@ -209,17 +223,13 @@ internal class NativeDirect(private val api: LeoApi, context: Context) {
                         override fun onIceConnectionChange(
                             state: PeerConnection.IceConnectionState
                         ) {
-                            val epoch = iceGeneration.incrementAndGet()
-                            when (state) {
-                                PeerConnection.IceConnectionState.DISCONNECTED ->
-                                    workers.launch {
-                                        delay(5000)
-                                        if (iceGeneration.get() == epoch) fail()
-                                    }
-                                PeerConnection.IceConnectionState.FAILED,
-                                PeerConnection.IceConnectionState.CLOSED -> fail()
-                                else -> {}
-                            }
+                            iceGrace.changed(
+                                disconnected =
+                                    state == PeerConnection.IceConnectionState.DISCONNECTED,
+                                terminal =
+                                    state == PeerConnection.IceConnectionState.FAILED ||
+                                        state == PeerConnection.IceConnectionState.CLOSED,
+                            )
                         }
 
                         override fun onIceConnectionReceivingChange(receiving: Boolean) {}
@@ -284,6 +294,7 @@ internal class NativeDirect(private val api: LeoApi, context: Context) {
                                             !failed.isCompleted &&
                                                 System.currentTimeMillis() < expires.get()
                                         ) {
+                                            retry.connected()
                                             api.transport.attach(traffic!!)
                                             opened.complete(Unit)
                                         } else fail()
@@ -304,9 +315,8 @@ internal class NativeDirect(private val api: LeoApi, context: Context) {
                                 fail()
                                 return
                             }
-                            // Decode one bounded packet before native frees the buffer. The decoder
-                            // already bounds incomplete assemblies; a burst is not a transport
-                            // failure.
+                            // Copy native memory before callback return. The bounded worker queue
+                            // waits under pressure; ordered assembly/JSON/base64 runs off JNI.
                             val packet = ByteArray(size)
                             buffer.data.get(packet)
                             traffic?.receive(packet)
@@ -435,7 +445,7 @@ internal class NativeDirect(private val api: LeoApi, context: Context) {
                 .jsonObject
 
         private fun updateGrant(grant: JsonObject, previousDeadline: Long = 0): Boolean {
-            require(grant["available"]!!.jsonPrimitive.boolean)
+            if (grant["available"]?.jsonPrimitive?.booleanOrNull != true) throw Unavailable()
             val claims = grant["grant"]!!.jsonObject["claims"]!!.jsonObject
             require(
                 claims["connection_id"]!!.jsonPrimitive.content == connection &&

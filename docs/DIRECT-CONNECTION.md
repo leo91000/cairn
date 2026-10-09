@@ -2,7 +2,7 @@
 
 Decision: [ADR-0033](adr/0033-direct-connection-with-relay-fallback.md). This
 document describes the data path, what the official service observes, the
-switching rules and the validation plan. Status: installation peer and control plane delivered; web route selection is delivered by #103; Android route selection is implemented in PR #118 (parent issue
+switching rules and the validation plan. Status: installation peer and control plane delivered; web route selection is delivered by #103; Android route selection is delivered by #104 (parent issue
 [#98](https://github.com/leo91000/leo-agent-manager/issues/98)); the existing relay ([INSTALLATION-RELAY.md](INSTALLATION-RELAY.md))
 serves the initial screen and remains the fallback.
 
@@ -151,7 +151,7 @@ emulator through simulated networks:
 ## Delivered control plane (#100)
 
 The authorization/signaling contract is implemented in protocol v4; the WebRTC
-peer is delivered by #101; the web transport is delivered by #103 and Android's data transport is implemented in #104/PR #118. No inbound local
+peer is delivered by #101; the web transport is delivered by #103 and Android's data transport is delivered by #104. No inbound local
 browser access or local password is introduced. The current shipped data path
 starts on the relay, with web and Android negotiating direct traffic in the background.
 
@@ -205,7 +205,7 @@ The peer requires exactly one reliable, ordered DataChannel named `leo.v4`.
 Trickle candidates use the existing authenticated signal routes. A failed peer,
 malformed frame, saturated ingress or duplicate channel closes only that direct
 connection; the HTTPS relay remains available. Clients negotiate a fresh grant
-after a closed connection; the web applies safe retry and route selection (#103); Android remains #104.
+after a closed connection; the web applies safe retry and route selection (#103); Android applies the same switching rules (#104).
 
 ### STUN and configuration
 
