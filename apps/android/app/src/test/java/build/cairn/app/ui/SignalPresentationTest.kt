@@ -359,7 +359,7 @@ class SignalPresentationTest {
     fun `identity colours and initials are stable`() {
         assertEquals(identityColor("agent-1"), identityColor("agent-1"))
         assertEquals("R", initial("revue de code"))
-        assertEquals("L", initial("  « Cairn »"))
+        assertEquals("C", initial("  « Cairn »"))
         assertEquals("?", initial("   "))
     }
 }
