@@ -273,7 +273,7 @@ async function close() {
 }
 .step-number.current {
   background: var(--color-accent);
-  color: #fff;
+  color: var(--color-on-brand);
 }
 .step-number.done {
   background: var(--color-soft);

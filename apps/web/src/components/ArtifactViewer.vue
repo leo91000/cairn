@@ -284,7 +284,7 @@ onBeforeUnmount(() => {
             <div v-else class="flex min-h-full flex-col items-center justify-center gap-4 text-center">
               <Icon :name="FileText" :size="44" class="text-accent" /><p class="text-sm text-muted">
                 This file is ready to download.
-              </p><a :href="artifactUrl(current, 'download')" :download="current.name" class="rounded-lg bg-accent px-4 py-2 text-sm text-white">Download {{ current.name }}</a>
+              </p><a :href="artifactUrl(current, 'download')" :download="current.name" class="rounded-lg bg-accent px-4 py-2 text-sm text-on-brand">Download {{ current.name }}</a>
             </div>
           </template>
         </div>

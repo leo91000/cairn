@@ -62,7 +62,7 @@ async function send() {
 
 <template>
   <div v-if="question" class="mb-3 flex items-center gap-3 rounded-xl border border-accent/30 bg-accent/8 px-3 py-3" role="status">
-    <span class="grid size-8 shrink-0 place-items-center rounded-lg bg-accent text-white"><Icon :name="MessageCircleQuestion" :size="16" /></span>
+    <span class="grid size-8 shrink-0 place-items-center rounded-lg bg-accent text-on-brand"><Icon :name="MessageCircleQuestion" :size="16" /></span>
     <button class="min-w-0 flex-1 text-left" aria-label="Answer pending questions" @click="open = true">
       <span class="mb-0.5 block text-[10px] font-semibold text-accent">{{ pending.length > 1 ? `${pending.length} questions` : 'Your input' }} · {{ question.blocking && active ? 'Waiting for you' : 'Answer when ready' }}</span>
       <span class="block truncate text-xs font-medium">{{ question.fields[0]?.title }}</span>
