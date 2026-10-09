@@ -237,6 +237,7 @@ internal fun ConversationHeader(
     agentKey: String,
     status: String,
     live: String?,
+    liveSince: Long?,
     back: () -> Unit,
     choose: () -> Unit,
     actions: @Composable RowScope.() -> Unit,
@@ -272,8 +273,14 @@ internal fun ConversationHeader(
                                 maxLines = 1,
                                 overflow = TextOverflow.Ellipsis,
                             )
-                            if (live != null) LiveChip(live, Modifier.padding(top = 2.dp))
-                            else if (status.isNotBlank())
+                            if (live != null) {
+                                val now = rememberNow(liveSince)
+                                val label =
+                                    listOf(live, elapsed(liveSince, now))
+                                        .filter { it.isNotBlank() }
+                                        .joinToString(" · ")
+                                LiveChip(label, Modifier.padding(top = 2.dp))
+                            } else if (status.isNotBlank())
                                 Text(
                                     status,
                                     style = MaterialTheme.typography.labelMedium,

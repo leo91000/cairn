@@ -416,7 +416,8 @@ internal fun ChatPage(
             if (running) backgroundWait(live.events) else null
         }
     val error = conversationError(chat)
-    var errorDismissed by remember(error, chat?.id, chat?.run?.finishedAt) { mutableStateOf(false) }
+    var errorDismissed by
+        remember(error, chat?.id, chat?.run?.id, chat?.run?.finishedAt) { mutableStateOf(false) }
     val selectedAgent = state.agents.find { it.id == (chat?.agentId ?: agent) }
     val currentProvider = chat?.run?.snapshot?.agent?.provider ?: selectedAgent?.provider ?: "codex"
     val chosenProvider = provider.ifBlank { currentProvider }
@@ -628,14 +629,8 @@ internal fun ChatPage(
                         agent = agentName,
                         agentKey = chat?.agentId ?: agent,
                         status = conversation.status,
-                        live =
-                            conversation.live?.let {
-                                // A background wait is timed from when it began.
-                                val since = waitingTasks?.since ?: chat?.run?.startedAt
-                                listOf(it, elapsed(since))
-                                    .filter { part -> part.isNotBlank() }
-                                    .joinToString(" · ")
-                            },
+                        live = conversation.live,
+                        liveSince = waitingTasks?.since ?: chat?.run?.startedAt,
                         back = {
                             persistDraft()
                             back()
@@ -810,8 +805,10 @@ internal fun ChatPage(
                         Text(
                             if (chat?.paused == true) "En pause"
                             else if (chat?.run?.status == "queued") "En attente"
-                            else if (waitingTasks != null) waitingStep(waitingTasks).title
-                            else if (active) "L’agent travaille…"
+                            else if (waitingTasks != null) {
+                                val now = rememberNow(waitingTasks.since)
+                                "${waitingStep(waitingTasks).title} · ${elapsed(waitingTasks.since, now)}"
+                            } else if (active) "L’agent travaille…"
                             else if (chat?.run?.status in listOf("failed", "interrupted"))
                                 statusLabel(chat?.run?.status.orEmpty())
                             else "Prêt"

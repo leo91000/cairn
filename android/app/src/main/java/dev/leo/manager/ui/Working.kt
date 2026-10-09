@@ -77,7 +77,18 @@ internal fun backgroundWait(events: List<RunEvent>): BackgroundWait? {
         announcement.activityData()?.get("tasks").asArray().orEmpty().map {
             it.asObject()?.get("description").plain().trim().ifEmpty { "Tâche en arrière-plan" }
         }
-    return if (tasks.isEmpty()) null else BackgroundWait(tasks, announcement.createdAt)
+    if (tasks.isEmpty()) return null
+
+    var since = announcement.createdAt
+    for (previous in index - 1 downTo 0) {
+        val event = events[previous]
+        val stillWaiting =
+            event.type == "turn.waiting" &&
+                event.activityData()?.get("tasks").asArray()?.isNotEmpty() == true
+        if (stillWaiting) since = event.createdAt else if (event.resumesWork()) break
+    }
+
+    return BackgroundWait(tasks, since)
 }
 
 /** The indicator for an agent that only waits for its background tasks. */
@@ -129,7 +140,7 @@ internal fun liveElapsed(start: Long?, now: Long = System.currentTimeMillis()): 
 
 /** The current time, refreshed every second for elapsed-time labels. */
 @Composable
-private fun rememberNow(key: Any?): Long {
+internal fun rememberNow(key: Any?): Long {
     var now by remember { mutableLongStateOf(System.currentTimeMillis()) }
     LaunchedEffect(key) {
         while (true) {

@@ -764,7 +764,19 @@ class DirectTransportTest {
                 MockWebServer().use { server ->
                     fun sse(cursor: Long, events: List<RunEvent>) =
                         "event: batch\nid: $cursor\ndata: ${wireJson.encodeToString(LiveBatch(events, LiveState(run = Run("r1", status = "running")), false, false, history = "h1"))}\n\n"
-                    val first = RunEvent(7, 7, "output", "direct")
+                    val first =
+                        RunEvent(
+                            7,
+                            7,
+                            "turn.waiting",
+                            "direct",
+                            mapOf(
+                                "tasks" to
+                                    buildJsonArray {
+                                        addJsonObject { put("description", "Vérifier la CI") }
+                                    }
+                            ),
+                        )
                     val next = RunEvent(8, 8, "output", "relay")
                     server.enqueue(
                         MockResponse()
@@ -866,6 +878,10 @@ class DirectTransportTest {
                         }
                     assertEquals(listOf(7L, 8L), final.events.map { it.id })
                     assertEquals(listOf("direct", "relay"), final.events.map { it.text })
+                    assertEquals(
+                        dev.leo.manager.ui.BackgroundWait(listOf("Vérifier la CI"), 7),
+                        dev.leo.manager.ui.backgroundWait(final.events),
+                    )
                     assertEquals(
                         "/api/installations/test/api/runs/r1/stream?after=7&history=h1&window=1",
                         server.takeRequest().path,

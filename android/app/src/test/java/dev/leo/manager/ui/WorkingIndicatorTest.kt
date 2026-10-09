@@ -148,6 +148,28 @@ class WorkingIndicatorTest {
     }
 
     @Test
+    fun `task list changes preserve the start of an uninterrupted background wait`() {
+        val events =
+            listOf(
+                user(1, 1000),
+                waiting(2, 2000, "Build", "Watch CI"),
+                RunEvent(3, 2500, "diagnostic", "Reconnecting"),
+                waiting(4, 3000, "Watch CI"),
+            )
+        assertEquals(BackgroundWait(listOf("Watch CI"), 2000), backgroundWait(events))
+        assertEquals(
+            BackgroundWait(listOf("Next build"), 5000),
+            backgroundWait(events + waiting(5, 4000) + waiting(6, 5000, "Next build")),
+        )
+        assertEquals(
+            BackgroundWait(listOf("Next build"), 5000),
+            backgroundWait(
+                events + tool(5, "cat log", running = true) + waiting(6, 5000, "Next build")
+            ),
+        )
+    }
+
+    @Test
     fun `the wait ends once the tasks finish, the agent acts again or the user writes`() {
         val announced = listOf(user(1, 1000), waiting(2, 2000, "Build"))
         assertNull(backgroundWait(emptyList()))
