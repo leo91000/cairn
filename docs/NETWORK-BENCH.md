@@ -335,3 +335,31 @@ assertions remain unchanged.
 Exact-head CI, all post-fix rates, every qualification run/attempt and the final
 Standards/Spec review are recorded in [PR #142](https://github.com/leo91000/leo-agent-manager/pull/142).
 Release qualification remains #105; this change performs no release or deployment.
+
+### POST observation under packet loss (#141)
+
+The first qualification matrix of the DTLS fix (`94bb9fb`, run
+[37947373445](https://github.com/leo91000/leo-agent-manager/actions/runs/37947373445))
+passed three full benches and failed one on the POST observation, after the
+browser had already established direct at 3,539 ms. The remaining six jobs were
+cancelled for diagnosis. This was not the 35-second direct-promotion failure.
+
+A reduced authenticated browser prefix, using the original packet-loss profile
+and original 10-second assertions, reproduced this second symptom once in 20
+local runs. That red run observed the POST **directly at 18,142 ms**, then its
+heading at 19,056 ms, on the same connected ICE/DTLS/DataChannel. No phase shift
+or forced loss was used in that run. For comparison, the unchanged CI's same-lan
+and NAT-only browser sends completed in 149–386 ms. The two direct requests
+therefore completed within the existing product contract; the 10-second test
+observation failed earlier.
+
+Sending the first message creates a conversation and then posts its message:
+these are two sequential requests. `DirectChannel` and
+[the direct-connection contract](DIRECT-CONNECTION.md) give **each response 35
+seconds**, including transport recovery. Only the packet-loss bench now observes
+the conversation response and then the message response with that same per-request
+window. Other scenarios retain their original observation timeout. Product
+response and negotiation deadlines, the initial 35-second route assertion, title
+assertion, packet-loss profile, direct-route checks and security assertions stay
+unchanged. This is a justified test-contract correction in addition to the
+independent DTLS retransmission product fix above.

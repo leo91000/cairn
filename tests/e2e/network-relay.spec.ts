@@ -162,9 +162,17 @@ test('authenticated browser and Rust client keep using the observed route under 
     await page.getByLabel('Message', { exact: true }).fill(marker)
     await expect(page.getByRole('status', { name: 'Connection route' })).toHaveAttribute('data-transport-route', expected, { timeout: 35000 })
     const before = (await observations()).length
+    const packetLoss = process.env.CAIRN_NETWORK_SCENARIO === 'packet-loss'
+    const responseObservationOptions = packetLoss ? { timeout: 35000 } : {}
     const started = performance.now()
     await page.getByRole('button', { name: /^(Send|Queue)$/, exact: true }).click()
-    await expect.poll(async () => (await observations()).slice(before).some(item => item.method === 'POST' && item.path.endsWith('/messages'))).toBe(true)
+    if (packetLoss) {
+      // Creating the conversation and posting its first message are sequential
+      // requests, each with the client's documented 35-second response deadline.
+      await expect.poll(async () => (await observations()).slice(before).some(item => item.method === 'POST' && item.path === '/chats'), responseObservationOptions).toBe(true)
+    }
+
+    await expect.poll(async () => (await observations()).slice(before).some(item => item.method === 'POST' && item.path.endsWith('/messages')), responseObservationOptions).toBe(true)
     await expect(page.getByRole('heading', { name: marker, exact: true })).toBeVisible()
     const sent = (await observations()).slice(before).find(item => item.method === 'POST' && item.path.endsWith('/messages'))!
     evidence.push({ route: sent.route, operation: 'browser-send', elapsedMs: performance.now() - started })
