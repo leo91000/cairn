@@ -273,8 +273,9 @@ jobs:
           printf '%s' "$ANDROID_KEYSTORE_BASE64" | base64 --decode > "$CAIRN_ANDROID_KEYSTORE"
           mkdir -p distribution
           "$ANDROID_HOME/build-tools/36.0.0/zipalign" -c -P 16 4 validated-apk/app-release-unsigned.apk
+          # The release keystore holds exactly one key; apksigner selects it without an alias.
           "$ANDROID_HOME/build-tools/36.0.0/apksigner" sign \
-            --ks "$CAIRN_ANDROID_KEYSTORE" --ks-key-alias cairn-android \
+            --ks "$CAIRN_ANDROID_KEYSTORE" \
             --ks-pass env:CAIRN_ANDROID_STORE_PASSWORD --key-pass env:CAIRN_ANDROID_STORE_PASSWORD \
             --out distribution/cairn-android.apk validated-apk/app-release-unsigned.apk
       - name: Verify APK and prepare update manifest
