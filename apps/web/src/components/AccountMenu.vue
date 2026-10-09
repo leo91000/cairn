@@ -67,9 +67,10 @@ function navigate(event: KeyboardEvent) {
   }
 }
 
+// Focus follows the outside click; only Escape and menu actions return it to the trigger.
 function outside(event: Event) {
   if (open.value && event.target instanceof Node && !root.value?.contains(event.target))
-    close(event.type === 'pointerdown')
+    close(false)
 }
 
 watch(() => props.disabled, disabled => disabled && close())

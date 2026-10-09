@@ -110,6 +110,7 @@ watch(session, (value) => {
   const requested = state.installationId
   installation.value = value.installations.find(item => item.id === requested) || null
   state.installationOnline = installation.value?.online
+  state.installationUpdateRequired = installation.value?.updateRequired ?? false
   if (requested && !installation.value) {
     error.value = 'This installation is unavailable or no longer accessible to your Cairn account.'
     return
@@ -492,7 +493,9 @@ async function refreshAvailability() {
       item.updateRequired = status?.updateRequired ?? false
     }
 
-    state.installationOnline = current.installations.find(item => item.id === state.installationId)?.online
+    const currentInstallation = current.installations.find(item => item.id === state.installationId)
+    state.installationOnline = currentInstallation?.online
+    state.installationUpdateRequired = currentInstallation?.updateRequired ?? false
 
     availabilityFailures = 0
   }
@@ -737,7 +740,7 @@ onMounted(async () => {
               Add an installation
             </UiButton>
           </div>
-          <form v-if="editingName" class="flex flex-wrap items-end gap-3 border-b border-line px-4 py-3" @submit.prevent="renameInstallation">
+          <form v-if="editingName" class="mt-5 flex flex-wrap items-end gap-3" @submit.prevent="renameInstallation">
             <label>Installation name<input
               v-model="installationName"
               required
@@ -879,7 +882,7 @@ onMounted(async () => {
         :passkeys="options.passkeys"
         :confirmation-only="showIdentityConfirmation"
         :confirmation-title="confirmationTitle"
-        :return-label="showMethods ? 'Back to sign-in methods' : showSecurity ? 'Back to account security' : 'Back to installation'"
+        :return-label="showSecurity ? 'Back to account security' : 'Back to installation'"
         @close="showIdentityConfirmation ? showIdentityConfirmation = false : showSecurity = false"
         @confirm-identity="openIdentityConfirmation('Confirm identity before revoking other devices')"
         @confirmed="showIdentityConfirmation = false; error = ''"

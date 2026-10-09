@@ -1,6 +1,12 @@
 <script setup lang="ts">
 import { twMerge } from 'tailwind-merge'
-import { computed, onMounted, ref } from 'vue'
+import {
+  computed,
+  onBeforeUnmount,
+  onMounted,
+  ref,
+  watch,
+} from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import {
   api,
@@ -32,6 +38,15 @@ const sections = [
   { id: 'installation', label: 'Installation' },
   { id: 'sensitive', label: 'Sensitive zone' },
 ]
+
+// Bare /settings shows Account beside the sections on wide screens, and only the list on phones.
+const phoneQuery = window.matchMedia('(width <= 640px)')
+const phone = ref(phoneQuery.matches)
+const onPhone = () => phone.value = phoneQuery.matches
+const currentSection = computed(() => section.value || (phone.value ? '' : 'account'))
+
+// An installation awaiting an update cannot answer: its settings wait until it can.
+const installationSettingsAvailable = computed(() => section.value === 'installation' && state.installationRole === 'owner' && !state.installationUpdateRequired)
 const settings = ref<any>()
 const grants = ref<any[]>([])
 const audit = ref<any[]>([])
@@ -57,10 +72,21 @@ async function load() {
   }
 }
 
-onMounted(() => {
-  if (section.value === 'installation' && state.installationRole === 'owner')
+watch(installationSettingsAvailable, (available) => {
+  if (available)
     void load()
-})
+}, { immediate: true })
+
+onMounted(() => phoneQuery.addEventListener('change', onPhone))
+onBeforeUnmount(() => phoneQuery.removeEventListener('change', onPhone))
+
+// Return to the section list this screen was opened from; a deep link has no such entry.
+function backToSettings() {
+  if (router.options.history.state.back === '/settings')
+    router.back()
+  else
+    void router.push('/settings')
+}
 
 async function create() {
   try {
@@ -115,8 +141,8 @@ async function copy(value: string) {
         :key="item.id"
         :to="`/settings/${item.id}`"
         class="min-h-11 rounded-lg border border-transparent px-4 py-3 text-sm font-semibold phone:border-line phone:bg-raised"
-        :class="section === item.id ? 'bg-soft text-accent' : item.id === 'sensitive' ? 'text-danger hover:bg-danger-surface' : 'text-muted hover:bg-hover hover:text-ink'"
-        :aria-current="section === item.id ? 'page' : undefined"
+        :class="currentSection === item.id ? 'bg-soft text-accent' : item.id === 'sensitive' ? 'text-danger hover:bg-danger-surface' : 'text-muted hover:bg-hover hover:text-ink'"
+        :aria-current="currentSection === item.id ? 'page' : undefined"
       >
         {{ item.label }}
       </RouterLink>
@@ -126,7 +152,7 @@ async function copy(value: string) {
         v-if="section"
         size="small"
         class="mb-5 hidden phone:inline-flex"
-        @click="router.push('/settings')"
+        @click="backToSettings"
       >
         Back to settings
       </UiButton>
@@ -158,7 +184,7 @@ async function copy(value: string) {
           </h2>
         </slot>
         <slot name="installation" />
-        <template v-if="settings && state.installationRole === 'owner'">
+        <template v-if="settings && installationSettingsAvailable">
           <StorageSettings />
           <section class="panel border-b border-line overflow-hidden settings-section mb-5.5 px-0 py-7 phone:py-5">
             <div class="section-intro flex gap-[17px] items-center mb-6 phone:items-start phone:gap-[13px]">
