@@ -344,6 +344,21 @@ fetch('http://127.0.0.1:4310/health', {{ signal: AbortSignal.timeout(5000) }}).t
                 continue
         return False
 
+    def pending_candidate_unavailable():
+        # A crash-looping candidate is briefly running between restarts, and
+        # Docker exec then fails before the probe starts. Observe again until
+        # the probe or the container state settles it.
+        for _ in range(5):
+            try:
+                return not manager_health()
+            except (OSError, ValueError, RuntimeError, subprocess.TimeoutExpired):
+                if failed_candidate_container(config['pendingImage']):
+                    return True
+            time.sleep(1)
+        # No verdict: the candidate may be healthy and another
+        # deployment may hold the lease. Its lease still wins.
+        return False
+
     health_failed = False
 
     def launch(image):
@@ -397,12 +412,7 @@ fetch('http://127.0.0.1:4310/health', {{ signal: AbortSignal.timeout(5000) }}).t
             if manager_state == 'running' and config.get('leaseAcquired'):
                 # Docker's running state does not imply HTTP readiness after a
                 # reboot. Probe only our journaled candidate, never a foreign image.
-                try:
-                    pending_unavailable = not manager_health()
-                except (OSError, ValueError, RuntimeError, subprocess.TimeoutExpired):
-                    # No verdict: the candidate may be healthy and another
-                    # deployment may hold the lease. Its lease still wins.
-                    pending_unavailable = False
+                pending_unavailable = pending_candidate_unavailable()
         manager_active = manager_state not in (None, 'exited', 'dead') and not pending_unavailable
         if not config.get('leaseAcquired') or manager_active:
             # A persisted acknowledgement may outlive the twenty-minute lease.

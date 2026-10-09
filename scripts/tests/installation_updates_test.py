@@ -15,7 +15,7 @@ NEW = 'ghcr.io/leo91000/cairn@sha256:' + '2' * 64
 
 class Updates(unittest.TestCase):
     def test_approved_update_and_failed_health_restore_previous_image_without_losing_data(self):
-        for failure in ('', 'health', 'runner-unhealthy', 'stop-once', 'up-once', 'exec-once', 'digest', 'unapproved', 'interrupted', 'interrupted-stopped', 'interrupted-created', 'interrupted-missing', 'interrupted-restarting', 'interrupted-unhealthy', 'interrupted-exec-once', 'interrupted-foreign-restarting', 'lease', 'expired-lease'):
+        for failure in ('', 'health', 'runner-unhealthy', 'stop-once', 'up-once', 'exec-once', 'digest', 'unapproved', 'interrupted', 'interrupted-stopped', 'interrupted-created', 'interrupted-missing', 'interrupted-restarting', 'interrupted-crash-loop', 'interrupted-unhealthy', 'interrupted-exec-once', 'interrupted-foreign-restarting', 'lease', 'expired-lease'):
             with self.subTest(failure=failure), tempfile.TemporaryDirectory() as directory:
                 root = Path(directory)
                 class Beacon(http.server.BaseHTTPRequestHandler):
@@ -31,16 +31,16 @@ class Updates(unittest.TestCase):
                 threading.Thread(target=server.serve_forever, daemon=True).start()
                 origin = f'http://127.0.0.1:{server.server_port}'
                 config = {'image': OLD, 'origin': origin}
-                if failure in ('interrupted', 'interrupted-stopped', 'interrupted-created', 'interrupted-missing', 'interrupted-restarting', 'interrupted-unhealthy', 'interrupted-exec-once', 'interrupted-foreign-restarting', 'expired-lease'):
+                if failure in ('interrupted', 'interrupted-stopped', 'interrupted-created', 'interrupted-missing', 'interrupted-restarting', 'interrupted-crash-loop', 'interrupted-unhealthy', 'interrupted-exec-once', 'interrupted-foreign-restarting', 'expired-lease'):
                     config.update(pendingImage=NEW, leaseOwner='00000000-0000-4000-8000-000000000001')
-                if failure in ('interrupted-stopped', 'interrupted-created', 'interrupted-missing', 'interrupted-restarting', 'interrupted-unhealthy', 'interrupted-exec-once', 'interrupted-foreign-restarting', 'expired-lease'):
+                if failure in ('interrupted-stopped', 'interrupted-created', 'interrupted-missing', 'interrupted-restarting', 'interrupted-crash-loop', 'interrupted-unhealthy', 'interrupted-exec-once', 'interrupted-foreign-restarting', 'expired-lease'):
                     config['leaseAcquired'] = True
                 (root / 'installation.json').write_text(json.dumps(config))
                 (root / 'data').mkdir()
                 (root / 'data/kept').write_text('conversation and storage must survive')
                 (root / 'data/maintenance-token').write_text('fixture-private-token')
                 (root / '.env').write_text('')
-                initial_image = NEW if failure in ('interrupted-unhealthy', 'interrupted-exec-once', 'interrupted-created') else OLD
+                initial_image = NEW if failure in ('interrupted-unhealthy', 'interrupted-exec-once', 'interrupted-created', 'interrupted-crash-loop') else OLD
                 (root / 'compose.json').write_text(json.dumps({
                     'name': 'cairn-installation',
                     'services': {
@@ -71,7 +71,13 @@ if 'ps' in args:
     failure = os.environ['FAILURE']
     if failure != 'interrupted-missing':
         state = 'restarting' if 'restarting' in failure else 'exited' if failure == 'interrupted-stopped' else 'created' if failure == 'interrupted-created' else 'running'
-        image = 'ghcr.io/leo91000/cairn@sha256:' + ('2' if failure in ('interrupted-restarting', 'interrupted-unhealthy', 'interrupted-exec-once', 'interrupted-created') else '1') * 64
+        image = 'ghcr.io/leo91000/cairn@sha256:' + ('2' if failure in ('interrupted-restarting', 'interrupted-crash-loop', 'interrupted-unhealthy', 'interrupted-exec-once', 'interrupted-created') else '1') * 64
+        if failure == 'interrupted-crash-loop':
+            # Between restarts, Docker briefly reports a crash-looping candidate running.
+            observed = root / 'crash-loop-observed'
+            state = 'running' if args[-1] == 'runner' or not observed.exists() else 'restarting'
+            if args[-1] == 'manager':
+                observed.touch()
         if failure in ('up-once', 'runner-unhealthy'):
             image = json.loads((root / 'compose.json').read_text())['services'][args[-1]]['image']
             state = 'created' if failure == 'runner-unhealthy' and args[-1] == 'manager' else 'running'
@@ -83,6 +89,9 @@ if 'inspect' in args:
     else:
         print(json.dumps([{'Id': 'sha256:fixture', 'RepoDigests': [args[-1]], 'Config': {'Env': ['APP_RUNTIME_ID=fixture']}}]))
 if 'exec' in args:
+    manager = json.loads((root / 'compose.json').read_text())['services']['manager']['image']
+    if os.environ['FAILURE'] == 'interrupted-crash-loop' and manager.endswith('2' * 64):
+        sys.exit(1)
     if 'deployment-lease' in args[-1]:
         if os.environ['FAILURE'] in ('lease', 'expired-lease', 'interrupted-exec-once', 'interrupted-foreign-restarting'):
             sys.exit(1)
@@ -109,7 +118,7 @@ if 'exec' in args:
                                                 env={**os.environ, 'PATH': str(binaries) + ':' + os.environ['PATH'],
                                                      'CAIRN_INSTALLATION_ROOT': directory, 'FAILURE': failure},
                                                 capture_output=True, text=True, timeout=90)
-                    self.assertEqual(result.returncode, 0 if failure in ('', 'health', 'runner-unhealthy', 'stop-once', 'up-once', 'exec-once', 'interrupted', 'interrupted-stopped', 'interrupted-created', 'interrupted-missing', 'interrupted-restarting', 'interrupted-unhealthy') else 1, result.stderr)
+                    self.assertEqual(result.returncode, 0 if failure in ('', 'health', 'runner-unhealthy', 'stop-once', 'up-once', 'exec-once', 'interrupted', 'interrupted-stopped', 'interrupted-created', 'interrupted-missing', 'interrupted-restarting', 'interrupted-crash-loop', 'interrupted-unhealthy') else 1, result.stderr)
                     updated = json.loads((root / 'installation.json').read_text())
                     self.assertEqual(updated['image'], NEW if not failure else OLD)
                     if failure in ('health', 'runner-unhealthy'):
