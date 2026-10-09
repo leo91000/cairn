@@ -270,6 +270,8 @@ else {
 
     if (prompt.includes('fixture:background')) {
       const ambient = prompt.includes('fixture:background-ambient')
+      // A slow build leaves time to observe the idle agent waiting for it.
+      const buildMs = prompt.includes('fixture:background-slow') ? 8000 : 500
       if (prompt.includes('fixture:background-ambient-flip'))
         out({ type: 'system', subtype: 'background_tasks_changed', tasks: [{ task_id: 'build', task_type: 'local_bash', description: 'Wait for build' }] })
       out({
@@ -283,6 +285,19 @@ else {
         }],
       })
       complete('Build is still running', false, correlation)
+      if (prompt.includes('fixture:background-stream')) {
+        setTimeout(() => {
+          out({ type: 'stream_event', event: { type: 'message_start', message: { id: 'resumed' } } })
+          out({ type: 'stream_event', event: { type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } } })
+          out({ type: 'stream_event', event: { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'Checking progress' } } })
+          out({
+            type: 'system',
+            subtype: 'background_tasks_changed',
+            tasks: [{ task_id: 'build', task_type: 'local_bash', description: 'Build finishing' }],
+          })
+        }, 100)
+      }
+
       if (!ambient) {
         setTimeout(() => {
           out({ type: 'system', subtype: 'background_tasks_changed', tasks: [] })
@@ -302,7 +317,7 @@ else {
             })
             complete('Build checked and task finished', false, { origin: { kind: 'task-notification' } })
           }, 200)
-        }, 500)
+        }, buildMs)
       }
 
       return

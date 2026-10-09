@@ -1,5 +1,5 @@
 import type { ChatView } from '../shared/chats'
-import type { RunListItem, Task } from '../shared/contracts'
+import type { RunEvent, RunListItem, Task } from '../shared/contracts'
 import type { ActivityEntry } from './activity'
 
 // Same identity palette as the Android « Signal » design: readable on white text in both themes.
@@ -104,8 +104,59 @@ export function filOf(chats: ChatView[], tasks: Task[], runs: RunListItem[]): Fi
   return { forYou: forYou.sort(newest), live: live.sort(newest), recent: recent.sort(newest) }
 }
 
-/** What the working indicator says: the step in progress, or the last one reached. */
-export interface WorkingStep { title: string, detail: string, since: number | null }
+/**
+ * What the working indicator says: the step in progress, or the last one reached. `waiting`
+ * lists the background tasks an idle agent waits for; `since` is then when it began waiting.
+ */
+export interface WorkingStep {
+  title: string
+  detail: string
+  since: number | null
+  waiting?: string[]
+}
+
+/** Events that show the agent active again after it announced a background wait. */
+function resumesWork(event: RunEvent) {
+  return event.type === 'chat.user' || event.type === 'thread.started' || event.type.startsWith('turn.') || event.type.startsWith('item.')
+}
+
+/**
+ * The background tasks the agent waits for, when its latest announcement still holds: the agent
+ * finished responding and its run stays open until those tasks notify it.
+ */
+export function backgroundWait(events: RunEvent[]): { tasks: string[], since: number } | null {
+  const index = events.findLastIndex(event => event.type === 'turn.waiting')
+  if (index < 0 || events.slice(index + 1).some(resumesWork))
+    return null
+  const announcement = events[index]!
+  const tasks = Array.isArray(announcement.payload?.tasks) ? announcement.payload.tasks : []
+  const descriptions = tasks.map((task) => {
+    const description = task && typeof task === 'object' ? (task as Record<string, unknown>).description : ''
+    return typeof description === 'string' && description.trim() ? description.trim() : 'Background task'
+  })
+
+  let since = announcement.createdAt
+  for (let previous = index - 1; previous >= 0; previous--) {
+    const event = events[previous]!
+    if (event.type === 'turn.waiting' && Array.isArray(event.payload?.tasks) && event.payload.tasks.length)
+      since = event.createdAt
+    else if (resumesWork(event))
+      break
+  }
+
+  return descriptions.length ? { tasks: descriptions, since } : null
+}
+
+/** The indicator for an agent that only waits for its background tasks. */
+export function waitingStep(wait: { tasks: string[], since: number }): WorkingStep {
+  const count = wait.tasks.length
+  return {
+    title: count === 1 ? 'Waiting for a background task' : `Waiting for ${count} background tasks`,
+    detail: wait.tasks.join(' · '),
+    since: wait.since,
+    waiting: wait.tasks,
+  }
+}
 
 /**
  * The agent's current step since the latest user message: an action in progress is named

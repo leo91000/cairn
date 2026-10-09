@@ -47,10 +47,16 @@ test('a transient agent error shows a retry countdown and resumes without user i
   await expect.poll(async () => (await workspace.api(`/api/chats/${chat.id}`)).run?.retry?.attempt).toBe(1)
   const waiting = (await workspace.api(`/api/chats/${chat.id}`)).run
   expect(waiting.status).toBe('queued')
+  // A retry keeps earlier conversation events, including an interrupted background wait.
+  workspace.service.store.event(waiting.id, 'turn.waiting', '', {
+    tasks: [{ id: 'old-build', description: 'Earlier background build' }],
+  })
   await page.goto(workspacePath(`/chats/${chat.id}`))
   await authenticateWorkspace(page)
   const notice = page.getByRole('status').filter({ hasText: /Temporary agent error\. Retrying in \d+ seconds \(attempt 1\/3\)\./ })
   await expect(notice).toBeVisible()
+  await expect(page.locator('.agent-waiting')).toHaveCount(0)
+  await expect(page.getByText('Background task', { exact: true })).toHaveCount(0)
   const before = await notice.textContent()
   await expect.poll(() => notice.textContent()).not.toBe(before)
   await page.screenshot({ path: test.info().outputPath('agent-retry-countdown.png') })

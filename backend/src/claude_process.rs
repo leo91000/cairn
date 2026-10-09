@@ -12,7 +12,7 @@ use base64::{Engine, engine::general_purpose::STANDARD};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{BTreeMap, HashMap, HashSet},
     path::{Path, PathBuf},
     time::Duration,
 };
@@ -354,9 +354,12 @@ struct Turn<'a> {
     stream_message: String,
     last: String,
     last_id: String,
-    background: HashSet<String>,
+    /// Background tasks that keep the run open, with their descriptions.
+    background: BTreeMap<String, String>,
     awaiting_background: HashSet<String>,
     background_replayed: bool,
+    /// The agent finished responding and only its background tasks keep the run open.
+    waiting_for_background: bool,
 }
 
 impl Turn<'_> {
@@ -419,6 +422,7 @@ impl Turn<'_> {
             send(&mut self.stdin, input(&message, self.inbox).await?).await?;
             self.submitted.insert(id.into());
             self.pending.insert(id.into());
+            self.waiting_for_background = false;
         }
         Ok(())
     }
@@ -464,7 +468,7 @@ impl Turn<'_> {
                     .await?;
             }
             "system" if value["subtype"] == "background_tasks_changed" => {
-                self.background_tasks(value);
+                self.background_tasks(value).await?;
             }
             "user" => self.on_user(value).await?,
             "assistant" => self.on_assistant(value).await?,
@@ -478,18 +482,41 @@ impl Turn<'_> {
         Ok(false)
     }
 
-    fn background_tasks(&mut self, value: &Value) {
+    async fn background_tasks(&mut self, value: &Value) -> Result<()> {
         let tasks = value["tasks"].as_array().into_iter().flatten();
         let (ambient, owned): (Vec<_>, Vec<_>) = tasks.partition(|task| task["ambient"] == true);
-        self.background = owned
+        let background: BTreeMap<String, String> = owned
             .iter()
-            .map(|task| text(task, "task_id").to_owned())
+            .map(|task| {
+                let id = text(task, "task_id").to_owned();
+                (id, text(task, "description").to_owned())
+            })
             .collect();
+        let changed = background != self.background;
+        self.background = background;
         self.awaiting_background
-            .extend(self.background.iter().cloned());
+            .extend(self.background.keys().cloned());
         for task in ambient {
             self.awaiting_background.remove(text(task, "task_id"));
         }
+
+        if self.waiting_for_background && changed {
+            self.announce_waiting().await?;
+        }
+        Ok(())
+    }
+
+    /// Tells clients which background tasks the idle agent waits for. An empty list
+    /// means they finished and the agent is about to continue.
+    async fn announce_waiting(&mut self) -> Result<()> {
+        let tasks: Vec<Value> = self
+            .background
+            .iter()
+            .map(|(id, description)| json!({ "id": id, "description": description }))
+            .collect();
+        self.waiting_for_background = !tasks.is_empty();
+        self.emit(json!({ "type": "turn.waiting", "tasks": tasks }))
+            .await
     }
 
     async fn on_user(&mut self, value: &Value) -> Result<()> {
@@ -546,6 +573,8 @@ impl Turn<'_> {
     // Claude Code emits one assistant event per content block, all sharing the message id.
     // Count blocks per message so ids match the streamed block index.
     async fn on_assistant(&mut self, value: &Value) -> Result<()> {
+        // The agent responds again, so it no longer only waits for background tasks.
+        self.waiting_for_background = false;
         let message = text(&value["message"], "id").to_owned();
         for block in value["message"]["content"].as_array().into_iter().flatten() {
             let next = self.blocks.entry(message.clone()).or_insert(0);
@@ -576,6 +605,7 @@ impl Turn<'_> {
         let index = event["index"].as_u64().unwrap_or(0) as usize;
         match text(event, "type") {
             "message_start" => {
+                self.waiting_for_background = false;
                 self.stream_message = text(&event["message"], "id").into();
                 self.streams.clear();
             }
@@ -698,13 +728,18 @@ impl Turn<'_> {
         self.consumed.retain(|id| self.pending.contains(id));
         if self.background_replayed || value["origin"]["kind"] == "task-notification" {
             self.awaiting_background
-                .retain(|id| self.background.contains(id));
+                .retain(|id| self.background.contains_key(id));
         }
         self.background_replayed = false;
         let waiting = !self.pending.is_empty()
             || !self.background.is_empty()
             || !self.awaiting_background.is_empty();
         if waiting {
+            // A result without pending messages means the agent stopped responding
+            // and now waits for its background tasks to notify it.
+            if self.pending.is_empty() && !self.background.is_empty() {
+                self.announce_waiting().await?;
+            }
             return Ok(false);
         }
         self.complete().await?;
@@ -859,9 +894,10 @@ pub async fn run(
         stream_message: String::new(),
         last: String::new(),
         last_id: format!("{initial_id}-result"),
-        background: HashSet::new(),
+        background: BTreeMap::new(),
         awaiting_background: HashSet::new(),
         background_replayed: false,
+        waiting_for_background: false,
     };
     let operation = turn.execute(&mut stdout, auth.as_mut(), &cancel).await;
     // Closes Claude Code's stdin.

@@ -54,11 +54,12 @@ const MESSAGE_LIMIT: usize = 100_000;
 const ERROR_LIMIT: usize = 10_000;
 
 /// Event types that are always recorded. Clients use turn markers to scope reused message IDs.
-const CONVERSATION_EVENTS: [&str; 5] = [
+const CONVERSATION_EVENTS: [&str; 6] = [
     "thread.started",
     "turn.started",
     "turn.completed",
     "turn.failed",
+    "turn.waiting",
     "error",
 ];
 

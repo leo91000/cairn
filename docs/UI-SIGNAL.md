@@ -42,6 +42,11 @@ Single keys never fire while typing or while a dialog is open (`src/shortcuts.ts
   step in progress (with its command) and the elapsed time to the second. It is
   announced politely. `workingStep` ignores earlier turns and session notices and
   never presents a failed step as running.
+- **Veille** (`WorkingIndicator.vue`): when the agent finished responding and only
+  waits for its background tasks (`turn.waiting`), a slow dashed ring replaces the
+  breath, the tasks appear as pills, the time counts from the start of the wait and
+  the conversation header reads « Background task ». `backgroundWait` ends the wait
+  as soon as the agent acts again, the tasks finish or the user writes.
 - **Live avatars** (`AgentAvatar.vue`): a comet arc orbits working agents; it
   overflows the avatar so rows stay aligned. "Working" is followed by three dots
   rising in a wave. Queued and paused work keeps a static badge.
