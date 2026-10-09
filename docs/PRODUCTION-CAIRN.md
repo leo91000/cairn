@@ -61,7 +61,7 @@ Disable `cairn-cli-update.timer` and any other old host dispatch/update timers
 while dismantling the old installation. The historical **Update agent tools**
 workflow is entirely disabled in code for this cutover: manual dispatch only
 explains the release path and never reads production configuration. Do not reuse
-its host timer with the official service UUID. New installation updates use their own timer.
+its host timer with Beacon UUID. New installation updates use their own timer.
 
 Stop and remove the old Cairn manager/runner Coolify service and its public domain
 route. Remove **only that service's identified** data, agent-home, workspaces,
@@ -124,7 +124,7 @@ With neither configured, Web Push is unavailable; email sign-in still works.
 Optional Android/FCM (delivered by #58): create a Firebase project with an Android
 application for `build.cairn.app`. Supply the matching approved APK SHA-256 signing
 certificate fingerprints to `CAIRN_BEACON_ANDROID_CERTIFICATES` (comma-separated,
-colon-separated hex accepted). The official service publishes their association
+colon-separated hex accepted). Beacon publishes their association
 at `https://cairn.build/.well-known/assetlinks.json`. Register that Android package
 and its signing certificate in the Google OAuth project too; the existing Google
 web client ID remains the token audience.
@@ -218,7 +218,7 @@ networks:
     name: cairn-beacon-proxy
 ```
 
-In the official service set `COOLIFY_PROXY_NETWORK=cairn-beacon-proxy` and
+In Beacon set `COOLIFY_PROXY_NETWORK=cairn-beacon-proxy` and
 `CAIRN_BEACON_TRUSTED_PROXIES=172.30.113.2/32` (adapt both to the selected network).
 The Compose's network label selects this exact network for backend traffic.
 Never trust `172.30.113.0/24`, the entire shared `coolify` network, or workers.

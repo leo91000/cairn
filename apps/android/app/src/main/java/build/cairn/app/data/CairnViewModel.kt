@@ -109,10 +109,7 @@ constructor(
         perform {
             val origin = officialOrigin
             if (origin.isNotBlank()) connect(origin)
-            else
-                notify(
-                    "Le service officiel n’est pas configuré dans cette version de l’application."
-                )
+            else notify("Beacon n’est pas configuré dans cette version de l’application.")
         }
     }
 
@@ -223,7 +220,7 @@ constructor(
                             it.copy(
                                 restoringSession = true,
                                 error =
-                                    "Le service officiel est injoignable. Réessayez lorsque le réseau est disponible.",
+                                    "Beacon est injoignable. Réessayez lorsque le réseau est disponible.",
                             )
                         }
                         return
@@ -331,7 +328,7 @@ constructor(
     }
 
     suspend fun requestEmailCode(email: String) {
-        val target = checkNotNull(accountConnection) { "Le service officiel n’est pas configuré." }
+        val target = checkNotNull(accountConnection) { "Beacon n’est pas configuré." }
         val normalizedEmail = email.trim().lowercase(java.util.Locale.ROOT)
         val request =
             target.send<EmailChallenge>(

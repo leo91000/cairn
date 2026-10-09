@@ -76,20 +76,20 @@ Minimum Android version: Android 8 (API 26). Compile/target API: 37.
 adb install -r app/build/outputs/apk/debug/app-debug.apk
 ```
 
-The app connects only to the official service. Sign in with a code received by
+The app connects only to Beacon. Sign in with a code received by
 email, then choose an installation belonging to or shared with your Cairn account.
 It reopens the last installation used by that account. Members can read agents,
 projects and skills and work in conversations; owner management is hidden.
 Appearance, app updates and notification permissions remain available to members.
 The selector shows each installation’s role and availability. With no installation,
 the app links to the official claim page to add or associate one.
-If the official service is temporarily unreachable, the app preserves the stored
+If Beacon is temporarily unreachable, the app preserves the stored
 session and offers a retry; an explicit rejection returns to email sign-in.
 There is no server-address, owner-password or bootstrap-token form.
 
 Set `CAIRN_BEACON_ORIGIN` to the fixed official HTTPS origin when building the
 app. The repository does not choose a production hostname; without this build
-setting the app reports that the official service is not configured. Signed
+setting the app reports that Beacon is not configured. Signed
 distribution requires this setting and HTTPS. The Android workflow reads the
 repository variable of the same name. This value is an origin, not a credential.
 
@@ -137,7 +137,7 @@ are configured; tag CI uses a persistent release key. Never commit a signing key
 - Documents use the Android picker, bounded streaming uploads, authenticated file
   downloads and scoped FileProvider sharing. Image, PDF, Markdown, code and media
   previews use native Android components; no arbitrary artifact URL is fetched.
-- Native push is opt-in and registers each device once with the official service
+- Native push is opt-in and registers each device once with Beacon
   for all installations accessible to its Cairn account. FCM data-only messages
   enqueue WorkManager delivery; the current Cairn session and installation membership
   are checked before displaying generic text. Removed members and signed-out
@@ -177,7 +177,7 @@ See [validation](VALIDATION.md).
 | Attachments | Android file/photo picker, pasted images and keyboard image insertion, up to 8 files, 10 MiB per file / 40 MiB per message, stable upload/message identifiers for explicit retries |
 | Artifacts | Authenticated file previews, downloads through Android’s save picker, sharing/open-with, native opening of Markdown artifact links, latest/all versions, groups and search |
 | MCP servers | HTTP/stdio configuration, test/discovery, enabled tool selection, bearer/client secrets, environment variables, OAuth, removal/disconnect |
-| Notifications | Opt-in native FCM through the official service, one account/device registration for all accessible installations, current-access checks and scoped conversation intents |
+| Notifications | Opt-in native FCM through Beacon, one account/device registration for all accessible installations, current-access checks and scoped conversation intents |
 
 Destructive actions use native confirmation dialogs and remain subject to the
 same server checks as the web. No live task is launched as part of validation.
@@ -339,7 +339,7 @@ linking policy and passkey store are shared with the web client.
 
 Account settings let an authenticated member link Google or GitHub, create a
 named passkey, confirm identity by email or passkey, and remove a sign-in method.
-The official service enforces recent proof and retention of the last sign-in
+Beacon enforces recent proof and retention of the last sign-in
 method. Challenge cookies and provider proofs remain in memory; only the Cairn
 session enters Android Keystore storage.
 
@@ -351,11 +351,11 @@ all four unset, account sign-in still works and push opt-in reports unavailable.
 The SDK does not create an FCM registration until notifications are enabled.
 Release evidence binds the compiled APK to these public Firebase values as well
 as its official origin, commit and version; changing them requires revalidation.
-Configure the same project's private FCM sender only on the official service;
+Configure the same project's private FCM sender only on Beacon;
 see [official configuration](../../docs/OFFICIAL-SERVICE.md).
 
 For native passkeys, configure trusted APK SHA-256 signing certificate hashes on
-the official service and serve its `/.well-known/assetlinks.json` over the HTTPS
+Beacon and serve its `/.well-known/assetlinks.json` over the HTTPS
 RP host. Register the Android package and certificate with the Google OAuth
 project as well; the server OAuth client remains the audience for Google tokens.
 Never put a Google OAuth client secret or an FCM service-account key in an APK.
@@ -363,6 +363,6 @@ Never put a Google OAuth client secret or an FCM service-account key in an APK.
 The shared native account and push cases run as JVM tests and as instrumentation
 on a Google APIs emulator. External credential results and FCM transport are
 controlled adapters in these cases; they do not demonstrate a live Google,
-GitHub or Firebase account. The official service tests verify signed Google JWTs,
+GitHub or Firebase account. Beacon tests verify signed Google JWTs,
 signed native-origin WebAuthn proofs, GitHub handover, FCM HTTP v1 and membership
 revocation separately.

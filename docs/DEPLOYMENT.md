@@ -7,7 +7,7 @@ Deployment requires Léo’s explicit go-ahead.
 For the official-service installation flow (one machine, integrated S3, no
 incoming ports), see [One-command installation](INSTALLATION.md).
 
-## Required migration to the official service
+## Required migration to Beacon
 
 This release removes the installation's browser login and application hosting.
 Administrator passwords, `SETUP_TOKEN`, local browser sessions and CSRF tokens no
@@ -23,9 +23,9 @@ release removes local browser access immediately.** Before any pull or automated
 upgrade, pin `CAIRN_IMAGE` to the currently verified immutable digest and complete
 the migration preparation below. Keep that digest for rollback.
 
-Before upgrading, back up the volumes below and deploy the official service
+Before upgrading, back up the volumes below and deploy Beacon
 with its own Postgres database, email delivery, HTTPS origin and web bundle
-([official service setup](OFFICIAL-SERVICE.md)). Upgrade its binary and web bundle
+([Beacon setup](OFFICIAL-SERVICE.md)). Upgrade its binary and web bundle
 together before running the new `cairn claim`: earlier official binaries do not
 provide the device-review confirmation step. Sign in there. The installation
 and official service must use compatible relay protocols. Keep one relay process,
@@ -196,7 +196,7 @@ docker compose up -d
 For published images, use
 `docker compose pull && docker compose up -d` and pin `CAIRN_IMAGE` to a verified
 `ghcr.io/leo91000/cairn:sha-<full-commit>` tag for controlled upgrades.
-Port 4310 is private machine traffic. The official service terminates browser
+Port 4310 is private machine traffic. Beacon terminates browser
 access and receives the installation's outbound relay connection.
 
 The Compose file persists:
@@ -317,7 +317,7 @@ build starts at that deadline. Production deployment jobs remain serialized.
 Main, PR and manual workflows never deploy.
 
 The GitHub `production` environment requires the secret `COOLIFY_TOKEN` and
-variables `COOLIFY_URL`, `COOLIFY_SERVICE_UUID` (**new official service UUID**)
+variables `COOLIFY_URL`, `COOLIFY_SERVICE_UUID` (**new Beacon UUID**)
 and `CAIRN_BEACON_ORIGIN=https://cairn.build`. Require Léo’s environment approval.
 The obsolete `CAIRN_PUBLIC_URL` and standalone-manager deployment target are no
 longer used by the CLI. The script refuses a manager/runner Compose target.
@@ -431,14 +431,14 @@ main pipeline's exact image.
 
 ### Task-author security upgrade (#59)
 
-Deploy the official service before upgrading installations for the task-author
+Deploy Beacon before upgrading installations for the task-author
 checks. Startup applies the additive `202610072155_task_author_access` migration
 with the existing SQLx migrator; historical migration numbers and checksums stay
 unchanged. Existing memberships receive access identifiers automatically.
 An upgraded manager cannot reconnect to an older official binary that lacks
 `/api/relay/{installation}/task-authors`: its 404 defers scheduled admissions
 and keeps the relay offline. Keep the upgraded official service while rolling
-back an installation. Rolling back the official service requires its matching
+back an installation. Rolling back Beacon requires its matching
 Postgres backup and compatible managers; older managers also restore the previous
 task-author/public-link rules, so suspend shared access during that rollback.
 

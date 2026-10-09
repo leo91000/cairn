@@ -320,7 +320,7 @@ that file. Recipients need no session. Revoking visibility or moving a
 conversation to trash invalidates the link; republication creates a new link.
 An offline installation returns 503 with an explicit offline message.
 
-The official service imposes no-store, nosniff, a sandbox CSP, no-referrer and
+Beacon imposes no-store, nosniff, a sandbox CSP, no-referrer and
 noindex headers on public responses, including errors. Headers from an
 installation cannot relax this policy. Downloads and byte ranges use the
 anonymous CORS policy (`Access-Control-Allow-Origin: *`, without credentials) and
@@ -553,7 +553,7 @@ Only supported HTTPS browser push endpoints are accepted.
 
 Configure `CAIRN_BEACON_VAPID_PRIVATE_KEY` (the base64url P-256 private key) and
 `CAIRN_BEACON_VAPID_SUBJECT` (an operator contact, `mailto:…` or an HTTPS URL) in
-the official service's private operator environment. The public key is derived
+Beacon's private operator environment. The public key is derived
 from that private key and is the only VAPID material returned to browsers. Keys
 are never generated or stored by an installation. With no VAPID configuration,
 the notification panel reports that push is unavailable. Keep the same operator
@@ -569,7 +569,7 @@ the account foreign key. Provider 4xx responses other than 429 remove the
 registration, including stale VAPID credentials (401/403). Rate limits (429),
 server errors and transport failures remain retryable.
 
-The official service keeps event content and delivery work only in bounded
+Beacon keeps event content and delivery work only in bounded
 memory. The installation retains events for up to one hour until acknowledged;
 transient failures or tunnel loss retry without interrupting agent execution.
 Delivery is at least once: interruption after a provider accepted a push can

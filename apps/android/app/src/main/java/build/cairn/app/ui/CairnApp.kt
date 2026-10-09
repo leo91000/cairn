@@ -99,7 +99,7 @@ private fun CairnAppContent(
     if (state.restoringSession) {
         Page {
             Heading(
-                "Connexion au service officiel",
+                "Connexion à Beacon",
                 "Votre session est conservée sur cet appareil.",
             )
             Text(state.error.orEmpty())
@@ -147,12 +147,12 @@ private fun CairnAppContent(
         Page {
             Heading(
                 "Aucune installation",
-                "Ajoutez ou revendiquez une installation depuis le service officiel.",
+                "Ajoutez ou revendiquez une installation depuis Beacon.",
             )
             Text(state.session.account?.email.orEmpty())
             Text("Les installations de votre compte Cairn apparaîtront ici.")
             Text(
-                "Obtenez la commande d’installation dans le service officiel, ou associez une installation existante avec cairn claim."
+                "Obtenez la commande d’installation dans Beacon, ou associez une installation existante avec cairn claim."
             )
             Button(onClick = { browse(context, state.origin.trimEnd('/') + "/claim") }) {
                 Text("Ajouter une installation")
@@ -524,9 +524,7 @@ private fun LoginScreen(vm: CairnViewModel, state: Workspace) {
                     Heading("Bienvenue dans Cairn", "Connectez-vous à votre compte Cairn.")
                     Panel {
                         if (state.origin.isBlank()) {
-                            Text(
-                                "Le service officiel n’est pas configuré dans cette version de l’application."
-                            )
+                            Text("Beacon n’est pas configuré dans cette version de l’application.")
                         } else if (state.emailForCode == null) {
                             OutlinedTextField(
                                 email,

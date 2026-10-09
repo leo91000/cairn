@@ -34,7 +34,7 @@ See [microVM requirements and architecture](docs/MICROVMS.md).
 
 ```sh
 cp .env.example .env
-# Configure CAIRN_BEACON_ORIGIN for the separate official service.
+# Configure CAIRN_BEACON_ORIGIN for Beacon.
 codex_version=$(npm view @openai/codex version)
 gh_version=$(gh api repos/cli/cli/releases/latest --jq '.tag_name | ltrimstr("v")')
 docker compose build --build-arg CODEX_VERSION="$codex_version" --build-arg GH_VERSION="$gh_version"
@@ -93,7 +93,7 @@ Run `pnpm prepare` to reinstall the hook.
 See [formatting and readability](docs/FORMATTING.md) for setup, commands, and CI checks.
 
 The official app is at `http://localhost:4311` with a development mailbox at
-`http://localhost:8025`; see [official service setup](docs/OFFICIAL-SERVICE.md).
+`http://localhost:8025`; see [Beacon setup](docs/OFFICIAL-SERVICE.md).
 Build the web bundle after edits, and claim a separately running installation
 with `cairn claim`. `pnpm dev` runs the official binary and Vite; configure its database, email
 delivery and `CAIRN_BEACON_ORIGIN=http://localhost:5178` as described in that

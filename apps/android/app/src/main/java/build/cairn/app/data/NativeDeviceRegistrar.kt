@@ -72,7 +72,7 @@ class NativeDeviceRegistrar(
         }
         api.csrf = session.csrf.orEmpty()
         require(api.get<AndroidPushConfiguration>("/account/notifications/android").enabled) {
-            "Le service officiel ne propose pas les notifications Android actuellement."
+            "Beacon ne propose pas les notifications Android actuellement."
         }
         val token = tokens.token()
         val fingerprint =
