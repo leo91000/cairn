@@ -1,10 +1,12 @@
 package dev.leo.manager.ui
 
 import android.app.Application
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.ui.test.*
 import androidx.compose.ui.test.junit4.v2.createComposeRule
 import androidx.test.core.app.ApplicationProvider
 import dev.leo.manager.data.*
+import kotlinx.coroutines.flow.first
 import kotlinx.serialization.json.*
 import okhttp3.mockwebserver.*
 import org.junit.Assert.*
@@ -125,6 +127,127 @@ abstract class NativeAccountCases {
             assertTrue(
                 vault.read(server.url("/").toString()).orEmpty().startsWith("leo_session=leo;")
             )
+        }
+    }
+
+    fun refusedPushRenewalTurnsOffAndExplainsRecovery() {
+        val application = ApplicationProvider.getApplicationContext<Application>()
+        val preferences = NotificationPreferences(application)
+        val vault = sessionVault(application)
+        val registered = java.util.concurrent.atomic.AtomicBoolean(true)
+        val registrationAttempts = java.util.concurrent.atomic.AtomicInteger()
+        val installations = java.util.concurrent.atomic.AtomicReference("[]")
+        val recoveryNotice =
+            "Les notifications push ont été désactivées. Confirmez votre identité par e-mail ou passkey dans les réglages du compte, puis réactivez-les."
+        val pushToggle = hasText("Notifications push")
+        val tokens =
+            object : PushTokens {
+                override val available = true
+
+                override suspend fun token() = "device-token"
+
+                override suspend fun delete() = Unit
+            }
+        MockWebServer().use { server ->
+            server.dispatcher =
+                object : Dispatcher() {
+                    override fun dispatch(request: RecordedRequest): MockResponse =
+                        when {
+                            request.path == "/api/account/session" ->
+                                MockResponse()
+                                    .setBody(
+                                        """{"authenticated":true,"csrf":"csrf","account":{"id":"push-person","email":"alice@example.test"},"installations":${installations.get()}}"""
+                                    )
+                            request.path == "/api/installations" ->
+                                MockResponse().setBody(installations.get())
+                            request.path == "/api/account/notifications/android" &&
+                                request.method == "GET" ->
+                                MockResponse().setBody("""{"enabled":true}""")
+                            request.path ==
+                                "/api/account/notifications/subscriptions/push-registration" ->
+                                MockResponse().setBody("""{"registered":${registered.get()}}""")
+                            request.path == "/api/account/notifications/android" &&
+                                request.method == "POST" -> {
+                                registrationAttempts.incrementAndGet()
+                                if (registered.get())
+                                    MockResponse().setBody("""{"id":"push-registration"}""")
+                                else
+                                    MockResponse()
+                                        .setResponseCode(403)
+                                        .setBody("""{"error":"Confirm identity"}""")
+                            }
+                            else -> MockResponse().setResponseCode(404).setBody("{}")
+                        }
+                }
+            server.start()
+            val origin = server.url("/").toString()
+            vault.write(origin, "leo_session=push-fixture; Path=/; Max-Age=3600; HttpOnly")
+            val registrar = NativeDeviceRegistrar(application, vault, origin, tokens)
+            kotlinx.coroutines.runBlocking { registrar.enable() }
+            val vm = LeoViewModel(application, vault, origin)
+            val currentVm = mutableStateOf(vm)
+            val showingHome = mutableStateOf(false)
+            compose.setContent {
+                LeoTheme {
+                    if (showingHome.value) LeoApp(vm = currentVm.value)
+                    else NotificationSettings(currentVm.value)
+                }
+            }
+            compose.waitUntil(10_000) {
+                compose.onAllNodes(pushToggle and isOn()).fetchSemanticsNodes().isNotEmpty()
+            }
+            compose.onNodeWithText("Notifications push").assertIsOn()
+
+            registered.set(false)
+            kotlinx.coroutines.runBlocking {
+                try {
+                    registrar.register()
+                } catch (error: ApiException) {
+                    assertEquals(403, error.status)
+                }
+                assertFalse(preferences.enabled.first())
+                assertTrue(NotificationPreferences(application).nativeReenrollmentRequired.first())
+                // A later background token callback must not silently re-enroll this device.
+                registrar.register()
+            }
+            assertEquals(2, registrationAttempts.get())
+            compose.waitUntil(10_000) {
+                compose.onAllNodesWithText(recoveryNotice).fetchSemanticsNodes().isNotEmpty() &&
+                    compose.onAllNodes(pushToggle and isOff()).fetchSemanticsNodes().isNotEmpty()
+            }
+            compose.onNodeWithText("Notifications push").assertIsOff()
+            compose.onNodeWithText(recoveryNotice).assertIsDisplayed()
+
+            // Reopening the app must explain the disabled push even with an offline installation.
+            installations.set(
+                """[{"id":"push-home","name":"Maison","role":"owner","online":false}]"""
+            )
+            compose.runOnIdle {
+                currentVm.value = LeoViewModel(application, vault, origin)
+                showingHome.value = true
+            }
+            compose.waitUntil(10_000) {
+                compose
+                    .onAllNodesWithText("Maison · Hors ligne")
+                    .fetchSemanticsNodes()
+                    .isNotEmpty() &&
+                    compose.onAllNodesWithText(recoveryNotice).fetchSemanticsNodes().isNotEmpty()
+            }
+            compose.onNodeWithText(recoveryNotice).assertIsDisplayed()
+            compose.runOnIdle { showingHome.value = false }
+
+            registered.set(true)
+            kotlinx.coroutines.runBlocking {
+                registrar.enable()
+                assertTrue(preferences.enabled.first())
+            }
+            compose.waitUntil(10_000) {
+                compose.onAllNodesWithText(recoveryNotice).fetchSemanticsNodes().isEmpty() &&
+                    compose.onAllNodes(pushToggle and isOn()).fetchSemanticsNodes().isNotEmpty()
+            }
+            compose.onNodeWithText("Notifications push").assertIsOn()
+            assertEquals(3, registrationAttempts.get())
+            kotlinx.coroutines.runBlocking { registrar.disable() }
         }
     }
 

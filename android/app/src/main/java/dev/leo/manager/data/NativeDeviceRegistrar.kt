@@ -18,8 +18,10 @@ interface PushTokens {
 }
 
 private val nativeDeviceKey = stringPreferencesKey("native_push_device")
-private val nativeRegistrationKey = stringPreferencesKey("native_push_registration")
-private val nativeRegistrationScopeKey = stringPreferencesKey("native_push_registration_scope")
+internal val nativeRegistrationKey = stringPreferencesKey("native_push_registration")
+internal val nativeRegistrationScopeKey = stringPreferencesKey("native_push_registration_scope")
+internal val nativeRegistrationRevisionKey =
+    stringPreferencesKey("native_push_registration_revision")
 
 @Serializable private data class AndroidPushConfiguration(val enabled: Boolean = false)
 
@@ -99,17 +101,27 @@ class NativeDeviceRegistrar(
             "La session du compte Leo a changé."
         }
         val registration =
-            api.send<RegisteredDevice>(
-                "POST",
-                "/account/notifications/android",
-                body("deviceId" to deviceId, "token" to token),
-            )
+            try {
+                api.send<RegisteredDevice>(
+                    "POST",
+                    "/account/notifications/android",
+                    body("deviceId" to deviceId, "token" to token),
+                )
+            } catch (error: ApiException) {
+                if (error.status == 403 && vault.read(origin.toString()) == originalCookie) {
+                    NotificationPreferences(context)
+                        .requireNativeReenrollment(stored[nativeRegistrationRevisionKey])
+                }
+
+                throw error
+            }
         require(vault.read(origin.toString()) == originalCookie) {
             "La session du compte Leo a changé."
         }
         context.dataStore.edit {
             it[nativeRegistrationKey] = registration.id
             it[nativeRegistrationScopeKey] = scope
+            it[nativeRegistrationRevisionKey] = UUID.randomUUID().toString()
         }
     }
 
