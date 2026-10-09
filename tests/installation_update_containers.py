@@ -9,6 +9,7 @@ import json
 import os
 from pathlib import Path
 import re
+import shlex
 import shutil
 import socket
 import subprocess
@@ -25,13 +26,23 @@ BASE = 'python:3.13-slim-trixie@sha256:3dd7cc108ec1493442514f5c2a871af6af0ec31d7
 
 
 def command(args, timeout=180, **kwargs):
+    root = Path(kwargs.get('env', {}).get('CAIRN_INSTALLATION_ROOT', '/nonexistent'))
+    failures = root / 'docker-failures.jsonl'
+    seen = failures.stat().st_size if failures.exists() else 0
     try:
         return subprocess.check_output(args, stderr=subprocess.PIPE, timeout=timeout, **kwargs)
     except subprocess.CalledProcessError as error:
-        # Fixture commands contain only synthetic credentials; expose the
-        # supervisor's safe error instead of hiding the reason in CI.
-        details = error.stderr.decode(errors='replace')
-        raise RuntimeError(f'Container fixture command failed:\n{details}') from error
+        # The supervisor discards Docker's stderr. The fixture's Docker seam
+        # records the real failed commands, with fixture secrets redacted.
+        details = [f'$ {shlex.join(map(str, args))}', f'exit {error.returncode}',
+                   error.stderr.decode(errors='replace').rstrip()]
+        if failures.exists():
+            with failures.open() as log:
+                log.seek(seen)
+                for record in map(json.loads, log):
+                    details += [f'Docker command failed: $ {shlex.join(record["args"])}',
+                                f'exit {record["exit"]}', record['stderr'].rstrip()]
+        raise RuntimeError('Container fixture command failed:\n' + '\n'.join(details)) from error
 
 
 def port():
@@ -164,7 +175,21 @@ if 'ps' in args:
     sys.exit(0)
 if 'exec' in args:
     args[-1] = args[-1].replace('127.0.0.1:4310', '127.0.0.1:' + os.environ['FIXTURE_MANAGER_PORT'])
-sys.exit(subprocess.run([os.environ['FIXTURE_DOCKER'], *args]).returncode)
+result = subprocess.run([os.environ['FIXTURE_DOCKER'], *args], stderr=subprocess.PIPE)
+stderr = result.stderr.decode(errors='replace')
+sys.stderr.write(stderr)
+if result.returncode:
+    manager = json.loads(source.read_text())['services']['manager']
+    secrets = [manager['environment'].get('CAIRN_INSTALLATION_CLAIM_CODE', '')]
+    token = root / 'data/maintenance-token'
+    if token.exists():
+        secrets.append(token.read_text().strip())
+    record = json.dumps({'args': ['docker', *args], 'exit': result.returncode, 'stderr': stderr})
+    for secret in filter(None, secrets):
+        record = record.replace(secret, '<REDACTED>')
+    with open(root / 'docker-failures.jsonl', 'a') as log:
+        log.write(record + '\\n')
+sys.exit(result.returncode)
 ''')
             (root / 'bin/docker').chmod(0o755)
             healthcheck = {'test': ['CMD', 'node', '-e',
