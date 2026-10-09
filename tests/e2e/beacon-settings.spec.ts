@@ -19,6 +19,12 @@ test('the header and settings sections support keyboard navigation, deep links a
   await expect(page.getByRole('heading', { name: 'Settings', exact: true })).toBeVisible()
   await expect(page.getByRole('heading', { name: 'Worker environment', exact: true })).toBeVisible()
 
+  await page.getByRole('button', { name: 'Rename installation', exact: true }).click()
+  const general = await page.getByRole('heading', { name: 'General', exact: true }).boundingBox()
+  const nameField = await page.getByRole('textbox', { name: 'Installation name', exact: true }).boundingBox()
+  expect(nameField!.x).toBeCloseTo(general!.x, 0)
+  await page.getByRole('button', { name: 'Cancel', exact: true }).click()
+
   const account = header.getByRole('button', { name: 'Account', exact: true })
   await account.press('ArrowDown')
   const menu = page.getByRole('menu', { name: 'Account', exact: true })
@@ -34,6 +40,20 @@ test('the header and settings sections support keyboard navigation, deep links a
   await account.click()
   await page.getByRole('heading', { name: 'Settings', exact: true }).click()
   await expect(menu).not.toBeVisible()
+  await expect(account).toBeFocused()
+
+  await account.click()
+  await expect(menu.getByRole('menuitem', { name: 'Account settings', exact: true })).toBeFocused()
+  await account.evaluate((trigger) => {
+    trigger.dataset.focusCount = '0'
+    trigger.addEventListener('focus', () => trigger.dataset.focusCount = String(Number(trigger.dataset.focusCount) + 1))
+  })
+  const mcpUrl = page.getByRole('textbox', { name: 'MCP server URL', exact: true })
+  await mcpUrl.click()
+  await expect(menu).not.toBeVisible()
+  await expect(mcpUrl).toBeFocused()
+  await expect(account).toHaveAttribute('data-focus-count', '0')
+
   await account.press('ArrowDown')
   await page.keyboard.press('Enter')
   await expect(page).toHaveURL(/\/settings\/account$/)
@@ -55,14 +75,29 @@ test('the header and settings sections support keyboard navigation, deep links a
   await page.goForward()
   await expect(page).toHaveURL(/\/settings\/sensitive$/)
 
+  await page.goto(workspacePath('/settings'))
+  await expect(page.getByRole('heading', { name: 'Profile', exact: true })).toBeVisible()
+  await expect(sections.getByRole('link', { name: 'Account', exact: true })).toHaveAttribute('aria-current', 'page')
+  await expect(sections.locator('[aria-current]')).toHaveCount(1)
+
   await page.setViewportSize({ width: 390, height: 844 })
   await page.goto(workspacePath('/settings'))
+  await expect(sections.locator('[aria-current]')).toHaveCount(0)
   await sections.getByRole('link', { name: 'Account', exact: true }).click()
   await expect(page.getByRole('button', { name: 'Back to settings', exact: true })).toBeVisible()
   await page.getByRole('button', { name: 'Back to settings', exact: true }).click()
   await expect(page).toHaveURL(/\/settings$/)
   await expect(sections.getByRole('link', { name: 'Account', exact: true })).toBeVisible()
+  await page.goForward()
+  await expect(page).toHaveURL(/\/settings\/account$/)
+  await page.goBack()
+  await expect(page).toHaveURL(/\/settings$/)
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
+
+  await page.goto(workspacePath('/settings/sensitive'))
+  await page.getByRole('button', { name: 'Back to settings', exact: true }).click()
+  await expect(page).toHaveURL(/\/settings$/)
+  await expect(sections.getByRole('link', { name: 'Sensitive zone', exact: true })).toBeVisible()
 })
 
 test('a member can deep-link to Settings without exposing owner controls or requesting owner data', async ({ page }) => {
