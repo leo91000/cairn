@@ -40,7 +40,6 @@ test('the header and settings sections support keyboard navigation, deep links a
   await account.click()
   await page.getByRole('heading', { name: 'Settings', exact: true }).click()
   await expect(menu).not.toBeVisible()
-  await expect(account).toBeFocused()
 
   await account.click()
   await expect(menu.getByRole('menuitem', { name: 'Account settings', exact: true })).toBeFocused()
@@ -185,10 +184,27 @@ test('an installation awaiting an update still permits account and installation 
     const installations = await response.json()
     await route.fulfill({ json: installations.map((installation: object) => ({ ...installation, updateRequired: true })) })
   })
+  // The beacon closes an incompatible tunnel, so relayed installation requests fail.
+  const unavailable = '**/api/installations/*/api/**'
+  await page.route(unavailable, route => route.fulfill({ status: 503, json: { error: 'Installation unavailable' } }))
+  const installationDataRequests: string[] = []
+  page.on('request', (request) => {
+    if (/\/(?:api\/settings|api\/audit|tokens)(?:\?|$)/.test(request.url()))
+      installationDataRequests.push(request.url())
+  })
   await page.reload()
   await expect(page.getByRole('alert')).toContainText('Mise à jour nécessaire')
   await page.getByRole('button', { name: 'Installation settings', exact: true }).click()
   await expect(page.getByRole('heading', { name: 'General', exact: true })).toBeVisible()
+  await expect(page.getByRole('heading', { name: 'Members & invitations', exact: true })).toBeVisible()
+  await expect(page.getByRole('alert')).toHaveCount(1)
+  await expect(page.getByRole('heading', { name: 'Worker environment', exact: true })).toHaveCount(0)
+  expect(installationDataRequests).toEqual([])
+
+  await page.unroute('**/api/installations')
+  await page.unroute(unavailable)
+  await expect(page.getByRole('heading', { name: 'Worker environment', exact: true })).toBeVisible({ timeout: 20000 })
+  await expect(page.getByRole('alert')).toHaveCount(0)
   await page.getByRole('navigation', { name: 'Settings sections' }).getByRole('link', { name: 'Sensitive zone', exact: true }).click()
   await expect(page.getByRole('button', { name: 'Detach installation', exact: true })).toBeVisible()
   await page.getByRole('button', { name: 'Account', exact: true }).click()

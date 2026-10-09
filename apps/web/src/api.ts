@@ -22,6 +22,7 @@ export const state = reactive({
   csrf: '',
   installationId,
   installationOnline: undefined as boolean | undefined,
+  installationUpdateRequired: false,
   accountId: '',
   installationRole: 'owner' as 'owner' | 'member',
   agents: [] as Agent[],

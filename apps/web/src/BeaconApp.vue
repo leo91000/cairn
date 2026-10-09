@@ -110,6 +110,7 @@ watch(session, (value) => {
   const requested = state.installationId
   installation.value = value.installations.find(item => item.id === requested) || null
   state.installationOnline = installation.value?.online
+  state.installationUpdateRequired = installation.value?.updateRequired ?? false
   if (requested && !installation.value) {
     error.value = 'This installation is unavailable or no longer accessible to your Cairn account.'
     return
@@ -492,7 +493,9 @@ async function refreshAvailability() {
       item.updateRequired = status?.updateRequired ?? false
     }
 
-    state.installationOnline = current.installations.find(item => item.id === state.installationId)?.online
+    const currentInstallation = current.installations.find(item => item.id === state.installationId)
+    state.installationOnline = currentInstallation?.online
+    state.installationUpdateRequired = currentInstallation?.updateRequired ?? false
 
     availabilityFailures = 0
   }

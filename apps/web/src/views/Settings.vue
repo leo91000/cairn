@@ -5,6 +5,7 @@ import {
   onBeforeUnmount,
   onMounted,
   ref,
+  watch,
 } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import {
@@ -67,11 +68,13 @@ async function load() {
   }
 }
 
-onMounted(() => {
-  phoneQuery.addEventListener('change', onPhone)
-  if (section.value === 'installation' && state.installationRole === 'owner')
+// An installation awaiting an update cannot answer; load its settings once it can.
+watch(() => section.value === 'installation' && state.installationRole === 'owner' && !state.installationUpdateRequired, (available) => {
+  if (available)
     void load()
-})
+}, { immediate: true })
+
+onMounted(() => phoneQuery.addEventListener('change', onPhone))
 onBeforeUnmount(() => phoneQuery.removeEventListener('change', onPhone))
 
 // Return to the section list this screen was opened from; a deep link has no such entry.

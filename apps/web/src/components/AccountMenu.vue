@@ -67,13 +67,10 @@ function navigate(event: KeyboardEvent) {
   }
 }
 
-// A click on another control keeps the focus it gives; elsewhere the trigger takes it back.
+// Focus follows the outside click; only Escape and menu actions return it to the trigger.
 function outside(event: Event) {
-  if (!open.value || !(event.target instanceof Node) || root.value?.contains(event.target))
-    return
-
-  const focusTarget = event.target instanceof Element && event.target.closest('a[href], button:not(:disabled), input:not(:disabled), select:not(:disabled), textarea:not(:disabled), summary, [tabindex], [contenteditable]')
-  close(event.type === 'pointerdown' && !focusTarget)
+  if (open.value && event.target instanceof Node && !root.value?.contains(event.target))
+    close(false)
 }
 
 watch(() => props.disabled, disabled => disabled && close())
