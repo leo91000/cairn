@@ -103,9 +103,9 @@ class SignalJourneyTest {
     @org.junit.After
     fun finish() = androidx.work.testing.WorkManagerTestInitHelper.closeWorkDatabase()
 
-    private fun stream(state: LiveState): MockResponse {
+    private fun stream(state: LiveState, events: List<RunEvent> = emptyList()): MockResponse {
         val frame =
-            "event: batch\nid: 1\ndata: ${wireJson.encodeToString(LiveBatch(emptyList(), state, true, false))}\n\n"
+            "event: batch\nid: 1\ndata: ${wireJson.encodeToString(LiveBatch(events, state, true, false))}\n\n"
         return MockResponse()
             .setHeader("Content-Type", "text/event-stream")
             .setBody(frame + ": keepalive\n\n".repeat(100000))
@@ -115,7 +115,11 @@ class SignalJourneyTest {
     private fun json(body: String) =
         MockResponse().setHeader("Content-Type", "application/json").setBody(body)
 
-    private fun journey(claudeConnected: Boolean = true, body: (LeoViewModel) -> Unit) {
+    private fun journey(
+        claudeConnected: Boolean = true,
+        liveEvents: List<RunEvent> = emptyList(),
+        body: (LeoViewModel) -> Unit,
+    ) {
         MockWebServer().use { server ->
             server.dispatcher =
                 object : Dispatcher() {
@@ -183,7 +187,8 @@ class SignalJourneyTest {
                                         chat =
                                             chats.find { it.id == id }
                                                 ?: Chat(id, agentId = "designer")
-                                    )
+                                    ),
+                                    if (id == "live") liveEvents else emptyList(),
                                 )
                             }
                             path.startsWith("/api/installations/fixture/api/chats/") &&
@@ -322,6 +327,56 @@ class SignalJourneyTest {
         compose.onNodeWithText("Répondre").performClick()
         waitDescription("Changer de conversation : Choisir la pagination")
     }
+
+    @Test
+    fun `a conversation waiting for a background task says so instead of working`() =
+        journey(
+            liveEvents =
+                listOf(
+                    RunEvent(
+                        1,
+                        now - 20 * 60_000,
+                        "chat.user",
+                        "Surveille la CI de la PR 77",
+                        mapOf("text" to JsonPrimitive("Surveille la CI de la PR 77")),
+                    ),
+                    RunEvent(
+                        2,
+                        now - 13 * 60_000,
+                        "turn.waiting",
+                        "",
+                        mapOf(
+                            "type" to JsonPrimitive("turn.waiting"),
+                            "tasks" to
+                                buildJsonArray {
+                                    addJsonObject {
+                                        put("id", "ci")
+                                        put("description", "Wait for PR 77 update and completed CI")
+                                    }
+                                },
+                        ),
+                    ),
+                )
+        ) {
+            waitText("Refonte de l’application")
+            compose.onNodeWithText("Refonte de l’application").performClick()
+            compose.waitUntil(15000) {
+                compose.onAllNodesWithTag("agent-waiting").fetchSemanticsNodes().isNotEmpty()
+            }
+            compose
+                .onNodeWithTag("agent-waiting")
+                .assert(
+                    hasContentDescription(
+                        "En attente d’une tâche en arrière-plan : Wait for PR 77 update and completed CI. L’agent reprend quand elle se termine."
+                    )
+                )
+            compose.onAllNodesWithTag("agent-working").assertCountEquals(0)
+            // The header no longer says the agent works; the wait is timed from its start.
+            compose
+                .onNodeWithText("Tâche en arrière-plan · 13 min", useUnmergedTree = true)
+                .assertExists()
+            capture("chat-background-wait-light")
+        }
 
     @Test
     fun `search finds missions and conversations and launches a mission`() = journey {

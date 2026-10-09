@@ -25,6 +25,33 @@ class ActivityPresentationTest {
         )
 
     @Test
+    fun `background waits are labelled in the activity log`() {
+        fun waiting(vararg descriptions: String) =
+            RunEvent(
+                1,
+                1000,
+                "turn.waiting",
+                "",
+                mapOf(
+                    "type" to JsonPrimitive("turn.waiting"),
+                    "tasks" to
+                        buildJsonArray {
+                            descriptions.forEach { addJsonObject { put("description", it) } }
+                        },
+                ),
+            )
+        val waiting = presentActivity(waiting("Build", "Watch CI"))
+        assertEquals(ActivityKind.NOTICE, waiting.kind)
+        assertEquals("En attente de tâches en arrière-plan", waiting.title)
+        assertEquals("Build · Watch CI", waiting.subtitle)
+        assertEquals("", waiting.output)
+        val finished = presentActivity(waiting())
+        assertEquals("Tâches en arrière-plan terminées", finished.title)
+        assertEquals("", finished.subtitle)
+        assertEquals("", finished.output)
+    }
+
+    @Test
     fun `session events from screenshot have human summaries and no JSON body`() {
         val done = presentActivity(event("turn.completed", """{"type":"turn.completed"}"""))
         assertEquals("Travail terminé", done.title)

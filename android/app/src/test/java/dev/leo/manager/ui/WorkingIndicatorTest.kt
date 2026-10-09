@@ -15,6 +15,8 @@ import dev.leo.manager.data.RunEvent
 import java.io.File
 import kotlinx.serialization.json.*
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -45,6 +47,26 @@ class WorkingIndicatorTest {
         )
 
     private fun user(id: Long, at: Long) = RunEvent(id, at, "chat.user", "Vérifie les tests")
+
+    private fun waiting(id: Long, at: Long, vararg descriptions: String) =
+        RunEvent(
+            id,
+            at,
+            "turn.waiting",
+            "",
+            mapOf(
+                "type" to JsonPrimitive("turn.waiting"),
+                "tasks" to
+                    buildJsonArray {
+                        descriptions.forEachIndexed { index, description ->
+                            addJsonObject {
+                                put("id", "task-$index")
+                                put("description", description)
+                            }
+                        }
+                    },
+            ),
+        )
 
     @Test
     fun `the step in progress is named with its command`() {
@@ -93,6 +115,129 @@ class WorkingIndicatorTest {
         val step = workingStep(listOf(user(1, 1), tool(2, "cargo test", exit = 101)), "Leo", null)
         assertEquals("Leo travaille", step.title)
         assertEquals("Dernière étape : Exécuter les tests", step.detail)
+    }
+
+    @Test
+    fun `an idle agent waiting for background tasks is timed from when it began waiting`() {
+        val events =
+            listOf(
+                user(1, 1000),
+                tool(2, "pnpm test > log 2>&1"),
+                waiting(3, 9000, "Rebuild and run regression test"),
+            )
+        val wait = backgroundWait(events)
+        assertEquals(BackgroundWait(listOf("Rebuild and run regression test"), 9000), wait)
+        assertEquals(
+            WorkingStep(
+                "En attente d’une tâche en arrière-plan",
+                "Rebuild and run regression test",
+                9000,
+                waiting = listOf("Rebuild and run regression test"),
+            ),
+            waitingStep(wait!!),
+        )
+        assertEquals(
+            "En attente de 2 tâches en arrière-plan",
+            waitingStep(BackgroundWait(listOf("Build", "Watch CI"), 1)).title,
+        )
+        // A task without a description still counts.
+        assertEquals(
+            listOf("Tâche en arrière-plan", "Watch CI"),
+            backgroundWait(listOf(waiting(1, 1, " ", "Watch CI")))?.tasks,
+        )
+    }
+
+    @Test
+    fun `task list changes preserve the start of an uninterrupted background wait`() {
+        val events =
+            listOf(
+                user(1, 1000),
+                waiting(2, 2000, "Build", "Watch CI"),
+                RunEvent(3, 2500, "diagnostic", "Reconnecting"),
+                waiting(4, 3000, "Watch CI"),
+            )
+        assertEquals(BackgroundWait(listOf("Watch CI"), 2000), backgroundWait(events))
+        assertEquals(
+            BackgroundWait(listOf("Next build"), 5000),
+            backgroundWait(events + waiting(5, 4000) + waiting(6, 5000, "Next build")),
+        )
+        assertEquals(
+            BackgroundWait(listOf("Next build"), 5000),
+            backgroundWait(
+                events + tool(5, "cat log", running = true) + waiting(6, 5000, "Next build")
+            ),
+        )
+    }
+
+    @Test
+    fun `the wait ends once the tasks finish, the agent acts again or the user writes`() {
+        val announced = listOf(user(1, 1000), waiting(2, 2000, "Build"))
+        assertNull(backgroundWait(emptyList()))
+        assertNotNull(backgroundWait(announced))
+        assertNull(backgroundWait(announced + waiting(3, 3000)))
+        assertNull(backgroundWait(announced + tool(3, "cat log", running = true)))
+        assertNull(backgroundWait(announced + user(3, 3000)))
+        assertNull(backgroundWait(announced + RunEvent(3, 3000, "turn.started", "")))
+        // Connection diagnostics do not mean the agent is working again.
+        assertNotNull(backgroundWait(announced + RunEvent(3, 3000, "diagnostic", "Reconnecting")))
+    }
+
+    @Test
+    fun `the background wait lists its first tasks and announces when the agent resumes`() {
+        var dark by androidx.compose.runtime.mutableStateOf(false)
+        val started = System.currentTimeMillis() - 725_000
+        compose.mainClock.autoAdvance = false
+        compose.setContent {
+            LeoTheme(if (dark) "dark" else "light") {
+                Column(Modifier.background(MaterialTheme.colorScheme.background).padding(20.dp)) {
+                    WorkingIndicator(
+                        waitingStep(BackgroundWait(listOf("Wait for PR 77 CI"), started))
+                    )
+                    Spacer(Modifier.height(20.dp))
+                    WorkingIndicator(
+                        waitingStep(
+                            BackgroundWait(
+                                listOf("Build", "Watch CI", "Rebuild the index", "Deploy"),
+                                started,
+                            )
+                        )
+                    )
+                }
+            }
+        }
+        compose.mainClock.advanceTimeBy(700)
+        compose.onAllNodesWithTag("agent-working").assertCountEquals(0)
+        val single = compose.onAllNodesWithTag("agent-waiting")[0]
+        single.assert(
+            SemanticsMatcher.expectValue(
+                SemanticsProperties.ContentDescription,
+                listOf(
+                    "En attente d’une tâche en arrière-plan : Wait for PR 77 CI. L’agent reprend quand elle se termine."
+                ),
+            )
+        )
+        single.assert(SemanticsMatcher.keyIsDefined(SemanticsProperties.LiveRegion))
+        compose
+            .onAllNodesWithTag("agent-waiting")[1]
+            .assert(
+                SemanticsMatcher.expectValue(
+                    SemanticsProperties.ContentDescription,
+                    listOf(
+                        "En attente de 4 tâches en arrière-plan : Build · Watch CI · Rebuild the index · Deploy. L’agent reprend quand elles se terminent."
+                    ),
+                )
+            )
+        // Three tasks at most, then a count of the others.
+        compose.onNodeWithText("+1", useUnmergedTree = true).assertExists()
+        compose.onNodeWithText("Deploy", useUnmergedTree = true).assertDoesNotExist()
+        // The time counts from the start of the wait.
+        compose
+            .onAllNodesWithText("12 min", substring = true, useUnmergedTree = true)
+            .assertCountEquals(2)
+        capture("waiting-light")
+        compose.runOnIdle { dark = true }
+        compose.mainClock.advanceTimeBy(700)
+        capture("waiting-dark")
     }
 
     @Test

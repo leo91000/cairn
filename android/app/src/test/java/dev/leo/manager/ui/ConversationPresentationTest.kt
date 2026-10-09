@@ -118,4 +118,62 @@ class ConversationPresentationTest {
             taskGroup(Task(), run.copy(outcome = run.outcome.copy(status = "completed"))),
         )
     }
+
+    @Test
+    fun `the header names a background wait, a failure or an interruption`() {
+        val run = Run("run", status = "running", startedAt = 1)
+        val chat = Chat("chat", agentName = "Leo", projectName = "Site", run = run)
+        assertEquals(
+            ConversationState("Leo · Site", "Leo travaille"),
+            conversationState(chat, "Leo", null),
+        )
+        assertEquals(
+            ConversationState("Leo · Site", "Tâche en arrière-plan"),
+            conversationState(chat, "Leo", BackgroundWait(listOf("Build"), 1)),
+        )
+        assertEquals(
+            "2 tâches en arrière-plan",
+            conversationState(chat, "Leo", BackgroundWait(listOf("Build", "Lint"), 1)).live,
+        )
+        // A wait announced earlier does not outlive the run.
+        val failed = chat.copy(run = run.copy(status = "failed"))
+        assertEquals(
+            ConversationState("Échec · Leo · Site", null),
+            conversationState(failed, "Leo", BackgroundWait(listOf("Build"), 1)),
+        )
+        assertEquals(
+            "Interrompue · Leo · Site",
+            conversationState(chat.copy(run = run.copy(status = "interrupted")), "Leo", null)
+                .status,
+        )
+        assertEquals("En pause", conversationState(chat.copy(paused = true), "Leo", null).status)
+        assertEquals(
+            "En attente",
+            conversationState(chat.copy(run = run.copy(status = "queued")), "Leo", null).status,
+        )
+        assertEquals(ConversationState("", null), conversationState(null, "Leo", null))
+    }
+
+    @Test
+    fun `a failed run explains why the response stopped`() {
+        val run = Run("run", status = "failed")
+        assertEquals(
+            "La réponse s’est arrêtée avant la fin. Reprenez la conversation pour continuer.",
+            conversationError(Chat("chat", run = run)),
+        )
+        assertEquals(
+            "Usage limit reached",
+            conversationError(Chat("chat", run = run.copy(error = "Usage limit reached"))),
+        )
+        // The conversation's own error comes first.
+        assertEquals(
+            "Upload failed",
+            conversationError(
+                Chat("chat", run = run.copy(error = "Usage limit reached"), error = "Upload failed")
+            ),
+        )
+        assertNull(conversationError(Chat("chat", run = run.copy(status = "succeeded"))))
+        assertNull(conversationError(Chat("chat", run = run.copy(error = " ", status = "running"))))
+        assertNull(conversationError(null))
+    }
 }

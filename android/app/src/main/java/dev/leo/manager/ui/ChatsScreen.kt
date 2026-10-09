@@ -410,6 +410,14 @@ internal fun ChatPage(
         }
     val loadOlder = rememberHistoryPaging(live, listState, positionReady && !gallery)
     val active = chat?.run?.active == true
+    val running = chat?.run?.status == "running"
+    val waitingTasks =
+        remember(live.events, running) {
+            if (running) backgroundWait(live.events) else null
+        }
+    val error = conversationError(chat)
+    var errorDismissed by
+        remember(error, chat?.id, chat?.run?.id, chat?.run?.finishedAt) { mutableStateOf(false) }
     val selectedAgent = state.agents.find { it.id == (chat?.agentId ?: agent) }
     val currentProvider = chat?.run?.snapshot?.agent?.provider ?: selectedAgent?.provider ?: "codex"
     val chosenProvider = provider.ifBlank { currentProvider }
@@ -612,6 +620,7 @@ internal fun ChatPage(
                 if (!fullscreen) {
                     val agentName =
                         chat?.agentName?.ifBlank { null } ?: selectedAgent?.name ?: "Agent"
+                    val conversation = conversationState(chat, agentName, waitingTasks)
                     ConversationHeader(
                         title =
                             chat?.title
@@ -619,20 +628,9 @@ internal fun ChatPage(
                                 ?: if (id == null) "Nouvelle conversation" else "Conversation",
                         agent = agentName,
                         agentKey = chat?.agentId ?: agent,
-                        status =
-                            when {
-                                chat == null -> ""
-                                chat.paused -> "En pause"
-                                chat.run?.status == "queued" -> "En attente"
-                                else ->
-                                    listOfNotNull(agentName, chat.projectName).joinToString(" · ")
-                            },
-                        live =
-                            if (chat?.run?.status == "running")
-                                listOf("$agentName travaille", elapsed(chat.run.startedAt))
-                                    .filter { it.isNotBlank() }
-                                    .joinToString(" · ")
-                            else null,
+                        status = conversation.status,
+                        live = conversation.live,
+                        liveSince = waitingTasks?.since ?: chat?.run?.startedAt,
                         back = {
                             persistDraft()
                             back()
@@ -807,7 +805,13 @@ internal fun ChatPage(
                         Text(
                             if (chat?.paused == true) "En pause"
                             else if (chat?.run?.status == "queued") "En attente"
-                            else if (active) "L’agent travaille…" else "Prêt"
+                            else if (waitingTasks != null) {
+                                val now = rememberNow(waitingTasks.since)
+                                "${waitingStep(waitingTasks).title} · ${elapsed(waitingTasks.since, now)}"
+                            } else if (active) "L’agent travaille…"
+                            else if (chat?.run?.status in listOf("failed", "interrupted"))
+                                statusLabel(chat?.run?.status.orEmpty())
+                            else "Prêt"
                         )
                         Text(
                             "${live.state?.artifacts?.size ?: 0} fichiers · ${questions.size} questions en attente"
@@ -819,13 +823,18 @@ internal fun ChatPage(
                             )
                         }
                     }
-                chat?.error?.let {
-                    Text(
-                        it,
-                        Modifier.padding(horizontal = 20.dp),
-                        color = MaterialTheme.colorScheme.error,
-                    )
-                }
+                if (error != null && !errorDismissed)
+                    Row(
+                        Modifier.fillMaxWidth().padding(start = 20.dp, end = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Text(
+                            error,
+                            Modifier.weight(1f),
+                            color = MaterialTheme.colorScheme.error,
+                        )
+                        ActionIcon("Masquer l’erreur", LeoIcons.Close) { errorDismissed = true }
+                    }
                 chatWaitNotice(chat?.run)?.let {
                     ChatWaitingNotice(it, openConnections, state.isOwner)
                 }
@@ -1021,14 +1030,16 @@ internal fun ChatPage(
                                             WorkingIndicator(
                                                 remember(
                                                     live.events,
+                                                    waitingTasks,
                                                     chat.agentName,
                                                     chat.run.startedAt,
                                                 ) {
-                                                    workingStep(
-                                                        live.events,
-                                                        chat.agentName,
-                                                        chat.run.startedAt,
-                                                    )
+                                                    waitingTasks?.let(::waitingStep)
+                                                        ?: workingStep(
+                                                            live.events,
+                                                            chat.agentName,
+                                                            chat.run.startedAt,
+                                                        )
                                                 }
                                             )
                                         }

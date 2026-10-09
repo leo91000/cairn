@@ -320,12 +320,22 @@ internal fun presentActivity(event: RunEvent): ActivityPresentation {
                         data?.get("error").asObject().string("message")
                     }
             val account = if (event.type == "status") accountUsed(event.text) else null
+            val backgroundTasks =
+                if (event.type != "turn.waiting") emptyList()
+                else
+                    data?.get("tasks").asArray().orEmpty().mapNotNull {
+                        it.asObject()?.get("description").plain().trim().ifEmpty { null }
+                    }
             val title =
                 when (event.type) {
                     "thread.started" -> "Session ouverte"
                     "turn.started",
                     "run.started" -> "Travail commencé"
                     "turn.completed" -> "Travail terminé"
+                    "turn.waiting" ->
+                        if (data?.get("tasks").asArray().isNullOrEmpty())
+                            "Tâches en arrière-plan terminées"
+                        else "En attente de tâches en arrière-plan"
                     "turn.failed",
                     "error" -> "L’agent a rencontré une erreur"
                     "status" ->
@@ -360,6 +370,7 @@ internal fun presentActivity(event: RunEvent): ActivityPresentation {
             val usage = data?.get("usage").asObject()
             val subtitle =
                 if (account != null) account.second
+                else if (backgroundTasks.isNotEmpty()) backgroundTasks.joinToString(" · ")
                 else if (usage != null)
                     listOf("input_tokens" to "entrée", "output_tokens" to "sortie")
                         .mapNotNull { (key, label) ->
