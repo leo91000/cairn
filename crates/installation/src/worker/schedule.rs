@@ -296,14 +296,7 @@ async fn recover(s: &Service, run: &Value) -> Result<bool> {
     s.mcps.revoke_run(s, run_id).await?;
     s.accounts.recover_run(s, run).await?;
     if !s.store.run(run_id).await?["cancelRequestedAt"].is_null() {
-        let patch = json!({
-            "status": RunStatus::Cancelled,
-            "finishedAt": now(),
-            "accountWaitReason": null,
-            "recoveryPending": false,
-            "retry": null,
-        });
-        s.store.patch_run(run_id, patch).await?;
+        s.store.patch_run(run_id, cancelled_recovery()).await?;
         return Ok(false);
     }
     if let Some(checkpoint) = RunCheckpoint::load(&s.store, run_id).await? {
@@ -330,10 +323,33 @@ async fn recover(s: &Service, run: &Value) -> Result<bool> {
             return Ok(false);
         }
     }
+    // A cancellation committed since the check above left this recovering run
+    // to the worker. Check again in the same transaction that ends recovery.
+    let id = run_id.to_owned();
     s.store
-        .patch_run(run_id, json!({ "recoveryPending": false }))
-        .await?;
-    Ok(true)
+        .transaction(move |db| {
+            let current = db
+                .run(&id)?
+                .ok_or_else(|| Error::not_found("Run not found"))?;
+            if !current["cancelRequestedAt"].is_null() {
+                db.patch_run(&id, &cancelled_recovery())?;
+                return Ok(false);
+            }
+            db.patch_run(&id, &json!({ "recoveryPending": false }))?;
+            Ok(true)
+        })
+        .await
+}
+
+/// Settles a recovering run whose cancellation was requested.
+fn cancelled_recovery() -> Value {
+    json!({
+        "status": RunStatus::Cancelled,
+        "finishedAt": now(),
+        "accountWaitReason": null,
+        "recoveryPending": false,
+        "retry": null,
+    })
 }
 
 /// Hands a run whose execution failed unexpectedly back to recovery.
