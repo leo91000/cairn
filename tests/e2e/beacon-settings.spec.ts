@@ -205,6 +205,16 @@ test('an installation awaiting an update still permits account and installation 
   await page.unroute(unavailable)
   await expect(page.getByRole('heading', { name: 'Worker environment', exact: true })).toBeVisible({ timeout: 20000 })
   await expect(page.getByRole('alert')).toHaveCount(0)
+
+  await page.route('**/api/installations', async (route) => {
+    const response = await route.fetch()
+    const installations = await response.json()
+    await route.fulfill({ json: installations.map((installation: object) => ({ ...installation, updateRequired: true })) })
+  })
+  await expect(page.getByRole('alert')).toContainText('Mise à jour nécessaire', { timeout: 20000 })
+  await expect(page.getByRole('heading', { name: 'Worker environment', exact: true })).toHaveCount(0)
+  await page.unroute('**/api/installations')
+  await expect(page.getByRole('heading', { name: 'Worker environment', exact: true })).toBeVisible({ timeout: 20000 })
   await page.getByRole('navigation', { name: 'Settings sections' }).getByRole('link', { name: 'Sensitive zone', exact: true }).click()
   await expect(page.getByRole('button', { name: 'Detach installation', exact: true })).toBeVisible()
   await page.getByRole('button', { name: 'Account', exact: true }).click()
