@@ -264,7 +264,9 @@ CREATE INDEX IF NOT EXISTS events_messages ON events(run_id,json_extract(payload
 
     pub async fn patch_run(&self, id: &str, patch: Value) -> Result<Value> {
         let id = id.to_owned();
-        self.write(move |db| db.patch_run(&id, &patch)).await
+        // Read and rewrite the document under one write lock: another connection,
+        // such as a second process on this database, must not interleave its patch.
+        self.transaction(move |db| db.patch_run(&id, &patch)).await
     }
 
     pub async fn event(
