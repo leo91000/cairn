@@ -285,6 +285,19 @@ else {
         }],
       })
       complete('Build is still running', false, correlation)
+      if (prompt.includes('fixture:background-stream')) {
+        setTimeout(() => {
+          out({ type: 'stream_event', event: { type: 'message_start', message: { id: 'resumed' } } })
+          out({ type: 'stream_event', event: { type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } } })
+          out({ type: 'stream_event', event: { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'Checking progress' } } })
+          out({
+            type: 'system',
+            subtype: 'background_tasks_changed',
+            tasks: [{ task_id: 'build', task_type: 'local_bash', description: 'Build finishing' }],
+          })
+        }, 100)
+      }
+
       if (!ambient) {
         setTimeout(() => {
           out({ type: 'system', subtype: 'background_tasks_changed', tasks: [] })

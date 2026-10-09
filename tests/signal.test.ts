@@ -184,6 +184,13 @@ describe('the working indicator', () => {
     expect(backgroundWait([waiting(1, 1, [' ', 'Watch CI'])])?.tasks).toEqual(['Background task', 'Watch CI'])
   })
 
+  it('keeps the original wait duration when tasks change and resets after the agent resumes', () => {
+    const events = [waiting(1, 1000, ['Build', 'Watch CI']), waiting(2, 2000, ['Watch CI'])]
+    expect(backgroundWait(events)).toEqual({ tasks: ['Watch CI'], since: 1000 })
+    expect(backgroundWait([...events, command(3, 3000, 'cat log', true), waiting(4, 4000, ['Watch CI'])])).toEqual({ tasks: ['Watch CI'], since: 4000 })
+    expect(backgroundWait([...events, waiting(3, 3000, []), waiting(4, 4000, ['Build'])])).toEqual({ tasks: ['Build'], since: 4000 })
+  })
+
   it('stops waiting once the tasks finish, the agent acts again or the user writes', () => {
     const announced = [user(1, 1000), waiting(2, 2000, ['Build'])]
     expect(backgroundWait([])).toBeNull()

@@ -4,6 +4,7 @@ import {
   expect,
   expectSingleScroll,
   test,
+  useRelayForHttpMocks,
   workspacePath,
 } from './fixtures'
 
@@ -124,13 +125,13 @@ test('switching coding agents preserves one chat, context and provider selection
 
 test('an agent idle until its background build finishes says it is waiting, not working', async ({ page, workspace }, testInfo) => {
   test.setTimeout(120000)
+  await useRelayForHttpMocks(page)
   if (!(await workspace.api('/api/accounts')).accounts.some((a: { provider: string }) => a.provider === 'claude'))
     expect((await connectClaude(workspace)).state).toBe('complete')
   const chat = await workspace.api('/api/chats', 'POST', {})
   await workspace.api(`/api/chats/${chat.id}/messages`, 'POST', { id: crypto.randomUUID(), text: 'fixture:background-slow', provider: 'claude' })
-  await page.goto(`/chats/${chat.id}`)
-  await page.getByLabel('Password', { exact: true }).fill('browser-password-long-enough')
-  await page.getByRole('button', { name: 'Sign in', exact: true }).click()
+  await page.goto(workspacePath(`/chats/${chat.id}`))
+  await authenticateWorkspace(page)
   const waiting = page.locator('.agent-waiting')
   await expect(waiting).toBeVisible({ timeout: 20000 })
   await expect(waiting).toHaveAccessibleName('Waiting for a background task: Wait for build. The agent resumes when it finishes.')

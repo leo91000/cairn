@@ -680,6 +680,25 @@ async fn background_work_and_its_followup_finish_before_the_run_completes() {
 }
 
 #[tokio::test]
+async fn task_updates_during_a_streamed_response_do_not_announce_an_idle_agent() {
+    let root = TempDir::new().unwrap();
+    let c = setup(&root);
+    let events = run_events(&c, plan(&root, "fixture:background-stream")).await;
+    let waits: Vec<_> = events
+        .iter()
+        .filter(|event| event["type"] == "turn.waiting")
+        .map(|event| event["tasks"].clone())
+        .collect();
+    assert_eq!(
+        waits,
+        vec![json!([{ "id": "build", "description": "Wait for build" }])]
+    );
+    assert!(events.iter().any(|event| {
+        event["type"] == "item.updated" && event["item"]["text"] == "Checking progress"
+    }));
+}
+
+#[tokio::test]
 async fn ambient_watchers_do_not_keep_the_run_alive() {
     for prompt in [
         "fixture:background-ambient",

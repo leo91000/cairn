@@ -486,24 +486,27 @@ mod tests {
         let logs = Logs::default();
         let _subscriber = tracing::subscriber::set_default(logs.subscriber());
         let mut activity = Activity::new(RUN, ATTEMPT, "adapter", Provider::Claude);
-        activity.observe(&json!({"type":"thread.started"}));
-        activity.observe(
-            &json!({"type":"turn.waiting","tasks":[{"id":"build","description":"Run tests"}]}),
-        );
+        activity.observe(&json!({ "type": "thread.started" }));
+        activity.observe(&json!({
+            "type": "turn.waiting",
+            "tasks": [{ "id": "build", "description": "Run tests" }],
+        }));
         activity.heartbeat("receive_agent_event");
         let heartbeat = logs.events().pop().unwrap();
         assert_eq!(heartbeat["state"], "waiting_for_background");
         assert_eq!(heartbeat["background_tasks"], 1);
 
-        activity.observe(&json!({"type":"turn.waiting","tasks":[]}));
+        activity.observe(&json!({ "type": "turn.waiting", "tasks": [] }));
         assert_eq!(activity.state(), "waiting_for_agent_event");
 
-        activity.observe(
-            &json!({"type":"turn.waiting","tasks":[{"id":"build","description":"Run tests"}]}),
-        );
-        activity.observe(
-            &json!({"type":"item.started","item":{"id":"check","type":"command_execution"}}),
-        );
+        activity.observe(&json!({
+            "type": "turn.waiting",
+            "tasks": [{ "id": "build", "description": "Run tests" }],
+        }));
+        activity.observe(&json!({
+            "type": "item.started",
+            "item": { "id": "check", "type": "command_execution" },
+        }));
         assert_eq!(activity.state(), "tools_open");
         assert_eq!(activity.background_tasks, 0);
     }

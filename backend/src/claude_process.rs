@@ -605,6 +605,7 @@ impl Turn<'_> {
         let index = event["index"].as_u64().unwrap_or(0) as usize;
         match text(event, "type") {
             "message_start" => {
+                self.waiting_for_background = false;
                 self.stream_message = text(&event["message"], "id").into();
                 self.streams.clear();
             }

@@ -134,7 +134,17 @@ export function backgroundWait(events: RunEvent[]): { tasks: string[], since: nu
     const description = task && typeof task === 'object' ? (task as Record<string, unknown>).description : ''
     return typeof description === 'string' && description.trim() ? description.trim() : 'Background task'
   })
-  return descriptions.length ? { tasks: descriptions, since: announcement.createdAt } : null
+
+  let since = announcement.createdAt
+  for (let previous = index - 1; previous >= 0; previous--) {
+    const event = events[previous]!
+    if (event.type === 'turn.waiting' && Array.isArray(event.payload?.tasks) && event.payload.tasks.length)
+      since = event.createdAt
+    else if (resumesWork(event))
+      break
+  }
+
+  return descriptions.length ? { tasks: descriptions, since } : null
 }
 
 /** The indicator for an agent that only waits for its background tasks. */

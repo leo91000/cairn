@@ -310,10 +310,30 @@ it('moves live streams between routes using only the accepted cursor and history
     body: '',
   })
   await vi.waitFor(() => expect(channel.packets.length).toBe(2))
-  reply(channel, { type: 'stream_chunk', id: request.id, body: btoa('event: batch\nid: 8\ndata: {"history":"v1","events":[],"reset":false,"more":false}\n\n') })
+  const waiting = {
+    id: 8,
+    type: 'turn.waiting',
+    createdAt: 1000,
+    payload: { tasks: [{ id: 'build', description: 'Wait for build' }] },
+  }
+  const batch = {
+    history: 'v1',
+    events: [waiting],
+    reset: false,
+    more: false,
+  }
+  reply(channel, { type: 'stream_chunk', id: request.id, body: btoa(`event: batch\nid: 8\ndata: ${JSON.stringify(batch)}\n\n`) })
   await vi.waitFor(() => expect(accept).toHaveBeenCalledTimes(1))
+  expect(accept.mock.calls[0][0].events).toEqual([waiting])
   channel.dispatchEvent(new Event('close'))
   await vi.waitFor(() => expect(Source.all.some(source => source.url.includes('after=8&history=v1'))).toBe(true))
+  const relay = Source.all.find(source => source.url.includes('after=8&history=v1'))!
+  const finished = { ...waiting, id: 9, payload: { tasks: [] } }
+  relay.dispatchEvent(new MessageEvent('batch', {
+    data: JSON.stringify({ ...batch, events: [finished] }),
+    lastEventId: '9',
+  }))
+  expect(accept.mock.calls[1][0].events).toEqual([finished])
   connection.close()
 })
 

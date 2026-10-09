@@ -193,7 +193,25 @@ const waitNotice = computed(() => retryNotice.value
   ? { account: null, message: retryNotice.value }
   : chatWaitNotice(detail.value?.run))
 const backgroundTasks = computed(() => detail.value?.run?.status === 'running' ? backgroundWait(events.value)?.tasks.length ?? 0 : 0)
-const chatStatus = computed(() => detail.value?.paused ? 'Paused' : active.value ? detail.value?.run?.status === 'queued' ? 'Waiting' : backgroundTasks.value ? backgroundTasks.value === 1 ? 'Background task' : 'Background tasks' : 'Working' : detail.value?.run?.status === 'failed' ? 'Failed' : detail.value?.run?.status === 'interrupted' ? 'Interrupted' : 'Ready')
+const chatStatus = computed(() => {
+  if (detail.value?.paused)
+    return 'Paused'
+
+  const status = detail.value?.run?.status
+  if (status === 'queued')
+    return 'Waiting'
+  if (status === 'running') {
+    if (backgroundTasks.value)
+      return backgroundTasks.value === 1 ? 'Background task' : 'Background tasks'
+    return 'Working'
+  }
+
+  if (status === 'failed')
+    return 'Failed'
+  if (status === 'interrupted')
+    return 'Interrupted'
+  return 'Ready'
+})
 const outgoing = ref<ChatMessage | null>(null)
 const delivery = computed(() => chatDelivery(detail.value, events.value, outgoing.value))
 const pending = computed(() => delivery.value.queued)
