@@ -3,29 +3,26 @@ import type { Page } from '@playwright/test'
 // Keep only transport state and counters: never SDP, candidates, URLs or payloads.
 export async function captureNetworkTransport(target: Page) {
   await target.addInitScript(() => {
-    const browser = window as typeof window & { networkTransport: unknown[] }
+    const browser = window as typeof window & { networkTransport: { kind: string, elapsedMs: number }[] }
     browser.networkTransport = []
     let peers = 0
 
+    function record(kind: string, values: Record<string, unknown>) {
+      browser.networkTransport.push({ elapsedMs: performance.now(), kind, ...values })
+      if (browser.networkTransport.length > 256)
+        browser.networkTransport.shift()
+    }
+
+    browser.addEventListener('cairn-direct-heartbeat-timeout', () => record('heartbeat-timeout', {}))
     browser.RTCPeerConnection = new Proxy(browser.RTCPeerConnection, {
       construct(target, args) {
         const peer = Reflect.construct(target, args) as RTCPeerConnection
         const index = ++peers
 
-        function record(kind: string, values: Record<string, unknown>) {
-          browser.networkTransport.push({
-            peer: index,
-            elapsedMs: performance.now(),
-            kind,
-            ...values,
-          })
-          if (browser.networkTransport.length > 256)
-            browser.networkTransport.shift()
-        }
-
-        record('created', {})
+        record('created', { peer: index })
         for (const event of ['iceconnectionstatechange', 'connectionstatechange', 'icegatheringstatechange', 'signalingstatechange']) {
           peer.addEventListener(event, () => record(event, {
+            peer: index,
             ice: peer.iceConnectionState,
             connection: peer.connectionState,
             gathering: peer.iceGatheringState,
@@ -37,7 +34,7 @@ export async function captureNetworkTransport(target: Page) {
         peer.createDataChannel = (...args) => {
           const channel = createChannel(...args)
           for (const event of ['open', 'close', 'error'])
-            channel.addEventListener(event, () => record(`channel-${event}`, { state: channel.readyState }))
+            channel.addEventListener(event, () => record(`channel-${event}`, { peer: index, state: channel.readyState }))
           return channel
         }
 
@@ -51,6 +48,7 @@ export async function captureNetworkTransport(target: Page) {
           stats?.forEach((item) => {
             if (item.type === 'candidate-pair' && (item.nominated || item.state === 'in-progress')) {
               record('candidate-pair', {
+                peer: index,
                 state: item.state,
                 nominated: item.nominated,
                 requestsSent: item.requestsSent,
@@ -62,6 +60,7 @@ export async function captureNetworkTransport(target: Page) {
 
             if (item.type === 'transport') {
               record('transport', {
+                peer: index,
                 dtlsState: item.dtlsState,
                 iceState: item.iceState,
                 packetsSent: item.packetsSent,
@@ -71,6 +70,7 @@ export async function captureNetworkTransport(target: Page) {
 
             if (item.type === 'data-channel') {
               record('data-channel', {
+                peer: index,
                 state: item.state,
                 messagesSent: item.messagesSent,
                 messagesReceived: item.messagesReceived,
@@ -87,5 +87,5 @@ export async function captureNetworkTransport(target: Page) {
 }
 
 export async function networkTransportDiagnostics(target: Page) {
-  return target.evaluate(() => (window as typeof window & { networkTransport: unknown[] }).networkTransport)
+  return target.evaluate(() => (window as typeof window & { networkTransport: { kind: string, elapsedMs: number }[] }).networkTransport)
 }

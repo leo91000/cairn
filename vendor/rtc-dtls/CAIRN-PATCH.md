@@ -6,14 +6,20 @@ Upstream source revision: `c8321cab79ae745aad973d62034ec84d301e893c`,
 [`webrtc-rs/rtc`](https://github.com/webrtc-rs/rtc/tree/c8321cab79ae745aad973d62034ec84d301e893c/rtc-dtls).
 The MIT and Apache licenses come from that same revision.
 
-Only `src/handshaker.rs` differs from that archive: `wait()` keeps the existing
-retransmission deadline when the peer's flight is incomplete or repeated. It
-cancels the deadline only when parsing a complete next flight advances the state.
-Previously, receiving a repeated previous flight removed the deadline before
-parsing failed to advance. The lost flight was never retransmitted, leaving ICE
-connected but DTLS/DataChannel stuck until Cairn's unchanged negotiation deadline.
+Only `src/handshaker.rs` and `src/endpoint.rs` differ from that archive:
 
-This is required by the WAITING state in
+- `wait()` keeps the retransmission deadline when the peer's flight is incomplete
+  or repeated. It cancels the deadline only after a complete next flight advances
+  the state. Previously the lost flight could be left without any retransmission.
+- An established endpoint still processes handshake repeats. The sender of the
+  final flight resends its cached flight when parsing recognizes the preceding
+  flight. The finished FSM returns when stable; the last-flight receiver does not
+  answer a repeated final flight, avoiding ping-pong and duplicate completion.
+  Previously local completion suppressed processing, so a lost final server
+  flight could leave the remote peer waiting forever while local DTLS looked
+  connected and SCTP could not open.
+
+Both behaviors are required by the WAITING/FINISHED states in
 [RFC 6347 section 4.2.4](https://www.rfc-editor.org/rfc/rfc6347.html#section-4.2.4).
 No dependency version, crypto configuration, replay detector, certificate/grant
 verification, revocation rule, network-loss profile or application deadline is

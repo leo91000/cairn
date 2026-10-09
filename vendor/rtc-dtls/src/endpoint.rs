@@ -192,7 +192,9 @@ impl Endpoint {
         if let Some(conn) = self.connections.get_mut(&remote) {
             let is_handshake_completed_before = conn.is_handshake_completed();
             conn.read(&data)?;
-            if !conn.is_handshake_completed() {
+            // A completed peer still answers repeats of the preceding flight
+            // when its final flight was lost (RFC 6347 4.2.4).
+            if !conn.is_handshake_completed() || conn.handshake_rx.is_some() {
                 conn.handshake(now)?;
                 // Drain any queued future-epoch packets (e.g. Finished that arrived
                 // before ChangeCipherSpec bumped remote_epoch). If draining sets

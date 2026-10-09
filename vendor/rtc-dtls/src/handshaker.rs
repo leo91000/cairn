@@ -102,7 +102,10 @@ impl DTLSConn {
             };
 
             if previous_handshake_state == self.current_handshake_state
-                && previous_handshake_state == HandshakeState::Waiting
+                && matches!(
+                    previous_handshake_state,
+                    HandshakeState::Waiting | HandshakeState::Finished
+                )
             {
                 // wait for timeout or incoming packet
                 return Ok(());
@@ -236,12 +239,20 @@ impl DTLSConn {
                 &self.cache,
                 &self.handshake_config,
             );
-            if let Err((alert, err)) = result {
-                if let Some(alert) = alert {
-                    self.notify(alert.alert_level, alert.alert_description);
+            match result {
+                Ok(_) if self.current_flight.is_last_send_flight() => {
+                    // Resend the cached final flight without completing the
+                    // handshake again or generating a new handshake sequence.
+                    return Ok(HandshakeState::Sending);
                 }
-                if let Some(err) = err {
-                    return Err(err);
+                Ok(_) => {}
+                Err((alert, err)) => {
+                    if let Some(alert) = alert {
+                        self.notify(alert.alert_level, alert.alert_description);
+                    }
+                    if let Some(err) = err {
+                        return Err(err);
+                    }
                 }
             };
         }

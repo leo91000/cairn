@@ -35,15 +35,28 @@ fn transfer(
 
 #[test]
 fn lost_server_flight_recovers_after_repeated_client_hello() -> TestResult {
-    recover_lost_flight(false)
+    recover_lost_flight(LostFlight::Server)
 }
 
 #[test]
 fn lost_client_certificate_flight_recovers_after_repeated_server_flight() -> TestResult {
-    recover_lost_flight(true)
+    recover_lost_flight(LostFlight::ClientCertificate)
 }
 
-fn recover_lost_flight(drop_client_flight: bool) -> TestResult {
+#[test]
+fn lost_final_server_flight_recovers_after_repeated_client_finished() -> TestResult {
+    recover_lost_flight(LostFlight::ServerFinished)
+}
+
+#[derive(Clone, Copy)]
+enum LostFlight {
+    Server,
+    ClientCertificate,
+    ServerFinished,
+}
+
+fn recover_lost_flight(lost_flight: LostFlight) -> TestResult {
+    let drop_client_flight = matches!(lost_flight, LostFlight::ClientCertificate);
     let provider = default_provider()?;
     let certificate =
         Certificate::generate_self_signed(vec!["localhost".into()], provider.crypto())?;
@@ -75,8 +88,18 @@ fn recover_lost_flight(drop_client_flight: bool) -> TestResult {
     transfer(&mut server, &mut client, server_addr, start)?;
     transfer(&mut client, &mut server, client_addr, start)?;
 
-    if drop_client_flight {
-        transfer(&mut server, &mut client, server_addr, start)?;
+    let mut client_completed = false;
+    let mut server_completed = false;
+
+    if drop_client_flight || matches!(lost_flight, LostFlight::ServerFinished) {
+        client_completed |= transfer(&mut server, &mut client, server_addr, start)?;
+    }
+    if matches!(lost_flight, LostFlight::ServerFinished) {
+        server_completed |= transfer(&mut client, &mut server, client_addr, start)?;
+        assert!(
+            server_completed,
+            "the server considers DTLS established before the lost final flight"
+        );
     }
 
     // Lose one complete flight. Receiving the peer's repeated previous flight
@@ -93,9 +116,6 @@ fn recover_lost_flight(drop_client_flight: bool) -> TestResult {
     }
 
     assert!(dropped > 0, "a handshake flight must actually be lost");
-
-    let mut client_completed = false;
-    let mut server_completed = false;
 
     for tick in 1..=50 {
         let now = start + Duration::from_millis(tick * 100);

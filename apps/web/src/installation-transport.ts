@@ -422,6 +422,8 @@ export class InstallationTransport {
       }
       catch (error) {
         if (current()) {
+          if (error instanceof DOMException && error.name === 'AbortError')
+            window.dispatchEvent(new Event('cairn-direct-heartbeat-timeout'))
           if (error instanceof TransportNotSent)
             this.scheduleHeartbeat(current)
           else
