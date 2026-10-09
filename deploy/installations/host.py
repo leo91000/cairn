@@ -329,11 +329,11 @@ fetch('http://127.0.0.1:4310/health', {{ signal: AbortSignal.timeout(5000) }}).t
             raise RuntimeError('Manager health probe did not return a verdict.')
         return result['healthy']
 
-    def failed_candidate_container(image):
+    def failed_candidate_container(image, services=('manager', 'runner')):
         # A Docker command error alone does not prove an image unhealthy. Only
         # inspect the exact candidate's containers, including the dependency that
         # can keep the manager from starting at all.
-        for service in ('manager', 'runner'):
+        for service in services:
             try:
                 containers = docker_output(docker[1:] + ['ps', '--all', '--format', 'json', service])
                 container = containers[0] if isinstance(containers, list) and containers else containers
@@ -345,16 +345,17 @@ fetch('http://127.0.0.1:4310/health', {{ signal: AbortSignal.timeout(5000) }}).t
         return False
 
     def pending_candidate_unavailable():
-        # A crash-looping candidate is briefly running between restarts, and
-        # Docker exec then fails before the probe starts. Observe again until
-        # the probe or the container state settles it.
-        for _ in range(5):
+        # A crash-looping candidate manager is briefly running between restarts,
+        # and Docker exec then fails before the probe starts. Observe it again
+        # until the probe or its own container state settles it.
+        for attempt in range(5):
+            if attempt:
+                time.sleep(1)
             try:
                 return not manager_health()
             except (OSError, ValueError, RuntimeError, subprocess.TimeoutExpired):
-                if failed_candidate_container(config['pendingImage']):
+                if failed_candidate_container(config['pendingImage'], ('manager',)):
                     return True
-            time.sleep(1)
         # No verdict: the candidate may be healthy and another
         # deployment may hold the lease. Its lease still wins.
         return False

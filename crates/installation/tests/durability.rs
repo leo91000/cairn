@@ -248,9 +248,10 @@ async fn writes_serialize_and_failed_transactions_roll_back() {
 }
 
 /// The worker integration tests patch a run from a second process while the
-/// worker patches the same run (#144). Neither writer may drop the other's fields.
+/// worker patches the same run. Neither writer may drop the other's fields.
 #[tokio::test]
 async fn run_patches_from_two_connections_keep_every_field() {
+    const PATCHES: usize = 200;
     let root = TempDir::new().unwrap();
     let first = Store::open(root.path()).unwrap();
     let second = Store::open(root.path()).unwrap();
@@ -266,7 +267,7 @@ async fn run_patches_from_two_connections_keep_every_field() {
     let writers = [("first", first.clone()), ("second", second)].map(|(name, store)| {
         let run_id = run_id.clone();
         tokio::spawn(async move {
-            for index in 0..200 {
+            for index in 0..PATCHES {
                 let patch = json!({ format!("{name}-{index}"): index });
                 store.patch_run(&run_id, patch).await.unwrap();
             }
@@ -279,7 +280,7 @@ async fn run_patches_from_two_connections_keep_every_field() {
     let patched = first.run(&run_id).await.unwrap();
     let missing = ["first", "second"]
         .iter()
-        .flat_map(|name| (0..200).map(move |index| format!("{name}-{index}")))
+        .flat_map(|name| (0..PATCHES).map(move |index| format!("{name}-{index}")))
         .filter(|field| patched[field].is_null())
         .collect::<Vec<_>>();
     assert!(missing.is_empty(), "Lost run fields: {missing:?}");

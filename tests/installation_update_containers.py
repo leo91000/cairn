@@ -26,22 +26,24 @@ BASE = 'python:3.13-slim-trixie@sha256:3dd7cc108ec1493442514f5c2a871af6af0ec31d7
 
 
 def command(args, timeout=180, **kwargs):
-    root = Path(kwargs.get('env', {}).get('CAIRN_INSTALLATION_ROOT', '/nonexistent'))
-    failures = root / 'docker-failures.jsonl'
-    seen = failures.stat().st_size if failures.exists() else 0
+    # The supervisor discards Docker's stderr. The fixture's Docker seam
+    # records the real failed commands, with fixture secrets redacted.
+    installation = kwargs.get('env', {}).get('CAIRN_INSTALLATION_ROOT')
+    failures = Path(installation) / 'docker-failures.jsonl' if installation else None
+    seen = failures.stat().st_size if failures and failures.exists() else 0
     try:
         return subprocess.check_output(args, stderr=subprocess.PIPE, timeout=timeout, **kwargs)
     except subprocess.CalledProcessError as error:
-        # The supervisor discards Docker's stderr. The fixture's Docker seam
-        # records the real failed commands, with fixture secrets redacted.
         details = [f'$ {shlex.join(map(str, args))}', f'exit {error.returncode}',
                    error.stderr.decode(errors='replace').rstrip()]
-        if failures.exists():
+
+        if failures and failures.exists():
             with failures.open() as log:
                 log.seek(seen)
                 for record in map(json.loads, log):
                     details += [f'Docker command failed: $ {shlex.join(record["args"])}',
                                 f'exit {record["exit"]}', record['stderr'].rstrip()]
+
         raise RuntimeError('Container fixture command failed:\n' + '\n'.join(details)) from error
 
 
@@ -143,15 +145,38 @@ import json, os, pathlib, subprocess, sys
 root = pathlib.Path(os.environ['CAIRN_INSTALLATION_ROOT'])
 registry = json.loads((root / 'registry.json').read_text())
 args = sys.argv[1:]
+source = root / 'compose.json'
+
+def docker(*arguments, **kwargs):
+    # Record each real failed command for the fixture error, without fixture secrets.
+    result = subprocess.run([os.environ['FIXTURE_DOCKER'], *arguments], stderr=subprocess.PIPE, **kwargs)
+    stderr = result.stderr.decode(errors='replace')
+    sys.stderr.write(stderr)
+    if result.returncode:
+        manager = json.loads(source.read_text())['services']['manager']
+        secrets = [manager['environment'].get('CAIRN_INSTALLATION_CLAIM_CODE', '')]
+        token = root / 'data/maintenance-token'
+        if token.exists():
+            secrets.append(token.read_text().strip())
+        command, details = ['docker', *arguments], stderr
+        for secret in filter(None, secrets):
+            command = [argument.replace(secret, '<REDACTED>') for argument in command]
+            details = details.replace(secret, '<REDACTED>')
+        with open(root / 'docker-failures.jsonl', 'a') as log:
+            log.write(json.dumps({'args': command, 'exit': result.returncode, 'stderr': details}) + '\\n')
+    return result
+
 if args[0] == 'pull':
     assert args[-1] in registry
     sys.exit(0)
 if args[:2] == ['image', 'inspect']:
-    metadata = json.loads(subprocess.check_output([os.environ['FIXTURE_DOCKER'], 'image', 'inspect', registry[args[-1]]]))
+    result = docker('image', 'inspect', registry[args[-1]], stdout=subprocess.PIPE)
+    if result.returncode:
+        sys.exit(result.returncode)
+    metadata = json.loads(result.stdout)
     metadata[0]['RepoDigests'] = [args[-1]]
     print(json.dumps(metadata))
     sys.exit(0)
-source = root / 'compose.json'
 target = root / 'compose.actual.json'
 if 'up' in args or not target.exists():
     config = json.loads(source.read_text())
@@ -165,9 +190,12 @@ if 'up' in args or not target.exists():
     target.write_text(json.dumps(config))
 args[args.index('-f') + 1] = str(target)
 if 'ps' in args:
-    result = subprocess.check_output([os.environ['FIXTURE_DOCKER'], *args]).decode().strip()
-    if result:
-        value = json.loads(result)
+    result = docker(*args, stdout=subprocess.PIPE)
+    if result.returncode:
+        sys.exit(result.returncode)
+    output = result.stdout.decode().strip()
+    if output:
+        value = json.loads(output)
         for reference, image in registry.items():
             if value['Image'] == image:
                 value['Image'] = reference
@@ -175,21 +203,7 @@ if 'ps' in args:
     sys.exit(0)
 if 'exec' in args:
     args[-1] = args[-1].replace('127.0.0.1:4310', '127.0.0.1:' + os.environ['FIXTURE_MANAGER_PORT'])
-result = subprocess.run([os.environ['FIXTURE_DOCKER'], *args], stderr=subprocess.PIPE)
-stderr = result.stderr.decode(errors='replace')
-sys.stderr.write(stderr)
-if result.returncode:
-    manager = json.loads(source.read_text())['services']['manager']
-    secrets = [manager['environment'].get('CAIRN_INSTALLATION_CLAIM_CODE', '')]
-    token = root / 'data/maintenance-token'
-    if token.exists():
-        secrets.append(token.read_text().strip())
-    record = json.dumps({'args': ['docker', *args], 'exit': result.returncode, 'stderr': stderr})
-    for secret in filter(None, secrets):
-        record = record.replace(secret, '<REDACTED>')
-    with open(root / 'docker-failures.jsonl', 'a') as log:
-        log.write(record + '\\n')
-sys.exit(result.returncode)
+sys.exit(docker(*args).returncode)
 ''')
             (root / 'bin/docker').chmod(0o755)
             healthcheck = {'test': ['CMD', 'node', '-e',
