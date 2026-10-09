@@ -1,5 +1,5 @@
 // Real Codex through the Rust adapter, isolated homes and synthetic model/MCP.
-// Run: node tests/fixtures/ready-codex.mjs /path/to/leo /path/to/native/codex
+// Run: node tests/fixtures/ready-codex.mjs /path/to/cairn /path/to/native/codex
 import assert from 'node:assert/strict'
 import { Buffer } from 'node:buffer'
 import { spawn } from 'node:child_process'
@@ -22,9 +22,9 @@ import { setTimeout } from 'node:timers/promises'
 async function main() {
   const [adapter, native] = process.argv.slice(2)
   assert.ok(adapter && native, 'Provide the Rust adapter and real native Codex executable')
-  const leo = path.resolve(adapter)
+  const cairn = path.resolve(adapter)
   const codex = path.resolve(native)
-  const root = await mkdtemp(path.join(os.tmpdir(), 'leo-ready-codex-'))
+  const root = await mkdtemp(path.join(os.tmpdir(), 'cairn-ready-codex-'))
   const home = path.join(root, 'home')
   const nativeHome = path.join(home, '.codex')
   const workspace = path.join(root, 'workspace')
@@ -120,7 +120,7 @@ async function main() {
   })
 
   function launch(args, environment) {
-    const child = spawn(leo, args, { cwd: workspace, env: environment, stdio: ['pipe', 'pipe', 'pipe'] })
+    const child = spawn(cairn, args, { cwd: workspace, env: environment, stdio: ['pipe', 'pipe', 'pipe'] })
     live.add(child)
     let stdout = ''
     let stderr = ''
@@ -184,7 +184,7 @@ async function main() {
       CODEX_HOME: nativeHome,
       CODEX_BIN: codex,
       NO_COLOR: '1',
-      RUST_LOG: 'warn,leo_performance=debug',
+      RUST_LOG: 'warn,cairn_performance=debug',
     }
     const samples = []
     let thread
@@ -220,7 +220,7 @@ async function main() {
         args: resident || !bearer ? [] : ['-c', `mcp_servers.fixture={url="${endpoint}/mcp",http_headers={Authorization="${bearer}"}}`],
         ...(resume ? { sessionId: thread } : {}),
       }
-      const launched = launch(['chat', codex], { ...environment, ...(resident ? { LEO_CODEX_SERVICE: socket } : {}) })
+      const launched = launch(['chat', codex], { ...environment, ...(resident ? { CAIRN_CODEX_SERVICE: socket } : {}) })
       launched.child.stdin.end(JSON.stringify(plan))
       const code = await launched.done
       assert.equal(code, 0, launched.stderr().slice(-5000))
@@ -306,8 +306,8 @@ async function main() {
         client.end(`${JSON.stringify({ accessToken, chatgptAccountId: 'synthetic-pool-account', chatgptPlanType: 'plus' })}\n`)
       })
     })
-    await new Promise(resolve => broker.listen(path.join(nativeHome, 'leo-auth.sock'), resolve))
-    await writeFile(path.join(nativeHome, 'leo-managed-auth'), '1')
+    await new Promise(resolve => broker.listen(path.join(nativeHome, 'cairn-auth.sock'), resolve))
+    await writeFile(path.join(nativeHome, 'cairn-managed-auth'), '1')
     await turn('ready-first', 'Bearer alpha', true, false)
     await turn('ready-resume', 'Bearer beta', true, true)
     await turn('ready-remove-mcp', null, true, true)

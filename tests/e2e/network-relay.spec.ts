@@ -6,17 +6,17 @@ import { readFile, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import process from 'node:process'
 import { chromium, expect, test } from '@playwright/test'
-import { officialRelayFixture } from './official-relay-fixture'
+import { beaconRelayFixture } from './beacon-relay-fixture'
 
 test('authenticated browser and Rust client keep using the observed route under network constraints', async () => {
   test.setTimeout(240000)
-  const fixture = await officialRelayFixture(4398, '198.18.103.1', process.env.LEO_NETWORK_FIXTURE_DIRECTORY)
+  const fixture = await beaconRelayFixture(4398, '198.18.103.1', process.env.CAIRN_NETWORK_FIXTURE_DIRECTORY)
   const {
     root,
     url,
     messages,
     start,
-    official,
+    beacon,
   } = fixture
   let browser: Browser | undefined
   const evidence: {
@@ -29,7 +29,7 @@ test('authenticated browser and Rust client keep using the observed route under 
 
   async function rustRequest(path: string, cookie: string, status: number, marker?: string) {
     const directRead = status === 200 && marker !== undefined
-    const executable = directRead ? process.env.LEO_NETWORK_DIRECT_CLIENT! : process.env.LEO_NETWORK_RUST_CLIENT!
+    const executable = directRead ? process.env.CAIRN_NETWORK_DIRECT_CLIENT! : process.env.CAIRN_NETWORK_RUST_CLIENT!
     const args = directRead
       ? ['http://localhost:4398', path.split('/')[3]!, path.slice(path.indexOf('/api/', 5)), marker]
       : ['http', '127.0.0.1:4398', path, String(status), ...(marker ? [marker] : [])]
@@ -46,12 +46,12 @@ test('authenticated browser and Rust client keep using the observed route under 
   }
 
   try {
-    let service = official()
+    let service = beacon()
     // Exercise numeric ICE paths deterministically; the separate mDNS-only client
     // case preserves Chromium's default privacy behavior and expects the relay.
     browser = await chromium.launch({
-      executablePath: process.env.LEO_NETWORK_CHROMIUM,
-      args: process.env.LEO_NETWORK_SCENARIO === 'mdns-only-client' ? [] : ['--disable-features=WebRtcHideLocalIpsWithMdns'],
+      executablePath: process.env.CAIRN_NETWORK_CHROMIUM,
+      args: process.env.CAIRN_NETWORK_SCENARIO === 'mdns-only-client' ? [] : ['--disable-features=WebRtcHideLocalIpsWithMdns'],
     })
     const page = await browser.newPage()
     const leases: string[] = []
@@ -74,7 +74,7 @@ test('authenticated browser and Rust client keep using the observed route under 
       await targetPage.addInitScript(() => {
         const target = window as typeof window & { transportObservations: unknown[] }
         target.transportObservations = []
-        window.addEventListener('leo-transport-observation', (event) => {
+        window.addEventListener('cairn-transport-observation', (event) => {
           target.transportObservations.push((event as CustomEvent).detail)
           if (target.transportObservations.length > 200)
             target.transportObservations.shift()
@@ -83,7 +83,7 @@ test('authenticated browser and Rust client keep using the observed route under 
     }
 
     await capture(page)
-    if (process.env.LEO_NETWORK_SCENARIO === 'mdns-only-client') {
+    if (process.env.CAIRN_NETWORK_SCENARIO === 'mdns-only-client') {
       await page.addInitScript(() => {
         const browser = window as typeof window & { iceCandidates: { mdns: boolean, type: string | null }[] }
         browser.iceCandidates = []
@@ -109,7 +109,7 @@ test('authenticated browser and Rust client keep using the observed route under 
     }
 
     const observations = () => page.evaluate(() => (window as typeof window & { transportObservations: Observation[] }).transportObservations)
-    const expected = process.env.LEO_NETWORK_EXPECT_ROUTE || 'relay'
+    const expected = process.env.CAIRN_NETWORK_EXPECT_ROUTE || 'relay'
     let releaseDirect: () => void = () => {}
     const authorizationGate = new Promise<void>(resolve => releaseDirect = resolve)
     await page.route('**/direct/authorize', async (route) => {
@@ -117,12 +117,12 @@ test('authenticated browser and Rust client keep using the observed route under 
       await route.continue()
     })
     await expect.poll(() => {
-      expect(service.exitCode, 'official binary must remain running').toBeNull()
+      expect(service.exitCode, 'beacon binary must remain running').toBeNull()
       return fetch(`${url}/health`).then(response => response.ok).catch(() => false)
     }).toBe(true)
     await expect.poll(() => fetch(`${url}/health`).then(response => response.json()).then(health => health.stun.status)).toBe('running')
     await page.goto(url)
-    const ownerEmail = `network-${process.env.LEO_NETWORK_SCENARIO}-${Date.now()}@example.test`
+    const ownerEmail = `network-${process.env.CAIRN_NETWORK_SCENARIO}-${Date.now()}@example.test`
     await page.getByLabel('Email address').fill(ownerEmail)
     await page.getByRole('button', { name: 'Send code', exact: true }).click()
     await expect.poll(() => messages.length).toBe(1)
@@ -130,7 +130,7 @@ test('authenticated browser and Rust client keep using the observed route under 
     await page.getByRole('button', { name: 'Sign in', exact: true }).click()
     await page.getByRole('button', { name: 'Add an installation', exact: true }).click()
     const code = await page.getByLabel('Installation claim code').inputValue()
-    const installation = start('target/debug/leo', {
+    const installation = start('target/debug/cairn', {
       DATA_DIR: join(root, 'data'),
       AGENT_HOME: join(root, 'home'),
       WORKSPACE_ROOTS: root,
@@ -138,9 +138,9 @@ test('authenticated browser and Rust client keep using the observed route under 
       WORKER_ENABLED: 'false',
       HOST: '127.0.0.1',
       PORT: '4399',
-      LEO_OFFICIAL_ORIGIN: url,
-      LEO_INSTALLATION_CLAIM_CODE: code,
-      LEO_INSTALLATION_NAME: 'Network bench installation',
+      CAIRN_BEACON_ORIGIN: url,
+      CAIRN_INSTALLATION_CLAIM_CODE: code,
+      CAIRN_INSTALLATION_NAME: 'Network bench installation',
     })
     const bootstrapStart = performance.now()
     await expect(async () => {
@@ -155,7 +155,7 @@ test('authenticated browser and Rust client keep using the observed route under 
     releaseDirect()
     const installationId = new URL(page.url()).pathname.split('/')[2]!
     const chatsPath = `/api/installations/${installationId}/api/chats`
-    const marker = `Network scenario ${process.env.LEO_NETWORK_SCENARIO}`
+    const marker = `Network scenario ${process.env.CAIRN_NETWORK_SCENARIO}`
     await page.getByRole('link', { name: 'New conversation', exact: true }).first().click()
     await page.getByLabel('Message', { exact: true }).fill(marker)
     await expect(page.getByRole('status', { name: 'Connection route' })).toHaveAttribute('data-transport-route', expected, { timeout: 35000 })
@@ -168,19 +168,19 @@ test('authenticated browser and Rust client keep using the observed route under 
     evidence.push({ route: sent.route, operation: 'browser-send', elapsedMs: performance.now() - started })
     const cookies = await page.context().cookies()
     const cookie = cookies.map(value => `${value.name}=${value.value}`).join('; ')
-    const samples = process.env.LEO_NETWORK_SCENARIO === 'packet-loss' ? 3 : 1
+    const samples = process.env.CAIRN_NETWORK_SCENARIO === 'packet-loss' ? 3 : 1
     for (let sample = 0; sample < samples; sample++)
       evidence.push({ ...await rustRequest(chatsPath, cookie, 200, marker), operation: sample ? `rust-read-${sample + 1}` : 'rust-read' })
     await rustRequest(chatsPath, '', 401)
     // A loopback listener on the installation still refuses anonymous local access.
-    const local = execFileSync(process.env.LEO_NETWORK_LOCAL_CLIENT!, ['http', '127.0.0.1:4399', '/api/chats', '401'], { input: '', encoding: 'utf8' })
+    const local = execFileSync(process.env.CAIRN_NETWORK_LOCAL_CLIENT!, ['http', '127.0.0.1:4399', '/api/chats', '401'], { input: '', encoding: 'utf8' })
     expect(JSON.parse(local).status).toBe(401)
     const session = await (await page.request.get(`${url}/api/account/session`)).json()
 
-    if (process.env.LEO_NETWORK_SCENARIO === 'network-change') {
+    if (process.env.CAIRN_NETWORK_SCENARIO === 'network-change') {
       const beforeChange = (await observations()).length
       const changed = performance.now()
-      execFileSync(process.env.LEO_NETWORK_CHANGE!, [], { stdio: 'ignore' })
+      execFileSync(process.env.CAIRN_NETWORK_CHANGE!, [], { stdio: 'ignore' })
       // Publish through the public relay from a separate authenticated control
       // client. Fresh content in the original page demonstrates stream recovery;
       // retained DOM and successful HTTP headers alone are insufficient.
@@ -202,7 +202,7 @@ test('authenticated browser and Rust client keep using the observed route under 
       await expect(page.getByRole('heading', { name: marker, exact: true })).toBeVisible()
     }
 
-    if (process.env.LEO_NETWORK_SCENARIO === 'same-lan') {
+    if (process.env.CAIRN_NETWORK_SCENARIO === 'same-lan') {
       // Browser-facing denial seam: Chromium's LNA permission is denied too,
       // but this loopback fixture is not a public-to-local origin. Inject only
       // the WebRTC NotAllowedError, leaving all application/relay traffic real.
@@ -235,7 +235,7 @@ test('authenticated browser and Rust client keep using the observed route under 
 
       const beforeCut = (await observations()).length
       const cut = performance.now()
-      execFileSync(process.env.LEO_NETWORK_CUT_DIRECT!, [], { stdio: 'ignore' })
+      execFileSync(process.env.CAIRN_NETWORK_CUT_DIRECT!, [], { stdio: 'ignore' })
       const once = 'Exactly once through a transport switch'
       await page.getByLabel('Message', { exact: true }).fill(once)
       await page.getByRole('button', { name: /^(Send|Queue)$/, exact: true }).click()
@@ -248,15 +248,15 @@ test('authenticated browser and Rust client keep using the observed route under 
       const chatId = new URL(page.url()).pathname.split('/').at(-1)!
       const detail = await (await page.request.get(`${url}/api/installations/${installationId}/api/chats/${chatId}`)).json()
       expect(detail.messages.filter((message: { text: string }) => message.text === once)).toHaveLength(1)
-      execFileSync(process.env.LEO_NETWORK_RESTORE_DIRECT!, [], { stdio: 'ignore' })
+      execFileSync(process.env.CAIRN_NETWORK_RESTORE_DIRECT!, [], { stdio: 'ignore' })
       await expect(page.getByRole('status', { name: 'Connection route' })).toHaveAttribute('data-transport-route', 'direct', { timeout: 40000 })
     }
 
-    if (process.env.LEO_NETWORK_SCENARIO === 'same-lan') {
+    if (process.env.CAIRN_NETWORK_SCENARIO === 'same-lan') {
       const oldLease = leases.at(-1)
       const leaseCount = leases.length
       await fixture.stop(service)
-      service = official()
+      service = beacon()
       await expect.poll(() => fetch(`${url}/health`).then(response => response.ok).catch(() => false)).toBe(true)
       await expect(page.getByRole('status', { name: 'Connection route' })).toHaveAttribute('data-transport-route', 'direct', { timeout: 40000 })
       await expect.poll(() => leases.length, { timeout: 40000 }).toBeGreaterThan(leaseCount)
@@ -266,7 +266,7 @@ test('authenticated browser and Rust client keep using the observed route under 
     }
 
     // Scoped revocation while browser streams are active, on both delivered routes.
-    if (['same-lan', 'udp-blocked'].includes(process.env.LEO_NETWORK_SCENARIO!)) {
+    if (['same-lan', 'udp-blocked'].includes(process.env.CAIRN_NETWORK_SCENARIO!)) {
       const email = `network-member-${Date.now()}@example.test`
       const headers = { 'origin': url, 'x-csrf-token': session.csrf }
       const invite = await page.request.post(`${url}/api/installations/${installationId}/sharing/invitations`, { headers, data: { email } })
@@ -298,7 +298,7 @@ test('authenticated browser and Rust client keep using the observed route under 
       const published = await page.request.post(`${url}/api/installations/${installationId}/api/chats/${chatId}/messages`, { headers, data: { id: randomUUID(), text: afterRemoval } })
       expect(published.ok()).toBe(true)
       const queued = page.getByRole('button', { name: /^\+ \d+ other messages?$/ })
-      if (process.env.LEO_NETWORK_SCENARIO === 'same-lan') {
+      if (process.env.CAIRN_NETWORK_SCENARIO === 'same-lan') {
         await expect(queued).toBeVisible()
         await queued.click()
       }
@@ -341,7 +341,7 @@ test('authenticated browser and Rust client keep using the observed route under 
       revocations.push('detachment')
     }
 
-    const mdnsCandidates = process.env.LEO_NETWORK_SCENARIO === 'mdns-only-client'
+    const mdnsCandidates = process.env.CAIRN_NETWORK_SCENARIO === 'mdns-only-client'
       ? await page.evaluate(() => (window as typeof window & { iceCandidates: { mdns: boolean, type: string | null }[] }).iceCandidates)
       : undefined
     if (mdnsCandidates) {
@@ -349,11 +349,11 @@ test('authenticated browser and Rust client keep using the observed route under 
       expect(mdnsCandidates.every(candidate => candidate.mdns && candidate.type === 'host')).toBe(true)
     }
 
-    const output = process.env.LEO_NETWORK_OUTPUT!
+    const output = process.env.CAIRN_NETWORK_OUTPUT!
     const report = JSON.parse(await readFile(output, 'utf8'))
     const rustReads = evidence.filter(item => item.operation.startsWith('rust-read'))
     const directReads = rustReads.filter(item => item.route === 'direct').length
-    const directNegotiations = process.env.LEO_NETWORK_SCENARIO === 'packet-loss'
+    const directNegotiations = process.env.CAIRN_NETWORK_SCENARIO === 'packet-loss'
       ? {
           attempts: rustReads.length,
           direct: directReads,
@@ -363,15 +363,15 @@ test('authenticated browser and Rust client keep using the observed route under 
       : undefined
     await writeFile(output, `${JSON.stringify({
       ...report,
-      expectedRoute: process.env.LEO_NETWORK_EXPECT_ROUTE || 'relay',
-      expectedRustRoute: process.env.LEO_NETWORK_EXPECT_RUST_ROUTE,
+      expectedRoute: process.env.CAIRN_NETWORK_EXPECT_ROUTE || 'relay',
+      expectedRustRoute: process.env.CAIRN_NETWORK_EXPECT_RUST_ROUTE,
       observations: evidence,
       directNegotiations,
       revocations,
       mdnsCandidates,
     })}\n`)
 
-    const packetLossReads = process.env.LEO_NETWORK_SCENARIO === 'packet-loss' && process.env.LEO_NETWORK_EXPECT_RUST_ROUTE === 'direct'
+    const packetLossReads = process.env.CAIRN_NETWORK_SCENARIO === 'packet-loss' && process.env.CAIRN_NETWORK_EXPECT_RUST_ROUTE === 'direct'
       ? rustReads
       : []
     if (packetLossReads.length) {
@@ -394,8 +394,8 @@ test('authenticated browser and Rust client keep using the observed route under 
       }
 
       const expectedRoute = observation.operation.startsWith('rust-')
-        ? process.env.LEO_NETWORK_EXPECT_RUST_ROUTE
-        : process.env.LEO_NETWORK_EXPECT_ROUTE || 'relay'
+        ? process.env.CAIRN_NETWORK_EXPECT_RUST_ROUTE
+        : process.env.CAIRN_NETWORK_EXPECT_ROUTE || 'relay'
       const route = ['bootstrap-read', 'stream-resume', 'fallback-send', 'fallback-stream', 'permission-denied-read'].includes(observation.operation) ? 'relay' : expectedRoute
       expect(observation.route, `${observation.operation}: actual route`).toBe(route)
     }

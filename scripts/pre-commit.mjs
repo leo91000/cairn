@@ -20,7 +20,7 @@ run('pnpm', ['lint:fix'])
 
 const staged = execFileSync('git', ['diff', '--cached', '--name-only', '-z'], { encoding: 'utf8' }).split('\0')
 
-if (staged.some(file => file.startsWith('android/') && /\.kts?$/.test(file)))
+if (staged.some(file => file.startsWith('apps/android/') && /\.kts?$/.test(file)))
   run('pnpm', ['format:android'])
 
 if (!before.equals(diff())) {

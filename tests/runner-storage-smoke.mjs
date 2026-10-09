@@ -104,7 +104,7 @@ export async function storageSmoke({
       }
       if(${benchmark}) {
         const control=setInterval(()=>{
-          if(!fs.readFileSync('/run/leo-chat/messages.json','utf8').includes('measure'))return;
+          if(!fs.readFileSync('/run/cairn-chat/messages.json','utf8').includes('measure'))return;
           clearInterval(control);
           const fd=fs.openSync(unused,'r'), buffer=Buffer.alloc(4096), firstReadsMs=[];
           for(const offset of [0,8*1024*1024,16*1024*1024]) {
@@ -128,7 +128,7 @@ export async function storageSmoke({
       command: ['/usr/local/bin/node', '-e', code],
       resources: { cpu: 1, memoryMiB: 512, diskMiB: 512 },
       storage,
-      imports: [{ source: workspace, target: workspace }, ...(benchmark ? [{ source: `/data/runs/${runId}/chat-input`, target: '/run/leo-chat', readOnly: true }] : [])],
+      imports: [{ source: workspace, target: workspace }, ...(benchmark ? [{ source: `/data/runs/${runId}/chat-input`, target: '/run/cairn-chat', readOnly: true }] : [])],
     }
     await writeFile(path.join(root, 'data/runner-plans', `${id}.json`), JSON.stringify(plan))
     await api(`/runs/${id}`, 'POST')
@@ -190,7 +190,7 @@ export async function storageSmoke({
   await stop(first)
 
   // Opt-in sustained VM qualification, separate from the short CI smoke path.
-  const soakSeconds = Number(process.env.LEO_STORAGE_SOAK_SECONDS || 0)
+  const soakSeconds = Number(process.env.CAIRN_STORAGE_SOAK_SECONDS || 0)
   if (soakSeconds > 0) {
     assert.ok(Number.isFinite(soakSeconds) && soakSeconds >= 60 && soakSeconds <= 3600)
     const attempt = await start(false, { soak: true })
@@ -237,8 +237,8 @@ export async function storageSmoke({
       unintendedRestarts: 0,
       source: 'real Firecracker/vhost-user journal, loopback immutable origin; not S3/WAN',
     }
-    if (process.env.LEO_STORAGE_SOAK_EVIDENCE)
-      await writeFile(process.env.LEO_STORAGE_SOAK_EVIDENCE, JSON.stringify(evidence, null, 2))
+    if (process.env.CAIRN_STORAGE_SOAK_EVIDENCE)
+      await writeFile(process.env.CAIRN_STORAGE_SOAK_EVIDENCE, JSON.stringify(evidence, null, 2))
     process.stdout.write(`${JSON.stringify(evidence)}\n`)
     await stop(attempt)
     // Verify durable guest contents on a new VM after all acknowledged backups.

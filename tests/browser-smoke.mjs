@@ -10,7 +10,7 @@ async function main() {
   // Runs as the container's normal worker user, without custom library paths.
   const version = process.argv.at(-1)
   assert.match(version, /^\d+\.\d+\.\d+$/)
-  const directory = await mkdtemp(path.join(os.tmpdir(), 'leo-browser-smoke-'))
+  const directory = await mkdtemp(path.join(os.tmpdir(), 'cairn-browser-smoke-'))
   try {
     process.env.PLAYWRIGHT_BROWSERS_PATH = path.join(directory, 'browsers')
     delete process.env.LD_LIBRARY_PATH

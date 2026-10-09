@@ -1,5 +1,5 @@
 // Real native Codex in Firecracker, with synthetic account/model/MCP access.
-// Run twice with LEO_VM_RETENTION_SECONDS=0/180 to compare cold and retained resumes.
+// Run twice with CAIRN_VM_RETENTION_SECONDS=0/180 to compare cold and retained resumes.
 import assert from 'node:assert/strict'
 import { Buffer } from 'node:buffer'
 import { execFileSync, spawnSync } from 'node:child_process'
@@ -54,11 +54,11 @@ http.createServer(async(req,res)=>{
 async function main() {
   const image = process.argv[2]
   assert.ok(image, 'Provide the runner image')
-  const retention = Number(process.env.LEO_VM_RETENTION_SECONDS ?? 180)
-  const cpuQuota = process.env.LEO_RETENTION_CPU_QUOTA ?? '3'
+  const retention = Number(process.env.CAIRN_VM_RETENTION_SECONDS ?? 180)
+  const cpuQuota = process.env.CAIRN_RETENTION_CPU_QUOTA ?? '3'
   const docker = (...args) => execFileSync('docker', ['--context', 'default', ...args], { encoding: 'utf8', timeout: 180000 }).trim()
-  const root = await mkdtemp(path.join(process.env.VM_TEST_ROOT || '/var/tmp', 'leo-retention-'))
-  const name = `leo-retention-${randomUUID().slice(0, 8)}`
+  const root = await mkdtemp(path.join(process.env.VM_TEST_ROOT || '/var/tmp', 'cairn-retention-'))
+  const name = `cairn-retention-${randomUUID().slice(0, 8)}`
   const peer = `${name}-peer`
   const network = `${name}-public`
   const endpoint = 'http://203.0.113.3:8080'
@@ -128,7 +128,7 @@ async function main() {
     await writeFile(path.join(root, 'peer.cjs'), peerCode)
     const home = path.join(root, 'data/runs', runId, 'home/.codex')
     await writeFile(path.join(home, 'config.toml'), `cli_auth_credentials_store = "file"\nchatgpt_base_url = "${endpoint}"\nmodel_provider = "fixture"\n[model_providers.fixture]\nname = "Fixture"\nbase_url = "${endpoint}"\nwire_api = "responses"\nrequires_openai_auth = false\n`)
-    await writeFile(path.join(home, 'leo-managed-auth'), '1')
+    await writeFile(path.join(home, 'cairn-managed-auth'), '1')
     broker = createServer((client) => {
       let input = ''
       client.on('data', (bytes) => {
@@ -141,12 +141,12 @@ async function main() {
         client.end(`${JSON.stringify({ accessToken: `eyJhbGciOiJub25lIn0.${claims}.synthetic-${currentLease}`, chatgptAccountId: 'synthetic-retention', chatgptPlanType: 'plus' })}\n`)
       })
     })
-    await new Promise(resolve => broker.listen(path.join(home, 'leo-auth.sock'), resolve))
+    await new Promise(resolve => broker.listen(path.join(home, 'cairn-auth.sock'), resolve))
     docker('network', 'create', '--internal', '--subnet', '203.0.113.0/29', network)
     docker('run', '-d', '--name', peer, '-v', `${root}/peer.cjs:/peer.cjs:ro`, '--entrypoint', 'node', image, '/peer.cjs')
     docker('network', 'connect', '--ip', '203.0.113.3', network, peer)
     const capabilities = ['SYS_ADMIN', 'NET_ADMIN', 'SYS_CHROOT', 'SETUID', 'SETGID', 'MKNOD', 'CHOWN', 'FOWNER', 'KILL', 'DAC_OVERRIDE']
-    docker('run', '-d', '--name', name, '--user', '0:0', '--read-only', '--cap-drop', 'ALL', ...capabilities.flatMap(value => ['--cap-add', value]), '--security-opt', 'apparmor=unconfined', '--security-opt', 'seccomp=unconfined', '--device', '/dev/kvm', '--device', '/dev/fuse', '--device', '/dev/net/tun', '--sysctl', 'net.ipv4.ip_forward=1', '--sysctl', 'net.ipv6.conf.all.disable_ipv6=1', '--tmpfs', '/run', '--tmpfs', '/tmp', '-v', `${root}/data:/data`, '-v', `${root}/state:/runner-state`, '-p', '127.0.0.1::4311', '--memory', `${process.env.LEO_RETENTION_MEMORY_GIB ?? 10}g`, '--cpus', cpuQuota, '-e', 'CONCURRENCY=3', '-e', `LEO_VM_RETENTION_SECONDS=${retention}`, '-e', 'LEO_READY_VM_POOL=false', '--entrypoint', '/usr/local/bin/leo', image, 'runner-broker')
+    docker('run', '-d', '--name', name, '--user', '0:0', '--read-only', '--cap-drop', 'ALL', ...capabilities.flatMap(value => ['--cap-add', value]), '--security-opt', 'apparmor=unconfined', '--security-opt', 'seccomp=unconfined', '--device', '/dev/kvm', '--device', '/dev/fuse', '--device', '/dev/net/tun', '--sysctl', 'net.ipv4.ip_forward=1', '--sysctl', 'net.ipv6.conf.all.disable_ipv6=1', '--tmpfs', '/run', '--tmpfs', '/tmp', '-v', `${root}/data:/data`, '-v', `${root}/state:/runner-state`, '-p', '127.0.0.1::4311', '--memory', `${process.env.CAIRN_RETENTION_MEMORY_GIB ?? 10}g`, '--cpus', cpuQuota, '-e', 'CONCURRENCY=3', '-e', `CAIRN_VM_RETENTION_SECONDS=${retention}`, '-e', 'CAIRN_READY_VM_POOL=false', '--entrypoint', '/usr/local/bin/cairn', image, 'runner-broker')
     docker('network', 'connect', '--ip', '203.0.113.2', network, name)
     url = `http://${await until(() => {
       try {
@@ -163,7 +163,7 @@ async function main() {
       name,
       api,
     })
-    const delayedPublication = process.env.LEO_RETENTION_ASYNC_PUBLISH === 'true'
+    const delayedPublication = process.env.CAIRN_RETENTION_ASYNC_PUBLISH === 'true'
     let pendingPublication
     let delayedAcknowledgements = 0
     let protectedEvictions = 0
@@ -214,7 +214,7 @@ async function main() {
     let evictedVm
     let crashRecoveryPassed = false
     let expiryPassed = false
-    for (let lease = 0; lease < Number(process.env.LEO_RETENTION_TURNS ?? 3); lease++) {
+    for (let lease = 0; lease < Number(process.env.CAIRN_RETENTION_TURNS ?? 3); lease++) {
       currentLease = lease
       const id = randomUUID()
       const bearer = lease === 0 ? 'Bearer alpha' : lease === 1 ? 'Bearer beta' : null
@@ -224,7 +224,7 @@ async function main() {
         provider: 'codex',
         execution: { messageId: randomUUID(), text: `Remember lease-${lease}; reply RETENTION_NATIVE_OK.`, recovery: false },
         instructions: 'Reply with the requested marker.',
-        inputDirectory: '/run/leo-chat',
+        inputDirectory: '/run/cairn-chat',
         output: `${runRoot}/output/result.md`,
         cwd: `${runRoot}/workspace`,
         model: 'gpt-5.4',
@@ -262,7 +262,7 @@ async function main() {
         cwd: chat.cwd,
         resources: { cpu: 3, memoryMiB: 1024, diskMiB: 32768 },
         chat,
-        imports: [{ source: `${runRoot}/home`, target: '/home/node' }, { source: `${runRoot}/workspace`, target: chat.cwd }, { source: `${runRoot}/output`, target: `${runRoot}/output` }, { source: `${runRoot}/chat-input`, target: '/run/leo-chat' }],
+        imports: [{ source: `${runRoot}/home`, target: '/home/node' }, { source: `${runRoot}/workspace`, target: chat.cwd }, { source: `${runRoot}/output`, target: `${runRoot}/output` }, { source: `${runRoot}/chat-input`, target: '/run/cairn-chat' }],
       }
       await writeFile(path.join(root, 'data/runner-plans', `${id}.json`), JSON.stringify(plan))
       const before = records().length
@@ -317,7 +317,7 @@ async function main() {
           assert.equal(vmId, previousVm, 'Resume keeps the same physical VMM')
         if (evictedVm) {
           assert.notEqual(vmId, evictedVm, 'Evicted conversations resume from their durable disk')
-          crashRecoveryPassed ||= process.env.LEO_RETENTION_CRASH_AFTER !== undefined
+          crashRecoveryPassed ||= process.env.CAIRN_RETENTION_CRASH_AFTER !== undefined
           evictedVm = undefined
         }
 
@@ -335,7 +335,7 @@ async function main() {
           assert.ok(snapshot.manifest.generation > 0)
           assert.equal(snapshot.manifest.consistency, 'crash', 'CPU pause does not promise filesystem freeze')
           assert.equal(state(vmId), 'Paused', 'Publication never wakes retained CPUs')
-          if (!delayedPublication && process.env.LEO_RETENTION_PUBLISH === 'true' && index === 0 && lease % 10 === 0) {
+          if (!delayedPublication && process.env.CAIRN_RETENTION_PUBLISH === 'true' && index === 0 && lease % 10 === 0) {
             await publish(snapshot)
             assert.equal(state(vmId), 'Paused', 'Publication acknowledgement also leaves CPUs paused')
           }
@@ -368,14 +368,14 @@ async function main() {
         health: { pool: health.pool, usage: health.usage },
       })
       previousVm = vmId
-      if (retention > 0 && lease === Number(process.env.LEO_RETENTION_CRASH_AFTER ?? -1)) {
+      if (retention > 0 && lease === Number(process.env.CAIRN_RETENTION_CRASH_AFTER ?? -1)) {
         docker('exec', name, 'node', '-e', 'process.kill(Number(process.argv[1]), "SIGKILL")', retained.pid.toString())
         await until(async () => (await (await api('/health')).json()).pool.retained === 0)
         previousVm = undefined
         evictedVm = vmId
       }
 
-      if (retention > 0 && lease === Number(process.env.LEO_RETENTION_EXPIRE_AFTER ?? -1)) {
+      if (retention > 0 && lease === Number(process.env.CAIRN_RETENTION_EXPIRE_AFTER ?? -1)) {
         await flushPublication()
         await until(async () => (await (await api('/health')).json()).pool.retained === 0, (retention + 5) * 1000)
         previousVm = undefined
@@ -389,7 +389,7 @@ async function main() {
     // has been acknowledged, including benchmarks with periodic upload disabled.
     await flushPublication()
     let activeAdmissionPassed = false
-    if (retention > 0 && process.env.LEO_RETENTION_ADMISSION === 'true') {
+    if (retention > 0 && process.env.CAIRN_RETENTION_ADMISSION === 'true') {
       const active = []
       const occupied = (await (await api('/health')).json()).pool.occupied
       for (let index = occupied; index <= 3; index++) {
@@ -459,8 +459,8 @@ async function main() {
       pausedCapturePassed: retention > 0,
       deletionReaped: true,
     }
-    if (process.env.LEO_RETENTION_EVIDENCE)
-      await writeFile(process.env.LEO_RETENTION_EVIDENCE, JSON.stringify(evidence, null, 2))
+    if (process.env.CAIRN_RETENTION_EVIDENCE)
+      await writeFile(process.env.CAIRN_RETENTION_EVIDENCE, JSON.stringify(evidence, null, 2))
     process.stdout.write(`${JSON.stringify(evidence)}\n`)
   }
   catch (error) {
@@ -468,10 +468,10 @@ async function main() {
       const logs = runnerLogs('100')
       const retentionDiagnostics = stripVTControlCharacters(logs).split('\n').filter(line => /vm_retention|balloon|reclaim|failed|Could not/.test(line))
       console.error(retentionDiagnostics.join('\n'))
-      if (process.env.LEO_RETENTION_EVIDENCE) {
-        await writeFile(`${process.env.LEO_RETENTION_EVIDENCE}.failure.log`, logs)
+      if (process.env.CAIRN_RETENTION_EVIDENCE) {
+        await writeFile(`${process.env.CAIRN_RETENTION_EVIDENCE}.failure.log`, logs)
         const files = JSON.parse(docker('exec', name, 'node', '-e', `const fs=require('node:fs');console.log(JSON.stringify(fs.readdirSync('/runner-state').filter(p=>p.endsWith('.log')||p.includes('exit')).map(p=>({file:p,data:fs.readFileSync('/runner-state/'+p,'utf8')}))));`))
-        await writeFile(`${process.env.LEO_RETENTION_EVIDENCE}.attempts.json`, JSON.stringify(files, null, 2))
+        await writeFile(`${process.env.CAIRN_RETENTION_EVIDENCE}.attempts.json`, JSON.stringify(files, null, 2))
       }
     }
     catch {}

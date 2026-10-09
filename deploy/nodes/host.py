@@ -15,8 +15,8 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-ROOT = Path(os.environ.get('LEO_NODE_ROOT', '/var/lib/leo-node'))
-NAME = 'leo-execution-node'
+ROOT = Path(os.environ.get('CAIRN_NODE_ROOT', '/var/lib/cairn-node'))
+NAME = 'cairn-execution-node'
 STOP = False
 STOP_AT = None
 IMAGE = re.compile(r'^[a-z0-9][a-z0-9./:_-]*@sha256:[a-f0-9]{64}$')
@@ -99,7 +99,7 @@ def container():
         return None
     value = json.loads(inspected.stdout)[0]
     identity = json.loads((ROOT / 'data/node/identity.json').read_text())
-    if value['Config'].get('Labels', {}).get('dev.leo.node.owner') != identity['nodeId']:
+    if value['Config'].get('Labels', {}).get('dev.cairn.node.owner') != identity['nodeId']:
         raise RuntimeError('Container name belongs to another installation')
     return value
 
@@ -112,7 +112,7 @@ def remove():
 def refresh_supervisor():
     current = Path(__file__).resolve()
     pending = current.with_suffix('.next.py')
-    command(['docker', 'cp', NAME + ':/opt/leo-node/host.py', str(pending)], timeout=10)
+    command(['docker', 'cp', NAME + ':/opt/cairn-node/host.py', str(pending)], timeout=10)
     source = pending.read_bytes()
     if len(source) > 1024 * 1024:
         raise RuntimeError('Invalid supervisor package')
@@ -159,7 +159,7 @@ def block_device_arguments(transport):
     return ['--cap-add=SYS_RESOURCE', '--device=/dev/ublk-control',
             f'--device-cgroup-rule=c {character}:* rwm',
             f'--device-cgroup-rule=b {block}:* rwm',
-            '-e', 'LEO_BLOCK_TRANSPORT=ublk']
+            '-e', 'CAIRN_BLOCK_TRANSPORT=ublk']
 
 
 def vm_arguments(config):
@@ -182,13 +182,13 @@ def vm_arguments(config):
         raise ValueError('Snapshots require paired disks')
     arguments = []
     if 'readyVmPool' in config:
-        arguments += ['-e', 'LEO_READY_VM_POOL=' + ('true' if config['readyVmPool'] else 'false')]
+        arguments += ['-e', 'CAIRN_READY_VM_POOL=' + ('true' if config['readyVmPool'] else 'false')]
     if pool_size is not None:
-        arguments += ['-e', 'LEO_READY_VM_POOL_SIZE=' + str(pool_size)]
+        arguments += ['-e', 'CAIRN_READY_VM_POOL_SIZE=' + str(pool_size)]
     if layout is not None:
-        arguments += ['-e', 'LEO_DISK_LAYOUT=' + layout]
+        arguments += ['-e', 'CAIRN_DISK_LAYOUT=' + layout]
     if 'vmSnapshots' in config:
-        arguments += ['-e', 'LEO_VM_SNAPSHOTS=' + ('true' if snapshots else 'false')]
+        arguments += ['-e', 'CAIRN_VM_SNAPSHOTS=' + ('true' if snapshots else 'false')]
     return arguments
 
 
@@ -202,14 +202,14 @@ def launch(image):
     remove()
     command(['docker', 'run', '-d', '--name', NAME, '--init', '--user', '0:0', '--read-only',
              '--health-cmd', '/usr/local/bin/node -e ' + shlex.quote(HEALTH_CHECK),
-             '--restart=unless-stopped', '--label', 'dev.leo.node.owner=' + json.loads((ROOT / 'data/node/identity.json').read_text())['nodeId'], '--cap-drop=ALL', *['--cap-add=' + cap for cap in ('SYS_ADMIN', 'NET_ADMIN', 'SYS_CHROOT', 'SETUID', 'SETGID', 'MKNOD', 'CHOWN', 'FOWNER', 'KILL', 'DAC_OVERRIDE')],
+             '--restart=unless-stopped', '--label', 'dev.cairn.node.owner=' + json.loads((ROOT / 'data/node/identity.json').read_text())['nodeId'], '--cap-drop=ALL', *['--cap-add=' + cap for cap in ('SYS_ADMIN', 'NET_ADMIN', 'SYS_CHROOT', 'SETUID', 'SETGID', 'MKNOD', 'CHOWN', 'FOWNER', 'KILL', 'DAC_OVERRIDE')],
              '--security-opt=apparmor:unconfined', '--security-opt=seccomp:unconfined',
              '--device=/dev/kvm', '--device=/dev/net/tun', *(['--device=/dev/fuse'] if Path('/dev/fuse').exists() else []), *devices, *vm_options, '--sysctl=net.ipv4.ip_forward=1',
              '--sysctl=net.ipv6.conf.all.disable_ipv6=1', '--tmpfs=/run', '--tmpfs=/tmp',
              '-v', f'{ROOT}/data:/data', '-v', f'{ROOT}/state:/runner-state',
              '-e', 'DATA_DIR=/data', '-e', 'RUNNER_STATE_DIR=/runner-state',
              '-e', 'RUNNER_BIND=127.0.0.1:4311', '-e', 'RUNNER_URL=http://127.0.0.1:4311',
-             '-e', 'LEO_NODE_IMAGE=' + image, '--entrypoint=/usr/local/bin/leo', image,
+             '-e', 'CAIRN_NODE_IMAGE=' + image, '--entrypoint=/usr/local/bin/cairn', image,
              'node-daemon', '/data/node'])
     deadline = time.monotonic() + 120
     while time.monotonic() < deadline and not STOP:
@@ -296,9 +296,9 @@ def cache_runtimes(master):
         command(['docker', 'pull', image], timeout=1200)
         # Extract from the approved digest, with no network or host Docker access.
         # Publish atomically; repair missing files without replacing an existing image.
-        script = 'test "$APP_RUNTIME_ID" = "$LEO_EXPECTED_RUNTIME"; staging="/cache/$APP_RUNTIME_ID.partial"; mkdir -p "$staging"; zstd -d -f /opt/leo-vm/root.ext4.zst -o "$staging/root.ext4"; cp /opt/leo-vm/vmlinux "$staging/vmlinux"; chmod 444 "$staging/root.ext4" "$staging/vmlinux"; sync; if test ! -d "/cache/$APP_RUNTIME_ID"; then mv "$staging" "/cache/$APP_RUNTIME_ID"; else for file in root.ext4 vmlinux; do test -s "/cache/$APP_RUNTIME_ID/$file" || mv "$staging/$file" "/cache/$APP_RUNTIME_ID/$file"; done; rm -rf "$staging"; fi; sync'
+        script = 'test "$APP_RUNTIME_ID" = "$CAIRN_EXPECTED_RUNTIME"; staging="/cache/$APP_RUNTIME_ID.partial"; mkdir -p "$staging"; zstd -d -f /opt/cairn-vm/root.ext4.zst -o "$staging/root.ext4"; cp /opt/cairn-vm/vmlinux "$staging/vmlinux"; chmod 444 "$staging/root.ext4" "$staging/vmlinux"; sync; if test ! -d "/cache/$APP_RUNTIME_ID"; then mv "$staging" "/cache/$APP_RUNTIME_ID"; else for file in root.ext4 vmlinux; do test -s "/cache/$APP_RUNTIME_ID/$file" || mv "$staging/$file" "/cache/$APP_RUNTIME_ID/$file"; done; rm -rf "$staging"; fi; sync'
         command(['docker', 'run', '--rm', '--network=none', '--read-only', '--cap-drop=ALL', '--user=0:0',
-                 '-v', str(ROOT / 'state/images') + ':/cache', '-e', 'LEO_EXPECTED_RUNTIME=' + identifier,
+                 '-v', str(ROOT / 'state/images') + ':/cache', '-e', 'CAIRN_EXPECTED_RUNTIME=' + identifier,
                  '--entrypoint=/bin/sh', image, '-ec', script], timeout=1200)
 
 
@@ -323,7 +323,7 @@ def install(master):
     command(['docker', 'pull', release['image']], timeout=1200)
     code = getpass.getpass('Single-use enrollment code: ').encode()
     command(['docker', 'run', '--rm', '-i', '--user=0:0', '--device=/dev/kvm',
-             '-v', f'{ROOT}/data:/data', '--entrypoint=/usr/local/bin/leo', release['image'],
+             '-v', f'{ROOT}/data:/data', '--entrypoint=/usr/local/bin/cairn', release['image'],
              'node-enroll', master, '/data/node'], data=code)
     atomic(ROOT / 'config.json', {'master': master, 'image': release['image']})
 

@@ -5,14 +5,14 @@ if ! sudo -n /usr/bin/docker info >/dev/null 2>&1; then
   (
     flock -x 9
     if ! sudo -n /usr/bin/docker info >/dev/null 2>&1; then
-      sudo -n dockerd --host=unix:///var/run/docker.sock > /tmp/leo-docker.log 2>&1 9>&- &
+      sudo -n dockerd --host=unix:///var/run/docker.sock > /tmp/cairn-docker.log 2>&1 9>&- &
       count=0
       until sudo -n /usr/bin/docker info >/dev/null 2>&1; do
         count=$((count + 1))
-        if [ "$count" -ge 200 ]; then cat /tmp/leo-docker.log >&2; exit 1; fi
+        if [ "$count" -ge 200 ]; then cat /tmp/cairn-docker.log >&2; exit 1; fi
         sleep 0.1
       done
     fi
-  ) 9>/tmp/leo-docker.lock
+  ) 9>/tmp/cairn-docker.lock
 fi
 exec sudo -n /usr/bin/docker "$@"

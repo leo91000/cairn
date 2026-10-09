@@ -1,6 +1,6 @@
 # Appearance
 
-Leo defaults to the device's preferred color scheme. Choose **System**, **Light**,
+Cairn defaults to the device's preferred color scheme. Choose **System**, **Light**,
 or **Dark** from the navigation rail, on the sign-in/setup screen, or in
 **Atelier → Appearance** and **Settings → Appearance**. The preference belongs to this browser and origin;
 it does not change another person's device or workspace settings.
@@ -12,18 +12,18 @@ browser privacy settings block storage, selection still works for the current pa
 
 ## Implementation
 
-`public/theme.js` is a small, same-origin, blocking head script. It resolves the
+`apps/web/public/theme.js` is a small, same-origin, blocking head script. It resolves the
 preference before Vue starts, sets the document's theme and native `color-scheme`,
 and updates the browser's theme-color metadata. The initial document also provides
 a matching background before the main styles arrive. The bootstrap is revalidated
 along with the HTML, so an old cached controller cannot outlive a new deployment.
 No inline JavaScript, additional dependency, or CSP relaxation is required.
 
-`src/theme.ts` connects that controller to Vue. `ThemeControl.vue` uses native radio
+`apps/web/src/theme.ts` connects that controller to Vue. `ThemeControl.vue` uses native radio
 semantics, a keyboard-accessible popover, focus restoration, and viewport bounds.
 The same control renders as three preview cards in Settings.
 
-The « Signal » palette in `src/styles/theme.css` (paper and ink with the Leo blue as
+The « Signal » palette in `apps/web/src/styles/theme.css` (paper and ink with the Cairn blue as
 the single accent and coral for what needs attention, see [Signal](UI-SIGNAL.md))
 defines canvas, panels, raised surfaces,
 inset code/inputs, borders, text, and semantic colors. Tailwind utilities such as
@@ -73,3 +73,24 @@ Representative reviewed captures:
 The complete per-screen captures are retained in the `browser-evidence` CI artifact
 for 14 days. Screenshots and automated layout checks are review evidence, not a
 pixel-diff baseline or a claim to have tested every possible user-generated value.
+
+## Cairn · Balise palette
+
+The approved B identity uses Prussian blue `#14365A`, a light-mode primary
+button with white text, and `#8DB8E8` with dark ink `#0F0F14` in dark mode.
+Links use the same primary pair. The ocher flame `#F2A93B` belongs only to the
+logo; attention, warning and success retain their existing semantic colors.
+
+WCAG AA contrast ratios: white on Prussian blue **12.32:1**; Prussian blue on
+paper `#F4F2EC` **11.00:1**; dark ink on `#8DB8E8` **9.24:1**. The dark icon
+outline `#346AA3` distinguishes the mark from the dark canvas. Sources live in
+`apps/web/public/brand`; `uv run scripts/generate-brand-icons.py` regenerates
+PNG icons and social/email images. Icons at 16/32 px use the optical mark without
+arcs. Android uses the same geometry within the adaptive-icon safe zone.
+
+The standalone symbol and wordmark on light surfaces use the darker ocher
+`#B8650A`: its contrast is **3.83:1** against paper `#F4F2EC`
+and **4.28:1** against white. The approved flame `#F2A93B`
+would reach only **1.78:1** against paper. This light-surface
+variant keeps the small flame distinguishable; icons on Prussian blue retain
+`#F2A93B`. Neither ocher is used for controls or semantic status.

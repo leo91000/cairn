@@ -8,9 +8,9 @@ ARG GH_VERSION
 ARG TARGETARCH
 RUN test -n "$CODEX_VERSION" && test -n "$GH_VERSION" \
     && /usr/local/bin/pnpm add --global "@openai/codex@${CODEX_VERSION}"
-COPY deploy/codex-state/prepare.mjs /opt/leo-codex-state-builder.mjs
-RUN --network=none rm -rf /opt/leo-codex-state \
-    && node /opt/leo-codex-state-builder.mjs /opt/leo-codex-state
+COPY deploy/codex-state/prepare.mjs /opt/cairn-codex-state-builder.mjs
+RUN --network=none rm -rf /opt/cairn-codex-state \
+    && node /opt/cairn-codex-state-builder.mjs /opt/cairn-codex-state
 RUN arch="${TARGETARCH:-amd64}" \
     && curl -fsSL "https://github.com/cli/cli/releases/download/v${GH_VERSION}/gh_${GH_VERSION}_linux_${arch}.tar.gz" -o /tmp/gh.tar.gz \
     && curl -fsSL "https://github.com/cli/cli/releases/download/v${GH_VERSION}/gh_${GH_VERSION}_checksums.txt" -o /tmp/gh-checksums.txt \
@@ -20,8 +20,8 @@ RUN arch="${TARGETARCH:-amd64}" \
     && cp "/tmp/gh_${GH_VERSION}_linux_${arch}/bin/gh" /usr/local/bin/gh \
     && rm -rf /tmp/gh*
 COPY cli-update-plan.json /tmp/cli-update-plan.json
-RUN --mount=type=secret,id=github_token,env=GITHUB_TOKEN if [ -f /opt/leo-toolkit/manage.mjs ]; then \
-      /usr/local/bin/node /opt/leo-toolkit/manage.mjs install /tmp/cli-update-plan.json \
+RUN --mount=type=secret,id=github_token,env=GITHUB_TOKEN if [ -f /opt/cairn-toolkit/manage.mjs ]; then \
+      /usr/local/bin/node /opt/cairn-toolkit/manage.mjs install /tmp/cli-update-plan.json \
       && apt-get update && apt-get upgrade -y --no-install-recommends \
       && rm -rf /var/lib/apt/lists/*; \
     fi \
@@ -42,12 +42,12 @@ USER node
 # the manager container while agents continue using an older embedded Codex.
 FROM updated AS guest
 USER root
-RUN rm -f /opt/leo-vm/root.ext4.zst \
-    && /opt/leo-vm/install-docker \
-    && cp /opt/leo-vm/init /sbin/leo-init && cp /opt/leo-vm/docker /usr/local/bin/docker
+RUN rm -f /opt/cairn-vm/root.ext4.zst \
+    && /opt/cairn-vm/install-docker \
+    && cp /opt/cairn-vm/init /sbin/cairn-init && cp /opt/cairn-vm/docker /usr/local/bin/docker
 FROM debian:bookworm-slim AS guest-disk
 RUN apt-get update && apt-get install -y --no-install-recommends e2fsprogs zstd && rm -rf /var/lib/apt/lists/*
 RUN --mount=from=guest,target=/rootfs,ro truncate -s 8G /root.ext4 && mkfs.ext4 -q -F -d /rootfs /root.ext4 \
     && zstd -T2 -3 /root.ext4 -o /root.ext4.zst && rm /root.ext4
 FROM updated
-COPY --from=guest-disk /root.ext4.zst /opt/leo-vm/root.ext4.zst
+COPY --from=guest-disk /root.ext4.zst /opt/cairn-vm/root.ext4.zst

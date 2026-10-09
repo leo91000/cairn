@@ -12,7 +12,7 @@ without retaining a session; standalone SSE GET and session DELETE return 405.
 The run queue persists
 in SQLite independently of MCP transport state.
 
-The official SDK client is exercised over real HTTP in `tests/mcp.test.ts` with:
+The official SDK client is exercised over real HTTP in `scripts/tests/mcp.test.ts` with:
 
 ```ts
 const client = new Client(
@@ -34,7 +34,7 @@ still be verified separately on the final hosted endpoint.
 Add the HTTPS endpoint with native OAuth dynamic client registration:
 
 ```sh
-codex mcp add leo-agent-manager \
+codex mcp add cairn-installation \
   --url https://agents.example.com/mcp \
   --oauth-client-registration dcr \
   --oauth-resource https://agents.example.com/mcp
@@ -46,8 +46,8 @@ handshake without an adapter or server-side transport sessions.
 
 ## Authorization
 
-The public `/mcp`, OAuth discovery and token endpoints belong to the official
-service. Sign in with a Leo account and choose one owned installation on the
+The public `/mcp`, OAuth discovery and token endpoints belong to the beacon
+service. Sign in with a Cairn account and choose one owned installation on the
 consent screen. Tools execute on that installation through its outbound relay.
 Its local `/mcp`, OAuth endpoints and personal tokens have been removed.
 An offline installation returns 503 without replaying a tool call.
@@ -96,7 +96,7 @@ Tool metadata includes OAuth scopes and
 read/write annotations; denied tool calls carry an OAuth challenge for clients
 that support relinking with additional scopes.
 
-OAuth grants and 30-day personal tokens are limited to one installation and the selected scopes. They can be revoked from that installation’s **Settings** on the official web app. Personal
+OAuth grants and 30-day personal tokens are limited to one installation and the selected scopes. They can be revoked from that installation’s **Settings** on the beacon web app. Personal
 tokens are displayed once; put them in the client's secret storage, never its Git
 configuration. Dynamic registration is limited to 10 requests per minute per caller IP.
 A `run` grant starts existing tasks in YOLO mode inside Docker and can cause the
@@ -130,7 +130,7 @@ HTTP+SSE transport are outside this project's scope.
 
 ## Before submitting to a directory or marketplace
 
-The repository supplies the implementation, icon (`public/favicon.svg`), screenshots,
+The repository supplies the implementation, icon (`apps/web/public/favicon.svg`), screenshots,
 installation instructions, and the following evaluation prompts:
 
 1. “List my agents and scheduled tasks.” — read-only tools, no execution.

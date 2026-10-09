@@ -1,6 +1,6 @@
 import { expect, test } from './fixtures'
 
-test('uses the Leo account and refuses the retired local login endpoints', async ({ page, request }) => {
+test('uses the Cairn account and refuses the retired local login endpoints', async ({ page, request }) => {
   for (const route of ['/api/setup', '/api/login', '/api/session', '/api/logout']) {
     const response = await request.post(route, {
       data: { setupToken: 'browser-test-setup', password: 'browser-password-long-enough' },
@@ -15,7 +15,7 @@ test('uses the Leo account and refuses the retired local login endpoints', async
   await expect(page.getByLabel('Setup token', { exact: true })).toHaveCount(0)
 })
 
-test('the default built web entry uses Leo account sign-in', async ({ page, workspace }) => {
+test('the default built web entry uses Cairn account sign-in', async ({ page, workspace }) => {
   const { preview } = await import('vite')
   const server = await preview({
     configFile: false,

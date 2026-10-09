@@ -4,11 +4,11 @@ Recherche du 26 septembre 2026, sans implémentation ni essai KVM/S3. L’utilis
 
 ## Réponse
 
-Oui : garder le disque actif local et transférer uniquement ses modifications est faisable. Il faut toutefois un mécanisme de capture des changements, des points de reprise cohérents et un format de sauvegarde incrémental. Une réplication asynchrone peut réduire la perte potentielle ; elle ne garantit pas que chaque écriture locale soit déjà sauvegardée à distance. C'est une conclusion d'architecture fondée sur les mécanismes ci-dessous, pas une capacité actuellement livrée par Leo.
+Oui : garder le disque actif local et transférer uniquement ses modifications est faisable. Il faut toutefois un mécanisme de capture des changements, des points de reprise cohérents et un format de sauvegarde incrémental. Une réplication asynchrone peut réduire la perte potentielle ; elle ne garantit pas que chaque écriture locale soit déjà sauvegardée à distance. C'est une conclusion d'architecture fondée sur les mécanismes ci-dessous, pas une capacité actuellement livrée par Cairn.
 
-## Point de départ de Leo et Firecracker
+## Point de départ de Cairn et Firecracker
 
-Leo utilise Firecracker 1.17.0 ([Dockerfile](../Dockerfile)), une image `root.ext4` en lecture seule et un `data.ext4` mutable initialement dimensionné à 32 Gio ([création et configuration](../backend/src/microvm/host.rs)). La migration convenue conserve l'environnement et la session, sans RAM ni processus ([ADR](adr/0002-conversation-movement-by-pause-and-resume.md)). L'image immuable peut donc être conservée par version ; le disque mutable et les autres données persistantes nécessaires doivent être inventoriés ensemble.
+Cairn utilise Firecracker 1.17.0 ([Dockerfile](../Dockerfile)), une image `root.ext4` en lecture seule et un `data.ext4` mutable initialement dimensionné à 32 Gio ([création et configuration](../crates/installation/src/microvm/host.rs)). La migration convenue conserve l'environnement et la session, sans RAM ni processus ([ADR](adr/0002-conversation-movement-by-pause-and-resume.md)). L'image immuable peut donc être conservée par version ; le disque mutable et les autres données persistantes nécessaires doivent être inventoriés ensemble.
 
 Les snapshots différentiels Firecracker suivent les **pages mémoire**, pas les modifications du disque. Les fichiers des disques restent à sauvegarder par l'intégrateur. Firecracker exige une pause pour son snapshot et draine/synchronise les écritures des disques lors de sa création. Une pause seule ne démontre donc pas que tous les caches sont vidés. [Documentation 1.17.0](https://github.com/firecracker-microvm/firecracker/blob/v1.17.0/docs/snapshotting/snapshot-support.md)
 
@@ -18,7 +18,7 @@ Le chemin le moins intrusif conserve les fichiers raw locaux avec les moteurs bl
 
 S3 ne fournit pas un disque avec réécriture aléatoire de secteurs dans un objet. L'append existe pour S3 Express One Zone dans les directory buckets, seulement en fin d'objet : cela ne résout pas les réécritures dispersées d'une image VM. [PutObject](https://docs.aws.amazon.com/AmazonS3/latest/API/API_PutObject.html), [Append](https://docs.aws.amazon.com/AmazonS3/latest/userguide/directory-buckets-objects-append.html)
 
-Une représentation adaptée contient des fragments ou deltas immuables et un manifeste décrivant une sauvegarde complète. Proposition : uploader et vérifier toutes ses dépendances avant de publier le manifeste ; mettre à jour le pointeur courant conditionnellement. AWS garantit l'atomicité par clé, sans transaction multiclés ; le protocole Leo doit donc empêcher de présenter une génération incomplète comme restaurable. Vérifier ces propriétés séparément pour chaque fournisseur compatible S3. [Cohérence S3](https://docs.aws.amazon.com/AmazonS3/latest/userguide/Welcome.html#ConsistencyModel), [Écritures conditionnelles](https://docs.aws.amazon.com/AmazonS3/latest/userguide/conditional-writes.html)
+Une représentation adaptée contient des fragments ou deltas immuables et un manifeste décrivant une sauvegarde complète. Proposition : uploader et vérifier toutes ses dépendances avant de publier le manifeste ; mettre à jour le pointeur courant conditionnellement. AWS garantit l'atomicité par clé, sans transaction multiclés ; le protocole Cairn doit donc empêcher de présenter une génération incomplète comme restaurable. Vérifier ces propriétés séparément pour chaque fournisseur compatible S3. [Cohérence S3](https://docs.aws.amazon.com/AmazonS3/latest/userguide/Welcome.html#ConsistencyModel), [Écritures conditionnelles](https://docs.aws.amazon.com/AmazonS3/latest/userguide/conditional-writes.html)
 
 ## Approches réutilisables
 
@@ -38,7 +38,7 @@ Copier des portions du disque pendant qu'elles changent peut produire un mélang
 
 En asynchrone, l'âge du dernier point restaurable dépend du débit sortant, du volume modifié et des incidents. Garantir la protection distante des écritures déclarées durables exige de faire attendre leur acquittement distant au bon niveau de flush/fsync : le réseau entre alors dans le chemin critique. Cela ne protège toujours pas les données que l'application n'a pas écrites. Cette conséquence découle du protocole d'acquittement, sans promesse de performance mesurée.
 
-## Recommandation pour Leo
+## Recommandation pour Cairn
 
 Viser des **sauvegardes incrémentales fréquentes et cohérentes**, asynchrones vers le master ou S3, avec affichage du dernier point réellement restaurable. Évaluer d'abord les snapshots hôte et outils existants ; choisir la fréquence après mesure, sans développer immédiatement un moteur bloc distribué.
 

@@ -1,5 +1,5 @@
 name: Update agent tools
-# Explicitly disabled after the official-service cutover (#113).
+# Explicitly disabled after the beacon cutover (#113).
 # Installation tools now travel in the paired, fully validated release image.
 on:
   workflow_dispatch:

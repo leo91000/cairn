@@ -22,8 +22,8 @@ async function dispose(root, name, image, started, initial) {
 }
 
 async function trial(image, probe, mode, directory, majors) {
-  const root = await fs.mkdtemp('/var/tmp/leo-ublk-writeback-')
-  const name = `leo-ublk-writeback-${path.basename(root).split('-').at(-1).toLowerCase()}`
+  const root = await fs.mkdtemp('/var/tmp/cairn-ublk-writeback-')
+  const name = `cairn-ublk-writeback-${path.basename(root).split('-').at(-1).toLowerCase()}`
   const prefix = `${directory}/${mode}`
   await fs.mkdir(`${root}/state`)
   await fs.mkdir(`${root}/fixtures`)
@@ -48,7 +48,7 @@ async function trial(image, probe, mode, directory, majors) {
   const caps = ['SYS_ADMIN', 'MKNOD', 'CHOWN', 'FOWNER', 'KILL', 'DAC_OVERRIDE', ...(mode === 'with-cap' ? ['SYS_RESOURCE'] : [])]
   let started = false
   try {
-    docker(['run', '-d', '--name', name, '--network', 'none', '--user', '0', '--read-only', '--cap-drop', 'ALL', ...caps.flatMap(cap => ['--cap-add', cap]), '--device', '/dev/ublk-control', '--device-cgroup-rule', `c ${majors.c}:* rwm`, '--device-cgroup-rule', `b ${majors.b}:* rwm`, '--security-opt', 'seccomp=unconfined', '--security-opt', 'apparmor=unconfined', '--tmpfs', '/run', '--tmpfs', '/tmp', '--memory', '1280m', '--cpus', '2', '--pids-limit', '64', '-v', `${root}:${root}`, '-v', `${root}/fixtures:/fixtures:ro`, '-e', `LEO_WRITEBACK_FIXTURE=${root}`, '-e', `LEO_FLUSHER_MODE=${mode}`, '--entrypoint', 'node', image, '-e', 'setInterval(()=>{},1000)'])
+    docker(['run', '-d', '--name', name, '--network', 'none', '--user', '0', '--read-only', '--cap-drop', 'ALL', ...caps.flatMap(cap => ['--cap-add', cap]), '--device', '/dev/ublk-control', '--device-cgroup-rule', `c ${majors.c}:* rwm`, '--device-cgroup-rule', `b ${majors.b}:* rwm`, '--security-opt', 'seccomp=unconfined', '--security-opt', 'apparmor=unconfined', '--tmpfs', '/run', '--tmpfs', '/tmp', '--memory', '1280m', '--cpus', '2', '--pids-limit', '64', '-v', `${root}:${root}`, '-v', `${root}/fixtures:/fixtures:ro`, '-e', `CAIRN_WRITEBACK_FIXTURE=${root}`, '-e', `CAIRN_FLUSHER_MODE=${mode}`, '--entrypoint', 'node', image, '-e', 'setInterval(()=>{},1000)'])
     started = true
     const child = spawnSync('docker', ['--context', 'default', 'exec', name, 'node', '/fixtures/inner.mjs'], { encoding: 'utf8', timeout: 45000, maxBuffer: 2 * 1024 ** 2 })
     await fs.writeFile(`${prefix}.log`, `${child.stdout ?? ''}\n${child.stderr ?? ''}`)
@@ -119,7 +119,7 @@ async function main() {
   }
 
   assert.ok(majors.c && majors.b, 'ublk unavailable')
-  const directory = await fs.mkdtemp('/var/tmp/leo-ublk-evidence-')
+  const directory = await fs.mkdtemp('/var/tmp/cairn-ublk-evidence-')
   for (const mode of ['with-cap', 'no-cap'])
     await trial(image, probe, mode, directory, majors)
 }

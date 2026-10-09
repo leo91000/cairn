@@ -66,11 +66,11 @@ Passive checkpoints require the explicitly enabled experimental feature. The bas
 ## Reproduction
 
 ```sh
-CARGO_TARGET_DIR=/var/tmp/leo-journal-engine-bench/target cargo +nightly -Zscript build --release --manifest-path /var/tmp/leo-journal-engine-bench/bench.rs
-node /var/tmp/leo-journal-engine-bench/run.mjs smoke
-node /var/tmp/leo-journal-engine-bench/run.mjs large
-node /var/tmp/leo-journal-engine-bench/run.mjs crash
-node /var/tmp/leo-journal-engine-bench/analyze.mjs smoke-final.log large-final.log
+CARGO_TARGET_DIR=/var/tmp/cairn-journal-engine-bench/target cargo +nightly -Zscript build --release --manifest-path /var/tmp/cairn-journal-engine-bench/bench.rs
+node /var/tmp/cairn-journal-engine-bench/run.mjs smoke
+node /var/tmp/cairn-journal-engine-bench/run.mjs large
+node /var/tmp/cairn-journal-engine-bench/run.mjs crash
+node /var/tmp/cairn-journal-engine-bench/analyze.mjs smoke-final.log large-final.log
 ```
 
 Optional mode arguments select a subset, e.g. `large segments-log turso-mvcc-passive`. The large fixture takes about 21 GiB; each run starts from a new copy. Existing runs and source seeds are not overwritten.

@@ -4,47 +4,47 @@ For the production target **https://cairn.build** and a fresh installation on th
 same Coolify/Traefik server, follow [the production runbook](PRODUCTION-CAIRN.md).
 Deployment requires Léo’s explicit go-ahead.
 
-For the official-service installation flow (one machine, integrated S3, no
+For the beacon installation flow (one machine, integrated S3, no
 incoming ports), see [One-command installation](INSTALLATION.md).
 
-## Required migration to the official service
+## Required migration to Beacon
 
 This release removes the installation's browser login and application hosting.
 Administrator passwords, `SETUP_TOKEN`, local browser sessions and CSRF tokens no
 longer grant access. Local MCP OAuth/PAT entry points and public artifact URLs
-also stop working; their official replacements are delivered separately (#55).
+also stop working; their beacon replacements are delivered separately (#55).
 MCP OAuth setup that redirects to the old manager `/oauth/mcp/callback` also
-needs an official callback route before it can work again; existing stored
+needs an beacon callback route before it can work again; existing stored
 outbound MCP credentials remain usable by agents. Old Android clients that use
-local login need the separate official sign-in/client migration (#57).
+local login need the separate Beacon sign-in/client migration (#57).
 Do not deploy this as a transparent upgrade of the old public site.
 **The `.env.example` default follows `:latest`. Pulling that tag after this
 release removes local browser access immediately.** Before any pull or automated
-upgrade, pin `LEO_IMAGE` to the currently verified immutable digest and complete
+upgrade, pin `CAIRN_IMAGE` to the currently verified immutable digest and complete
 the migration preparation below. Keep that digest for rollback.
 
-Before upgrading, back up the volumes below and deploy the official service
+Before upgrading, back up the volumes below and deploy Beacon
 with its own Postgres database, email delivery, HTTPS origin and web bundle
-([official service setup](OFFICIAL-SERVICE.md)). Upgrade its binary and web bundle
-together before running the new `leo claim`: earlier official binaries do not
+([Beacon setup](BEACON.md)). Upgrade its binary and web bundle
+together before running the new `cairn claim`: earlier beacon binaries do not
 provide the device-review confirmation step. Sign in there. The installation
-and official service must use compatible relay protocols. Keep one relay process,
+and Beacon must use compatible relay protocols. Keep one relay process,
 and route account/access mutations, installation API requests and relay
-WebSockets to it. Revocation notifications are process-local; multiple official
+WebSockets to it. Revocation notifications are process-local; multiple beacon
 replicas are unsupported even with sticky installation routing. See
-[official process limits](OFFICIAL-SERVICE.md#configuration) and
-[ADR-0032](adr/0032-single-official-relay-process.md) for this explicit restriction
+[beacon process limits](BEACON.md#configuration) and
+[ADR-0032](adr/0032-single-beacon-relay-process.md) for this explicit restriction
 of spec #43 and the tolerance of persisted revocation checks.
 
-For an existing installation, preserve all volumes, add `LEO_OFFICIAL_ORIGIN`
+For an existing installation, preserve all volumes, add `CAIRN_BEACON_ORIGIN`
 to the manager environment, upgrade the image, then run:
 
 ```sh
-docker compose exec manager leo claim
+docker compose exec manager cairn claim
 ```
 
-The command prints the official `/claim` URL and a temporary device code. Open
-that URL, sign in to the Leo account that will own the installation, and approve
+The command prints the beacon `/claim` URL and a temporary device code. Open
+that URL, sign in to the Cairn account that will own the installation, and approve
 only the code displayed on your own machine. Wait for the command to confirm
 success, then restart the manager to load its new relay identity:
 
@@ -59,7 +59,7 @@ installation. **Discarding old volumes discards their data**: retain backups
 until the replacement has been verified. The one-command installer includes local
 S3 setup; this manual Compose procedure still needs existing S3 configuration.
 
-After migration, use the official site. Verify the installation appears, a
+After migration, use the beacon site. Verify the installation appears, a
 conversation can be read and modified, and access returns after a manager
 restart. Direct `/api/session`, `/api/setup`, `/api/login`, static pages, local
 OAuth, local `/mcp` and public artifact requests must be refused. Remove obsolete
@@ -67,7 +67,7 @@ setup secrets and the installation's public browser domain/proxy. `PUBLIC_URL`
 is now an optional **internal manager origin** for execution nodes and run-scoped
 MCP, defaulting to loopback; it is not a browser address or a relay prerequisite.
 For additional nodes use a reachable private LAN/VPN origin and keep the node
-channel available. Agent execution and node traffic continue during an official
+channel available. Agent execution and node traffic continue during an beacon
 service outage, while browser access is unavailable.
 
 The read-only `/health` readiness probe and authenticated deployment lease remain
@@ -81,62 +81,62 @@ proof from the last five minutes in the calling session; use **Confirm identity*
 in its confirmation form.
 
 Detaching an installation revokes access and disconnects the active tunnel while
-preserving the official installation record and its local data. Deleting its
-owner account has the same effect. To claim it again, run `leo claim` on its
+preserving the beacon installation record and its local data. Deleting its
+owner account has the same effect. To claim it again, run `cairn claim` on its
 machine; successful approval rotates and atomically replaces the private identity
 file. A still-owned installation cannot be claimed by another account. A failed
 or expired claim keeps the existing identity file intact. Remove a used
-`LEO_INSTALLATION_CLAIM_CODE` from the environment. Protect
+`CAIRN_INSTALLATION_CLAIM_CODE` from the environment. Protect
 `/data/installation-relay/identity.json` like node credentials and never publish it.
 
 If recovery is interrupted after the service attached the owner but before the
 machine saved its new token, detach that installation in the app and run
-`leo claim` again with the existing private file. The service retains the proof
+`cairn claim` again with the existing private file. The service retains the proof
 used to start recovery separately from the tunnel credential, so the same
 installation record remains recoverable; that proof never reconnects a tunnel.
 A still-owned installation must be detached before any recovery attempt.
 
 If the identity file is missing/corrupt (or an initial claim response was lost
 before any identity was saved), choose **Revoke and forget installation** in the
-official app. This also works when it is offline and permanently invalidates old
+beacon app. This also works when it is offline and permanently invalidates old
 credentials and recovery proofs. Stop the manager, back up the entire private
 `installation-relay` directory outside the deployment volumes, remove that
-directory, and run `leo claim` with `LEO_OFFICIAL_ORIGIN`. This creates a new
-official installation ID while preserving existing data volumes.
+directory, and run `cairn claim` with `CAIRN_BEACON_ORIGIN`. This creates a new
+beacon installation ID while preserving existing data volumes.
 Retain backups until access has been verified. Use this **Revoke and forget**
 path after machine-token theft too: the thief may rotate first, making the old
-local token unusable for `leo rotate-token`.
+local token unusable for `cairn rotate-token`.
 
 To renew a credential while retaining the installation ID and its sharing,
-run `leo rotate-token` with the deployment's usual `DATA_DIR`, then restart the
+run `cairn rotate-token` with the deployment's usual `DATA_DIR`, then restart the
 manager. Retry the same command if its response is lost; retain `rotation.json`
 until the command succeeds. See [credential renewal](INSTALLATION-RELAY.md#renewing-a-machine-credential).
 
 ### Roll back this access migration
 
 This ticket makes **no installation SQLite schema migration**. To restore the
-previous access model, stop the new manager, set `LEO_IMAGE` back to the exact
+previous access model, stop the new manager, set `CAIRN_IMAGE` back to the exact
 previous verified image digest for both manager and runner, then run
 `docker compose pull && docker compose up -d`. Keep all four existing volumes.
-For Coolify, restore that same digest in `LEO_IMAGE` and restart the service.
+For Coolify, restore that same digest in `CAIRN_IMAGE` and restart the service.
 Restore the previous manager origin/proxy and its old setup configuration if
 removed; the previous image reads the preserved administrator/session records.
 Check its `/health` commit and local sign-in before declaring rollback complete.
 This deliberately restores the old local-access behavior. The private relay
 identity file can stay on disk; the old image ignores it. Detach the installation
-in the official app to revoke its relay identity if abandoning the migration.
+in the beacon app to revoke its relay identity if abandoning the migration.
 
-The official Postgres migrations are separate and remain applied: do not run an
-older official binary against that database without its matching backup. If a
+The beacon Postgres migrations are separate and remain applied: do not run an
+older beacon binary against that database without its matching backup. If a
 later installation release has changed SQLite, follow the image-and-backup
 rollback rule below instead of assuming this procedure is still sufficient.
 
 ## Additional execution nodes
 
-In the official app, open the installation’s **Nodes → Add a machine** screen.
+In the beacon app, open the installation’s **Nodes → Add a machine** screen.
 Supply the **Direct manager address** reachable from that machine: a LAN address,
 VPN hostname or optional public HTTPS origin, including its port. The browser
-continues to use the official relay; the additional node connects directly to
+continues to use the beacon relay; the additional node connects directly to
 this address. No public domain is required. The manager needs a listener or
 reverse proxy reachable from that LAN/VPN. The one-command installation keeps
 its manager on the private Docker network; expose only the manager’s node
@@ -151,7 +151,7 @@ send credentials across the network. Node identities and enrollment codes
 remain stored as hashes on the manager; enrollment codes expire and can be
 consumed only once. The address is connection configuration, not authorization.
 Disk blocks travel over the authenticated direct node channel or to configured
-S3 storage, never through the official relay.
+S3 storage, never through the beacon relay.
 
 The chosen address is visible as an argument in the generated command:
 `curl …/internal/nodes/install.sh | sudo bash -s -- 'https://manager.vpn.example'`.
@@ -164,8 +164,8 @@ this authenticated connection address for disk preparation and restoration,
 even if the manager’s internal origin is loopback. The manager’s optional
 `PUBLIC_URL` remains a fallback for older enrollment clients and
 manager-local calls; it need not be the browser’s origin. Installers require
-`LEO_NODE_IMAGE` to pin the manager’s approved image digest. Without it, use the
-matching `leo node-enroll` binary with the address and temporary code shown in
+`CAIRN_NODE_IMAGE` to pin the manager’s approved image digest. Without it, use the
+matching `cairn node-enroll` binary with the address and temporary code shown in
 the app. Changes of address after installation require updating the node’s
 private identity and supervisor configuration together while its service is
 stopped; no credential is displayed by the app.
@@ -179,10 +179,10 @@ serve only the node channel, not an installation browser interface.
 ## Docker on a VPS
 
 Install Docker Engine and the Compose plugin. Clone this repository on the server,
-copy `.env.example` to `.env`, and configure `LEO_OFFICIAL_ORIGIN`.
+copy `.env.example` to `.env`, and configure `CAIRN_BEACON_ORIGIN`.
 Keep one manager replica per SQLite data volume. If using a prefilled claim code,
-set `LEO_INSTALLATION_CLAIM_CODE` and `LEO_INSTALLATION_NAME` before first startup;
-otherwise use `leo claim` as above.
+set `CAIRN_INSTALLATION_CLAIM_CODE` and `CAIRN_INSTALLATION_NAME` before first startup;
+otherwise use `cairn claim` as above.
 
 For a local build, resolve current stable CLI versions and pass them to Docker:
 
@@ -194,9 +194,9 @@ docker compose up -d
 ```
 
 For published images, use
-`docker compose pull && docker compose up -d` and pin `LEO_IMAGE` to a verified
-`ghcr.io/leo91000/leo-agent-manager:sha-<full-commit>` tag for controlled upgrades.
-Port 4310 is private machine traffic. The official service terminates browser
+`docker compose pull && docker compose up -d` and pin `CAIRN_IMAGE` to a verified
+`ghcr.io/leo91000/cairn:sha-<full-commit>` tag for controlled upgrades.
+Port 4310 is private machine traffic. Beacon terminates browser
 access and receives the installation's outbound relay connection.
 
 The Compose file persists:
@@ -213,10 +213,10 @@ The image runs as UID/GID 1000. Bind mounts need matching ownership. Do not run
 The Compose defaults give the application two CPUs and 4 GB of memory; adjust these
 for the projects your agents build. Container logs rotate independently of run logs.
 
-## Leo account and CLI accounts
+## Cairn account and CLI accounts
 
-Complete the claim above, then open the installation from your Leo account on the
-official site. Agent CLI accounts remain separate from your Leo account. Keep
+Complete the claim above, then open the installation from your Cairn account on the
+Beacon site. Agent CLI accounts remain separate from your Cairn account. Keep
 tokens and account files out of Git, images, screenshots and support logs.
 
 The **Connections** screen provides official CLI device sign-in. If a provider
@@ -278,8 +278,8 @@ hosts deployed by hand, such as Docker on a VPS or Coolify, enable it once as ro
 ```sh
 apt-get install -y zram-tools
 printf 'ALGO=zstd\nPERCENT=25\nPRIORITY=100\n' > /etc/default/zramswap
-echo 'vm.swappiness=100' > /etc/sysctl.d/99-leo-zram.conf
-sysctl -p /etc/sysctl.d/99-leo-zram.conf
+echo 'vm.swappiness=100' > /etc/sysctl.d/99-cairn-zram.conf
+sysctl -p /etc/sysctl.d/99-cairn-zram.conf
 systemctl enable zramswap && systemctl restart zramswap
 swapon --show
 ```
@@ -290,21 +290,21 @@ the default `memswap_limit` rather than setting it equal to `mem_limit`.
 ## Coolify
 
 Create a Compose service from `compose.yaml`, using the published GHCR image for
-both manager and runner. Configure the official origin and claim the manager as
+both manager and runner. Configure the beacon origin and claim the manager as
 above. Preserve the persistent mounts, one replica and a 60-second shutdown grace
 period. Use `/health` only for the private readiness check. Do not configure a
-public browser domain for the installation; serve the official application on its
+public browser domain for the installation; serve the beacon application on its
 own HTTPS origin. Additional nodes still need a direct private route to port 4310.
 
 ### Deploy version tags through GitHub Actions
 
-The production workflow targets the **official Compose service**, never the old
+The production workflow targets the **beacon Compose service**, never the old
 public installation manager. The full [cairn.build runbook](PRODUCTION-CAIRN.md)
 lists environment setup, DNS, Resend, OAuth, co-location and rollback steps.
 
-Main and same-repository PRs build both installation and official images. All
+Main and same-repository PRs build both installation and beacon images. All
 existing quality, browser, network and installation/VM smoke checks remain
-publication prerequisites, alongside the exact official-image smoke with
+publication prerequisites, alongside the exact beacon-image smoke with
 Postgres, bundled SPA, sign-in, persistence and readiness checks. Both images
 carry SBOM/provenance and share schema-3 evidence for one validated Git tree.
 Older single-image evidence cannot be reused. Fork images remain local.
@@ -317,22 +317,22 @@ build starts at that deadline. Production deployment jobs remain serialized.
 Main, PR and manual workflows never deploy.
 
 The GitHub `production` environment requires the secret `COOLIFY_TOKEN` and
-variables `COOLIFY_URL`, `COOLIFY_SERVICE_UUID` (**new official service UUID**)
-and `LEO_OFFICIAL_ORIGIN=https://cairn.build`. Require Léo’s environment approval.
-The obsolete `LEO_PUBLIC_URL` and standalone-manager deployment target are no
+variables `COOLIFY_URL`, `COOLIFY_SERVICE_UUID` (**new Beacon UUID**)
+and `CAIRN_BEACON_ORIGIN=https://cairn.build`. Require Léo’s environment approval.
+The obsolete `CAIRN_PUBLIC_URL` and standalone-manager deployment target are no
 longer used by the CLI. The script refuses a manager/runner Compose target.
 
-The deployment sends `LEO_OFFICIAL_IMAGE` and `LEO_INSTALLATION_IMAGE` together
+The deployment sends `CAIRN_BEACON_IMAGE` and `CAIRN_INSTALLATION_IMAGE` together
 to Coolify’s bulk environment endpoint, re-reads both literal values, and repairs
 a partial write before restarting. If repair fails, it restores the previous
 pair and fails without restart; an unrecoverable API failure requires freezing
 manual restarts and repairing both values. The token needs `read:sensitive` to
-verify the pair. Only official is restarted. It waits up to ten minutes for
+verify the pair. Only beacon is restarted. It waits up to ten minutes for
 `/health` to report the tested image's commit/runtime identity and
 `/install/release` to approve the paired installation image. Reused PR images
 report the tested merge commit with the released tree. Existing installations
 update through their host timer; the check does not wait for every installation.
-A failed official rollout needs operator rollback of the previous digest and
+A failed beacon rollout needs operator rollback of the previous digest and
 matching Postgres backup; see [rollback](PRODUCTION-CAIRN.md#7-backups-and-rollback).
 
 Retained VM disks keep their original guest OS and tools. Only approve an
@@ -349,7 +349,7 @@ consistent database backup, but that does not include working directories or CLI
 accounts and is not a complete recovery point.
 
 Restore into fresh volumes while the manager is stopped, preserve UID/GID 1000,
-and start the same image version that created the backup. Check official claim/relay access, profiles,
+and start the same image version that created the backup. Check beacon claim/relay access, profiles,
 tasks, global/project skills, and worktree paths. Database schema versions newer
 than the application are rejected rather than silently downgraded. Roll back the
 image and its matching backup together when a future migration requires it.
@@ -361,13 +361,13 @@ cleanup refuses changes, including ignored/untracked files, and keeps Git branch
 
 ## Troubleshooting
 
-- **Unexpected host/origin:** check the internal manager origin for node traffic, and the official origin for browser access.
+- **Unexpected host/origin:** check the internal manager origin for node traffic, and the beacon origin for browser access.
 - **Project outside workspace root:** use a directory under `WORKSPACE_ROOTS` (colon-separated on Linux), then register its canonical path.
 - **Worktree preparation failed:** check that the project is a Git repository and the configured local base branch exists.
 - **Recovering:** active conversations resume after the previous process/container stops. If the runner is unavailable, recovery waits and retains project/account locks. **Interrupted:** older runs without a checkpoint need review and an explicit retry. See [restart recovery](RESTART-RECOVERY.md).
 - **No CLI installed/signed in:** use Connections and the commands above; provider account credentials are separate from the manager password.
 - **MCP rejects initialization:** verify the client uses Streamable HTTP and the deployed image includes stateless compatibility. Both 2026-07-28 and older 2025 clients are supported; standalone HTTP+SSE and stateful sessions are not.
-- **Installation detached or owner account deleted:** run `leo claim` on the machine, approve its device code on the official site, then restart the manager. Old local passwords and sessions cannot restore access.
+- **Installation detached or owner account deleted:** run `cairn claim` on the machine, approve its device code on the beacon site, then restart the manager. Old local passwords and sessions cannot restore access.
 
 See [Docker's volume documentation](https://docs.docker.com/engine/storage/volumes/)
 and [Codex authentication](https://learn.chatgpt.com/docs/auth) for the underlying tools.
@@ -407,7 +407,7 @@ ANDROID_TEST_COMMIT=<full-commit-sha> \
 ANDROID_TEST_SYSTEM=aosp \
 ANDROID_EVIDENCE=/absolute/private/path/intel.json \
 ANDROID_SCREENSHOTS=/absolute/private/path/screenshots \
-node tests/android-runner-smoke.mjs ghcr.io/leo91000/leo-agent-manager@sha256:<digest>
+node tests/android-runner-smoke.mjs ghcr.io/leo91000/cairn@sha256:<digest>
 ```
 
 This command requires Node and Docker on the test controller; the controller may
@@ -431,20 +431,20 @@ main pipeline's exact image.
 
 ### Task-author security upgrade (#59)
 
-Deploy the official service before upgrading installations for the task-author
+Deploy Beacon before upgrading installations for the task-author
 checks. Startup applies the additive `202610072155_task_author_access` migration
 with the existing SQLx migrator; historical migration numbers and checksums stay
 unchanged. Existing memberships receive access identifiers automatically.
-An upgraded manager cannot reconnect to an older official binary that lacks
+An upgraded manager cannot reconnect to an older beacon binary that lacks
 `/api/relay/{installation}/task-authors`: its 404 defers scheduled admissions
-and keeps the relay offline. Keep the upgraded official service while rolling
-back an installation. Rolling back the official service requires its matching
+and keeps the relay offline. Keep the upgraded Beacon while rolling
+back an installation. Rolling back Beacon requires its matching
 Postgres backup and compatible managers; older managers also restore the previous
 task-author/public-link rules, so suspend shared access during that rollback.
 
 Upgrade every shared installation: older binaries do not enforce the task-author
-policy. Upgraded installations require the official task-author endpoint before
-reconnecting and before admitting scheduled work. During an official outage,
+policy. Upgraded installations require the beacon task-author endpoint before
+reconnecting and before admitting scheduled work. During an beacon outage,
 new scheduled admissions wait and already admitted work continues. On first
 reconciliation, old tasks without authors belong to the current owner. Removed
 members' tasks and admitted runs remain available; re-invitation does not resume

@@ -1,5 +1,5 @@
 import type { Page } from '@playwright/test'
-import type { Service } from '../legacy/server/service'
+import type { Service } from '../fixtures/legacy/server/service'
 import { execFileSync, spawn } from 'node:child_process'
 import { once } from 'node:events'
 import {
@@ -13,10 +13,10 @@ import os from 'node:os'
 import path from 'node:path'
 import process from 'node:process'
 import { test as base, expect } from '@playwright/test'
-import { config as loadConfig } from '../legacy/server/config'
-import { Service as SeedService } from '../legacy/server/service'
-import { Store } from '../legacy/server/store'
-import { executeOfficialSql, officialRelayFixture } from './official-relay-fixture'
+import { config as loadConfig } from '../fixtures/legacy/server/config'
+import { Service as SeedService } from '../fixtures/legacy/server/service'
+import { Store } from '../fixtures/legacy/server/store'
+import { beaconRelayFixture, executeBeaconSql } from './beacon-relay-fixture'
 
 export interface Workspace {
   service: Service
@@ -30,7 +30,7 @@ export interface Workspace {
   setAccountUsage: (id: string, value: unknown) => Promise<void>
 }
 
-// One application per worker; navigation and sign-in share its real official context.
+// One application per worker; navigation and sign-in share its real beacon context.
 let currentWorkspace: Pick<Workspace, 'url' | 'installationId' | 'signIn'> | undefined
 
 export function workspacePath(route: string) {
@@ -57,16 +57,16 @@ export const test = base.extend<object, { workspace: Workspace }>({
   // Playwright requires a destructuring pattern even with no fixture dependencies.
   // eslint-disable-next-line no-empty-pattern
   workspace: [async ({}, use, workerInfo) => {
-    const directory = await mkdtemp(path.join(os.tmpdir(), 'leo-browser-'))
+    const directory = await mkdtemp(path.join(os.tmpdir(), 'cairn-browser-'))
     const home = path.join(directory, 'home')
     const projectPath = path.join(directory, 'project')
     const port = 4322 + workerInfo.parallelIndex
     const managerUrl = `http://127.0.0.1:${port}`
-    const official = await officialRelayFixture(4422 + workerInfo.parallelIndex)
-    const url = official.url
-    const database = new URL(process.env.LEO_OFFICIAL_TEST_DATABASE_URL!)
+    const beacon = await beaconRelayFixture(4422 + workerInfo.parallelIndex)
+    const url = beacon.url
+    const database = new URL(process.env.CAIRN_BEACON_TEST_DATABASE_URL!)
     const schema = `browser_${crypto.randomUUID().replaceAll('-', '')}`
-    executeOfficialSql(database, `CREATE SCHEMA ${schema}`)
+    executeBeaconSql(database, `CREATE SCHEMA ${schema}`)
     const isolatedDatabase = new URL(database)
     isolatedDatabase.searchParams.set('options', `-c search_path=${schema}`)
     const accountEmail = `${schema}@example.test`
@@ -93,19 +93,19 @@ export const test = base.extend<object, { workspace: Workspace }>({
     await writeFile(usageFile, '{}')
     // A developer may rebuild Cargo while this fixture is active. Keep the
     // supervisor's current executable stable for the entire browser journey.
-    const binary = path.join(directory, 'leo')
-    await copyFile(process.env.LEO_TEST_BINARY || path.resolve('target/debug/leo'), binary)
+    const binary = path.join(directory, 'cairn')
+    await copyFile(process.env.CAIRN_TEST_BINARY || path.resolve('target/debug/cairn'), binary)
     let log = ''
     let claimCode = ''
     const start = () => {
       const child = spawn(binary, [], {
         env: {
           ...process.env,
-          LEO_CONFIG: configuration,
-          LEO_FIXTURE_USAGE: usageFile,
-          LEO_OFFICIAL_ORIGIN: url,
-          LEO_INSTALLATION_CLAIM_CODE: claimCode,
-          LEO_INSTALLATION_NAME: 'Browser workspace',
+          CAIRN_CONFIG: configuration,
+          CAIRN_FIXTURE_USAGE: usageFile,
+          CAIRN_BEACON_ORIGIN: url,
+          CAIRN_INSTALLATION_CLAIM_CODE: claimCode,
+          CAIRN_INSTALLATION_NAME: 'Browser workspace',
         },
         stdio: ['ignore', 'pipe', 'pipe'],
       })
@@ -150,7 +150,7 @@ export const test = base.extend<object, { workspace: Workspace }>({
           throw new Error(`Email sign-in failed: ${response.status}`)
         return response.ok
       }, { timeout: 70000 }).toBe(true)
-      const code = official.messages.at(-1)!.match(/\b\d{8}\b/)![0]
+      const code = beacon.messages.at(-1)!.match(/\b\d{8}\b/)![0]
       const response = await fetch(`${url}/api/account/verify`, {
         method: 'POST',
         headers,
@@ -217,9 +217,9 @@ export const test = base.extend<object, { workspace: Workspace }>({
     }
 
     try {
-      const officialChild = official.official(isolatedDatabase.toString())
+      const beaconChild = beacon.beacon(isolatedDatabase.toString())
       await expect.poll(async () => {
-        expect(officialChild.exitCode).toBeNull()
+        expect(beaconChild.exitCode).toBeNull()
         return fetch(`${url}/health`).then(response => response.ok).catch(() => false)
       }, { timeout: 60000 }).toBe(true)
       await login()
@@ -272,7 +272,7 @@ export const test = base.extend<object, { workspace: Workspace }>({
           child = start()
           closed = once(child, 'exit')
           await ready()
-          // Local readiness precedes reconnection to the official relay.
+          // Local readiness precedes reconnection to the beacon relay.
           await expect.poll(async () => {
             const response = await fetch(`${url}${apiPath('/api/agents')}`, { headers })
             return response.ok
@@ -286,8 +286,8 @@ export const test = base.extend<object, { workspace: Workspace }>({
     }
     finally {
       await stop()
-      await official.close()
-      executeOfficialSql(database, `DROP SCHEMA ${schema} CASCADE`)
+      await beacon.close()
+      executeBeaconSql(database, `DROP SCHEMA ${schema} CASCADE`)
       currentWorkspace = undefined
       await service.accounts.close()
       service.store.close()

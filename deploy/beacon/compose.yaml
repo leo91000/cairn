@@ -1,0 +1,48 @@
+services:
+  postgres:
+    image: postgres:17-alpine@sha256:b0f9560a2de083e2cc7382e75f808c7381a32852a7ec49117deedb300e552b24
+    environment:
+      POSTGRES_USER: cairn
+      POSTGRES_PASSWORD: development-only
+      POSTGRES_DB: cairn_beacon
+    ports: ['127.0.0.1:5433:5432']
+    volumes: [beacon-postgres:/var/lib/postgresql/data]
+    healthcheck:
+      test: [CMD-SHELL, pg_isready -U cairn -d cairn_beacon]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+  mail:
+    image: node:24-alpine
+    command: [node, /app/dev-mail.mjs]
+    volumes: ['./dev-mail.mjs:/app/dev-mail.mjs:ro']
+    ports: ['127.0.0.1:8025:8025']
+  beacon:
+    image: rust:1.97.1-bookworm
+    working_dir: /app
+    command: [cargo, run, --locked, --bin, cairn-beacon]
+    environment:
+      CAIRN_BEACON_DATABASE_URL: postgres://cairn:development-only@postgres/cairn_beacon
+      CAIRN_BEACON_ORIGIN: http://localhost:4311
+      CAIRN_BEACON_LISTEN: 0.0.0.0:4311
+      CAIRN_BEACON_EMAIL_ENDPOINT: http://mail:8025/emails
+      CAIRN_BEACON_EMAIL_KEY: development-only
+      CAIRN_BEACON_EMAIL_FROM: Cairn <cairn@example.test>
+      CAIRN_BEACON_GOOGLE_CLIENT_ID: ${CAIRN_BEACON_GOOGLE_CLIENT_ID:-}
+      CAIRN_BEACON_GOOGLE_CLIENT_SECRET: ${CAIRN_BEACON_GOOGLE_CLIENT_SECRET:-}
+      CAIRN_BEACON_GITHUB_CLIENT_ID: ${CAIRN_BEACON_GITHUB_CLIENT_ID:-}
+      CAIRN_BEACON_GITHUB_CLIENT_SECRET: ${CAIRN_BEACON_GITHUB_CLIENT_SECRET:-}
+    volumes:
+      - ../..:/app
+      - beacon-cargo:/usr/local/cargo
+      - beacon-target:/app/target
+    ports: ['127.0.0.1:4311:4311']
+    depends_on:
+      postgres:
+        condition: service_healthy
+      mail:
+        condition: service_started
+volumes:
+  beacon-postgres:
+  beacon-cargo:
+  beacon-target:

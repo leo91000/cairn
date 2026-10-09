@@ -18,8 +18,8 @@ cache allocation and manager status can change during collection.
 
 ## Local diagnostics
 
-The default log filter is `warn,leo_performance=info`. If `RUST_LOG` is explicitly
-set, include `leo_performance=info` to enable the timing events. No diagnostics are
+The default log filter is `warn,cairn_performance=info`. If `RUST_LOG` is explicitly
+set, include `cairn_performance=info` to enable the timing events. No diagnostics are
 sent to an external telemetry service. Logs contain operation names, run/VM IDs,
 durations and counters, never credentials, object keys or conversation content.
 

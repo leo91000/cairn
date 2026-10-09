@@ -56,7 +56,7 @@ Le code vérifie les nouvelles demandes sur un intervalle d'**une seconde**,
 sans réveil immédiat depuis les routes de création examinées. Il faudra notifier
 le worker à l'envoi d'un message, tout en gardant le timer pour les tâches
 planifiées et la récupération. Diminuer le coût de boot ne retire pas cette attente.
-Source : [worker](../backend/src/worker.rs).
+Source : [worker](../crates/installation/src/worker.rs).
 
 ### 2. La découverte des modèles se répète au premier compte
 
@@ -70,8 +70,8 @@ automatiquement un premier chat réel sous 500 ms. Une prochaine implémentation
 devrait exploiter les métadonnées déjà découvertes par le manager, liées au compte
 et au modèle, avec invalidation appropriée. Il faut ensuite mesurer si l'on retire
 réellement cette requête du chemin critique, sans perdre les contrôles de capacités.
-Sources : [démarrage du chat](../backend/src/chat_process.rs),
-[gestion des comptes](../backend/src/accounts.rs).
+Sources : [démarrage du chat](../crates/installation/src/chat_process.rs),
+[gestion des comptes](../crates/installation/src/accounts.rs).
 
 ### 3. Les applications connectées ajoutent un second MCP
 
@@ -113,7 +113,7 @@ n'attende pas tout le monitoring, **en conservant une rotation sérialisée et l
 validation de la réservation du compte**. Supprimer simplement le verrou serait
 une régression du contrat d'authentification.
 Sources : `access_tokens` et `refresh` dans
-[accounts.rs](../backend/src/accounts.rs).
+[accounts.rs](../crates/installation/src/accounts.rs).
 
 ## Ce qui reste hors de ces conclusions
 
@@ -147,7 +147,7 @@ toutes les connexions activées.
 ## Preuves et nettoyage
 
 [Données agrégées et échantillons](https://github.com/leo91000/leo-agent-manager/releases/download/v0.50.6/authenticated-startup-2026-09-12.json).
-Les scripts exploratoires sont conservés dans `/var/tmp/leo-auth-bench/` sur la
+Les scripts exploratoires sont conservés dans `/var/tmp/cairn-auth-bench/` sur la
 machine de développement. La production reste au commit `8643deb`, sans changement
 de paramètres ni redéploiement.
 

@@ -1,54 +1,54 @@
-# Leo Agent Manager
+# Cairn
 
-Leo Agent Manager permet de conduire des conversations avec des agents et de retrouver leur travail.
+Cairn permet de conduire des conversations avec des agents et de retrouver leur travail.
 
 ## Language
 
-**Service officiel** :
-Le service hébergé par Leo qui fournit l’interface web et mobile, les comptes Leo et l’accès à toutes les installations d’un compte. Il ne conserve pas le travail des agents.
+**Beacon** :
+Le service hébergé par Cairn qui fournit l’interface web et mobile, les comptes Cairn et l’accès à toutes les installations d’un compte. Il ne conserve pas le travail des agents.
 
-**Compte Leo** :
-L’identité d’une personne sur le service officiel, définie par une adresse e-mail vérifiée. Le code par e-mail, Google, GitHub et les passkeys ne sont que des moyens de s’y connecter. C’est la seule manière d’accéder à une installation.
+**Compte Cairn** :
+L’identité d’une personne sur Beacon, définie par une adresse e-mail vérifiée. Le code par e-mail, Google, GitHub et les passkeys ne sont que des moyens de s’y connecter. C’est la seule manière d’accéder à une installation.
 _Avoid_ : utilisateur GitHub, compte d’agent de code
 
 **Installation** :
-Un ensemble autonome déployé par une personne sur ses machines, avec ses nodes d’exécution. Il conserve les conversations, les projets, les comptes d’agent de code et les secrets ; ces données ne quittent pas l’installation pour être conservées par le service officiel.
+Un ensemble autonome déployé par une personne sur ses machines, avec ses nodes d’exécution. Il conserve les conversations, les projets, les comptes d’agent de code et les secrets ; ces données ne quittent pas l’installation pour être conservées par Beacon.
 _Avoid_ : node, set de nodes, instance, serveur
 
 **Revendication d’une installation** :
-Le rattachement d’une installation à un compte Leo, qui en devient le propriétaire. Une installation non revendiquée n’est accessible à personne.
+Le rattachement d’une installation à un compte Cairn, qui en devient le propriétaire. Une installation non revendiquée n’est accessible à personne.
 
 **Révocation définitive d’une installation** (« Revoke and forget installation ») :
-La suppression de son rattachement et de son identité auprès de Leo, décidée par son propriétaire, qui met fin à ses accès et à son partage tout en conservant ses données sur la machine. Revenir exige une nouvelle revendication, sous une nouvelle identité d’installation.
+La suppression de son rattachement et de son identité auprès de Cairn, décidée par son propriétaire, qui met fin à ses accès et à son partage tout en conservant ses données sur la machine. Revenir exige une nouvelle revendication, sous une nouvelle identité d’installation.
 _Avoid_ : détachement (qui conserve l’identité de l’installation)
 
 **Propriétaire d’une installation** :
-Le compte Leo auquel l’installation est rattachée. Il est le seul à gérer ses nodes, ses comptes d’agent de code, ses secrets et son partage.
+Le compte Cairn auquel l’installation est rattachée. Il est le seul à gérer ses nodes, ses comptes d’agent de code, ses secrets et son partage.
 Sans propriétaire, une installation redevient non revendiquée ; la propriété ne se transfère pas.
 
 **Autorisation MCP d’une installation** :
 L’accès qu’un propriétaire accorde à un client externe pour une seule installation et des droits précis. Les membres font travailler les agents depuis l’app, sans pouvoir accorder ni utiliser cet accès externe.
 
 **Membre d’une installation** :
-Un compte Leo invité par le propriétaire. Il voit toutes les conversations de l’installation et fait travailler ses agents, donc avec les comptes d’agent de code et les secrets du propriétaire, sans pouvoir les gérer.
+Un compte Cairn invité par le propriétaire. Il voit toutes les conversations de l’installation et fait travailler ses agents, donc avec les comptes d’agent de code et les secrets du propriétaire, sans pouvoir les gérer.
 _Avoid_ : invité, collaborateur
 
 **Installation courante** :
 L’installation dans laquelle on travaille dans l’interface ; on n’en voit qu’une à la fois et on passe de l’une à l’autre.
 
 **Relais** :
-Le passage par le service officiel des échanges entre l’interface et une installation, sur la connexion sortante ouverte par l’installation. C’est la voie de secours quand la connexion directe est impossible ou interrompue ; il transporte le travail des agents sans le conserver.
+Le passage par Beacon des échanges entre l’interface et une installation, sur la connexion sortante ouverte par l’installation. C’est la voie de secours quand la connexion directe est impossible ou interrompue ; il transporte le travail des agents sans le conserver.
 _Avoid_ : tunnel (qui désigne la connexion technique de l’installation)
 
 **Connexion directe** :
-L’échange entre l’interface et une installation sans passer par le service officiel, établi quand le réseau le permet et autorisé par l’installation pour un compte Leo, une session et un rôle. Elle transporte les mêmes échanges que le relais et bascule sur lui si elle tombe.
+L’échange entre l’interface et une installation sans passer par Beacon, établi quand le réseau le permet et autorisé par l’installation pour un compte Cairn, une session et un rôle. Elle transporte les mêmes échanges que le relais et bascule sur lui si elle tombe.
 _Avoid_ : accès local, P2P
 
 **Signalisation** :
-La mise en relation par le service officiel d’une interface et d’une installation pour établir une connexion directe. Elle transporte l’autorisation et les paramètres de connexion, jamais le contenu des conversations.
+La mise en relation par Beacon d’une interface et d’une installation pour établir une connexion directe. Elle transporte l’autorisation et les paramètres de connexion, jamais le contenu des conversations.
 
 **Autorisation de connexion directe** :
-La permission signée par le service officiel, limitée à une installation, un compte, une session et quelques minutes, sans laquelle l’installation refuse une connexion directe. Sa révocation ou son échéance ferme la connexion.
+La permission signée par Beacon, limitée à une installation, un compte, une session et quelques minutes, sans laquelle l’installation refuse une connexion directe. Sa révocation ou son échéance ferme la connexion.
 
 **Node d’exécution** :
 Machine rattachée à une installation pour y effectuer le travail d’un agent, selon ses capacités et les autorisations accordées. Une node peut être disponible de manière intermittente.
@@ -108,4 +108,4 @@ Le nombre maximal d’exécutions simultanées sur un compte. Le réduire laisse
 Une remise à zéro de fenêtre d’usage offerte par Codex, utilisée automatiquement quand la capacité restante d’un compte actif tombe à 2 %. Elle n’existe pas pour Claude Code.
 
 **Auteur d’une tâche** :
-Le compte Leo qui a créé une tâche. Le retrait de cet auteur met fin aux déclenchements planifiés de ses tâches ; leur travail reste partagé avec toute l’installation.
+Le compte Cairn qui a créé une tâche. Le retrait de cet auteur met fin aux déclenchements planifiés de ses tâches ; leur travail reste partagé avec toute l’installation.

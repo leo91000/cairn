@@ -1,6 +1,6 @@
 # VM import timings
 
-VM imports emit structured records under the existing `leo_performance` target.
+VM imports emit structured records under the existing `cairn_performance` target.
 They contain random transfer IDs, VM IDs, fixed phase names and aggregate byte
 counts; they do not include paths, archive contents or credentials.
 

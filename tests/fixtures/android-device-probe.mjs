@@ -13,7 +13,7 @@ async function main() {
   assert.match(api, /^(?:29|[3-9]\d)$/)
   const system = process.argv[5] || 'google-apis'
   assert.ok(['aosp', 'google-apis'].includes(system))
-  const env = JSON.parse(execFileSync('/usr/local/bin/leo', ['toolkit-env'], { encoding: 'utf8' }))
+  const env = JSON.parse(execFileSync('/usr/local/bin/cairn', ['toolkit-env'], { encoding: 'utf8' }))
   const run = (bin, args) => {
     process.stdout.write(`probe.command ${path.basename(bin)} ${bin === 'adb' ? args.slice(2, 5).join(' ') : ''}\n`)
     const timeout = bin !== 'adb' ? 1200000 : args.includes('uiautomator') ? 30000 : 120000
@@ -39,9 +39,9 @@ async function main() {
   }
 
   const start = Date.now()
-  process.stdout.write(run('leo-android', ['setup', '--accept-licenses', 'platforms;android-34', 'build-tools;34.0.0']))
-  process.stdout.write(run('leo-android', ['emulator', 'start', api, ...(system === 'aosp' ? ['--aosp'] : []), '--accept-licenses']))
-  const device = JSON.parse(run('leo-android', ['emulator', 'status']))
+  process.stdout.write(run('cairn-android', ['setup', '--accept-licenses', 'platforms;android-34', 'build-tools;34.0.0']))
+  process.stdout.write(run('cairn-android', ['emulator', 'start', api, ...(system === 'aosp' ? ['--aosp'] : []), '--accept-licenses']))
+  const device = JSON.parse(run('cairn-android', ['emulator', 'status']))
   assert.equal(device.state, 'ready')
   assert.equal(device.image || 'google-apis', system)
   assert.equal(device.acceleration, 'kvm', 'Android must use nested KVM, not software emulation')
@@ -59,12 +59,12 @@ async function main() {
   adb(['shell', 'wm', 'dismiss-keyguard'])
   if (mode === 'first') {
     fs.mkdirSync('classes', { recursive: true })
-    fs.writeFileSync('MainActivity.java', 'package com.leo.fixture; public class MainActivity extends android.app.Activity { public void onCreate(android.os.Bundle b) { super.onCreate(b); android.widget.Button v = new android.widget.Button(this); v.setText("Tap to verify"); v.setContentDescription("Verify device"); v.setOnClickListener(w -> {v.setText("Device test passed"); getPreferences(0).edit().putBoolean("passed",true).commit();}); if(getPreferences(0).getBoolean("passed",false))v.setText("Device test passed"); setContentView(v); } }')
-    fs.writeFileSync('AndroidManifest.xml', '<manifest xmlns:android="http://schemas.android.com/apk/res/android" package="com.leo.fixture"><application android:theme="@android:style/Theme.Material.Light.NoActionBar" android:label="Leo device probe"><activity android:name=".MainActivity" android:exported="true"/></application></manifest>')
+    fs.writeFileSync('MainActivity.java', 'package com.cairn.fixture; public class MainActivity extends android.app.Activity { public void onCreate(android.os.Bundle b) { super.onCreate(b); android.widget.Button v = new android.widget.Button(this); v.setText("Tap to verify"); v.setContentDescription("Verify device"); v.setOnClickListener(w -> {v.setText("Device test passed"); getPreferences(0).edit().putBoolean("passed",true).commit();}); if(getPreferences(0).getBoolean("passed",false))v.setText("Device test passed"); setContentView(v); } }')
+    fs.writeFileSync('AndroidManifest.xml', '<manifest xmlns:android="http://schemas.android.com/apk/res/android" package="com.cairn.fixture"><application android:theme="@android:style/Theme.Material.Light.NoActionBar" android:label="Cairn device probe"><activity android:name=".MainActivity" android:exported="true"/></application></manifest>')
     const tools = path.join(env.ANDROID_HOME, 'build-tools/34.0.0')
     const android = path.join(env.ANDROID_HOME, 'platforms/android-34/android.jar')
     run('javac', ['-source', '8', '-target', '8', '-classpath', android, '-d', 'classes', 'MainActivity.java'])
-    run('mise', ['exec', '--', `${tools}/d8`, '--lib', android, '--output', '.', 'classes/com/leo/fixture/MainActivity.class'])
+    run('mise', ['exec', '--', `${tools}/d8`, '--lib', android, '--output', '.', 'classes/com/cairn/fixture/MainActivity.class'])
     run(`${tools}/aapt2`, ['link', '-I', android, '--manifest', 'AndroidManifest.xml', '--min-sdk-version', '23', '--target-sdk-version', '34', '-o', 'unsigned.apk'])
     run('zip', ['-j', 'unsigned.apk', 'classes.dex'])
     run(`${tools}/zipalign`, ['-f', '4', 'unsigned.apk', 'probe.apk'])
@@ -72,11 +72,11 @@ async function main() {
       run('keytool', ['-genkeypair', '-keystore', 'fixture.jks', '-storepass', 'android', '-keypass', 'android', '-alias', 'fixture', '-keyalg', 'RSA', '-dname', 'CN=Fixture', '-validity', '1'])
     run('mise', ['exec', '--', `${tools}/apksigner`, 'sign', '--ks', 'fixture.jks', '--ks-pass', 'pass:android', 'probe.apk'])
     adb(['install', '--no-incremental', '-r', 'probe.apk'])
-    adb(['shell', 'pm', 'clear', 'com.leo.fixture'])
+    adb(['shell', 'pm', 'clear', 'com.cairn.fixture'])
   }
 
-  assert.match(adb(['shell', 'pm', 'path', 'com.leo.fixture']), /^package:/, 'installed application survives device restart')
-  const launch = adb(['shell', 'am', 'start', '-W', '-n', 'com.leo.fixture/.MainActivity'])
+  assert.match(adb(['shell', 'pm', 'path', 'com.cairn.fixture']), /^package:/, 'installed application survives device restart')
+  const launch = adb(['shell', 'am', 'start', '-W', '-n', 'com.cairn.fixture/.MainActivity'])
   assert.doesNotMatch(launch, /Error(?: type \d+|:)/, 'application activity launches')
 
   async function dump() {
@@ -146,20 +146,20 @@ async function main() {
   }
 
   fs.rmSync(ack, { recursive: true })
-  process.stdout.write(run('leo-android', ['emulator', 'stop']))
+  process.stdout.write(run('cairn-android', ['emulator', 'stop']))
   process.stdout.write('probe.done\n')
 }
 
 main().catch((error) => {
   try {
-    const env = JSON.parse(execFileSync('/usr/local/bin/leo', ['toolkit-env'], { encoding: 'utf8' }))
+    const env = JSON.parse(execFileSync('/usr/local/bin/cairn', ['toolkit-env'], { encoding: 'utf8' }))
     // This disposable device contains only the synthetic probe application.
     const logcat = execFileSync('adb', ['-s', 'emulator-5580', 'logcat', '-b', 'crash', '-b', 'system', '-d', '-t', '200'], { env, encoding: 'utf8', timeout: 15000 })
     process.stderr.write(`Android failure diagnostics:\n${logcat}\n`)
   }
   catch {}
 
-  const log = '/home/node/.android/leo-emulator.log'
+  const log = '/home/node/.android/cairn-emulator.log'
   if (fs.existsSync(log))
     process.stderr.write(`Emulator log:\n${fs.readFileSync(log, 'utf8').slice(-20000).replace(/^.*(?:adb public key|adb.pubkey).*$/gm, '<REDACTED>')}\n`)
   process.stderr.write(`${error.message}\n${error.stdout?.toString() || ''}\n${error.stderr?.toString() || ''}`)

@@ -1,6 +1,6 @@
 # Security model
 
-Leo Agent Manager is a private, single-owner application for trusted coding agents.
+Cairn is a private, single-owner application for trusted coding agents.
 Administrator access can configure tasks, projects, and skills.
 Every run uses Codex YOLO mode (`--dangerously-bypass-approvals-and-sandbox`).
 Docker provides isolation; Codex has no inner sandbox and does not prompt for approval.

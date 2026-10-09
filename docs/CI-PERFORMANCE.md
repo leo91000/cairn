@@ -7,7 +7,7 @@ job scheduling; runner time sums job durations.
 
 ## Paired production images, 2026-10-07
 
-The `official-image` job builds the `official` Dockerfile target separately from
+The `beacon-image` job builds the `beacon` Dockerfile target separately from
 VM/kernel layers and smoke-tests the exact published digest with disposable
 Postgres. It also verifies the bundled SPA/assets, installer release, sign-in,
 session persistence after restart and database readiness. Existing installation,
@@ -15,12 +15,12 @@ runner, retention, browser, network and quality checks still gate publication.
 Both images use immutable digests, SBOM and provenance; one schema-3 artifact
 records both digests for the same Git tree and run. Single-image evidence is
 ineligible, so its first release falls back to complete validation. Promotion
-accepts a repository parameter and tags both digests; deployment verifies official
+accepts a repository parameter and tags both digests; deployment verifies beacon
 health and the paired installation approval. Main/PR/manual runs never deploy.
-The official job has its own registry cache and no KVM dependency. When main
+The beacon job has its own registry cache and no KVM dependency. When main
 reuses the validated pair, the existing optional cache job also refreshes
-`-official:buildcache` with the `official` target; it does not gate publication.
-The official smoke now checks cached readiness under 100 public probes,
+`-beacon:buildcache` with the `beacon` target; it does not gate publication.
+The beacon smoke now checks cached readiness under 100 public probes,
 root-owned web assets, database loss/recovery, and the operator backup/restore
 helper against pinned disposable Postgres. No elapsed-time
 improvement is claimed for this additional job before hosted measurements.
@@ -159,9 +159,9 @@ took **8m53s** (528 aggregate runner seconds), without deployment.
 - In CI, use separate runners for two journey shards, Chromium layouts, and two
   WebKit shards, with at most two workers per runner. A dedicated build job shares
   the frontend and Rust backend through artifacts, so neither the browser tests
-  nor the image job, whose smoke test uses the official binary, wait for the
+  nor the image job, whose smoke test uses the beacon binary, wait for the
   quality checks. Retry a failed browser test once and retain evidence.
-- Run browser jobs in the official Playwright Noble image, pinned by version and
+- Run browser jobs in the beacon Playwright Noble image, pinned by version and
   digest to the installed `@playwright/test`. Check their versions before tests.
   This removes repeated browser and OS-library installation: Ubuntu package
   downloads took over seven minutes and exhausted the ten-minute job budget in
@@ -189,7 +189,7 @@ Android now archives the optimized unsigned APK after successful validation and
 can reuse it for the exact commit and version. A tag verifies the artifact, signs
 it with the existing key and publishes it without invoking Gradle. Missing or
 incompatible evidence still requires the full pipeline. See
-[Android updates](../android/docs/UPDATES.md#fast-tag-publication) for the guards.
+[Android updates](../apps/android/docs/UPDATES.md#fast-tag-publication) for the guards.
 The Gradle task-output cache is enabled separately from the dependency cache.
 
 These changes remove duplicated work; a new hosted tag duration has **not yet

@@ -1,0 +1,85 @@
+name: cairn-beacon
+services:
+  postgres:
+    image: postgres:17-alpine@sha256:b0f9560a2de083e2cc7382e75f808c7381a32852a7ec49117deedb300e552b24
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: cairn
+      POSTGRES_DB: cairn_beacon
+      POSTGRES_PASSWORD: ${CAIRN_BEACON_POSTGRES_PASSWORD:?Set the private database password}
+    volumes:
+      - beacon-postgres:/var/lib/postgresql/data
+    networks: [database]
+    healthcheck:
+      test: [CMD-SHELL, pg_isready -h 127.0.0.1 -U cairn -d cairn_beacon]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    mem_limit: 1g
+    cpus: 1
+    logging: &logs
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: '3'
+  beacon:
+    image: ${CAIRN_BEACON_IMAGE:?Set the validated beacon image digest}
+    user: '1000:1000'
+    init: true
+    restart: unless-stopped
+    stop_grace_period: 60s
+    deploy:
+      replicas: 1
+      update_config:
+        order: stop-first
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      CAIRN_BEACON_DATABASE_URL: ${CAIRN_BEACON_DATABASE_URL:?Set the private Postgres URL}
+      CAIRN_BEACON_ORIGIN: https://cairn.build
+      CAIRN_BEACON_LISTEN: 0.0.0.0:4311
+      CAIRN_BEACON_STUN_LISTEN: 0.0.0.0:3478
+      CAIRN_BEACON_STUN_URL: stun:cairn.build:3478
+      CAIRN_BEACON_WEB_DIR: /app/dist
+      CAIRN_BEACON_TRUSTED_PROXIES: ${CAIRN_BEACON_TRUSTED_PROXIES:?Trust only the controlled proxy hops}
+      CAIRN_INSTALLATION_IMAGE: ${CAIRN_INSTALLATION_IMAGE:?Set the paired installation digest}
+      CAIRN_BEACON_EMAIL_FROM: ${CAIRN_BEACON_EMAIL_FROM:?Set the verified Resend sender}
+      CAIRN_BEACON_EMAIL_KEY: ${CAIRN_BEACON_EMAIL_KEY:?Set the private Resend API key}
+      CAIRN_BEACON_GOOGLE_CLIENT_ID: ${CAIRN_BEACON_GOOGLE_CLIENT_ID:-}
+      CAIRN_BEACON_GOOGLE_CLIENT_SECRET: ${CAIRN_BEACON_GOOGLE_CLIENT_SECRET:-}
+      CAIRN_BEACON_GITHUB_CLIENT_ID: ${CAIRN_BEACON_GITHUB_CLIENT_ID:-}
+      CAIRN_BEACON_GITHUB_CLIENT_SECRET: ${CAIRN_BEACON_GITHUB_CLIENT_SECRET:-}
+      CAIRN_BEACON_VAPID_PRIVATE_KEY: ${CAIRN_BEACON_VAPID_PRIVATE_KEY:-}
+      CAIRN_BEACON_VAPID_SUBJECT: ${CAIRN_BEACON_VAPID_SUBJECT:-}
+      CAIRN_BEACON_ANDROID_CERTIFICATES: ${CAIRN_BEACON_ANDROID_CERTIFICATES:-}
+      CAIRN_BEACON_FCM_SERVICE_ACCOUNT_JSON: ${CAIRN_BEACON_FCM_SERVICE_ACCOUNT_JSON:-}
+    expose: ['4311']
+    ports: ['3478:3478/udp']
+    networks: [database, coolify]
+    labels:
+      traefik.enable: 'true'
+      traefik.docker.network: ${COOLIFY_PROXY_NETWORK:-coolify}
+      traefik.http.routers.cairn-beacon.rule: Host(`cairn.build`)
+      traefik.http.routers.cairn-beacon.entrypoints: ${CAIRN_PROXY_HTTPS_ENTRYPOINT:-https}
+      traefik.http.routers.cairn-beacon.tls: 'true'
+      traefik.http.routers.cairn-beacon.tls.certresolver: ${CAIRN_PROXY_CERT_RESOLVER:-letsencrypt}
+      traefik.http.routers.cairn-beacon.service: cairn-beacon
+      traefik.http.services.cairn-beacon.loadbalancer.server.port: '4311'
+    healthcheck:
+      test: [CMD, curl, --fail, --silent, --output, /dev/null, http://127.0.0.1:4311/health]
+      interval: 30s
+      timeout: 5s
+      start_period: 30s
+      start_interval: 1s
+    mem_limit: 1g
+    cpus: 1
+    logging: *logs
+volumes:
+  beacon-postgres:
+networks:
+  database:
+    internal: true
+  coolify:
+    external: true
+    name: ${COOLIFY_PROXY_NETWORK:-coolify}

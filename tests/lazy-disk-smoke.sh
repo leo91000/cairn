@@ -10,12 +10,12 @@ command -v busybox >/dev/null
 command -v mkfs.ext4 >/dev/null
 test -x /usr/local/bin/firecracker
 test -x /usr/local/bin/jailer
-fixture=$(mktemp -d "${TMPDIR:-/tmp}/leo-storage-smoke.XXXXXXXX")
+fixture=$(mktemp -d "${TMPDIR:-/tmp}/cairn-storage-smoke.XXXXXXXX")
 cleanup() {
   sudo -n python3 - "$fixture" <<'PY'
 import pathlib, shutil, sys
 root = pathlib.Path(sys.argv[1])
-assert root.name.startswith('leo-storage-smoke.') and root.parent != root
+assert root.name.startswith('cairn-storage-smoke.') and root.parent != root
 shutil.rmtree(root)
 PY
 }
@@ -32,7 +32,7 @@ cat > "$fixture/rootfs/init" <<'INIT'
 /bin/busybox cat /data/probe
 echo storage-after-guest-sync > /data/probe
 /bin/busybox sync
-echo LEO_STORAGE_GUEST_SYNCED
+echo CAIRN_STORAGE_GUEST_SYNCED
 while true; do /bin/busybox sleep 1; done
 INIT
 chmod +x "$fixture/rootfs/init"
@@ -45,7 +45,7 @@ cat > "$fixture/rootfs/init" <<'INIT'
 /bin/busybox mount -t devtmpfs devtmpfs /dev
 /bin/busybox mount -t proc proc /proc
 /bin/busybox mount -t sysfs sysfs /sys
-echo LEO_STORAGE_GUEST_PREPARED
+echo CAIRN_STORAGE_GUEST_PREPARED
 # A size query observes the device configuration without reading its contents.
 # The host replaces the 4 MiB placeholder before any data I/O or filesystem mount.
 while [ "$(/bin/busybox blockdev --getsize64 /dev/vdb)" -lt 268435456 ]; do
@@ -55,7 +55,7 @@ done
 /bin/busybox cat /data/probe
 echo storage-after-guest-sync > /data/probe
 /bin/busybox sync
-echo LEO_STORAGE_GUEST_SYNCED
+echo CAIRN_STORAGE_GUEST_SYNCED
 while true; do /bin/busybox sleep 1; done
 INIT
 truncate -s 16M "$fixture/root-prepared.ext4"

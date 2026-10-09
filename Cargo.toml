@@ -1,8 +1,8 @@
 [workspace]
 members = [
-  "backend",
-  "official-service",
-  "relay-protocol"
+  "crates/installation",
+  "crates/beacon",
+  "crates/protocol"
 ]
 resolver = "3"
 

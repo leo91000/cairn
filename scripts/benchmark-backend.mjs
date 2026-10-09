@@ -14,13 +14,13 @@ import os from 'node:os'
 import path from 'node:path'
 import { performance } from 'node:perf_hooks'
 import process from 'node:process'
-import { Auth } from '../tests/legacy/server/auth.ts'
-import { Store } from '../tests/legacy/server/store.ts'
+import { Auth } from '../tests/fixtures/legacy/server/auth.ts'
+import { Store } from '../tests/fixtures/legacy/server/store.ts'
 
 async function main() {
   if (process.argv[2] === '--node-server') {
-    const { buildApp } = await import('../tests/legacy/server/app.ts')
-    const config = JSON.parse(await readFile(process.env.LEO_CONFIG, 'utf8'))
+    const { buildApp } = await import('../tests/fixtures/legacy/server/app.ts')
+    const config = JSON.parse(await readFile(process.env.CAIRN_CONFIG, 'utf8'))
     const { app } = await buildApp(config)
     const url = await app.listen({ port: 0, host: '127.0.0.1' })
     process.stdout.write(`Listening on ${url}\n`)
@@ -30,7 +30,7 @@ async function main() {
     return
   }
 
-  const directory = await mkdtemp(path.join(os.tmpdir(), 'leo-benchmark-'))
+  const directory = await mkdtemp(path.join(os.tmpdir(), 'cairn-benchmark-'))
   const template = path.join(directory, 'template')
   const store = new Store(template)
   const session = new Auth(store, 'http://localhost:4310').session()
@@ -77,11 +77,11 @@ async function main() {
               workerEnabled: false,
             }))
             const started = performance.now()
-            const child = spawn(backend === 'node' ? process.execPath : path.resolve('target/release/leo'), backend === 'node' ? ['--import', 'tsx', import.meta.filename, '--node-server'] : [], {
+            const child = spawn(backend === 'node' ? process.execPath : path.resolve('target/release/cairn'), backend === 'node' ? ['--import', 'tsx', import.meta.filename, '--node-server'] : [], {
               env: {
                 ...process.env,
-                LEO_CONFIG: file,
-                LEO_TOOLKIT_DIR: undefined,
+                CAIRN_CONFIG: file,
+                CAIRN_TOOLKIT_DIR: undefined,
                 NODE_ENV: 'test',
               },
               stdio: ['ignore', 'pipe', 'inherit'],
@@ -107,7 +107,7 @@ async function main() {
               const startupMs = performance.now() - started
               const route = scenario === 'events' ? `/api/runs/${eventRun}/events?limit=500&after=5000` : scenario === 'runs' ? '/api/runs?limit=100&offset=400' : '/api/agents'
               const headers = {
-                'cookie': `leo_session=${session.value}`,
+                'cookie': `cairn_session=${session.value}`,
                 'x-csrf-token': session.csrf,
                 'content-type': 'application/json',
                 'accept-encoding': 'identity',
@@ -170,7 +170,7 @@ async function main() {
       node: process.version,
       platform: `${os.platform()} ${os.release()}`,
       cpu: os.cpus()[0].model,
-      httpThreads: Number(process.env.LEO_HTTP_THREADS || 2),
+      httpThreads: Number(process.env.CAIRN_HTTP_THREADS || 2),
       fixtures: { runs: 1000, events: 10000 },
       results,
     }, null, 2)}\n`)

@@ -27,9 +27,9 @@ it also adds spacing inside blocks and between attributes and their declarations
 | Rust only | `pnpm format:rust` | `node scripts/rust-format.mjs --check` |
 | Kotlin + Gradle Kotlin scripts | `pnpm format:android` | `pnpm lint:android` |
 
-Android formatting uses Spotless and ktfmt, pinned in `android/build.gradle.kts`.
-Use the JDK from `android/mise.toml` and the Gradle wrapper. With mise, run
-`mise exec -- ./gradlew spotlessApply --no-daemon` from `android/`.
+Android formatting uses Spotless and ktfmt, pinned in `apps/android/build.gradle.kts`.
+Use the JDK from `apps/android/mise.toml` and the Gradle wrapper. With mise, run
+`mise exec -- ./gradlew spotlessApply --no-daemon` from `apps/android/`.
 
 ESLint adds blank lines around functions and types, expands larger objects,
 limits statements per line, and splits Vue tags with many attributes. These

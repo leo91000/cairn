@@ -24,7 +24,7 @@ promise about future releases.
 
 The downloaded [150.7871.01 AAR](https://repo.maven.apache.org/maven2/io/github/webrtc-sdk/android/150.7871.01/android-150.7871.01.aar)
 has SHA-256 `0a1627b1a48c2bc17d9a40d62fc47bd45166f44a311e95917f147c402de379b0`.
-Its manifest declares minimum Android API 21, compatible with Leo's minimum 26.
+Its manifest declares minimum Android API 21, compatible with Cairn's minimum 26.
 The published sources jar contains only a manifest: inspect `classes.jar` with
 `javap` to verify the actual shipped interface, rather than assuming that current
 upstream sources exactly match the binary.
@@ -38,13 +38,13 @@ The publisher provides a consolidated
 [WebRTC and third-party notice](https://github.com/webrtc-sdk/android/blob/v150.7871.01/Licenses/WEBRTC.md),
 including WebRTC's BSD notice and bundled dependencies' notices. Preserve that
 notice in distribution materials; the established Android packaging location is
-`android/app/src/main/assets/licenses/`, alongside existing font notices. Use
+`apps/android/app/src/main/assets/licenses/`, alongside existing font notices. Use
 `webrtc-150.7871.01-NOTICES.txt` there, sourced from this exact release tag.
 The downloaded notice is 788,358 bytes, SHA-256
 `d1f9382c6878ac024155fd6d44a5977329108bb8b0a01cea40e4a2f1d7de252e`.
 
 The 150.7871.01 AAR has **no consumer ProGuard rules**. Preserve the Java/JNI
-interface in Leo's release rules with `-keep class org.webrtc.** { *; }`.
+interface in Cairn's release rules with `-keep class org.webrtc.** { *; }`.
 This mirrors the conservative rule shipped in the
 [Stream core](https://github.com/GetStream/webrtc-android/blob/main/stream-webrtc-android/consumer-rules.pro).
 Do not infer release safety from a debug-only build: verify a minified build as
@@ -67,7 +67,7 @@ truth for availability in the pin.
   `iceTransportsType`, and `continualGatheringPolicy`. Use only the authenticated
   control response's STUN URLs, `TcpCandidatePolicy.DISABLED`,
   `IceTransportsType.ALL`, and `ContinualGatheringPolicy.GATHER_CONTINUALLY`.
-  With no TURN URLs and TCP candidates disabled, blocked UDP falls back to Leo's
+  With no TURN URLs and TCP candidates disabled, blocked UDP falls back to Cairn's
   existing application relay, as required by ADR-0033.
 - `createOffer(SdpObserver, MediaConstraints)`, `createAnswer`,
   `setLocalDescription`, `setRemoteDescription`, and `addIceCandidate` exist.
@@ -171,7 +171,7 @@ and body sizes.
 
 A locally full request table or a channel closed before any packet is accepted
 uses the relay even for a mutation. The server's reserved finite response
-`503` with `x-leo-direct-rejection: reassembly-busy` also permits this recovery:
+`503` with `x-cairn-direct-rejection: reassembly-busy` also permits this recovery:
 the fragmented member request was refused before dispatch. The healthy peer
 remains available. Ordinary 503 responses, unknown markers and stream responses
 retain the usual replay rules. Once a request may have been delivered, only

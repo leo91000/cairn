@@ -12,12 +12,12 @@ export async function entrypointSmoke({ root, api, storage }) {
   const workspace = `/data/runs/${runId}/workspace`
   const source = path.join(root, 'data/runs', runId, 'workspace')
   await mkdir(source, { recursive: true })
-  const stale = `#!/bin/sh\nif [ "$1" = guest ]; then exec /usr/local/bin/leo-retained "$@"; fi\necho OBSOLETE_RUNNER\nexit 97\n`
+  const stale = `#!/bin/sh\nif [ "$1" = guest ]; then exec /usr/local/bin/cairn-retained "$@"; fi\necho OBSOLETE_RUNNER\nexit 97\n`
   const prepare = `
     const fs=require('node:fs'),cp=require('node:child_process');
     cp.execFileSync('sudo',['/usr/local/bin/node','-e',
-      'require("node:fs").renameSync("/usr/local/bin/leo","/usr/local/bin/leo-retained");'+
-      'require("node:fs").writeFileSync("/usr/local/bin/leo",'+${JSON.stringify(JSON.stringify(stale))}+',{mode:0o755});']);
+      'require("node:fs").renameSync("/usr/local/bin/cairn","/usr/local/bin/cairn-retained");'+
+      'require("node:fs").writeFileSync("/usr/local/bin/cairn",'+${JSON.stringify(JSON.stringify(stale))}+',{mode:0o755});']);
     fs.writeFileSync(${JSON.stringify(`${workspace}/sentinel`)},'preserved');
   `
   for (const retained of [false, true]) {

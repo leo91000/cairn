@@ -59,7 +59,7 @@ forwarding. A reverse proxy must preserve streaming and allow keep-alives.
 
 ## Verification
 
-`backend/tests/live.rs` exercises real HTTP streams: concurrent clients, paginated
+`crates/installation/tests/live.rs` exercises real HTTP streams: concurrent clients, paginated
 replay, writes during replay, slow readers, rollback, cursor precedence/reset,
 server restart, session revocation, invalid requests, metadata-only updates, and
 Unicode text baselines/deltas. The local 25-sample write-to-HTTP measurement was
@@ -69,8 +69,8 @@ Unicode text baselines/deltas. The local 25-sample write-to-HTTP measurement was
 browser contexts: progressive text, offline/online recovery, mid-answer refresh,
 server restart, a late third viewer, route changes, and mobile screenshot/scroll
 checks. Existing chat, question, deliverable and task journeys exercise the same
-stream. `tests/live-connection.test.ts` covers heartbeat/watchdog behavior,
-backoff, malformed batches, failed application, and cleanup. `tests/live-events.test.ts`
+stream. `apps/web/tests/live-connection.test.ts` covers heartbeat/watchdog behavior,
+backoff, malformed batches, failed application, and cleanup. `apps/web/tests/live-events.test.ts`
 checks deduplication, Unicode reconstruction and bounded intermediate snapshots.
 
 No inference provider is used by these tests. The guest-to-runner log transport

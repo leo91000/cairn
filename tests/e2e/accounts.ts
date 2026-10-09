@@ -1,11 +1,11 @@
-import type { Provider } from '../../shared/accounts'
-import type { AccountLimits } from '../legacy/server/codex-account-types'
+import type { Provider } from '../../packages/contracts/accounts'
+import type { AccountLimits } from '../fixtures/legacy/server/codex-account-types'
 import type { Workspace } from './fixtures'
 import { randomUUID } from 'node:crypto'
 import { mkdir, writeFile } from 'node:fs/promises'
 import path from 'node:path'
-import { credential } from '../codex-account-fixture'
-import { McpVault } from '../legacy/server/mcp-vault'
+import { credential } from '../fixtures/codex-account-fixture'
+import { McpVault } from '../fixtures/legacy/server/mcp-vault'
 
 // Synthetic accounts written straight into the native server's database. The fixture Codex
 // app-server reports their usage; Claude accounts sign in through the fixture CLI instead.

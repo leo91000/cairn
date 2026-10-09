@@ -88,16 +88,16 @@ export function nativeRunnerCompose(compose) {
       : value
         ? [scalar(value)]
         : lines.slice(index + 1, end).filter(line => !line.trimStart().startsWith('#')).map(line => scalar(line.replace(/^\s*-\s*/, '')))
-    if ((args.length === 2 && args[0] === '/usr/local/bin/leo' && args[1] === 'runner-broker')
-      || (args.length === 1 && args[0] === '/usr/local/bin/leo runner-broker')) {
+    if ((args.length === 2 && args[0] === '/usr/local/bin/cairn' && args[1] === 'runner-broker')
+      || (args.length === 1 && args[0] === '/usr/local/bin/cairn runner-broker')) {
       return lines.join('\n')
     }
 
-    lines.splice(index, end - index, `${' '.repeat(entryIndent)}entrypoint: [/usr/local/bin/leo, runner-broker]`)
+    lines.splice(index, end - index, `${' '.repeat(entryIndent)}entrypoint: [/usr/local/bin/cairn, runner-broker]`)
     return lines.join('\n')
   }
 
-  lines.splice(start + 1, 0, `${' '.repeat(indent + 2)}entrypoint: [/usr/local/bin/leo, runner-broker]`)
+  lines.splice(start + 1, 0, `${' '.repeat(indent + 2)}entrypoint: [/usr/local/bin/cairn, runner-broker]`)
   return lines.join('\n')
 }
 
@@ -113,13 +113,13 @@ export function firecrackerRunnerCompose(compose) {
   if (!managerEnvironment || typeof managerEnvironment.toJSON !== 'function' || typeof managerEnvironment.set !== 'function')
     throw new Error('Manager environment not found.')
   // Older Coolify services predate remote nodes. Their manager must advertise the
-  // same immutable image digest that the release workflow assigns to LEO_IMAGE.
+  // same immutable image digest that the release workflow assigns to CAIRN_IMAGE.
   // eslint-disable-next-line no-template-curly-in-string -- Compose must resolve the release image at deployment time.
-  const nodeImage = '${LEO_IMAGE:-}'
+  const nodeImage = '${CAIRN_IMAGE:-}'
   const environment = managerEnvironment.toJSON()
   if (Array.isArray(environment)) {
-    const entry = `LEO_NODE_IMAGE=${nodeImage}`
-    const index = environment.findIndex(value => typeof value === 'string' && value.startsWith('LEO_NODE_IMAGE='))
+    const entry = `CAIRN_NODE_IMAGE=${nodeImage}`
+    const index = environment.findIndex(value => typeof value === 'string' && value.startsWith('CAIRN_NODE_IMAGE='))
     if (index < 0) {
       managerEnvironment.add(entry)
       changed = true
@@ -130,8 +130,8 @@ export function firecrackerRunnerCompose(compose) {
     }
   }
   else if (environment && typeof environment === 'object') {
-    if (managerEnvironment.get('LEO_NODE_IMAGE') !== nodeImage) {
-      managerEnvironment.set('LEO_NODE_IMAGE', nodeImage)
+    if (managerEnvironment.get('CAIRN_NODE_IMAGE') !== nodeImage) {
+      managerEnvironment.set('CAIRN_NODE_IMAGE', nodeImage)
       changed = true
     }
   }
@@ -159,25 +159,25 @@ export function firecrackerRunnerCompose(compose) {
   const runnerSetting = key => Array.isArray(runnerEnvironment)
     ? runnerEnvironment.find(value => typeof value === 'string' && value.startsWith(`${key}=`))?.slice(key.length + 1)
     : runnerEnvironment?.[key]
-  const poolSetting = runnerSetting('LEO_READY_VM_POOL')
+  const poolSetting = runnerSetting('CAIRN_READY_VM_POOL')
   const migratedEnvironment = { DATA_DIR: '/data', CONCURRENCY: concurrency }
   if (poolSetting !== undefined)
-    migratedEnvironment.LEO_READY_VM_POOL = poolSetting
+    migratedEnvironment.CAIRN_READY_VM_POOL = poolSetting
 
-  const poolSize = runnerSetting('LEO_READY_VM_POOL_SIZE')
+  const poolSize = runnerSetting('CAIRN_READY_VM_POOL_SIZE')
   if (poolSize !== undefined && !/^[1-4]$/.test(poolSize))
     throw new Error('Runner pool size must be between 1 and 4.')
   if (poolSize !== undefined)
-    migratedEnvironment.LEO_READY_VM_POOL_SIZE = poolSize
+    migratedEnvironment.CAIRN_READY_VM_POOL_SIZE = poolSize
 
-  const blockTransport = runnerSetting('LEO_BLOCK_TRANSPORT')
+  const blockTransport = runnerSetting('CAIRN_BLOCK_TRANSPORT')
   if (blockTransport !== undefined && !['vhost-user', 'ublk'].includes(blockTransport))
     throw new Error('Unsupported runner block transport.')
   if (blockTransport !== undefined)
-    migratedEnvironment.LEO_BLOCK_TRANSPORT = blockTransport
+    migratedEnvironment.CAIRN_BLOCK_TRANSPORT = blockTransport
 
-  const diskLayout = runnerSetting('LEO_DISK_LAYOUT')
-  const snapshots = runnerSetting('LEO_VM_SNAPSHOTS')
+  const diskLayout = runnerSetting('CAIRN_DISK_LAYOUT')
+  const snapshots = runnerSetting('CAIRN_VM_SNAPSHOTS')
   if (diskLayout !== undefined && !['flat-ext4-v1', 'paired-ext4-v1'].includes(diskLayout))
     throw new Error('Unsupported runner disk layout.')
   if (snapshots !== undefined && !['true', 'false'].includes(snapshots))
@@ -187,9 +187,9 @@ export function firecrackerRunnerCompose(compose) {
   if (snapshots === 'true' && diskLayout !== 'paired-ext4-v1')
     throw new Error('Snapshots require paired disks.')
   if (diskLayout !== undefined)
-    migratedEnvironment.LEO_DISK_LAYOUT = diskLayout
+    migratedEnvironment.CAIRN_DISK_LAYOUT = diskLayout
   if (snapshots !== undefined)
-    migratedEnvironment.LEO_VM_SNAPSHOTS = snapshots
+    migratedEnvironment.CAIRN_VM_SNAPSHOTS = snapshots
 
   const devices = ['/dev/kvm:/dev/kvm', '/dev/fuse:/dev/fuse', '/dev/net/tun:/dev/net/tun']
   if (blockTransport === 'ublk') {
@@ -205,7 +205,7 @@ export function firecrackerRunnerCompose(compose) {
 
   const values = {
     user: '0:0',
-    entrypoint: ['/usr/local/bin/leo', 'runner-broker'],
+    entrypoint: ['/usr/local/bin/cairn', 'runner-broker'],
     stop_grace_period: '30s',
     read_only: true,
     cap_drop: ['ALL'],

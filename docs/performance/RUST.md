@@ -6,7 +6,7 @@ below remain slightly slower. These are local measurements, not production SLAs.
 
 ## Method
 
-Run `cargo build --locked --release --bin leo`, then
+Run `cargo build --locked --release --bin cairn`, then
 `node --import tsx scripts/benchmark-backend.mjs`. Set `TMPDIR` to a directory on a
 real disk when `/tmp` is tmpfs. The recorded run used ext4, an Intel i9-14900K,
 Linux 7.2.3, Node 26.8.1, Rust 1.97.1 and two Tokio worker threads. Production's
@@ -54,7 +54,7 @@ Raw measurements: [final results](rust-backend.json).
   instead of deleting old rows on every event.
 - A bounded HTTP client pool reuses validated MCP connections. DNS and private
   network policy are still checked before every request.
-- Two Tokio worker threads are the default; `LEO_HTTP_THREADS` can override it.
+- Two Tokio worker threads are the default; `CAIRN_HTTP_THREADS` can override it.
   An earlier two-versus-eight-thread trial showed similar concurrent throughput
   (run pages 3,308/3,270; event pages 1,614/1,653; writes 658/651 req/s). Eight
   threads did not provide a consistent benefit. These trials preceded the final

@@ -111,7 +111,7 @@ async function initialize(home) {
         if (message.id === 2)
           finish()
       })
-      send({ id: 1, method: 'initialize', params: { clientInfo: { name: 'leo_schema_builder', version: '1' }, capabilities: { experimentalApi: true } } })
+      send({ id: 1, method: 'initialize', params: { clientInfo: { name: 'cairn_schema_builder', version: '1' }, capabilities: { experimentalApi: true } } })
     })
   }
   finally {
@@ -124,7 +124,7 @@ async function initialize(home) {
 }
 
 export async function prepare(destination) {
-  const home = await mkdtemp(path.join(os.tmpdir(), 'leo-codex-schema-'))
+  const home = await mkdtemp(path.join(os.tmpdir(), 'cairn-codex-schema-'))
   try {
     await initialize(home)
     const names = (await readdir(home)).filter(name => /^[a-z_]+_\d+\.sqlite$/.test(name)).sort()

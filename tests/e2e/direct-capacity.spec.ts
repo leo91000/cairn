@@ -3,16 +3,16 @@ import { randomUUID } from 'node:crypto'
 import { join } from 'node:path'
 import process from 'node:process'
 import { chromium, expect, test } from '@playwright/test'
-import { executeOfficialSql, officialRelayFixture } from './official-relay-fixture'
+import { beaconRelayFixture, executeBeaconSql } from './beacon-relay-fixture'
 
 test('a member mutation refused behind another member upload succeeds exactly once through relay', async () => {
   test.setTimeout(120000)
-  const database = new URL(process.env.LEO_OFFICIAL_TEST_DATABASE_URL!)
+  const database = new URL(process.env.CAIRN_BEACON_TEST_DATABASE_URL!)
   const schema = `capacity_${randomUUID().replaceAll('-', '')}`
-  executeOfficialSql(database, `CREATE SCHEMA ${schema}`)
+  executeBeaconSql(database, `CREATE SCHEMA ${schema}`)
   const isolated = new URL(database)
   isolated.searchParams.set('options', `-c search_path=${schema}`)
-  const fixture = await officialRelayFixture(4431)
+  const fixture = await beaconRelayFixture(4431)
   const browser = await chromium.launch({ args: ['--disable-features=WebRtcHideLocalIpsWithMdns'] })
   const { url, messages } = fixture
   const owner = await (await browser.newContext()).newPage()
@@ -31,24 +31,24 @@ test('a member mutation refused behind another member upload succeeds exactly on
   }
 
   try {
-    const official = fixture.official(isolated.toString())
+    const beacon = fixture.beacon(isolated.toString())
     await expect.poll(() => {
-      expect(official.exitCode).toBeNull()
+      expect(beacon.exitCode).toBeNull()
       return fetch(`${url}/health`).then(response => response.ok).catch(() => false)
     }).toBe(true)
     await signIn(owner, `${schema}-owner@example.test`)
     await owner.getByRole('button', { name: 'Add an installation', exact: true }).click()
     const code = await owner.getByLabel('Installation claim code').inputValue()
-    const installation = fixture.start('target/debug/leo', {
+    const installation = fixture.start('target/debug/cairn', {
       DATA_DIR: join(fixture.root, 'data'),
       AGENT_HOME: join(fixture.root, 'home'),
       WORKSPACE_ROOTS: fixture.root,
       NODE_ENV: 'test',
       WORKER_ENABLED: 'false',
       PORT: '0',
-      LEO_OFFICIAL_ORIGIN: url,
-      LEO_INSTALLATION_CLAIM_CODE: code,
-      LEO_INSTALLATION_NAME: 'Capacity installation',
+      CAIRN_BEACON_ORIGIN: url,
+      CAIRN_INSTALLATION_CLAIM_CODE: code,
+      CAIRN_INSTALLATION_NAME: 'Capacity installation',
     })
     await expect(async () => {
       expect(installation.exitCode).toBeNull()
@@ -144,7 +144,7 @@ test('a member mutation refused behind another member upload succeeds exactly on
     await member.getByLabel('What should happen?').fill(prompt)
     await member.evaluate(() => {
       Object.assign(window, { capacityRoutes: [] })
-      window.addEventListener('leo-transport-observation', (event) => {
+      window.addEventListener('cairn-transport-observation', (event) => {
         const observation = (event as CustomEvent).detail
         if (observation.method === 'POST' && observation.path === '/tasks')
           (window as typeof window & { capacityRoutes: string[] }).capacityRoutes.push(observation.route)
@@ -163,6 +163,6 @@ test('a member mutation refused behind another member upload succeeds exactly on
   finally {
     await browser.close()
     await fixture.close()
-    executeOfficialSql(database, `DROP SCHEMA ${schema} CASCADE`)
+    executeBeaconSql(database, `DROP SCHEMA ${schema} CASCADE`)
   }
 })

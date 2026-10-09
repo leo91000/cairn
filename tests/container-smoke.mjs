@@ -5,24 +5,24 @@ import { readFile } from 'node:fs/promises'
 import process from 'node:process'
 import { setTimeout } from 'node:timers/promises'
 import { promisify } from 'node:util'
-import { startOfficial } from './official-smoke.mjs'
+import { startBeacon } from './beacon-smoke.mjs'
 
 const exec = promisify(execFile)
-const name = `leo-smoke-${randomUUID().slice(0, 8)}`
+const name = `cairn-smoke-${randomUUID().slice(0, 8)}`
 const volumes = ['data', 'home', 'workspaces'].map(
   suffix => `${name}-${suffix}`,
 )
 
 async function main() {
-  const official = await startOfficial()
+  const beacon = await startBeacon()
 
   function docker(...args) {
     return exec('docker', ['--context', 'default', ...args], {
       timeout: args[0] === 'run' ? 180000 : 60000,
       env: {
         ...process.env,
-        LEO_OFFICIAL_ORIGIN: official.origin,
-        LEO_INSTALLATION_CLAIM_CODE: official.claimCode,
+        CAIRN_BEACON_ORIGIN: beacon.origin,
+        CAIRN_INSTALLATION_CLAIM_CODE: beacon.claimCode,
       },
     })
   }
@@ -41,16 +41,16 @@ async function main() {
       '-e',
       'HOST=127.0.0.1',
       '-e',
-      'LEO_OFFICIAL_ORIGIN',
+      'CAIRN_BEACON_ORIGIN',
       '-e',
-      'LEO_INSTALLATION_CLAIM_CODE',
+      'CAIRN_INSTALLATION_CLAIM_CODE',
       '-v',
       `${volumes[0]}:/data`,
       '-v',
       `${volumes[1]}:/home/node`,
       '-v',
       `${volumes[2]}:/workspaces`,
-      process.argv[2] || 'leo-agent-manager:test',
+      process.argv[2] || 'cairn-installation:test',
     )
     const url = 'http://127.0.0.1:4310'
 
@@ -88,13 +88,13 @@ async function main() {
       assert.equal(version.commit, expectedCommit)
     assert.equal((await fetch(`${url}/api/tasks`)).status, 401)
     assert.equal((await fetch(`${url}/api/setup`, { method: 'POST' })).status, 401)
-    const headers = official.headers
+    const headers = beacon.headers
     let installations
     for (let attempt = 0; ; attempt++) {
-      assert.ok(attempt < 100, 'Image must claim and connect through the real official service')
-      installations = await fetch(`${official.origin}/api/account/session`, { headers }).then(response => response.json())
+      assert.ok(attempt < 100, 'Image must claim and connect through the real Beacon')
+      installations = await fetch(`${beacon.origin}/api/account/session`, { headers }).then(response => response.json())
       if (installations.installations.length) {
-        const probe = await fetch(`${official.origin}/api/installations/${installations.installations[0].id}/api/agents`, { headers })
+        const probe = await fetch(`${beacon.origin}/api/installations/${installations.installations[0].id}/api/agents`, { headers })
         if (probe.ok)
           break
       }
@@ -102,7 +102,7 @@ async function main() {
       await setTimeout(200)
     }
 
-    const api = `${official.origin}/api/installations/${installations.installations[0].id}/api`
+    const api = `${beacon.origin}/api/installations/${installations.installations[0].id}/api`
     const saved = await fetch(`${api}/agents`, {
       method: 'POST',
       headers,
@@ -150,11 +150,11 @@ async function main() {
     assert.equal((await fetch(`${url}/api/session`)).status, 401)
     const page = await fetch(url)
     assert.equal(page.status, 401)
-    const officialPage = await fetch(official.origin)
-    assert.equal(officialPage.status, 200)
-    assert.match(await officialPage.text(), /Leo/)
+    const beaconPage = await fetch(beacon.origin)
+    assert.equal(beaconPage.status, 200)
+    assert.match(await beaconPage.text(), /Cairn/)
     process.stdout.write(
-      'Container smoke passed: non-root, CLI tools, Chromium/Firefox/WebKit, relay-only access and persistent data through the official service across restart.\n',
+      'Container smoke passed: non-root, CLI tools, Chromium/Firefox/WebKit, relay-only access and persistent data through the Beacon across restart.\n',
     )
   }
   catch (error) {
@@ -166,7 +166,7 @@ async function main() {
   finally {
     await docker('rm', '-f', name).catch(() => {})
     await docker('volume', 'rm', ...volumes).catch(() => {})
-    await official.stop()
+    await beacon.stop()
   }
 }
 

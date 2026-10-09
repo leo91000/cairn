@@ -2,12 +2,12 @@
 
 **Historical standalone-manager workflow:** the entire **Update agent tools**
 workflow is
-explicitly disabled after the official-service cutover (#113). Manual dispatch
+explicitly disabled after the beacon cutover (#113). Manual dispatch
 only explains the supported release path; it reads no production environment,
 queries no manager or Coolify API, and builds/deploys no candidate. Do not enable
 its host dispatch timer on
-the new deployment or reuse the official service UUID for it. New installations
-follow the approved immutable image through `leo-installation-update.timer`;
+the new deployment or reuse the Beacon UUID for it. New installations
+follow the approved immutable image through `cairn-installation-update.timer`;
 application CI resolves stable CLI versions before validating those images.
 See [the production runbook](PRODUCTION-CAIRN.md). The setup below describes the
 previous deployment and is retained for recovery context.
@@ -25,7 +25,7 @@ not change. Deriving from the original base prevents update layers accumulating.
 The manager and isolated agents use the same updated tools.
 
 Candidates retain exact CLI versions. GitHub CLI downloads are checked against
-its release checksums; Codex is installed from its versioned official npm package.
+its release checksums; Codex is installed from its versioned beacon npm package.
 Container CI checks actual CLI versions against runtime metadata, launches all
 three browser engines, and exercises runner authentication, isolation, sandbox
 write denial, output streaming, and cancellation. Failed candidates are not deployed.
@@ -53,11 +53,11 @@ inspect the failed workflow before retrying.
 The update workflow also maintains mise, global runtimes and the agent toolbox.
 See [Agent toolkit](TOOLKIT.md) for the catalogue, project overrides and update policy.
 
-## Historical setup (do not enable on the official deployment)
+## Historical setup (do not enable on the beacon deployment)
 
 First deploy an application version that supports runtime metadata and deployment
 leases (0.2.1 or newer). The manager creates `/data/maintenance-token`, mode 0600.
-Store this value as GitHub production-environment secret `LEO_MAINTENANCE_TOKEN`
+Store this value as GitHub production-environment secret `CAIRN_MAINTENANCE_TOKEN`
 without printing it or placing it in logs. This token can only pause/resume task
 starts. The updater also uses the existing Coolify deployment secret and variables.
 The Coolify token needs `read`, `read:sensitive`, `write`, and `deploy` permissions:
@@ -65,25 +65,25 @@ reading the configured image is required for concurrency checks and rollback.
 Allow the `main` branch in the GitHub production environment's deployment policy,
 alongside the existing `v*` tag rule, because update dispatches run on `main`.
 
-Install `deploy/leo-cli-update.service` and `deploy/leo-cli-update.timer` under
+Install `deploy/cairn-cli-update.service` and `deploy/cairn-cli-update.timer` under
 `/etc/systemd/system` on the Docker host. In a service override, set
-`LEO_MANAGER_CONTAINER` to the actual manager container name. For forks, also set
-`LEO_REPOSITORY`. The manager's GitHub login must be allowed to dispatch Actions
+`CAIRN_MANAGER_CONTAINER` to the actual manager container name. For forks, also set
+`CAIRN_REPOSITORY`. The manager's GitHub login must be allowed to dispatch Actions
 workflows in that repository.
 
 ```sh
 sudo systemctl daemon-reload
-sudo systemctl enable --now leo-cli-update.timer
-sudo systemctl start leo-cli-update.service
-sudo systemctl list-timers leo-cli-update.timer
-sudo journalctl -u leo-cli-update.service
+sudo systemctl enable --now cairn-cli-update.timer
+sudo systemctl start cairn-cli-update.service
+sudo systemctl list-timers cairn-cli-update.timer
+sudo journalctl -u cairn-cli-update.service
 ```
 
 The manual start checks immediately. The timer catches up after host downtime.
-For local Compose the default container name is `leo-manager`. Coolify installations
+For local Compose the default container name is `cairn-manager`. Coolify installations
 use the generated name, such as `manager-SERVICE_UUID`.
 
-To pause automatic updates, run `sudo systemctl disable --now leo-cli-update.timer`.
+To pause automatic updates, run `sudo systemctl disable --now cairn-cli-update.timer`.
 The workflow can still be triggered manually from Actions. Normal app version tags
 continue to deploy their own validated image. Every CI run, including every tag
 release, resolves the latest stable Codex and GitHub CLI versions before deciding

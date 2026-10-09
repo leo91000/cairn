@@ -39,7 +39,7 @@ export async function resolveAndroidRelease(config, {
     const runs = JSON.parse(response).workflow_runs.filter(run => trustedAndroidRun(run, config))
     const successful = runs.find(run => run.status === 'completed' && run.conclusion === 'success')
     if (successful) {
-      const directory = await mkdtemp(path.join(os.tmpdir(), 'leo-android-release-'))
+      const directory = await mkdtemp(path.join(os.tmpdir(), 'cairn-android-release-'))
       try {
         await gh(['run', 'download', successful.id.toString(), '--repo', config.repository, '--name', artifactName, '--dir', directory])
         await verifyBuild(directory, { ...config, runId: successful.id })
@@ -71,7 +71,7 @@ if (import.meta.main) {
       repository: process.env.GITHUB_REPOSITORY,
       commit: process.env.GITHUB_SHA,
       tag: process.env.GITHUB_REF_NAME,
-      officialOrigin: process.env.LEO_OFFICIAL_ORIGIN,
+      beaconOrigin: process.env.CAIRN_BEACON_ORIGIN,
       firebaseConfiguration: firebaseConfigurationFromEnvironment(),
     }
     androidVersion(config.tag)

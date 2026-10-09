@@ -42,7 +42,7 @@ jobs:
           ANDROID_TEST_SYSTEM: ${{ inputs.system }}
           ANDROID_SCREENSHOTS: ${{ runner.temp }}/nested-android
         run: |
-          [[ "$SMOKE_IMAGE" =~ ^ghcr.io/leo91000/leo-agent-manager@sha256:[a-f0-9]{64}$ ]]
+          [[ "$SMOKE_IMAGE" =~ ^ghcr.io/leo91000/cairn@sha256:[a-f0-9]{64}$ ]]
           node tests/android-runner-smoke.mjs "$SMOKE_IMAGE"
       - uses: actions/upload-artifact@v7.0.1
         if: always()

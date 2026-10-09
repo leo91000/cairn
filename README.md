@@ -1,4 +1,4 @@
-# Leo Agent Manager
+# Cairn
 
 A self-hosted Vue control room with a native Rust backend for Codex and Claude Code agents, recurring work, and reusable skills.
 Run it on a VPS so schedules keep working when your laptop is off.
@@ -34,17 +34,17 @@ See [microVM requirements and architecture](docs/MICROVMS.md).
 
 ```sh
 cp .env.example .env
-# Configure LEO_OFFICIAL_ORIGIN for the separate official service.
+# Configure CAIRN_BEACON_ORIGIN for Beacon.
 codex_version=$(npm view @openai/codex version)
 gh_version=$(gh api repos/cli/cli/releases/latest --jq '.tag_name | ltrimstr("v")')
 docker compose build --build-arg CODEX_VERSION="$codex_version" --build-arg GH_VERSION="$gh_version"
 docker compose up -d
-# Approve the printed device code in the official app.
-docker compose exec manager leo claim
+# Approve the printed device code in the beacon app.
+docker compose exec manager cairn claim
 docker compose restart manager
 ```
 
-Open the official app, sign in to your Leo account, and claim the installation.
+Open the beacon app, sign in to your Cairn account, and claim the installation.
 The manager port is private machine traffic; local passwords, pages and sessions
 no longer grant access. Existing deployments must follow the explicit migration
 in [DEPLOYMENT.md](docs/DEPLOYMENT.md) before upgrading.
@@ -79,7 +79,7 @@ Install Rust through rustup; `rust-toolchain.toml` pins the compiler and checks.
 ```sh
 pnpm install --frozen-lockfile
 pnpm build
-docker compose -f deploy/official/compose.yaml up
+docker compose -f deploy/beacon/compose.yaml up
 ```
 
 `pnpm install` installs a pre-commit hook that runs `pnpm lint:fix` across the
@@ -92,11 +92,11 @@ examples. Lint errors, compiler errors, and Clippy warnings block the commit.
 Run `pnpm prepare` to reinstall the hook.
 See [formatting and readability](docs/FORMATTING.md) for setup, commands, and CI checks.
 
-The official app is at `http://localhost:4311` with a development mailbox at
-`http://localhost:8025`; see [official service setup](docs/OFFICIAL-SERVICE.md).
+The beacon app is at `http://localhost:4311` with a development mailbox at
+`http://localhost:8025`; see [Beacon setup](docs/BEACON.md).
 Build the web bundle after edits, and claim a separately running installation
-with `leo claim`. `pnpm dev` runs the official binary and Vite; configure its database, email
-delivery and `LEO_OFFICIAL_ORIGIN=http://localhost:5178` as described in that
+with `cairn claim`. `pnpm dev` runs the beacon binary and Vite; configure its database, email
+delivery and `CAIRN_BEACON_ORIGIN=http://localhost:5178` as described in that
 guide. Browser journeys use both production binaries and the real account and
 installation relay, with synthetic email delivery. Local password sign-in and
 its historical Rust fixtures have been retired.
@@ -112,9 +112,9 @@ runs (`.env` is used by Compose, not loaded automatically by the development ser
 pnpm check                       # ESLint, rustfmt, types, JS tests and frontend build
 pnpm test:backend                # Native backend integration and migration tests
 cargo clippy --all-targets -- -D warnings
-cargo build --locked --workspace --bin leo --bin leo-official --example worker_fixture # Browser and worker test binaries
+cargo build --locked --workspace --bin cairn --bin cairn-beacon --example worker_fixture # Browser and worker test binaries
 pnpm exec playwright install chromium
-pnpm test:e2e                    # Real official + installation binaries (disposable Postgres URL required)
+pnpm test:e2e                    # Real beacon + installation binaries (disposable Postgres URL required)
 pnpm build:backend               # Optimized native production binary
 node --import tsx scripts/benchmark-backend.mjs # Node/Rust comparison
 pnpm lint:fix                    # ESLint fixes and Rust formatting
@@ -172,12 +172,12 @@ authenticated. Sharing state persists across server restarts.
 
 ## Native Android client
 
-The Kotlin / Jetpack Compose client lives in [`android/`](android/README.md).
+The Kotlin / Jetpack Compose client lives in [`apps/android/`](apps/android/README.md).
 It uses native Material 3 controls with the web theme’s current light/dark colors
-and saved appearance preference. Open `android/` in Android Studio.
+and saved appearance preference. Open `apps/android/` in Android Studio.
 It includes chats, streaming activity, attachments and artifacts, MCP management,
 Codex and Claude Code accounts and optional periodic notifications without Firebase.
-[Android coverage](android/README.md#coverage) and [validation](android/VALIDATION.md)
+[Android coverage](apps/android/README.md#coverage) and [validation](apps/android/VALIDATION.md)
 document the implemented workflows and device/deployment gates. Android builds
 run in their own CI workflow. Native MCP OAuth uses the accompanying server bridge.
 
@@ -224,7 +224,7 @@ Claude subscriptions do not provide this image generation path.
 Only the agent's name and description are sent; instructions, conversations and
 connected resources are not included. Generation uses an isolated, ephemeral
 Codex session with the built-in image tool and no project, shell or MCP tools.
-Authentication uses the existing account broker; refresh credentials stay in Leo.
+Authentication uses the existing account broker; refresh credentials stay in Cairn.
 The orchestration model is explicitly `gpt-6-astra`, both when selecting a compatible
 account with available quota and when starting the Codex thread and turn.
 

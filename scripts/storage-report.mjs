@@ -5,7 +5,7 @@ import { join } from 'node:path'
 import process from 'node:process'
 import { DatabaseSync } from 'node:sqlite'
 
-const state = process.env.LEO_RUNNER_STATE || '/runner-state'
+const state = process.env.CAIRN_RUNNER_STATE || '/runner-state'
 const data = process.env.DATA_DIR || '/data'
 const db = new DatabaseSync(join(data, 'manager.db'), { readOnly: true })
 const runs = new Map(db.prepare('SELECT id, status, data FROM runs').all().map(row => [row.id, { status: row.status, ...JSON.parse(row.data) }]))

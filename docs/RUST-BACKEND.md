@@ -1,6 +1,6 @@
 # Native Rust backend
 
-Version 0.12 replaces the Node backend with the `leo` binary. HTTP, authentication,
+Version 0.12 replaces the Node backend with the `cairn` binary. HTTP, authentication,
 SQLite, scheduling, execution supervision, chat RPC, account management, MCP
 client/server/OAuth, Web Push, and the Docker runner broker/client are native Rust.
 Vue, shared frontend contracts and build tooling remain TypeScript. Node stays in
@@ -24,7 +24,7 @@ Bootstrap tokens are generated privately when `SETUP_TOKEN` is absent, as before
 Schema version 5 adds durable shared S3 object references and deletion jobs. Older
 executables refuse that database; see [shared blocks and rollback](SHARED-S3-BLOCKS.md).
 
-The old implementation is frozen under `tests/legacy/server` solely as a migration
+The old implementation is frozen under `tests/fixtures/legacy/server` solely as a migration
 oracle, fixture seeder and benchmark reference. It is excluded from the container.
 Browser fixtures serve every request and run every worker through Rust; direct
 legacy service access in tests only seeds or inspects persisted fixtures.
@@ -58,19 +58,19 @@ pnpm test:backend
 cargo clippy --locked --workspace --all-targets -- -D warnings
 node scripts/rust-format.mjs --check
 pnpm check
-cargo build --bin leo
+cargo build --bin cairn
 pnpm test:e2e
 ```
 
-Regenerate `backend/schemas/inputs.json` with `node --import tsx scripts/backend-schemas.mjs`
+Regenerate `crates/installation/schemas/inputs.json` with `node --import tsx scripts/backend-schemas.mjs`
 after changing shared input contracts. CI rejects schema drift. MCP's tool catalog
-lives in `backend/schemas/mcp-tools.json`; keep it aligned with tool dispatch.
+lives in `crates/installation/schemas/mcp-tools.json`; keep it aligned with tool dispatch.
 
-`leo serve` runs the manager; `leo runner-broker`, `runner-client`, `runner-entry`,
+`cairn serve` runs the manager; `cairn runner-broker`, `runner-client`, `runner-entry`,
 `supervise` and `chat` implement the execution boundary. `toolkit-env` and
 `prepare-execution` are local administrative commands used by the container checks;
 their output can contain private environment values and must not be logged publicly.
-`LEO_HTTP_THREADS` can override the bounded HTTP executor size. It does not change
+`CAIRN_HTTP_THREADS` can override the bounded HTTP executor size. It does not change
 the separately configured agent concurrency (any positive integer, default 4).
 
 ## Deployment and rollback
@@ -80,7 +80,7 @@ backup facility together with the encryption key and persistent agent home; copy
 only `manager.db` while WAL writes are active is insufficient.
 
 The tag deployment updates Coolify's stored runner entrypoint to
-`/usr/local/bin/leo runner-broker` while preserving volume declarations and secret
+`/usr/local/bin/cairn runner-broker` while preserving volume declarations and secret
 expressions. CI builds dependency layers separately, tests the exact container,
 and promotes its digest only after native, frontend and browser checks pass. A tag
 reuses the image validated for its source tree on main or a same-repository PR.

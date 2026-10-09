@@ -35,7 +35,7 @@ SQLite schema version 5 prevents the previous executable from opening a database
 ## Validation
 
 - Inventory tests cover cross-run reuse, last-reference deletion, immutable replacement during deletion, grace-period reuse, destination/size isolation, pending references across restart, corrupt-object invalidation, simultaneous first-upload convergence, and cleanup retry fairness.
-- `tests/node_s3_test.py` uses a loopback Moto server, real SDK/CLI operations, synthetic credentials, and the existing publication/restore interfaces. Coverage includes legacy and shared ciphertext, incremental reuse, old grant retention, missing-object repair, exact version deletion, interrupted publication recovery, same-content publication in another run, legacy migration without a source-block request, deletion of each shared owner, and publication/read progress while a prefix deletion is deliberately blocked.
+- `scripts/tests/node_s3_test.py` uses a loopback Moto server, real SDK/CLI operations, synthetic credentials, and the existing publication/restore interfaces. Coverage includes legacy and shared ciphertext, incremental reuse, old grant retention, missing-object repair, exact version deletion, interrupted publication recovery, same-content publication in another run, legacy migration without a source-block request, deletion of each shared owner, and publication/read progress while a prefix deletion is deliberately blocked.
 - The metadata benchmark reserves/commits twenty 4,096-block manifests; the optimized publication benchmark compares initial unique data, unchanged captures, and one-block deltas against the base revision, with exact restored-byte verification.
 
 ### Performance comparison
@@ -57,12 +57,12 @@ Reproduce with `moto[server]==5.2.3` and the AWS CLI installed:
 ```sh
 pnpm check
 node --import tsx scripts/backend-schemas.mjs
-git diff --exit-code -- backend/schemas/inputs.json
+git diff --exit-code -- crates/installation/schemas/inputs.json
 cargo clippy --locked --workspace --all-targets -- -D warnings
 node scripts/test-backend.mjs --no-fail-fast -- --test-threads=1
-python tests/node_s3_test.py
-CARGO_TARGET_DIR=/tmp/shared-candidate-target python tests/node_s3_test.py --benchmark
-CARGO_TARGET_DIR=/tmp/shared-baseline-target python tests/node_s3_test.py --benchmark --repo /path/to/baseline
+python scripts/tests/node_s3_test.py
+CARGO_TARGET_DIR=/tmp/shared-candidate-target python scripts/tests/node_s3_test.py --benchmark
+CARGO_TARGET_DIR=/tmp/shared-baseline-target python scripts/tests/node_s3_test.py --benchmark --repo /path/to/baseline
 ```
 
-Copy the updated `backend/tests/node_performance.rs` fixture into the baseline checkout too. It supports batched source requests and uses the fixture's `AWS_ENDPOINT_URL_S3` environment override instead of an explicit loopback HTTP endpoint; production endpoint validation remains unchanged.
+Copy the updated `crates/installation/tests/node_performance.rs` fixture into the baseline checkout too. It supports batched source requests and uses the fixture's `AWS_ENDPOINT_URL_S3` environment override instead of an explicit loopback HTTP endpoint; production endpoint validation remains unchanged.

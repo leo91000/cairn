@@ -1,5 +1,0 @@
-<resources>
-    <color name="leo_brand">#4545F5</color>
-    <!-- Launch window matches the Compose "Signal" background to avoid a flash on start. -->
-    <color name="leo_window">#F4F2EC</color>
-</resources>

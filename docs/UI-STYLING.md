@@ -1,6 +1,6 @@
 # UI styling
 
-The UI uses Tailwind CSS 4 through its Vite plugin. `src/styles/index.css` is the
+The UI uses Tailwind CSS 4 through its Vite plugin. `apps/web/src/styles/index.css` is the
 single stylesheet entry point. Vite's existing Docker build copies all of `src`,
 so the same theme, utilities, and icons compile locally and in the release image.
 
@@ -13,17 +13,17 @@ so the same theme, utilities, and icons compile locally and in the release image
 - Reuse behavior and visual states through `UiButton`, `UiSegments`, `UiAlert`,
   `Status`, `Modal`, and `VirtualSelect`. Do not make a wrapper for every repeated
   flex row. Native fields share baseline typography and focus styles.
-- `src/ui.ts` owns button variants and icon-button styles. `UiButton` and native
+- `apps/web/src/ui.ts` owns button variants and icon-button styles. `UiButton` and native
   icon buttons merge caller utilities with `tailwind-merge`, so local sizing or
   responsive visibility replaces defaults deterministically. Links retain their
   native navigation semantics and use the shared button styles when appropriate.
-- Theme colors live in `src/styles/theme.css`. Use `bg-surface`, `bg-inset`,
+- Theme colors live in `apps/web/src/styles/theme.css`. Use `bg-surface`, `bg-inset`,
   `text-ink`, `text-muted`, `text-accent`, and `border-line`. The existing theme
   controller and `light-dark()` support system, saved light, and saved dark
   preferences without maintaining a second palette in each component.
 - Keep CSS for generated Markdown/highlight markup, browser primitives, and
   relationships across components such as embedded/fullscreen run layouts.
-  These rules are grouped by feature in `src/styles`; do not add another global
+  These rules are grouped by feature in `apps/web/src/styles`; do not add another global
   override stylesheet. `@apply` is limited to baseline element styling, rather
   than recreating the old class system with utility aliases.
 - Descriptive classes such as `activity-scroll` remain useful for structural
@@ -36,7 +36,7 @@ See [workspace scrolling](UI-SCROLLING.md) before changing panel heights.
 ## Icons
 
 `@egoist/tailwindcss-icons` discovers the installed Lucide, Tabler, and Simple
-Icons collections. `src/icons.ts` contains complete literal utility names, which
+Icons collections. `apps/web/src/icons.ts` contains complete literal utility names, which
 Tailwind can discover at build time. Add an exported constant there and pass it
 to `Icon`, or use it in a typed select option. Never concatenate icon utility
 names from user input or fetch icons at runtime.

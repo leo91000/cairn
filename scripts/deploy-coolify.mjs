@@ -44,28 +44,28 @@ export async function deploy(config, { timeoutMs = 600000, intervalMs = 2000 } =
 
   const started = Date.now()
   const service = await api(servicePath, 'GET', undefined, true)
-  const official = !!config.installationImage
-  if (official) {
+  const beacon = !!config.installationImage
+  if (beacon) {
     let document
     try {
       document = parse(service.docker_compose_raw)
     }
     catch {
-      throw new Error('Coolify returned invalid official production Compose')
+      throw new Error('Coolify returned invalid beacon production Compose')
     }
 
-    const officialService = document?.services?.official
+    const beaconService = document?.services?.beacon
     // Reject the old manager target before changing any environment values.
     // eslint-disable-next-line no-template-curly-in-string -- Coolify must retain these Compose expressions.
-    if (!officialService || document.services.manager || document.services.runner || officialService.image !== '${LEO_OFFICIAL_IMAGE:?Set the validated official image digest}'
-      || Number(officialService.deploy?.replicas) !== 1 || officialService.deploy?.update_config?.order !== 'stop-first'
+    if (!beaconService || document.services.manager || document.services.runner || beaconService.image !== '${CAIRN_BEACON_IMAGE:?Set the validated beacon image digest}'
+      || Number(beaconService.deploy?.replicas) !== 1 || beaconService.deploy?.update_config?.order !== 'stop-first'
       // eslint-disable-next-line no-template-curly-in-string -- This must be operator-configured, not baked into Compose.
-      || officialService.environment?.LEO_INSTALLATION_IMAGE !== '${LEO_INSTALLATION_IMAGE:?Set the paired installation digest}') {
-      throw new Error('Coolify must target the single-process official production Compose, not the old manager')
+      || beaconService.environment?.CAIRN_INSTALLATION_IMAGE !== '${CAIRN_INSTALLATION_IMAGE:?Set the paired installation digest}') {
+      throw new Error('Coolify must target the single-process beacon production Compose, not the old manager')
     }
   }
 
-  const compose = official ? service.docker_compose_raw : firecrackerRunnerCompose(service.docker_compose_raw)
+  const compose = beacon ? service.docker_compose_raw : firecrackerRunnerCompose(service.docker_compose_raw)
   if (compose !== service.docker_compose_raw) {
     await api(servicePath, 'PATCH', { docker_compose_raw: Buffer.from(compose).toString('base64') })
     const updatedService = await api(servicePath, 'GET', undefined, true)
@@ -73,10 +73,10 @@ export async function deploy(config, { timeoutMs = 600000, intervalMs = 2000 } =
       throw new Error('Coolify did not persist the runner configuration.')
   }
 
-  if (official) {
+  if (beacon) {
     const data = [
-      { key: 'LEO_OFFICIAL_IMAGE', value: image, is_literal: true },
-      { key: 'LEO_INSTALLATION_IMAGE', value: config.installationImage, is_literal: true },
+      { key: 'CAIRN_BEACON_IMAGE', value: image, is_literal: true },
+      { key: 'CAIRN_INSTALLATION_IMAGE', value: config.installationImage, is_literal: true },
     ]
     const previousEnvironment = await api(`${servicePath}/envs`, 'GET', undefined, true)
     const previous = data.map(({ key }) => {
@@ -118,7 +118,7 @@ export async function deploy(config, { timeoutMs = 600000, intervalMs = 2000 } =
   }
   else {
     await api(`${servicePath}/envs`, 'PATCH', {
-      key: 'LEO_IMAGE',
+      key: 'CAIRN_IMAGE',
       value: image,
       is_literal: true,
     })
@@ -141,14 +141,14 @@ export async function deploy(config, { timeoutMs = 600000, intervalMs = 2000 } =
       if (response.ok) {
         const health = await response.json()
         if (health.status === 'ok' && health.commit === commit && (!config.runtimeId || health.runtimeId === config.runtimeId)) {
-          const releaseResponse = await fetch(new URL(official ? '/install/release' : '/internal/nodes/release', publicUrl), {
+          const releaseResponse = await fetch(new URL(beacon ? '/install/release' : '/internal/nodes/release', publicUrl), {
             cache: 'no-store',
             redirect: 'error',
             signal: AbortSignal.timeout(10000),
           })
           if (releaseResponse.ok) {
             const release = await releaseResponse.json()
-            if (official ? release.image === config.installationImage : release.protocol === 2 && release.commit === commit && release.image === image) {
+            if (beacon ? release.image === config.installationImage : release.protocol === 2 && release.commit === commit && release.image === image) {
               return {
                 updateMs: updated - started,
                 restartMs: restarted - updated,
@@ -174,17 +174,17 @@ export async function deploy(config, { timeoutMs = 600000, intervalMs = 2000 } =
     await setTimeout(intervalMs)
   }
 
-  throw new Error(`Deployment did not serve commit ${commit} with ${official ? 'installation' : 'node'} image ${config.installationImage || image} before the timeout`)
+  throw new Error(`Deployment did not serve commit ${commit} with ${beacon ? 'installation' : 'node'} image ${config.installationImage || image} before the timeout`)
 }
 
 function configuration() {
-  const names = ['COOLIFY_URL', 'COOLIFY_SERVICE_UUID', 'COOLIFY_TOKEN', 'LEO_OFFICIAL_ORIGIN', 'DEPLOY_IMAGE', 'DEPLOY_INSTALLATION_IMAGE', 'DEPLOY_COMMIT']
+  const names = ['COOLIFY_URL', 'COOLIFY_SERVICE_UUID', 'COOLIFY_TOKEN', 'CAIRN_BEACON_ORIGIN', 'DEPLOY_IMAGE', 'DEPLOY_INSTALLATION_IMAGE', 'DEPLOY_COMMIT']
   for (const name of names) {
     if (!process.env[name])
       throw new Error(`Missing ${name}`)
   }
 
-  for (const name of ['COOLIFY_URL', 'LEO_OFFICIAL_ORIGIN']) {
+  for (const name of ['COOLIFY_URL', 'CAIRN_BEACON_ORIGIN']) {
     const url = new URL(process.env[name])
     if (url.protocol !== 'https:' || url.username || url.password || url.pathname !== '/' || url.search || url.hash)
       throw new Error(`${name} must be an HTTPS origin`)
@@ -205,7 +205,7 @@ function configuration() {
     commit: process.env.DEPLOY_COMMIT,
     runtimeId: process.env.DEPLOY_COMMIT,
     installationImage: process.env.DEPLOY_INSTALLATION_IMAGE,
-    publicUrl: process.env.LEO_OFFICIAL_ORIGIN,
+    publicUrl: process.env.CAIRN_BEACON_ORIGIN,
   }
 }
 

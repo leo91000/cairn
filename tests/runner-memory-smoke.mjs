@@ -125,8 +125,8 @@ export async function memorySmoke({
       reclaimedBytes,
       statistics,
     }
-    if (process.env.LEO_MEMORY_EVIDENCE)
-      await writeFile(process.env.LEO_MEMORY_EVIDENCE, JSON.stringify(evidence, null, 2))
+    if (process.env.CAIRN_MEMORY_EVIDENCE)
+      await writeFile(process.env.CAIRN_MEMORY_EVIDENCE, JSON.stringify(evidence, null, 2))
     process.stdout.write(`${JSON.stringify(evidence)}\n`)
   }
   finally {

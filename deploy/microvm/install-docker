@@ -8,5 +8,5 @@ printf '%s\n' 'deb [arch=amd64 signed-by=/etc/apt/keyrings/docker.asc] https://d
 apt-get update
 apt-get install -y --no-install-recommends docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin sudo
 rm -rf /var/lib/apt/lists/*
-printf 'node ALL=(ALL) NOPASSWD: ALL\n' > /etc/sudoers.d/leo
-chmod 440 /etc/sudoers.d/leo
+printf 'node ALL=(ALL) NOPASSWD: ALL\n' > /etc/sudoers.d/cairn
+chmod 440 /etc/sudoers.d/cairn

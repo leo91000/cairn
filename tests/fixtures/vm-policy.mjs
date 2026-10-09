@@ -45,7 +45,7 @@ async function main() {
   else
     write()
   process.stdout.write('parallel.ready\n')
-  await awaitProjectImport({ project, readOnly, inbox: '/run/leo-chat/messages.json' })
+  await awaitProjectImport({ project, readOnly, inbox: '/run/cairn-chat/messages.json' })
 }
 
 if (import.meta.main) {

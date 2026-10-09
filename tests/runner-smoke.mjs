@@ -18,11 +18,11 @@ import { entrypointSmoke } from './runner-entrypoint-smoke.mjs'
 import { prepareStorageOrigin, storageSmoke } from './runner-storage-smoke.mjs'
 
 async function main() {
-  const image = process.argv[2] || 'leo-firecracker:dev'
+  const image = process.argv[2] || 'cairn-firecracker:dev'
   const docker = (...args) => execFileSync('docker', ['--context', 'default', ...args], { encoding: 'utf8', timeout: 180000, stdio: ['pipe', 'pipe', 'pipe'] }).trim()
   // The extracted guest image must stay on disk: /tmp can be a RAM filesystem.
-  const root = await mkdtemp(path.join(process.env.VM_TEST_ROOT || '/var/tmp', 'leo-microvm-'))
-  const name = `leo-vm-test-${randomUUID().slice(0, 8)}`
+  const root = await mkdtemp(path.join(process.env.VM_TEST_ROOT || '/var/tmp', 'cairn-microvm-'))
+  const name = `cairn-vm-test-${randomUUID().slice(0, 8)}`
   const networkName = `${name}-network`
   const networkServer = `${name}-peer`
   // A documentation-only subnet emulates public destinations without Internet access.
@@ -76,7 +76,7 @@ async function main() {
     const source = path.join(root, 'data/runs', runId)
     for (const dir of ['workspace', 'home/.codex', 'home/.claude', 'chat-input', 'output'])
       await mkdir(path.join(source, dir), { recursive: true })
-    await writeFile(path.join(source, 'home/.codex/leo-managed-auth'), '1')
+    await writeFile(path.join(source, 'home/.codex/cairn-managed-auth'), '1')
     await writeFile(path.join(source, 'home/.claude/.credentials.json'), JSON.stringify({ fixture: 'provisioned' }))
     await writeFile(path.join(source, 'chat-input/messages.json'), '[]')
     await writeFile(path.join(source, 'workspace/nested-kvm.c'), await readFile(new URL('./fixtures/nested-kvm.c', import.meta.url)))
@@ -102,7 +102,7 @@ if(mode==='first'||mode==='resume')assert.match(execFileSync(root+'/workspace/ne
 assert.match(execFileSync('uname',['-r'],{encoding:'utf8'}),/^6\\.12\\.109/);
 assert.equal(fs.existsSync('/sys/bus/serio/devices/serio0'),false,'guest has no emulated PS/2 keyboard');
 if(mode==='first'){
-  const templates='/opt/leo-codex-state';
+  const templates='/opt/cairn-codex-state';
   const manifest=JSON.parse(fs.readFileSync(templates+'/manifest.json','utf8'));
   assert.equal(manifest.version,1);
   assert.ok(manifest.files.some(name=>/^state_\\d+\\.sqlite$/.test(name)));
@@ -121,21 +121,21 @@ for(const path of ['/data/private-manager-canary','/data/runner-secret','/var/ru
 assert.equal(process.env.RUNNER_TOKEN,undefined);
 if(mode==='first') {
   console.log(execFileSync('/usr/local/bin/node',[root+'/workspace/network-probe.mjs','guest',${JSON.stringify(publicPeer)},${JSON.stringify(privatePeer)}],{encoding:'utf8',timeout:15000}));
-  const env=JSON.parse(execFileSync('/usr/local/bin/leo',['toolkit-env'],{encoding:'utf8'}));
-  assert.equal(env.LEO_TOOLKIT_DIR,'/opt/leo-toolkit');
+  const env=JSON.parse(execFileSync('/usr/local/bin/cairn',['toolkit-env'],{encoding:'utf8'}));
+  assert.equal(env.CAIRN_TOOLKIT_DIR,'/opt/cairn-toolkit');
   for(const tool of ['cargo','rustc','pnpm','python','uv','rg','fd','gh','codex','claude'])execFileSync(tool,['--version'],{env,timeout:30000});
-  const auth=await new Promise((resolve,reject)=>{const socket=net.connect('/run/leo-auth.sock',()=>socket.write('{"refresh":false}\\n'));let data='';socket.on('data',chunk=>{data+=chunk;if(data.includes('\\n')){socket.end();resolve(JSON.parse(data))}});socket.on('error',reject);});
+  const auth=await new Promise((resolve,reject)=>{const socket=net.connect('/run/cairn-auth.sock',()=>socket.write('{"refresh":false}\\n'));let data='';socket.on('data',chunk=>{data+=chunk;if(data.includes('\\n')){socket.end();resolve(JSON.parse(data))}});socket.on('error',reject);});
   assert.equal(auth.accessToken,'fixture-access-token');
   assert.equal(fs.existsSync(project),false,'unopened project is absent');
   fs.writeFileSync('/tmp/artifact-probe.bin',Buffer.alloc(150000,90));
   fs.symlinkSync('/etc/passwd','/tmp/artifact-link');
   console.log('probe.ready');
   const deadline=Date.now()+20000;
-  while(!fs.readFileSync('/run/leo-chat/messages.json','utf8').includes('steered')){assert.ok(Date.now()<deadline,'live inbox');await new Promise(r=>setTimeout(r,100));}
+  while(!fs.readFileSync('/run/cairn-chat/messages.json','utf8').includes('steered')){assert.ok(Date.now()<deadline,'live inbox');await new Promise(r=>setTimeout(r,100));}
   assert.equal(fs.readFileSync(project+'/hello','utf8'),'imported on demand');
   fs.writeFileSync(project+'/hello','guest edit');
   console.log('project.edited');
-  while(!fs.readFileSync('/run/leo-chat/messages.json','utf8').includes('reopened')){assert.ok(Date.now()<deadline,'reopen response');await new Promise(r=>setTimeout(r,100));}
+  while(!fs.readFileSync('/run/cairn-chat/messages.json','utf8').includes('reopened')){assert.ok(Date.now()<deadline,'reopen response');await new Promise(r=>setTimeout(r,100));}
   assert.equal(fs.readFileSync(project+'/hello','utf8'),'guest edit','reopen must preserve edits');
   console.log(execFileSync('docker',['run','--rm','busybox:1.37','echo','nested-docker-ok'],{encoding:'utf8',timeout:120000}));
   fs.writeFileSync(root+'/workspace/compose.yaml',JSON.stringify({services:{probe:{image:'busybox:1.37',command:['echo','compose-ok']}}}));
@@ -155,7 +155,7 @@ if(mode==='cancel'||mode==='crash') {
   console.log('probe.pause');
   if(mode==='cancel') {
     const deadline=Date.now()+30000;
-    while(!fs.readFileSync('/run/leo-chat/messages.json','utf8').includes('capture-update')){assert.ok(Date.now()<deadline,'capture update request');await new Promise(r=>setTimeout(r,100));}
+    while(!fs.readFileSync('/run/cairn-chat/messages.json','utf8').includes('capture-update')){assert.ok(Date.now()<deadline,'capture update request');await new Promise(r=>setTimeout(r,100));}
     fs.writeFileSync(root+'/workspace/capture-update',Buffer.alloc(4*1024*1024,91));
     execFileSync('sync');
     console.log('probe.updated');
@@ -164,7 +164,7 @@ if(mode==='cancel'||mode==='crash') {
 }
 if(mode==='recover')assert.equal(fs.readFileSync(root+'/workspace/interrupted','utf8'),'saved before interruption');
 if(mode==='managed-claude') {
-  const state=await new Promise((resolve,reject)=>{const socket=net.connect('/run/leo-auth.sock',()=>socket.write('{}\\n'));let data='';socket.on('data',chunk=>{data+=chunk;if(data.includes('\\n')){socket.end();resolve(JSON.parse(data))}});socket.on('error',reject);});
+  const state=await new Promise((resolve,reject)=>{const socket=net.connect('/run/cairn-auth.sock',()=>socket.write('{}\\n'));let data='';socket.on('data',chunk=>{data+=chunk;if(data.includes('\\n')){socket.end();resolve(JSON.parse(data))}});socket.on('error',reject);});
   assert.equal(state.claudeAiOauth.accessToken,'fixture-claude-access');
   assert.equal(state.claudeAiOauth.refreshToken,undefined);
   fs.writeFileSync('/home/node/.claude/.credentials.json',JSON.stringify({fixture:'must-not-overwrite-shared-state'}));
@@ -174,10 +174,10 @@ console.log('probe.done');
 `
     await writeFile(path.join(source, 'workspace/probe.mjs'), fixture)
     auth = createServer(socket => socket.once('data', () => socket.end('{"accessToken":"fixture-access-token"}\n')))
-    await new Promise(resolve => auth.listen(path.join(source, 'home/.codex/leo-auth.sock'), resolve))
+    await new Promise(resolve => auth.listen(path.join(source, 'home/.codex/cairn-auth.sock'), resolve))
     claudeAuth = createServer(socket => socket.once('data', () => socket.end(`${JSON.stringify({ claudeAiOauth: { accessToken: 'fixture-claude-access', expiresAt: Date.now() + 3600000 } })}\n`)))
-    await new Promise(resolve => claudeAuth.listen(path.join(source, 'home/.claude/leo-auth.sock'), resolve))
-    docker('run', '-d', '--name', name, '--user', '0:0', '--read-only', '--cap-drop', 'ALL', ...['SYS_ADMIN', 'NET_ADMIN', 'SYS_CHROOT', 'SETUID', 'SETGID', 'MKNOD', 'CHOWN', 'FOWNER', 'KILL', 'DAC_OVERRIDE'].flatMap(cap => ['--cap-add', cap]), '--security-opt', 'apparmor=unconfined', '--security-opt', 'seccomp=unconfined', '--device', '/dev/kvm', '--device', '/dev/fuse', '--device', '/dev/net/tun', '--sysctl', 'net.ipv4.ip_forward=1', '--sysctl', 'net.ipv6.conf.all.disable_ipv6=1', '--tmpfs', '/run', '--tmpfs', '/tmp', '-v', `${root}/data:/data`, '-v', `${root}/state:/runner-state`, '-p', '127.0.0.1::4311', '--memory', '6g', '--cpus', '3', '-e', 'CONCURRENCY=5', '--entrypoint', '/usr/local/bin/leo', image, 'runner-broker')
+    await new Promise(resolve => claudeAuth.listen(path.join(source, 'home/.claude/cairn-auth.sock'), resolve))
+    docker('run', '-d', '--name', name, '--user', '0:0', '--read-only', '--cap-drop', 'ALL', ...['SYS_ADMIN', 'NET_ADMIN', 'SYS_CHROOT', 'SETUID', 'SETGID', 'MKNOD', 'CHOWN', 'FOWNER', 'KILL', 'DAC_OVERRIDE'].flatMap(cap => ['--cap-add', cap]), '--security-opt', 'apparmor=unconfined', '--security-opt', 'seccomp=unconfined', '--device', '/dev/kvm', '--device', '/dev/fuse', '--device', '/dev/net/tun', '--sysctl', 'net.ipv4.ip_forward=1', '--sysctl', 'net.ipv6.conf.all.disable_ipv6=1', '--tmpfs', '/run', '--tmpfs', '/tmp', '-v', `${root}/data:/data`, '-v', `${root}/state:/runner-state`, '-p', '127.0.0.1::4311', '--memory', '6g', '--cpus', '3', '-e', 'CONCURRENCY=5', '--entrypoint', '/usr/local/bin/cairn', image, 'runner-broker')
     docker('network', 'connect', '--ip', '203.0.113.2', networkName, name)
     // First prove every listener is reachable outside the guest firewall.
     process.stdout.write(docker('exec', name, '/usr/local/bin/node', `${runRoot}/workspace/network-probe.mjs`, 'control', publicPeer, privatePeer))
@@ -202,8 +202,8 @@ console.log('probe.done');
     assert.equal(unauthenticatedBudget.status, 401)
     await api('/node-budget', 'POST', adjustedBudget)
     assert.deepEqual((await (await api('/health')).json()).budget, adjustedBudget)
-    assert.equal(docker('exec', name, 'cat', '/run/leo-cgroup/leo-shared/cpu.max'), '200000 100000')
-    assert.equal(docker('exec', name, 'cat', '/run/leo-cgroup/leo-shared/memory.max'), String(4096 * 1024 ** 2))
+    assert.equal(docker('exec', name, 'cat', '/run/cairn-cgroup/cairn-shared/cpu.max'), '200000 100000')
+    assert.equal(docker('exec', name, 'cat', '/run/cairn-cgroup/cairn-shared/memory.max'), String(4096 * 1024 ** 2))
     await api('/node-budget', 'POST', originalBudget)
     for (const mode of ['first', 'resume', 'cancel', 'crash', 'recover', 'managed-claude', 'codex-return']) {
       const id = randomUUID()
@@ -221,7 +221,7 @@ console.log('probe.done');
           { source: `${runRoot}/workspace`, target: `${runRoot}/workspace`, readOnly: false },
           { source: `${runRoot}/home`, target: '/home/node', readOnly: false },
           { source: `${runRoot}/output`, target: `${runRoot}/output`, readOnly: false },
-          { source: `${runRoot}/chat-input`, target: '/run/leo-chat', readOnly: true },
+          { source: `${runRoot}/chat-input`, target: '/run/cairn-chat', readOnly: true },
         ],
       }
       if (mode === 'managed-claude') {
@@ -388,7 +388,7 @@ console.log('probe.done');
         command: ['/usr/local/bin/node', `${workspace}/policy-probe.mjs`, workspace, lazy, sandbox],
         imports: [
           { source: workspace, target: workspace, readOnly: sandbox === 'read-only' },
-          { source: `/data/runs/${runId}/chat-input`, target: '/run/leo-chat', readOnly: true },
+          { source: `/data/runs/${runId}/chat-input`, target: '/run/cairn-chat', readOnly: true },
         ],
       }
       await writeFile(path.join(root, 'data/runner-plans', `${id}.json`), JSON.stringify(plan))

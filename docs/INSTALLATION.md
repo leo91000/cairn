@@ -1,10 +1,10 @@
 # One-command installation
 
-For an installation sharing the official `https://cairn.build` production server,
+For an installation sharing the beacon `https://cairn.build` production server,
 follow the [same-server runbook](PRODUCTION-CAIRN.md). Reserve memory/disk for the
-official process, Postgres and proxy before assigning installation VM budgets.
+beacon process, Postgres and proxy before assigning installation VM budgets.
 
-Sign in to the official service and choose **Add an installation**. Copy the
+Sign in to the Beacon and choose **Add an installation**. Copy the
 complete `curl … | sudo bash` command onto a trusted Linux x86-64 machine. Its
 single-use code lasts ten minutes and is passed by the launcher through a private
 environment to `host.py`, never in a download URL. The copied shell command can
@@ -20,24 +20,24 @@ downloading or starting services, including a working Docker daemon and 16 GiB
 of free disk for runtime images and recovery staging. Conversation disks need
 additional space. It does not install Docker or change virtualization settings.
 
-The root-owned directory `/var/lib/leo-installation` holds the installation.
+The root-owned directory `/var/lib/cairn-installation` holds the installation.
 Compose starts the manager, its local runner and Garage with restart policies and
 rotated logs. No service publishes a host port; no container receives the Docker
 socket. Private identity and storage credentials must stay on this host. Do not
 publish the directory or `docker compose config` output.
 
-Reruns retain the chosen immutable Leo image, identity, Garage keys, storage
+Reruns retain the chosen immutable Cairn image, identity, Garage keys, storage
 settings and persistent data. Concurrent installers are refused. An incomplete or unsafe identity stops the
 rerun with recovery instructions and is retained rather than overwritten. The one-use
 claim environment is cleared after success or failure; after startup the manager
-is recreated without it. A refused or expired code leaves Leo running unclaimed.
-Obtain a new command and rerun it, or run `sudo leo claim` and confirm its code in
-the official app. After the fallback command confirms success, restart the manager
+is recreated without it. A refused or expired code leaves Cairn running unclaimed.
+Obtain a new command and rerun it, or run `sudo cairn claim` and confirm its code in
+the beacon app. After the fallback command confirms success, restart the manager
 to load its new relay identity:
 
 ```sh
-sudo docker compose --project-directory /var/lib/leo-installation \
-  -f /var/lib/leo-installation/compose.json restart manager
+sudo docker compose --project-directory /var/lib/cairn-installation \
+  -f /var/lib/cairn-installation/compose.json restart manager
 ```
 
 No installation is accessible before claiming. Refresh
@@ -67,7 +67,7 @@ public domains, bucket locks or ACLs. For R2 endpoints the owner must confirm in
 the form that `r2.dev` and public custom domains are disabled and bucket locks
 are absent in the Cloudflare dashboard. Lifecycle rules and object access are
 still checked. Other providers retain the existing privacy and Object Lock
-checks. R2 uses its own encryption at rest; Leo does not send unsupported SSE-S3
+checks. R2 uses its own encryption at rest; Cairn does not send unsupported SSE-S3
 headers or version-list operations.
 
 The external target becomes the default for new disks. Existing disks keep using
@@ -84,12 +84,12 @@ explicit server confirmation replaces the form confirmation; `false` refuses R2.
 
 ## Automatic approved updates
 
-The installer enables `leo-installation-update.timer` on the host. It checks the
-saved official origin's `/install/release` every five minutes, with up to thirty
+The installer enables `cairn-installation-update.timer` on the host. It checks the
+saved beacon origin's `/install/release` every five minutes, with up to thirty
 seconds of jitter, and two minutes after boot. The operator selects the tested
-immutable image using `LEO_INSTALLATION_IMAGE`; no mutable tag is accepted.
+immutable image using `CAIRN_INSTALLATION_IMAGE`; no mutable tag is accepted.
 Downloads are verified against Docker's repository digest before any restart.
-If the official service or registry is unavailable, the current image keeps running.
+If the Beacon or registry is unavailable, the current image keeps running.
 The update channel is independent of the relay, so an incompatible installation
 can still update.
 
@@ -118,13 +118,13 @@ cannot undo a destructive database migration. Keep the stopped-installation back
 required above before approving a release with a new data format.
 
 ```sh
-sudo systemctl status leo-installation-update.timer
-sudo systemctl start leo-installation-update.service
-sudo journalctl -u leo-installation-update.service
+sudo systemctl status cairn-installation-update.timer
+sudo systemctl start cairn-installation-update.service
+sudo journalctl -u cairn-installation-update.service
 ```
 
 The timer and installer share the same nonblocking host lock. Containers receive
-no Docker socket. Rerun the current official installation command to refresh the
+no Docker socket. Rerun the current beacon installation command to refresh the
 checksum-verified host supervisors on an existing one-command installation. Recovery
 renews the recorded deployment lease before stopping a running manager, because
 a durable acknowledgement may outlive the lease. If the interrupted replacement
@@ -136,14 +136,14 @@ lease acquisition.
 ## Operation and validation
 
 ```sh
-sudo docker compose --project-directory /var/lib/leo-installation \
-  -f /var/lib/leo-installation/compose.json ps
-sudo docker compose --project-directory /var/lib/leo-installation \
-  -f /var/lib/leo-installation/compose.json logs --tail 50
+sudo docker compose --project-directory /var/lib/cairn-installation \
+  -f /var/lib/cairn-installation/compose.json ps
+sudo docker compose --project-directory /var/lib/cairn-installation \
+  -f /var/lib/cairn-installation/compose.json logs --tail 50
 ```
 
 For a disposable test, build the current binaries and web output, then run
-`bash tests/installation-installer-container.sh`. It uses the real official
+`bash tests/installation-installer-container.sh`. It uses the real beacon
 service, manager, Postgres and Garage. All Docker lifecycle commands (pull,
 startup, recreation and container health execution) are simulated by an adapter
 that starts the manager binary as a fixture process. The generated configuration
@@ -154,7 +154,7 @@ devices and command adapters exercise prerequisite and checksum failures.
 Claim, relay, deployment leases, runtime health and S3 write/read/delete checks are real. The fixture also verifies an approved update and rollback from a wrong-runtime candidate, preserving relay identity and S3 configuration. A disk published to Garage
 continues publishing, reading remotely and purging there after relayed settings
 select external HTTPS S3. No VM boots; this is not runtime/KVM coverage. Containers, network and data are cleaned up on exit.
-`LEO_OFFICIAL_TEST_DATABASE_URL=… python3 tests/installation_update_containers.py`
+`CAIRN_BEACON_TEST_DATABASE_URL=… python3 tests/installation_update_containers.py`
 also replaces real manager and readiness-runner containers using locally built
 fixture images, including interrupted recovery with `restart: unless-stopped`.
 Only the registry is adapted; Compose, persistent mounts, runtime
@@ -163,5 +163,5 @@ endpoint, relay reconnection and conversation reads are real.
 It checks successful replacement and an exited-candidate rollback, including
 identity, synthetic credentials, workspaces and runner state. The readiness runner
 boots no VM; active VM checkpointing remains covered by the existing node tests.
-`python3 tests/installation_installer_test.py` checks failure cleanup and
+`python3 scripts/tests/installation_installer_test.py` checks failure cleanup and
 idempotent configuration separately.

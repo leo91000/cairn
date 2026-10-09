@@ -13,7 +13,7 @@ class NetworkProbeTest(unittest.TestCase):
     def test_stale_response_does_not_hide_current_response(self):
         with tempfile.TemporaryDirectory() as directory, socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as server:
             binary = Path(directory) / "probe"
-            subprocess.run(["rustc", "--edition=2024", "backend/examples/network_client.rs", "-o", str(binary)], check=True)
+            subprocess.run(["rustc", "--edition=2024", "crates/installation/examples/network_client.rs", "-o", str(binary)], check=True)
             server.bind(("127.0.0.1", 0))
             server.settimeout(5)
             address = f"127.0.0.1:{server.getsockname()[1]}"

@@ -1,0 +1,12 @@
+<resources>
+    <style name="Theme.Cairn" parent="android:style/Theme.Material.Light.NoActionBar">
+        <item name="android:fontFamily">sans</item>
+        <item name="android:windowLightStatusBar">true</item>
+        <item name="android:windowActionModeOverlay">true</item>
+        <item name="android:colorAccent">#14365A</item>
+        <item name="android:windowBackground">@color/cairn_window</item>
+    </style>
+    <style name="Theme.Cairn.Starting" parent="Theme.Cairn">
+        <item name="android:windowBackground">@drawable/cairn_splash</item>
+    </style>
+</resources>

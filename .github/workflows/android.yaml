@@ -1,18 +1,18 @@
 name: Android
 on:
   pull_request:
-    paths: ['android/**', '.github/actions/setup-pnpm/**', '.github/actions/setup-android-emulator/**', .github/workflows/android.yaml, 'scripts/android-*.mjs', scripts/resolve-android-release.mjs, 'tests/android-*.test.mjs', tests/android-runner-smoke.mjs, tests/runner-storage-smoke.mjs]
+    paths: ['apps/android/**', '.github/actions/setup-pnpm/**', '.github/actions/setup-android-emulator/**', .github/workflows/android.yaml, 'scripts/android-*.mjs', scripts/resolve-android-release.mjs, 'scripts/tests/android-*.test.mjs', tests/android-runner-smoke.mjs, tests/runner-storage-smoke.mjs]
   push:
     branches: [main]
     tags: ['v*']
-    paths: ['android/**', '.github/actions/setup-pnpm/**', '.github/actions/setup-android-emulator/**', .github/workflows/android.yaml, 'scripts/android-*.mjs', scripts/resolve-android-release.mjs, 'tests/android-*.test.mjs', tests/android-runner-smoke.mjs, tests/runner-storage-smoke.mjs]
+    paths: ['apps/android/**', '.github/actions/setup-pnpm/**', '.github/actions/setup-android-emulator/**', .github/workflows/android.yaml, 'scripts/android-*.mjs', scripts/resolve-android-release.mjs, 'scripts/tests/android-*.test.mjs', tests/android-runner-smoke.mjs, tests/runner-storage-smoke.mjs]
   workflow_dispatch:
 env:
-  LEO_OFFICIAL_ORIGIN: ${{ vars.LEO_OFFICIAL_ORIGIN }}
-  LEO_ANDROID_FIREBASE_APP_ID: ${{ vars.LEO_ANDROID_FIREBASE_APP_ID }}
-  LEO_ANDROID_FIREBASE_PROJECT_ID: ${{ vars.LEO_ANDROID_FIREBASE_PROJECT_ID }}
-  LEO_ANDROID_FIREBASE_API_KEY: ${{ vars.LEO_ANDROID_FIREBASE_API_KEY }}
-  LEO_ANDROID_FIREBASE_SENDER_ID: ${{ vars.LEO_ANDROID_FIREBASE_SENDER_ID }}
+  CAIRN_BEACON_ORIGIN: ${{ vars.CAIRN_BEACON_ORIGIN }}
+  CAIRN_ANDROID_FIREBASE_APP_ID: ${{ vars.CAIRN_ANDROID_FIREBASE_APP_ID }}
+  CAIRN_ANDROID_FIREBASE_PROJECT_ID: ${{ vars.CAIRN_ANDROID_FIREBASE_PROJECT_ID }}
+  CAIRN_ANDROID_FIREBASE_API_KEY: ${{ vars.CAIRN_ANDROID_FIREBASE_API_KEY }}
+  CAIRN_ANDROID_FIREBASE_SENDER_ID: ${{ vars.CAIRN_ANDROID_FIREBASE_SENDER_ID }}
 permissions:
   contents: read
 concurrency:
@@ -57,13 +57,13 @@ jobs:
       - uses: gradle/actions/setup-gradle@v5
       - run: sdkmanager 'platforms;android-37.0' 'build-tools;36.0.0'
       - name: Check Kotlin formatting
-        working-directory: android
+        working-directory: apps/android
         run: ./gradlew spotlessCheck --no-daemon
       - name: Use the tag version for a fresh release build
         if: startsWith(github.ref, 'refs/tags/v')
-        run: printf 'LEO_ANDROID_VERSION=%s\n' "${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
+        run: printf 'CAIRN_ANDROID_VERSION=%s\n' "${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
       - name: Test, lint and build debug
-        working-directory: android
+        working-directory: apps/android
         run: ./gradlew testDebugUnitTest lintDebug assembleDebug assembleDebugAndroidTest --no-daemon --stacktrace
       - name: Enable emulator acceleration
         run: |
@@ -82,29 +82,29 @@ jobs:
           profile: pixel_6
           disable-animations: false
           script: |
-            cd android && ./gradlew connectedDebugAndroidTest -Pandroid.testInstrumentationRunnerArguments.class=dev.leo.manager.ui.HistoryFollowDeviceTest --no-daemon
-            adb install -r android/app/build/outputs/apk/debug/app-debug.apk
-            adb install -r -t android/app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk
+            cd apps/android && ./gradlew connectedDebugAndroidTest -Pandroid.testInstrumentationRunnerArguments.class=build.cairn.app.ui.HistoryFollowDeviceTest --no-daemon
+            adb install -r apps/android/app/build/outputs/apk/debug/app-debug.apk
+            adb install -r -t apps/android/app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk
             # Gradle uninstalls the test app, so regenerate the captures after reinstalling.
-            adb shell am instrument -w -e class 'dev.leo.manager.ui.HistoryFollowDeviceTest#oversizedFinalMessageStillReachesTheBottomAfterStreamingAndResize,dev.leo.manager.ui.ModelPickerDeviceTest#selectionSurvivesRecreationAndModelChangeResetsEffort,dev.leo.manager.ui.ConversationLifecycleDeviceTest#swipeFromFilTrashesWithUndoWithoutOpeningTheConversation' dev.leo.manager.test/androidx.test.runner.AndroidJUnitRunner > android/app/build/reports/capture-instrumentation.txt
-            adb exec-out run-as dev.leo.manager cat files/scroll-validation/pinned-stream.png > android/app/build/reports/pinned-stream.png
-            adb exec-out run-as dev.leo.manager cat files/model-picker/reasoning.png > android/app/build/reports/reasoning-picker.png
-            adb exec-out run-as dev.leo.manager cat files/conversation-lifecycle/swipe-fil.png > android/app/build/reports/swipe-fil.png
-            python3 -c 'from pathlib import Path; p = Path("android/app/build/reports"); assert "OK (3 tests)" in (p / "capture-instrumentation.txt").read_text(); assert all((p / name).read_bytes()[:8] == bytes([137, 80, 78, 71, 13, 10, 26, 10]) for name in ("pinned-stream.png", "reasoning-picker.png", "swipe-fil.png"))'
+            adb shell am instrument -w -e class 'build.cairn.app.ui.HistoryFollowDeviceTest#oversizedFinalMessageStillReachesTheBottomAfterStreamingAndResize,build.cairn.app.ui.ModelPickerDeviceTest#selectionSurvivesRecreationAndModelChangeResetsEffort,build.cairn.app.ui.ConversationLifecycleDeviceTest#swipeFromFilTrashesWithUndoWithoutOpeningTheConversation' build.cairn.app.test/androidx.test.runner.AndroidJUnitRunner > apps/android/app/build/reports/capture-instrumentation.txt
+            adb exec-out run-as build.cairn.app cat files/scroll-validation/pinned-stream.png > apps/android/app/build/reports/pinned-stream.png
+            adb exec-out run-as build.cairn.app cat files/model-picker/reasoning.png > apps/android/app/build/reports/reasoning-picker.png
+            adb exec-out run-as build.cairn.app cat files/conversation-lifecycle/swipe-fil.png > apps/android/app/build/reports/swipe-fil.png
+            python3 -c 'from pathlib import Path; p = Path("apps/android/app/build/reports"); assert "OK (3 tests)" in (p / "capture-instrumentation.txt").read_text(); assert all((p / name).read_bytes()[:8] == bytes([137, 80, 78, 71, 13, 10, 26, 10]) for name in ("pinned-stream.png", "reasoning-picker.png", "swipe-fil.png"))'
       - uses: actions/upload-artifact@v7.0.1
         if: always()
         with:
-          name: leo-android
+          name: cairn-android
           path: |
-            android/app/build/outputs/apk/debug/*.apk
-            android/app/build/reports/tests/
-            android/app/build/reports/lint-results-debug.*
-            android/app/build/reports/androidTests/
-            android/app/build/outputs/androidTest-results/
-            android/app/build/reports/pinned-stream.png
-            android/app/build/reports/reasoning-picker.png
-            android/app/build/reports/swipe-fil.png
-            android/app/build/reports/capture-instrumentation.txt
+            apps/android/app/build/outputs/apk/debug/*.apk
+            apps/android/app/build/reports/tests/
+            apps/android/app/build/reports/lint-results-debug.*
+            apps/android/app/build/reports/androidTests/
+            apps/android/app/build/outputs/androidTest-results/
+            apps/android/app/build/reports/pinned-stream.png
+            apps/android/app/build/reports/reasoning-picker.png
+            apps/android/app/build/reports/swipe-fil.png
+            apps/android/app/build/reports/capture-instrumentation.txt
           retention-days: 14
 
   device-extra:
@@ -128,9 +128,9 @@ jobs:
       - run: sdkmanager 'platforms;android-37.0' 'build-tools;36.0.0'
       - name: Use the tag version for a fresh release build
         if: startsWith(github.ref, 'refs/tags/v')
-        run: printf 'LEO_ANDROID_VERSION=%s\n' "${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
+        run: printf 'CAIRN_ANDROID_VERSION=%s\n' "${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
       - name: Build debug and instrumentation APKs
-        working-directory: android
+        working-directory: apps/android
         run: ./gradlew assembleDebug assembleDebugAndroidTest --no-daemon --stacktrace
       - name: Enable emulator acceleration
         run: |
@@ -147,25 +147,25 @@ jobs:
           profile: pixel_6
           disable-animations: false
           script: |
-            cd android && ./gradlew connectedDebugAndroidTest -Pandroid.testInstrumentationRunnerArguments.class=dev.leo.manager.ui.BackgroundWaitDeviceTest,dev.leo.manager.ui.NativeAccountDeviceTest,dev.leo.manager.data.NativePushDeviceTest,dev.leo.manager.ui.LeoAccountDeviceTest,dev.leo.manager.ui.LeoAccountRestorationDeviceTest,dev.leo.manager.ui.ModelPickerDeviceTest,dev.leo.manager.ui.AccountsDeviceTest,dev.leo.manager.ui.ModelCatalogDeviceTest,dev.leo.manager.ui.ChatProviderDeviceTest,dev.leo.manager.ui.SkillMentionDeviceTest,dev.leo.manager.ui.ConversationLifecycleDeviceTest,dev.leo.manager.ui.ImagePasteDeviceTest,dev.leo.manager.ui.QueueStripDeviceTest,dev.leo.manager.ui.NodePlacementDeviceTest,dev.leo.manager.ui.MissionBackDeviceTest --no-daemon
-            adb install -r android/app/build/outputs/apk/debug/app-debug.apk
-            adb install -r -t android/app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk
-            adb shell am instrument -w -e class dev.leo.manager.ui.NodePlacementDeviceTest dev.leo.manager.test/androidx.test.runner.AndroidJUnitRunner > android/app/build/reports/node-captures.txt
-            adb exec-out run-as dev.leo.manager cat files/node-screenshots/nodes.png > android/app/build/reports/nodes.png
-            adb exec-out run-as dev.leo.manager cat files/node-screenshots/storage.png > android/app/build/reports/node-storage.png
-            adb exec-out run-as dev.leo.manager cat files/node-screenshots/execution-sheet.png > android/app/build/reports/node-execution.png
-            node -e 'const fs = require("node:fs"); const p = "android/app/build/reports/"; if (!fs.readFileSync(p + "node-captures.txt", "utf8").includes("OK (2 tests)")) throw new Error("Node capture tests failed"); for (const name of ["nodes.png", "node-storage.png", "node-execution.png"]) if (!fs.readFileSync(p + name).subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]))) throw new Error("Invalid capture: " + name);'
+            cd apps/android && ./gradlew connectedDebugAndroidTest -Pandroid.testInstrumentationRunnerArguments.class=build.cairn.app.ui.BackgroundWaitDeviceTest,build.cairn.app.ui.NativeAccountDeviceTest,build.cairn.app.data.NativePushDeviceTest,build.cairn.app.ui.CairnAccountDeviceTest,build.cairn.app.ui.CairnAccountRestorationDeviceTest,build.cairn.app.ui.ModelPickerDeviceTest,build.cairn.app.ui.AccountsDeviceTest,build.cairn.app.ui.ModelCatalogDeviceTest,build.cairn.app.ui.ChatProviderDeviceTest,build.cairn.app.ui.SkillMentionDeviceTest,build.cairn.app.ui.ConversationLifecycleDeviceTest,build.cairn.app.ui.ImagePasteDeviceTest,build.cairn.app.ui.QueueStripDeviceTest,build.cairn.app.ui.NodePlacementDeviceTest,build.cairn.app.ui.MissionBackDeviceTest --no-daemon
+            adb install -r apps/android/app/build/outputs/apk/debug/app-debug.apk
+            adb install -r -t apps/android/app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk
+            adb shell am instrument -w -e class build.cairn.app.ui.NodePlacementDeviceTest build.cairn.app.test/androidx.test.runner.AndroidJUnitRunner > apps/android/app/build/reports/node-captures.txt
+            adb exec-out run-as build.cairn.app cat files/node-screenshots/nodes.png > apps/android/app/build/reports/nodes.png
+            adb exec-out run-as build.cairn.app cat files/node-screenshots/storage.png > apps/android/app/build/reports/node-storage.png
+            adb exec-out run-as build.cairn.app cat files/node-screenshots/execution-sheet.png > apps/android/app/build/reports/node-execution.png
+            node -e 'const fs = require("node:fs"); const p = "apps/android/app/build/reports/"; if (!fs.readFileSync(p + "node-captures.txt", "utf8").includes("OK (2 tests)")) throw new Error("Node capture tests failed"); for (const name of ["nodes.png", "node-storage.png", "node-execution.png"]) if (!fs.readFileSync(p + name).subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]))) throw new Error("Invalid capture: " + name);'
       - uses: actions/upload-artifact@v7.0.1
         if: always()
         with:
-          name: leo-android-other-tests
+          name: cairn-android-other-tests
           path: |
-            android/app/build/reports/androidTests/
-            android/app/build/outputs/androidTest-results/
-            android/app/build/reports/node-captures.txt
-            android/app/build/reports/nodes.png
-            android/app/build/reports/node-storage.png
-            android/app/build/reports/node-execution.png
+            apps/android/app/build/reports/androidTests/
+            apps/android/app/build/outputs/androidTest-results/
+            apps/android/app/build/reports/node-captures.txt
+            apps/android/app/build/reports/nodes.png
+            apps/android/app/build/reports/node-storage.png
+            apps/android/app/build/reports/node-execution.png
           retention-days: 14
 
   release:
@@ -189,23 +189,23 @@ jobs:
       - run: sdkmanager 'platforms;android-37.0' 'build-tools;36.0.0'
       - name: Use the tag version for a fresh release build
         if: startsWith(github.ref, 'refs/tags/v')
-        run: printf 'LEO_ANDROID_VERSION=%s\n' "${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
+        run: printf 'CAIRN_ANDROID_VERSION=%s\n' "${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
       - name: Build optimized release
-        working-directory: android
+        working-directory: apps/android
         run: ./gradlew assembleRelease --no-daemon
       # The workflow only succeeds when this build and the device checks pass.
       # A tag signs these exact bytes without compiling them again.
       - name: Record the validated unsigned release
         if: github.event_name != 'pull_request'
-        run: node scripts/android-build.mjs record android/app/build/outputs/apk/release
+        run: node scripts/android-build.mjs record apps/android/app/build/outputs/apk/release
       - uses: actions/upload-artifact@v7.0.1
         if: github.event_name != 'pull_request'
         with:
           name: validated-android-release
           path: |
-            android/app/build/outputs/apk/release/app-release-unsigned.apk
-            android/app/build/outputs/apk/release/output-metadata.json
-            android/app/build/outputs/apk/release/validation.json
+            apps/android/app/build/outputs/apk/release/app-release-unsigned.apk
+            apps/android/app/build/outputs/apk/release/output-metadata.json
+            apps/android/app/build/outputs/apk/release/validation.json
           if-no-files-found: error
           retention-days: 90
           overwrite: true
@@ -262,27 +262,27 @@ jobs:
       - name: Sign the validated APK without rebuilding
         env:
           ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
-          LEO_ANDROID_STORE_PASSWORD: ${{ secrets.ANDROID_STORE_PASSWORD }}
+          CAIRN_ANDROID_STORE_PASSWORD: ${{ secrets.ANDROID_STORE_PASSWORD }}
         run: |
           set -euo pipefail
           test -n "$ANDROID_KEYSTORE_BASE64"
-          test -n "$LEO_ANDROID_STORE_PASSWORD"
-          export LEO_ANDROID_KEYSTORE="$RUNNER_TEMP/leo-android.p12"
-          trap 'rm -f "$LEO_ANDROID_KEYSTORE"' EXIT
+          test -n "$CAIRN_ANDROID_STORE_PASSWORD"
+          export CAIRN_ANDROID_KEYSTORE="$RUNNER_TEMP/cairn-android.p12"
+          trap 'rm -f "$CAIRN_ANDROID_KEYSTORE"' EXIT
           umask 077
-          printf '%s' "$ANDROID_KEYSTORE_BASE64" | base64 --decode > "$LEO_ANDROID_KEYSTORE"
+          printf '%s' "$ANDROID_KEYSTORE_BASE64" | base64 --decode > "$CAIRN_ANDROID_KEYSTORE"
           mkdir -p distribution
           "$ANDROID_HOME/build-tools/36.0.0/zipalign" -c -P 16 4 validated-apk/app-release-unsigned.apk
           "$ANDROID_HOME/build-tools/36.0.0/apksigner" sign \
-            --ks "$LEO_ANDROID_KEYSTORE" --ks-key-alias leo-android \
-            --ks-pass env:LEO_ANDROID_STORE_PASSWORD --key-pass env:LEO_ANDROID_STORE_PASSWORD \
-            --out distribution/leo-android.apk validated-apk/app-release-unsigned.apk
+            --ks "$CAIRN_ANDROID_KEYSTORE" --ks-key-alias cairn-android \
+            --ks-pass env:CAIRN_ANDROID_STORE_PASSWORD --key-pass env:CAIRN_ANDROID_STORE_PASSWORD \
+            --out distribution/cairn-android.apk validated-apk/app-release-unsigned.apk
       - name: Verify APK and prepare update manifest
         env:
           RELEASE_TAG: ${{ github.ref_name }}
         run: |
-          "$ANDROID_HOME/build-tools/36.0.0/apksigner" verify --verbose --print-certs distribution/leo-android.apk
-          node scripts/android-release.mjs "$RELEASE_TAG" distribution/leo-android.apk validated-apk/output-metadata.json distribution/android-update.json
+          "$ANDROID_HOME/build-tools/36.0.0/apksigner" verify --verbose --print-certs distribution/cairn-android.apk
+          node scripts/android-release.mjs "$RELEASE_TAG" distribution/cairn-android.apk validated-apk/output-metadata.json distribution/android-update.json
       - name: Publish complete release atomically
         env:
           GH_TOKEN: ${{ github.token }}
@@ -293,7 +293,7 @@ jobs:
           if gh release view "$RELEASE_TAG" --json isDraft > "$RUNNER_TEMP/release.json" 2>/dev/null; then
             node -e 'if (!JSON.parse(require("fs").readFileSync(process.argv[1])).isDraft) process.exit(1)' "$RUNNER_TEMP/release.json"
           else
-            gh release create "$RELEASE_TAG" --verify-tag --draft --title "Leo $RELEASE_TAG" --notes 'La version Android est disponible ci-dessous. Les applications compatibles détectent automatiquement cette mise à jour. Android peut demander une confirmation pour installer le fichier APK.'
+            gh release create "$RELEASE_TAG" --verify-tag --draft --title "Cairn $RELEASE_TAG" --notes 'La version Android est disponible ci-dessous. Les applications compatibles détectent automatiquement cette mise à jour. Android peut demander une confirmation pour installer le fichier APK.'
           fi
-          gh release upload "$RELEASE_TAG" distribution/leo-android.apk distribution/android-update.json --clobber
+          gh release upload "$RELEASE_TAG" distribution/cairn-android.apk distribution/android-update.json --clobber
           gh release edit "$RELEASE_TAG" --draft=false --latest

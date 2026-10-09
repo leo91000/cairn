@@ -1,7 +1,7 @@
 import fs from 'node:fs'
 import process from 'node:process'
 
-const group = '/run/leo-cgroup/leo-shared'
+const group = '/run/cairn-cgroup/cairn-shared'
 const vmms = fs.readdirSync('/proc').filter(pid => /^\d+$/.test(pid)).flatMap((pid) => {
   try {
     if (fs.readFileSync(`/proc/${pid}/comm`, 'utf8').trim() !== 'firecracker')

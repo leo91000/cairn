@@ -24,7 +24,7 @@ runs:
     - uses: docker/metadata-action@v6.2.0
       id: meta
       with:
-        images: ${{ inputs.image || format('ghcr.io/{0}', github.repository) }}
+        images: ${{ inputs.image || format('ghcr.io/{0}/cairn', github.repository_owner) }}
         tags: |
           type=sha,format=long
           type=raw,value=latest,enable={{is_default_branch}}
@@ -32,7 +32,7 @@ runs:
     - name: Promote the tested digest
       shell: bash
       env:
-        IMAGE_REPOSITORY: ${{ inputs.image || format('ghcr.io/{0}', github.repository) }}
+        IMAGE_REPOSITORY: ${{ inputs.image || format('ghcr.io/{0}/cairn', github.repository_owner) }}
         IMAGE_DIGEST: ${{ inputs.digest }}
         IMAGE_TAGS: ${{ steps.meta.outputs.tags }}
       run: |

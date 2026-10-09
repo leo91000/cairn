@@ -4,7 +4,7 @@ Recherche du 26 septembre 2026, sur sources primaires uniquement (docs officiell
 
 ## Point de départ
 
-Toutes les 60 s, Leo gèle le FS invité, met la VM en pause, puis lance `cp --reflink=auto --sparse=always` ([checkpoint.rs](../backend/src/nodes/checkpoint.rs)). Il relisait ensuite **toute** la copie par blocs de 4 Mio pour calculer un SHA-256, trous compris ; l'indexation saute désormais les trous avec `SEEK_DATA` ([snapshots.rs](../backend/src/nodes/snapshots.rs)). Les disques sont configurés sans `io_engine` ni `cache_type`, donc `Sync` et `Unsafe` par défaut, et sans `discard`. Ils sont liés en dur dans le chroot du jailer ([host.rs](../backend/src/microvm/host.rs)). Le noyau invité n'active ni device-mapper ni btrfs ([kernel.config](../deploy/microvm/kernel.config)).
+Toutes les 60 s, Cairn gèle le FS invité, met la VM en pause, puis lance `cp --reflink=auto --sparse=always` ([checkpoint.rs](../crates/installation/src/nodes/checkpoint.rs)). Il relisait ensuite **toute** la copie par blocs de 4 Mio pour calculer un SHA-256, trous compris ; l'indexation saute désormais les trous avec `SEEK_DATA` ([snapshots.rs](../crates/installation/src/nodes/snapshots.rs)). Les disques sont configurés sans `io_engine` ni `cache_type`, donc `Sync` et `Unsafe` par défaut, et sans `discard`. Ils sont liés en dur dans le chroot du jailer ([host.rs](../crates/installation/src/microvm/host.rs)). Le noyau invité n'active ni device-mapper ni btrfs ([kernel.config](../deploy/microvm/kernel.config)).
 
 ## 1. Firecracker 1.17.0 lui-même
 
@@ -25,7 +25,7 @@ Toutes les 60 s, Leo gèle le FS invité, met la VM en pause, puis lance `cp --r
 - **Code** : le compteur d'ère est sur 32 bits. `take_metadata_snap` fait lui-même un rollover d'ère puis un commit, et refuse un second snapshot tant que le premier n'est pas relâché ([dm-era-target.c#n1034](https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git/tree/drivers/md/dm-era-target.c?h=v6.12.109#n1034)). La taille de bloc s'exprime en secteurs, multiple de 8 (4 Kio minimum) ([#n23](https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git/tree/drivers/md/dm-era-target.c?h=v6.12.109#n23), [#n1462](https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git/tree/drivers/md/dm-era-target.c?h=v6.12.109#n1462)). Les bios sont découpés à la taille de bloc (`dm_set_target_max_io_len`). Toute bio d'écriture non-flush marque son bloc, discard compris ([era_map](https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git/tree/drivers/md/dm-era-target.c?h=v6.12.109#n1568)). Mémoire : `4 × nr_blocks` octets plus tampons. Kconfig : « Era target (EXPERIMENTAL) » ([Kconfig#n345](https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git/tree/drivers/md/Kconfig?h=v6.12.109#n345)).
 - **Outil** : `era_invalidate --written-since <ère> [--metadata-snapshot] <meta>` produit une liste XML `<blocks><range begin end/>` des blocs *pouvant* avoir changé. Sans snapshot, l'outil ne peut pas lire des métadonnées actives ([man era_invalidate, thin-provisioning-tools v1.3.4](https://github.com/jthornber/thin-provisioning-tools/blob/v1.3.4/man8/era_invalidate.txt), [invalidate.rs](https://github.com/jthornber/thin-provisioning-tools/blob/v1.3.4/src/era/invalidate.rs#L125-L173)).
 - **Disponibilité** : `CONFIG_DM_ERA=m` chez Debian ([config Debian](https://salsa.debian.org/kernel-team/linux/-/blob/debian/latest/debian/config/config)) et Fedora ([config Fedora](https://src.fedoraproject.org/rpms/kernel/blob/rawhide/f/kernel-x86_64-fedora.config)). Chez Ubuntu 24.04, `dm-era.ko.zst` figure dans le paquet de base `linux-modules` ([liste 6.8.0-31](https://packages.ubuntu.com/noble/amd64/linux-modules-6.8.0-31-generic/filelist)).
-- **Pour Leo** : il faut `data.ext4` en `losetup`, un fichier de métadonnées également en loop, `dmsetup create` (root), puis un `mknod` du nœud dm dans le chroot. Ces loop/dm sont à nettoyer à chaque arrêt. Déplacement : les métadonnées ne valent que si le fichier de métadonnées accompagne `data.ext4` ; toute écriture hors dm-era (outil hôte, redimensionnement) invalide le suivi. Déduction : prévoir une sauvegarde complète après tout déplacement ou doute.
+- **Pour Cairn** : il faut `data.ext4` en `losetup`, un fichier de métadonnées également en loop, `dmsetup create` (root), puis un `mknod` du nœud dm dans le chroot. Ces loop/dm sont à nettoyer à chaque arrêt. Déplacement : les métadonnées ne valent que si le fichier de métadonnées accompagne `data.ext4` ; toute écriture hors dm-era (outil hôte, redimensionnement) invalide le suivi. Déduction : prévoir une sauvegarde complète après tout déplacement ou doute.
 
 ## 4. dm-era dans l'invité (noyau 6.12.109 maîtrisé)
 
@@ -38,7 +38,7 @@ Toutes les 60 s, Leo gèle le FS invité, met la VM en pause, puis lance `cp --r
 
 - **ublk** : `CONFIG_BLK_DEV_UBLK`, marqué « Experimental » ; interface utilisateur « pas finalisée » ([drivers/block/Kconfig#n382](https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git/tree/drivers/block/Kconfig?h=v6.12.109#n382)). Chaque I/O de `/dev/ublkbN` part vers le serveur par io_uring passthrough. Il existe un mode non privilégié (`UBLK_F_UNPRIVILEGED_DEV`) et une reprise après crash du serveur (`UBLK_F_USER_RECOVERY[_REISSUE]`) ([ublk.rst](https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git/tree/Documentation/block/ublk.rst?h=v6.12.109)). Ubuntu place `ublk_drv` dans `linux-modules-extra`, pas dans le paquet de base ([liste](https://packages.ubuntu.com/noble/amd64/linux-modules-extra-6.8.0-31-generic/filelist)).
 - **NBD** : `nbd.ko` est présent chez Debian, Fedora et Ubuntu (mêmes sources). `nbdkit-log-filter` journalise `Write`/`Trim`/`Zero` avec `offset` et `count`, dans un fichier ou via `logscript` ([nbdkit-log-filter](https://libguestfs.org/nbdkit-log-filter.1.html)). C'est un journal, pas un bitmap persistant, sans garantie de durabilité documentée. L'alternative est QSD avec un export NBD `bitmap=` (§2).
-- **Pour Leo** : il faudrait un démon par VM à superviser, une commande root pour attacher `/dev/nbdN`, et un `mknod` dans le jail. Un double passage en espace utilisateur (Firecracker → noyau → serveur) s'ajoute au chemin d'I/O. La persistance du bitmap et son ordre par rapport aux écritures restent à construire soi-même. Aucun chiffre de performance primaire pour cette combinaison.
+- **Pour Cairn** : il faudrait un démon par VM à superviser, une commande root pour attacher `/dev/nbdN`, et un `mknod` dans le jail. Un double passage en espace utilisateur (Firecracker → noyau → serveur) s'ajoute au chemin d'I/O. La persistance du bitmap et son ordre par rapport aux écritures restent à construire soi-même. Aucun chiffre de performance primaire pour cette combinaison.
 
 ## 6. Fichier FUSE comme `path_on_host`
 
@@ -71,7 +71,7 @@ Toutes les 60 s, Leo gèle le FS invité, met la VM en pause, puis lance `cp --r
 | 7b. Reflink + FIEMAP hôte | Oui (extents) | Mûr | Hôte XFS/btrfs seulement | Pause + clone | Base complète après déplacement | Faible |
 | 8. SEEK_DATA + discard | Non (ignore seulement les trous) | GA | `discard: true`, `fstrim` | Inchangée | Oui | Très faible |
 
-## Recommandation classée pour Leo
+## Recommandation classée pour Cairn
 
 1. **Tout de suite (§8)** : `index()` fondé sur `SEEK_DATA`/`SEEK_HOLE`, `discard: true` sur `data` et `fstrim` invité régulier. Risque minimal, sans changement de format.
 2. **Cible principale (§4) : dm-era dans l'invité** avec métadonnées sur un petit second disque et blocs de 4 Mio alignés sur le manifeste. Aucune dépendance au FS hôte (ext4 compris), aucun privilège hôte supplémentaire, jailer inchangé. Les métadonnées voyagent avec le disque. Garde-fous : sauvegarde complète au premier démarrage, après tout écart d'ère ou de métadonnées et après restauration ; comparaison complète périodique contre un invité menteur.
@@ -107,7 +107,7 @@ Scripts du prototype (hors dépôt) : init invité, harnais à deux démarrages,
 
 ## Implémentation (27 septembre 2026)
 
-Décision : [ADR 0005](adr/0005-guest-dm-era-write-tracking.md). Code : [tracking.rs](../backend/src/nodes/tracking.rs) (état côté node), [checkpoint.rs](../backend/src/nodes/checkpoint.rs) (capture), [era.rs](../backend/src/microvm/era.rs) (invité), [init](../deploy/microvm/init).
+Décision : [ADR 0005](adr/0005-guest-dm-era-write-tracking.md). Code : [tracking.rs](../crates/installation/src/nodes/tracking.rs) (état côté node), [checkpoint.rs](../crates/installation/src/nodes/checkpoint.rs) (capture), [era.rs](../crates/installation/src/microvm/era.rs) (invité), [init](../deploy/microvm/init).
 
 **État conservé à côté de `data.ext4`.**
 - `era.meta` : les métadonnées dm-era. L'invité les recharge à chaque démarrage, ce qui récupère aussi les écritures d'une VM arrêtée brutalement.
@@ -133,7 +133,7 @@ Décision : [ADR 0005](adr/0005-guest-dm-era-write-tracking.md). Code : [trackin
 - Un démarrage efface le scellé, qui ne décrit alors plus le disque.
 
 **Validation.**
-- De bout en bout, avec le vrai script de démarrage et le vrai `leo guest` dans Firecracker 1.17 piloté par vsock, sur un même disque :
+- De bout en bout, avec le vrai script de démarrage et le vrai `cairn guest` dans Firecracker 1.17 piloté par vsock, sur un même disque :
   - premier démarrage : écritures puis arrêt propre (ère scellée, VM arrêtée en 0,1 s). Lecture hors ligne par l'hôte : **9 blocs modifiés, 9 signalés** ;
   - deuxième démarrage tué par `SIGKILL` ;
   - troisième démarrage : la liste depuis l'ère scellée contient les écritures du démarrage tué, **5 sur 5**.

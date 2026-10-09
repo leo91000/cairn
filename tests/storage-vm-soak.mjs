@@ -16,10 +16,10 @@ import { prepareStorageOrigin, storageSmoke } from './runner-storage-smoke.mjs'
 
 async function main() {
   const image = process.argv[2]
-  assert.ok(image, 'Usage: LEO_STORAGE_SOAK_SECONDS=300 node tests/storage-vm-soak.mjs IMAGE')
-  assert.ok(Number(process.env.LEO_STORAGE_SOAK_SECONDS) >= 60)
-  const root = await mkdtemp(path.join(process.env.VM_TEST_ROOT || '/var/tmp', 'leo-storage-qualification-'))
-  const name = `leo-storage-${randomUUID().slice(0, 8)}`
+  assert.ok(image, 'Usage: CAIRN_STORAGE_SOAK_SECONDS=300 node tests/storage-vm-soak.mjs IMAGE')
+  assert.ok(Number(process.env.CAIRN_STORAGE_SOAK_SECONDS) >= 60)
+  const root = await mkdtemp(path.join(process.env.VM_TEST_ROOT || '/var/tmp', 'cairn-storage-qualification-'))
+  const name = `cairn-storage-${randomUUID().slice(0, 8)}`
   let started = false
 
   function docker(...args) {
@@ -47,7 +47,7 @@ async function main() {
       await mkdir(path.join(root, directory), { recursive: true })
     await writeFile(path.join(root, 'data/runner-secret'), 'fixture-runner-token')
     const capabilities = ['SYS_ADMIN', 'NET_ADMIN', 'SYS_CHROOT', 'SETUID', 'SETGID', 'MKNOD', 'CHOWN', 'FOWNER', 'KILL', 'DAC_OVERRIDE']
-    docker('run', '-d', '--name', name, '--user', '0:0', '--read-only', '--cap-drop', 'ALL', ...capabilities.flatMap(capability => ['--cap-add', capability]), '--security-opt', 'apparmor=unconfined', '--security-opt', 'seccomp=unconfined', '--device', '/dev/kvm', '--device', '/dev/fuse', '--device', '/dev/net/tun', '--sysctl', 'net.ipv4.ip_forward=1', '--sysctl', 'net.ipv6.conf.all.disable_ipv6=1', '--tmpfs', '/run', '--tmpfs', '/tmp', '-v', `${root}/data:/data`, '-v', `${root}/state:/runner-state`, '-p', '127.0.0.1::4311', '--memory', '6g', '--cpus', '3', '-e', 'CONCURRENCY=1', '--entrypoint', '/usr/local/bin/leo', image, 'runner-broker')
+    docker('run', '-d', '--name', name, '--user', '0:0', '--read-only', '--cap-drop', 'ALL', ...capabilities.flatMap(capability => ['--cap-add', capability]), '--security-opt', 'apparmor=unconfined', '--security-opt', 'seccomp=unconfined', '--device', '/dev/kvm', '--device', '/dev/fuse', '--device', '/dev/net/tun', '--sysctl', 'net.ipv4.ip_forward=1', '--sysctl', 'net.ipv6.conf.all.disable_ipv6=1', '--tmpfs', '/run', '--tmpfs', '/tmp', '-v', `${root}/data:/data`, '-v', `${root}/state:/runner-state`, '-p', '127.0.0.1::4311', '--memory', '6g', '--cpus', '3', '-e', 'CONCURRENCY=1', '--entrypoint', '/usr/local/bin/cairn', image, 'runner-broker')
     started = true
     let address
     const api = async (endpoint, method = 'GET', body) => {

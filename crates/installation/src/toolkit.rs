@@ -1,0 +1,213 @@
+use crate::{
+    error::{Error, Result},
+    process::{Environment, bounded_output, command},
+};
+use std::{path::Path, time::Duration};
+
+const MISE_INSTALLS: &str = "/usr/local/share/mise/installs";
+
+async fn copy_new(source: &Path, target: &Path, optional: bool) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    let mut source = match tokio::fs::File::open(source).await {
+        Ok(source) => source,
+        Err(e) if optional && e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(e.into()),
+    };
+    let mode = source.metadata().await?.permissions().mode();
+    let mut target = match tokio::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(mode)
+        .open(target)
+        .await
+    {
+        Ok(target) => target,
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => return Ok(()),
+        Err(e) => return Err(e.into()),
+    };
+    tokio::io::copy(&mut source, &mut target).await?;
+    Ok(())
+}
+
+async fn link(source: &Path, target: &Path) -> Result<()> {
+    match tokio::fs::symlink(source, target).await {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Ok(()),
+        Err(e) => Err(e.into()),
+    }
+}
+
+async fn names(path: &Path) -> Result<Vec<String>> {
+    let mut entries = tokio::fs::read_dir(path).await?;
+    let mut names = Vec::new();
+    while let Some(entry) = entries.next_entry().await? {
+        names.push(
+            entry
+                .file_name()
+                .to_str()
+                .ok_or_else(|| Error::internal("Invalid toolkit filename"))?
+                .to_owned(),
+        );
+    }
+    Ok(names)
+}
+
+async fn prune(path: &Path, directory: &Path) -> Result<()> {
+    for name in names(path).await? {
+        let file = path.join(name);
+        if let Ok(target) = tokio::fs::read_link(&file).await
+            && (target.starts_with(MISE_INSTALLS)
+                || target.starts_with(directory.join("rustup/toolchains")))
+            && !tokio::fs::try_exists(&file).await?
+        {
+            tokio::fs::remove_file(file).await?;
+        }
+    }
+    Ok(())
+}
+
+/// Runtime versions provided by the image: exact `x.y.z` releases and Temurin JDKs.
+fn linkable_version(tool: &str, version: &str) -> bool {
+    let parts = version.split('.').collect::<Vec<_>>();
+    let exact = parts.len() == 3
+        && parts
+            .iter()
+            .all(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()));
+    (tool == "java" && version.starts_with("temurin-")) || exact
+}
+
+async fn link_rust(directory: &Path, rustup: &Path, cargo: &Path) -> Result<()> {
+    for path in [
+        rustup.join("toolchains"),
+        cargo.join("bin"),
+        rustup.join("update-hashes"),
+        rustup.join("downloads"),
+        rustup.join("tmp"),
+    ] {
+        tokio::fs::create_dir_all(path).await?;
+    }
+    for name in names(&directory.join("rustup/update-hashes")).await? {
+        copy_new(
+            &directory.join("rustup/update-hashes").join(&name),
+            &rustup.join("update-hashes").join(name),
+            false,
+        )
+        .await?;
+    }
+    prune(&rustup.join("toolchains"), directory).await
+}
+
+async fn link_mise(home: &Path, directory: &Path) -> Result<()> {
+    let installs = home.join(".local/share/mise/installs");
+    for tool in ["node", "pnpm", "python", "go", "rust", "java"] {
+        let source = Path::new(MISE_INSTALLS).join(tool);
+        let target = installs.join(tool);
+        tokio::fs::create_dir_all(&target).await?;
+        prune(&target, directory).await?;
+        copy_new(
+            &source.join(".mise.backend.toml"),
+            &target.join(".mise.backend.toml"),
+            true,
+        )
+        .await?;
+        for version in names(&source).await? {
+            if linkable_version(tool, &version) {
+                link(&source.join(&version), &target.join(version)).await?;
+            }
+        }
+    }
+    let shims = home.join(".local/share/mise/shims");
+    tokio::fs::create_dir_all(&shims).await?;
+    for name in names(Path::new("/usr/local/share/mise/shims")).await? {
+        link(Path::new("/usr/local/bin/mise"), &shims.join(name)).await?;
+    }
+    Ok(())
+}
+
+async fn link_toolchains(directory: &Path, rustup: &Path, cargo: &Path) -> Result<()> {
+    for name in names(&directory.join("rustup/toolchains")).await? {
+        link(
+            &directory.join("rustup/toolchains").join(&name),
+            &rustup.join("toolchains").join(name),
+        )
+        .await?;
+    }
+    for name in names(&directory.join("cargo/bin")).await? {
+        let target = cargo.join("bin").join(&name);
+        if tokio::fs::read_link(&target)
+            .await
+            .is_ok_and(|p| p.starts_with(directory.join("cargo/bin")))
+        {
+            tokio::fs::remove_file(&target).await?;
+        }
+        if name == "rustup" {
+            copy_new(&directory.join("cargo/bin/rustup"), &target, false).await?;
+        } else {
+            link(&cargo.join("bin/rustup"), &target).await?;
+        }
+    }
+    copy_new(
+        &directory.join("rustup/settings.toml"),
+        &rustup.join("settings.toml"),
+        false,
+    )
+    .await
+}
+
+fn insert_path(env: &mut Environment, key: &str, path: &Path) {
+    env.insert(key.into(), path.to_string_lossy().into_owned());
+}
+
+/// Paths are independent of accounts and filesystem preparation. A resident
+/// native process needs these before it starts, including for non-login shells.
+pub(crate) fn toolchain_environment(home: &Path, mut env: Environment) -> Environment {
+    let rustup = home.join(".rustup");
+    let cargo = home.join(".cargo");
+    let shims = home.join(".local/share/mise/shims");
+    insert_path(
+        &mut env,
+        "ANDROID_HOME",
+        &home.join(".local/share/android/sdk"),
+    );
+    insert_path(&mut env, "ANDROID_USER_HOME", &home.join(".android"));
+    insert_path(&mut env, "GRADLE_USER_HOME", &home.join(".gradle"));
+    insert_path(&mut env, "HOME", home);
+    insert_path(&mut env, "RUSTUP_HOME", &rustup);
+    insert_path(&mut env, "CARGO_HOME", &cargo);
+    let inherited = env
+        .get("PATH")
+        .map_or("/usr/local/bin:/usr/bin:/bin", String::as_str);
+    let path = format!(
+        "{}:/usr/local/share/mise/shims:{}:{}/.local/share/android/sdk/platform-tools:{}/.local/share/android/sdk/cmdline-tools/latest/bin:{inherited}",
+        shims.display(),
+        cargo.join("bin").display(),
+        home.display(),
+        home.display(),
+    );
+    env.insert("PATH".into(), path);
+    env
+}
+
+/// Links the image's shared toolchains into `home` and returns an environment using them.
+pub async fn environment(home: &Path, env: Environment) -> Result<Environment> {
+    let Some(directory) = env.get("CAIRN_TOOLKIT_DIR").cloned() else {
+        return Ok(env);
+    };
+    let directory = Path::new(&directory);
+    link_rust(directory, &home.join(".rustup"), &home.join(".cargo")).await?;
+    link_mise(home, directory).await?;
+    link_toolchains(directory, &home.join(".rustup"), &home.join(".cargo")).await?;
+    let env = toolchain_environment(home, env);
+    for args in [vec!["reshim".into()], vec!["env".into(), "--json".into()]] {
+        let output = bounded_output(
+            command("/usr/local/bin/mise", &args, &env, Some(Path::new("/tmp"))),
+            Duration::from_secs(30),
+            100_000,
+        )
+        .await?;
+        if !output.success {
+            return Err(Error::unavailable("Unable to prepare the agent toolkit."));
+        }
+    }
+    Ok(env)
+}

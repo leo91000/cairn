@@ -1,20 +1,20 @@
 services:
   manager:
-    image: ${LEO_IMAGE:-ghcr.io/leo91000/leo-agent-manager:latest}
+    image: ${CAIRN_IMAGE:-ghcr.io/leo91000/cairn:latest}
     build: .
-    container_name: leo-manager
+    container_name: cairn-manager
     init: true
     restart: unless-stopped
     stop_grace_period: 60s
     ports:
       - '127.0.0.1:4310:4310'
     environment:
-      LEO_NODE_IMAGE: ${LEO_IMAGE:-}
+      CAIRN_NODE_IMAGE: ${CAIRN_IMAGE:-}
       # Private origin used by execution nodes and run-scoped MCP.
       PUBLIC_URL: ${PUBLIC_URL:-http://localhost:4310}
-      LEO_OFFICIAL_ORIGIN: ${LEO_OFFICIAL_ORIGIN:-}
-      LEO_INSTALLATION_CLAIM_CODE: ${LEO_INSTALLATION_CLAIM_CODE:-}
-      LEO_INSTALLATION_NAME: ${LEO_INSTALLATION_NAME:-My installation}
+      CAIRN_BEACON_ORIGIN: ${CAIRN_BEACON_ORIGIN:-}
+      CAIRN_INSTALLATION_CLAIM_CODE: ${CAIRN_INSTALLATION_CLAIM_CODE:-}
+      CAIRN_INSTALLATION_NAME: ${CAIRN_INSTALLATION_NAME:-My installation}
       RUNNER_URL: http://runner:4311
       STORAGE_S3_BUCKET: ${STORAGE_S3_BUCKET:-${ARCHIVE_S3_BUCKET:-}}
       STORAGE_S3_ENDPOINT: ${STORAGE_S3_ENDPOINT:-${ARCHIVE_S3_ENDPOINT:-}}
@@ -37,9 +37,9 @@ services:
         max-size: 10m
         max-file: '3'
   runner:
-    image: ${LEO_IMAGE:-ghcr.io/leo91000/leo-agent-manager:latest}
+    image: ${CAIRN_IMAGE:-ghcr.io/leo91000/cairn:latest}
     user: '0:0'
-    entrypoint: [/usr/local/bin/leo, runner-broker]
+    entrypoint: [/usr/local/bin/cairn, runner-broker]
     restart: unless-stopped
     stop_grace_period: 30s
     environment:

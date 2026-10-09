@@ -46,7 +46,7 @@ Example: the warm PR [image job of run 37221466077](https://github.com/leo91000/
 | --- | ---: | --- |
 | Checkout, `Prepare KVM build host` (mostly `rm -rf` of preinstalled SDKs; 47–149 s across runs), Docker restart | ~155 | disk |
 | Cache manifest import, pulls of cached dependency/runtime layers | ~115 | network |
-| `leo` crate compile (`Finished release in 3m 57s`) | 238 | one CPU core |
+| `cairn` crate compile (`Finished release in 3m 57s`) | 238 | one CPU core |
 | Guest disk: `mkfs.ext4 -d` of the 8 GB image plus `zstd -T2` | 49 | disk, two threads |
 | Export and unpack into the runner's Docker | 41 | disk |
 | Smoke tests: container 42 s, runner + nested KVM 121 s, retention 57 s, run serially | 220 | VM boots |

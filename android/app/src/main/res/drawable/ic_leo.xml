@@ -1,6 +1,0 @@
-<vector xmlns:android="http://schemas.android.com/apk/res/android" android:width="108dp" android:height="108dp" android:viewportWidth="108" android:viewportHeight="108">
-    <!-- The lightning mark from public/favicon.svg, inside Android's adaptive-icon safe zone. -->
-    <group android:scaleX="2" android:scaleY="2" android:translateX="14" android:translateY="14">
-        <path android:fillColor="#FFFFFF" android:strokeColor="#FFFFFF" android:strokeWidth="2" android:strokeLineJoin="round" android:pathData="M22,8 L11,22 H19 L18,32 L29,17 H21 Z" />
-    </group>
-</vector>

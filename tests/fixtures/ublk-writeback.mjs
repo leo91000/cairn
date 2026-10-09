@@ -5,15 +5,15 @@ import process from 'node:process'
 import { setTimeout as sleep } from 'node:timers/promises'
 
 async function main() {
-  const root = process.env.LEO_WRITEBACK_FIXTURE
-  if (!/^\/var\/tmp\/leo-ublk-writeback-[a-zA-Z0-9]+$/.test(root))
+  const root = process.env.CAIRN_WRITEBACK_FIXTURE
+  if (!/^\/var\/tmp\/cairn-ublk-writeback-[a-zA-Z0-9]+$/.test(root))
     throw new Error('Invalid fixture')
   const log = fs.openSync(`${root}/backend.log`, 'w')
   const args = ['ublk-managed', `${root}/base`, `${root}/journal`, `${root}/ready`, `${root}/metrics`, `${root}/state`]
   const launch = () => spawn('/fixtures/ublk_probe', args, { stdio: ['ignore', log, log] })
   let backend = launch()
   let writer
-  const result = { mode: process.env.LEO_FLUSHER_MODE, startedAt: Date.now(), samples: [] }
+  const result = { mode: process.env.CAIRN_FLUSHER_MODE, startedAt: Date.now(), samples: [] }
   const sample = () => ({
     atMs: Date.now() - result.startedAt,
     metrics: JSON.parse(fs.readFileSync(`${root}/metrics`, 'utf8')),

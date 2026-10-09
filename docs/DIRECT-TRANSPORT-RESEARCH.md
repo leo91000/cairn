@@ -11,7 +11,7 @@ Verified 2026-10-06 against primary sources; unverifiable facts are flagged.
 **Message size.**
 - Without message interleaving (RFC 8260), "the sender SHOULD limit the maximum message size to 16 KB to avoid monopolization" ([RFC 8831 §6.6](https://www.rfc-editor.org/rfc/rfc8831.html)).
 - The SDP `max-message-size` attribute advertises what the receiver accepts. It defaults to 64K when absent, and 0 means "any size" ([RFC 8841 §6.1](https://www.rfc-editor.org/rfc/rfc8841.html)).
-- `send()` throws above `RTCSctpTransport.maxMessageSize` ([W3C WebRTC](https://www.w3.org/TR/webrtc/)); Leo must chunk large bodies.
+- `send()` throws above `RTCSctpTransport.maxMessageSize` ([W3C WebRTC](https://www.w3.org/TR/webrtc/)); Cairn must chunk large bodies.
 
 **ICE.**
 - ICE ([RFC 8445](https://www.rfc-editor.org/rfc/rfc8445.html)) gathers host, server-reflexive, peer-reflexive and relayed (TURN) candidates, and tests candidate pairs with STUN checks.
@@ -83,7 +83,7 @@ Browsers must support TURN/TCP/TLS themselves ([RFC 8835](https://www.rfc-editor
 - **Network changes.**
   - libwebrtc's NetworkMonitor already registers `ConnectivityManager` callbacks ([NetworkMonitorAutoDetect.java](https://webrtc.googlesource.com/src/+/refs/heads/main/sdk/android/api/org/webrtc/NetworkMonitorAutoDetect.java)).
   - Apps can add `registerDefaultNetworkCallback` to trigger ICE restart; on a default-network change, connections on the old one "are forcefully terminated" ([Android docs](https://developer.android.com/develop/connectivity/network-ops/reading-network-state)).
-- **APK size.** No official figure was found. Measured from the 1.3.10 AAR on Maven Central ([artifact](https://repo1.maven.org/maven2/io/getstream/stream-webrtc-android/1.3.10/)), `libjingle_peerconnection_so.so` is:
+- **APK size.** No beacon figure was found. Measured from the 1.3.10 AAR on Maven Central ([artifact](https://repo1.maven.org/maven2/io/getstream/stream-webrtc-android/1.3.10/)), `libjingle_peerconnection_so.so` is:
 
   | ABI | Uncompressed | Zip-compressed |
   |---|---|---|
@@ -108,7 +108,7 @@ Browsers must support TURN/TCP/TLS themselves ([RFC 8835](https://www.rfc-editor
 
 | | App-level relay (today) | TURN |
 |---|---|---|
-| Where TLS ends | At the official service, so content is plaintext in its memory | DTLS is end-to-end between UI and installation ([RFC 8827 §4.3](https://www.rfc-editor.org/rfc/rfc8827.html)) |
+| Where TLS ends | At the Beacon, so content is plaintext in its memory | DTLS is end-to-end between UI and installation ([RFC 8827 §4.3](https://www.rfc-editor.org/rfc/rfc8827.html)) |
 | What the operator can do | Inspect, rewrite and enforce per request | Sees ciphertext plus metadata: IPs, ports, timing, byte counts, TURN username/user id ([RFC 8656 §21.1.6](https://www.rfc-editor.org/rfc/rfc8656.html)) |
 | Protocol | Any; works over WSS/443 | UDP, or TCP/TLS fallback |
 | Revocation | Operator can cut any request | The service can drop the allocation but cannot police content |
@@ -118,7 +118,7 @@ Browsers must support TURN/TCP/TLS themselves ([RFC 8835](https://www.rfc-editor
 - **IPFS/libp2p.** A 2026 study of 4.4M attempts in IPFS reports a 70% ± 7.1% hole-punching success rate, conditional on relay reservation and address discovery succeeding. TCP and QUIC were similar ([arXiv 2604.12484](https://arxiv.org/abs/2604.12484)). Not WebRTC.
 - **Ford et al. (USENIX 2005).** 82% of 380 NATs were compatible with UDP hole punching, and 64% of 286 with TCP hole punching ([paper](https://www.usenix.org/legacy/event/usenix05/tech/general/full_papers/ford/ford_html/)). Old data.
 - **WebRTC relay share.** No current primary figure from a browser vendor or large operator was found. A 2017 callstats.io "30% via TURN" figure survives only second-hand ([discuss-webrtc](https://groups.google.com/g/discuss-webrtc/c/5d_EJwM6iJM)); the original 404s, so it is unverified.
-- **Leo should measure its own rates** via `getStats` candidate-pair types.
+- **Cairn should measure its own rates** via `getStats` candidate-pair types.
 
 ## 7. Browser constraints
 
@@ -131,7 +131,7 @@ Browsers must support TURN/TCP/TLS themselves ([RFC 8835](https://www.rfc-editor
   - "LNA Restrictions for WebRTC" is an Intent to Prototype (May 2025). Chromestatus shows it as "Proposed" with no milestone ([blink-dev](https://groups.google.com/a/chromium.org/g/blink-dev/c/CDy8LAs-DoA), [chromestatus](https://chromestatus.com/feature/5065884686876672)).
   - A third-party "Chrome 146" claim is unverified.
 
-## Implications for Leo
+## Implications for Cairn
 
 **Recommended building blocks:**
 
@@ -147,7 +147,7 @@ Browsers must support TURN/TCP/TLS themselves ([RFC 8835](https://www.rfc-editor
    - webrtc-rs 0.21 in the installation, because it has a TURN client, ICE-TCP, mDNS and ICE restart built in.
 
    str0m is the alternative if sans-IO control is preferred (needs a custom TURN client). Use reliable ordered channels, and chunk messages at 16 KB or less, or at `maxMessageSize`.
-3. **Run coturn with REST-style ephemeral credentials** minted by the official service:
+3. **Run coturn with REST-style ephemeral credentials** minted by the Beacon:
    - short TTL;
    - TURN/UDP, TURN/TCP and TURN/TLS, with TLS on 443;
    - `denied-peer-ip` for private ranges.
@@ -161,12 +161,12 @@ Browsers must support TURN/TCP/TLS themselves ([RFC 8835](https://www.rfc-editor
    - Trigger ICE restart on Android default-network callbacks and on `iceconnectionstatechange` failures.
    - Fall back to the tunnel immediately while ICE recovers. Keep requests idempotent or resumable across paths.
 
-**What the official service sees:**
+**What the Beacon sees:**
 
-| Transport | Visible to the official service |
+| Transport | Visible to the Beacon |
 |---|---|
 | Direct | Signaling only: SDP with candidate IPs, ICE credentials and fingerprints, plus auth metadata. No payload. |
-| TURN (if operated by Leo) | The above, plus 5-tuples, timing, byte counts and the TURN username. Payload is DTLS ciphertext. |
+| TURN (if operated by Cairn) | The above, plus 5-tuples, timing, byte counts and the TURN username. Payload is DTLS ciphertext. |
 | App relay | Full plaintext content. |
 
 **Main risks:**

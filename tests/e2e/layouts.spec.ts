@@ -1,5 +1,5 @@
 import type { Locator, Page, TestInfo } from '@playwright/test'
-import type { RunEvent } from '../../shared/contracts'
+import type { RunEvent } from '../../packages/contracts/contracts'
 import type { Workspace } from './fixtures'
 import {
   signIn as authenticateWorkspace,

@@ -34,12 +34,12 @@ stable patch/build releases without downgrading; project runtime pins take
 precedence. The SDK and emulator are installed **only on demand**:
 
 ```sh
-leo-android setup --accept-licenses 'platforms;android-34' 'build-tools;34.0.0'
+cairn-android setup --accept-licenses 'platforms;android-34' 'build-tools;34.0.0'
 ./gradlew test
-leo-android emulator start 34 --aosp --accept-licenses
+cairn-android emulator start 34 --aosp --accept-licenses
 adb -s emulator-5580 install --no-incremental -r app/build/outputs/apk/debug/app-debug.apk
 ./gradlew connectedAndroidTest
-leo-android emulator stop
+cairn-android emulator stop
 ```
 
 Select API/build-tools versions from the project. `--accept-licenses` explicitly
@@ -56,7 +56,7 @@ Persistent defaults inside each run:
 | Device state (`ANDROID_USER_HOME`) | `$HOME/.android` |
 | Gradle (`GRADLE_USER_HOME`) | `$HOME/.gradle` |
 
-`leo-android status` describes SDK/KVM availability; `leo-android emulator status`
+`cairn-android status` describes SDK/KVM availability; `cairn-android emulator status`
 reports device readiness. Emulator metadata uses both Linux boot ID and process
 start time so a stale PID from an earlier VM cannot be treated as a live device.
 One managed emulator runs at a time in each VM; other runs have separate disks,
@@ -71,7 +71,7 @@ performance measurements.
 
 The guest kernel includes KVM for Intel and AMD. On a host with nested
 virtualization enabled, the guest creates its own `/dev/kvm`; guest init grants
-UID/GID 1000 access without supplementary groups. `leo-android` then selects
+UID/GID 1000 access without supplementary groups. `cairn-android` then selects
 hardware acceleration automatically and starts the emulator with `-accel on`.
 It does not silently fall back if that accelerated startup fails. Boot readiness
 has a ten-minute deadline and returns as soon as Android is ready; SDK download
