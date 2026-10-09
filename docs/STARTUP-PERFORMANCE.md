@@ -69,7 +69,7 @@ imports, live inbox updates, preserved edits, cancellation, controller crash,
 recovery, nested Docker, and read-only policy after reboot. The VPS comparison
 also exercises an older controller importing into a newer guest.
 
-Raw aggregated samples are in [the benchmark data](https://github.com/leo91000/leo-agent-manager/releases/download/v0.50.6/startup-2026-09-12.json).
+Raw aggregated samples are in [the benchmark data](https://github.com/leo91000/cairn/releases/download/v0.50.6/startup-2026-09-12.json).
 The temporary diagnostic probes were removed from production code. The throwaway
 harness and raw logs remain in `/var/tmp/cairn-startup-bench` on the development
 machine; the harness uses disposable data and must never target a live run disk.

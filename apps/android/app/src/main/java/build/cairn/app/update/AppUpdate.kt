@@ -21,7 +21,7 @@ import kotlinx.serialization.json.Json
 import okhttp3.OkHttpClient
 import okhttp3.Request
 
-const val RELEASE_BASE = "https://github.com/leo91000/leo-agent-manager/releases"
+const val RELEASE_BASE = "https://github.com/leo91000/cairn/releases"
 const val MAX_APK_BYTES = 100L * 1024 * 1024
 
 @Serializable

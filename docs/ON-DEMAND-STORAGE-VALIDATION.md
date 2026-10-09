@@ -5,7 +5,7 @@
 - `cargo test --locked --lib storage::` : réussi.
 - Parcours HTTP export/import existant avec verrou conservé : réussi.
 - Typage, lint, `cargo check --locked --workspace --all-targets` et clippy : réussis.
-- CI GitHub : https://github.com/leo91000/leo-agent-manager/pull/5 (contrôles réussis).
+- CI GitHub : https://github.com/leo91000/cairn/pull/5 (contrôles réussis).
 
 ## Adapter expérimental — deuxième PR
 

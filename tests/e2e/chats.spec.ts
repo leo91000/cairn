@@ -328,9 +328,9 @@ test('task outcomes stay with the reply and expose evidence without crowding the
     status: 'completed' as const,
     reason: 'Android fix pushed to main. Signed APK published and checks passed.',
     evidence: [
-      'Changes pushed to **main** · https://github.com/leo91000/leo-agent-manager/commit/2b62b45',
+      'Changes pushed to **main** · https://github.com/leo91000/cairn/commit/2b62b45',
       '**Local validation passed**\n\n73 tests · lint · debug & release builds',
-      '**Android CI passed** · https://github.com/leo91000/leo-agent-manager/actions/runs/35315999841',
+      '**Android CI passed** · https://github.com/leo91000/cairn/actions/runs/35315999841',
       `Published APK: ${artifactPath}`,
       '[Review notes](https://example.test/review) · [Unsafe link](javascript:alert(1))',
     ],
@@ -353,7 +353,7 @@ test('task outcomes stay with the reply and expose evidence without crowding the
   await page.keyboard.press('Enter')
   await expect(panel.getByRole('button', { name: 'Hide evidence' })).toHaveAttribute('aria-expanded', 'true')
   await expect(panel.getByText('73 tests · lint · debug & release builds')).toBeVisible()
-  await expect(panel.getByRole('link', { name: 'View commit' })).toHaveAttribute('href', 'https://github.com/leo91000/leo-agent-manager/commit/2b62b45')
+  await expect(panel.getByRole('link', { name: 'View commit' })).toHaveAttribute('href', 'https://github.com/leo91000/cairn/commit/2b62b45')
   await expect(panel.getByRole('link', { name: 'View workflow' })).toHaveAttribute('target', '_blank')
   await expect(panel.getByRole('link', { name: 'View workflow' })).toHaveAttribute('rel', 'noopener noreferrer')
   await expect(panel.getByRole('link', { name: 'Review notes' })).toHaveAttribute('href', 'https://example.test/review')

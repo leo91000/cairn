@@ -48,7 +48,7 @@ Release builds against baseline `c6e35f6`, using a 64 MiB synthetic disk and a l
 | Unchanged disk | 56.24 ms | 5.54 ms | 2.82 ms | 1.64 ms |
 | One changed 4 MiB block | 124.45 ms | 32.85 ms | 18.55 ms | 15.64 ms |
 
-These measure foreground capture latency: remote reclamation now happens independently. The unchanged and delta paths avoid synchronous deletion work; reused shared blocks also avoid transfer and encryption. Initial unique upload time is effectively unchanged in this sample. This is a local comparison, not a production WAN latency or peak-memory measurement. Raw samples are in [the benchmark artifact](https://github.com/leo91000/leo-agent-manager/releases/download/v0.50.6/shared-s3-blocks-2026-09-29.json).
+These measure foreground capture latency: remote reclamation now happens independently. The unchanged and delta paths avoid synchronous deletion work; reused shared blocks also avoid transfer and encryption. Initial unique upload time is effectively unchanged in this sample. This is a local comparison, not a production WAN latency or peak-memory measurement. Raw samples are in [the benchmark artifact](https://github.com/leo91000/cairn/releases/download/v0.50.6/shared-s3-blocks-2026-09-29.json).
 
 The integration suite separately verifies that publishing identical content from another run uploads zero bytes and issues no additional source-block request. It also blocks a remote deletion deliberately and checks that publication and reads still complete.
 

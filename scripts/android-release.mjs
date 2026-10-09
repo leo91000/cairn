@@ -28,7 +28,7 @@ export function updateManifest(tag, bytes, metadata) {
     schema: 1,
     ...version,
     minSdk: 26,
-    url: `https://github.com/leo91000/leo-agent-manager/releases/download/${tag}/cairn-android.apk`,
+    url: `https://github.com/leo91000/cairn/releases/download/${tag}/cairn-android.apk`,
     sha256: createHash('sha256').update(bytes).digest('hex'),
     size: bytes.length,
   }

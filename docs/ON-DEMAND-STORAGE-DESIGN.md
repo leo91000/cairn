@@ -9,7 +9,7 @@ Implémentation en stack de PR ; résultats et limites dans [la validation](ON-D
 
 ## Base de travail
 
-- PR des nodes : <https://github.com/leo91000/leo-agent-manager/pull/3>.
+- PR des nodes : <https://github.com/leo91000/cairn/pull/3>.
 - Révision examinée lors de la conception : `360e714297e61242fb359284bedf22a648fcb99e`.
 - Base d'intégration actualisée : `635cfd12676676d7415c928289bdb967996105ab`.
   Elle ajoute le chiffrement binaire compact des blocs avec lecture des anciens

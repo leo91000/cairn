@@ -19,7 +19,7 @@
 
 ### Issue tracker
 
-Issues and specs live in GitHub Issues for `leo91000/leo-agent-manager`. See `docs/agents/issue-tracker.md`.
+Issues and specs live in GitHub Issues for `leo91000/cairn`. See `docs/agents/issue-tracker.md`.
 
 ### Domain docs
 

@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest'
 import { evidenceStatus, waitForValidation } from '../nested-android-validation.mjs'
 
 const config = {
-  repository: 'leo91000/leo-agent-manager',
+  repository: 'leo91000/cairn',
   commit: 'a'.repeat(40),
   digest: `sha256:${'b'.repeat(64)}`,
   validator: 'leo91000',

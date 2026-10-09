@@ -1,6 +1,6 @@
 # Direct / relay network bench
 
-Ticket [#102](https://github.com/leo91000/leo-agent-manager/issues/102),
+Ticket [#102](https://github.com/leo91000/cairn/issues/102),
 [ADR-0033](adr/0033-direct-connection-with-relay-fallback.md).
 
 ## Run locally

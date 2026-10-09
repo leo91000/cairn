@@ -146,7 +146,7 @@ toutes les connexions activées.
 
 ## Preuves et nettoyage
 
-[Données agrégées et échantillons](https://github.com/leo91000/leo-agent-manager/releases/download/v0.50.6/authenticated-startup-2026-09-12.json).
+[Données agrégées et échantillons](https://github.com/leo91000/cairn/releases/download/v0.50.6/authenticated-startup-2026-09-12.json).
 Les scripts exploratoires sont conservés dans `/var/tmp/cairn-auth-bench/` sur la
 machine de développement. La production reste au commit `8643deb`, sans changement
 de paramètres ni redéploiement.

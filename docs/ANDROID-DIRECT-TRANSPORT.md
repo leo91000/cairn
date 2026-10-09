@@ -129,8 +129,8 @@ runtime, ABI packaging and build options (all four ABIs above):
 The measured increase is **48,490,269 bytes (+257.7%)**, including the native
 libraries, Kotlin adapter and consolidated notices. These are APK file sizes,
 not installed sizes or an ABI-specific estimate. Source artifacts are the
-[baseline Android CI run](https://github.com/leo91000/leo-agent-manager/actions/runs/37704381521)
-and [native Android CI run](https://github.com/leo91000/leo-agent-manager/actions/runs/37715411140).
+[baseline Android CI run](https://github.com/leo91000/cairn/actions/runs/37704381521)
+and [native Android CI run](https://github.com/leo91000/cairn/actions/runs/37715411140).
 The native CI run also built the minified release successfully; no release-size
 comparison is claimed. No ABI filter or split changes are included in #104.
 
