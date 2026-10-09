@@ -139,12 +139,16 @@ comparison is claimed. No ABI filter or split changes are included in #104.
 The installation transport starts on the relay. `ProcessLifecycleOwner` owns
 optional ICE negotiation, signaling and renewal only while the application is
 started. `ON_STOP` closes the peer and signaling stream and unregisters the
-default-network callback. Returning to the foreground creates a fresh peer;
-no change of transport interrupts an installation agent run.
+default-network callback. Returning to the foreground creates a fresh peer after
+any pending retry deadline; elapsed background time counts toward that deadline.
+No change of transport interrupts an installation agent run.
 
-Failed attempts wait 15, 30, 60 seconds and so on, capped at five minutes. A
+Failed attempts wait 15, 30, 60 seconds and so on, capped at five minutes. An
+authorized channel opening resets the next failure to 15 seconds. Retry deadlines
+use monotonic elapsed time and survive foreground coroutine cancellation. A
 default-network change interrupts that wait and starts fresh authorized ICE.
-`available:false` suspends attempts until the network or owning session changes.
+`available:false` on authorization or renewal suspends attempts immediately until
+the network or owning session changes, without another authorization.
 401/403 suspends them until a new session owner is created. A transient ICE
 `DISCONNECTED` gets five seconds to recover; failed ICE, explicit revocation,
 lease expiry and default-network changes still close the peer immediately.
@@ -154,12 +158,16 @@ requests. If renewal cannot advance the deadline, it stops renewing and retains
 the valid peer until expiry; it never loops against a session-capped deadline.
 
 Native writes wait for buffer capacity, with at most 64 KiB queued locally. The
-request's 30-second deadline includes that wait. Cancellation and a request
+request's 35-second deadline includes that wait, leaving five seconds beyond
+the dispatcher's 30-second response deadline. Cancellation and a request
 timeout do not destroy a healthy peer. JNI writes and disposal are coordinated,
-and the native reference is cleared before disposal. Incoming bounded packets
-are decoded in the native callback; a burst does not overflow a second packet
-queue. The existing protocol still limits assemblies, credited streams and
-body sizes.
+and the native reference is cleared before disposal. Incoming native buffers are
+copied before callback return. One ordered worker performs reassembly, JSON parsing
+and base64 validation with a four-packet queue (at most 64 KiB). A full queue waits
+for the worker instead of dropping responses or tearing down the peer. The worker
+does not acquire the JNI write/disposal lock; closing cancels the queue and releases
+waiting callbacks. The existing protocol still limits assemblies, credited streams
+and body sizes.
 
 A locally full request table or a channel closed before any packet is accepted
 uses the relay even for a mutation. Once a request may have been delivered, only
@@ -172,8 +180,9 @@ existing relay clients and deadlines.
 
 The existing Android network bench also checks foreground/background ownership
 with concurrent reads, unavailable/401/403 control responses through the HTTP
-seam, a 1 MB fragmented request, and capped renewal scheduling. The main peer,
-normal renewal and in-flight revocation still use the real installation and
+seam, a 1 MB fragmented request, capped renewal scheduling, foreground backoff
+after a capacity error, and unavailability returned by renewal without another
+authorization. The main peer, normal renewal and in-flight revocation still use the real installation and
 control plane. The capped-renewal check changes only this client's scheduling
 input after a real acknowledged renewal; it does not replace installation
 authorization or the signed grant verifier.

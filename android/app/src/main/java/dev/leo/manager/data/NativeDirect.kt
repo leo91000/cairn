@@ -66,7 +66,7 @@ internal class NativeDirect(private val api: LeoApi, context: Context) {
 
     private val denied = AtomicBoolean()
     private val generation = AtomicLong()
-    private var unavailableAt: Long? = null
+    private val unavailableAt = AtomicLong(-1)
     private val retry = DirectRetry()
     private val stopped = AtomicBoolean()
     private val application = context.applicationContext
@@ -121,7 +121,7 @@ internal class NativeDirect(private val api: LeoApi, context: Context) {
                 try {
                     while (isActive) {
                         val attemptGeneration = generation.get()
-                        if (denied.get() || unavailableAt == attemptGeneration) {
+                        if (denied.get() || unavailableAt.get() == attemptGeneration) {
                             changed.receive()
                             continue
                         }
@@ -130,7 +130,7 @@ internal class NativeDirect(private val api: LeoApi, context: Context) {
                             withTimeoutOrNull(remaining) { changed.receive() }
                             continue
                         }
-                        val attempt = Attempt()
+                        val attempt = Attempt(attemptGeneration)
                         active.set(attempt)
                         var attemptFailed = false
                         try {
@@ -140,7 +140,7 @@ internal class NativeDirect(private val api: LeoApi, context: Context) {
                         } catch (error: CancellationException) {
                             throw error
                         } catch (error: Unavailable) {
-                            unavailableAt = attemptGeneration
+                            unavailableAt.set(attemptGeneration)
                         } catch (error: Exception) {
                             attemptFailed = true
                             rememberDenial(error)
@@ -153,7 +153,7 @@ internal class NativeDirect(private val api: LeoApi, context: Context) {
                                     (attemptFailed || attempt.failed.isCompleted) &&
                                         generation.get() == attemptGeneration &&
                                         !denied.get() &&
-                                        unavailableAt != attemptGeneration
+                                        unavailableAt.get() != attemptGeneration
                                 )
                                     retry.failed()
                             }
@@ -178,7 +178,7 @@ internal class NativeDirect(private val api: LeoApi, context: Context) {
         if (error is ApiException && error.status in setOf(401, 403)) denied.set(true)
     }
 
-    private inner class Attempt {
+    private inner class Attempt(private val attemptGeneration: Long) {
         val failed = CompletableDeferred<Unit>()
         private val opened = CompletableDeferred<Unit>()
         private val expires = AtomicLong()
@@ -197,6 +197,9 @@ internal class NativeDirect(private val api: LeoApi, context: Context) {
         private var fingerprint = ""
 
         fun fail(error: Exception? = null) {
+            // Renewal unavailability belongs to this network generation, even if a newer
+            // default network was observed while the HTTP request was in flight.
+            if (error is Unavailable) unavailableAt.set(attemptGeneration)
             error?.let(::rememberDenial)
             traffic?.close()
             events.get()?.cancel()
@@ -442,7 +445,7 @@ internal class NativeDirect(private val api: LeoApi, context: Context) {
                 .jsonObject
 
         private fun updateGrant(grant: JsonObject, previousDeadline: Long = 0): Boolean {
-            require(grant["available"]!!.jsonPrimitive.boolean)
+            if (grant["available"]?.jsonPrimitive?.booleanOrNull != true) throw Unavailable()
             val claims = grant["grant"]!!.jsonObject["claims"]!!.jsonObject
             require(
                 claims["connection_id"]!!.jsonPrimitive.content == connection &&

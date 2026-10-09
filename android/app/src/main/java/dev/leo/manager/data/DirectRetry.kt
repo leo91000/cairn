@@ -1,9 +1,10 @@
 package dev.leo.manager.data
 
+import android.os.SystemClock
 import java.util.concurrent.TimeUnit
 
 /** Retry deadlines outlive a foreground coroutine and use elapsed, not wall-clock, time. */
-internal class DirectRetry(private val now: () -> Long = { System.nanoTime() / 1_000_000 }) {
+internal class DirectRetry(private val now: () -> Long = SystemClock::elapsedRealtime) {
     private var interval = 15000L
     private var retryAt: Long? = null
 
