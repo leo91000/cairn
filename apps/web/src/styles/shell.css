@@ -411,8 +411,8 @@ h2 {
     color: var(--color-accent);
   }
   .mobile-bottom-nav > a.mobile-new-task {
-    background: #14365a;
-    color: #fff;
+    background: var(--color-brand);
+    color: var(--color-on-brand);
     width: 36px;
     height: 36px;
     border: 1px solid light-dark(#292943, #346aa3);

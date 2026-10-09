@@ -69,7 +69,7 @@ void refresh()
         @focus="($event.target as HTMLInputElement).select()"
       >
       <div class="flex flex-wrap gap-2">
-        <button :disabled="busy" class="rounded-lg bg-brand phone:min-h-11 px-3 py-2 text-xs text-white disabled:opacity-50" @click="copy">
+        <button :disabled="busy" class="rounded-lg bg-brand phone:min-h-11 px-3 py-2 text-xs text-on-brand disabled:opacity-50" @click="copy">
           Copy public link
         </button>
         <button

@@ -219,7 +219,7 @@ describe('the working indicator', () => {
   })
 
   it('keeps identity colours stable and shared with Android', () => {
-    // Kotlin: Math.floorMod("cairn".hashCode(), 8) == 94425239 % 8 == 7
+    // Kotlin: Math.floorMod("cairn".hashCode(), 8) == 94422855 % 8 == 7
     expect(identityColor('cairn')).toBe('#5E6B2E')
     expect(identityColor('main')).toBe(identityColor('main'))
   })

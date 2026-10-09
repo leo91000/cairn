@@ -283,7 +283,7 @@ async fn oauth_pkce_registration_rotation_and_reuse_are_bound_to_the_selected_in
 async fn an_external_mcp_connection_returns_through_the_official_installation_and_account() {
     use tokio::io::{AsyncBufReadExt, BufReader};
 
-    let provider_script = "import { mcpProvider } from './tests/mcp-provider.ts'; const p = await mcpProvider(); console.log(p.origin); await new Promise(() => {});";
+    let provider_script = "import { mcpProvider } from './tests/fixtures/mcp-provider.ts'; const p = await mcpProvider(); console.log(p.origin); await new Promise(() => {});";
     let mut provider = tokio::process::Command::new("node")
         .args([
             "--import",

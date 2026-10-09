@@ -536,7 +536,7 @@ async fn official_clients_negotiate_modern_and_legacy_protocols_and_enforce_scop
 
 /// Runs the OAuth provider fixture and reports its counters on demand.
 const OAUTH_PROVIDER: &str = r"
-import { mcpProvider } from './tests/mcp-provider.ts';
+import { mcpProvider } from './tests/fixtures/mcp-provider.ts';
 import { createInterface } from 'node:readline';
 const provider = await mcpProvider();
 console.log(provider.origin);
