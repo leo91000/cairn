@@ -455,14 +455,27 @@ impl Execution<'_> {
         if s.shutdown.is_cancelled() && !self.cancel.is_cancelled() && !saved.completed() {
             return Err(Error::conflict("Worker is restarting"));
         }
+        let session = s.store.run(&self.id).await?["sessionId"]
+            .as_str()
+            .map(str::to_owned);
         let stopped_by_controller =
             !self.cancel.is_cancelled() && !exit.timed_out && !exit.exhausted;
         let firecracker = workspace.prepared["backend"] == "firecracker";
         let interrupted = exit.code == Some(crate::runner::CONTROLLER_INTERRUPTED);
         if firecracker && stopped_by_controller && interrupted {
-            return Err(Error::unavailable(
-                "VM controller interrupted execution. The saved conversation and workspace have been preserved.",
-            ));
+            if saved.start_rejected == Some(true) {
+                return Err(Error::unavailable(format!(
+                    "{} Working files were preserved; retry when the controller is available.",
+                    saved.last_error(),
+                )));
+            }
+
+            let message = if session.is_some() {
+                "VM controller interrupted execution. The saved conversation and workspace have been preserved."
+            } else {
+                "VM controller interrupted execution. Working files were preserved, but no resumable agent session was confirmed."
+            };
+            return Err(Error::unavailable(message));
         }
 
         // Remote nodes retry unavailable attempts without a cap; bound this
@@ -474,9 +487,7 @@ impl Execution<'_> {
                 "VM controller failed while running this attempt. The saved conversation and workspace have been preserved.",
             ));
         }
-        let session = s.store.run(&self.id).await?["sessionId"]
-            .as_str()
-            .map(str::to_owned);
+
         if let Some(session) = session.as_ref()
             && self.may_switch_account(&exit)
         {
@@ -734,6 +745,7 @@ impl Execution<'_> {
         log_total: &mut usize,
     ) -> Result<Exit> {
         let s = self.s;
+        let previously_launched = self.checkpoint.read(RunCheckpoint::launched).await;
         let mut child = Supervised::spawn(
             &launch.binary,
             &launch.args,
@@ -751,9 +763,10 @@ impl Execution<'_> {
             .update(|c| {
                 c.process = Some(identity);
                 c.launched = Some(true);
+                c.start_rejected = Some(false);
+                c.retry_cause = Some(None);
                 c.completed = Some(false);
                 c.last_error = Some(None);
-                c.retry_cause = Some(None);
             })
             .await?;
         if self.stopping() {
@@ -778,7 +791,7 @@ impl Execution<'_> {
         }
         let span = tracing::info_span!(target: "leo_performance", "agent_attempt", run_id = self.id, attempt_id = self.attempt_id);
         let exit = self
-            .wait(&mut child, &mut events, log_total)
+            .wait(&mut child, &mut events, log_total, previously_launched)
             .instrument(span)
             .await?;
         let _ = out.await;
@@ -791,6 +804,7 @@ impl Execution<'_> {
         child: &mut Supervised,
         events: &mut mpsc::Receiver<output::Output>,
         log_total: &mut usize,
+        previously_launched: bool,
     ) -> Result<Exit> {
         let s = self.s;
         let cancel = self.cancel;
@@ -832,9 +846,9 @@ impl Execution<'_> {
                         crate::performance::wait("refresh_redactions", self.refresh_redactions()).await?;
                         exit.exhausted |= crate::performance::wait("persist_output", output::record(
                             s,
-                            &self.id,
                             &output,
                             self.checkpoint,
+                            previously_launched,
                             self.sensitive,
                             log_total,
                             &mut activity,

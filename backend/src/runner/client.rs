@@ -3,17 +3,19 @@ use super::CONTROLLER_INTERRUPTED;
 use crate::{
     error::{Error, Result},
     microvm::{protocol::Event, wire},
+    run_output,
     validation::uuid,
 };
 use base64::{Engine, engine::general_purpose::STANDARD};
 use futures_util::StreamExt;
-use serde_json::Value;
+use serde_json::{Value, json};
 use std::time::Duration;
 use tokio::io::{AsyncWriteExt, BufReader};
 use tokio_util::sync::CancellationToken;
 
 /// Exit code reported when this client is asked to stop.
 const STOPPED: i32 = 143;
+const ERROR_BODY_LIMIT: usize = 10_000;
 
 struct Controller {
     http: reqwest::Client,
@@ -23,7 +25,7 @@ struct Controller {
 
 impl Controller {
     async fn start(&self) -> Result<()> {
-        let response = self
+        let mut response = self
             .http
             .post(&self.url)
             .bearer_auth(&self.token)
@@ -32,7 +34,36 @@ impl Controller {
             .await
             .map_err(|_| Error::unavailable("VM controller could not start the run."))?;
         if !response.status().is_success() {
-            return Err(Error::unavailable("VM controller could not start the run."));
+            let status = response.status();
+            let mut body = Vec::new();
+            while let Ok(Some(chunk)) = response.chunk().await {
+                if body.len() + chunk.len() > ERROR_BODY_LIMIT {
+                    body.clear();
+                    break;
+                }
+                body.extend_from_slice(&chunk);
+            }
+
+            let error = serde_json::from_slice::<Value>(&body).unwrap_or_default();
+            let mut message = format!("VM controller rejected startup (HTTP {status}).");
+            if let Some(reason) = error["error"].as_str() {
+                message.push(' ');
+                message.push_str(reason);
+            }
+
+            let message = run_output::redact(&message, std::slice::from_ref(&self.token));
+
+            // Only an explicit rejection proves that the native agent never started.
+            // Transport failures deliberately leave the launch outcome uncertain.
+            let event = json!({
+                "type": "runner.start_rejected",
+                "message": message,
+            });
+
+            let mut stdout = tokio::io::stdout();
+            stdout.write_all(format!("{event}\n").as_bytes()).await?;
+            stdout.flush().await?;
+            return Err(Error::unavailable(message));
         }
         Ok(())
     }

@@ -1,4 +1,4 @@
-use super::checkpoint::Checkpoint;
+use super::checkpoint::{Checkpoint, RunCheckpoint};
 use crate::{error::Result, run_output, service::Service, validation::text};
 use serde_json::Value;
 use tokio::{
@@ -120,13 +120,14 @@ pub(super) async fn read_output(
 /// Records one output line and returns whether it reports exhausted usage.
 pub(super) async fn record(
     s: &Service,
-    id: &str,
     output: &Output,
     checkpoint: &Checkpoint,
+    previously_launched: bool,
     secrets: &[String],
     log_total: &mut usize,
     activity: &mut crate::performance::Activity,
 ) -> Result<bool> {
+    let id = checkpoint.id.as_str();
     let raw = output.raw.as_str();
     if output.diagnostic {
         record_raw(s, id, "diagnostic", raw, secrets, log_total).await?;
@@ -136,6 +137,37 @@ pub(super) async fn record(
         record_raw(s, id, "output", raw, secrets, log_total).await?;
         return Ok(false);
     };
+    if event["type"] == "runner.start_rejected" {
+        let run = s.store.run(id).await?;
+        let first_rejected = !previously_launched
+            && run["sessionId"].is_null()
+            && checkpoint.read(RunCheckpoint::firecracker).await;
+        if first_rejected && run["chatExecution"].is_object() {
+            let mut execution = run["chatExecution"].clone();
+            execution["recovery"] = false.into();
+            s.store
+                .patch_run(id, serde_json::json!({ "chatExecution": execution }))
+                .await?;
+        }
+
+        let message = truncate(
+            &run_output::redact(text(&event, "message"), secrets),
+            ERROR_LIMIT,
+        );
+        checkpoint
+            .update(|c| {
+                c.start_rejected = Some(true);
+                c.last_error = Some(Some(message));
+                if first_rejected {
+                    // Persist retry intent before fencing can fail. Settlement
+                    // and every subsequent launch still require a successful fence.
+                    c.launched = Some(false);
+                }
+            })
+            .await?;
+        return Ok(false);
+    }
+
     activity.observe(&event);
     if handle_chat_control(s, id, &event).await? {
         return Ok(false);
