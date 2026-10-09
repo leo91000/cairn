@@ -9,7 +9,7 @@ import {
   verifiedImage,
 } from '../resolve-release.mjs'
 
-const repository = 'leo91000/leo-agent-manager'
+const repository = 'leo91000/cairn'
 const tree = 'e'.repeat(40)
 const config = {
   repository,

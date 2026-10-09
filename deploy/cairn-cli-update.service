@@ -9,7 +9,7 @@ StartLimitBurst=5
 [Service]
 Type=oneshot
 Environment=CAIRN_MANAGER_CONTAINER=cairn-manager
-Environment=CAIRN_REPOSITORY=leo91000/leo-agent-manager
+Environment=CAIRN_REPOSITORY=leo91000/cairn
 ExecStart=/usr/bin/docker exec ${CAIRN_MANAGER_CONTAINER} gh workflow run cli-updates.yaml --repo ${CAIRN_REPOSITORY} --ref main
 TimeoutStartSec=120
 Restart=on-failure

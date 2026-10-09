@@ -157,7 +157,7 @@ sont pas nécessaires pour le premier chemin rapide proposé.
 
 ## Traçabilité
 
-- [Mesures agrégées et échantillons complets](https://github.com/leo91000/leo-agent-manager/releases/download/v0.50.6/startup-strategies-2026-09-12.json).
+- [Mesures agrégées et échantillons complets](https://github.com/leo91000/cairn/releases/download/v0.50.6/startup-strategies-2026-09-12.json).
 - [Mesures précédentes sur le transfert des dépôts](STARTUP-PERFORMANCE.md).
 - Banc d'essai exploratoire conservé sur la machine de développement dans
   `/var/tmp/cairn-startup-strategies/` : `bench.mjs`, `guest.mjs`,

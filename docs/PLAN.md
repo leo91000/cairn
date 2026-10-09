@@ -159,7 +159,7 @@ responsible for project tests and releases requested by an agent.
   environment example with no secrets, image version/commit in diagnostics.
 - GitHub CI: lockfile install, types, unit/integration tests, browser e2e, production
   build, Docker build and smoke; GHCR images tagged by immutable commit and release.
-- Public GitHub repo `leo91000/leo-agent-manager`; meaningful commits and no tool
+- Public GitHub repo `leo91000/cairn`; meaningful commits and no tool
   attribution. Wait for actual CI results and image availability after pushing.
 - Bonus: deploy to Coolify when server/domain credentials are available; verify HTTPS,
   login, data persistence, task execution, and MCP externally before claiming live.

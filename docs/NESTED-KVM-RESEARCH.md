@@ -38,9 +38,9 @@ Upstream explicitly says **“Firecracker is not tested with nested virtualizati
 
 ## Runtime evidence, 2026-09-25
 
-The [image integration job](https://github.com/leo91000/leo-agent-manager/actions/runs/36142279729) successfully executed `nested-kvm: agent uid=1000, KVM_RUN, rax=42, HLT` inside Firecracker. The runner disk export/delete/import and subsequent guest execution also passed. This establishes nested execution, rather than only the presence of `/dev/kvm`.
+The [image integration job](https://github.com/leo91000/cairn/actions/runs/36142279729) successfully executed `nested-kvm: agent uid=1000, KVM_RUN, rax=42, HLT` inside Firecracker. The runner disk export/delete/import and subsequent guest execution also passed. This establishes nested execution, rather than only the presence of `/dev/kvm`.
 
-The [instrumented Android probe](https://github.com/leo91000/leo-agent-manager/actions/runs/36144997216) identified an AMD EPYC guest CPU and confirmed `Nested Virtualization enabled` and `Nested Paging enabled` in the guest kernel. Android reached userspace initialization before the 180-second helper deadline stopped it. This run did **not** establish a completed Android boot. These hosted runs do not establish Intel runtime behavior.
+The [instrumented Android probe](https://github.com/leo91000/cairn/actions/runs/36144997216) identified an AMD EPYC guest CPU and confirmed `Nested Virtualization enabled` and `Nested Paging enabled` in the guest kernel. Android reached userspace initialization before the 180-second helper deadline stopped it. This run did **not** establish a completed Android boot. These hosted runs do not establish Intel runtime behavior.
 
 
 ### Intel host comparison and release status
@@ -53,13 +53,13 @@ The helper deadline was increased to ten minutes based on the measured boot, whi
 
 A control test on the **same Intel host**, using the same API 34 fixture with KVM directly in a disposable Docker container (4 GiB RAM, two CPUs), passed: boot, APK installation, button discovery, tap and `Device test passed`. This rules out a consistently broken synthetic APK. It does not substitute for the required nested test. Setup plus boot took 249,210 ms, including the SDK and system-image installation; this duration is not an isolated boot benchmark.
 
-The [candidate image CI](https://github.com/leo91000/leo-agent-manager/actions/runs/36153618751) for commit `dee77c4` passed code quality, all three browser suites and the container/Firecracker smoke tests. Its exact published image (`sha256:e3140e18bc8d1ebb36650a37b2fc50573589af6405d7e281908770c3744aa3fb`) still failed API 34 boot at the real ten-minute deadline. No copied helper or diagnostic launch override was used in this CI run. The release must not be described as validated based on the other passing jobs.
+The [candidate image CI](https://github.com/leo91000/cairn/actions/runs/36153618751) for commit `dee77c4` passed code quality, all three browser suites and the container/Firecracker smoke tests. Its exact published image (`sha256:e3140e18bc8d1ebb36650a37b2fc50573589af6405d7e281908770c3744aa3fb`) still failed API 34 boot at the real ten-minute deadline. No copied helper or diagnostic launch override was used in this CI run. The release must not be described as validated based on the other passing jobs.
 
 ### AOSP comparison
 
 The API 34 AOSP variant subsequently **passed both first and resumed runs inside Firecracker on Intel**, with KVM required and actual button interaction. Setup plus first boot took 247,999 ms; the complete first probe took 328,895 ms. Setup plus resumed boot took 122,013 ms; the complete resumed probe took 148,184 ms. The first run required one explicit wait on an Android system dialog; the resumed run required none. Screenshots confirmed `Device test passed` in both runs. This comparison used the candidate launcher staged into the older immutable image, so validation of the final shipped image remains necessary.
 
-The launcher exposes this as `--aosp`, retaining Google APIs as the existing default and using a distinct AVD name. This choice follows the measured system-image difference, not a claim that KVM guarantees every Android image works. Official [AOSP image documentation](https://developer.android.com/studio/run/managing-avds) confirms that these images exclude Google apps/services. The [API 29 Google APIs comparison on the exact candidate image](https://github.com/leo91000/leo-agent-manager/actions/runs/36156560603) also failed; lowering the Android API alone did not solve that hosted run.
+The launcher exposes this as `--aosp`, retaining Google APIs as the existing default and using a distinct AVD name. This choice follows the measured system-image difference, not a claim that KVM guarantees every Android image works. Official [AOSP image documentation](https://developer.android.com/studio/run/managing-avds) confirms that these images exclude Google apps/services. The [API 29 Google APIs comparison on the exact candidate image](https://github.com/leo91000/cairn/actions/runs/36156560603) also failed; lowering the Android API alone did not solve that hosted run.
 
 ### Qualification on the existing Intel host
 

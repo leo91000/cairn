@@ -105,4 +105,4 @@ account authentication and model requests. They are not production conversation
 measurements or qualification of a release image. Publication timings include a
 JavaScript digest oracle and varied between rounds; no final-save gain is claimed.
 The raw four samples are in
-[`benchmarks/published-block-cache-2026-09-30.json`](https://github.com/leo91000/leo-agent-manager/releases/download/v0.50.6/published-block-cache-2026-09-30.json).
+[`benchmarks/published-block-cache-2026-09-30.json`](https://github.com/leo91000/cairn/releases/download/v0.50.6/published-block-cache-2026-09-30.json).

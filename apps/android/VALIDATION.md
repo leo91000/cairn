@@ -155,7 +155,7 @@ Run `./gradlew testDebugUnitTest lintDebug assembleDebug assembleRelease` from
 `apps/android/`. Add `-PcairnScreenshotsDir=/absolute/path` for native-graphics previews.
 These images use Robolectric and fixture data, not a physical phone. Android 16
 instrumentation remains a separate CI gate; the current commit's checks on
-[PR #1](https://github.com/leo91000/leo-agent-manager/pull/1) are authoritative.
+[PR #1](https://github.com/leo91000/cairn/pull/1) are authoritative.
 The development APK is version **0.6.1 / code 16**. Font licenses are bundled in
 its assets. Release optimization is checked separately from development signing.
 
@@ -166,13 +166,13 @@ platform equivalents are in [WEB-PARITY.md](docs/WEB-PARITY.md).
 
 The implementation passed the complete 87-test JVM/Robolectric suite, lint,
 debug and optimized release builds in
-[Android CI](https://github.com/leo91000/leo-agent-manager/actions/runs/35584279965).
+[Android CI](https://github.com/leo91000/cairn/actions/runs/35584279965).
 Lint reports zero errors and eight warnings. The same run passed 11 actual
 Android 16 instrumentation tests, followed by the separate one-test pinned-scroll
 capture. These include native chat switching, preserved drafts, evidence,
 keyboard/enlarged text, fullscreen, task management and adaptive layout alongside
 the existing history and gesture checks. The repository's
-[quality, browser and container checks](https://github.com/leo91000/leo-agent-manager/actions/runs/35584279943)
+[quality, browser and container checks](https://github.com/leo91000/cairn/actions/runs/35584279943)
 also passed.
 
 Two additional native-preview tests cover phone and tablet layouts, long URLs,

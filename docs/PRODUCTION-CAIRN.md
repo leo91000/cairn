@@ -402,7 +402,7 @@ backup would add privileged host access and secret backup storage to CI, so #113
 keeps the backup **manual and mandatory**, behind Léo's production environment
 approval. Do not approve that deployment until:
 
-- [ ] [#105](https://github.com/leo91000/leo-agent-manager/issues/105) is qualified
+- [ ] [#105](https://github.com/leo91000/cairn/issues/105) is qualified
       and the independent review of #113 has passed.
 - [ ] The exact Git tree has complete green CI and one schema-3 evidence pair;
       record both candidate and previous image digests privately.
@@ -515,10 +515,10 @@ After review and #105 qualification, before the first approved release:
   Prepare the signing key with alias `cairn-android` (the prior key must be
   re-aliased or a new key provisioned; changing an environment variable does not
   change a keystore alias).
-- GitHub repository: **Léo** renames `leo91000/leo-agent-manager` to
-  `leo91000/cairn`. Then update the repository references listed in
-  [naming exceptions](NAMING-EXCEPTIONS.md). GitHub redirects old links; the image
-  paths already use Cairn and remain independent of the repository name.
+- GitHub repository: done on 2026-10-09 with Léo's approval. The repository is
+  now `leo91000/cairn` and references were updated; GitHub redirects old links.
+  The image paths already use Cairn and remain independent of the repository
+  name.
 
 No DNS, provider setting, repository rename, release or deployment is performed
 by implementing #122/#132.

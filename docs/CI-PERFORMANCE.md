@@ -31,10 +31,10 @@ By October a release paid for the same validation twice:
 
 | Path | Elapsed |
 | --- | --- |
-| Pull request CI, e.g. [run 37221466077](https://github.com/leo91000/leo-agent-manager/actions/runs/37221466077) | 15–20 min |
+| Pull request CI, e.g. [run 37221466077](https://github.com/leo91000/cairn/actions/runs/37221466077) | 15–20 min |
 | Full re-run of the merged tree on main | 17–21 min |
 | Tag reusing main's image, then deploying | 1–4 min |
-| Tag on a commit main never validated, e.g. [v0.52.11](https://github.com/leo91000/leo-agent-manager/actions/runs/37221707803) | 23 min |
+| Tag on a commit main never validated, e.g. [v0.52.11](https://github.com/leo91000/cairn/actions/runs/37221707803) | 23 min |
 
 **Where the time went:**
 - The image job was the critical path at 14–19 min:
@@ -58,7 +58,7 @@ Measured on PR #74:
 
 | Step | Before | After |
 | --- | --- | --- |
-| Pull request CI, elapsed | 15–20 min | 8m50s ([run 37243176845](https://github.com/leo91000/leo-agent-manager/actions/runs/37243176845)) |
+| Pull request CI, elapsed | 15–20 min | 8m50s ([run 37243176845](https://github.com/leo91000/cairn/actions/runs/37243176845)) |
 | Build, then browser tests | 12–15 min (quality, then browsers) | 6.9–7.9 min (build about 2 min) |
 | Image job setup before the build | 1–2.5 min | 8 s |
 | Image publication | 42 s local load (PR only) | 40 s SBOM + 110 s export and push, so the image can be released |
@@ -70,7 +70,7 @@ How to read these numbers:
   the shared layer cache. Its image job took 8m16s and the quality job 8m30s.
 - A pull request that changes the backend adds the release compile. Its image
   job takes about 12.5 minutes and remains the critical path.
-- [Run 37241143537](https://github.com/leo91000/leo-agent-manager/actions/runs/37241143537)
+- [Run 37241143537](https://github.com/leo91000/cairn/actions/runs/37241143537)
   also rebuilt the dependency layer once (245 s) because the manifest had
   changed. It took 18m17s.
 
@@ -103,14 +103,14 @@ Faster, cache-persistent runners are evaluated in
 
 | Run | Release path | Elapsed |
 | --- | --- | --- |
-| [v0.1.5](https://github.com/leo91000/leo-agent-manager/actions/runs/34419219831) | Original serial quality, image build/load, smoke test, push, deploy | 10m19s |
-| [v0.1.6-rc.1](https://github.com/leo91000/leo-agent-manager/actions/runs/34421319030) | Reuse a completed main validation and its exact image | 1m34s |
-| [v0.1.6-rc.2](https://github.com/leo91000/leo-agent-manager/actions/runs/34421520389) | Tag deliberately pushed before main existed; full validation fallback | 5m23s |
-| [v0.1.6-rc.3](https://github.com/leo91000/leo-agent-manager/actions/runs/34422386090) | Atomic main + tag push; wait for main, then reuse | 5m00s |
+| [v0.1.5](https://github.com/leo91000/cairn/actions/runs/34419219831) | Original serial quality, image build/load, smoke test, push, deploy | 10m19s |
+| [v0.1.6-rc.1](https://github.com/leo91000/cairn/actions/runs/34421319030) | Reuse a completed main validation and its exact image | 1m34s |
+| [v0.1.6-rc.2](https://github.com/leo91000/cairn/actions/runs/34421520389) | Tag deliberately pushed before main existed; full validation fallback | 5m23s |
+| [v0.1.6-rc.3](https://github.com/leo91000/cairn/actions/runs/34422386090) | Atomic main + tag push; wait for main, then reuse | 5m00s |
 
 The fallback run includes the first cache population for the new Dockerfile.
 Main at the same commit completed in
-[3m55s](https://github.com/leo91000/leo-agent-manager/actions/runs/34421600808).
+[3m55s](https://github.com/leo91000/cairn/actions/runs/34421600808).
 The tag-only experiment confirms that reuse is optional: a release still gets all
 checks when there is no qualifying main run.
 
@@ -118,7 +118,7 @@ The simultaneous-push experiment spent 239 seconds waiting for main in the
 resolver, then completed its deployment job in 48 seconds. Its own quality and
 image jobs were skipped. This verifies that a fresh main + tag push shares the
 validation; it is distinct from timing a tag after main has already passed.
-The original [v0.1.5 main run](https://github.com/leo91000/leo-agent-manager/actions/runs/34419217324)
+The original [v0.1.5 main run](https://github.com/leo91000/cairn/actions/runs/34419217324)
 took **8m53s** (528 aggregate runner seconds), without deployment.
 
 ## Changes retained
@@ -178,11 +178,11 @@ took **8m53s** (528 aggregate runner seconds), without deployment.
 
 ### Android tag baseline, 2026-09-24
 
-The [v0.30.0 Android tag run](https://github.com/leo91000/leo-agent-manager/actions/runs/35983749505)
+The [v0.30.0 Android tag run](https://github.com/leo91000/cairn/actions/runs/35983749505)
 took **20m26s** despite the same commit already having passed Android CI on main:
 the check job repeated **16m20s**, then publication took **4m00s**, including
 **3m24s** rebuilding the signed release. The parallel
-[server tag workflow](https://github.com/leo91000/leo-agent-manager/actions/runs/35983749704)
+[server tag workflow](https://github.com/leo91000/cairn/actions/runs/35983749704)
 reused its validated image and finished in **2m27s**.
 
 Android now archives the optimized unsigned APK after successful validation and
@@ -208,13 +208,13 @@ The isolated local browser suite passed all nine tests with two, four, and five
 workers: approximately **102s**, **56.5s**, and **39.2s**, respectively. The original
 hosted serial browser step took **317s**. Hosted five-worker trials took **99s** and
 **126s**; a same-commit four-worker trial took
-[110s](https://github.com/leo91000/leo-agent-manager/actions/runs/34421600152).
+[110s](https://github.com/leo91000/cairn/actions/runs/34421600152).
 Local hardware and hosted runner contention differ, so local timings alone do not
 establish the best CI worker count.
 
 A second same-commit hosted comparison took
-[129s with five workers](https://github.com/leo91000/leo-agent-manager/actions/runs/34422050574)
-and [136s with four](https://github.com/leo91000/leo-agent-manager/actions/runs/34422052319).
+[129s with five workers](https://github.com/leo91000/cairn/actions/runs/34422050574)
+and [136s with four](https://github.com/leo91000/cairn/actions/runs/34422052319).
 Five was retained for local runs: it won locally and in the repeat hosted pair,
 but the hosted samples overlap and do not establish a large advantage over four.
 Two on one runner was rejected after the slower local trial. The historical
@@ -225,9 +225,9 @@ originally. Their actual build/push steps took **40s** and **34s**; the rest inc
 runner setup, pulling and smoke-testing the exact published digest, and cleanup.
 The existing GitHub Actions cache was retained after the warm measurements.
 
-Finally, [three browser runners](https://github.com/leo91000/leo-agent-manager/actions/runs/34422700748)
+Finally, [three browser runners](https://github.com/leo91000/cairn/actions/runs/34422700748)
 completed main CI in **3m16s**, compared with
-[4m04s on one runner](https://github.com/leo91000/leo-agent-manager/actions/runs/34422386493)
+[4m04s on one runner](https://github.com/leo91000/cairn/actions/runs/34422386493)
 in the preceding configuration and **8m53s** originally. Aggregate runner time was
 **389s**, versus **357s** in the preceding experiment and **528s** originally.
 The selected configuration trades about 9% more runner time than that intermediate

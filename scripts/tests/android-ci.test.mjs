@@ -17,7 +17,7 @@ import { androidVersion } from '../android-release.mjs'
 import { AndroidValidationPendingError, resolveAndroidRelease, trustedAndroidRun } from '../resolve-android-release.mjs'
 
 const config = {
-  repository: 'leo91000/leo-agent-manager',
+  repository: 'leo91000/cairn',
   commit: 'a'.repeat(40),
   tag: 'v0.31.0',
   runId: 123,

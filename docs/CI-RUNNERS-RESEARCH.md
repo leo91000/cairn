@@ -12,7 +12,7 @@ Research date: 2026-10-04. Scope: paid or self-hosted runners that could bring p
 
 ## Current usage
 
-Method: list every run of each workflow created between 2026-09-20 04:25 and 2026-10-04 19:21 UTC (14.62 days) with `gh api repos/leo91000/leo-agent-manager/actions/workflows/<file>/runs?created=>=2026-09-20`. Then fetch each run's jobs with `actions/runs/<id>/jobs?filter=all`, so re-run attempts are included. Job minutes are `completed_at − started_at`, rounded up per job the way paid GitHub runners are billed. Skipped jobs are excluded. Cancelled and failed jobs are included, because they would be billed on a paid runner. Results are scaled ×30/14.62.
+Method: list every run of each workflow created between 2026-09-20 04:25 and 2026-10-04 19:21 UTC (14.62 days) with `gh api repos/leo91000/cairn/actions/workflows/<file>/runs?created=>=2026-09-20`. Then fetch each run's jobs with `actions/runs/<id>/jobs?filter=all`, so re-run attempts are included. Job minutes are `completed_at − started_at`, rounded up per job the way paid GitHub runners are billed. Skipped jobs are excluded. Cancelled and failed jobs are included, because they would be billed on a paid runner. Results are scaled ×30/14.62.
 
 The window contains 809 runs (491 `ci.yaml`, 295 `android.yaml`) and 3,877 job executions, all on `ubuntu-latest`. There were 55 PRs and 362 commits.
 
@@ -40,7 +40,7 @@ Today this costs nothing: standard hosted runners are "free and unlimited on pub
 
 ## Where the image job spends its time
 
-Example: the warm PR [image job of run 37221466077](https://github.com/leo91000/leo-agent-manager/actions/runs/37221466077), timeline built from BuildKit step timestamps. Total 14.2 min: about 2.6 min setup, 7.9 min build, 3.7 min smoke tests.
+Example: the warm PR [image job of run 37221466077](https://github.com/leo91000/cairn/actions/runs/37221466077), timeline built from BuildKit step timestamps. Total 14.2 min: about 2.6 min setup, 7.9 min build, 3.7 min smoke tests.
 
 | Phase | Seconds | Bound by |
 | --- | ---: | --- |
@@ -51,7 +51,7 @@ Example: the warm PR [image job of run 37221466077](https://github.com/leo91000/
 | Export and unpack into the runner's Docker | 41 | disk |
 | Smoke tests: container 42 s, runner + nested KVM 121 s, retention 57 s, run serially | 220 | VM boots |
 
-On main, the job also pushes the 3.39 GB image (33 layers; the largest is 1.68 GB). It exports the ~8 GB `mode=max` registry cache (81 blobs) and generates an SBOM. In [run 37138675072](https://github.com/leo91000/leo-agent-manager/actions/runs/37138675072) these took 97 s, 56 s and 40 s. That run also rebuilt the dependency layer (272 s) before the 281 s application compile. Docker notes that `mode=max` caches all intermediate layers, which raises import and export cost ([cache backends](https://docs.docker.com/build/cache/backends/)).
+On main, the job also pushes the 3.39 GB image (33 layers; the largest is 1.68 GB). It exports the ~8 GB `mode=max` registry cache (81 blobs) and generates an SBOM. In [run 37138675072](https://github.com/leo91000/cairn/actions/runs/37138675072) these took 97 s, 56 s and 40 s. That run also rebuilt the dependency layer (272 s) before the 281 s application compile. Docker notes that `mode=max` caches all intermediate layers, which raises import and export cost ([cache backends](https://docs.docker.com/build/cache/backends/)).
 
 ## Hard filters
 
@@ -66,7 +66,7 @@ On main, the job also pushes the 3.39 GB image (33 layers; the largest is 1.68 G
   | L3 | `KVM_RUN` probe inside the guest | Image job's smoke test |
 
   The image job asserts `nested=Y` on the runner, then executes `KVM_RUN` inside the guest.
-  - GitHub's standard hosted runners demonstrably pass this ([run 36142279729](https://github.com/leo91000/leo-agent-manager/actions/runs/36142279729), [NESTED-KVM-RESEARCH.md](NESTED-KVM-RESEARCH.md)).
+  - GitHub's standard hosted runners demonstrably pass this ([run 36142279729](https://github.com/leo91000/cairn/actions/runs/36142279729), [NESTED-KVM-RESEARCH.md](NESTED-KVM-RESEARCH.md)).
   - On bare metal the same work is only L1/L2. Linux enables `nested` by default since 4.20 ([kernel guide](https://www.kernel.org/doc/html/latest/virt/kvm/x86/running-nested-guests.html)).
   - **No VM-based vendor documents L3.** AWS describes only "your EC2 instance running a hypervisor (L1), and one or more virtual machines created within that instance (L2)" ([AWS guide](https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/amazon-ec2-nested-virtualization.html)).
 - **Android emulators need only `/dev/kvm` on the runner (L1).**
@@ -131,7 +131,7 @@ On main, the job also pushes the 3.39 GB image (33 layers; the largest is 1.68 G
 
 These changes would also lower the free-runner floor. The quality path needs a persistent `target/` too: actions/cache restore alone takes 30–150 s today.
 
-**Measured since, in PR #74 ([run 37241143537](https://github.com/leo91000/leo-agent-manager/actions/runs/37241143537)):**
+**Measured since, in PR #74 ([run 37241143537](https://github.com/leo91000/cairn/actions/runs/37241143537)):**
 - Change 3 is implemented. The build job takes 2m04s, and the build-plus-browser path takes 7.9 min.
 - 16 codegen units alone cut the 238 s compile only to 222 s on the 4-vCPU runner, so the change was reverted. Change 1 therefore depends on disabling LTO or on faster cores, which is still unmeasured.
 - Same-repository PR images are now published so a release can reuse them. That adds about 40 s of SBOM generation and 110 s of export and push to the PR image job, which a persistent local cache would not remove.
@@ -168,11 +168,11 @@ These changes would also lower the free-runner floor. The quality path needs a p
 
 ```sh
 for wf in ci.yaml android.yaml; do
-  gh api --paginate "repos/leo91000/leo-agent-manager/actions/workflows/$wf/runs?created=>=2026-09-20&per_page=100" \
+  gh api --paginate "repos/leo91000/cairn/actions/workflows/$wf/runs?created=>=2026-09-20&per_page=100" \
     --jq '.workflow_runs[] | [.id, .event, .head_branch, .conclusion, .created_at] | @tsv'
 done > runs.tsv
 cut -f1 runs.tsv | xargs -P 8 -I{} sh -c \
-  'gh api --paginate "repos/leo91000/leo-agent-manager/actions/runs/{}/jobs?filter=all&per_page=100" \
+  'gh api --paginate "repos/leo91000/cairn/actions/runs/{}/jobs?filter=all&per_page=100" \
      --jq ".jobs[] | {name, conclusion, started_at, completed_at}" > jobs-{}.json'
 # Sum ceil((completed_at - started_at) / 60) per job name, skipping skipped jobs; scale by 30 / window days.
 node scripts/ci-timings.mjs 37221466077 37138675072   # per-step durations of the runs analysed above

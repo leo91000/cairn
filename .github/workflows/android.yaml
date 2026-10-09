@@ -252,7 +252,7 @@ jobs:
           node --input-type=module <<'JS'
           import { execFileSync } from 'node:child_process';
           import { androidVersion } from './scripts/android-release.mjs';
-          const releases = JSON.parse(execFileSync('gh', ['api', 'repos/leo91000/leo-agent-manager/releases?per_page=100']));
+          const releases = JSON.parse(execFileSync('gh', ['api', 'repos/leo91000/cairn/releases?per_page=100']));
           const code = androidVersion(process.env.RELEASE_TAG).versionCode;
           for (const release of releases.filter(r => !r.draft && !r.prerelease)) {
             if (release.assets.some(a => a.name === 'android-update.json') && androidVersion(release.tag_name).versionCode >= code)

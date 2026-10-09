@@ -3,7 +3,7 @@
 Decision: [ADR-0033](adr/0033-direct-connection-with-relay-fallback.md). This
 document describes the data path, what the Beacon observes, the
 switching rules and the validation plan. Status: installation peer and control plane delivered; web route selection is delivered by #103; Android route selection is delivered by #104 (parent issue
-[#98](https://github.com/leo91000/leo-agent-manager/issues/98)); the existing relay ([INSTALLATION-RELAY.md](INSTALLATION-RELAY.md))
+[#98](https://github.com/leo91000/cairn/issues/98)); the existing relay ([INSTALLATION-RELAY.md](INSTALLATION-RELAY.md))
 serves the initial screen and remains the fallback.
 
 ## Data path
