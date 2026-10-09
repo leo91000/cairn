@@ -505,16 +505,24 @@ After review and #105 qualification, before the first approved release:
 - Resend: verify `cairn.build`, authorize the new sender `Cairn <cairn@cairn.build>`
   and put its sending key in `CAIRN_BEACON_EMAIL_KEY`. The email wordmark is served
   by Beacon at `/brand/cairn-wordmark.png`.
-- OAuth: rename the displayed product Cairn and configure the Google/GitHub
-  homepage, origins and callbacks in step 4. Preserve the separation between
-  account sign-in and coding-agent repository credentials.
-- Android/Firebase: register a **new** app `build.cairn.app`, reinstall the app,
-  configure the four `CAIRN_ANDROID_FIREBASE_*` public workflow variables and
-  repository `CAIRN_BEACON_ORIGIN`; register the approved signing certificate in
-  Firebase/Google and `CAIRN_BEACON_ANDROID_CERTIFICATES` for `assetlinks.json`.
-  Prepare the signing key with alias `cairn-android` (the prior key must be
-  re-aliased or a new key provisioned; changing an environment variable does not
-  change a keystore alias).
+- OAuth: done on 2026-10-09, except the secrets. GitHub OAuth App **Cairn**
+  (client ID `Ov23li402ZCgzExlWmny`) and Google project `cairn-e2bea` with the web
+  client `514056782905-samtv7l6kskpgphh0vt84cne52obnprg.apps.googleusercontent.com`
+  (origin and callback above) plus an Android client for `build.cairn.app` use the
+  values in step 4. At cutover, generate each client secret and set it only in
+  Coolify. The Google consent screen stays in **Testing** (test users only) until
+  Cairn publishes a privacy policy, which Google requires before publishing.
+- Android/Firebase: done on 2026-10-09. Firebase project `cairn-e2bea` has the
+  Android app `build.cairn.app`; the four `CAIRN_ANDROID_FIREBASE_*` repository
+  variables and repository `CAIRN_BEACON_ORIGIN=https://cairn.build` are set.
+  Releases keep signing with the existing release key (a single-key keystore, so
+  no alias is configured). Its certificate fingerprints are
+  SHA-256 `71:41:88:30:35:FC:1E:00:FA:DD:81:7F:17:D9:0A:37:3B:0D:20:B5:30:D9:D3:B7:EE:36:FA:3A:C4:CA:6C:E4`
+  (for `CAIRN_BEACON_ANDROID_CERTIFICATES`) and
+  SHA-1 `5D:C0:DF:50:55:72:24:D0:DE:36:1A:38:81:2A:62:9F:37:72:E1:BF` (registered on
+  the Google Android OAuth client). Reinstall the app: the package changed. At
+  cutover, create the FCM service account key for `cairn-e2bea` and set it as
+  `CAIRN_BEACON_FCM_SERVICE_ACCOUNT_JSON` in Coolify only.
 - GitHub repository: done on 2026-10-09 with Léo's approval. The repository is
   now `leo91000/cairn` and references were updated; GitHub redirects old links.
   The image paths already use Cairn and remain independent of the repository
