@@ -4,6 +4,7 @@
 //! runner; a remote node's connector forwards it over the node's session.
 use crate::{
     error::{Error, Result},
+    nodes::executor::Session,
     service::Service,
     skills::private_dir,
 };
@@ -69,6 +70,7 @@ async fn bind(path: &Path) -> Result<UnixListener> {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(error) => return Err(error.into()),
     }
+
     let listener = UnixListener::bind(path)?;
     tokio::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).await?;
     Ok(listener)
@@ -78,6 +80,7 @@ async fn bind(path: &Path) -> Result<UnixListener> {
 pub async fn serve(s: &Arc<Service>, home: &Path, run: &str) -> Result<Channel> {
     let path = home.join(crate::microvm::mcp::SOCKET);
     let listener = bind(&path).await?;
+
     let stop = CancellationToken::new();
     let app = Router::new()
         .fallback(answer)
@@ -112,6 +115,7 @@ async fn answer(State((s, run)): State<(Arc<Service>, String)>, request: Request
 pub(crate) async fn relayed(s: &Arc<Service>, run: &str, forwarded: &Value) -> Result<Response> {
     let invalid = || Error::bad("Invalid MCP request.");
     let forwarded = Forwarded::deserialize(forwarded).map_err(|_| invalid())?;
+
     let mut request = Request::builder()
         .method(forwarded.method.as_str())
         .uri(forwarded.path.as_str());
@@ -123,35 +127,16 @@ pub(crate) async fn relayed(s: &Arc<Service>, run: &str, forwarded: &Value) -> R
     let request = request
         .body(Body::from(forwarded.body))
         .map_err(|_| invalid())?;
-    crate::mcp_server::run_scoped(s, run, request).await
-}
 
-/// The node connection an attempt's channel forwards through.
-struct Session {
-    client: reqwest::Client,
-    master: url::Url,
-    token: String,
-    attempt: String,
+    crate::mcp_server::run_scoped(s, run, request).await
 }
 
 /// The node side: forwards the attempt's MCP requests to the manager over the
 /// node's authenticated session until `stop`. No other network path is opened.
-pub async fn forward(
-    path: PathBuf,
-    client: reqwest::Client,
-    master: url::Url,
-    token: String,
-    attempt: String,
-    stop: CancellationToken,
-) -> Result<()> {
+pub async fn forward(path: PathBuf, session: Session, stop: CancellationToken) -> Result<()> {
     let listener = bind(&path).await?;
-    let session = Arc::new(Session {
-        client,
-        master,
-        token,
-        attempt,
-    });
-    let app = Router::new().fallback(send).with_state(session);
+    let app = Router::new().fallback(send).with_state(Arc::new(session));
+
     let result = axum::serve(listener, app)
         .with_graceful_shutdown(stop.cancelled_owned())
         .await;
@@ -195,7 +180,8 @@ async fn send_request(session: &Session, request: Request) -> Result<Response> {
         .await
         .map_err(|_| Error::unavailable("Workspace connection interrupted."))?;
 
-    // The manager's answer is the MCP response, rejections included.
+    // The manager's answer is the MCP response, rejections included. Run-scoped
+    // MCP is stateless and answers with complete JSON: no stream or session.
     let mut answer = Response::builder().status(response.status().as_u16());
     for name in RESPONSE_HEADERS {
         if let Some(value) = response.headers().get(name) {

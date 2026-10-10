@@ -20,7 +20,7 @@ use std::{
 use tokio::sync::Mutex;
 
 const NOT_FOUND: &str = "MCP connection not found.";
-const RUN_TOKEN_ENV: &str = "CAIRN_MCP_RUN_TOKEN";
+pub(crate) const RUN_TOKEN_ENV: &str = "CAIRN_MCP_RUN_TOKEN";
 
 /// Environment variables a command server may not override.
 const RESERVED_ENV: [&str; 6] = [

@@ -23,10 +23,10 @@ Dans une VM, l’agent joint le MCP de son exécution à `http://127.0.0.1:5202`
 - Sur l’installation, le manager sert ce socket pendant la tentative. Il n’expose
   que `/mcp-workspace` et `/mcp-gateway/{id}`, et refuse un jeton d’une autre
   exécution.
-- Sur un node distant, son connecteur sert ce socket. Il transmet chaque requête
+- Sur une node distante, son connecteur sert ce socket. Il transmet chaque requête
   MCP au manager par sa session authentifiée existante
   (`/internal/node-workspace/{attempt}/mcp`). Le manager vérifie que la tentative
-  appartient à ce node et que le jeton appartient à son exécution.
+  appartient à cette node et que le jeton appartient à son exécution.
 
 Les jetons restent liés à l’exécution et vérifiés par le manager. Le pare-feu
 des VM est inchangé, aucun port n’est publié, et le manager n’est pas exposé
@@ -35,7 +35,7 @@ hors de son réseau privé.
 ## Options écartées
 
 - **Ouvrir le pare-feu et le DNS vers l’origine du manager** : la VM aurait
-  joint le réseau privé de l’installation, et un node distant n’a pas de route
+  joint le réseau privé de l’installation, et une node distante n’a pas de route
   vers ce réseau.
 - **Relayer au niveau TCP vers `PUBLIC_URL`** : il faut alors un chemin distinct
   pour les nodes distants, et le contrôleur dépend d’une origine résolue.

@@ -440,7 +440,9 @@ impl Execution<'_> {
             None => None,
         };
         // A VM reaches its run-scoped MCP only through this channel.
-        let granted = workspace.mcp["env"].get("CAIRN_MCP_RUN_TOKEN").is_some();
+        let granted = workspace.mcp["env"]
+            .get(crate::mcps::RUN_TOKEN_ENV)
+            .is_some();
         let mcp_channel = if workspace.isolated() && granted {
             let home = self.directory.join("home");
             Some(crate::mcps::channel::serve(s, &home, &self.id).await?)
