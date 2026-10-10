@@ -200,9 +200,6 @@ impl Endpoint {
             let resends_final_flight = is_completed
                 && conn.handshake_rx.is_some()
                 && conn.current_flight.is_last_send_flight();
-            if is_completed && !resends_final_flight {
-                conn.handshake_rx = None;
-            }
             if !is_completed || resends_final_flight {
                 conn.handshake(now)?;
                 // Drain any queued future-epoch packets (e.g. Finished that arrived
@@ -212,6 +209,8 @@ impl Endpoint {
                 if is_handshake && !conn.is_handshake_completed() {
                     conn.handshake(now)?;
                 }
+            } else {
+                conn.handshake_rx = None;
             }
             if !is_handshake_completed_before && conn.is_handshake_completed() {
                 messages.push(EndpointEvent::HandshakeComplete)

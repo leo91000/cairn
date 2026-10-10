@@ -384,8 +384,8 @@ profile. A relayed message is accepted only when the browser diagnostic confirms
 Unknown fallbacks still fail. Three independent Rust negotiations still require
 at least one direct response; opening-timeout fallback remains the only accepted
 Rust relay reason. Other scenarios retain their original authorization release
-right after bootstrap, observer windows and route expectations. All anonymous-access, identity, revocation and security
-checks remain in place.
+right after bootstrap, observer windows and route expectations. All
+anonymous-access, identity, revocation and security checks remain in place.
 
 No heartbeat delay changes: it is still sent every 10 s with 5 s for its response
 after transmission. A metadata-only `cairn-direct-heartbeat-timeout` event records

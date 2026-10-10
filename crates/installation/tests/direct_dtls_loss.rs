@@ -389,6 +389,7 @@ fn handshake_records_after_completion_keep_the_session_open() -> TestResult {
         if let Err(error) = result {
             panic!("the client keeps its session after a stray handshake record: {error:?}");
         }
+
         transfer(
             &mut association.client,
             &mut association.server,
@@ -413,10 +414,9 @@ fn handshake_records_after_completion_keep_the_session_open() -> TestResult {
             now,
         );
 
-        assert!(
-            result.is_ok(),
-            "the client keeps its session after the server's answer: {result:?}"
-        );
+        if let Err(error) = result {
+            panic!("the client keeps its session after the server's answer: {error:?}");
+        }
     }
 
     assert_application_data_flows(&mut association)
@@ -467,12 +467,15 @@ fn completed_server_resends_final_flight_only_for_a_repeated_finished() -> TestR
         "the server completes on the client's Finished"
     );
 
-    // Lose the server's final flight.
-    let mut final_flight_datagrams = 0;
+    // Lose the server's final flight; it is delivered late below.
+    let mut late_final_flight = Vec::new();
 
-    while association.server.poll_transmit().is_some() {
-        final_flight_datagrams += 1;
+    while let Some(packet) = association.server.poll_transmit() {
+        late_final_flight.push(packet);
     }
+
+    let final_flight_datagrams = late_final_flight.len();
+
     assert!(
         final_flight_datagrams > 0,
         "the final flight must actually be lost"
@@ -559,6 +562,21 @@ fn completed_server_resends_final_flight_only_for_a_repeated_finished() -> TestR
     assert!(
         client_completed,
         "the resent final flight completes the client"
+    );
+
+    // The receiver of the final flight ignores a repeated Finished: it neither
+    // re-verifies nor answers.
+    for packet in late_final_flight {
+        association.client.read(
+            deadline,
+            association.server_addr,
+            packet.transport.ecn,
+            packet.message,
+        )?;
+    }
+    assert!(
+        association.client.poll_transmit().is_none(),
+        "the completed client does not answer a repeated final flight"
     );
 
     assert_application_data_flows(&mut association)

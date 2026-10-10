@@ -45,7 +45,13 @@ diff -rq rtc-dtls-0.21.0 vendor/rtc-dtls
   duplicate completion and transcript re-verification. Replayed records are discarded
   before they can trigger a retransmission.
 
-Both behaviors are required by the WAITING/FINISHED states in
+Retransmissions of the final flight are bounded by the peer: each needs a fresh,
+authenticated record of its Finished, and the peer stops repeating its flight after
+its own `maximum_retransmit_number`. The repeat must match the received Finished
+byte for byte, alone and unfragmented in its record, as rtc-dtls and browsers send
+this 12-byte message. A differently packed repeat is ignored rather than trusted.
+
+These behaviors are required by the WAITING/FINISHED states in
 [RFC 6347 section 4.2.4](https://www.rfc-editor.org/rfc/rfc6347.html#section-4.2.4).
 No dependency version, crypto configuration, replay detector, certificate/grant
 verification, revocation rule, network-loss profile or application deadline is
