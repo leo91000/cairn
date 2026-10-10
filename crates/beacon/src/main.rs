@@ -426,6 +426,9 @@ async fn run() -> Result<(), String> {
 
 #[tokio::main]
 async fn main() {
+    // The workspace compiles both rustls providers: choose one before any TLS client exists.
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+
     tracing_subscriber::fmt()
         .with_max_level(tracing::Level::INFO)
         .init();
