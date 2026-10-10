@@ -32,6 +32,14 @@ its local runner, which then reads conversation disks from exactly this origin.
 Every other controller keeps the HTTPS rule: remote nodes enroll, connect and
 read disks over HTTPS, HTTP being accepted only on loopback for tests.
 
+Agents never use this origin: their VMs cannot resolve or reach it. Inside a VM,
+`cairn_workspace` and MCP connections use `http://127.0.0.1:5202`. The guest
+relays it over vsock to the runner, which forwards it to a private socket in the
+run's directory, served by the manager during the attempt. A remote node's
+connector serves that socket instead and forwards each request over its
+authenticated manager connection. The VM firewall, the published ports and the
+manager's network are unchanged. See [ADR-0035](adr/0035-vm-local-mcp-channel.md).
+
 Reruns retain the chosen immutable Cairn image, identity, Garage keys, storage
 settings and persistent data. Concurrent installers are refused. An incomplete or unsafe identity stops the
 rerun with recovery instructions and is retained rather than overwritten. The one-use

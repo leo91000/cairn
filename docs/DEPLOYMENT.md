@@ -64,8 +64,10 @@ conversation can be read and modified, and access returns after a manager
 restart. Direct `/api/session`, `/api/setup`, `/api/login`, static pages, local
 OAuth, local `/mcp` and public artifact requests must be refused. Remove obsolete
 setup secrets and the installation's public browser domain/proxy. `PUBLIC_URL`
-is now an optional **internal manager origin** for execution nodes and run-scoped
-MCP, defaulting to loopback; it is not a browser address or a relay prerequisite.
+is now an optional **internal manager origin** for execution nodes, defaulting to
+loopback; it is not a browser address or a relay prerequisite. Agents in VMs
+reach run-scoped MCP through their [VM-local channel](MICROVMS.md#vm-local-mcp-channel),
+not through this origin.
 For additional nodes use a reachable private LAN/VPN origin and keep the node
 channel available. Agent execution and node traffic continue during an beacon
 service outage, while browser access is unavailable.
