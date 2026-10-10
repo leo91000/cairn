@@ -88,6 +88,25 @@ async fn installation_runner_reads_disks_from_the_private_manager_origin_only() 
     let enrollment = connector::enroll(INSTALLATION_ORIGIN, &node)
         .await
         .unwrap_err();
-    assert!(enrollment.message.contains("HTTPS"), "{}", enrollment.message);
+    assert!(
+        enrollment.message.contains("HTTPS"),
+        "{}",
+        enrollment.message
+    );
     assert!(!node.join("identity.json").exists());
+
+    // An identity saved with that origin cannot connect a node either, so no
+    // node session can hand it to a remote runner.
+    std::fs::create_dir(&node).unwrap();
+    let identity =
+        json!({ "master": INSTALLATION_ORIGIN, "nodeId": id(), "token": "x".repeat(43) });
+    std::fs::write(node.join("identity.json"), identity.to_string()).unwrap();
+    let connection = connector::connect(&node, CancellationToken::new())
+        .await
+        .unwrap_err();
+    assert!(
+        connection.message.contains("HTTPS"),
+        "{}",
+        connection.message
+    );
 }

@@ -37,7 +37,9 @@ impl RemoteSource {
             .ok_or_else(|| crate::error::Error::bad("Missing disk read authorization."))?
             .to_owned();
         Ok(Self {
-            origin: crate::nodes::connector::master(crate::validation::text(context, "master"))?,
+            origin: crate::nodes::connector::disk_master(crate::validation::text(
+                context, "master",
+            ))?,
             credential,
             client: reqwest::Client::builder()
                 .redirect(reqwest::redirect::Policy::none())

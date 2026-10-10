@@ -150,7 +150,7 @@ pub async fn controller(state: &Path, run: &str, value: Value) -> Result<Value> 
     {
         return Ok(ready());
     }
-    let origin = super::connector::master(text(&value, "master"))?;
+    let origin = super::connector::disk_master(text(&value, "master"))?;
     let _replacement = crate::storage::runtime::replacement(directory).await?;
     crate::skills::atomic_write(&directory.join("restore.pending"), b"restoring").await?;
     if directory.join("lazy").exists() {
