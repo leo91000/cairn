@@ -16,11 +16,11 @@ use tokio_util::sync::CancellationToken;
 
 /// The master connection an attempt's node-side work runs under.
 #[derive(Clone)]
-struct Session {
-    client: reqwest::Client,
-    master: url::Url,
-    token: String,
-    attempt: String,
+pub struct Session {
+    pub client: reqwest::Client,
+    pub master: url::Url,
+    pub token: String,
+    pub attempt: String,
 }
 
 impl Session {
@@ -102,6 +102,12 @@ impl Executor {
             stop.clone(),
         );
         tokio::spawn(auth);
+        let mcp = crate::mcps::channel::forward(
+            root.join("home").join(crate::microvm::mcp::SOCKET),
+            session.clone(),
+            stop.clone(),
+        );
+        tokio::spawn(mcp);
         tokio::spawn(refresh_inbox(session, root, stop));
         Ok(())
     }

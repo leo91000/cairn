@@ -1115,6 +1115,166 @@ async fn node_slots_exceed_manager_concurrency_without_overpreparing_the_queue()
     server.abort();
 }
 
+/// The local VM controller of an installation, which calls `cairn_workspace`
+/// while an attempt runs, as its guest would: through the run's MCP channel.
+struct WorkspaceProbe {
+    controller: Arc<Controller>,
+    other_run_token: String,
+    calls: tokio::sync::Mutex<Vec<Value>>,
+}
+
+impl WorkspaceProbe {
+    async fn call(&self, plan: &Value) -> Value {
+        let home = plan["imports"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|import| import["target"] == "/home/node")
+            .map(|import| PathBuf::from(text(import, "source")))
+            .unwrap();
+        // The URL Codex receives: `-c mcp_servers.cairn_workspace={…,"url"="…"}`.
+        let url = plan["args"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(Value::as_str)
+            .filter(|arg| arg.starts_with("mcp_servers.cairn_workspace="))
+            .find_map(|arg| arg.split("\"url\"=\"").nth(1))
+            .and_then(|rest| rest.split('"').next())
+            .unwrap()
+            .to_owned();
+        let token = text(&plan["mcpEnv"], "CAIRN_MCP_RUN_TOKEN");
+        let client = reqwest::Client::builder()
+            .unix_socket(home.join("cairn-mcp.sock"))
+            .timeout(Duration::from_secs(10))
+            .build()
+            .unwrap();
+        let request = |url: &str, token: &str| {
+            let body = json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "tools/call",
+                "params": { "name": "list_nodes", "arguments": {} },
+            });
+            client
+                .post(url)
+                .bearer_auth(token)
+                .header("mcp-protocol-version", "2025-11-25")
+                .json(&body)
+                .send()
+        };
+        let Ok(response) = request(&url, token).await else {
+            return json!({ "url": url, "reachable": false });
+        };
+        let status = response.status().as_u16();
+        let reply: Value = response.json().await.unwrap_or_default();
+        let other_run = request(&url, &self.other_run_token).await.unwrap().status();
+        let management = request("http://127.0.0.1:5202/api/mcp", token)
+            .await
+            .unwrap()
+            .status();
+        json!({
+            "url": url,
+            "reachable": true,
+            "status": status,
+            "reply": reply,
+            "otherRun": other_run.as_u16(),
+            "management": management.as_u16(),
+        })
+    }
+}
+
+async fn serve_workspace_probe(
+    State(state): State<Arc<WorkspaceProbe>>,
+    request: Request,
+) -> Response {
+    let path = request.uri().path().to_owned();
+    if path.starts_with("/runs/") && path.ends_with("/wait") {
+        let attempt = path.split('/').nth(2).unwrap();
+        let plan = state
+            .controller
+            .data
+            .join("runner-plans")
+            .join(format!("{attempt}.json"));
+        let plan: Value = serde_json::from_slice(&tokio::fs::read(plan).await.unwrap()).unwrap();
+        let call = state.call(&plan).await;
+        state.calls.lock().await.push(call);
+    }
+    serve_controller(State(state.controller.clone()), request).await
+}
+
+#[tokio::test]
+async fn vm_agents_call_workspace_tools_through_their_run_channel_without_a_public_url() {
+    let mut fixture = Fixture::new().await;
+    fixture.stop(false).await;
+    let controller = Arc::new(Controller {
+        data: fixture.service.config.data_dir.clone(),
+        plans: tokio::sync::Mutex::new(Vec::new()),
+        failures: 0,
+        slots: 4,
+        hold: std::sync::atomic::AtomicBool::new(false),
+    });
+    // A token granted to another run of the same installation.
+    let other_run = json!({ "id": id(), "snapshot": { "agent": { "id": MAIN_AGENT_ID } } });
+    let other = fixture
+        .service
+        .mcps
+        .run_configuration(&fixture.service, &other_run)
+        .await
+        .unwrap();
+    let probe = Arc::new(WorkspaceProbe {
+        controller: controller.clone(),
+        other_run_token: text(&other["env"], "CAIRN_MCP_RUN_TOKEN").to_owned(),
+        calls: tokio::sync::Mutex::new(Vec::new()),
+    });
+    let app = Router::new()
+        .fallback(any(serve_workspace_probe))
+        .with_state(probe.clone());
+    let (listener, address) = common::bind().await;
+    // The installer's private manager origin: unreachable from inside a VM.
+    common::reconfigure(&mut fixture.service, |config| {
+        config.public_url = "http://manager:4310".into();
+        config.runner_url = format!("http://{address}");
+    })
+    .await;
+    let server = common::serve(listener, app);
+    let home = fixture.service.config.home.join(".codex");
+    tokio::fs::create_dir_all(&home).await.unwrap();
+    tokio::fs::write(home.join("auth.json"), "{}")
+        .await
+        .unwrap();
+    tokio::fs::write(
+        fixture.service.config.data_dir.join("storage-s3.json"),
+        json!({ "bucket": "fixture-storage", "endpoint": "https://127.0.0.1:1" }).to_string(),
+    )
+    .await
+    .unwrap();
+    cairn_installation::nodes::refresh_local(&fixture.service)
+        .await
+        .unwrap();
+    let run = fixture.enqueue("Open a project").await;
+    fixture.start().await;
+
+    let finished = fixture.until_finished(text(&run, "id")).await;
+
+    assert_eq!(finished["status"], RunStatus::Succeeded, "{finished}");
+    let calls = probe.calls.lock().await.clone();
+    assert_eq!(calls.len(), 1, "{calls:?}");
+    let call = &calls[0];
+    assert_eq!(call["url"], "http://127.0.0.1:5202/mcp-workspace", "{call}");
+    assert_eq!(call["reachable"], true, "{call}");
+    assert_eq!(call["status"], 200, "{call}");
+    assert!(call["reply"]["error"].is_null(), "{call}");
+    assert_ne!(call["reply"]["result"]["isError"], true, "{call}");
+    assert_eq!(call["otherRun"], 401, "{call}");
+    assert_eq!(call["management"], 404, "{call}");
+    // Disk reads still use the private origin; the agent never does.
+    let args = controller.plans.lock().await[0]["args"].to_string();
+    assert!(!args.contains("manager:4310"), "{args}");
+    fixture.stop(false).await;
+    server.abort();
+}
+
 #[tokio::test]
 async fn refused_local_budget_keeps_presence_and_exposes_the_reason() {
     let mut fixture = Fixture::new().await;

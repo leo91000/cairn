@@ -14,8 +14,8 @@ use cairn_installation::{
     config::{Config, MAIN_AGENT_ID, id, now},
     microvm::wire,
     nodes::{
-        LOCAL_NODE_ID, alerts, checkpoint, disk_grants, files, moves, placement, publication,
-        relay, restore, shared_blocks, snapshots, workspace,
+        LOCAL_NODE_ID, alerts, checkpoint, disk_grants, executor, files, moves, placement,
+        publication, relay, restore, shared_blocks, snapshots, workspace,
     },
     object_storage::Storage,
     recovery,
@@ -1936,6 +1936,201 @@ async fn native_auth_relays_refresh_both_protocols_and_stop_after_grant_revocati
         relay.await.unwrap().unwrap();
         server.abort();
     }
+}
+
+/// Sends a JSON-RPC request through a run's MCP channel socket, as the VM
+/// controller relays its agent's calls to `http://127.0.0.1:5202`.
+async fn mcp_through(
+    socket: &Path,
+    path: &str,
+    bearer: &str,
+    method: &str,
+    params: Value,
+) -> (u16, Value) {
+    let client = reqwest::Client::builder()
+        .unix_socket(socket)
+        .timeout(Duration::from_secs(10))
+        .build()
+        .unwrap();
+    let body = json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": method,
+        "params": params,
+    });
+    let response = client
+        .post(format!("http://127.0.0.1:5202{path}"))
+        .bearer_auth(bearer)
+        .header("mcp-protocol-version", "2025-11-25")
+        .json(&body)
+        .send()
+        .await
+        .unwrap();
+    let status = response.status().as_u16();
+    (status, response.json().await.unwrap_or(Value::Null))
+}
+
+#[tokio::test]
+async fn remote_vm_agents_reach_workspace_tools_only_through_their_node_session() {
+    let (listener, address) = common::bind().await;
+    // An installation with its local runner and a node enrolled at a private origin.
+    let owner = Owner::with_runner(address.to_string(), "http://runner:4311".into()).await;
+    let (node, attempt, run, token) = (id(), id(), id(), auth::token());
+    owner.register_node(&node, &token).await;
+    owner.grant_nodes(MAIN_AGENT_ID, json!([node])).await;
+    owner
+        .put(
+            "node-attempts",
+            json!({ "id": attempt, "runId": run, "nodeId": node, "released": false }),
+        )
+        .await;
+    let snapshot = json!({ "agent": { "id": MAIN_AGENT_ID, "access": { "nodes": [node] } } });
+    let mut record = run_record(&run, RunStatus::Running);
+    record["snapshot"] = snapshot.clone();
+    owner.add_run(&record).await;
+    owner
+        .set_checkpoint(&run, json!({ "nodeId": node, "runnerId": attempt }))
+        .await;
+    let plans = owner.service.config.data_dir.join("runner-plans");
+    std::fs::create_dir_all(&plans).unwrap();
+    std::fs::write(
+        plans.join(format!("{attempt}.json")),
+        json!({ "runId": run }).to_string(),
+    )
+    .unwrap();
+    // An HTTP MCP connection the agent reaches through the manager's gateway.
+    let (upstream, upstream_address) = common::bind().await;
+    let answer = |Json(body): Json<Value>| async move {
+        let result = match body["method"].as_str() {
+            Some("server/discover") => json!({
+                "supportedVersions": [cairn_installation::mcp_client::MODERN],
+                "capabilities": { "tools": {} },
+            }),
+            _ => json!({ "content": [{ "type": "text", "text": "connection-ok" }] }),
+        };
+        Json(json!({ "jsonrpc": "2.0", "id": body["id"], "result": result }))
+    };
+    let upstream = common::serve(
+        upstream,
+        Router::new().route("/mcp", axum::routing::post(answer)),
+    );
+    let connection = json!({
+        "name": "Upstream",
+        "url": format!("http://{upstream_address}/mcp"),
+        "auth": "none",
+        "allowPrivateNetwork": true,
+    });
+    let connection = owner
+        .service
+        .mcps
+        .save(&owner.service, connection, None)
+        .await
+        .unwrap();
+    let connection = connection["id"].as_str().unwrap();
+    let configuration = owner
+        .service
+        .mcps
+        .run_configuration(&owner.service, &record)
+        .await
+        .unwrap();
+    let run_token = configuration["env"]["CAIRN_MCP_RUN_TOKEN"]
+        .as_str()
+        .unwrap();
+    let gateway = format!("cairn_{}", connection.replace('-', "_"));
+    // Claude Code and the resident Codex thread receive the VM-local origin.
+    for (name, path) in [
+        ("cairn_workspace", "/mcp-workspace".to_owned()),
+        (gateway.as_str(), format!("/mcp-gateway/{connection}")),
+    ] {
+        let url = format!("http://127.0.0.1:5202{path}");
+        assert_eq!(configuration["claudeMcps"]["mcpServers"][name]["url"], url);
+        assert_eq!(configuration["codexConfig"][name]["url"], url);
+    }
+    // Another run in progress on the same installation.
+    let mut other_run = run_record(&id(), RunStatus::Running);
+    other_run["taskId"] = "other".into();
+    other_run["snapshot"] = snapshot;
+    owner.add_run(&other_run).await;
+    let other = owner
+        .service
+        .mcps
+        .run_configuration(&owner.service, &other_run)
+        .await
+        .unwrap();
+    let other_token = other["env"]["CAIRN_MCP_RUN_TOKEN"].as_str().unwrap();
+    let server = owner.serve(listener);
+    let stop = CancellationToken::new();
+    let socket = owner.root().join("node/runs/home").join("cairn-mcp.sock");
+    let session = executor::Session {
+        client: reqwest::Client::new(),
+        master: format!("http://{address}").parse().unwrap(),
+        token,
+        attempt,
+    };
+    let channel = tokio::spawn(cairn_installation::mcps::channel::forward(
+        socket.clone(),
+        session,
+        stop.clone(),
+    ));
+    wait_for_path(&socket).await;
+
+    let (status, listed) = mcp_through(
+        &socket,
+        "/mcp-workspace",
+        run_token,
+        "tools/list",
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, 200, "{listed}");
+    assert_eq!(
+        listed["result"]["tools"][0]["name"], "open_project",
+        "{listed}"
+    );
+    let call = json!({ "name": "list_nodes", "arguments": {} });
+    let (status, called) = mcp_through(
+        &socket,
+        "/mcp-workspace",
+        run_token,
+        "tools/call",
+        call.clone(),
+    )
+    .await;
+    assert_eq!(status, 200, "{called}");
+    assert!(called["error"].is_null(), "{called}");
+    assert_ne!(called["result"]["isError"], true, "{called}");
+    let echo = json!({ "name": "echo", "arguments": {} });
+    let gateway = format!("/mcp-gateway/{connection}");
+    let (status, proxied) = mcp_through(&socket, &gateway, run_token, "tools/call", echo).await;
+    assert_eq!(status, 200, "{proxied}");
+    assert_eq!(
+        proxied["result"]["content"][0]["text"], "connection-ok",
+        "{proxied}"
+    );
+
+    // The node relays only this attempt's run-scoped MCP.
+    let (status, _) = mcp_through(
+        &socket,
+        "/mcp-workspace",
+        other_token,
+        "tools/list",
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, 401);
+    for path in ["/api/mcp", "/internal/nodes/heartbeat", "/api/agents"] {
+        let (status, _) = mcp_through(&socket, path, run_token, "tools/list", json!({})).await;
+        assert_eq!(status, 404, "{path}");
+    }
+    owner.grant_nodes(MAIN_AGENT_ID, json!([])).await;
+    let (status, _) = mcp_through(&socket, "/mcp-workspace", run_token, "tools/call", call).await;
+    assert_eq!(status, 403);
+
+    stop.cancel();
+    channel.await.unwrap().unwrap();
+    assert!(!socket.exists());
+    server.abort();
+    upstream.abort();
 }
 
 #[tokio::test]

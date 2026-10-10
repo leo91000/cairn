@@ -49,6 +49,7 @@ pub async fn serve(stop: CancellationToken) -> Result<()> {
     let auth = UnixListener::bind(AUTH_SOCKET)?;
     std::os::unix::fs::chown(AUTH_SOCKET, Some(AGENT_ID), Some(AGENT_ID))?;
     tokio::spawn(relay_auth(auth, stop.clone()));
+    tokio::spawn(super::mcp::serve_guest(stop.clone()));
     let running = Arc::new(Mutex::new(()));
     let codex = Arc::new(codex::Codex::default());
     // Native exports can arrive after an attempt detaches its output lease.

@@ -1,3 +1,4 @@
+pub mod channel;
 pub mod record;
 
 use crate::{
@@ -19,7 +20,7 @@ use std::{
 use tokio::sync::Mutex;
 
 const NOT_FOUND: &str = "MCP connection not found.";
-const RUN_TOKEN_ENV: &str = "CAIRN_MCP_RUN_TOKEN";
+pub(crate) const RUN_TOKEN_ENV: &str = "CAIRN_MCP_RUN_TOKEN";
 
 /// Environment variables a command server may not override.
 const RESERVED_ENV: [&str; 6] = [
@@ -56,6 +57,24 @@ pub async fn callback_url(s: &Service) -> Result<String> {
 
 pub(crate) fn grant_key(bearer: &str) -> String {
     format!("mcp-grant:{}", hex_digest(bearer))
+}
+
+/// The run a bearer was granted to, if its grant still exists.
+pub(crate) async fn granted_run(s: &Service, bearer: &str) -> Result<Option<String>> {
+    let Some(grant) = s.store.kv(&grant_key(bearer)).await? else {
+        return Ok(None);
+    };
+    Ok(Some(RunGrant::deserialize(&grant)?.run_id))
+}
+
+/// Where the agent of `run` reaches run-scoped MCP. Inside a VM, only its
+/// relayed loopback origin is reachable; a host execution uses the manager's.
+fn agent_origin<'a>(s: &'a Service, run: &Value) -> &'a str {
+    if crate::execution::uses_vm(run, &s.config) {
+        crate::microvm::mcp::ORIGIN
+    } else {
+        &s.config.public_url
+    }
 }
 
 /// Drops OAuth authorizations started for this connection.
@@ -267,12 +286,12 @@ impl RunConfiguration {
     /// HTTP servers are reached through this server's gateway with the run token.
     fn add_http(
         &mut self,
-        s: &Service,
+        origin: &str,
         server: &McpServer,
         tools: Option<Vec<String>>,
     ) -> Result<()> {
         let name = server_name(server);
-        let url = format!("{}/mcp-gateway/{}", s.config.public_url, server.id);
+        let url = format!("{origin}/mcp-gateway/{}", server.id);
         let claude = ClaudeServer::Http {
             url: url.clone(),
             headers: self.bearer_headers(),
@@ -319,8 +338,8 @@ impl RunConfiguration {
         self.add_codex(&name, &codex)
     }
 
-    fn add_workspace(&mut self, s: &Service) -> Result<()> {
-        let url = format!("{}/mcp-workspace", s.config.public_url);
+    fn add_workspace(&mut self, origin: &str) -> Result<()> {
+        let url = format!("{origin}/mcp-workspace");
         let claude = ClaudeServer::Http {
             url: url.clone(),
             headers: self.bearer_headers(),
@@ -573,6 +592,7 @@ impl Mcps {
         let access = policy(agent);
         let token = token();
         let mut configuration = RunConfiguration::new(token.clone());
+        let origin = agent_origin(s, run);
         let mut servers = BTreeMap::new();
         for item in s.store.list("mcps").await? {
             let server = McpServer::deserialize(&item)?;
@@ -592,14 +612,14 @@ impl Mcps {
                     tools: tools.clone(),
                 };
                 servers.insert(server.id.clone(), scope);
-                configuration.add_http(s, &server, tools)?;
+                configuration.add_http(origin, &server, tools)?;
             } else {
                 configuration.add_stdio(&server, tools, env)?;
             }
         }
         let workspace = !s.config.runner_url.is_empty();
         if workspace {
-            configuration.add_workspace(s)?;
+            configuration.add_workspace(origin)?;
         }
         if workspace || !servers.is_empty() {
             configuration.env.insert(RUN_TOKEN_ENV, token.clone());

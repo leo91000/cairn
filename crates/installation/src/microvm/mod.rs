@@ -5,6 +5,7 @@ pub mod guest;
 pub mod host;
 pub(crate) mod images;
 mod listener;
+pub mod mcp;
 mod network;
 pub mod plan;
 pub mod pool;

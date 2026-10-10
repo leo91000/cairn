@@ -110,7 +110,8 @@ project IDs and loaded paths; it never advertises host paths for unopened projec
 
 Every new VM run receives a built-in `cairn_workspace.open_project` MCP tool, even
 when the agent has no external MCP connections. Its short-lived bearer grant is
-limited to that run and revoked when the run ends. `project_workspaces.rs` checks
+limited to that run and revoked when the run ends. The agent reaches it, and its
+MCP connections, through the [VM-local MCP channel](#vm-local-mcp-channel). `project_workspaces.rs` checks
 the current agent policy and snapshotted project catalog, then prepares a private
 host seed. Selecting a project supplies initial context; restrictions belong to
 the agent's project access policy.
@@ -145,6 +146,26 @@ available. Connected apps and MCP startup remain enabled for actual runs.
 Account IDs, refresh tokens, the runner credential and the host Docker socket are
 not supplied through this relay. Managed authentication files are excluded from
 home imports. GitHub credentials remain scoped according to the agent policy.
+
+### VM-local MCP channel
+
+Run-scoped MCP (`/mcp-workspace` and `/mcp-gateway/{id}`) is configured for the
+agent at `http://127.0.0.1:5202`, for Codex and Claude Code alike. The guest
+supervisor listens on that loopback port from boot and relays each connection
+to vsock port 5202 of the host. During an attempt, the controller relays that
+port to `cairn-mcp.sock` in the run home, and nowhere else. Without an attempt,
+or for a plan without a home, guest connections are closed.
+
+On the installation, the manager serves this socket while the attempt runs. It
+answers only the two run-scoped endpoints, and only for a token granted to that
+run; other paths return 404. On a remote node, the connector serves the socket
+and forwards each request to `/internal/node-workspace/{attempt}/mcp` over its
+authenticated session. The manager checks that the node still owns the attempt,
+then applies the same rules. The manager's origin, its DNS name and the VM
+firewall play no part. A host execution without a VM keeps `PUBLIC_URL`.
+
+A conversation whose disk keeps an image from before this channel has no guest
+listener, and therefore no MCP. See [the decision](adr/0035-vm-local-mcp-channel.md).
 
 The manager remains authoritative for queued messages, answers and attachments.
 Changed inbox contents are transferred while output continues streaming. The guest
@@ -184,9 +205,10 @@ are bounded independently of the guest disk.
 Per-guest firewall rules permit outgoing TCP on all ports to public destinations
 and DNS (UDP 53). SSH works on standard and custom ports; other UDP is blocked.
 They reject private/reserved destinations and access to the controller itself;
-new inbound connections are not forwarded into guests. This allows the public
-manager MCP gateway, public SSH servers and Git over HTTPS or SSH. Additional
-outbound protocols require an explicit network-policy change. Firecracker does not
+new inbound connections are not forwarded into guests. This allows public SSH
+servers and Git over HTTPS or SSH. The manager is never reached over the network:
+run-scoped MCP uses the vsock channel above. Additional outbound protocols require
+an explicit network-policy change. Firecracker does not
 remove the need to patch host kernel, firmware, guest kernel and the VMM; follow
 upstream production guidance.
 
@@ -219,7 +241,8 @@ No task is allowed to silently switch to host execution when VM setup fails.
 Run `pnpm test:backend`, `cargo clippy --workspace --all-targets -- -D warnings`
 and `pnpm check`. The real KVM test runs with `node tests/runner-smoke.mjs IMAGE` on
 the Docker host. It uses synthetic credentials and temporary storage to exercise
-kernel isolation, the authentication relay, live steering, Docker and disk reuse.
+kernel isolation, the authentication relay, a `cairn_workspace` call through the
+MCP channel, live steering, Docker and disk reuse.
 Use `VM_TEST_ROOT=/var/tmp` when `/tmp` is a small memory filesystem.
 
 The September 11 hardware check on the production VPS completed the first probe,

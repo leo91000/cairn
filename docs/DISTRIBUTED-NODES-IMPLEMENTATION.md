@@ -13,8 +13,9 @@ has not been merged, deployed or released.
   tags, per-agent grants including Main, and web/Android management.
 - Outbound controller transport, private workspace staging, project/artifact
   routing (artifact responses preserve the channel’s snapshot `length` in
-  `X-Cairn-Artifact-Size` independently of HTTP framing; no node upgrade is needed), chat/inbox streaming and scoped native-auth relays. Provider account
-  refresh and 1Password access stay under master control.
+  `X-Cairn-Artifact-Size` independently of HTTP framing; no node upgrade is needed), chat/inbox streaming, scoped native-auth relays and the run's MCP channel
+  (`cairn_workspace` and gateway connections), forwarded over the node session.
+  Provider account refresh and 1Password access stay under master control.
 - Atomic slot admission, shared CPU/RAM/disk budgets including retained stale disks,
   resource pressure, preferred/strict placement, bounded capacity waits and
   immediate request failure without ending the conversation.
@@ -80,7 +81,8 @@ The repeatable checks live beside the implementation:
 
 - `pnpm test:backend`: registration, grants, concurrent admission, quotas,
   encrypted block publication, retention, failover fencing, transfer cancellation,
-  lost stop retries, current grants on worker recovery and native-auth refresh.
+  lost stop retries, current grants on worker recovery, native-auth refresh and
+  remote run-scoped MCP.
   The outbound idle-movement test copies an environment between two separate
   controller directories, moves it back without a destination execution history,
   and checks both failed transfer and cancellation during capture.

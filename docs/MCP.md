@@ -44,6 +44,20 @@ Complete OAuth in the browser, then start a new Codex session. Codex CLI 0.153.4
 uses protocol 2025-06-18; the stateless compatibility handler supports this
 handshake without an adapter or server-side transport sessions.
 
+## Agents inside a VM
+
+The tools above are for external clients. An agent running in a VM receives two
+run-scoped endpoints instead: `cairn_workspace` at
+`http://127.0.0.1:5202/mcp-workspace`, and each assigned HTTP connection at
+`http://127.0.0.1:5202/mcp-gateway/{id}`. Codex and Claude Code receive the same
+URLs, with the run's bearer token. This loopback origin is relayed over vsock to
+the run's manager, directly for the local runner and through the node's
+authenticated session for a remote node. It needs no public URL, DNS name or
+firewall exception. The manager accepts only these two endpoints on that channel,
+and only with a token granted to that run; the token expires or is revoked with
+the run. A host execution without a VM uses `PUBLIC_URL`. See
+[VM-local MCP channel](MICROVMS.md#vm-local-mcp-channel).
+
 ## Authorization
 
 The public `/mcp`, OAuth discovery and token endpoints belong to the beacon

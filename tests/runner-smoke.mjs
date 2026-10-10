@@ -9,6 +9,7 @@ import {
   rm,
   writeFile,
 } from 'node:fs/promises'
+import { createServer as createHttpServer } from 'node:http'
 import { createServer } from 'node:net'
 import path from 'node:path'
 import process from 'node:process'
@@ -33,6 +34,11 @@ async function main() {
   let url
   let auth
   let claudeAuth
+  let mcp
+  // Agents reach run-scoped MCP inside their VM, never through the manager origin.
+  const vmMcp = 'http://127.0.0.1:5202'
+  const mcpToken = 'fixture-mcp-run-token'
+  const mcpCalls = []
 
   async function until(operation, timeout = 180000) {
     const deadline = Date.now() + timeout
@@ -164,6 +170,15 @@ if(mode==='cancel'||mode==='crash') {
   }
   await new Promise(()=>{setInterval(()=>{},1000)});
 }
+if(mode==='first'||mode==='resume'){
+  const call=async(path,token)=>fetch(${JSON.stringify(vmMcp)}+path,{method:'POST',headers:{authorization:'Bearer '+token,'content-type':'application/json',accept:'application/json, text/event-stream','mcp-protocol-version':'2025-11-25'},body:JSON.stringify({jsonrpc:'2.0',id:1,method:'tools/call',params:{name:'list_nodes',arguments:{}}}),signal:AbortSignal.timeout(15000)});
+  const response=await call('/mcp-workspace',${JSON.stringify(mcpToken)});
+  assert.equal(response.status,200,'cairn_workspace is reachable from the VM');
+  const reply=await response.json();
+  assert.equal(reply.result.structuredContent.mode,mode,'the run channel answers this attempt');
+  assert.equal((await call('/mcp-workspace','wrong-token')).status,401,'the manager still checks the run token');
+  console.log('mcp.workspace.'+mode);
+}
 if(mode==='recover')assert.equal(fs.readFileSync(root+'/workspace/interrupted','utf8'),'saved before interruption');
 if(mode==='managed-claude') {
   const state=await new Promise((resolve,reject)=>{const socket=net.connect('/run/cairn-auth.sock',()=>socket.write('{}\\n'));let data='';socket.on('data',chunk=>{data+=chunk;if(data.includes('\\n')){socket.end();resolve(JSON.parse(data))}});socket.on('error',reject);});
@@ -179,6 +194,29 @@ console.log('probe.done');
     await new Promise(resolve => auth.listen(path.join(source, 'home/.codex/cairn-auth.sock'), resolve))
     claudeAuth = createServer(socket => socket.once('data', () => socket.end(`${JSON.stringify({ claudeAiOauth: { accessToken: 'fixture-claude-access', expiresAt: Date.now() + 3600000 } })}\n`)))
     await new Promise(resolve => claudeAuth.listen(path.join(source, 'home/.claude/cairn-auth.sock'), resolve))
+    // The manager's run channel, as served during an attempt in the run home.
+    mcp = createHttpServer((request, response) => {
+      let body = ''
+      request.on('data', chunk => body += chunk)
+      request.on('end', () => {
+        const message = JSON.parse(body)
+        mcpCalls.push({
+          method: request.method,
+          path: request.url,
+          authorization: request.headers.authorization,
+          tool: message.params?.name,
+        })
+        if (request.headers.authorization !== `Bearer ${mcpToken}`) {
+          response.writeHead(401, { 'content-type': 'application/json' }).end('{"error":"MCP run access expired or was revoked."}')
+          return
+        }
+
+        const mode = mcpCalls.filter(call => call.authorization === `Bearer ${mcpToken}`).length === 1 ? 'first' : 'resume'
+        const result = { content: [{ type: 'text', text: mode }], structuredContent: { mode } }
+        response.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify({ jsonrpc: '2.0', id: message.id, result }))
+      })
+    })
+    await new Promise(resolve => mcp.listen(path.join(source, 'home/cairn-mcp.sock'), resolve))
     docker('run', '-d', '--name', name, '--user', '0:0', '--read-only', '--cap-drop', 'ALL', ...['SYS_ADMIN', 'NET_ADMIN', 'SYS_CHROOT', 'SETUID', 'SETGID', 'MKNOD', 'CHOWN', 'FOWNER', 'KILL', 'DAC_OVERRIDE'].flatMap(cap => ['--cap-add', cap]), '--security-opt', 'apparmor=unconfined', '--security-opt', 'seccomp=unconfined', '--device', '/dev/kvm', '--device', '/dev/fuse', '--device', '/dev/net/tun', '--sysctl', 'net.ipv4.ip_forward=1', '--sysctl', 'net.ipv6.conf.all.disable_ipv6=1', '--tmpfs', '/run', '--tmpfs', '/tmp', '-v', `${root}/data:/data`, '-v', `${root}/state:/runner-state`, '-p', '127.0.0.1::4311', '--memory', '6g', '--cpus', '3', '-e', 'CONCURRENCY=5', '--entrypoint', '/usr/local/bin/cairn', image, 'runner-broker')
     docker('network', 'connect', '--ip', '203.0.113.2', networkName, name)
     docker('network', 'create', installationNetwork)
@@ -354,6 +392,16 @@ console.log('probe.done');
         assert.ok(text.includes('probe.pause'))
       else
         assert.equal(docker('exec', name, 'cat', `${runRoot}/output/result.md`), `guest test passed ${mode}`)
+      if (['first', 'resume'].includes(mode)) {
+        assert.ok(text.includes(`mcp.workspace.${mode}`), text)
+        assert.deepEqual(mcpCalls.at(-1), {
+          method: 'POST',
+          path: '/mcp-workspace',
+          authorization: 'Bearer wrong-token',
+          tool: 'list_nodes',
+        })
+      }
+
       if (mode === 'managed-claude') {
         // Guest credential writes never reach the host.
         assert.equal(JSON.parse(await readFile(path.join(source, 'home/.claude/.credentials.json'), 'utf8')).fixture, 'provisioned')
@@ -623,6 +671,8 @@ console.log('probe.done');
       await new Promise(resolve => auth.close(resolve))
     if (claudeAuth)
       await new Promise(resolve => claudeAuth.close(resolve))
+    if (mcp)
+      await new Promise(resolve => mcp.close(resolve))
     if (process.env.KEEP_VM_TEST !== '1') {
       docker('run', '--rm', '--user', '0:0', '-v', `${root}:/cleanup`, '--entrypoint', '/bin/rm', image, '-rf', '/cleanup/data', '/cleanup/state')
       await rm(root, { recursive: true, force: true })

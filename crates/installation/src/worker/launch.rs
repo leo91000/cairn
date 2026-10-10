@@ -439,6 +439,16 @@ impl Execution<'_> {
             Some(account) => Some(broker::serve(s, account).await?),
             None => None,
         };
+        // A VM reaches its run-scoped MCP only through this channel.
+        let granted = workspace.mcp["env"]
+            .get(crate::mcps::RUN_TOKEN_ENV)
+            .is_some();
+        let mcp_channel = if workspace.isolated() && granted {
+            let home = self.directory.join("home");
+            Some(crate::mcps::channel::serve(s, &home, &self.id).await?)
+        } else {
+            None
+        };
         let chat = self.chat_plan(workspace, resume, &mut launch).await?;
         if workspace.isolated() {
             self.prepare_runner(workspace, resume, chat, &mut launch)
@@ -446,6 +456,7 @@ impl Execution<'_> {
         }
         let exit = self.supervise(workspace, launch, log_total).await?;
         drop(auth_broker);
+        drop(mcp_channel);
         self.checkpoint.update(|c| c.process = Some(None)).await?;
         if workspace.isolated() {
             recovery::fence(s, &s.store.run(&self.id).await?).await?;
