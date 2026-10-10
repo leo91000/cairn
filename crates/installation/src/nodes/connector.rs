@@ -75,7 +75,7 @@ pub(crate) fn master(input: &str) -> Result<url::Url> {
 }
 
 /// The manager's own origin, recorded in the `DATA_DIR` it shares with its local runner.
-const MANAGER_ORIGIN: &str = "manager-origin";
+const MANAGER_ORIGIN_FILE: &str = "manager-origin";
 
 /// Lets the installation's own runner read disks through the manager's private
 /// origin, such as `http://manager:4310` on the Compose network. Only the
@@ -83,7 +83,7 @@ const MANAGER_ORIGIN: &str = "manager-origin";
 /// supplies it, and a remote node's data root has none.
 pub async fn record_manager_origin(config: &crate::config::Config) -> Result<()> {
     crate::skills::atomic_write(
-        &config.data_dir.join(MANAGER_ORIGIN),
+        &config.data_dir.join(MANAGER_ORIGIN_FILE),
         config.public_url.as_bytes(),
     )
     .await
@@ -94,12 +94,13 @@ pub async fn record_manager_origin(config: &crate::config::Config) -> Result<()>
 /// controller's data root.
 pub(crate) fn disk_master(input: &str) -> Result<url::Url> {
     master(input).or_else(|refused| {
-        let recorded = std::fs::read_to_string(super::node_data_dir().join(MANAGER_ORIGIN)).ok();
-        local_manager(input, recorded.as_deref()).ok_or(refused)
+        let recorded =
+            std::fs::read_to_string(super::node_data_dir().join(MANAGER_ORIGIN_FILE)).ok();
+        recorded_manager_origin(input, recorded.as_deref()).ok_or(refused)
     })
 }
 
-fn local_manager(input: &str, recorded: Option<&str>) -> Option<url::Url> {
+fn recorded_manager_origin(input: &str, recorded: Option<&str>) -> Option<url::Url> {
     let recorded = url::Url::parse(recorded?.trim()).ok()?;
     let value = url::Url::parse(input).ok()?;
 
@@ -510,7 +511,10 @@ mod origin_tests {
     fn only_the_recorded_manager_origin_relaxes_the_https_rule() {
         let recorded = Some("http://manager:4310");
         for input in ["http://manager:4310", "http://manager:4310/"] {
-            assert!(local_manager(input, recorded).is_some(), "{input}");
+            assert!(
+                recorded_manager_origin(input, recorded).is_some(),
+                "{input}"
+            );
         }
         for input in [
             "http://manager:4311",
@@ -520,11 +524,16 @@ mod origin_tests {
             "http://user@manager:4310",
             "http://manager:4310/?q",
         ] {
-            assert!(local_manager(input, recorded).is_none(), "{input}");
+            assert!(
+                recorded_manager_origin(input, recorded).is_none(),
+                "{input}"
+            );
         }
         // A remote node's data root has no record.
-        assert!(local_manager("http://manager:4310", None).is_none());
-        assert!(local_manager("http://manager:4310", Some("http://manager:4310/x")).is_none());
+        assert!(recorded_manager_origin("http://manager:4310", None).is_none());
+        assert!(
+            recorded_manager_origin("http://manager:4310", Some("http://manager:4310/x")).is_none()
+        );
         // Remote nodes enroll and connect with the unchanged rule.
         assert!(master("http://manager:4310").is_err());
         assert!(master("https://manager.example").is_ok());

@@ -8,7 +8,7 @@ mod common;
 
 use cairn_installation::{
     config::{Config, id},
-    nodes::{LOCAL_NODE_ID, connector, disk_grants},
+    nodes::{LOCAL_NODE_ID, connector, disk_grants, restore, snapshots},
     service::Service,
     storage::{bootstrap, policy::Policy, remote::RemoteSource, runtime},
 };
@@ -69,6 +69,46 @@ async fn installation_runner_reads_disks_from_the_private_manager_origin_only() 
         .unwrap();
     // A restarted controller reopens the disk from its persisted authorization.
     drop(runtime::load(&directory).await.unwrap());
+
+    // Resuming a published disk on the local node sends the same origin to
+    // the runner's restore endpoint.
+    let state = root.path().join("runner-state");
+    let images = state.join("images/fixture");
+    std::fs::create_dir_all(&images).unwrap();
+    for file in ["root.ext4", "vmlinux"] {
+        std::fs::write(images.join(file), b"").unwrap();
+    }
+    let restoration = |master: &str| {
+        json!({
+            "manifest": {
+                "version": 1,
+                "size": 4096,
+                "blockSize": snapshots::BLOCK,
+                "blocks": [{ "offset": 0, "size": 4096, "hash": null }],
+                "runtime": { "runtimeId": "fixture" },
+            },
+            "master": master,
+            "grant": "fixture",
+            "backupId": "published",
+            "policy": storage["policy"],
+        })
+    };
+    let restored =
+        restore::controller(&state, &id(), restoration(&service.config.public_url)).await;
+    match restored {
+        Ok(ready) => assert_eq!(ready["ready"], true),
+        // Hosts without FUSE stop after the origin was accepted.
+        Err(error) => assert_eq!(error.message, "Node has no FUSE device."),
+    }
+    let refused_restore =
+        restore::controller(&state, &id(), restoration("http://master.internal:4310/"))
+            .await
+            .unwrap_err();
+    assert!(
+        refused_restore.message.contains("HTTPS"),
+        "{}",
+        refused_restore.message
+    );
 
     // Another plain-HTTP origin, as a remote node's master could supply, is
     // refused even on the installation's own runner.

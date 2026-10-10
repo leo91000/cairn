@@ -174,5 +174,5 @@ is accepted only for loopback testing. The installation's own runner is the one
 exception: it reads disks from the exact origin its manager records in their
 shared `DATA_DIR` (`http://manager:4310` in the generated Compose file). Only the
 manager writes that record, from its own configuration; a node or a request
-never supplies it. No root privileges, host reformatting or
-systemd changes are performed by these commands.
+never supplies it. No root privileges, host reformatting or systemd changes are
+performed by these commands.
