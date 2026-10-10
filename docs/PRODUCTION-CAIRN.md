@@ -262,6 +262,33 @@ traffic resumes. Never widen trust to fix a mismatch. Sources:
 [Coolify main proxy configuration](https://coolify.io/docs/core/networking/proxy/traefik/overview),
 [Compose static network addresses](https://docs.docker.com/reference/compose-file/services/#ipv4_address-ipv6_address).
 
+**Lessons from the first deployment (2026-10-10).**
+
+- Recreating `coolify-proxy` outside Coolify drops the networks that Coolify had attached
+  to it dynamically (`docker network connect`), one per service. Every service routed through
+  Traefik then times out. After any manual recreation, reconnect the proxy to each service
+  network before resuming traffic, and check every routed host:
+
+  ```sh
+  # Coolify names each service network after the service UUID (24 lowercase characters).
+  for n in $(docker ps --format '{{.Networks}}' | tr ',' '\n' | grep -E '^[a-z0-9]{24}$' | sort -u); do
+    docker network connect "$n" coolify-proxy 2>/dev/null || true
+  done
+  ```
+- In the Beacon Coolify service, disable **Escape special characters in labels**
+  (`is_container_label_escape_enabled=false`). Otherwise Coolify writes the `${...}` label
+  expressions literally, and Traefik reports the router as using a nonexistent entrypoint
+  and resolver.
+- Beacon's labels only define the HTTPS router. Plain HTTP for `cairn.build` is
+  redirected by the dynamic file `/data/coolify/proxy/dynamic/cairn-build-redirect.yaml`
+  (router `cairn-build-http` on entrypoint `http`, `redirectScheme` to `https`, service
+  `noop@internal`).
+- Coolify also attaches Postgres to the service's own network, which the proxy joins.
+  Postgres stays unpublished and password-protected, but it is not limited to the internal
+  database network as intended above.
+- `/health` and STUN can be checked from the host itself; a client with outbound UDP blocked
+  cannot validate STUN.
+
 **Proxy access logs.** `coolify-proxy` runs Traefik without `--accesslog`
 (checked on 2026-10-10), so it keeps no access log, and the privacy policy says
 so. Do not enable the proxy's access logs without first updating `/privacy`
