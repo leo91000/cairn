@@ -1882,7 +1882,9 @@ async fn public_alias_is_withheld_without_remote_candidates_and_does_not_escape_
         },
     )
     .await;
+    let (candidates, _candidate_events) = mpsc::channel(32);
     let peer = PeerConnectionBuilder::new()
+        .with_handler(Arc::new(ClientEvents(candidates)))
         .with_udp_addrs(vec!["0.0.0.0:0"])
         .build()
         .await
@@ -1976,14 +1978,20 @@ async fn public_alias_is_withheld_without_remote_candidates_and_does_not_escape_
         sdp_mid: Some("0".into()),
         sdp_m_line_index: Some(0),
     }).await;
-    let late = tokio::time::timeout(Duration::from_millis(500), events.chunk()).await;
-    if let Ok(Ok(Some(chunk))) = late {
-        assert!(
-            !std::str::from_utf8(&chunk)
-                .unwrap()
-                .contains("candidate:cairn-public ")
-        );
-    }
+    let late = tokio::time::timeout(Duration::from_secs(3), async {
+        while let Some(chunk) = events.chunk().await.unwrap() {
+            buffered.push_str(std::str::from_utf8(&chunk).unwrap());
+            assert!(
+                !buffered.contains("candidate:cairn-public "),
+                "late candidates must not release an expired alias"
+            );
+        }
+    })
+    .await;
+    assert!(
+        late.is_err(),
+        "ordinary negotiation remains open until its handshake deadline"
+    );
     peer.close().await.unwrap();
     relay.close().await;
 }

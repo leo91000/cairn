@@ -279,7 +279,7 @@ jobs:
         with:
           cache: true
       - run: rustup toolchain install 1.97.1 --profile minimal && rustup default 1.97.1
-      - run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends iproute2 iptables util-linux
+      - run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends iproute2 iptables conntrack util-linux
       - run: pnpm exec playwright install --with-deps chromium
       - uses: actions/download-artifact@v8.0.1
         with:

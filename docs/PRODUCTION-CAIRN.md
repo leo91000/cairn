@@ -509,9 +509,25 @@ reflexive address. `same-server` reproduces that error: the external client sees
 its actual NAT address, while the installation sees `10.102.2.1`. For an explicitly
 verified, **port-preserving** installation NAT, set `CAIRN_DIRECT_PUBLIC_IP` to the
 host's public unicast IP in the installation environment. The peer retains its
-bound host candidate and additionally advertises that public alias with the same
-ephemeral port through authenticated signaling. This opens no listener or port
-mapping. The bench verifies a successful authorized DataChannel with this setting.
+bound host candidate. Its `cairn-public` alias uses the same ephemeral port and
+is sent through authenticated signaling only after that exact UDP socket has
+successfully sent a real ICE Binding check to a numeric remote UDP candidate of
+the same family, from the offer or trickle signaling. Private IPv4/unique-local
+IPv6 destinations cannot release the public alias. This ordering creates the
+outgoing NAT mapping before the client learns the alias: otherwise the client's
+first check can reserve an unanswered host conntrack tuple and force Docker
+MASQUERADE to allocate a different source port (#163).
+
+The alias window is five seconds from peer setup. Without an eligible remote
+candidate and a successful socket send in that window, no alias is advertised
+for this negotiation, including if a candidate arrives later. Ordinary ICE
+candidates continue immediately; the handshake still has its existing 30 s
+limit and the relay remains usable. STUN discovery alone does not prepare this
+peer-specific mapping. This opens no listener, incoming port mapping or host
+network mode. The `same-server` bench delays browser trickle signaling to make
+an eager alias receive the client's check first, observes the kernel's local
+and public ports throughout negotiation, and requires an authorized DataChannel
+plus preserved ports after the correction.
 It cannot repair a NAT that changes the public port; leave direct disabled or use
 the relay on such a host until qualification establishes a supported mapping.
 A wrong setting only makes direct fail; it never relaxes grant or DTLS validation.
