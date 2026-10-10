@@ -1,5 +1,6 @@
 """Public CLI contract: packets cross the actual simulated network (no KVM)."""
 import json
+import re
 import importlib.util
 import subprocess
 import tempfile
@@ -86,6 +87,43 @@ class NetworkBenchTest(unittest.TestCase):
         report = self.probe("same-server")
         self.assertEqual(report["stun"]["client"]["address"], "198.18.102.2")
         self.assertEqual(report["stun"]["installation"]["address"], "10.102.2.1")
+
+    def test_same_server_client_first_reserves_the_reply_tuple_and_remaps_masquerade(self):
+        spec = importlib.util.spec_from_file_location("network_bench", "tests/network-bench.py")
+        bench = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(bench)
+        network = bench.Network()
+        with tempfile.TemporaryDirectory() as directory:
+            network.directory = Path(directory)
+            try:
+                network.setup("same-server")
+                client = network.participants["client"]["namespace"]
+                installation = network.participants["installation"]["namespace"]
+                ready = Path(directory) / "client-ready"
+                receiver = network.spawn(client, "python3", "-c", """
+import socket, sys
+from pathlib import Path
+sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+sock.bind(('10.102.1.2', 52568))
+sock.sendto(b'check', ('198.18.102.3', 54584))
+Path(sys.argv[1]).touch()
+""", str(ready))
+                bench.wait_ready(ready, receiver, "client-first check")
+                network.exec(installation, "python3", "-c", """
+import socket
+sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+sock.bind(('10.102.2.2', 54584))
+sock.sendto(b'check', ('198.18.102.2', 52568))
+""")
+                self.assertEqual(receiver.wait(timeout=6), 0)
+                tuples = network.exec(network.participants["installation"]["router"],
+                                      "conntrack", "-L", "-p", "udp", "--orig-src", "10.102.2.2")
+                reply_ports = re.findall(r"src=198\.18\.102\.2 dst=198\.18\.102\.3 sport=52568 dport=(\d+)", tuples)
+                self.assertEqual(len(reply_ports), 1)
+                self.assertNotEqual(int(reply_ports[0]), 54584,
+                                    "the fixture must reproduce Docker's remapped source port")
+            finally:
+                network.close()
 
     def test_packet_loss_is_deterministic(self):
         for _ in range(2):

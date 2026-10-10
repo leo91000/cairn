@@ -7,6 +7,7 @@ import hashlib
 import socket
 import struct
 import json
+import re
 import os
 import shlex
 import signal
@@ -200,8 +201,12 @@ class Network:
                               "-o", external, "-p", "udp", "-j", "MASQUERADE", "--random-fully")
                 self.exec(router, "iptables", "-t", "nat", "-A", "POSTROUTING",
                           "-o", external, "-j", "MASQUERADE")
-                self.exec(router, "iptables", "-A", "INPUT", "-i", external, "-p", "udp",
-                          "-m", "conntrack", "--ctstate", "NEW", "-j", "DROP")
+                # Docker's host receives an unsolicited check to an unpublished
+                # port. Confirm that INPUT tuple before its reverse MASQUERADE
+                # flow; dropping it pre-confirmation hides production #163.
+                if scenario != "same-server" or role != "installation":
+                    self.exec(router, "iptables", "-A", "INPUT", "-i", external, "-p", "udp",
+                              "-m", "conntrack", "--ctstate", "NEW", "-j", "DROP")
                 self.exec(router, "iptables", "-A", "FORWARD", "-i", external,
                           "-m", "conntrack", "--ctstate", "NEW", "-j", "DROP")
             if scenario == "udp-blocked":
@@ -519,7 +524,23 @@ def browser(network, binary, directory, args, report):
     process = subprocess.Popen(["pnpm", "exec", "playwright", "test", "--config", "playwright.network.config.ts"], env=env, start_new_session=True)
     network.children.append(process)
     network.groups.append(process.pid)
-    if process.wait():
+    status = process.wait()
+    if args.scenario == "same-server":
+        # Read only synthetic fixture tuples, never packet contents or credentials.
+        router = network.participants["installation"]["router"]
+        tuples = network.exec(router, "conntrack", "-L", "-p", "udp",
+                              "--orig-src", "10.102.2.2", "--orig-dst", "198.18.102.2")
+        mappings = []
+        for entry in tuples.splitlines():
+            ports = re.findall(r"sport=(\d+) dport=(\d+)", entry)
+            if len(ports) == 2:
+                mappings.append({"localPort": int(ports[0][0]), "publicPort": int(ports[1][1])})
+        saved = json.loads(args.output.read_text())
+        saved["sameServerMappings"] = mappings
+        args.output.write_text(json.dumps(saved) + "\n")
+        if not mappings or any(mapping["localPort"] != mapping["publicPort"] for mapping in mappings):
+            raise RuntimeError(f"same-server: Docker MASQUERADE remapped the ICE socket: {mappings}")
+    if status:
         raise RuntimeError("Authenticated network scenario failed; see Playwright diagnostics")
 
 

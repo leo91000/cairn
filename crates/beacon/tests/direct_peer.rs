@@ -1870,3 +1870,120 @@ async fn a_panicking_peer_task_releases_its_authorization_and_preserves_other_pe
     running.await.unwrap();
     relay.close().await;
 }
+
+#[tokio::test]
+async fn public_alias_is_withheld_without_remote_candidates_and_does_not_escape_after_timeout() {
+    let mut relay = RelayedInstallation::new(axum::Router::new()).await;
+    configured_connector(
+        &mut relay,
+        cairn_installation::direct::peer::PeerConfig {
+            public_ip: Some("198.18.102.3".parse().unwrap()),
+            ..Default::default()
+        },
+    )
+    .await;
+    let peer = PeerConnectionBuilder::new()
+        .with_udp_addrs(vec!["0.0.0.0:0"])
+        .build()
+        .await
+        .unwrap();
+    peer.create_data_channel("cairn.v4", None).await.unwrap();
+    let mut offer = peer.create_offer(None).await.unwrap();
+    offer.sdp = cairn_protocol::direct::uppercase_sdp_fingerprints(&offer.sdp);
+    let fingerprint = offer
+        .sdp
+        .lines()
+        .find_map(|line| line.strip_prefix("a=fingerprint:"))
+        .unwrap();
+    let installation = relay.session["installations"][0]["id"].as_str().unwrap();
+    let authorization: serde_json::Value = relay
+        .app
+        .authenticated(
+            &relay.cookie,
+            &relay.session,
+            Method::POST,
+            &format!("/api/installations/{installation}/direct/authorize"),
+        )
+        .json(&json!({
+            "fingerprint": fingerprint,
+            "versions": [4],
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let grant: DirectAuthorization =
+        serde_json::from_value(authorization["grant"].clone()).unwrap();
+    signal_as(
+        &relay,
+        &relay.cookie,
+        &relay.session,
+        &grant,
+        &DirectSignal::Offer { sdp: offer.sdp },
+    )
+    .await;
+    let path = format!(
+        "{}/api/installations/{installation}/direct/{}/events",
+        relay.app.url, grant.claims.connection_id
+    );
+    let mut events = relay
+        .app
+        .client
+        .get(path)
+        .header("cookie", &relay.cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(events.status(), StatusCode::OK);
+    let mut buffered = String::new();
+    let mut answer_received = false;
+    let mut host_received = false;
+    // Observe authenticated outgoing signaling across the five-second alias
+    // deadline. Gathering remains live even though no client candidates arrive.
+    let observed = tokio::time::timeout(Duration::from_secs(6), async {
+        while let Some(chunk) = events.chunk().await.unwrap() {
+            buffered.push_str(std::str::from_utf8(&chunk).unwrap());
+            while let Some(end) = buffered.find("\n\n") {
+                let event: String = buffered.drain(..end + 2).collect();
+                for line in event.lines() {
+                    if let Some(data) = line.strip_prefix("data: ") {
+                        match serde_json::from_str::<DirectSignal>(data).unwrap() {
+                            DirectSignal::Answer { .. } => answer_received = true,
+                            DirectSignal::Candidate { candidate, .. } => {
+                                assert!(
+                                    !candidate.starts_with("candidate:cairn-public "),
+                                    "public alias must await an outgoing check to the remote peer"
+                                );
+                                host_received |= candidate.contains(" typ host");
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            }
+        }
+    })
+    .await;
+    assert!(observed.is_err());
+    assert!(
+        answer_received && host_received,
+        "ordinary ICE signaling must continue"
+    );
+    signal_as(&relay, &relay.cookie, &relay.session, &grant, &DirectSignal::Candidate {
+        candidate: "candidate:late 1 udp 1694498815 198.18.102.2 52568 typ srflx raddr 10.102.1.2 rport 52568".into(),
+        sdp_mid: Some("0".into()),
+        sdp_m_line_index: Some(0),
+    }).await;
+    let late = tokio::time::timeout(Duration::from_millis(500), events.chunk()).await;
+    if let Ok(Ok(Some(chunk))) = late {
+        assert!(
+            !std::str::from_utf8(&chunk)
+                .unwrap()
+                .contains("candidate:cairn-public ")
+        );
+    }
+    peer.close().await.unwrap();
+    relay.close().await;
+}
