@@ -29,6 +29,11 @@ origin and proxies account requests, OAuth callbacks and relay WebSockets to
 claim it through the beacon account; its HTTP listener never hosts the web
 application. `PUBLIC_URL` continues to describe private installation traffic.
 
+`/privacy` is the public privacy policy, linked from the sign-in screen. The
+account shell renders it without loading the session or calling the account API.
+Its text describes Beacon's stored data, retention and providers; keep it in step
+with them (see [production](PRODUCTION-CAIRN.md#4-resend-and-optional-sign-inpush)).
+
 Browser tests use the production `cairn-beacon` and `cairn` binaries, a separate
 Postgres schema per worker, a real email proof and installation claim, and the
 real authenticated relay. Only email delivery and external agent/provider

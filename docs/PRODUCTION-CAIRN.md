@@ -109,6 +109,25 @@ Optional OAuth configuration, each enabled provider requiring **both** values:
 | GitHub | OAuth App homepage `https://cairn.build`; authorization callback `https://cairn.build/api/account/oauth/github/callback` | `CAIRN_BEACON_GITHUB_CLIENT_ID`, `CAIRN_BEACON_GITHUB_CLIENT_SECRET` |
 | Google | Web OAuth client; authorized JavaScript origin `https://cairn.build`; redirect URI `https://cairn.build/api/account/oauth/google/callback`; configure consent screen/publishing as required | `CAIRN_BEACON_GOOGLE_CLIENT_ID`, `CAIRN_BEACON_GOOGLE_CLIENT_SECRET` |
 
+**Publish the Google consent screen.** Until it is published, the Google project
+`cairn-e2bea` stays in *Testing*: only its listed test users can continue with
+Google. Publish it after a Beacon release serving the privacy policy is live:
+
+1. Check that `https://cairn.build/privacy` loads in a private window without
+   signing in, and that the sign-in screen links to it.
+2. In Google Auth Platform → **Branding**, set the application home page
+   `https://cairn.build`, the privacy policy link `https://cairn.build/privacy`,
+   and the authorized domain `cairn.build`.
+3. In **Data access**, keep only `openid` and `.../auth/userinfo.email`: Beacon
+   requests `openid email` and nothing else. Adding a scope requires updating the
+   privacy policy first.
+4. In **Audience**, publish the app to *In production*, then check that an account
+   outside the test users can continue with Google.
+
+The policy's contact address `privacy@cairn.build` is configured separately.
+Update the policy text and its date in `apps/web/src/views/PrivacyPolicy.vue`
+whenever Beacon's stored data, retention or providers change.
+
 Leaving both variables empty hides the provider. GitHub sign-in requests only
 `user:email`, never repository access; agent GitHub credentials are installed
 separately. Passkeys use the `cairn.build` relying-party ID automatically: keep
@@ -242,6 +261,11 @@ main proxy configuration, reapply the saved static attachment **before** Cairn
 traffic resumes. Never widen trust to fix a mismatch. Sources:
 [Coolify main proxy configuration](https://coolify.io/docs/core/networking/proxy/traefik/overview),
 [Compose static network addresses](https://docs.docker.com/reference/compose-file/services/#ipv4_address-ipv6_address).
+
+**Proxy access logs.** `coolify-proxy` runs Traefik without `--accesslog`
+(checked on 2026-10-10), so it keeps no access log, and the privacy policy says
+so. Do not enable the proxy's access logs without first updating `/privacy`
+(`apps/web/src/views/PrivacyPolicy.vue`) and its date.
 
 Start the new service only after Léo's approval. Verify `/health` reports the
 expected tested commit, `/install/release` reports the paired digest, `/` and

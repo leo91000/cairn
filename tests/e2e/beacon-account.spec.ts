@@ -53,6 +53,58 @@ test('beacon pages deny framing and enable HSTS only for an HTTPS beacon origin'
   }
 })
 
+test('the privacy policy is public and linked from sign-in', async ({ page, request }) => {
+  const url = 'http://localhost:4398'
+  const child = spawn('target/debug/cairn-beacon', [], {
+    env: {
+      ...process.env,
+      CAIRN_BEACON_DATABASE_URL: process.env.CAIRN_BEACON_TEST_DATABASE_URL,
+      CAIRN_BEACON_ORIGIN: url,
+      CAIRN_BEACON_LISTEN: '127.0.0.1:4398',
+      CAIRN_BEACON_EMAIL_KEY: 'fixture-only',
+      CAIRN_BEACON_EMAIL_FROM: 'Cairn <cairn@example.test>',
+    },
+    stdio: ['ignore', 'ignore', 'pipe'],
+  })
+  const exited = once(child, 'exit')
+  let log = ''
+  child.stderr.on('data', chunk => log += chunk)
+  try {
+    await expect.poll(async () => {
+      if (child.exitCode !== null)
+        throw new Error(`Beacon exited: ${log}`)
+      return fetch(`${url}/health`).then(response => response.ok).catch(() => false)
+    }).toBe(true)
+
+    const response = await request.get(`${url}/privacy`)
+    expect(response.status()).toBe(200)
+    expect(response.headers()['content-type']).toContain('text/html')
+
+    // Without a session, the policy must render from the document alone.
+    const apiRequests: string[] = []
+    page.on('request', (sent) => {
+      if (new URL(sent.url()).pathname.startsWith('/api/'))
+        apiRequests.push(sent.url())
+    })
+    await page.goto(`${url}/privacy`)
+    await expect(page.getByRole('heading', { level: 1, name: 'Privacy Policy' })).toBeVisible()
+    await expect(page.getByRole('link', { name: 'privacy@cairn.build' }).first()).toHaveAttribute('href', 'mailto:privacy@cairn.build')
+    await expect(page.getByText('Last updated')).toBeVisible()
+    expect(page.url()).toBe(`${url}/privacy`)
+    expect(apiRequests).toEqual([])
+
+    await page.goto(url)
+    await expect(page.getByLabel('Email address')).toBeVisible()
+    await page.getByRole('link', { name: 'Privacy Policy' }).click()
+    await expect(page).toHaveURL(`${url}/privacy`)
+    await expect(page.getByRole('heading', { level: 1, name: 'Privacy Policy' })).toBeVisible()
+  }
+  finally {
+    child.kill('SIGTERM')
+    await exited
+  }
+})
+
 test('email sign-in works after a third party exhausts their challenge, persists and signs out', async ({ page, context, request }) => {
   const messages: Array<{ to: string[], text: string }> = []
   const mail = createServer(async (request, response) => {
