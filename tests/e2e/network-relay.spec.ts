@@ -156,10 +156,12 @@ test('authenticated browser and Rust client keep using the observed route under 
     await expect(page.getByRole('status', { name: 'Connection route' })).toHaveAttribute('data-transport-route', 'relay')
     await expect.poll(async () => (await observations()).some(item => item.route === 'relay' && item.method === 'GET')).toBe(true)
     evidence.push({ route: (await observations()).find(item => item.method === 'GET')!.route, operation: 'bootstrap-read', elapsedMs: performance.now() - bootstrapStart })
+    const packetLoss = process.env.CAIRN_NETWORK_SCENARIO === 'packet-loss'
+    if (!packetLoss)
+      releaseDirect()
     const installationId = new URL(page.url()).pathname.split('/')[2]!
     const chatsPath = `/api/installations/${installationId}/api/chats`
     const marker = `Network scenario ${process.env.CAIRN_NETWORK_SCENARIO}`
-    const packetLoss = process.env.CAIRN_NETWORK_SCENARIO === 'packet-loss'
     if (packetLoss) {
       // Chat creation is not safely replayable after transport loss. Prepare it
       // on the authenticated relay, then exercise the idempotent message below.
@@ -175,12 +177,12 @@ test('authenticated browser and Rust client keep using the observed route under 
       const chat = await created.json()
       evidence.push({ route: creationRoute, operation: 'bootstrap-create', elapsedMs: performance.now() - creationStarted })
       await page.goto(`${url}/installations/${installationId}/chats/${chat.id}`)
+      releaseDirect()
     }
     else {
       await page.getByRole('link', { name: 'New conversation', exact: true }).first().click()
     }
 
-    releaseDirect()
     await page.getByLabel('Message', { exact: true }).fill(marker)
     await expect(page.getByRole('status', { name: 'Connection route' })).toHaveAttribute('data-transport-route', expected, { timeout: 35000 })
     const before = (await observations()).length

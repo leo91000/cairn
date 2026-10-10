@@ -376,14 +376,15 @@ and are removed after diagnosis.
 The packet-loss scenario therefore prepares its empty conversation on the
 **authenticated relay**, as it already does bootstrap reads. Chat creation is
 not safely replayable after transport loss. It then requires the browser's
-initial direct promotion under the unchanged 35 s assertion and sends the
+initial direct promotion under the unchanged 35 s assertion, releasing direct
+authorization only once that conversation is open, and sends the
 idempotent message under loss. POST and title observers allow 35 s only for this
 profile. A relayed message is accepted only when the browser diagnostic confirms
 **heartbeat timeout** and earlier successful authenticated direct traffic.
 Unknown fallbacks still fail. Three independent Rust negotiations still require
 at least one direct response; opening-timeout fallback remains the only accepted
-Rust relay reason. Other scenarios retain their original observer windows and
-route expectations. All anonymous-access, identity, revocation and security
+Rust relay reason. Other scenarios retain their original authorization release
+right after bootstrap, observer windows and route expectations. All anonymous-access, identity, revocation and security
 checks remain in place.
 
 No heartbeat delay changes: it is still sent every 10 s with 5 s for its response
