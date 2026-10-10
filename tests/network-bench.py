@@ -3,6 +3,7 @@ import argparse
 import array
 import asyncio
 import fcntl
+import hashlib
 import socket
 import struct
 import json
@@ -212,7 +213,7 @@ class Network:
                 self.exec(router, "ip", "link", "set", "loss", "up")
                 ready = self.directory / ("loss-ready-" + role)
                 child = self.spawn(router, os.sys.executable, str(Path(__file__).resolve()),
-                                   "loss-router", external, str(ready), privileged=True)
+                                   "loss-router", external, str(ready), role, privileged=True)
                 wait_ready(ready, child, "Deterministic loss router")
                 self.exec(router, "ip", "route", "add", "table", "102", "default", "dev", "loss")
                 self.exec(router, "ip", "rule", "add", "iif", "lan", "lookup", "102")
@@ -564,7 +565,7 @@ def stun_probe(address):
     raise RuntimeError("STUN mapping unavailable")
 
 
-def loss_router(external, ready):
+def loss_router(external, ready, role):
     # Read the TUN's routed IPv4 packets; inject surviving packets onto the WAN.
     # No parsing, logging, rewriting or persistence of application content.
     with open("/dev/net/tun", "r+b", buffering=0) as interface:
@@ -579,7 +580,14 @@ def loss_router(external, ready):
                 # controlled topology is IPv4, and these are not test packets.
                 if packet[0] >> 4 != 4:
                     continue
-                if count % 5:
+                if count % 5 == 0:
+                    # One loss in each five-packet block, with a reproducible
+                    # position independent of periodic STUN/SCTP traffic. Fixed
+                    # every-fifth loss can suppress *all* INIT retransmissions.
+                    seed = f"cairn-network-loss-v1:{role}:{count // 5}".encode()
+                    digest = hashlib.blake2s(seed, digest_size=8).digest()
+                    lost_position = int.from_bytes(digest, "big") % 5
+                if count % 5 != lost_position:
                     outgoing.sendto(packet, (socket.inet_ntoa(packet[16:20]), 0))
                 count += 1
 
@@ -650,8 +658,8 @@ if __name__ == "__main__":
         stun_probe(os.sys.argv[2])
     elif len(os.sys.argv) in {4, 5} and os.sys.argv[1] == "forward":
         asyncio.run(forward(int(os.sys.argv[2]), os.sys.argv[3], os.sys.argv[4] if len(os.sys.argv) == 5 else None))
-    elif len(os.sys.argv) == 4 and os.sys.argv[1] == "loss-router":
-        loss_router(os.sys.argv[2], os.sys.argv[3])
+    elif len(os.sys.argv) == 5 and os.sys.argv[1] == "loss-router":
+        loss_router(os.sys.argv[2], os.sys.argv[3], os.sys.argv[4])
     elif len(os.sys.argv) >= 5 and os.sys.argv[1] == "browser-pipe":
         raise SystemExit(browser_pipe(*os.sys.argv[2:5], os.sys.argv[5:]))
     elif len(os.sys.argv) >= 4 and os.sys.argv[1] == "browser-pipe-child":

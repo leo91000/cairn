@@ -7,6 +7,7 @@ import { join } from 'node:path'
 import process from 'node:process'
 import { chromium, expect, test } from '@playwright/test'
 import { beaconRelayFixture } from './beacon-relay-fixture'
+import { captureNetworkTransport, networkTransportDiagnostics } from './network-transport-diagnostics'
 
 test('authenticated browser and Rust client keep using the observed route under network constraints', async () => {
   test.setTimeout(240000)
@@ -24,6 +25,7 @@ test('authenticated browser and Rust client keep using the observed route under 
     operation: string
     elapsedMs: number
     directFailure?: { phase: string, timedOut: boolean } | null
+    fallbackReason?: 'heartbeat-timeout'
   }[] = []
   const revocations: string[] = []
 
@@ -68,14 +70,16 @@ test('authenticated browser and Rust client keep using the observed route under 
       path: string
       method: string
       cursor?: number
+      observedAt: number
     }
 
     async function capture(targetPage: Page) {
+      await captureNetworkTransport(targetPage)
       await targetPage.addInitScript(() => {
         const target = window as typeof window & { transportObservations: unknown[] }
         target.transportObservations = []
         window.addEventListener('cairn-transport-observation', (event) => {
-          target.transportObservations.push((event as CustomEvent).detail)
+          target.transportObservations.push({ ...(event as CustomEvent).detail, observedAt: performance.now() })
           if (target.transportObservations.length > 200)
             target.transportObservations.shift()
         })
@@ -152,20 +156,59 @@ test('authenticated browser and Rust client keep using the observed route under 
     await expect(page.getByRole('status', { name: 'Connection route' })).toHaveAttribute('data-transport-route', 'relay')
     await expect.poll(async () => (await observations()).some(item => item.route === 'relay' && item.method === 'GET')).toBe(true)
     evidence.push({ route: (await observations()).find(item => item.method === 'GET')!.route, operation: 'bootstrap-read', elapsedMs: performance.now() - bootstrapStart })
-    releaseDirect()
+    const packetLoss = process.env.CAIRN_NETWORK_SCENARIO === 'packet-loss'
+    if (!packetLoss)
+      releaseDirect()
     const installationId = new URL(page.url()).pathname.split('/')[2]!
     const chatsPath = `/api/installations/${installationId}/api/chats`
     const marker = `Network scenario ${process.env.CAIRN_NETWORK_SCENARIO}`
-    await page.getByRole('link', { name: 'New conversation', exact: true }).first().click()
+    if (packetLoss) {
+      // Chat creation is not safely replayable after transport loss. Prepare it
+      // on the authenticated relay, then exercise the idempotent message below.
+      const setupSession = await (await page.request.get(`${url}/api/account/session`)).json()
+      const creationStarted = performance.now()
+      const created = await page.request.post(`${url}${chatsPath}`, {
+        headers: { 'origin': url, 'x-csrf-token': setupSession.csrf },
+        data: {},
+      })
+      expect(created.ok()).toBe(true)
+      const creationRoute = created.headers()['x-cairn-transport']!
+      expect(creationRoute).toBe('relay')
+      const chat = await created.json()
+      evidence.push({ route: creationRoute, operation: 'bootstrap-create', elapsedMs: performance.now() - creationStarted })
+      await page.goto(`${url}/installations/${installationId}/chats/${chat.id}`)
+      releaseDirect()
+    }
+    else {
+      await page.getByRole('link', { name: 'New conversation', exact: true }).first().click()
+    }
+
     await page.getByLabel('Message', { exact: true }).fill(marker)
     await expect(page.getByRole('status', { name: 'Connection route' })).toHaveAttribute('data-transport-route', expected, { timeout: 35000 })
     const before = (await observations()).length
+    const responseObservationOptions = packetLoss ? { timeout: 35000 } : {}
     const started = performance.now()
     await page.getByRole('button', { name: /^(Send|Queue)$/, exact: true }).click()
-    await expect.poll(async () => (await observations()).slice(before).some(item => item.method === 'POST' && item.path.endsWith('/messages'))).toBe(true)
-    await expect(page.getByRole('heading', { name: marker, exact: true })).toBeVisible()
+    await expect.poll(async () => (await observations()).slice(before).some(item => item.method === 'POST' && item.path.endsWith('/messages')), responseObservationOptions).toBe(true)
     const sent = (await observations()).slice(before).find(item => item.method === 'POST' && item.path.endsWith('/messages'))!
-    evidence.push({ route: sent.route, operation: 'browser-send', elapsedMs: performance.now() - started })
+    let fallbackReason: 'heartbeat-timeout' | undefined
+    if (packetLoss && sent.route === 'relay') {
+      const diagnostics = await networkTransportDiagnostics(page)
+      const heartbeat = diagnostics.findLast(item => item.kind === 'heartbeat-timeout' && item.elapsedMs <= sent.observedAt)
+      expect(heartbeat, 'relayed browser send requires a prior diagnosed heartbeat timeout').toBeDefined()
+      expect((await observations()).some(item => item.route === 'direct' && ['GET', 'POST', 'STREAM'].includes(item.method) && item.observedAt < heartbeat!.elapsedMs), 'the browser must have completed authenticated direct traffic before fallback').toBe(true)
+      fallbackReason = 'heartbeat-timeout'
+    }
+
+    // The title is delivered asynchronously on the same reliable transport;
+    // packet loss can delay it beyond 10 s without exceeding reassembly's 30 s.
+    await expect(page.getByRole('heading', { name: marker, exact: true })).toBeVisible(responseObservationOptions)
+    evidence.push({
+      route: sent.route,
+      operation: 'browser-send',
+      elapsedMs: performance.now() - started,
+      fallbackReason,
+    })
     const cookies = await page.context().cookies()
     const cookie = cookies.map(value => `${value.name}=${value.value}`).join('; ')
     const samples = process.env.CAIRN_NETWORK_SCENARIO === 'packet-loss' ? 3 : 1
@@ -393,10 +436,17 @@ test('authenticated browser and Rust client keep using the observed route under 
         continue
       }
 
+      if (packetLoss && observation.operation === 'browser-send' && observation.route === 'relay') {
+        // Promotion remains mandatory. The documented 5 s heartbeat deadline
+        // may subsequently select relay under loss; accept only that diagnosis.
+        expect(observation.fallbackReason).toBe('heartbeat-timeout')
+        continue
+      }
+
       const expectedRoute = observation.operation.startsWith('rust-')
         ? process.env.CAIRN_NETWORK_EXPECT_RUST_ROUTE
         : process.env.CAIRN_NETWORK_EXPECT_ROUTE || 'relay'
-      const route = ['bootstrap-read', 'stream-resume', 'fallback-send', 'fallback-stream', 'permission-denied-read'].includes(observation.operation) ? 'relay' : expectedRoute
+      const route = ['bootstrap-read', 'bootstrap-create', 'stream-resume', 'fallback-send', 'fallback-stream', 'permission-denied-read'].includes(observation.operation) ? 'relay' : expectedRoute
       expect(observation.route, `${observation.operation}: actual route`).toBe(route)
     }
 
@@ -406,7 +456,18 @@ test('authenticated browser and Rust client keep using the observed route under 
     await rustRequest(chatsPath, cookie, 401)
   }
   finally {
-    await browser?.close()
-    await fixture.close()
+    try {
+      const output = process.env.CAIRN_NETWORK_OUTPUT
+      if (browser && output) {
+        const diagnostics = await Promise.all(browser.contexts().flatMap(context => context.pages())
+          .map(page => networkTransportDiagnostics(page).catch(() => [])))
+        const diagnosticsOutput = output.endsWith('.json') ? `${output.slice(0, -5)}.transport.json` : `${output}.transport.json`
+        await writeFile(diagnosticsOutput, `${JSON.stringify(diagnostics)}\n`)
+      }
+    }
+    finally {
+      await browser?.close()
+      await fixture.close()
+    }
   }
 })

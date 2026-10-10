@@ -83,7 +83,7 @@ if (import.meta.main) {
     process.exit(1)
   }
 
-  const files = execFileSync('git', ['ls-files', '--cached', '--others', '--exclude-standard', '-z', '--', '*.rs'], { encoding: 'utf8' }).split('\0').filter(Boolean)
+  const files = execFileSync('git', ['ls-files', '--cached', '--others', '--exclude-standard', '-z', '--', '*.rs'], { encoding: 'utf8' }).split('\0').filter(file => file && !file.startsWith('vendor/'))
   let changed = false
 
   for (const file of new Set(files)) {

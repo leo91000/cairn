@@ -1,0 +1,93 @@
+[package]
+name = "rtc-dtls"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+description = "RTC DTLS in Rust"
+license.workspace = true
+documentation = "https://docs.rs/rtc-dtls"
+homepage.workspace = true
+repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[features]
+default = ["crypto-ring"]
+crypto-ring = ["crypto/crypto-ring", "rustls/ring", "rcgen/ring"]
+crypto-aws-lc-rs = ["crypto/crypto-aws-lc-rs", "rustls/aws-lc-rs", "rcgen/aws_lc_rs"]
+
+[dependencies]
+shared = { workspace = true, default-features = false, features = ["replay"] }
+crypto.workspace = true
+
+bytes.workspace = true
+byteorder.workspace = true
+x509-parser.workspace = true
+der-parser.workspace = true
+rcgen.workspace = true
+rustls.workspace = true
+rkyv.workspace = true
+bytecheck.workspace = true
+log.workspace = true
+pem.workspace = true
+
+[dev-dependencies]
+criterion.workspace = true
+local-sync.workspace = true
+core_affinity.workspace = true
+chrono.workspace = true
+env_logger.workspace = true
+clap.workspace = true
+anyhow.workspace = true
+ctrlc.workspace = true
+futures.workspace = true
+
+#[[example]]
+#name = "dtls_chat_server"
+#path = "examples/dtls_chat_server.rs"
+
+#[[example]]
+#name = "dtls_echo_server"
+#path = "examples/dtls_echo_server.rs"
+
+#[[example]]
+#name = "dtls_client"
+#path = "examples/dtls_client.rs"
+
+#[[example]]
+#name = "dtls_client_selfsign"
+#path = "examples/dtls_client_selfsign.rs"
+
+#[[example]]
+#name = "dial_psk"
+#path = "examples/dial/psk/dial_psk.rs"
+#bench = false
+#
+#[[example]]
+#name = "dial_selfsign"
+#path = "examples/dial/selfsign/dial_selfsign.rs"
+#bench = false
+#
+#[[example]]
+#name = "dial_verify"
+#path = "examples/dial/verify/dial_verify.rs"
+#bench = false
+#
+#[[example]]
+#name = "listen_psk"
+#path = "examples/listen/psk/listen_psk.rs"
+#bench = false
+#
+#[[example]]
+#name = "listen_selfsign"
+#path = "examples/listen/selfsign/listen_selfsign.rs"
+#bench = false
+#
+#[[example]]
+#name = "listen_verify"
+#path = "examples/listen/verify/listen_verify.rs"
+#bench = false
+
+[[bench]]
+name = "record_protection"
+harness = false

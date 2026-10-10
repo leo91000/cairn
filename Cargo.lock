@@ -4490,8 +4490,6 @@ dependencies = [
 [[package]]
 name = "rtc-dtls"
 version = "0.21.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b05fe638f13e60cf3ef8e1608d0e8d36cfb740cce4514e8d6662887eb6c17ff9"
 dependencies = [
  "bytecheck",
  "byteorder",

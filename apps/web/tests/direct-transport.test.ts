@@ -24,13 +24,14 @@ class Channel extends EventTarget {
   bufferedAmountLowThreshold = 0
   binaryType = ''
   packets: Uint8Array[] = []
+  respondToHeartbeats = true
   send(packet: ArrayBuffer) {
     this.packets.push(new Uint8Array(packet))
     const data = new Uint8Array(packet)
     if (data.length < 16384 && data.length > 13) {
       try {
         const frame = JSON.parse(new TextDecoder().decode(data.subarray(13)))
-        if (frame.method === 'HEAD') {
+        if (frame.method === 'HEAD' && this.respondToHeartbeats) {
           queueMicrotask(() => reply(this, {
             type: 'response',
             id: frame.id,
@@ -425,6 +426,26 @@ it('starts heartbeat response timing after transmission instead of closing a bac
   channel.dispatchEvent(new Event('bufferedamountlow'))
   await vi.advanceTimersByTimeAsync(10000)
   expect(state.transportRoute).toBe('direct')
+})
+
+it('reports a missed heartbeat and safely relays an interrupted idempotent message', async () => {
+  const { api, channel, state } = await direct()
+  channel.respondToHeartbeats = false
+  const heartbeatTimeout = vi.fn()
+  window.addEventListener('cairn-direct-heartbeat-timeout', heartbeatTimeout)
+  const body = JSON.stringify({ id: 'heartbeat-loss', text: 'hello' })
+  const message = api('/chats/c/messages', { method: 'POST', body })
+  await vi.waitFor(() => expect(channel.packets.length).toBe(1))
+
+  await vi.advanceTimersByTimeAsync(10000)
+  expect(state.transportRoute).toBe('direct')
+  expect(heartbeatTimeout).not.toHaveBeenCalled()
+  await vi.advanceTimersByTimeAsync(5000)
+  expect(state.transportRoute).toBe('relay')
+  expect(heartbeatTimeout).toHaveBeenCalledTimes(1)
+  expect(await message).toEqual({ marker: 'relay' })
+  const relayed = vi.mocked(fetch).mock.calls.find(([url]) => String(url).endsWith('/api/chats/c/messages'))!
+  expect(relayed[1]).toMatchObject({ method: 'POST', body })
 })
 
 it('resets connection backoff after successful reconnection before another transport loss', async () => {

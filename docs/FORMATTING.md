@@ -36,6 +36,11 @@ limits statements per line, and splits Vue tags with many attributes. These
 rules extend the existing Antfu configuration. `.editorconfig` supplies basic
 indentation and newline settings to editors.
 
+Vendored third-party sources under `vendor/` retain their upstream formatting;
+ESLint and the Rust declaration-spacing pass exclude them. Vendored packages are
+also excluded from the Cargo workspace so `cargo fmt --all` formats Cairn's code.
+Local patches keep the upstream style; regression tests use Cairn's conventions.
+
 ## Commit and CI checks
 
 The existing pre-commit hook runs `pnpm lint:fix`. When staged Kotlin or Gradle

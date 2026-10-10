@@ -17,6 +17,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends clang libclang-
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /build
 COPY Cargo.toml Cargo.lock ./
+COPY vendor ./vendor
 COPY crates/installation/Cargo.toml ./crates/installation/Cargo.toml
 COPY crates/beacon/Cargo.toml ./crates/beacon/Cargo.toml
 COPY crates/protocol/Cargo.toml ./crates/protocol/Cargo.toml
@@ -42,6 +43,7 @@ FROM rust:1.97.1-bookworm AS beacon-backend
 ENV CARGO_BUILD_JOBS=4
 WORKDIR /build
 COPY Cargo.toml Cargo.lock ./
+COPY vendor ./vendor
 COPY crates/installation/Cargo.toml ./crates/installation/Cargo.toml
 COPY crates/beacon/Cargo.toml ./crates/beacon/Cargo.toml
 COPY crates/protocol/Cargo.toml ./crates/protocol/Cargo.toml
