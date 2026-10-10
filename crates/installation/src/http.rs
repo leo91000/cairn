@@ -355,9 +355,9 @@ impl Input {
         let (parts, body) = request.into_parts();
         let query = serde_urlencoded::from_str(parts.uri.query().unwrap_or(""))
             .map_err(|_| Error::bad("Invalid query parameters."))?;
-        let limit = if parts.uri.path().starts_with("/internal/node-workspace/")
-            && parts.uri.path().ends_with("/result")
-        {
+        let path = parts.uri.path();
+        let large = path.ends_with("/result") || path.ends_with("/mcp");
+        let limit = if path.starts_with("/internal/node-workspace/") && large {
             2_000_000
         } else {
             150000

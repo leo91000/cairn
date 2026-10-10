@@ -3,6 +3,7 @@ pub(super) mod snapshots;
 
 use super::{
     host::{self, call, connect, import, valid_runtime_name},
+    mcp,
     network::Network,
     plan::{CHAT_INBOX, ENTRYPOINT, HOME, Import, Plan},
     protocol::{Event, GuestRequest, GuestStatus, Reply},
@@ -771,15 +772,21 @@ impl Vm {
         let relay_path = self.jail.join("v.sock_5201");
         let listener = UnixListener::bind(&relay_path)?;
         std::os::unix::fs::chown(&relay_path, Some(self.uid), Some(self.uid))?;
+        let mcp_path = self.jail.join(format!("v.sock_{}", mcp::PORT));
+        let mcp_listener = UnixListener::bind(&mcp_path)?;
+        std::os::unix::fs::chown(&mcp_path, Some(self.uid), Some(self.uid))?;
+
         let auth_socket = match plan.chat_provider() {
             Provider::Claude => ".claude/cairn-auth.sock",
             Provider::Codex => ".codex/cairn-auth.sock",
         };
-        let manager = plan
-            .import_to(HOME)
-            .map(|home| home.source.join(auth_socket));
+        let home = plan.import_to(HOME);
+        let manager = home.map(|home| home.source.join(auth_socket));
+        let channel = home.map(|home| home.source.join(mcp::SOCKET));
         let relay_stop = CancellationToken::new();
         let relay = auth_relay(listener, manager, relay_stop.clone());
+        // Only this run's MCP channel is reachable: the guest firewall is unchanged.
+        let mcp_relay = mcp::relay(mcp_listener, channel, relay_stop.clone());
         let socket = &self.socket;
         let warmed = self.warmed;
         let operation = async {
@@ -810,7 +817,9 @@ impl Vm {
         relay_stop.cancel();
         relay.abort();
         let _ = relay.await;
+        let _ = mcp_relay.await;
         let _ = tokio::fs::remove_file(relay_path).await;
+        let _ = tokio::fs::remove_file(mcp_path).await;
         result
     }
 

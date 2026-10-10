@@ -102,6 +102,15 @@ impl Executor {
             stop.clone(),
         );
         tokio::spawn(auth);
+        let mcp = crate::mcps::channel::forward(
+            root.join("home").join(crate::microvm::mcp::SOCKET),
+            client.clone(),
+            master.clone(),
+            token.into(),
+            attempt.into(),
+            stop.clone(),
+        );
+        tokio::spawn(mcp);
         tokio::spawn(refresh_inbox(session, root, stop));
         Ok(())
     }

@@ -1,4 +1,5 @@
-//! Master-owned run scope for remote seed files, inboxes, results and access-token relay.
+//! Master-owned run scope for remote seed files, inboxes, results, access-token
+//! relay and run-scoped MCP.
 use crate::{
     error::{Error, Result},
     http::{App, Input},
@@ -107,6 +108,7 @@ pub async fn handle(State(app): State<App>, request: Request) -> Result<Response
             let value = relay_auth(&socket, &input.body).await?;
             Ok(Json(value).into_response())
         }
+        "mcp" => crate::mcps::channel::relayed(s, text(&run, "id"), &input.body).await,
         "result" => {
             let result = text(&input.body, "result");
             if result.len() > MAX_RESULT_BYTES {

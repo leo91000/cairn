@@ -202,8 +202,26 @@ fn headers_match(input: &Input, method: &str, version: &str) -> bool {
 }
 
 pub async fn handle(State(app): State<App>, request: Request) -> Result<Response> {
+    respond(&app.service, request).await
+}
+
+/// Run-scoped MCP received on the channel of `run`: a VM reaches only the
+/// workspace and gateway endpoints, with a token granted to that same run.
+pub(crate) async fn run_scoped(s: &Arc<Service>, run: &str, request: Request) -> Result<Response> {
+    if matches!(Endpoint::of(request.uri().path()), Endpoint::Management) {
+        return Err(Error::not_found("Not found."));
+    }
+    let granted = crate::mcps::granted_run(s, &bearer(&request)).await?;
+    if granted.as_deref() != Some(run) {
+        return Err(Error::unauthorized(
+            "MCP run access expired or was revoked.",
+        ));
+    }
+    respond(s, request).await
+}
+
+async fn respond(s: &Arc<Service>, request: Request) -> Result<Response> {
     let started = std::time::Instant::now();
-    let s = &app.service;
     let bearer = bearer(&request);
     let endpoint = Endpoint::of(request.uri().path());
     let scopes = request

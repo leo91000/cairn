@@ -1268,8 +1268,9 @@ async fn vm_agents_call_workspace_tools_through_their_run_channel_without_a_publ
     assert_ne!(call["reply"]["result"]["isError"], true, "{call}");
     assert_eq!(call["otherRun"], 401, "{call}");
     assert_eq!(call["management"], 404, "{call}");
-    let plan = &controller.plans.lock().await[0];
-    assert!(!plan.to_string().contains("manager:4310"), "{plan}");
+    // Disk reads still use the private origin; the agent never does.
+    let args = controller.plans.lock().await[0]["args"].to_string();
+    assert!(!args.contains("manager:4310"), "{args}");
     fixture.stop(false).await;
     server.abort();
 }
