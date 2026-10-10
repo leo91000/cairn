@@ -59,6 +59,16 @@ impl HandshakeCache {
         true
     }
 
+    // Whether `data` repeats, byte for byte, a Finished already received at `epoch`.
+    pub(crate) fn is_received_finished(&self, data: &[u8], epoch: u16, is_client: bool) -> bool {
+        self.cache.iter().any(|i| {
+            i.typ == HandshakeType::Finished
+                && i.epoch == epoch
+                && i.is_client == is_client
+                && i.data == data
+        })
+    }
+
     // returns a list handshakes that match the requested rules
     // the list will contain null entries for rules that can't be satisfied
     // multiple entries may match a rule, but only the last match is returned (ie ClientHello with cookies)

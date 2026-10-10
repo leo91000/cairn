@@ -192,9 +192,18 @@ impl Endpoint {
         if let Some(conn) = self.connections.get_mut(&remote) {
             let is_handshake_completed_before = conn.is_handshake_completed();
             conn.read(&data)?;
-            // A completed peer still answers repeats of the preceding flight
-            // when its final flight was lost (RFC 6347 4.2.4).
-            if !conn.is_handshake_completed() || conn.handshake_rx.is_some() {
+            // Once complete, only the sender of the final flight answers the peer
+            // repeating its own final flight, in case ours was lost (RFC 6347
+            // 4.2.4). The receiver of the final flight has concluded verification:
+            // it drops the signal without parsing anything again.
+            let is_completed = conn.is_handshake_completed();
+            let resends_final_flight = is_completed
+                && conn.handshake_rx.is_some()
+                && conn.current_flight.is_last_send_flight();
+            if is_completed && !resends_final_flight {
+                conn.handshake_rx = None;
+            }
+            if !is_completed || resends_final_flight {
                 conn.handshake(now)?;
                 // Drain any queued future-epoch packets (e.g. Finished that arrived
                 // before ChangeCipherSpec bumped remote_epoch). If draining sets

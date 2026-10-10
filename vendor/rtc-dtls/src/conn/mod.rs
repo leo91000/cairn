@@ -664,6 +664,21 @@ impl DTLSConn {
             }
         }
 
+        // Once the handshake is complete, the only meaningful handshake record
+        // is the peer repeating its final flight (RFC 6347 4.2.4). Any other
+        // record must not reach the fragment buffer or the concluded transcript.
+        if self.is_handshake_completed() && h.content_type == ContentType::Handshake {
+            let repeats_peer_finished = self.cache.is_received_finished(
+                &pkt[RECORD_LAYER_HEADER_SIZE..],
+                h.epoch,
+                !self.is_client,
+            );
+            if repeats_peer_finished {
+                self.replay_detector[h.epoch as usize].accept();
+            }
+            return (repeats_peer_finished, None, None);
+        }
+
         let is_handshake = match self.fragment_buffer.push(&pkt) {
             Ok(is_handshake) => is_handshake,
             Err(err) => {

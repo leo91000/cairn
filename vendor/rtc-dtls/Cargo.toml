@@ -13,7 +13,7 @@
 edition = "2024"
 name = "rtc-dtls"
 version = "0.21.0"
-authors = [ "Rain Liu <yliu@webrtc.rs>" ]
+authors = ["Rain Liu <yliu@webrtc.rs>"]
 build = false
 autolib = false
 autobins = false
@@ -25,27 +25,27 @@ homepage = "https://webrtc.rs"
 documentation = "https://docs.rs/rtc-dtls"
 readme = "README.md"
 keywords = [
-  "sansio",
-  "networking",
-  "protocols",
+    "sansio",
+    "networking",
+    "protocols",
 ]
-categories = [ "network-programming" ]
+categories = ["network-programming"]
 license = "MIT/Apache-2.0"
 repository = "https://github.com/webrtc-rs/rtc"
 resolver = "2"
 
 [features]
 crypto-aws-lc-rs = [
-  "crypto/crypto-aws-lc-rs",
-  "rustls/aws-lc-rs",
-  "rcgen/aws_lc_rs",
+    "crypto/crypto-aws-lc-rs",
+    "rustls/aws-lc-rs",
+    "rcgen/aws_lc_rs",
 ]
 crypto-ring = [
-  "crypto/crypto-ring",
-  "rustls/ring",
-  "rcgen/ring",
+    "crypto/crypto-ring",
+    "rustls/ring",
+    "rcgen/ring",
 ]
-default = [ "crypto-ring" ]
+default = ["crypto-ring"]
 
 [lib]
 name = "rtc_dtls"
@@ -85,7 +85,7 @@ version = "3.0.3"
 
 [dependencies.rcgen]
 version = "0.14.8"
-features = [ "pem" ]
+features = ["pem"]
 default-features = false
 
 [dependencies.rkyv]
@@ -93,12 +93,12 @@ version = "0.8.17"
 
 [dependencies.rustls]
 version = "0.23.27"
-features = [ "std" ]
+features = ["std"]
 default-features = false
 
 [dependencies.shared]
 version = "0.21.0"
-features = [ "replay" ]
+features = ["replay"]
 default-features = false
 package = "rtc-shared"
 
@@ -113,7 +113,7 @@ version = "0.4.45"
 
 [dev-dependencies.clap]
 version = "4.6.1"
-features = [ "derive" ]
+features = ["derive"]
 
 [dev-dependencies.core_affinity]
 version = "0.8.1"

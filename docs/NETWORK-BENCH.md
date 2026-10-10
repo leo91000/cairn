@@ -327,8 +327,21 @@ CARGO_PROFILE_DEV_DEBUG=0 CARGO_BUILD_JOBS=4 pnpm test:backend --test direct_dtl
 The fixes retain the timer until a complete next flight advances the handshake,
 and answer a recognized repeat with the cached final flight after local
 completion. They preserve crypto configuration, replay protection, grants,
-fingerprints, revocation and every product deadline. The exact 0.21.0 archive
-and licenses are retained; only two upstream source files differ. See
+fingerprints, revocation and every product deadline.
+
+After completion, only the sender of the final flight answers, and only an
+authenticated Finished identical to the one already received triggers one copy
+of its cached flight. Other handshake records never reach the concluded
+transcript. A review found that an unexpected epoch-0 record, such as a 25-byte
+ServerHelloDone with the next message number, made the client re-verify a
+rebuilt transcript, fail with `ErrVerifyDataMismatch` and close the session. Two
+further public endpoint tests inject unexpected and repeated handshake records
+on both sides after completion: application data still flows, and the server
+resends its final flight exactly once per repeated Finished, never for other
+records or replays. Both failed before this correction.
+
+The 0.21.0 sources are the verified crates.io archive with four upstream source
+files patched; provenance and verification are in
 [`vendor/rtc-dtls/CAIRN-PATCH.md`](../vendor/rtc-dtls/CAIRN-PATCH.md).
 No WebRTC or other dependency version is upgraded.
 
