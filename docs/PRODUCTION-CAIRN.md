@@ -262,6 +262,11 @@ traffic resumes. Never widen trust to fix a mismatch. Sources:
 [Coolify main proxy configuration](https://coolify.io/docs/core/networking/proxy/traefik/overview),
 [Compose static network addresses](https://docs.docker.com/reference/compose-file/services/#ipv4_address-ipv6_address).
 
+**Proxy access logs.** `coolify-proxy` runs Traefik without `--accesslog`
+(checked on 2026-10-10), so it keeps no access log, and the privacy policy says
+so. Do not enable the proxy's access logs without first updating `/privacy`
+(`apps/web/src/views/PrivacyPolicy.vue`) and its date.
+
 Start the new service only after Léo's approval. Verify `/health` reports the
 expected tested commit, `/install/release` reports the paired digest, `/` and
 `/claim` serve the SPA with framing protection, and an email-code sign-in works.

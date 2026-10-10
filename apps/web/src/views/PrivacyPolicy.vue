@@ -88,6 +88,10 @@ const providers = [
     name: 'Cloudflare',
     use: 'Hosts the DNS records of cairn.build. Traffic to Beacon does not pass through Cloudflare.',
   },
+  {
+    name: 'Scaleway',
+    use: 'Hosts Beacon’s dedicated server in France.',
+  },
 ]
 
 const cookies = [
@@ -107,7 +111,7 @@ const cookies = [
     <article class="mx-auto mt-10 max-w-3xl break-words phone:mt-8">
       <h1>Privacy Policy</h1>
       <p class="mt-2 text-sm text-muted">
-        Last updated <time datetime="2026-10-09">October 9, 2026</time>
+        Last updated <time datetime="2026-10-10">October 10, 2026</time>
       </p>
 
       <section aria-labelledby="privacy-who" class="mt-8 grid gap-3">
@@ -164,6 +168,7 @@ const cookies = [
         </dl>
         <p>
           Beacon does not write IP addresses, email addresses or request content to its application logs.
+          The reverse proxy in front of Beacon does not keep access logs.
           Database backups taken before Beacon updates may still contain deleted data until those backups are removed.
         </p>
       </section>
@@ -194,7 +199,7 @@ const cookies = [
             <strong>{{ provider.name }}.</strong> {{ provider.use }}
           </li>
         </ul>
-        <p>Beacon and its database run on a server in France operated by Léo Coletta. Personal data is not sold or used for advertising.</p>
+        <p>Beacon and its database run on a dedicated server rented from Scaleway in France, operated by Léo Coletta. Personal data is not sold or used for advertising.</p>
       </section>
 
       <section aria-labelledby="privacy-google" class="mt-10 grid gap-3">
@@ -228,6 +233,35 @@ const cookies = [
             <a class="text-accent underline underline-offset-2" href="mailto:privacy@cairn.build">privacy@cairn.build</a>.
           </li>
         </ul>
+      </section>
+
+      <section aria-labelledby="privacy-legal" class="mt-10 grid gap-3">
+        <h2 id="privacy-legal">
+          Legal basis and your rights
+        </h2>
+        <p>
+          The controller of the personal data described here is Léo Coletta, who can be reached at
+          <a class="text-accent underline underline-offset-2" href="mailto:privacy@cairn.build">privacy@cairn.build</a>.
+          Beacon relies on two legal bases under the GDPR:
+        </p>
+        <ul class="grid list-disc gap-2 pl-5">
+          <li>
+            <strong>Providing the service you ask for</strong> (contract): your account, sign-in, sessions, installations, members and invitations, the notifications you turn on, external app authorizations, and sign-in and invitation emails.
+          </li>
+          <li>
+            <strong>Legitimate interest in keeping the service secure</strong>: abuse protection and the audit log.
+          </li>
+        </ul>
+        <p>
+          You have the right to access, correct and erase your personal data, to restrict or object to its processing, and to receive it in a portable format.
+          To exercise these rights, write to
+          <a class="text-accent underline underline-offset-2" href="mailto:privacy@cairn.build">privacy@cairn.build</a>.
+          Account deletion remains available in your account settings.
+        </p>
+        <p>
+          You also have the right to lodge a complaint with the CNIL, the French data protection authority
+          (<a class="text-accent underline underline-offset-2" href="https://www.cnil.fr" rel="noopener noreferrer">https://www.cnil.fr</a>).
+        </p>
       </section>
 
       <section aria-labelledby="privacy-changes" class="mt-10 grid gap-3">
