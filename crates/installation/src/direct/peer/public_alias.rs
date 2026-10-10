@@ -73,6 +73,7 @@ impl PublicAliases {
         if self.public.is_none() || Instant::now() >= self.deadline {
             return;
         }
+
         let raw = raw.strip_prefix("candidate:").unwrap_or(raw);
         let Ok(candidate) = unmarshal_candidate(raw) else {
             return;
@@ -80,12 +81,14 @@ impl PublicAliases {
         let Ok(address) = candidate.address().parse::<IpAddr>() else {
             return;
         };
+
         // A check to an unroutable private host must not release the alias
         // before the client's actual public mapping arrives in trickle ICE.
         let private = match address {
             IpAddr::V4(ip) => ip.is_private(),
             IpAddr::V6(ip) => ip.is_unique_local(),
         };
+
         if candidate.component() != 1
             || !candidate.network_type().is_udp()
             || !matches!(
@@ -98,6 +101,7 @@ impl PublicAliases {
         {
             return;
         }
+
         self.state
             .lock()
             .unwrap()
@@ -107,6 +111,7 @@ impl PublicAliases {
 
     pub(super) fn host_candidate(&self, local: SocketAddr) {
         let Some(public) = self.public else { return };
+
         if Instant::now() >= self.deadline
             || local.is_ipv4() != public.is_ipv4()
             || local.ip().is_unspecified()
@@ -114,16 +119,19 @@ impl PublicAliases {
         {
             return;
         }
+
         let mut state = self.state.lock().unwrap();
         if state.announced.contains(&local) {
             return;
         }
+
         let port = local.port();
         state.pending.insert(local, DirectSignal::Candidate {
             candidate: format!("candidate:cairn-public 1 udp 1694498815 {public} {port} typ srflx raddr {} rport {port}", local.ip()),
             sdp_mid: Some("0".into()),
             sdp_m_line_index: Some(0),
         });
+
         self.announce(&mut state, local);
     }
 
@@ -140,6 +148,7 @@ impl PublicAliases {
         {
             return;
         }
+
         let mut state = self.state.lock().unwrap();
         if state.remote.contains(&transmit.destination) {
             let mut message = Message::default();
@@ -151,6 +160,7 @@ impl PublicAliases {
             {
                 return;
             }
+
             state.checked.insert(local);
             self.announce(&mut state, local);
         }
@@ -161,6 +171,7 @@ impl PublicAliases {
             && let Some(signal) = state.pending.remove(&local)
         {
             state.announced.insert(local);
+
             if self.direct.send_signal(&self.id, signal).is_err() {
                 self.failed.cancel();
             }
@@ -212,6 +223,7 @@ impl Runtime for AliasRuntime {
 
     fn wrap_udp_socket(&self, socket: std::net::UdpSocket) -> io::Result<Arc<dyn AsyncUdpSocket>> {
         let local = socket.local_addr()?;
+
         Ok(Arc::new(AliasSocket {
             inner: self.inner.wrap_udp_socket(socket)?,
             local,
@@ -267,9 +279,11 @@ impl AsyncUdpSocket for AliasSocket {
 
     fn poll_send(&self, cx: &mut Context<'_>, transmit: &Transmit<'_>) -> Poll<io::Result<usize>> {
         let result = self.inner.poll_send(cx, transmit);
+
         if matches!(result, Poll::Ready(Ok(bytes)) if bytes == transmit.contents.len()) {
             self.aliases.sent_check(self.local, transmit);
         }
+
         result
     }
 
