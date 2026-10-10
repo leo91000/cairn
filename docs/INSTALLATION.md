@@ -26,6 +26,12 @@ rotated logs. No service publishes a host port; no container receives the Docker
 socket. Private identity and storage credentials must stay on this host. Do not
 publish the directory or `docker compose config` output.
 
+The manager's origin, `http://manager:4310`, exists only on that private Compose
+network. At startup the manager records it in the data directory it shares with
+its local runner, which then reads conversation disks from exactly this origin.
+Every other controller keeps the HTTPS rule: remote nodes enroll, connect and
+read disks over HTTPS, HTTP being accepted only on loopback for tests.
+
 Reruns retain the chosen immutable Cairn image, identity, Garage keys, storage
 settings and persistent data. Concurrent installers are refused. An incomplete or unsafe identity stops the
 rerun with recovery instructions and is retained rather than overwritten. The one-use

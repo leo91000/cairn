@@ -170,5 +170,9 @@ The state directory is private and the identity file uses mode 0600. Enrollment
 refuses to replace an existing identity. A revoked connector exits and must be
 registered again using a new private state directory. Production connections
 require HTTPS, do not follow redirects, and make only outbound requests. HTTP
-is accepted only for loopback testing. No root privileges, host reformatting or
-systemd changes are performed by these commands.
+is accepted only for loopback testing. The installation's own runner is the one
+exception: it reads disks from the exact origin its manager records in their
+shared `DATA_DIR` (`http://manager:4310` in the generated Compose file). Only the
+manager writes that record, from its own configuration; a node or a request
+never supplies it. No root privileges, host reformatting or systemd changes are
+performed by these commands.

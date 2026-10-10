@@ -20,8 +20,13 @@ export async function prepareStorageOrigin({
   name,
   api,
   maxDirtySeconds = 300,
+  // An installation manager's private origin, such as `http://manager:4310`.
+  // The caller resolves its host to the runner container on a Docker network.
+  managerOrigin,
 }) {
   const origin = path.join(root, 'data/storage-fixture')
+  const master = new URL(managerOrigin || 'http://127.0.0.1:4313')
+  const address = managerOrigin ? '0.0.0.0' : '127.0.0.1'
   await mkdir(origin)
   // The server runs as root with the runner's private umask. Pre-create the
   // read ledger as the test user so subsequent assertions can read/reset it.
@@ -38,9 +43,12 @@ export async function prepareStorageOrigin({
       const delay=Number(fs.existsSync(root+'/latency')?fs.readFileSync(root+'/latency','utf8'):0);
       setTimeout(()=>{const bytes=fs.readFileSync(root+'/'+hash);
         fs.appendFileSync(root+'/reads',hash+'\\n'); res.end(bytes);},delay);
-    }).listen(4313,'127.0.0.1');
+    }).listen(${master.port},'${address}');
   `)
   docker('exec', '-d', name, '/usr/local/bin/node', '/data/storage-fixture/server.mjs')
+  // As the installation manager does at startup, in the DATA_DIR it shares with its runner.
+  if (managerOrigin)
+    await writeFile(path.join(root, 'data/manager-origin'), master.origin)
   const policy = {
     cacheMiB: 8,
     reserveMiB: 64,
@@ -48,7 +56,7 @@ export async function prepareStorageOrigin({
     backupSeconds: 60,
     maxDirtySeconds,
   }
-  const storage = { master: 'http://127.0.0.1:4313/', grant: 'fixture-storage-grant', policy }
+  const storage = { master: master.href, grant: 'fixture-storage-grant', policy }
   await api('/storage-policy', 'POST', policy)
   return { origin, policy, storage }
 }

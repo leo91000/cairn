@@ -56,6 +56,7 @@ impl Service {
         }
         let store = Store::open(&config.data_dir)?;
         let vault = Vault::new(store.clone(), &config.data_dir)?;
+        crate::nodes::connector::record_manager_origin(&config).await?;
         let service = Arc::new(Self {
             task_author_lock: Arc::default(),
             node_maintenance_tasks: Arc::default(),

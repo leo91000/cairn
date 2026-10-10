@@ -25,6 +25,8 @@ async function main() {
   const name = `cairn-vm-test-${randomUUID().slice(0, 8)}`
   const networkName = `${name}-network`
   const networkServer = `${name}-peer`
+  // The generated installation reaches its manager by name on a private network.
+  const installationNetwork = `${name}-installation`
   // A documentation-only subnet emulates public destinations without Internet access.
   const publicPeer = '203.0.113.3'
   const headers = { authorization: 'Bearer fixture-runner-token' }
@@ -179,6 +181,8 @@ console.log('probe.done');
     await new Promise(resolve => claudeAuth.listen(path.join(source, 'home/.claude/cairn-auth.sock'), resolve))
     docker('run', '-d', '--name', name, '--user', '0:0', '--read-only', '--cap-drop', 'ALL', ...['SYS_ADMIN', 'NET_ADMIN', 'SYS_CHROOT', 'SETUID', 'SETGID', 'MKNOD', 'CHOWN', 'FOWNER', 'KILL', 'DAC_OVERRIDE'].flatMap(cap => ['--cap-add', cap]), '--security-opt', 'apparmor=unconfined', '--security-opt', 'seccomp=unconfined', '--device', '/dev/kvm', '--device', '/dev/fuse', '--device', '/dev/net/tun', '--sysctl', 'net.ipv4.ip_forward=1', '--sysctl', 'net.ipv6.conf.all.disable_ipv6=1', '--tmpfs', '/run', '--tmpfs', '/tmp', '-v', `${root}/data:/data`, '-v', `${root}/state:/runner-state`, '-p', '127.0.0.1::4311', '--memory', '6g', '--cpus', '3', '-e', 'CONCURRENCY=5', '--entrypoint', '/usr/local/bin/cairn', image, 'runner-broker')
     docker('network', 'connect', '--ip', '203.0.113.2', networkName, name)
+    docker('network', 'create', installationNetwork)
+    docker('network', 'connect', '--alias', 'manager', installationNetwork, name)
     // First prove every listener is reachable outside the guest firewall.
     process.stdout.write(docker('exec', name, '/usr/local/bin/node', `${runRoot}/workspace/network-probe.mjs`, 'control', publicPeer, privatePeer))
     await reconnect()
@@ -187,6 +191,7 @@ console.log('probe.done');
       docker,
       name,
       api,
+      managerOrigin: 'http://manager:4310',
     })
     const { storage } = storageFixture
     const initialHealth = await (await api('/health')).json()
@@ -603,6 +608,12 @@ console.log('probe.done');
       try {
         docker('rm', '-fv', networkServer)
         docker('network', 'rm', networkName)
+      }
+      catch {
+      }
+
+      try {
+        docker('network', 'rm', installationNetwork)
       }
       catch {
       }
