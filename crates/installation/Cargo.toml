@@ -43,6 +43,7 @@ rusqlite = { version = "0.40", features = [
   "bundled",
   "serde_json"
 ] }
+rustls = { version = "0.23", default-features = false, features = [ "aws_lc_rs" ] }
 reqwest = { version = "0.13", default-features = false, features = [
   "json",
   "stream",

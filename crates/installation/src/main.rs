@@ -37,6 +37,8 @@ where
     F: FnOnce(Arc<Service>) -> Fut,
     Fut: std::future::Future<Output = Result<axum::Router>>,
 {
+    cairn_installation::tls::install_provider();
+
     let args = std::env::args().skip(1).collect::<Vec<_>>();
     // Validate the inherited control socket before Tokio creates any FDs.
     if args.first().is_some_and(|a| a == "supervise") && !has_control_socket() {

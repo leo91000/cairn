@@ -54,6 +54,7 @@ pub mod storage;
 pub mod store;
 pub mod supervisor;
 mod task_authors;
+pub mod tls;
 pub mod toolkit;
 pub mod validation;
 pub mod vault;
