@@ -224,7 +224,18 @@ the beacon Compose definition; Traefik routes HTTPS only.
   source, at most four URLs of 256 bytes each. TURN URLs are rejected.
 - `CAIRN_DIRECT_PUBLIC_IP` optionally announces the installation host's public
   unicast address for an explicitly verified port-preserving NAT. It avoids the
-  same-host STUN hairpin trap without publishing any installation port; see the
+  same-host STUN hairpin trap without publishing any installation port. The
+  `cairn-public` alias is withheld until that host candidate's UDP socket has
+  successfully sent an ICE Binding check to an authorized numeric remote UDP
+  candidate of the same address family. Private IPv4 and unique-local IPv6
+  candidates do not release it: their mapping cannot prepare the public route.
+  Both candidates embedded in the offer and trickled candidates are considered.
+  Each socket's alias is announced at most once, within five seconds of peer
+  setup. STUN discovery, inbound traffic, failed/pending sends and checks from
+  another socket cannot release it. If no eligible candidate/check arrives in
+  that window, the alias is omitted for this negotiation; ordinary candidates
+  keep working, the existing 30 s handshake limit applies and HTTPS relay
+  remains available. See the
   [production runbook](PRODUCTION-CAIRN.md#stun-and-direct-installation-connectivity-101).
 - An unset or empty `CAIRN_DIRECT_STUN_URLS` uses the authenticated beacon STUN
   source. An empty override logs this choice explicitly; it does not disable direct.

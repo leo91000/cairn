@@ -7,6 +7,7 @@ import hashlib
 import socket
 import struct
 import json
+import re
 import os
 import shlex
 import signal
@@ -200,8 +201,12 @@ class Network:
                               "-o", external, "-p", "udp", "-j", "MASQUERADE", "--random-fully")
                 self.exec(router, "iptables", "-t", "nat", "-A", "POSTROUTING",
                           "-o", external, "-j", "MASQUERADE")
-                self.exec(router, "iptables", "-A", "INPUT", "-i", external, "-p", "udp",
-                          "-m", "conntrack", "--ctstate", "NEW", "-j", "DROP")
+                # Docker's host receives an unsolicited check to an unpublished
+                # port. Confirm that INPUT tuple before its reverse MASQUERADE
+                # flow; dropping it pre-confirmation hides production #163.
+                if scenario != "same-server" or role != "installation":
+                    self.exec(router, "iptables", "-A", "INPUT", "-i", external, "-p", "udp",
+                              "-m", "conntrack", "--ctstate", "NEW", "-j", "DROP")
                 self.exec(router, "iptables", "-A", "FORWARD", "-i", external,
                           "-m", "conntrack", "--ctstate", "NEW", "-j", "DROP")
             if scenario == "udp-blocked":
@@ -516,11 +521,48 @@ def browser(network, binary, directory, args, report):
     env["CAIRN_NETWORK_CUT_DIRECT"] = str(cut)
     env["CAIRN_NETWORK_RESTORE_DIRECT"] = str(restore)
     env["CAIRN_NETWORK_CHANGE"] = str(change)
+    mappings_output = directory / "same-server-mappings.json"
+    if args.scenario == "same-server":
+        ready = directory / "mapping-observer-ready"
+        observer = network.spawn(network.participants["installation"]["router"],
+                                 python, script, "mapping-observer", str(mappings_output), str(ready),
+                                 privileged=True)
+        wait_ready(ready, observer, "same-server conntrack observer")
     process = subprocess.Popen(["pnpm", "exec", "playwright", "test", "--config", "playwright.network.config.ts"], env=env, start_new_session=True)
     network.children.append(process)
     network.groups.append(process.pid)
-    if process.wait():
+    status = process.wait()
+    if args.scenario == "same-server":
+        # Observe throughout negotiation: failed ICE flows can expire before
+        # Playwright's 35 s assertion. Keep only synthetic ports, no payload.
+        mappings = json.loads(mappings_output.read_text())
+        saved = json.loads(args.output.read_text())
+        saved["sameServerMappings"] = mappings
+        args.output.write_text(json.dumps(saved) + "\n")
+        if not mappings or any(mapping["localPort"] != mapping["publicPort"] for mapping in mappings):
+            raise RuntimeError(f"same-server: Docker MASQUERADE remapped the ICE socket: {mappings}")
+    if status:
         raise RuntimeError("Authenticated network scenario failed; see Playwright diagnostics")
+
+
+def mapping_observer(output, ready):
+    output = Path(output)
+    observed = {}
+    started = time.monotonic()
+    while True:
+        tuples = subprocess.run(["conntrack", "-L", "-p", "udp", "--orig-src", "10.102.2.2",
+                                 "--orig-dst", "198.18.102.2"], check=True, capture_output=True, text=True).stdout
+        for entry in tuples.splitlines():
+            ports = re.findall(r"sport=(\d+) dport=(\d+)", entry)
+            if len(ports) == 2:
+                local, public = int(ports[0][0]), int(ports[1][1])
+                observed.setdefault((local, public), {"localPort": local, "publicPort": public,
+                                                     "firstSeenMs": round((time.monotonic() - started) * 1000)})
+        temporary = output.with_suffix(".tmp")
+        temporary.write_text(json.dumps(list(observed.values())))
+        temporary.replace(output)
+        Path(ready).touch()
+        time.sleep(0.05)
 
 
 def stun_server(address, ready):
@@ -654,6 +696,8 @@ def change_network(namespace, link, ready_file):
 if __name__ == "__main__":
     if len(os.sys.argv) == 4 and os.sys.argv[1] == "stun-server":
         stun_server(*os.sys.argv[2:4])
+    elif len(os.sys.argv) == 4 and os.sys.argv[1] == "mapping-observer":
+        mapping_observer(*os.sys.argv[2:4])
     elif len(os.sys.argv) == 3 and os.sys.argv[1] == "stun-probe":
         stun_probe(os.sys.argv[2])
     elif len(os.sys.argv) in {4, 5} and os.sys.argv[1] == "forward":

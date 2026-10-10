@@ -5,7 +5,7 @@ Ticket [#102](https://github.com/leo91000/cairn/issues/102),
 
 ## Run locally
 
-Linux, `iproute2` (including `ss`), `iptables`, `util-linux`, Python 3, `/dev/net/tun`, the pinned
+Linux, `iproute2` (including `ss`), `iptables`, `conntrack`, `util-linux`, Python 3, `/dev/net/tun`, the pinned
 Rust/Node/pnpm runtimes and passwordless sudo are required. No KVM,
 VM, real email provider or agent credentials are needed. Docker is needed only
 for disposable Postgres and the published STUN-port check. Use an empty disposable
@@ -65,7 +65,7 @@ only the standard library and never serves installation data.
 | udp-blocked | Every forwarded UDP datagram is dropped on both routers; TCP remains usable. |
 | symmetric-nat | Both routers allocate UDP source ports per flow/destination and deny unsolicited inbound packets. The two probe destinations have distinct fixed mappings; arbitrary UDP destinations use fresh random port allocation. |
 | symmetric-client | Destination-dependent client NAT faces an installation with ordinary Docker-like NAT/filtering; relay expected, no installation port published. |
-| same-server | Beacon STUN behind a directly published DNAT port on the installation host; external client source preserved, installation hairpin reports a gateway; explicit public-IP alias restores the authorized direct route. |
+| same-server | Beacon STUN behind a directly published DNAT port on the installation host; external client source preserved, installation hairpin reports a gateway; explicit public-IP alias withheld until outbound ICE prepares the mapping; delayed browser trickle makes an eager alias receive the first check and remap Docker MASQUERADE. |
 | network-change | The client moves to a new source address during a live stream; old-address sockets are closed. |
 | packet-loss | A userspace TUN router drops one outgoing IPv4 packet per five-packet block on both sides, including TCP. A fixed, side-specific BLAKE2s seed varies its position; no optional netfilter/netem module. |
 
@@ -76,8 +76,15 @@ sequences until the current reply or its deadline. The beacon Rust Binding respo
 198.18.102.1:3478, before the host-facing masquerade; mapped addresses therefore
 identify each actual NAT router (198.18.102.2/.3), rather than a shared host
 address. Tests assert these reflexive addresses. NAT routers drop unsolicited UDP to their own ports as well as forwarded UDP,
-and private host candidates behind NAT have no internet route; otherwise
+except the same-server installation host: its INPUT path confirms unsolicited
+checks to unpublished host ports, reproducing Docker conntrack tuple collisions.
+There is still no DNAT or incoming forwarding to the installation. The
+`sameServerMappings` evidence records local/public source ports and first-seen
+timings throughout negotiation, so a failed tuple expiring before the route
+assertion cannot hide a remap. All observed peer mappings must preserve ports.
+Private host candidates behind NAT have no internet route; otherwise
 conntrack can create artificial reverse-flow mappings before hole punching.
+
 The CLI tests assert these effects, including repeated
 exact packet-loss counts. These diagnostic listeners cannot access installation
 content and are not a WebRTC peer or an anonymous local installation interface.

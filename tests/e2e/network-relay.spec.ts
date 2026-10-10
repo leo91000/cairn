@@ -87,6 +87,17 @@ test('authenticated browser and Rust client keep using the observed route under 
     }
 
     await capture(page)
+    if (process.env.CAIRN_NETWORK_SCENARIO === 'same-server') {
+      // Slow outbound trickle signaling while the browser's UDP checks keep
+      // running. An eager public alias is therefore checked before the
+      // installation learns a remote destination, just like production #163.
+      await page.route('**/direct/*/signal', async (route) => {
+        if (route.request().postDataJSON()?.kind === 'candidate')
+          await new Promise(resolve => setTimeout(resolve, 750))
+        await route.continue()
+      })
+    }
+
     if (process.env.CAIRN_NETWORK_SCENARIO === 'mdns-only-client') {
       await page.addInitScript(() => {
         const browser = window as typeof window & { iceCandidates: { mdns: boolean, type: string | null }[] }

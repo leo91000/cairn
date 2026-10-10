@@ -1,4 +1,6 @@
 //! The authorized UDP peer. All application traffic uses the relay dispatcher.
+mod public_alias;
+
 use super::{DirectConnections, DirectEvent};
 use crate::{
     error::{Error, Result},
@@ -6,6 +8,7 @@ use crate::{
 };
 use axum::Router;
 use cairn_protocol::direct::{DirectAuthorization, DirectSignal};
+use public_alias::{AliasRuntime, PublicAliases};
 use rtc::{
     ice::{mdns::MulticastDnsMode, network_type::NetworkType},
     peer_connection::configuration::setting_engine::{SctpMaxMessageSize, SettingEngineBuilder},
@@ -94,7 +97,7 @@ struct PeerEvents {
     direct: DirectConnections,
     channels: mpsc::Sender<Arc<dyn DataChannel>>,
     failed: CancellationToken,
-    public_ip: Option<IpAddr>,
+    aliases: Arc<PublicAliases>,
 }
 
 #[async_trait::async_trait]
@@ -113,31 +116,15 @@ impl PeerConnectionEventHandler for PeerEvents {
 
                 self.direct.send_signal(&self.id, signal)
             });
-        let public = if let Some(public) = self.public_ip
-            && event.candidate.typ == webrtc::peer_connection::RTCIceCandidateType::Host
+
+        if event.candidate.typ == webrtc::peer_connection::RTCIceCandidateType::Host
             && let Ok(local) = event.candidate.address.parse::<IpAddr>()
-            && local.is_ipv4() == public.is_ipv4()
-            && !local.is_unspecified()
-            && !local.is_loopback()
         {
-            // Only an explicit, port-preserving NAT mapping. Keep the bound
-            // host candidate inside ICE; announce its public alias to the peer.
-            let port = event.candidate.port;
-            let candidate = format!(
-                "candidate:cairn-public 1 udp 1694498815 {public} {port} typ srflx raddr {local} rport {port}"
-            );
-            self.direct.send_signal(
-                &self.id,
-                DirectSignal::Candidate {
-                    candidate,
-                    sdp_mid: Some("0".into()),
-                    sdp_m_line_index: Some(0),
-                },
-            )
-        } else {
-            Ok(())
-        };
-        if result.is_err() || public.is_err() {
+            self.aliases
+                .host_candidate(std::net::SocketAddr::new(local, event.candidate.port));
+        }
+
+        if result.is_err() {
             self.failed.cancel();
         }
     }
@@ -267,15 +254,35 @@ async fn serve_peer(
         mut signals,
     } = negotiation;
     let (channels, mut incoming) = mpsc::channel(1);
+    let aliases = Arc::new(PublicAliases::new(
+        config.public_ip,
+        authorization.claims.connection_id.clone(),
+        direct.clone(),
+        failed.clone(),
+    ));
+
+    for candidate in sdp
+        .lines()
+        .filter_map(|line| line.strip_prefix("a=candidate:"))
+    {
+        aliases.remote_candidate(candidate);
+    }
+
     let handler = Arc::new(PeerEvents {
         id: authorization.claims.connection_id.clone(),
         direct: direct.clone(),
         channels,
         failed: failed.clone(),
-        public_ip: config.public_ip,
+        aliases: aliases.clone(),
     });
+    let builder = PeerConnectionBuilder::new();
+    let builder = if config.public_ip.is_some() {
+        builder.with_runtime(Arc::new(AliasRuntime::new(aliases.clone())))
+    } else {
+        builder
+    };
     let peer: Arc<dyn PeerConnection> = Arc::new(
-        PeerConnectionBuilder::new()
+        builder
             .with_configuration(
                 RTCConfigurationBuilder::default()
                     .with_ice_servers(vec![RTCIceServer {
@@ -329,7 +336,7 @@ async fn serve_peer(
             tokio::select! {
                 () = &mut deadline => return Err(Error::gateway_timeout("Direct handshake timed out.")),
                 Some(channel) = incoming.recv() => break channel,
-                signal = signals.recv() => apply_signal(peer.as_ref(), signal).await?,
+                signal = signals.recv() => apply_signal(peer.as_ref(), &aliases, signal).await?,
             }
         };
         *channel_to_close.lock().unwrap() = Some(channel.clone());
@@ -396,7 +403,7 @@ async fn serve_peer(
                     biased;
                     () = lease.closed.cancelled() => return Ok(()),
                     Some(_) = incoming.recv() => return Err(Error::bad("Only one DataChannel is allowed.")),
-                    signal = signals.recv() => apply_signal(peer.as_ref(), signal).await?,
+                    signal = signals.recv() => apply_signal(peer.as_ref(), &aliases, signal).await?,
                     _ = timeout.tick() => {
                         decoder.expire();
                     }
@@ -476,7 +483,11 @@ async fn serve_peer(
     result
 }
 
-async fn apply_signal(peer: &dyn PeerConnection, signal: Option<DirectSignal>) -> Result<()> {
+async fn apply_signal(
+    peer: &dyn PeerConnection,
+    aliases: &PublicAliases,
+    signal: Option<DirectSignal>,
+) -> Result<()> {
     let Some(DirectSignal::Candidate {
         candidate,
         sdp_mid,
@@ -485,6 +496,7 @@ async fn apply_signal(peer: &dyn PeerConnection, signal: Option<DirectSignal>) -
     else {
         return Err(Error::bad("Expected ICE candidate."));
     };
+    aliases.remote_candidate(&candidate);
     peer.add_ice_candidate(RTCIceCandidateInit {
         candidate,
         sdp_mid,
