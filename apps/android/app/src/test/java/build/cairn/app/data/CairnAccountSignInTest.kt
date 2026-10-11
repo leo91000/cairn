@@ -6,6 +6,7 @@ import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import okhttp3.mockwebserver.MockResponse
 import okhttp3.mockwebserver.MockWebServer
+import okhttp3.mockwebserver.SocketPolicy
 import org.junit.Assert.*
 import org.junit.Test
 
@@ -65,6 +66,90 @@ class CairnAccountSignInTest {
                 )
             }
             assertFalse(vault.values.values.single().contains("native-secret"))
+        }
+    }
+
+    @Test
+    fun `GitHub keeps polling when Android cuts the network behind the browser`() = runBlocking {
+        MockWebServer().use { server ->
+            server.start()
+            val launcher =
+                server
+                    .url(
+                        "/api/account/oauth/github/native/browser?challenge=one-use&opener=launcher"
+                    )
+                    .toString()
+            server.enqueue(
+                MockResponse()
+                    .setBody(
+                        """{"challenge":"one-use","secret":"native-secret","url":"$launcher"}"""
+                    )
+            )
+            server.enqueue(MockResponse().setSocketPolicy(SocketPolicy.DISCONNECT_AFTER_REQUEST))
+            server.enqueue(MockResponse().setResponseCode(202).setBody("""{"pending":true}"""))
+            server.enqueue(
+                MockResponse()
+                    .setBody(
+                        """{"authenticated":true,"csrf":"csrf","account":{"id":"account","email":"alice@example.test"}}"""
+                    )
+                    .addHeader("Set-Cookie", "cairn_session=cairn; Path=/; HttpOnly")
+            )
+            val api = CairnApi(server.url("/"), MemoryVault(), installationId = "selected")
+            val credentials =
+                object : CairnCredentials {
+                    override suspend fun google(clientId: String, nonce: String): String =
+                        error("unused")
+
+                    override suspend fun authenticatePasskey(options: String): String =
+                        error("unused")
+
+                    override suspend fun createPasskey(options: String): String = error("unused")
+
+                    override fun openGitHub(url: String) {}
+                }
+
+            assertTrue(CairnAccountSignIn(api, credentials).github().authenticated)
+            assertEquals(4, server.requestCount)
+        }
+    }
+
+    @Test
+    fun `GitHub stops polling when Beacon rejects the handover`() = runBlocking {
+        MockWebServer().use { server ->
+            server.start()
+            val launcher =
+                server
+                    .url(
+                        "/api/account/oauth/github/native/browser?challenge=one-use&opener=launcher"
+                    )
+                    .toString()
+            server.enqueue(
+                MockResponse()
+                    .setBody(
+                        """{"challenge":"one-use","secret":"native-secret","url":"$launcher"}"""
+                    )
+            )
+            server.enqueue(MockResponse().setResponseCode(410).setBody("""{"error":"expired"}"""))
+            val api = CairnApi(server.url("/"), MemoryVault(), installationId = "selected")
+            val credentials =
+                object : CairnCredentials {
+                    override suspend fun google(clientId: String, nonce: String): String =
+                        error("unused")
+
+                    override suspend fun authenticatePasskey(options: String): String =
+                        error("unused")
+
+                    override suspend fun createPasskey(options: String): String = error("unused")
+
+                    override fun openGitHub(url: String) {}
+                }
+
+            val error = runCatching {
+                CairnAccountSignIn(api, credentials).github()
+            }
+                .exceptionOrNull()
+            assertEquals(410, (error as ApiException).status)
+            assertEquals(2, server.requestCount)
         }
     }
 
