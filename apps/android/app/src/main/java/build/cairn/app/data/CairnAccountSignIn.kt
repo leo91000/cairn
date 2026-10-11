@@ -1,5 +1,6 @@
 package build.cairn.app.data
 
+import java.io.IOException
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withTimeout
 import kotlinx.serialization.Serializable
@@ -55,20 +56,29 @@ class CairnAccountSignIn(private val api: CairnApi, private val credentials: Cai
         return withTimeout(300_000) {
             var result: Session? = null
             while (result == null) {
+                // Android 15+ cuts network access while the browser is in front. Keep polling
+                // through those transport failures; Beacon's own HTTP errors stay final.
                 val response =
-                    wireJson
-                        .parseToJsonElement(
-                            api.request(
-                                "POST",
-                                "/account/oauth/github/native/finish",
-                                body(
-                                    "challenge" to handover.challenge,
-                                    "secret" to handover.secret,
-                                ),
+                    try {
+                        wireJson
+                            .parseToJsonElement(
+                                api.request(
+                                    "POST",
+                                    "/account/oauth/github/native/finish",
+                                    body(
+                                        "challenge" to handover.challenge,
+                                        "secret" to handover.secret,
+                                    ),
+                                )
                             )
-                        )
-                        .jsonObject
-                if (response["pending"]?.jsonPrimitive?.content != "true") {
+                            .jsonObject
+                    } catch (error: ApiException) {
+                        throw error
+                    } catch (_: IOException) {
+                        null
+                    }
+
+                if (response != null && response["pending"]?.jsonPrimitive?.content != "true") {
                     result = acceptSession(wireJson.decodeFromJsonElement<Session>(response))
                 }
                 if (result == null) delay(1000)
