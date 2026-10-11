@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import type { Run } from '../../../../packages/contracts/contracts'
-import { computed, inject } from 'vue'
+import { computed, inject, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { state } from '../api'
 import { ChevronRight } from '../icons'
@@ -21,6 +21,9 @@ const emit = defineEmits<{ close: [] }>()
 const router = useRouter()
 const installation = inject(installationKey, null)
 const current = computed(() => installation?.current.value ?? null)
+const owner = computed(() => (current.value?.role ?? state.installationRole) === 'owner')
+// NodeExecution loads the placement itself and stays empty while only the master runner exists.
+const runnerRelevant = ref(false)
 
 function select(id: string) {
   if (id !== current.value?.id)
@@ -69,7 +72,7 @@ function openSettings() {
         </div>
         <div>
           <dt>Role</dt>
-          <dd>{{ state.installationRole === 'owner' ? 'Owner' : 'Member' }}</dd>
+          <dd>{{ owner ? 'Owner' : 'Member' }}</dd>
         </div>
         <div>
           <dt>Route</dt>
@@ -79,10 +82,11 @@ function openSettings() {
             {{ routeLabel(state.transportRoute) }}
           </dd>
         </div>
-        <div v-if="run && state.installationRole === 'owner'" class="connection-runner">
+        <!-- v-show, not v-if: the chip must stay mounted to learn whether there is a runner to show. -->
+        <div v-if="run && owner" v-show="runnerRelevant">
           <dt>Runner</dt>
           <dd>
-            <NodeExecution :key="run.id" :run="run" />
+            <NodeExecution :key="run.id" :run="run" @relevance="runnerRelevant = $event" />
           </dd>
         </div>
         <div v-if="agent">
@@ -93,7 +97,7 @@ function openSettings() {
         </div>
       </dl>
       <button
-        v-if="state.installationRole === 'owner'"
+        v-if="owner"
         type="button"
         class="flex min-h-12 w-full items-center justify-between gap-3 text-left text-sm text-muted hover:text-ink"
         @click="openSettings"
@@ -115,6 +119,4 @@ function openSettings() {
 }
 .connection-rows dt { flex-shrink: 0; color: var(--color-muted); }
 .connection-rows dd { margin: 0; min-width: 0; display: flex; justify-content: flex-end; text-align: right; }
-/* The runner chip renders nothing while only the master runner exists. */
-.connection-runner:not(:has(button)) { display: none; }
 </style>

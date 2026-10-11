@@ -1,5 +1,10 @@
 <script setup lang="ts">
-import { computed, inject, ref } from 'vue'
+import {
+  computed,
+  inject,
+  ref,
+  useId,
+} from 'vue'
 import { state } from '../api'
 import { ChevronDown, Search } from '../icons'
 import { connectionTone, installationKey, routeLabel } from '../installation-context'
@@ -15,6 +20,7 @@ const workspaceActions = inject(workspaceActionsKey, undefined)
 const current = computed(() => installation?.current.value ?? null)
 const connectionOpen = ref(false)
 const trigger = ref<HTMLButtonElement>()
+const id = useId()
 </script>
 
 <template>
@@ -31,35 +37,36 @@ const trigger = ref<HTMLButtonElement>()
       height="36"
       class="size-9 shrink-0 rounded-[10px]"
     >
-    <div class="min-w-0 flex-1 cursor-pointer" @click="connectionOpen = true">
-      <button
-        ref="trigger"
-        type="button"
-        class="flex max-w-full min-w-0 items-center gap-1 text-left font-heading text-[15px] font-bold leading-tight text-ink"
-        aria-haspopup="dialog"
-        :aria-expanded="connectionOpen"
-        :title="current.name"
-        @click.stop="connectionOpen = true"
-      >
-        <span class="truncate">{{ current.name }}</span><Icon :name="ChevronDown" :size="15" class="shrink-0 text-muted" />
-      </button>
-      <p class="m-0! mt-0.5! flex min-w-0 items-center gap-1.5 text-xs text-muted" :title="`${current.status} · ${routeLabel(state.transportRoute)}`">
-        <span aria-hidden="true" class="size-1.5 shrink-0 rounded-full" :class="connectionTone(current, state.transportRoute)" />
-        <span
-          role="status"
-          aria-label="Installation availability"
-          class="truncate"
-          :class="current.updateRequired ? 'text-warning' : ''"
-        >{{ current.status }}</span>
-        <span aria-hidden="true">·</span>
-        <span
-          role="status"
-          aria-label="Connection route"
-          :data-transport-route="state.transportRoute"
-          class="shrink-0"
-        >{{ routeLabel(state.transportRoute) }}</span>
-      </p>
-    </div>
+    <!-- One tap target for name and route; the live statuses are announced through aria-describedby. -->
+    <button
+      ref="trigger"
+      type="button"
+      class="flex min-h-11 min-w-0 flex-1 flex-col items-start justify-center rounded-lg text-left"
+      aria-haspopup="dialog"
+      :aria-expanded="connectionOpen"
+      :aria-labelledby="`${id}-name`"
+      :aria-describedby="`${id}-status`"
+      :title="`${current.name} · ${current.status} · ${routeLabel(state.transportRoute)}`"
+      @click="connectionOpen = true"
+    >
+      <span class="flex max-w-full min-w-0 items-center gap-1 font-heading text-[15px] font-bold leading-tight text-ink">
+        <span :id="`${id}-name`" class="truncate">{{ current.name }}</span><Icon :name="ChevronDown" :size="15" class="shrink-0 text-muted" />
+      </span>
+      <span aria-hidden="true" class="mt-0.5 flex max-w-full min-w-0 items-center gap-1.5 text-xs text-muted">
+        <span class="size-1.5 shrink-0 rounded-full" :class="connectionTone(current, state.transportRoute)" />
+        <span class="truncate" :class="current.updateRequired ? 'text-warning' : ''">{{ current.status }}</span>
+        <span>·</span>
+        <span class="shrink-0">{{ routeLabel(state.transportRoute) }}</span>
+      </span>
+    </button>
+    <p :id="`${id}-status`" class="sr-only">
+      <span role="status" aria-label="Installation availability">{{ current.status }}</span>,
+      <span
+        role="status"
+        aria-label="Connection route"
+        :data-transport-route="state.transportRoute"
+      >{{ routeLabel(state.transportRoute) }}</span>
+    </p>
     <button
       type="button"
       class="grid size-11 shrink-0 place-items-center rounded-full border border-line text-muted hover:bg-hover hover:text-ink"

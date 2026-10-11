@@ -32,6 +32,8 @@ import VirtualSelect from './VirtualSelect.vue'
 type Mode = 'automatic' | 'preferred' | 'fixed'
 
 const props = defineProps<{ run: Run }>()
+// Lets hosts drop the row around the chip while it renders nothing.
+const emit = defineEmits<{ relevance: [relevant: boolean] }>()
 const nodes = ref<ExecutionNode[]>([])
 const nodeOptions = computed(() => nodes.value.map(node => ({ value: node.id, label: node.name })))
 const labels: Record<string, string> = {
@@ -70,7 +72,8 @@ const open = ref(false)
 const moving = ref(false)
 const chip = ref<HTMLButtonElement>()
 const panel = ref<HTMLDialogElement>()
-const position = ref({ left: '16px', top: '80px', maxHeight: 'calc(100dvh - 96px)' })
+const position = ref<Record<string, string>>({ left: '16px', top: '80px', maxHeight: 'calc(100dvh - 96px)' })
+const sheet = ref(false)
 // Recovery ages are shown to the minute, so a slow clock is enough.
 const now = ref(Date.now())
 const timer = setInterval(() => {
@@ -82,6 +85,7 @@ const relevant = computed(() => (!!props.run.nodeId && props.run.nodeId !== LOCA
   || nodes.value.some(candidate => !candidate.local)
   || !!error.value
   || !!(props.run.nodeState || props.run.movementError || props.run.restoredAt || props.run.capacityWaitUntil || props.run.backup?.error))
+watch(relevant, value => emit('relevance', value), { immediate: true })
 const destinations = computed(() => nodes.value.filter(candidate => candidate.id !== props.run.nodeId))
 const destinationOptions = computed(() => destinations.value.map(node => ({ value: node.id, label: node.name })))
 const canMove = computed(() => !!props.run.sessionId && !busy.value && !!destination.value && destination.value !== props.run.nodeId && ['running', 'succeeded'].includes(props.run.status) && !props.run.nodeState)
@@ -197,9 +201,26 @@ async function toggle() {
 
   open.value = true
   await nextTick()
-  const rect = chip.value?.getBoundingClientRect()
-  const top = Math.min((rect?.bottom ?? 60) + 8, window.innerHeight - 220)
-  position.value = { maxHeight: `${window.innerHeight - top - 16}px`, left: `${Math.max(16, Math.min(rect?.left ?? 16, window.innerWidth - 416))}px`, top: `${top}px` }
+  // Phones open the details as a bottom sheet: the chip can sit low (in the Connection sheet),
+  // where a panel hanging below it would be squeezed.
+  sheet.value = window.matchMedia('(width <= 640px)').matches
+  if (sheet.value) {
+    position.value = {
+      left: '0',
+      right: '0',
+      top: 'auto',
+      bottom: '0',
+      width: '100%',
+      maxWidth: '100%',
+      maxHeight: 'min(85dvh, calc(100dvh - 48px))',
+    }
+  }
+  else {
+    const rect = chip.value?.getBoundingClientRect()
+    const top = Math.min((rect?.bottom ?? 60) + 8, window.innerHeight - 220)
+    position.value = { maxHeight: `${window.innerHeight - top - 16}px`, left: `${Math.max(16, Math.min(rect?.left ?? 16, window.innerWidth - 416))}px`, top: `${top}px` }
+  }
+
   panel.value?.showModal()
   panel.value?.focus()
   if (!changed.value && !busy.value) {
@@ -275,7 +296,8 @@ onUnmounted(() => {
         :style="position"
         aria-label="Execution node"
         tabindex="-1"
-        class="fixed m-0 max-h-[calc(100dvh-160px)] w-[min(400px,calc(100vw-32px))] overflow-auto rounded-card border border-control bg-raised p-4 text-xs text-muted shadow-lift outline-none"
+        class="fixed m-0 max-h-[calc(100dvh-160px)] w-[min(400px,calc(100vw-32px))] overflow-auto border border-control bg-raised p-4 text-xs text-muted shadow-lift outline-none"
+        :class="sheet ? 'rounded-t-card border-b-0 pb-[max(16px,env(safe-area-inset-bottom))]' : 'rounded-card'"
         @cancel.prevent="close(true)"
         @click="($event.target === panel) && close(true)"
       >
