@@ -186,6 +186,8 @@ test('claims an installation and sends after relay restarts and beacon session r
     await expect(page.getByRole('navigation', { name: 'Workspace navigation', exact: true })).toHaveCount(0)
     for (const width of [1440, 390, 320]) {
       await page.setViewportSize({ width, height: 900 })
+      // Phones keep the installation bar while an update is required: the workspace and its Fil header are unavailable.
+      await expect(page.getByRole('banner', { name: 'Current installation', exact: true })).toBeVisible()
       expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
     }
 

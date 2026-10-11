@@ -283,12 +283,26 @@ test('phone headers carry the installation, its route and the conversation conne
   await connection.getByRole('button', { name: 'Close dialog', exact: true }).click()
   await expect(connection).toHaveCount(0)
 
-  // Desktop keeps its installation bar and conversation toolbar.
+  // Desktop keeps its conversation toolbar, and on the Fil its installation bar.
   await page.setViewportSize({ width: 1280, height: 800 })
-  await expect(banner).toBeVisible()
-  await expect(installation).toBeHidden()
   await expect(page.getByRole('link', { name: 'New chat', exact: true })).toBeVisible()
   await expect(header.getByRole('button', { name: /^Files: / })).toBeHidden()
+  await page.goto(workspacePath('/'))
+  await expect(page.locator('.installation-header')).toHaveCount(1)
+  await expect(installation).toBeHidden()
+  await expect(banner).toBeVisible()
+
+  // The phone account menu still reaches sign-out. Not clicked: the worker's session is shared with later tests.
+  await page.setViewportSize({ width: 390, height: 844 })
+  await expect(installation).toBeVisible()
+  const account = installation.getByRole('button', { name: 'Account', exact: true })
+  await account.click()
+  const signOut = page.getByRole('menuitem', { name: 'Sign out', exact: true })
+  await expect(signOut).toBeInViewport()
+  await expect(signOut).toBeEnabled()
+  await page.keyboard.press('Escape')
+  await expect(signOut).toBeHidden()
+  await expect(account).toBeFocused()
 })
 
 test('ordinary sends and steering stay in the transcript while only follow-ups queue', async ({ page, workspace }) => {
