@@ -94,6 +94,7 @@ pub async fn router(service: Arc<Service>) -> Result<Router> {
         .route("/health", any(health))
         .route("/api/mcp", any(crate::mcp_server::handle))
         .route("/mcp-workspace", any(crate::mcp_server::handle))
+        .route("/mcp-installation", any(crate::mcp_server::handle))
         .route("/mcp-gateway/{id}", any(crate::mcp_server::handle))
         .route("/api/{*path}", any(api))
         .fallback(|| async { Error::unauthorized("Access this installation through the Beacon.") })
@@ -168,6 +169,7 @@ async fn security(State(app): State<App>, mut request: Request, next: Next) -> R
 fn is_dynamic(path: &str) -> bool {
     path.starts_with("/api/")
         || path == "/mcp-workspace"
+        || path == "/mcp-installation"
         || path.starts_with("/mcp-gateway/")
         || path.starts_with("/internal/")
         || path == "/health"
@@ -289,6 +291,7 @@ fn authenticate_installation(request: &Request) -> Result<()> {
         || path.starts_with("/internal/node-workspace/")
         || path.starts_with("/internal/execution/")
         || path == "/mcp-workspace"
+        || path == "/mcp-installation"
         || path.starts_with("/mcp-gateway/");
     if machine {
         return Ok(());

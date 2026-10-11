@@ -21,6 +21,7 @@ pub mod execution;
 pub mod file_lock;
 pub mod github_projects;
 pub mod http;
+mod installation_mcp;
 pub mod live;
 mod live_text;
 pub mod mcp_client;

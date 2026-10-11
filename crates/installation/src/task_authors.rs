@@ -15,6 +15,26 @@ impl Service {
         existing: Option<&str>,
         identity: Option<&InstallationIdentity>,
     ) -> Result<Value> {
+        self.task_with_grant(input, existing, identity, None).await
+    }
+
+    pub(crate) async fn task_from_run(
+        &self,
+        input: Value,
+        existing: Option<&str>,
+        bearer: &str,
+    ) -> Result<Value> {
+        self.task_with_grant(input, existing, None, Some(bearer.to_owned()))
+            .await
+    }
+
+    async fn task_with_grant(
+        &self,
+        input: Value,
+        existing: Option<&str>,
+        identity: Option<&InstallationIdentity>,
+        bearer: Option<String>,
+    ) -> Result<Value> {
         let _guard = self.task_author_lock.lock().await;
         let input = parse("task", input)?;
 
@@ -29,7 +49,7 @@ impl Service {
                 && (input["archived"] == previous_input["archived"] || input["archived"] == true)
                 && unchanged_content == previous_input;
             if only_reduces_execution {
-                return self.save_task(input, existing, None).await;
+                return self.save_task(input, existing, None, bearer).await;
             }
 
             if let Some(identity) = identity
@@ -54,7 +74,7 @@ impl Service {
             None
         };
 
-        self.save_task(input, existing, author).await
+        self.save_task(input, existing, author, bearer).await
     }
 
     pub async fn synchronize_task_authors(&self) -> Result<()> {

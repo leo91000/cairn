@@ -52,6 +52,7 @@
           "skills": null,
           "mcps": null,
           "mcpTools": {},
+          "installation": false,
           "github": true,
           "sandbox": "yolo"
         },
@@ -144,6 +145,10 @@
               }
             }
           },
+          "installation": {
+            "default": false,
+            "type": "boolean"
+          },
           "github": {
             "default": true,
             "type": "boolean"
@@ -164,6 +169,7 @@
           "skills",
           "mcps",
           "mcpTools",
+          "installation",
           "github",
           "sandbox"
         ],

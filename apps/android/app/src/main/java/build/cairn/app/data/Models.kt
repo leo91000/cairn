@@ -40,6 +40,7 @@ data class AccessPolicy(
     val skills: List<String>? = null,
     val mcps: List<String>? = null,
     val mcpTools: Map<String, List<String>> = emptyMap(),
+    val installation: Boolean = false,
     val github: Boolean = true,
     val sandbox: String = "yolo",
 )
