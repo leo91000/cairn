@@ -151,6 +151,9 @@ jobs:
           arch: x86_64
           target: google_apis
           profile: pixel_6
+          # The runner has 4 vCPUs; software rendering and system UI starve a 2-core emulator.
+          cores: 4
+          ram-size: 4096M
           disable-animations: false
           script: node scripts/android-device-tests.mjs run --apk apks/debug/app-debug.apk --test-apk apks/androidTest/debug/app-debug-androidTest.apk --output device-results/shard-${{ matrix.shard }} --shard ${{ matrix.shard }}/${{ strategy.job-total }} --timings apps/android/device-test-timings.json --not-class build.cairn.app.data.DirectTransportDeviceTest ${SKIP_ON_PULL_REQUEST:+--not-annotation "$SKIP_ON_PULL_REQUEST"}
       - uses: actions/upload-artifact@v7.0.1
