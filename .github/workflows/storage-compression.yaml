@@ -33,7 +33,7 @@ jobs:
       - uses: ./.github/actions/setup-pnpm
         with:
           cache: true
-      - run: rustup toolchain install 1.97.1 --profile minimal && rustup default 1.97.1
+      - run: rustup toolchain install 1.97.1 --profile minimal --component rustfmt,clippy && rustup default 1.97.1
       - uses: actions/cache@v6.1.0
         with:
           path: |
@@ -80,6 +80,11 @@ jobs:
                   warm = row['warm4KiB']
                   warm_text = f"{warm['p50Ms']:.4f}" if warm else '—'
                   summary.write(f"| {row['transport']} | {row['case']} | {row['format']} | {row['encodedBytes']} | {row['write']['p50Ms']:.3f} | {row['read']['p50Ms']:.3f} | {warm_text} |\n")
+              summary.write('\nBlocking manager startup for four old raw 4 MiB objects, including verified copy and old-key/version cleanup; no WAN or Moto CPU.\n\n')
+              summary.write('| Trial | Old bytes | New bytes | Startup without migration ms | Startup with migration ms | Migration startup CPU ms |\n')
+              summary.write('| ---: | ---: | ---: | ---: | ---: | ---: |\n')
+              for row in migration_rows:
+                  summary.write(f"| {row['trial']} | {row['oldEncodedBytes']} | {row['newEncodedBytes']} | {row['startupWithoutMigrationMs']:.3f} | {row['startupWithMigrationMs']:.3f} | {row['startupWithMigrationCpuMs']:.3f} |\n")
           PY
       - uses: actions/upload-artifact@v7.0.1
         if: always()

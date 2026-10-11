@@ -94,8 +94,8 @@ and temporary space for the current replacement; downtime depends on the object
 count, throughput and provider latency. Progress logs contain aggregate counts
 and elapsed time. The durable `migration:disk-blocks-v2` summary records object
 count, old/new encoded bytes and the last attempt's elapsed time. Separate S3
-byte totals exclude local cache copies and unknown obsolete-object sizes. Failures leave
-the service offline and resume on the next start; there is no silent data reset.
+byte totals exclude local cache copies and unknown obsolete-object sizes. Failures
+leave the service offline and resume on the next start; there is no silent data reset.
 Restore any required previous storage configuration before restarting. Unknown
 remote orphans are outside the authenticated inventory and are not bucket-scanned.
 
@@ -184,8 +184,21 @@ these timings into flaky CI thresholds.
 The `Storage compression reference` workflow runs this benchmark for storage PRs
 and on manual dispatch. Its job summary compares both policies and its artifact
 retains the sixteen JSON rows, input hashes, revision, host details and log for
-thirty days. This supplies a read/write reference without a latency gate tied to
-the timing of a shared CI runner.
+thirty days. It also records three `STORAGE_MIGRATION_PERF` trials. Each trial
+compares `Service::new` with a completed migration marker against startup that
+must convert four old raw 4 MiB S3 objects from the same corpus. Migration timing
+includes manifest authentication, durable planning/checkpoints, verified copy,
+old-key/version cleanup and ordinary manager initialization. Fixture construction
+and final cleanup are outside the timed regions. Wall time and manager process
+CPU are recorded separately; Moto CPU and WAN latency are excluded. These small
+trials establish a reproducible startup reference, not a downtime prediction for
+a large installation.
+
+For correctness against a versioned bucket, run the same launcher with
+`--migration-tests`. It uploads multiple old source versions and checks that
+migration and test cleanup leave neither versions nor delete markers.
+
+These references avoid a latency gate tied to the timing of a shared CI runner.
 
 Production deployment should preserve these counters and compare equivalent
 intervals for S3 bytes, codec execution time, manager CPU usage, cold-fetch latency
@@ -241,6 +254,7 @@ Required checks are `pnpm lint:fix`, `pnpm check`, `pnpm test:backend` and
 `cargo clippy --locked --workspace --all-targets -- -D warnings`. The normal S3
 fixture suite also exercises compressed publication, deduplication, full restore,
 corruption repair with a replacement incarnation, and ownership-aware collection.
-Startup tests cover blocking migration, partial failure, restart checkpoints, shared ownership, versioned source deletion and strict normal-format rejection.
+Startup tests cover blocking migration, partial failure, restart checkpoints,
+shared ownership, versioned source deletion and strict normal-format rejection.
 Codec tests include independently produced migration-input/v2 fixtures, authenticated
 malformed frames and cancellation while a blocking decode is queued.
