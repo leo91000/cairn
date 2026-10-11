@@ -5,6 +5,7 @@ import {
   defineAsyncComponent,
   onMounted,
   onScopeDispose,
+  provide,
   ref,
   watch,
 } from 'vue'
@@ -25,6 +26,7 @@ import UiAlert from './components/UiAlert.vue'
 import UiButton from './components/UiButton.vue'
 import VirtualSelect from './components/VirtualSelect.vue'
 import { Settings } from './icons'
+import { installationKey } from './installation-context'
 import Authorize from './views/Authorize.vue'
 
 const PrivacyPolicy = defineAsyncComponent(() => import('./views/PrivacyPolicy.vue'))
@@ -553,6 +555,27 @@ function selectInstallation(id: string) {
     openInstallation(selected)
 }
 
+// Phones hide the installation bar: the Fil header and the Connection sheet carry it instead.
+provide(installationKey, {
+  current: computed(() => installation.value && session.value
+    ? {
+        id: installation.value.id,
+        name: installation.value.name,
+        role: installation.value.role,
+        online: installation.value.online,
+        updateRequired: installation.value.updateRequired,
+        status: installationStatus(installation.value),
+        options: installationOptions.value,
+        email: session.value.account?.email || '',
+        disabled: busy.value || methodBusy.value || state.redirecting,
+      }
+    : null),
+  select: selectInstallation,
+  add: addInstallation,
+  accountSettings: () => void router.push('/settings/account'),
+  signOut,
+})
+
 function changeEmail() {
   challenge.value = ''
   code.value = ''
@@ -607,7 +630,8 @@ onMounted(async () => {
     <Authorize />
   </main>
   <div v-else-if="session?.authenticated && installation" class="flex h-dvh min-h-0 flex-col bg-canvas text-ink">
-    <header class="flex shrink-0 items-center gap-3 border-b border-line px-4 py-2 text-sm phone:gap-2 phone:px-3" aria-label="Current installation">
+    <!-- While an update is required the workspace is unavailable, so phones keep this bar. -->
+    <header class="flex shrink-0 items-center gap-3 border-b border-line px-4 py-2 text-sm phone:gap-2 phone:px-3" :class="{ 'phone:hidden': !installation.updateRequired }" aria-label="Current installation">
       <VirtualSelect
         v-if="session.installations.length > 1"
         :model-value="installation.id"

@@ -25,6 +25,7 @@ import AssistantPicker from '../components/AssistantPicker.vue'
 import ChatAttachments from '../components/ChatAttachments.vue'
 import ChatQuestions from '../components/ChatQuestions.vue'
 import ChatSwitcher from '../components/ChatSwitcher.vue'
+import ConnectionSheet from '../components/ConnectionSheet.vue'
 import FilColumn from '../components/FilColumn.vue'
 import Icon from '../components/Icon.vue'
 import Modal from '../components/Modal.vue'
@@ -46,17 +47,20 @@ import {
   ChevronLeft,
   FileText,
   FolderGit2,
+  Layers,
   LoaderCircle,
   Maximize2,
   Menu,
   MessageCircle,
   MoreHorizontal,
   Paperclip,
+  Plug,
   Plus,
   Search,
   X,
   Zap,
 } from '../icons'
+import { connectionTone, installationKey, routeLabel } from '../installation-context'
 import { useRetryNotice } from '../run-retry'
 import { backgroundWait } from '../signal'
 import { chatSkills } from '../skill-mentions'
@@ -85,6 +89,9 @@ const detailsOpen = ref(false)
 const detailsButton = ref<HTMLButtonElement>()
 const activity = ref<InstanceType<typeof ActivityFeed>>()
 const workspaceActions = inject(workspaceActionsKey)
+const installation = inject(installationKey, null)
+const currentInstallation = computed(() => installation?.current.value ?? null)
+const connectionOpen = ref(false)
 const fileCount = computed(() => latestArtifacts(deliverables.value).length)
 
 async function detailAction(action: () => void) {
@@ -417,6 +424,7 @@ function edit(message: ChatMessage) {
 watch(chatId, (id) => {
   history.value = false
   detailsOpen.value = false
+  connectionOpen.value = false
   newSession.value = false
   editing.value = null
   error.value = ''
@@ -490,6 +498,9 @@ function key(event: KeyboardEvent) {
           <span class="size-1.5 rounded-full bg-accent" />{{ chatStatus }}
         </dd>
       </dl>
+      <button class="chat-detail-action" @click="detailAction(newConversation)">
+        <Icon :name="Plus" :size="18" />New chat
+      </button>
       <button
         v-if="detail?.run"
         class="chat-detail-action"
@@ -503,6 +514,9 @@ function key(event: KeyboardEvent) {
       </button>
       <button class="chat-detail-action" @click="detailAction(() => { notifications = true })">
         <Icon :name="Bell" :size="18" />Question notifications
+      </button>
+      <button class="chat-detail-action" aria-haspopup="dialog" @click="detailAction(() => { connectionOpen = true })">
+        <Icon :name="Plug" :size="18" />Connection
       </button>
       <template v-if="detail?.run">
         <button class="chat-detail-action" @click="detailAction(() => activity?.followLatest())">
@@ -525,6 +539,14 @@ function key(event: KeyboardEvent) {
       </div>
     </div>
   </Modal>
+  <ConnectionSheet
+    v-if="connectionOpen"
+    :run="detail?.run"
+    :agent="detail?.agentName || selectedAgent?.name || 'Main agent'"
+    :project="detail ? detail.projectName : state.projects.find(project => project.id === projectId)?.name"
+    :return-focus="detailsButton"
+    @close="connectionOpen = false"
+  />
   <div class="flex h-full min-h-0">
     <aside class="w-88 shrink-0 border-r border-line bg-inset tablet:hidden" aria-label="Fil">
       <FilColumn :chats="chats" :selected="chatId" compact />
@@ -545,20 +567,34 @@ function key(event: KeyboardEvent) {
         <RouterLink to="/" class="hidden size-11 shrink-0 place-items-center rounded-full text-ink hover:bg-hover phone:grid" aria-label="Back to the Fil">
           <Icon :name="ChevronLeft" :size="22" />
         </RouterLink>
+        <!-- On phones the trigger is the conversation itself: agent, title and where it runs. -->
         <button
           ref="historyButton"
-          class="flex min-h-10 items-center gap-2 rounded-lg border border-accent/25 bg-accent/10 px-3 py-2 text-xs font-semibold text-accent phone:min-w-0 phone:flex-1 phone:justify-start phone:border-0 phone:bg-transparent phone:px-1 phone:py-1"
+          class="flex min-h-10 items-center gap-2 rounded-lg border border-accent/25 bg-accent/10 px-3 py-2 text-xs font-semibold text-accent phone:min-w-0 phone:flex-1 phone:justify-start phone:border-0 phone:bg-transparent phone:px-0.5 phone:py-1"
           aria-label="Conversations"
           aria-haspopup="dialog"
           :aria-expanded="history"
           @click="history = true"
         >
-          <span class="min-w-0">
-            <span class="flex items-center gap-2"><Icon :name="MessageCircle" :size="18" />Conversations
-              <span class="rounded bg-accent/10 px-1.5 py-0.5 text-[10px] phone:hidden">{{ chats.length }}</span>
-              <Icon :name="ChevronDown" :size="14" />
+          <span class="flex items-center gap-2 phone:hidden"><Icon :name="MessageCircle" :size="18" />Conversations
+            <span class="rounded bg-accent/10 px-1.5 py-0.5 text-[10px]">{{ chats.length }}</span>
+            <Icon :name="ChevronDown" :size="14" />
+          </span>
+          <span class="hidden min-w-0 items-center gap-2.5 phone:flex">
+            <AgentAvatar
+              :name="detail?.agentName || selectedAgent?.name || 'Main agent'"
+              :identity="detail?.agentId || selectedAgent?.id"
+              :size="34"
+            />
+            <span class="min-w-0 text-left">
+              <span class="flex min-w-0 items-center gap-1 text-[14px] font-semibold leading-tight text-ink">
+                <span class="truncate">{{ detail?.title || 'New conversation' }}</span><Icon :name="ChevronDown" :size="14" class="shrink-0 text-muted" />
+              </span>
+              <span class="mt-0.5 flex min-w-0 items-center gap-1.5 text-[11.5px] font-normal leading-tight text-muted" :title="currentInstallation ? `${currentInstallation.status} · ${routeLabel(state.transportRoute)}` : undefined">
+                <span class="size-1.5 shrink-0 rounded-full" :class="connectionTone(currentInstallation, state.transportRoute)" />
+                <span class="truncate">{{ [detail?.agentName || selectedAgent?.name || 'Main agent', currentInstallation?.name].filter(Boolean).join(' · ') }}</span>
+              </span>
             </span>
-            <span class="mt-0.5 hidden truncate text-left text-[11px] font-normal text-muted phone:block">{{ detail?.title || 'New conversation' }}</span>
           </span>
         </button>
         <div class="flex items-center gap-1">
@@ -573,11 +609,22 @@ function key(event: KeyboardEvent) {
           <RouterLink
             to="/chats"
             aria-label="New chat"
-            class="flex min-h-10 shrink-0 items-center gap-2 whitespace-nowrap rounded-lg border border-line px-3 py-2 text-xs font-medium text-muted hover:bg-hover hover:text-ink phone:min-h-11 phone:min-w-11 phone:justify-center phone:border-transparent phone:px-2"
+            class="flex min-h-10 shrink-0 items-center gap-2 whitespace-nowrap rounded-lg border border-line px-3 py-2 text-xs font-medium text-muted hover:bg-hover hover:text-ink phone:hidden"
             @click.prevent="newConversation"
           >
-            <Icon :name="Plus" :size="18" /><span class="phone:hidden">New chat</span>
+            <Icon :name="Plus" :size="18" />New chat
           </RouterLink>
+          <button
+            v-if="detail?.run"
+            :class="iconButton"
+            class="relative hidden! phone:inline-flex!"
+            :aria-label="`Files: ${fileCount}`"
+            :disabled="!fileCount"
+            @click="activity?.openFiles()"
+          >
+            <Icon :name="Layers" :size="19" />
+            <span v-if="fileCount" aria-hidden="true" class="absolute right-1 top-1 grid h-4 min-w-4 place-items-center rounded-full bg-accent px-1 text-[10px] font-bold text-surface">{{ fileCount }}</span>
+          </button>
           <button
             ref="detailsButton"
             :class="iconButton"
@@ -617,9 +664,6 @@ function key(event: KeyboardEvent) {
       <h1 v-else class="sr-only">
         Chats
       </h1>
-      <div v-if="detail?.run && state.installationRole === 'owner'" class="hidden phone:block">
-        <NodeExecution :key="detail.run.id" :run="detail.run" class="mx-4 mb-2" />
-      </div>
       <div class="flex min-h-0 flex-1 flex-col">
         <section
           class="relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden transition-opacity"

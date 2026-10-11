@@ -22,6 +22,7 @@ import { typingTarget } from '../shortcuts'
 import { filOf, greeting, shortAge } from '../signal'
 import AgentAvatar from './AgentAvatar.vue'
 import Icon from './Icon.vue'
+import InstallationHeader from './InstallationHeader.vue'
 
 // The Fil: what needs the user, live work and recent conversations. J/K move the selection,
 // Enter opens it and / filters, as in a mail client.
@@ -126,7 +127,8 @@ onBeforeUnmount(() => document.removeEventListener('keydown', key))
 
 <template>
   <div class="fil flex h-full min-h-0 flex-col">
-    <header class="shrink-0 px-5 pb-3" :class="compact ? 'pt-5' : 'pt-6 phone:pt-[max(18px,env(safe-area-inset-top))]'">
+    <header class="shrink-0 px-5 pb-3" :class="compact ? 'pt-5' : 'pt-6 phone:px-4 phone:pt-[max(10px,env(safe-area-inset-top))]'">
+      <InstallationHeader v-if="!compact" class="mb-4" />
       <div class="flex items-start gap-3">
         <div class="min-w-0 flex-1">
           <p class="eyebrow">
