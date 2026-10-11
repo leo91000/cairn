@@ -229,7 +229,10 @@ test('compact mobile toolbar keeps details and workspace controls accessible', a
   await expect(details).not.toBeVisible()
   await expect(message).toHaveValue('Keep my draft while browsing details')
   await page.setViewportSize({ width: 390, height: 844 })
-  await page.getByRole('link', { name: 'New chat', exact: true }).click()
+  // New chat moves from the phone header into the ⋯ menu.
+  await expect(page.getByRole('link', { name: 'New chat', exact: true })).toBeHidden()
+  await details.click()
+  await panel.getByRole('button', { name: 'New chat', exact: true }).click()
   await expect(page).toHaveURL(workspacePath('/chats'))
   await details.click()
   await expect(panel.getByText('New conversation', { exact: true })).toBeVisible()
@@ -238,6 +241,54 @@ test('compact mobile toolbar keeps details and workspace controls accessible', a
   await expectSingleScroll(page)
   // This standalone journey must not consume later chats' request budget.
   await workspace.restart()
+})
+
+test('phone headers carry the installation, its route and the conversation connection', async ({ page, workspace }) => {
+  test.setTimeout(60000)
+  await workspace.restart()
+  const chat = await workspace.api('/api/chats', 'POST', {})
+  await workspace.api(`/api/chats/${chat.id}/messages`, 'POST', { id: randomUUID(), text: 'Check the phone header.' })
+  await expect.poll(() => workspace.service.chats.detail(chat.id).run?.status).toBe('succeeded')
+  await page.setViewportSize({ width: 390, height: 844 })
+  await page.goto(workspacePath('/'))
+  await authenticateWorkspace(page)
+
+  // The Fil header replaces the global installation bar on phones.
+  const banner = page.getByRole('banner', { name: 'Current installation', exact: true })
+  await expect(banner).toBeHidden()
+  const installation = page.getByRole('group', { name: 'Installation', exact: true })
+  await expect(installation.getByRole('status', { name: 'Installation availability', exact: true })).toHaveText('Online')
+  await expect(installation.getByRole('status', { name: 'Connection route', exact: true })).toHaveAttribute('data-transport-route', /^(direct|relay)$/)
+  await expect(installation.getByRole('button', { name: 'Search workspace', exact: true })).toBeVisible()
+  await expect(installation.getByRole('button', { name: 'Account', exact: true })).toBeVisible()
+  await installation.getByRole('button', { name: 'Browser workspace', exact: true }).click()
+  const connection = page.getByRole('dialog', { name: 'Connection', exact: true })
+  await expect(connection).toContainText('Owner')
+  await expect(connection).toContainText(/Direct|Relais/)
+  await expect(connection.getByText('Agent · project', { exact: true })).toHaveCount(0)
+  await connection.getByRole('button', { name: 'Installation settings', exact: true }).click()
+  await expect(page).toHaveURL(workspacePath('/settings/installation'))
+
+  // A conversation keeps one row: agent, title and installation, files and the ⋯ menu.
+  await page.goto(workspacePath(`/chats/${chat.id}`))
+  const header = page.locator('.chat-header')
+  await expect(header.getByRole('button', { name: 'Conversations', exact: true })).toContainText('Browser workspace')
+  expect(Math.round((await header.boundingBox())!.height)).toBeLessThanOrEqual(60)
+  await expect(header.getByRole('button', { name: /^Files: \d+$/ })).toBeVisible()
+  await expect(page.getByRole('link', { name: 'New chat', exact: true })).toBeHidden()
+  await expectSingleScroll(page)
+  await page.getByRole('button', { name: 'Chat details', exact: true }).click()
+  await page.getByRole('dialog', { name: 'Chat details', exact: true }).getByRole('button', { name: 'Connection', exact: true }).click()
+  await expect(connection.getByText('Agent · project', { exact: true })).toBeVisible()
+  await connection.getByRole('button', { name: 'Close dialog', exact: true }).click()
+  await expect(connection).toHaveCount(0)
+
+  // Desktop keeps its installation bar and conversation toolbar.
+  await page.setViewportSize({ width: 1280, height: 800 })
+  await expect(banner).toBeVisible()
+  await expect(installation).toBeHidden()
+  await expect(page.getByRole('link', { name: 'New chat', exact: true })).toBeVisible()
+  await expect(header.getByRole('button', { name: /^Files: / })).toBeHidden()
 })
 
 test('ordinary sends and steering stay in the transcript while only follow-ups queue', async ({ page, workspace }) => {

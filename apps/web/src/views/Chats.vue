@@ -585,7 +585,6 @@ function key(event: KeyboardEvent) {
               :name="detail?.agentName || selectedAgent?.name || 'Main agent'"
               :identity="detail?.agentId || selectedAgent?.id"
               :size="34"
-              :working="detail?.run?.status === 'running' && !detail.paused"
             />
             <span class="min-w-0 text-left">
               <span class="flex min-w-0 items-center gap-1 text-[14px] font-semibold leading-tight text-ink">
