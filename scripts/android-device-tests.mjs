@@ -228,7 +228,7 @@ export function parseArguments(argv) {
         throw new Error('Use --shard <index>/<count>, starting at 1')
       options.shard = { index: Number(match[1]), count: Number(match[2]) }
     }
-    else if (['--apk', '--test-apk', '--output', '--timings', '--write-timings'].includes(name)) {
+    else if (['--apk', '--test-apk', '--output', '--timings', '--write-timings', '--job'].includes(name)) {
       options[name.slice(2).replace(/-(\w)/g, (_, letter) => letter.toUpperCase())] = value
     }
     else if (name === '--not-class') {
@@ -251,6 +251,62 @@ export function parseArguments(argv) {
   }
 
   return options
+}
+
+/**
+ * Device jobs boot their emulator while the build job compiles, then wait here
+ * for its artifact. A build that ends without uploading it stops the wait.
+ */
+export async function waitForArtifact({
+  repository,
+  runId,
+  attempt,
+  artifact,
+  job,
+}, {
+  gh,
+  sleep = delay => new Promise(resolve => setTimeout(resolve, delay)),
+  now = Date.now,
+  timeoutMs = 20 * 60 * 1000,
+}) {
+  const deadline = now() + timeoutMs
+  while (now() < deadline) {
+    const artifacts = JSON.parse(await gh(['api', `repos/${repository}/actions/runs/${runId}/artifacts?name=${artifact}`]))
+    if (artifacts.artifacts?.some(entry => entry.name === artifact && !entry.expired))
+      return
+
+    const { jobs } = JSON.parse(await gh(['api', `repos/${repository}/actions/runs/${runId}/attempts/${attempt}/jobs?per_page=100`]))
+    const producer = jobs.find(entry => entry.name === job)
+    if (producer?.status === 'completed') {
+      // The upload is the build job's last step; re-read once to close the race.
+      const latest = JSON.parse(await gh(['api', `repos/${repository}/actions/runs/${runId}/artifacts?name=${artifact}`]))
+      if (latest.artifacts?.some(entry => entry.name === artifact && !entry.expired))
+        return
+      throw new Error(`The ${job} job finished (${producer.conclusion}) without uploading ${artifact}`)
+    }
+
+    await sleep(5000)
+  }
+
+  throw new Error(`Timed out waiting for the ${artifact} artifact`)
+}
+
+async function fetchArtifact(options) {
+  const artifact = options.positional?.[0]
+  if (!artifact || !options.output)
+    throw new Error('fetch needs the artifact name and --output')
+  const gh = async args => (await exec('gh', args, { maxBuffer: 16 * 1024 * 1024, timeout: 300000 })).stdout
+  const started = Date.now()
+  const run = {
+    repository: process.env.GITHUB_REPOSITORY,
+    runId: process.env.GITHUB_RUN_ID,
+    attempt: process.env.GITHUB_RUN_ATTEMPT || '1',
+    artifact,
+    job: options.job || 'build',
+  }
+  await waitForArtifact(run, { gh })
+  await gh(['run', 'download', run.runId, '--repo', run.repository, '--name', artifact, '--dir', options.output])
+  console.log(`Fetched ${artifact} after ${((Date.now() - started) / 1000).toFixed(0)}s`)
 }
 
 async function run(options) {
@@ -381,9 +437,9 @@ async function report(options) {
 if (import.meta.main) {
   const [command, ...rest] = process.argv.slice(2)
   const options = parseArguments(rest)
-  const commands = { run, report }
+  const commands = { fetch: fetchArtifact, run, report }
   if (!commands[command]) {
-    console.error('Usage: android-device-tests.mjs run --apk <apk> --test-apk <apk> --output <dir> [--shard i/n] [--timings file] [--not-class a,b] [--not-annotation a]\n       android-device-tests.mjs report <dir> [--require path.png,...] [--write-timings file]')
+    console.error('Usage: android-device-tests.mjs fetch <artifact> --output <dir> [--job build]\n       android-device-tests.mjs run --apk <apk> --test-apk <apk> --output <dir> [--shard i/n] [--timings file] [--not-class a,b] [--not-annotation a]\n       android-device-tests.mjs report <dir> [--require path.png,...] [--write-timings file]')
     process.exitCode = 2
   }
   else {

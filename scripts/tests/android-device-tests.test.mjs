@@ -4,6 +4,7 @@ import {
   parseArguments,
   parseInstrumentation,
   planShards,
+  waitForArtifact,
 } from '../android-device-tests.mjs'
 
 function output(text, step = 1000) {
@@ -144,5 +145,55 @@ describe('reports and options', () => {
     for (const shard of ['0/3', '4/3', 'two'])
       expect(() => parseArguments(['--shard', shard])).toThrow('--shard')
     expect(() => parseArguments(['--shards', '2'])).toThrow('Unknown option')
+  })
+})
+
+describe('waiting for the build artifact', () => {
+  const run = {
+    repository: 'leo91000/cairn',
+    runId: '7',
+    attempt: '1',
+    artifact: 'cairn-android-debug',
+    job: 'build',
+  }
+
+  function github({ artifactAfter = Infinity, build = 'in_progress', conclusion = null }) {
+    let artifactQueries = 0
+    return async (args) => {
+      if (args[1].includes('/artifacts?')) {
+        artifactQueries++
+        return JSON.stringify({ artifacts: artifactQueries >= artifactAfter ? [{ name: run.artifact, expired: false }] : [] })
+      }
+
+      return JSON.stringify({ jobs: [{ name: 'build', status: build, conclusion }] })
+    }
+  }
+
+  it('keeps polling while the build job runs', async () => {
+    let sleeps = 0
+    const sleep = async () => {
+      sleeps++
+    }
+
+    await waitForArtifact(run, { gh: github({ artifactAfter: 3 }), sleep })
+    expect(sleeps).toBe(2)
+  })
+
+  it('accepts an upload that lands as the build job completes', async () => {
+    await expect(waitForArtifact(run, { gh: github({ artifactAfter: 2, build: 'completed', conclusion: 'success' }), sleep: async () => {} })).resolves.toBeUndefined()
+  })
+
+  it('stops as soon as the build job ends without the artifact', async () => {
+    await expect(waitForArtifact(run, { gh: github({ build: 'completed', conclusion: 'failure' }), sleep: async () => {} })).rejects.toThrow('The build job finished (failure)')
+  })
+
+  it('gives up at the deadline', async () => {
+    let time = 0
+    await expect(waitForArtifact(run, {
+      gh: github({}),
+      now: () => time,
+      sleep: async () => { time += 5000 },
+      timeoutMs: 10000,
+    })).rejects.toThrow('Timed out')
   })
 })
