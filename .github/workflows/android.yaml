@@ -41,7 +41,7 @@ jobs:
     needs: resolve
     if: needs.resolve.outputs.reuse != 'true'
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7.0.1
       - uses: ./.github/actions/setup-pnpm
@@ -59,55 +59,20 @@ jobs:
       - name: Check Kotlin formatting
         working-directory: apps/android
         run: ./gradlew spotlessCheck --no-daemon
-      - name: Use the tag version for a fresh release build
-        if: startsWith(github.ref, 'refs/tags/v')
-        run: printf 'CAIRN_ANDROID_VERSION=%s\n' "${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
-      - name: Test, lint and build debug
+      - name: Unit tests and lint
         working-directory: apps/android
-        run: ./gradlew testDebugUnitTest lintDebug assembleDebug assembleDebugAndroidTest --no-daemon --stacktrace
-      - name: Enable emulator acceleration
-        run: |
-          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
-          sudo udevadm control --reload-rules
-          sudo udevadm trigger --name-match=kvm
-      - uses: ./.github/actions/setup-android-emulator
-      # These history tests take about half of the device-test time. The other
-      # device classes run on a second emulator while captures stay here.
-      - name: Check history and capture controls on Android 16
-        uses: reactivecircus/android-emulator-runner@a421e43855164a8197daf9d8d40fe71c6996bb0d
-        with:
-          api-level: 36
-          arch: x86_64
-          target: google_apis
-          profile: pixel_6
-          disable-animations: false
-          script: |
-            cd apps/android && ./gradlew connectedDebugAndroidTest -Pandroid.testInstrumentationRunnerArguments.class=build.cairn.app.ui.HistoryFollowDeviceTest --no-daemon
-            adb install -r apps/android/app/build/outputs/apk/debug/app-debug.apk
-            adb install -r -t apps/android/app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk
-            # Gradle uninstalls the test app, so regenerate the captures after reinstalling.
-            adb shell am instrument -w -e class 'build.cairn.app.ui.HistoryFollowDeviceTest#oversizedFinalMessageStillReachesTheBottomAfterStreamingAndResize,build.cairn.app.ui.ModelPickerDeviceTest#selectionSurvivesRecreationAndModelChangeResetsEffort,build.cairn.app.ui.ConversationLifecycleDeviceTest#swipeFromFilTrashesWithUndoWithoutOpeningTheConversation' build.cairn.app.test/androidx.test.runner.AndroidJUnitRunner > apps/android/app/build/reports/capture-instrumentation.txt
-            adb exec-out run-as build.cairn.app cat files/scroll-validation/pinned-stream.png > apps/android/app/build/reports/pinned-stream.png
-            adb exec-out run-as build.cairn.app cat files/model-picker/reasoning.png > apps/android/app/build/reports/reasoning-picker.png
-            adb exec-out run-as build.cairn.app cat files/conversation-lifecycle/swipe-fil.png > apps/android/app/build/reports/swipe-fil.png
-            python3 -c 'from pathlib import Path; p = Path("apps/android/app/build/reports"); assert "OK (3 tests)" in (p / "capture-instrumentation.txt").read_text(); assert all((p / name).read_bytes()[:8] == bytes([137, 80, 78, 71, 13, 10, 26, 10]) for name in ("pinned-stream.png", "reasoning-picker.png", "swipe-fil.png"))'
+        run: ./gradlew testDebugUnitTest lintDebug --no-daemon --stacktrace
       - uses: actions/upload-artifact@v7.0.1
         if: always()
         with:
           name: cairn-android
           path: |
-            apps/android/app/build/outputs/apk/debug/*.apk
             apps/android/app/build/reports/tests/
             apps/android/app/build/reports/lint-results-debug.*
-            apps/android/app/build/reports/androidTests/
-            apps/android/app/build/outputs/androidTest-results/
-            apps/android/app/build/reports/pinned-stream.png
-            apps/android/app/build/reports/reasoning-picker.png
-            apps/android/app/build/reports/swipe-fil.png
-            apps/android/app/build/reports/capture-instrumentation.txt
           retention-days: 14
 
-  device-extra:
+  # Device jobs install these APKs instead of compiling the app again.
+  build:
     needs: resolve
     if: needs.resolve.outputs.reuse != 'true'
     runs-on: ubuntu-latest
@@ -132,40 +97,93 @@ jobs:
       - name: Build debug and instrumentation APKs
         working-directory: apps/android
         run: ./gradlew assembleDebug assembleDebugAndroidTest --no-daemon --stacktrace
+      - uses: actions/upload-artifact@v7.0.1
+        with:
+          name: cairn-android-debug
+          path: |
+            apps/android/app/build/outputs/apk/debug/app-debug.apk
+            apps/android/app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk
+          if-no-files-found: error
+          retention-days: 14
+
+  # Pull requests skip @RobolectricTwin classes, whose journeys already run in
+  # testDebugUnitTest; main, tags and manual runs execute every device test.
+  # Shards are balanced with apps/android/device-test-timings.json.
+  device:
+    name: device (${{ matrix.shard }}/${{ strategy.job-total }})
+    needs: [resolve, build]
+    if: needs.resolve.outputs.reuse != 'true'
+    # Set CAIRN_ANDROID_DEVICE_RUNNER to a larger runner label to move device tests
+    # off the free runners; fork pull requests always stay on ubuntu-latest.
+    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && vars.CAIRN_ANDROID_DEVICE_RUNNER || 'ubuntu-latest' }}
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: ${{ fromJSON(github.event_name == 'pull_request' && '[1, 2]' || '[1, 2, 3]') }}
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: ./.github/actions/setup-pnpm
+        with:
+          install: false
+      - uses: actions/download-artifact@v8.0.1
+        with:
+          name: cairn-android-debug
+          path: apks
       - name: Enable emulator acceleration
         run: |
           echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
           sudo udevadm control --reload-rules
           sudo udevadm trigger --name-match=kvm
+      - uses: android-actions/setup-android@v3
+        with:
+          packages: platform-tools
       - uses: ./.github/actions/setup-android-emulator
-      - name: Check the remaining Android controls
+        with:
+          target: google_atd
+          build-packages: ''
+      - name: Run device tests on Android 16
         uses: reactivecircus/android-emulator-runner@a421e43855164a8197daf9d8d40fe71c6996bb0d
+        env:
+          SKIP_ON_PULL_REQUEST: ${{ github.event_name == 'pull_request' && 'build.cairn.app.ui.RobolectricTwin' || '' }}
         with:
           api-level: 36
           arch: x86_64
-          target: google_apis
+          target: google_atd
           profile: pixel_6
           disable-animations: false
-          script: |
-            cd apps/android && ./gradlew connectedDebugAndroidTest -Pandroid.testInstrumentationRunnerArguments.class=build.cairn.app.ui.BackgroundWaitDeviceTest,build.cairn.app.ui.NativeAccountDeviceTest,build.cairn.app.data.NativePushDeviceTest,build.cairn.app.ui.CairnAccountDeviceTest,build.cairn.app.ui.CairnAccountRestorationDeviceTest,build.cairn.app.ui.ModelPickerDeviceTest,build.cairn.app.ui.AccountsDeviceTest,build.cairn.app.ui.ModelCatalogDeviceTest,build.cairn.app.ui.ChatProviderDeviceTest,build.cairn.app.ui.SkillMentionDeviceTest,build.cairn.app.ui.ConversationLifecycleDeviceTest,build.cairn.app.ui.ImagePasteDeviceTest,build.cairn.app.ui.QueueStripDeviceTest,build.cairn.app.ui.NodePlacementDeviceTest,build.cairn.app.ui.MissionBackDeviceTest,build.cairn.app.ui.InstallationAccessDeviceTest --no-daemon
-            adb install -r apps/android/app/build/outputs/apk/debug/app-debug.apk
-            adb install -r -t apps/android/app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk
-            adb shell am instrument -w -e class build.cairn.app.ui.NodePlacementDeviceTest build.cairn.app.test/androidx.test.runner.AndroidJUnitRunner > apps/android/app/build/reports/node-captures.txt
-            adb exec-out run-as build.cairn.app cat files/node-screenshots/nodes.png > apps/android/app/build/reports/nodes.png
-            adb exec-out run-as build.cairn.app cat files/node-screenshots/storage.png > apps/android/app/build/reports/node-storage.png
-            adb exec-out run-as build.cairn.app cat files/node-screenshots/execution-sheet.png > apps/android/app/build/reports/node-execution.png
-            node -e 'const fs = require("node:fs"); const p = "apps/android/app/build/reports/"; if (!fs.readFileSync(p + "node-captures.txt", "utf8").includes("OK (2 tests)")) throw new Error("Node capture tests failed"); for (const name of ["nodes.png", "node-storage.png", "node-execution.png"]) if (!fs.readFileSync(p + name).subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]))) throw new Error("Invalid capture: " + name);'
+          script: node scripts/android-device-tests.mjs run --apk apks/debug/app-debug.apk --test-apk apks/androidTest/debug/app-debug-androidTest.apk --output device-results/shard-${{ matrix.shard }} --shard ${{ matrix.shard }}/${{ strategy.job-total }} --timings apps/android/device-test-timings.json --not-class build.cairn.app.data.DirectTransportDeviceTest ${SKIP_ON_PULL_REQUEST:+--not-annotation "$SKIP_ON_PULL_REQUEST"}
       - uses: actions/upload-artifact@v7.0.1
         if: always()
         with:
-          name: cairn-android-other-tests
-          path: |
-            apps/android/app/build/reports/androidTests/
-            apps/android/app/build/outputs/androidTest-results/
-            apps/android/app/build/reports/node-captures.txt
-            apps/android/app/build/reports/nodes.png
-            apps/android/app/build/reports/node-storage.png
-            apps/android/app/build/reports/node-execution.png
+          name: cairn-android-device-${{ matrix.shard }}
+          path: device-results/
+          retention-days: 14
+
+  device-report:
+    needs: [resolve, device]
+    if: always() && !cancelled() && needs.resolve.outputs.reuse != 'true' && needs.device.result != 'skipped'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: ./.github/actions/setup-pnpm
+        with:
+          install: false
+      - uses: actions/download-artifact@v8.0.1
+        with:
+          pattern: cairn-android-device-*
+          path: device-results
+      - name: Combine shard results and check captures
+        env:
+          CAPTURES: ${{ github.event_name == 'pull_request' && 'scroll-validation/pinned-stream.png' || 'scroll-validation/pinned-stream.png,model-picker/reasoning.png,conversation-lifecycle/swipe-fil.png,node-screenshots/nodes.png,node-screenshots/storage.png,node-screenshots/execution-sheet.png' }}
+        run: node scripts/android-device-tests.mjs report device-results --require "$CAPTURES" --write-timings device-test-timings.json
+      - uses: actions/upload-artifact@v7.0.1
+        if: always()
+        with:
+          name: cairn-android-device-timings
+          path: device-test-timings.json
+          if-no-files-found: ignore
           retention-days: 14
 
   release:
@@ -210,8 +228,8 @@ jobs:
           retention-days: 90
           overwrite: true
   publish:
-    needs: [resolve, check, device-extra, release]
-    if: always() && !cancelled() && startsWith(github.ref, 'refs/tags/v') && needs.resolve.result == 'success' && (needs.resolve.outputs.reuse == 'true' || (needs.check.result == 'success' && needs.device-extra.result == 'success' && needs.release.result == 'success'))
+    needs: [resolve, check, device, device-report, release]
+    if: always() && !cancelled() && startsWith(github.ref, 'refs/tags/v') && needs.resolve.result == 'success' && (needs.resolve.outputs.reuse == 'true' || (needs.check.result == 'success' && needs.device.result == 'success' && needs.device-report.result == 'success' && needs.release.result == 'success'))
     runs-on: ubuntu-latest
     timeout-minutes: 10
     concurrency:
