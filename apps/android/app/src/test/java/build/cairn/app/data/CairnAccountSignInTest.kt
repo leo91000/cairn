@@ -129,7 +129,11 @@ class CairnAccountSignInTest {
                         """{"challenge":"one-use","secret":"native-secret","url":"$launcher"}"""
                     )
             )
-            server.enqueue(MockResponse().setResponseCode(410).setBody("""{"error":"expired"}"""))
+            server.enqueue(
+                MockResponse()
+                    .setResponseCode(401)
+                    .setBody("""{"error":"Unable to verify this sign-in. Please try again."}""")
+            )
             val api = CairnApi(server.url("/"), MemoryVault(), installationId = "selected")
             val credentials =
                 object : CairnCredentials {
@@ -144,11 +148,11 @@ class CairnAccountSignInTest {
                     override fun openGitHub(url: String) {}
                 }
 
-            val error = runCatching {
-                CairnAccountSignIn(api, credentials).github()
-            }
-                .exceptionOrNull()
-            assertEquals(410, (error as ApiException).status)
+            val error =
+                assertThrows(ApiException::class.java) {
+                    runBlocking { CairnAccountSignIn(api, credentials).github() }
+                }
+            assertEquals(401, error.status)
             assertEquals(2, server.requestCount)
         }
     }
