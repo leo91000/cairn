@@ -50,11 +50,15 @@ internal fun conversationState(
     chat: Chat?,
     agentName: String,
     wait: BackgroundWait?,
+    installation: String? = null,
+    /** A conversation not created yet still names its agent; a loading one stays quiet. */
+    newChat: Boolean = false,
 ): ConversationState {
-    if (chat == null) return ConversationState("", null)
+    // The project lives in the Connexion sheet; the header names where the agent runs.
+    val identity = listOfNotNull(agentName, installation).joinToString(" · ")
+    if (chat == null) return ConversationState(if (newChat) identity else "", null)
 
     val run = chat.run?.status.orEmpty()
-    val identity = listOfNotNull(agentName, chat.projectName).joinToString(" · ")
     val status =
         when {
             chat.paused -> "En pause"
@@ -238,6 +242,7 @@ internal fun ConversationHeader(
     status: String,
     live: String?,
     liveSince: Long?,
+    route: ConnectionRoute,
     back: () -> Unit,
     choose: () -> Unit,
     actions: @Composable RowScope.() -> Unit,
@@ -267,27 +272,43 @@ internal fun ConversationHeader(
                         else AgentAvatar(agent, agentKey, 36.dp)
                         Spacer(Modifier.width(10.dp))
                         Column(Modifier.weight(1f)) {
-                            Text(
-                                title,
-                                style = MaterialTheme.typography.titleMedium,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis,
-                            )
-                            if (live != null) {
-                                val now = rememberNow(liveSince)
-                                val label =
-                                    listOf(live, elapsed(liveSince, now))
-                                        .filter { it.isNotBlank() }
-                                        .joinToString(" · ")
-                                LiveChip(label, Modifier.padding(top = 2.dp))
-                            } else if (status.isNotBlank())
+                            Row(verticalAlignment = Alignment.CenterVertically) {
                                 Text(
-                                    status,
-                                    style = MaterialTheme.typography.labelMedium,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    title,
+                                    Modifier.weight(1f, fill = false),
+                                    style = MaterialTheme.typography.titleMedium,
                                     maxLines = 1,
                                     overflow = TextOverflow.Ellipsis,
                                 )
+                                Icon(
+                                    CairnIcons.Down,
+                                    null,
+                                    Modifier.padding(start = 2.dp).size(16.dp),
+                                )
+                            }
+                            if (live != null || status.isNotBlank())
+                                Row(
+                                    Modifier.padding(top = 2.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                ) {
+                                    ConnectionDot(route)
+                                    Spacer(Modifier.width(6.dp))
+                                    if (live != null) {
+                                        val now = rememberNow(liveSince)
+                                        val label =
+                                            listOf(live, elapsed(liveSince, now))
+                                                .filter { it.isNotBlank() }
+                                                .joinToString(" · ")
+                                        LiveChip(label)
+                                    } else if (status.isNotBlank())
+                                        Text(
+                                            status,
+                                            style = MaterialTheme.typography.labelMedium,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis,
+                                        )
+                                }
                         }
                     }
                 }

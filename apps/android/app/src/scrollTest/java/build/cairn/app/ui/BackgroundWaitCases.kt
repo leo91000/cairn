@@ -44,6 +44,7 @@ abstract class BackgroundWaitCases {
                     status = "",
                     live = "Tâche en arrière-plan",
                     liveSince = started,
+                    route = ConnectionRoute.DIRECT,
                     back = {},
                     choose = {},
                     actions = {},
@@ -67,7 +68,7 @@ abstract class BackgroundWaitCases {
             val message =
                 "La réponse s’est arrêtée avant la fin. Reprenez la conversation pour continuer."
             compose.onNodeWithText(message).assertIsDisplayed()
-            compose.onNodeWithText("Échec · Agent principal").assertExists()
+            compose.onNodeWithText("Échec · Agent principal · Installation de test").assertExists()
             compose.onAllNodesWithTag("agent-waiting").assertCountEquals(0)
             compose.onNodeWithContentDescription("Masquer l’erreur").performClick()
             compose.onNodeWithText(message).assertDoesNotExist()

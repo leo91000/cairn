@@ -50,7 +50,9 @@ class CairnAccountRestorationDeviceTest {
                     model.value.state.value.installation?.id == "cached-installation" &&
                         !model.value.state.value.busy
                 }
-                compose.onNodeWithText("Cache · Hors ligne").assertIsDisplayed()
+                // The offline page names the installation in its header.
+                compose.onNode(installationHeader("Cache", "Hors ligne")).assertIsDisplayed()
+                compose.onNodeWithText("Installation hors ligne").assertIsDisplayed()
             }
             awaitRestoredInstallation()
             val original = model.value
