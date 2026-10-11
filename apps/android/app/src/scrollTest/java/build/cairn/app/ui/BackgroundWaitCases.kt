@@ -44,6 +44,7 @@ abstract class BackgroundWaitCases {
                     status = "",
                     live = "Tâche en arrière-plan",
                     liveSince = started,
+                    route = ConnectionRoute.DIRECT,
                     back = {},
                     choose = {},
                     actions = {},

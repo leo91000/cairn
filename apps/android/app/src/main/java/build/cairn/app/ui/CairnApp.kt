@@ -20,8 +20,6 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.semantics.contentDescription
-import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
@@ -58,15 +56,19 @@ fun CairnApp(
     targetAccount: String = "",
 ) {
     CompositionLocalProvider(LocalCairnCredentials provides credentials) {
-        CairnAppContent(
-            sharedUrl,
-            consumedShare,
-            vm,
-            targetChat,
-            targetCacheScope,
-            consumedTarget,
-            targetAccount,
-        )
+        // Gives every screen, including those outside the workspace Scaffold, the theme's
+        // background and content colors instead of black text on the window background.
+        Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
+            CairnAppContent(
+                sharedUrl,
+                consumedShare,
+                vm,
+                targetChat,
+                targetCacheScope,
+                consumedTarget,
+                targetAccount,
+            )
+        }
     }
 }
 
@@ -166,97 +168,50 @@ private fun CairnAppContent(
         return
     }
     val installation = checkNotNull(state.installation)
-    Column(Modifier.fillMaxSize()) {
-        if (pushReenrollmentRequired)
-            Text(
-                NATIVE_PUSH_REENROLLMENT_MESSAGE,
-                modifier = Modifier.statusBarsPadding().padding(12.dp),
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.error,
-            )
-        var choosing by remember { mutableStateOf(false) }
-        Box(Modifier.fillMaxWidth().statusBarsPadding().padding(horizontal = 12.dp)) {
-            if (state.session.installations.size > 1)
-                TextButton(
-                    onClick = { choosing = true },
-                    enabled = state.session.installations.size > 1 && !state.busy,
-                    modifier =
-                        Modifier.semantics { contentDescription = "Choisir une installation" },
-                ) {
-                    InstallationLabel(installation, route = state.transportRoute)
-                }
-            else
-                InstallationLabel(
-                    installation,
-                    Modifier.padding(horizontal = 8.dp, vertical = 12.dp),
-                    route = state.transportRoute,
-                )
-            DropdownMenu(expanded = choosing, onDismissRequest = { choosing = false }) {
-                state.session.installations.forEach { choice ->
-                    DropdownMenuItem(
-                        text = {
-                            InstallationLabel(choice)
-                        },
-                        onClick = {
-                            choosing = false
-                            vm.perform { selectInstallation(choice.id) }
-                        },
+    // No installation row above the workspace: each screen's own header shows it, and only the
+    // workspace Scaffold (or the offline page below) applies the status bar inset.
+    key(installation.id, installation.role, state.session.csrf) {
+        if (!installation.online) {
+            var connection by remember { mutableStateOf(false) }
+            Box(Modifier.fillMaxSize().statusBarsPadding()) {
+                Page {
+                    if (pushReenrollmentRequired) PushReenrollmentNotice()
+                    InstallationHeader(state, openConnection = { connection = true })
+                    Heading(
+                        "Installation hors ligne",
+                        "Les exécutions continuent sur votre installation. Réessayez lorsqu’elle sera connectée.",
                     )
-                }
-            }
-        }
-        key(installation.id, installation.role, state.session.csrf) {
-            Box(Modifier.weight(1f)) {
-                if (!installation.online)
-                    Page {
-                        Heading(
-                            "Installation hors ligne",
-                            "Les exécutions continuent sur votre installation. Réessayez lorsqu’elle sera connectée.",
-                        )
-                        TextButton(onClick = { vm.perform { refreshInstallations() } }) {
-                            Text("Actualiser")
-                        }
-                        TextButton(onClick = { vm.perform { logout() } }) { Text("Se déconnecter") }
-                        state.error?.let { ErrorNotice(it, vm::clearMessage) }
+                    TextButton(onClick = { vm.perform { refreshInstallations() } }) {
+                        Text("Actualiser")
                     }
-                else
-                    WorkspaceApp(
-                        vm,
-                        state,
-                        snackbar,
-                        sharedUrl,
-                        consumedShare,
-                        if (approvedTarget) targetChat else "",
-                        targetCacheScope,
-                        consumedTarget,
-                    )
+                    TextButton(onClick = { vm.perform { logout() } }) { Text("Se déconnecter") }
+                    state.error?.let { ErrorNotice(it, vm::clearMessage) }
+                }
             }
-        }
+            if (connection) ConnectionSheet(vm, state, close = { connection = false })
+        } else
+            WorkspaceApp(
+                vm,
+                state,
+                snackbar,
+                sharedUrl,
+                consumedShare,
+                if (approvedTarget) targetChat else "",
+                targetCacheScope,
+                consumedTarget,
+                pushReenrollmentRequired,
+            )
     }
 }
 
 @Composable
-private fun InstallationLabel(
-    installation: Installation,
-    modifier: Modifier = Modifier,
-    route: String? = null,
-) {
-    Column(modifier) {
-        Text("${installation.name} · ${if (installation.online) "En ligne" else "Hors ligne"}")
-        Row {
-            Text(installation.role.label, style = MaterialTheme.typography.labelSmall)
-            if (installation.online && route != null)
-                Text(
-                    " · ${if (route == "direct") "Direct" else "Relais"}",
-                    style = MaterialTheme.typography.labelSmall,
-                    modifier =
-                        Modifier.semantics {
-                            contentDescription =
-                                "Transport : ${if (route == "direct") "Direct" else "Relais"}"
-                        },
-                )
-        }
-    }
+private fun PushReenrollmentNotice() {
+    Text(
+        NATIVE_PUSH_REENROLLMENT_MESSAGE,
+        modifier = Modifier.padding(12.dp),
+        style = MaterialTheme.typography.bodySmall,
+        color = MaterialTheme.colorScheme.error,
+    )
 }
 
 @Composable
@@ -269,12 +224,15 @@ private fun WorkspaceApp(
     targetChat: String,
     targetCacheScope: String,
     consumedTarget: () -> Unit,
+    pushReenrollmentRequired: Boolean,
 ) {
     val nav = rememberNavController()
     fun openConnections() {
         if (state.isOwner) nav.navigate("connections")
         else vm.notify("Demandez au propriétaire de reconnecter le compte.")
     }
+
+    fun openSettings() = nav.navigate("settings") { launchSingleTop = true }
 
     val backStack by nav.currentBackStackEntryAsState()
     val route = backStack?.destination?.route ?: "fil"
@@ -391,6 +349,7 @@ private fun WorkspaceApp(
                     },
                 ) { padding ->
                     Column(Modifier.padding(padding)) {
+                        if (pushReenrollmentRequired) PushReenrollmentNotice()
                         if (state.busy) LinearProgressIndicator(Modifier.fillMaxWidth())
                         state.error?.let { ErrorNotice(it, vm::clearMessage) }
                         NavHost(
@@ -411,6 +370,7 @@ private fun WorkspaceApp(
                                     openRun = { nav.navigate("run/$it") },
                                     openConnections = ::openConnections,
                                     search = { nav.navigate("search") },
+                                    openAccount = ::openSettings,
                                 )
                             }
                             composable("search") {
@@ -439,6 +399,7 @@ private fun WorkspaceApp(
                                     back = { nav.popBackStack() },
                                     create = { nav.navigate("new-chat") },
                                     openConnections = ::openConnections,
+                                    openSettings = ::openSettings,
                                 )
                             }
                             composable("new-chat?agent={agent}&project={project}") { entry ->
@@ -456,6 +417,7 @@ private fun WorkspaceApp(
                                     back = { nav.popBackStack() },
                                     create = { nav.navigate("new-chat") },
                                     openConnections = ::openConnections,
+                                    openSettings = ::openSettings,
                                 )
                             }
                             composable("missions") {

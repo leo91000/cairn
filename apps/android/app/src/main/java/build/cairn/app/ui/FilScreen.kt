@@ -198,8 +198,13 @@ fun FilScreen(
     openRun: (String) -> Unit,
     openConnections: () -> Unit,
     search: () -> Unit,
+    openAccount: () -> Unit = {},
+    openSettings: () -> Unit = openAccount,
 ) {
     val live = rememberLive(vm, state, "/chats/stream")
+    var connection by remember { mutableStateOf(false) }
+    if (connection)
+        ConnectionSheet(vm, state, close = { connection = false }, openSettings = openSettings)
     var activity by remember { mutableStateOf<List<Run>>(emptyList()) }
     Poll("fil-activity", 5000) {
         try {
@@ -235,15 +240,14 @@ fun FilScreen(
         contentPadding = PaddingValues(bottom = 24.dp),
     ) {
         item(key = "header") {
-            Column(
-                Modifier.widthIn(max = 760.dp).padding(horizontal = 20.dp).padding(top = 12.dp)
-            ) {
-                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                    Wordmark()
-                    Spacer(Modifier.weight(1f))
-                    RoundAction("Rechercher", CairnIcons.Search, onClick = search)
-                }
-                Spacer(Modifier.height(16.dp))
+            Column(Modifier.widthIn(max = 760.dp).padding(horizontal = 20.dp)) {
+                InstallationHeader(
+                    state,
+                    openConnection = { connection = true },
+                    search = search,
+                    account = openAccount,
+                )
+                Spacer(Modifier.height(12.dp))
                 Text(greeting(), style = MaterialTheme.typography.headlineLarge)
                 Text(
                     if (chats == null) "Chargement…" else feedSummary(feed),
@@ -349,26 +353,31 @@ private fun Stamp(value: Long, now: Long) {
 }
 
 @Composable
+internal fun CairnLogo() {
+    Image(
+        painter = painterResource(R.drawable.ic_cairn),
+        contentDescription = null,
+        modifier =
+            Modifier.size(40.dp)
+                .background(
+                    CairnLightColors.primary,
+                    RoundedCornerShape(10.dp),
+                )
+                .border(
+                    1.dp,
+                    colorResource(R.color.cairn_icon_outline),
+                    RoundedCornerShape(10.dp),
+                ),
+    )
+}
+
+@Composable
 internal fun Wordmark() {
     Row(
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(8.dp),
     ) {
-        Image(
-            painter = painterResource(R.drawable.ic_cairn),
-            contentDescription = null,
-            modifier =
-                Modifier.size(40.dp)
-                    .background(
-                        CairnLightColors.primary,
-                        RoundedCornerShape(10.dp),
-                    )
-                    .border(
-                        1.dp,
-                        colorResource(R.color.cairn_icon_outline),
-                        RoundedCornerShape(10.dp),
-                    ),
-        )
+        CairnLogo()
         Text(
             "Cairn",
             style = MaterialTheme.typography.headlineMedium,

@@ -319,6 +319,7 @@ internal fun ChatPage(
     back: () -> Unit = {},
     create: () -> Unit = back,
     openConnections: () -> Unit = {},
+    openSettings: () -> Unit = {},
 ) {
     val live =
         if (id == null) conversations
@@ -353,6 +354,7 @@ internal fun ChatPage(
     BackHandler(selected && fullscreen) { fullscreen = false }
     var choosing by rememberSaveable(id) { mutableStateOf(false) }
     var details by rememberSaveable(id) { mutableStateOf(false) }
+    var connection by rememberSaveable(id) { mutableStateOf(false) }
     var outgoing by remember(id) { mutableStateOf<ChatMessage?>(null) }
     fun persistDraft() {
         if (vm.state.value.session.authenticated && !vm.state.value.signingOut)
@@ -620,7 +622,8 @@ internal fun ChatPage(
                 if (!fullscreen) {
                     val agentName =
                         chat?.agentName?.ifBlank { null } ?: selectedAgent?.name ?: "Agent"
-                    val conversation = conversationState(chat, agentName, waitingTasks)
+                    val conversation =
+                        conversationState(chat, agentName, waitingTasks, state.installation?.name)
                     ConversationHeader(
                         title =
                             chat?.title
@@ -628,9 +631,16 @@ internal fun ChatPage(
                                 ?: if (id == null) "Nouvelle conversation" else "Conversation",
                         agent = agentName,
                         agentKey = chat?.agentId ?: agent,
-                        status = conversation.status,
+                        status =
+                            conversation.status.ifBlank {
+                                if (id == null)
+                                    listOfNotNull(agentName, state.installation?.name)
+                                        .joinToString(" · ")
+                                else ""
+                            },
                         live = conversation.live,
                         liveSince = waitingTasks?.since ?: chat?.run?.startedAt,
+                        route = connectionRoute(state.installation, state.transportRoute),
                         back = {
                             persistDraft()
                             back()
@@ -675,6 +685,21 @@ internal fun ChatPage(
                                         menu = false
                                         persistDraft()
                                         create()
+                                    },
+                                )
+                                DropdownMenuItem(
+                                    text = { Text("Connexion") },
+                                    leadingIcon = {
+                                        ConnectionDot(
+                                            connectionRoute(
+                                                state.installation,
+                                                state.transportRoute,
+                                            )
+                                        )
+                                    },
+                                    onClick = {
+                                        menu = false
+                                        connection = true
                                     },
                                 )
                                 if (chat != null)
@@ -796,6 +821,22 @@ internal fun ChatPage(
                         }
                     }
                 }
+                if (connection)
+                    ConnectionSheet(
+                        vm,
+                        state,
+                        close = { connection = false },
+                        openSettings = {
+                            persistDraft()
+                            openSettings()
+                        },
+                        conversation =
+                            ConversationConnection(
+                                chat?.agentName?.ifBlank { null } ?: selectedAgent?.name ?: "Agent",
+                                chat?.projectName ?: state.projects.find { it.id == project }?.name,
+                                chat?.run,
+                            ),
+                    )
                 if (details)
                     DetailSheet("Détails de la conversation", { details = false }) {
                         Text(

@@ -34,6 +34,7 @@ fun ChatScreen(
     back: () -> Unit = {},
     create: () -> Unit = back,
     openConnections: () -> Unit = {},
+    openSettings: () -> Unit = {},
 ) {
     val conversations = rememberLive(vm, state, "/chats/stream")
     if (id == null) {
@@ -49,6 +50,7 @@ fun ChatScreen(
             back = back,
             create = create,
             openConnections = openConnections,
+            openSettings = openSettings,
         )
         return
     }
@@ -117,6 +119,7 @@ fun ChatScreen(
                         back = back,
                         create = create,
                         openConnections = openConnections,
+                        openSettings = openSettings,
                     )
                 }
             }

@@ -121,37 +121,48 @@ class ConversationPresentationTest {
 
     @Test
     fun `the header names a background wait, a failure or an interruption`() {
+        // The subtitle names the agent and its installation; the project moved to the sheet.
         val run = Run("run", status = "running", startedAt = 1)
         val chat = Chat("chat", agentName = "Cairn", projectName = "Site", run = run)
         assertEquals(
-            ConversationState("Cairn · Site", "Cairn travaille"),
-            conversationState(chat, "Cairn", null),
+            ConversationState("Cairn · Maison", "Cairn travaille"),
+            conversationState(chat, "Cairn", null, "Maison"),
         )
         assertEquals(
-            ConversationState("Cairn · Site", "Tâche en arrière-plan"),
-            conversationState(chat, "Cairn", BackgroundWait(listOf("Build"), 1)),
+            ConversationState("Cairn · Maison", "Tâche en arrière-plan"),
+            conversationState(chat, "Cairn", BackgroundWait(listOf("Build"), 1), "Maison"),
         )
         assertEquals(
             "2 tâches en arrière-plan",
-            conversationState(chat, "Cairn", BackgroundWait(listOf("Build", "Lint"), 1)).live,
+            conversationState(chat, "Cairn", BackgroundWait(listOf("Build", "Lint"), 1), "Maison")
+                .live,
         )
         // A wait announced earlier does not outlive the run.
         val failed = chat.copy(run = run.copy(status = "failed"))
         assertEquals(
-            ConversationState("Échec · Cairn · Site", null),
-            conversationState(failed, "Cairn", BackgroundWait(listOf("Build"), 1)),
+            ConversationState("Échec · Cairn · Maison", null),
+            conversationState(failed, "Cairn", BackgroundWait(listOf("Build"), 1), "Maison"),
         )
         assertEquals(
-            "Interrompue · Cairn · Site",
-            conversationState(chat.copy(run = run.copy(status = "interrupted")), "Cairn", null)
+            "Interrompue · Cairn · Maison",
+            conversationState(
+                    chat.copy(run = run.copy(status = "interrupted")),
+                    "Cairn",
+                    null,
+                    "Maison",
+                )
                 .status,
         )
-        assertEquals("En pause", conversationState(chat.copy(paused = true), "Cairn", null).status)
+        assertEquals(
+            "En pause",
+            conversationState(chat.copy(paused = true), "Cairn", null, "Maison").status,
+        )
         assertEquals(
             "En attente",
-            conversationState(chat.copy(run = run.copy(status = "queued")), "Cairn", null).status,
+            conversationState(chat.copy(run = run.copy(status = "queued")), "Cairn", null, "Maison")
+                .status,
         )
-        assertEquals(ConversationState("", null), conversationState(null, "Cairn", null))
+        assertEquals(ConversationState("", null), conversationState(null, "Cairn", null, "Maison"))
     }
 
     @Test

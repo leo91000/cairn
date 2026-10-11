@@ -495,11 +495,11 @@ class DirectTransportDeviceTest {
                     withContext(Dispatchers.Main) { selectedVm = vm }
                     compose.waitUntil(30000) {
                         compose
-                            .onAllNodesWithContentDescription("Transport : Direct")
+                            .onAllNodesWithContentDescription("Connexion : Direct")
                             .fetchSemanticsNodes()
                             .isNotEmpty()
                     }
-                    compose.onNodeWithContentDescription("Transport : Direct").assertIsDisplayed()
+                    compose.onNodeWithContentDescription("Connexion : Direct").assertIsDisplayed()
                     vm.api.closeStreams()
                     ui = true
 
