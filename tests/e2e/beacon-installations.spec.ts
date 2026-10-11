@@ -196,14 +196,28 @@ test('selects installations, remembers the last one and honours deep workspace U
     await expect(selector).toHaveValue(homeName)
     await page.reload()
     await expect(selector).toHaveValue(homeName)
+    const settingsUrl = page.url()
     for (const theme of ['light', 'dark'] as const) {
       await page.emulateMedia({ colorScheme: theme })
       for (const width of [1440, 390, 320]) {
         await page.setViewportSize({ width, height: width === 320 ? 568 : 900 })
         const banner = page.getByRole('banner', { name: 'Current installation', exact: true })
+        // Phones fold the installation bar into the Fil header and its Connection sheet.
+        if (width < 641) {
+          await expect(banner).toBeHidden()
+          await page.goto(firstUrl.replace(/agents$/, ''))
+          const header = page.getByRole('group', { name: 'Installation', exact: true })
+          await expect(header.getByRole('status', { name: 'Installation availability', exact: true })).toHaveText('Online')
+          await header.getByRole('button', { name: homeName, exact: true }).click()
+          await expect(page.getByRole('dialog', { name: 'Connection', exact: true })).toBeVisible()
+        }
+        else {
+          await page.goto(settingsUrl)
+          expect((await banner.boundingBox())!.height).toBeLessThan(80)
+        }
+
         await expect(selector).toHaveAttribute('title', homeName)
         expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
-        expect((await banner.boundingBox())!.height).toBeLessThan(80)
         await page.screenshot({ path: test.info().outputPath(`installation-picker-${theme}-${width}-closed.png`) })
         await selector.click()
         const list = page.getByRole('listbox', { name: 'Current installation', exact: true })
@@ -220,6 +234,7 @@ test('selects installations, remembers the last one and honours deep workspace U
       }
     }
 
+    await page.goto(settingsUrl)
     await page.setViewportSize({ width: 1440, height: 900 })
     await page.emulateMedia({ colorScheme: 'light' })
     await page.getByRole('link', { name: 'New conversation', exact: true }).first().click()
@@ -378,7 +393,11 @@ test('selects installations, remembers the last one and honours deep workspace U
     for (const width of [1440, 390, 320]) {
       await page.setViewportSize({ width, height: 900 })
       expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
-      expect((await page.getByRole('banner', { name: 'Current installation', exact: true }).boundingBox())!.height).toBeLessThan(80)
+      const banner = page.getByRole('banner', { name: 'Current installation', exact: true })
+      if (width < 641)
+        await expect(banner).toBeHidden()
+      else
+        expect((await banner.boundingBox())!.height).toBeLessThan(80)
       await page.screenshot({ path: test.info().outputPath(`installation-selector-${width}.png`) })
     }
 
