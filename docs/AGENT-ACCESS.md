@@ -11,10 +11,11 @@ under **Connections → 1Password**. Those grants can be revoked live; see
 **Allow access to the current Cairn installation** is also opt-in, including for
 Main and existing agents. The owner enables it in the web or Android agent editor.
 It automatically supplies `cairn_installation` to Codex and Claude Code, without
-a server URL, personal access token, or OAuth setup. The agent can list permitted
-its profile, permitted projects, missions and runs; create or schedule missions; update or start
-them; inspect run history; and cancel runs. Agent, project, skill, account and MCP
-connection administration are not exposed through this execution grant.
+a server URL, personal access token, or OAuth setup. The agent can list its
+profile, permitted projects, missions and runs; create or schedule missions;
+update or start them; inspect run history; and cancel runs. Agent, project, skill,
+account and MCP connection administration are not exposed through this execution
+grant.
 
 Missions and runs must use the calling agent, with resource, tool, execution
 and node permissions within its snapshotted permissions. Another agent may have
