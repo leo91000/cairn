@@ -13,6 +13,7 @@ import build.cairn.app.data.*
 import java.util.concurrent.TimeUnit
 import kotlin.math.abs
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.runBlocking
 import okhttp3.mockwebserver.*
 import org.junit.Assert.assertTrue
 import org.junit.Rule
@@ -102,7 +103,11 @@ abstract class UnifiedHeaderCases {
                 }
             }
         val application = ApplicationProvider.getApplicationContext<Application>()
-        return CairnViewModel(application, vault, beaconOrigin = "")
+        return CairnViewModel(application, vault, beaconOrigin = "").also { vm ->
+            // Preferences outlive a Robolectric test: clear a push notice left by another one so
+            // nothing but the header sits under the status bar.
+            runBlocking { vm.notifications.setEnabled(false) }
+        }
     }
 
     /**
