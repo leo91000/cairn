@@ -7,11 +7,13 @@ real. The runner serves readiness only: this test requires no KVM or agent login
 import http.server
 import json
 import os
+from contextlib import closing
 from pathlib import Path
 import re
 import shlex
 import shutil
 import socket
+import sqlite3
 import subprocess
 import tempfile
 import threading
@@ -285,7 +287,13 @@ fetch('http://127.0.0.1:%d/internal/deployment-lease', {
 """ % (manager_port, json.dumps(owner))
                     command(docker + ['exec', '-T', 'manager', 'node', '-e', lease_script])
                     journal = json.loads((root / 'installation.json').read_text())
-                    journal.update(pendingImage=image, leaseOwner=owner, leaseAcquired=True)
+                    # Simulate the new supervisor's durable pre-update checkpoint.
+                    # This fixture changes only runtime identity, not storage format.
+                    manager_database_uri = (root / 'data/manager.db').resolve().as_uri() + '?mode=ro'
+                    with closing(sqlite3.connect(manager_database_uri, uri=True)) as db:
+                        version = db.execute('PRAGMA user_version').fetchone()[0]
+                    journal.update(pendingImage=image, leaseOwner=owner, leaseAcquired=True,
+                                   pendingDatabaseVersion=version)
                     (root / 'installation.json').write_text(json.dumps(journal))
                     deployment = json.loads((root / 'compose.json').read_text())
                     deployment['services']['manager'].update(image=image, restart='unless-stopped')

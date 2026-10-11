@@ -45,6 +45,7 @@ struct StorageCredentials {
 /// Recovery operations reuse a client for each storage configuration, including
 /// retained disks on a previously selected endpoint.
 pub struct HotS3 {
+    pub(crate) block_codec: crate::storage::block_codec::BlockCodec,
     clients: Mutex<HashMap<ClientKey, aws_sdk_s3::Client>>,
     settings_lock: Mutex<()>,
     reads: Semaphore,
@@ -58,6 +59,7 @@ pub struct HotS3 {
 impl HotS3 {
     pub fn new() -> Self {
         Self {
+            block_codec: crate::storage::block_codec::BlockCodec::default(),
             clients: Mutex::new(HashMap::new()),
             settings_lock: Mutex::new(()),
             reads: Semaphore::new(HOT_READ_CONCURRENCY),
@@ -73,7 +75,8 @@ impl HotS3 {
         json!({
             "get": self.get_metrics.snapshot(),
             "put": self.put_metrics.snapshot(),
-            "purgeKey": self.purge_metrics.snapshot()
+            "purgeKey": self.purge_metrics.snapshot(),
+            "blockCodec": self.block_codec.performance()
         })
     }
 

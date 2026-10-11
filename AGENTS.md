@@ -2,6 +2,10 @@
 
 - Keep changes focused on the requested behavior. Preserve existing contracts and
   use the tests around the affected code to check them.
+- For storage behavior changes, record reproducible read/write measurements against
+  a reference: encoded bytes, cold/warm read latency, write latency, CPU, workload
+  and host conditions. See [object compression measurements](docs/STORAGE-COMPRESSION.md).
+  Distinguish local measurements from production network latency.
 - Separate logical steps with blank lines. Give complex expressions descriptive
   intermediate names when that makes the flow easier to follow. Avoid arbitrary
   function-size limits or extracting helpers solely to reduce line counts.

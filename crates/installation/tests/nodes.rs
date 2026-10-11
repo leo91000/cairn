@@ -2469,9 +2469,8 @@ async fn assert_s3_outage_is_transient(
     std::fs::write(&config_path, original_config).unwrap();
 }
 
-/// The previous JSON/base64 envelope and the binary format can coexist: a
-/// recovery point without a block format reads the run-scoped `key`.
-async fn assert_legacy_block_envelope_is_readable(
+/// Normal recovery rejects old envelopes immediately after startup migration.
+async fn assert_legacy_block_envelope_is_rejected(
     owner: &Owner,
     key: &str,
     retained: &Value,
@@ -2492,12 +2491,16 @@ async fn assert_legacy_block_envelope_is_readable(
         .unwrap();
     let mut legacy_point = retained.clone();
     legacy_point.as_object_mut().unwrap().remove("blockFormat");
-    assert_eq!(
+    assert!(
         publication::read_block(&owner.service, &legacy_point, block)
             .await
-            .unwrap(),
-        original[..4 * MIB]
+            .is_err()
     );
+    Storage::configured(&owner.service)
+        .unwrap()
+        .purge_key(key)
+        .await
+        .unwrap();
 }
 
 #[tokio::test]
@@ -2599,7 +2602,7 @@ async fn encrypted_recovery_points_cross_the_outbound_relay_and_reject_incomplet
         original[..4 * MIB],
     );
     let legacy_key = format!("node-backups/{run}/blocks/{block}");
-    assert_legacy_block_envelope_is_readable(&owner, &legacy_key, &retained, block, &original)
+    assert_legacy_block_envelope_is_rejected(&owner, &legacy_key, &retained, block, &original)
         .await;
     original[4 * MIB] = 2;
     std::fs::write(&source, &original).unwrap();
@@ -4451,11 +4454,13 @@ async fn corrupted_recovery_ciphertext_is_terminal_and_invalidates_the_baseline(
     owner.add_run(&record).await;
     let data = b"durable conversation work";
     let hash = hex::encode(Sha256::digest(data));
-    let key = format!("node-backups/{run}/blocks/{hash}");
-    let mut encoded = b"CAIRNB\x01\0".to_vec();
-    encoded.extend(owner.service.vault.encrypt_bytes(&key, data).unwrap());
+    let key = format!("node-backups-v2/{run}/blocks/{hash}");
+    let mut encoded = cairn_installation::storage::block_codec::BlockCodec::default()
+        .encode(owner.service.vault.clone(), key.clone(), data.to_vec())
+        .await
+        .unwrap();
     *encoded.last_mut().unwrap() ^= 1;
-    let path = owner.service.config.data_dir.join(&key);
+    let path = owner.backup_directory(&run).join("blocks").join(&hash);
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
     std::fs::write(&path, encoded).unwrap();
     let error = publication::read_block(
@@ -5089,8 +5094,8 @@ sys.exit(subprocess.call(['aws']+sys.argv[1:]))
         .unwrap();
     drain_remote_deletions(s).await;
 
-    // Legacy incremental captures can omit unchanged bytes on the node. Migrate
-    // them from their old authenticated object instead of requesting absent data.
+    // Run-scoped manifests migrated at startup can omit unchanged bytes on the
+    // node. Reuse their v2 object instead of requesting absent data.
     let legacy_run = new_run().await;
     let run_id = legacy_run["id"].as_str().unwrap();
     let point_id = id();
@@ -5102,9 +5107,11 @@ sys.exit(subprocess.call(['aws']+sys.argv[1:]))
         .as_str()
         .unwrap()
         .to_owned();
-    let old_key = format!("node-backups/{run_id}/blocks/{hash}");
-    let mut encoded = b"CAIRNB\x01\0".to_vec();
-    encoded.extend(s.vault.encrypt_bytes(&old_key, legacy_bytes).unwrap());
+    let old_key = format!("node-backups-v2/{run_id}/blocks/{hash}");
+    let encoded = cairn_installation::storage::block_codec::BlockCodec::default()
+        .encode(s.vault.clone(), old_key.clone(), legacy_bytes.to_vec())
+        .await
+        .unwrap();
     Storage::configured(s)
         .unwrap()
         .upload_bytes(encoded, &old_key)
@@ -5161,6 +5168,134 @@ sys.exit(subprocess.call(['aws']+sys.argv[1:]))
     );
     publication::purge(s, run_id).await.unwrap();
     drain_remote_deletions(s).await;
+    server.abort();
+}
+
+#[tokio::test]
+#[ignore = "requires loopback S3; run scripts/tests/node_s3_test.py --case compressed_publications"]
+async fn compressed_publications_restore_mixed_blocks_reuse_objects_and_repair_corruption() {
+    use cairn_installation::storage::block_codec::MAX_ENCODED_BYTES;
+    use rand::{RngCore, SeedableRng};
+
+    let root = TempDir::new().unwrap();
+    let disk = root.path().join("source");
+    let mut original = vec![42u8; 8 * MIB + 23];
+    rand::rngs::StdRng::seed_from_u64(42).fill_bytes(&mut original[4 * MIB..8 * MIB]);
+    std::fs::write(&disk, &original).unwrap();
+    let mut manifest = snapshots::index(&disk).await.unwrap();
+    // Mixed identity algorithms are independent of the storage representation.
+    manifest["blocks"][1]["hash"] = hex::encode(Sha256::digest(&original[4 * MIB..8 * MIB])).into();
+    let state = Arc::new(tokio::sync::Mutex::new(manifest.clone()));
+    let gates = SharedPublicationGates::default();
+    let (url, server) =
+        common::serve_locally(shared_publication_controller(disk, state, gates.clone())).await;
+    let owner = Owner::with_runner(common::HOST.into(), url).await;
+    let s = &owner.service;
+    let first_run = local_run(&id());
+    let second_run = local_run(&id());
+    add_local_run(&owner, &first_run).await;
+    add_local_run(&owner, &second_run).await;
+    let first = publication::capture(s, &first_run).await.unwrap();
+    let second = publication::capture(s, &second_run).await.unwrap();
+    assert_eq!(first["uploadedBytes"], original.len());
+    assert_eq!(second["uploadedBytes"], 0);
+    assert_eq!(gates.requests.load(Ordering::SeqCst), 3);
+    let first = s
+        .get("node-backups", first["id"].as_str().unwrap())
+        .await
+        .unwrap();
+    let second = s
+        .get("node-backups", second["id"].as_str().unwrap())
+        .await
+        .unwrap();
+    let first_manifest = publication::manifest(s, &first).await.unwrap();
+    let second_manifest = publication::manifest(s, &second).await.unwrap();
+    assert_eq!(first_manifest["blocks"], second_manifest["blocks"]);
+    let storage = Storage::configured(s).unwrap();
+    let hashes: Vec<_> = manifest["blocks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|block| block["hash"].as_str())
+        .collect();
+    for (index, hash) in hashes.iter().enumerate() {
+        let encoded = storage
+            .download_bytes(&shared_object_key(&first_manifest, hash), MAX_ENCODED_BYTES)
+            .await
+            .unwrap();
+        assert!(encoded.starts_with(b"CAIRNB\x02\0"));
+        if index == 0 {
+            assert!(encoded.len() < 4096);
+        } else if index == 1 {
+            assert_eq!(encoded.len() as u64, MAX_ENCODED_BYTES);
+        }
+    }
+    let restored = root.path().join("restored");
+    snapshots::restore(&restored, &second_manifest, |hash| {
+        let (s, second) = (s.clone(), second.clone());
+        async move { publication::read_block(&s, &second, &hash).await }
+    })
+    .await
+    .unwrap();
+    assert_eq!(std::fs::read(restored).unwrap(), original);
+
+    // Corruption is terminal, invalidates reuse and forces a new immutable incarnation.
+    let old_key = shared_object_key(&first_manifest, hashes[0]);
+    let mut corrupt = storage
+        .download_bytes(&old_key, MAX_ENCODED_BYTES)
+        .await
+        .unwrap();
+    *corrupt.last_mut().unwrap() ^= 1;
+    storage.upload_bytes(corrupt, &old_key).await.unwrap();
+    assert_eq!(
+        publication::read_block(s, &second, hashes[0])
+            .await
+            .unwrap_err()
+            .status,
+        409
+    );
+    assert!(owner.run(second_run["id"].as_str().unwrap()).await["backup"]["snapshotId"].is_null());
+    let repaired = publication::capture(s, &second_run).await.unwrap();
+    assert_eq!(repaired["uploadedBytes"], 4 * MIB);
+    let repaired = s
+        .get("node-backups", repaired["id"].as_str().unwrap())
+        .await
+        .unwrap();
+    let repaired_manifest = publication::manifest(s, &repaired).await.unwrap();
+    assert_ne!(shared_object_key(&repaired_manifest, hashes[0]), old_key);
+    assert_eq!(
+        publication::read_block(s, &repaired, hashes[0])
+            .await
+            .unwrap(),
+        original[..4 * MIB]
+    );
+    assert_eq!(
+        publication::read_block(s, &first, hashes[1]).await.unwrap(),
+        original[4 * MIB..8 * MIB]
+    );
+
+    publication::purge(s, first_run["id"].as_str().unwrap())
+        .await
+        .unwrap();
+    drain_remote_deletions(s).await;
+    assert_eq!(
+        publication::read_block(s, &repaired, hashes[0])
+            .await
+            .unwrap(),
+        original[..4 * MIB]
+    );
+    publication::purge(s, second_run["id"].as_str().unwrap())
+        .await
+        .unwrap();
+    drain_remote_deletions(s).await;
+    assert_eq!(
+        storage
+            .download_bytes(&old_key, MAX_ENCODED_BYTES)
+            .await
+            .unwrap_err()
+            .status,
+        409
+    );
     server.abort();
 }
 

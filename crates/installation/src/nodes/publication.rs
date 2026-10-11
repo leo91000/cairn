@@ -1,5 +1,5 @@
 //! Publish the current disk to S3, then collect unreachable generations.
-//! New publications share immutable objects; existing run-scoped objects remain readable.
+//! Publications share immutable objects; startup migrates older encoded objects.
 //! Persisted record and object names remain compatible with existing disks.
 use super::{shared_blocks, snapshots};
 use crate::{
@@ -11,7 +11,6 @@ use crate::{
     service::Service,
     validation::text,
 };
-use base64::{Engine, engine::general_purpose::STANDARD};
 use serde::Serialize;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -22,9 +21,6 @@ use std::{
     time::Duration,
 };
 use tokio::task::{AbortHandle, JoinSet};
-
-// Versioned binary blocks avoid both JSON/base64 layers used by legacy records.
-const BINARY_BLOCK_HEADER: &[u8; 8] = b"CAIRNB\x01\0";
 
 const MIB: u64 = 1024 * 1024;
 
@@ -129,8 +125,8 @@ fn root(s: &Service, run: &str) -> PathBuf {
     s.config.data_dir.join("node-backups").join(run)
 }
 
-fn key(run: &str, hash: &str) -> String {
-    format!("node-backups/{run}/blocks/{hash}")
+pub(crate) fn key(run: &str, hash: &str) -> String {
+    format!("node-backups-v2/{run}/blocks/{hash}")
 }
 
 fn manifest_key(run: &str, point: &str) -> String {
@@ -741,14 +737,10 @@ async fn complete_request(s: &Service, run: &str, revision: u64) -> Result<()> {
 }
 
 async fn encrypt_block(s: &Service, scope: String, bytes: Vec<u8>) -> Result<Vec<u8>> {
-    let vault = s.vault.clone();
-    tokio::task::spawn_blocking(move || -> Result<Vec<u8>> {
-        let mut encoded = BINARY_BLOCK_HEADER.to_vec();
-        encoded.extend(vault.encrypt_bytes(&scope, &bytes)?);
-        Ok(encoded)
-    })
-    .await
-    .map_err(Error::internal)?
+    s.hot_s3
+        .block_codec
+        .encode(s.vault.clone(), scope, bytes)
+        .await
 }
 
 /// Blocks of this run's earlier publications, by hash, with the point that holds them.
@@ -834,7 +826,7 @@ pub async fn read_block(s: &Service, backup: &Value, hash: &str) -> Result<Vec<u
         return Err(Error::bad("Invalid backup block."));
     }
     if !shared_format(backup) {
-        return read_legacy_block(s, backup, hash).await;
+        return read_run_scoped_block(s, backup, hash).await;
     }
     let manifest = manifest(s, backup).await?;
     let block = snapshots::find_block(&manifest, hash)
@@ -851,7 +843,7 @@ pub(crate) async fn read_manifest_block(
 ) -> Result<Vec<u8>> {
     let hash = text(block, "hash");
     if !shared_format(backup) {
-        return read_legacy_block(s, backup, hash).await;
+        return read_run_scoped_block(s, backup, hash).await;
     }
     let object = text(block, "object");
     crate::validation::uuid(object)?;
@@ -862,13 +854,14 @@ pub(crate) async fn read_manifest_block(
     let scope = shared_blocks::key(hash, object);
     let storage = storage_for(s, backup)?;
     let result = async {
+        let permit = s.hot_s3.block_codec.read_permit().await?;
         let encoded = storage
-            .download_bytes(&scope, snapshots::BLOCK + 36)
+            .download_bytes(&scope, crate::storage::block_codec::MAX_ENCODED_BYTES)
             .await?;
-        let bytes = decode_scoped_block(s, &scope, hash, encoded).await?;
-        if Some(bytes.len() as u64) != block["size"].as_u64() {
-            return Err(Error::conflict("Recovery block size mismatch."));
-        }
+        let size = block["size"]
+            .as_u64()
+            .ok_or_else(|| Error::conflict("Recovery block size mismatch."))?;
+        let bytes = decode_scoped_block(s, &scope, hash, Some(size), encoded, permit).await?;
         Ok(bytes)
     }
     .await;
@@ -882,11 +875,12 @@ pub(crate) async fn read_manifest_block(
     result
 }
 
-async fn read_legacy_block(s: &Service, backup: &Value, hash: &str) -> Result<Vec<u8>> {
+async fn read_run_scoped_block(s: &Service, backup: &Value, hash: &str) -> Result<Vec<u8>> {
     let run = text(backup, "runId");
     let path = root(s, run).join("blocks").join(hash);
+    let permit = s.hot_s3.block_codec.read_permit().await?;
     if let Ok(encoded) = tokio::fs::read(&path).await {
-        match decode_block(s, run, hash, encoded).await {
+        match decode_block(s, run, hash, encoded, permit).await {
             Ok(bytes) => return Ok(bytes),
             Err(error) => {
                 // A failed restore must not leave known-bad bytes in the cache.
@@ -897,6 +891,8 @@ async fn read_legacy_block(s: &Service, backup: &Value, hash: &str) -> Result<Ve
                 }
             }
         }
+    } else {
+        drop(permit);
     }
     if !in_s3(backup) {
         forget_baseline(s, run).await?;
@@ -906,10 +902,14 @@ async fn read_legacy_block(s: &Service, backup: &Value, hash: &str) -> Result<Ve
     let storage = storage_for(s, backup)?;
     crate::skills::private_dir(path.parent().unwrap()).await?;
     let recovered = async {
+        let permit = s.hot_s3.block_codec.read_permit().await?;
         let encoded = storage
-            .download_bytes(&key(run, hash), snapshots::BLOCK * 3 + 4096)
+            .download_bytes(
+                &key(run, hash),
+                crate::storage::block_codec::MAX_ENCODED_BYTES,
+            )
             .await?;
-        decode_block(s, run, hash, encoded).await
+        decode_block(s, run, hash, encoded, permit).await
     }
     .await;
     if let Err(error) = &recovered
@@ -925,40 +925,35 @@ async fn read_legacy_block(s: &Service, backup: &Value, hash: &str) -> Result<Ve
     recovered
 }
 
-async fn decode_block(s: &Service, run: &str, hash: &str, encoded: Vec<u8>) -> Result<Vec<u8>> {
-    decode_scoped_block(s, &key(run, hash), hash, encoded).await
+async fn decode_block(
+    s: &Service,
+    run: &str,
+    hash: &str,
+    encoded: Vec<u8>,
+    permit: tokio::sync::OwnedSemaphorePermit,
+) -> Result<Vec<u8>> {
+    decode_scoped_block(s, &key(run, hash), hash, None, encoded, permit).await
 }
 
 async fn decode_scoped_block(
     s: &Service,
     scope: &str,
     hash: &str,
+    expected_size: Option<u64>,
     encoded: Vec<u8>,
+    permit: tokio::sync::OwnedSemaphorePermit,
 ) -> Result<Vec<u8>> {
-    let vault = s.vault.clone();
-    let scope = scope.to_owned();
-    let hash = hash.to_owned();
-    tokio::task::spawn_blocking(move || {
-        let bytes = if let Some(ciphertext) = encoded.strip_prefix(BINARY_BLOCK_HEADER) {
-            vault.decrypt_bytes(&scope, ciphertext)?
-        } else {
-            // Published S3 blocks remain readable independently of archive removal.
-            let value: Value = serde_json::from_slice(&encoded)?;
-            let plaintext = vault.decrypt(&scope, &value)?;
-            STANDARD
-                .decode(plaintext.as_str().unwrap_or(""))
-                .map_err(|_| Error::bad("Invalid backup ciphertext."))?
-        };
-        if !crate::storage::digest::matches(&hash, &bytes) {
-            return Err(Error::bad("Backup integrity check failed."));
-        }
-        Ok(bytes)
-    })
-    .await
-    .map_err(Error::internal)?
-    // Decoding has no network or filesystem effects. Invalid envelopes,
-    // authentication failures and digest mismatches all require repair.
-    .map_err(|_| Error::conflict("Recovery block integrity check failed."))
+    s.hot_s3
+        .block_codec
+        .decode_reserved(
+            s.vault.clone(),
+            scope.to_owned(),
+            hash.to_owned(),
+            expected_size,
+            encoded,
+            permit,
+        )
+        .await
 }
 
 /// The local controller owns the configured node cache. Retire duplicate S3
@@ -1661,6 +1656,7 @@ pub async fn purge(s: &Service, run: &str) -> Result<()> {
         let storage = storage_for(s, &location)?;
         if deleted.insert((storage.endpoint.clone(), storage.bucket.clone())) {
             queue_deletion(s, &location, &format!("node-backups/{run}/"), true).await?;
+            queue_deletion(s, &location, &format!("node-backups-v2/{run}/"), true).await?;
         }
     }
     let directory = root(s, run);
