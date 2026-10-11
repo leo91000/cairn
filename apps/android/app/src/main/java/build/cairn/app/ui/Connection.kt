@@ -13,6 +13,7 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.layout.Layout
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
@@ -193,6 +194,7 @@ internal fun ConnectionSheet(
                                     installation.name,
                                     maxLines = 1,
                                     overflow = TextOverflow.Ellipsis,
+                                    style = MaterialTheme.typography.bodyLarge,
                                     color = MaterialTheme.colorScheme.onSurface,
                                 )
                                 Icon(
@@ -245,10 +247,23 @@ internal fun ConnectionSheet(
                     }
                 }
                 // Runner and synchronization come from the run's placement, owner only; the card
-                // stays hidden while the master runner is the only choice.
+                // stays hidden while the master runner is the only choice, so its spacing only
+                // applies when it shows.
                 val run = conversation?.run
                 if (state.isOwner && run != null)
-                    Box(Modifier.padding(vertical = 8.dp)) { NodePlacement(vm, run) }
+                    Layout(content = { NodePlacement(vm, run) }) { measurables, constraints ->
+                        val gap = 8.dp.roundToPx()
+                        val placeables = measurables.map {
+                            it.measure(constraints.copy(minHeight = 0))
+                        }
+                        val height = placeables.maxOfOrNull { it.height } ?: 0
+                        val width = placeables.maxOfOrNull { it.width } ?: 0
+                        if (height == 0) layout(width, 0) {}
+                        else
+                            layout(width, height + 2 * gap) {
+                                placeables.forEach { it.place(0, gap) }
+                            }
+                    }
                 if (conversation != null) {
                     HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
                     ConnectionRow("Agent · projet") {
