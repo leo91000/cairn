@@ -109,6 +109,8 @@ abstract class UnifiedHeaderCases {
      * Connects from composition: blocking the test thread would stall Robolectric's main looper.
      */
     private fun setApp(vm: CairnViewModel, server: MockWebServer, dark: Boolean = true) {
+        // Starting the server is network I/O, which Android forbids on the main thread.
+        val origin = server.url("/").toString()
         compose.setContent {
             val local = LocalDensity.current
             val inset = WindowInsets.statusBars.getTop(local).toFloat()
@@ -118,7 +120,7 @@ abstract class UnifiedHeaderCases {
             }
             LaunchedEffect(Unit) {
                 vm.state.first { it.ready }
-                vm.connect(server.url("/").toString())
+                vm.connect(origin)
             }
             CairnTheme(if (dark) "dark" else "light") { CairnApp(vm = vm) }
         }
@@ -192,7 +194,8 @@ abstract class UnifiedHeaderCases {
                 compose.onNodeWithText("Relais").assertExists()
                 capture("chat-connection-sheet")
             } finally {
-                vm.api.closeStreams()
+                // Keeps the original failure when no installation was opened yet.
+                runCatching { vm.api.closeStreams() }
             }
         }
     }
@@ -220,7 +223,8 @@ abstract class UnifiedHeaderCases {
                     vm.state.value.installation?.id == "shared"
                 }
             } finally {
-                vm.api.closeStreams()
+                // Keeps the original failure when no installation was opened yet.
+                runCatching { vm.api.closeStreams() }
             }
         }
     }
