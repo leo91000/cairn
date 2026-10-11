@@ -79,7 +79,7 @@ async fn startup_migrates_binary_json_and_current_envelopes_before_returning() {
             digest::block(&bytes)
         };
         let source = format!("node-backups/{run}/blocks/{hash}");
-        let target = format!("node-backups/{run}/blocks-v2/{hash}");
+        let target = format!("node-backups-v2/{run}/blocks/{hash}");
         let encoded = match format {
             0 => binary(&vault, &source, &bytes),
             1 => serde_json::to_vec(
@@ -204,7 +204,7 @@ async fn local_atomic_rename_before_checkpoint_resumes_without_old_scope() {
     let bytes = vec![7; 4096];
     let hash = digest::block(&bytes);
     let source = format!("node-backups/{run}/blocks/{hash}");
-    let target = format!("node-backups/{run}/blocks-v2/{hash}");
+    let target = format!("node-backups-v2/{run}/blocks/{hash}");
     let path = config.data_dir.join(&source);
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
     let encoded = cairn_installation::storage::block_codec::BlockCodec::default()
@@ -331,6 +331,24 @@ async fn startup_migration_verifies_shared_and_run_scoped_objects_before_removin
         .put("node-backups", legacy_point.clone())
         .await
         .unwrap();
+    let deletion_run = run.clone();
+    s.store
+        .write(move |db| {
+            db.0.execute(
+                "INSERT INTO remote_deletions(id,location,key,prefix) VALUES('old-run-purge',?1,?2,1)",
+                params![
+                    json!({
+                        "destination": "s3",
+                        "bucket": "cairn-node-test",
+                        "endpoint": null
+                    }).to_string(),
+                    format!("node-backups/{deletion_run}/")
+                ],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
     // A corrupt replacement must never authorize deletion of the intact source.
     storage
         .upload_bytes(b"bad replacement".to_vec(), &target)
@@ -355,6 +373,9 @@ async fn startup_migration_verifies_shared_and_run_scoped_objects_before_removin
         .await
         .unwrap();
     let migrated = Service::new(s.config.clone()).await.unwrap();
+    // A pre-upgrade whole-run purge can survive a crash before metadata retirement.
+    // Executing that old queue entry must not erase the replacement namespace.
+    assert_eq!(shared_blocks::collect(&migrated).await.unwrap(), 1);
     for point in &points {
         assert_eq!(
             migrated
@@ -417,7 +438,7 @@ async fn startup_migration_verifies_shared_and_run_scoped_objects_before_removin
     );
     storage.purge_key(&target).await.unwrap();
     storage
-        .purge_key(&format!("node-backups/{run}/blocks-v2/{json_hash}"))
+        .purge_key(&format!("node-backups-v2/{run}/blocks/{json_hash}"))
         .await
         .unwrap();
 }

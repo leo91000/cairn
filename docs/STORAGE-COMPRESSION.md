@@ -48,8 +48,10 @@ objects are accepted only by the blocking startup migrator, with their original
 AAD and identity rules. Shared manifests still use `shared-v1` because their
 hash/object-ID schema is unchanged. Shared object keys now use
 `shared-blocks/v2/{hash}/{object}`; run-scoped keys use
-`node-backups/{run}/blocks-v2/{hash}`. Normal reads never fall back to old keys or
-envelopes.
+`node-backups-v2/{run}/blocks/{hash}`. Normal reads never fall back to old keys or
+envelopes. The separate top-level run namespace also protects replacements from
+whole-run prefix deletions queued by an old executable. New conversation purges
+queue both the manifest/old-data prefix and the v2 block prefix.
 
 ## Rollout and rollback
 

@@ -4454,7 +4454,7 @@ async fn corrupted_recovery_ciphertext_is_terminal_and_invalidates_the_baseline(
     owner.add_run(&record).await;
     let data = b"durable conversation work";
     let hash = hex::encode(Sha256::digest(data));
-    let key = format!("node-backups/{run}/blocks-v2/{hash}");
+    let key = format!("node-backups-v2/{run}/blocks/{hash}");
     let mut encoded = cairn_installation::storage::block_codec::BlockCodec::default()
         .encode(owner.service.vault.clone(), key.clone(), data.to_vec())
         .await
@@ -5107,7 +5107,7 @@ sys.exit(subprocess.call(['aws']+sys.argv[1:]))
         .as_str()
         .unwrap()
         .to_owned();
-    let old_key = format!("node-backups/{run_id}/blocks-v2/{hash}");
+    let old_key = format!("node-backups-v2/{run_id}/blocks/{hash}");
     let encoded = cairn_installation::storage::block_codec::BlockCodec::default()
         .encode(s.vault.clone(), old_key.clone(), legacy_bytes.to_vec())
         .await

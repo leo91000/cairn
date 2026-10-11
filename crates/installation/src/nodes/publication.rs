@@ -126,7 +126,7 @@ fn root(s: &Service, run: &str) -> PathBuf {
 }
 
 pub(crate) fn key(run: &str, hash: &str) -> String {
-    format!("node-backups/{run}/blocks-v2/{hash}")
+    format!("node-backups-v2/{run}/blocks/{hash}")
 }
 
 fn manifest_key(run: &str, point: &str) -> String {
@@ -1656,6 +1656,7 @@ pub async fn purge(s: &Service, run: &str) -> Result<()> {
         let storage = storage_for(s, &location)?;
         if deleted.insert((storage.endpoint.clone(), storage.bucket.clone())) {
             queue_deletion(s, &location, &format!("node-backups/{run}/"), true).await?;
+            queue_deletion(s, &location, &format!("node-backups-v2/{run}/"), true).await?;
         }
     }
     let directory = root(s, run);
