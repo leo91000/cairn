@@ -3,15 +3,19 @@
 package build.cairn.app.ui
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.Layout
 import androidx.compose.ui.platform.testTag
@@ -38,9 +42,16 @@ internal fun connectionRoute(installation: Installation?, transportRoute: String
         else -> ConnectionRoute.RELAY
     }
 
-/** Green when online and direct, amber through the relay, grey when offline. */
+/**
+ * Green when online and direct, amber through the relay, grey when offline. Pass a null
+ * [description] when an adjacent text already names the route.
+ */
 @Composable
-internal fun ConnectionDot(route: ConnectionRoute, modifier: Modifier = Modifier) {
+internal fun ConnectionDot(
+    route: ConnectionRoute,
+    modifier: Modifier = Modifier,
+    description: String? = "Connexion : ${route.label}",
+) {
     val color =
         when (route) {
             ConnectionRoute.DIRECT -> signal.success
@@ -48,9 +59,13 @@ internal fun ConnectionDot(route: ConnectionRoute, modifier: Modifier = Modifier
             ConnectionRoute.OFFLINE -> MaterialTheme.colorScheme.onSurfaceVariant
         }
     Box(
-        modifier.size(8.dp).background(color, CircleShape).semantics {
-            contentDescription = "Connexion : ${route.label}"
-        }
+        modifier
+            .size(8.dp)
+            .background(color, CircleShape)
+            .then(
+                if (description != null) Modifier.semantics { contentDescription = description }
+                else Modifier
+            )
     )
 }
 
@@ -72,14 +87,20 @@ internal fun InstallationHeader(
         modifier.fillMaxWidth().heightIn(min = 56.dp).testTag("installation-header"),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Surface(
-            onClick = openConnection,
-            modifier =
-                Modifier.weight(1f).semantics {
-                    contentDescription = "Choisir une installation : ${installation.name}"
-                },
-            color = Color.Transparent,
-            shape = RoundedCornerShape(12.dp),
+        // One announcement for the whole control: the installation and its route, then what a tap
+        // does. Only several installations make it a chooser.
+        val several = state.session.installations.size > 1
+        Box(
+            Modifier.weight(1f)
+                .clip(RoundedCornerShape(12.dp))
+                .clickable(
+                    onClickLabel = if (several) "Choisir une installation" else "Voir la connexion",
+                    role = Role.Button,
+                    onClick = openConnection,
+                )
+                .semantics {
+                    contentDescription = installationDescription(installation.name, route)
+                }
         ) {
             Row(Modifier.padding(vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
                 CairnLogo()
@@ -97,7 +118,7 @@ internal fun InstallationHeader(
                         Icon(CairnIcons.Down, null, Modifier.padding(start = 2.dp).size(18.dp))
                     }
                     Row(verticalAlignment = Alignment.CenterVertically) {
-                        ConnectionDot(route)
+                        ConnectionDot(route, description = null)
                         Spacer(Modifier.width(6.dp))
                         Text(
                             route.summary,
@@ -116,6 +137,9 @@ internal fun InstallationHeader(
         }
     }
 }
+
+internal fun installationDescription(name: String, route: ConnectionRoute) =
+    "Installation : $name, ${route.summary}"
 
 @Composable
 private fun AccountButton(email: String, open: () -> Unit) {
@@ -168,7 +192,12 @@ internal fun ConnectionSheet(
         onDismissRequest = close,
         sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
     ) {
-        Column(Modifier.testTag("connection-sheet").padding(bottom = 16.dp)) {
+        // Scrolls in landscape or with large fonts so every row stays reachable.
+        Column(
+            Modifier.testTag("connection-sheet")
+                .verticalScroll(rememberScrollState())
+                .padding(bottom = 16.dp)
+        ) {
             Row(
                 Modifier.fillMaxWidth().padding(start = 20.dp, end = 8.dp),
                 verticalAlignment = Alignment.CenterVertically,
@@ -186,7 +215,8 @@ internal fun ConnectionSheet(
                                 enabled = !state.busy,
                                 modifier =
                                     Modifier.semantics {
-                                        contentDescription = "Changer d’installation"
+                                        contentDescription =
+                                            "Changer d’installation : ${installation.name}"
                                     },
                                 contentPadding = PaddingValues(start = 8.dp, end = 0.dp),
                             ) {
@@ -241,7 +271,7 @@ internal fun ConnectionSheet(
                 HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
                 ConnectionRow("Route") {
                     Row(verticalAlignment = Alignment.CenterVertically) {
-                        ConnectionDot(route)
+                        ConnectionDot(route, description = null)
                         Spacer(Modifier.width(8.dp))
                         ConnectionValue(route.label)
                     }

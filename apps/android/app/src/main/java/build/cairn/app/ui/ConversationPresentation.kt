@@ -51,12 +51,14 @@ internal fun conversationState(
     agentName: String,
     wait: BackgroundWait?,
     installation: String? = null,
+    /** A conversation not created yet still names its agent; a loading one stays quiet. */
+    newChat: Boolean = false,
 ): ConversationState {
-    if (chat == null) return ConversationState("", null)
-
-    val run = chat.run?.status.orEmpty()
     // The project lives in the Connexion sheet; the header names where the agent runs.
     val identity = listOfNotNull(agentName, installation).joinToString(" · ")
+    if (chat == null) return ConversationState(if (newChat) identity else "", null)
+
+    val run = chat.run?.status.orEmpty()
     val status =
         when {
             chat.paused -> "En pause"

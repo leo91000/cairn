@@ -162,7 +162,26 @@ class ConversationPresentationTest {
             conversationState(chat.copy(run = run.copy(status = "queued")), "Cairn", null, "Maison")
                 .status,
         )
+        // A loading conversation stays quiet; a new one already names its agent and installation.
         assertEquals(ConversationState("", null), conversationState(null, "Cairn", null, "Maison"))
+        assertEquals(
+            ConversationState("Cairn · Maison", null),
+            conversationState(null, "Cairn", null, "Maison", newChat = true),
+        )
+    }
+
+    @Test
+    fun `the header names only the agent while no installation is known`() {
+        val chat = Chat("chat", agentName = "Cairn", projectName = "Site")
+        assertEquals(ConversationState("Cairn", null), conversationState(chat, "Cairn", null, null))
+        assertEquals(
+            "Échec · Cairn",
+            conversationState(chat.copy(run = Run("run", status = "failed")), "Cairn", null).status,
+        )
+        assertEquals(
+            ConversationState("Cairn", null),
+            conversationState(null, "Cairn", null, null, newChat = true),
+        )
     }
 
     @Test

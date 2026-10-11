@@ -110,7 +110,7 @@ abstract class CairnAccountCases {
             }
             compose.waitUntil(30000) {
                 compose
-                    .onAllNodesWithContentDescription("Choisir une installation : Maison")
+                    .onAllNodes(installationHeader("Maison", "En ligne"))
                     .fetchSemanticsNodes()
                     .isNotEmpty() && !model.value.state.value.busy
             }
@@ -124,16 +124,16 @@ abstract class CairnAccountCases {
             assertTrue(homeFile.exists())
             // The Fil header opens the Connexion sheet, which switches installation.
             compose.onNodeWithContentDescription("Fil").performClick()
-            compose.onNodeWithContentDescription("Choisir une installation : Maison").performClick()
-            compose.onNodeWithContentDescription("Changer d’installation").performClick()
+            compose.onNode(installationHeader("Maison")).performClick()
+            compose.onNodeWithContentDescription("Changer d’installation : Maison").performClick()
             compose.onNodeWithText("Bureau").performClick()
             compose.waitUntil(30000) {
                 compose
-                    .onAllNodesWithContentDescription("Choisir une installation : Bureau")
+                    .onAllNodes(installationHeader("Bureau", "En ligne"))
                     .fetchSemanticsNodes()
                     .isNotEmpty() && !model.value.state.value.busy
             }
-            compose.onNodeWithContentDescription("Choisir une installation : Bureau").performClick()
+            compose.onNode(installationHeader("Bureau")).performClick()
             compose.onNodeWithText("Membre").assertIsDisplayed()
             compose.onNodeWithText("Réglages de l’installation").assertDoesNotExist()
             compose.onNodeWithContentDescription("Fermer Connexion").performClick()
@@ -186,7 +186,7 @@ abstract class CairnAccountCases {
             }
             compose.waitUntil(30000) {
                 compose
-                    .onAllNodesWithContentDescription("Choisir une installation : Bureau")
+                    .onAllNodes(installationHeader("Bureau", "En ligne"))
                     .fetchSemanticsNodes()
                     .isNotEmpty() && !model.value.state.value.busy
             }
@@ -199,16 +199,14 @@ abstract class CairnAccountCases {
             compose.runOnIdle { model.value.perform { refresh() } }
             compose.waitUntil(10000) {
                 compose
-                    .onAllNodesWithContentDescription("Choisir une installation : Maison")
+                    .onAllNodes(installationHeader("Maison", "En ligne"))
                     .fetchSemanticsNodes()
                     .isNotEmpty() &&
                     model.value.state.value.installation?.id == "selection-home" &&
                     !model.value.state.value.busy
             }
             assertFalse(workFile.exists())
-            compose
-                .onNodeWithContentDescription("Choisir une installation : Maison")
-                .assertIsDisplayed()
+            compose.onNode(installationHeader("Maison", "En ligne")).assertIsDisplayed()
             compose.onNodeWithText("Agent selection-work").assertDoesNotExist()
             compose.onNodeWithContentDescription("Atelier").performClick()
             compose.onNodeWithContentDescription("Paramètres").assertExists()
@@ -219,7 +217,7 @@ abstract class CairnAccountCases {
             compose.runOnIdle { model.value.perform { refreshInstallations() } }
             compose.waitUntil(30000) {
                 compose
-                    .onAllNodesWithContentDescription("Choisir une installation : Maison")
+                    .onAllNodes(installationHeader("Maison", "En ligne"))
                     .fetchSemanticsNodes()
                     .isNotEmpty() &&
                     model.value.state.value.installation?.role == InstallationRole.Member &&
@@ -375,7 +373,7 @@ abstract class CairnAccountCases {
             compose.onNodeWithText("Se connecter").performClick()
             compose.waitUntil(30000) {
                 compose
-                    .onAllNodesWithContentDescription("Choisir une installation : Maison")
+                    .onAllNodes(installationHeader("Maison", "En ligne"))
                     .fetchSemanticsNodes()
                     .isNotEmpty() &&
                     !vm.state.value.busy &&
@@ -389,9 +387,11 @@ abstract class CairnAccountCases {
             }
             assertTrue(downloaded.exists())
             // A single installation has nothing to switch to.
-            compose.onNodeWithContentDescription("Choisir une installation : Maison").performClick()
+            compose.onNode(installationHeader("Maison")).performClick()
             compose.onNodeWithText("Réglages de l’installation").assertIsDisplayed()
-            compose.onNodeWithContentDescription("Changer d’installation").assertDoesNotExist()
+            compose
+                .onNode(hasContentDescription("Changer d’installation", substring = true))
+                .assertDoesNotExist()
             compose.onNodeWithContentDescription("Fermer Connexion").performClick()
             assertTrue(vault.read(server.url("/").toString()).orEmpty().contains("account-fixture"))
             assertTrue(paths.contains("/api/installations/home/api/agents"))
@@ -452,13 +452,11 @@ abstract class CairnAccountCases {
             compose.onNodeWithText("Réessayer").performClick()
             compose.waitUntil(30000) {
                 compose
-                    .onAllNodesWithContentDescription("Choisir une installation : Reprise")
+                    .onAllNodes(installationHeader("Reprise", "Hors ligne"))
                     .fetchSemanticsNodes()
                     .isNotEmpty() && !vm.state.value.busy
             }
-            compose
-                .onNodeWithContentDescription("Choisir une installation : Reprise")
-                .assertIsDisplayed()
+            compose.onNode(installationHeader("Reprise", "Hors ligne")).assertIsDisplayed()
             assertNotNull(vault.read(origin))
             rejected.set(true)
             compose.runOnIdle { vm.perform { connect(origin) } }

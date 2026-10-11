@@ -277,7 +277,7 @@ abstract class NativeAccountCases {
             }
             compose.waitUntil(10_000) {
                 compose
-                    .onAllNodesWithContentDescription("Choisir une installation : Maison")
+                    .onAllNodes(installationHeader("Maison", "Hors ligne"))
                     .fetchSemanticsNodes()
                     .isNotEmpty() &&
                     compose.onAllNodesWithText(recoveryNotice).fetchSemanticsNodes().isNotEmpty()
@@ -328,7 +328,7 @@ abstract class NativeAccountCases {
             compose.setContent { CairnTheme { CairnApp(vm = vm) } }
             compose.waitUntil(10_000) {
                 compose
-                    .onAllNodesWithContentDescription("Choisir une installation : Maison")
+                    .onAllNodes(installationHeader("Maison", "Hors ligne"))
                     .fetchSemanticsNodes()
                     .isNotEmpty() && !vm.state.value.busy
             }

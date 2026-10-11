@@ -12,6 +12,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.*
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -202,7 +203,7 @@ fun FilScreen(
     openSettings: () -> Unit = openAccount,
 ) {
     val live = rememberLive(vm, state, "/chats/stream")
-    var connection by remember { mutableStateOf(false) }
+    var connection by rememberSaveable { mutableStateOf(false) }
     if (connection)
         ConnectionSheet(vm, state, close = { connection = false }, openSettings = openSettings)
     var activity by remember { mutableStateOf<List<Run>>(emptyList()) }

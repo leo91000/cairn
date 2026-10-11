@@ -14,6 +14,7 @@ import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import build.cairn.app.ui.CairnApp
 import build.cairn.app.ui.CairnTheme
+import build.cairn.app.ui.installationHeader
 import java.io.File
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.ConcurrentLinkedQueue
@@ -495,11 +496,13 @@ class DirectTransportDeviceTest {
                     withContext(Dispatchers.Main) { selectedVm = vm }
                     compose.waitUntil(30000) {
                         compose
-                            .onAllNodesWithContentDescription("Connexion : Direct")
+                            .onAllNodes(installationHeader(state = "En ligne · Direct"))
                             .fetchSemanticsNodes()
                             .isNotEmpty()
                     }
-                    compose.onNodeWithContentDescription("Connexion : Direct").assertIsDisplayed()
+                    compose
+                        .onNode(installationHeader(state = "En ligne · Direct"))
+                        .assertIsDisplayed()
                     vm.api.closeStreams()
                     ui = true
 

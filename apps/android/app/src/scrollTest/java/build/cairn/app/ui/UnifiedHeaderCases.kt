@@ -1,11 +1,15 @@
 package build.cairn.app.ui
 
 import android.app.Application
+import android.view.View
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.statusBars
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.SideEffect
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalView
+import androidx.compose.ui.semantics.SemanticsActions
+import androidx.compose.ui.semantics.getOrNull
 import androidx.compose.ui.test.*
 import androidx.compose.ui.test.junit4.v2.createComposeRule
 import androidx.test.core.app.ApplicationProvider
@@ -13,17 +17,27 @@ import build.cairn.app.data.*
 import java.util.concurrent.TimeUnit
 import kotlin.math.abs
 import kotlinx.coroutines.flow.first
-import kotlinx.coroutines.runBlocking
 import okhttp3.mockwebserver.*
 import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
 
 /**
+ * The top-level installation header, whose description names the installation then its state, e.g.
+ * "Installation : Maison, En ligne · Relais".
+ */
+internal fun installationHeader(name: String = "", state: String = ""): SemanticsMatcher =
+    hasContentDescription("Installation : $name", substring = true) and
+        hasContentDescription(state, substring = true)
+
+/**
  * Issue #176: one header per screen, the status bar inset applied once, and the Connexion sheet.
  */
 abstract class UnifiedHeaderCases {
     protected open fun capture(name: String) {}
+
+    /** Robolectric has no status bar: its test gives the compose view a real inset here. */
+    protected open fun applyStatusBar(view: View) {}
 
     @get:Rule val compose = createComposeRule()
 
@@ -103,11 +117,7 @@ abstract class UnifiedHeaderCases {
                 }
             }
         val application = ApplicationProvider.getApplicationContext<Application>()
-        return CairnViewModel(application, vault, beaconOrigin = "").also { vm ->
-            // Preferences outlive a Robolectric test: clear a push notice left by another one so
-            // nothing but the header sits under the status bar.
-            runBlocking { vm.notifications.setEnabled(false) }
-        }
+        return CairnViewModel(application, vault, beaconOrigin = "")
     }
 
     /**
@@ -119,9 +129,11 @@ abstract class UnifiedHeaderCases {
         compose.setContent {
             val local = LocalDensity.current
             val inset = WindowInsets.statusBars.getTop(local).toFloat()
+            val current = LocalView.current
             SideEffect {
                 statusBar = inset
                 density = local.density
+                view = current
             }
             LaunchedEffect(Unit) {
                 vm.state.first { it.ready }
@@ -133,6 +145,7 @@ abstract class UnifiedHeaderCases {
 
     private var statusBar = 0f
     private var density = 1f
+    private var view: View? = null
 
     private fun waitText(value: String) =
         compose.waitUntil(30000) {
@@ -144,8 +157,14 @@ abstract class UnifiedHeaderCases {
             compose.onAllNodesWithContentDescription(value).fetchSemanticsNodes().isNotEmpty()
         }
 
-    /** The first content sits right under the status bar: its inset is applied exactly once. */
-    private fun assertTopsUnderStatusBar(node: SemanticsNodeInteraction, statusBar: Float) {
+    /**
+     * The first content sits right under a real status bar: applying its inset twice, or not at
+     * all, moves it.
+     */
+    private fun assertTopsUnderStatusBar(node: SemanticsNodeInteraction) {
+        compose.runOnUiThread { applyStatusBar(checkNotNull(view)) }
+        compose.waitForIdle()
+        assertTrue("The status bar inset is $statusBar px", statusBar > 0f)
         val top = node.fetchSemanticsNode().boundsInRoot.top
         assertTrue("Top $top should follow the $statusBar px status bar", abs(top - statusBar) < 2f)
     }
@@ -160,13 +179,24 @@ abstract class UnifiedHeaderCases {
                 capture("fil")
 
                 // Fil: the installation replaces the wordmark, with its live route.
-                waitDescription("Connexion : Relais")
+                compose.waitUntil(30000) {
+                    compose
+                        .onAllNodes(installationHeader("Maison", "En ligne · Relais"))
+                        .fetchSemanticsNodes()
+                        .isNotEmpty()
+                }
                 compose.onNodeWithText("Cairn").assertDoesNotExist()
-                assertTopsUnderStatusBar(compose.onNodeWithTag("installation-header"), statusBar)
+                assertTopsUnderStatusBar(compose.onNodeWithTag("installation-header"))
                 compose.onNodeWithContentDescription("Rechercher").assertIsDisplayed()
                 compose.onNodeWithContentDescription("Compte et paramètres").assertIsDisplayed()
                 compose
-                    .onNodeWithContentDescription("Choisir une installation : Maison")
+                    .onNode(installationHeader("Maison"))
+                    .assert(
+                        SemanticsMatcher("chooses an installation") {
+                            it.config.getOrNull(SemanticsActions.OnClick)?.label ==
+                                "Choisir une installation"
+                        }
+                    )
                     .performClick()
                 waitText("Connexion")
                 compose.onNodeWithText("Propriétaire").assertExists()
@@ -186,7 +216,7 @@ abstract class UnifiedHeaderCases {
                 waitDescription("Fichiers · 4")
                 capture("chat")
                 val header = compose.onNodeWithTag("conversation-header")
-                assertTopsUnderStatusBar(header, statusBar)
+                assertTopsUnderStatusBar(header)
                 val height = header.fetchSemanticsNode().boundsInRoot.height / density
                 assertTrue("Conversation chrome is $height dp", height <= 60f)
                 compose
@@ -212,11 +242,10 @@ abstract class UnifiedHeaderCases {
             try {
                 setApp(vm, server, dark = false)
                 waitText(chat.title)
-                compose
-                    .onNodeWithContentDescription("Choisir une installation : Maison")
-                    .performClick()
+                compose.onNode(installationHeader("Maison")).performClick()
                 waitText("Réglages de l’installation")
-                val picker = hasContentDescription("Changer d’installation") and isEnabled()
+                val picker =
+                    hasContentDescription("Changer d’installation : Maison") and isEnabled()
                 compose.waitUntil(30000) {
                     compose.onAllNodes(picker).fetchSemanticsNodes().isNotEmpty()
                 }

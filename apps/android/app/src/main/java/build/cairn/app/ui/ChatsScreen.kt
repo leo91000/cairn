@@ -616,14 +616,19 @@ internal fun ChatPage(
         rendering,
         followGesture,
     )
+    val agentName = chat?.agentName?.ifBlank { null } ?: selectedAgent?.name ?: "Agent"
     CompositionLocalProvider(LocalSkillNames provides skillNames) {
         ArtifactLinkHost(vm, live.state?.artifacts.orEmpty()) {
             Column(Modifier.fillMaxSize()) {
                 if (!fullscreen) {
-                    val agentName =
-                        chat?.agentName?.ifBlank { null } ?: selectedAgent?.name ?: "Agent"
                     val conversation =
-                        conversationState(chat, agentName, waitingTasks, state.installation?.name)
+                        conversationState(
+                            chat,
+                            agentName,
+                            waitingTasks,
+                            state.installation?.name,
+                            newChat = id == null,
+                        )
                     ConversationHeader(
                         title =
                             chat?.title
@@ -631,13 +636,7 @@ internal fun ChatPage(
                                 ?: if (id == null) "Nouvelle conversation" else "Conversation",
                         agent = agentName,
                         agentKey = chat?.agentId ?: agent,
-                        status =
-                            conversation.status.ifBlank {
-                                if (id == null)
-                                    listOfNotNull(agentName, state.installation?.name)
-                                        .joinToString(" · ")
-                                else ""
-                            },
+                        status = conversation.status,
                         live = conversation.live,
                         liveSince = waitingTasks?.since ?: chat?.run?.startedAt,
                         route = connectionRoute(state.installation, state.transportRoute),
@@ -694,7 +693,8 @@ internal fun ChatPage(
                                             connectionRoute(
                                                 state.installation,
                                                 state.transportRoute,
-                                            )
+                                            ),
+                                            description = null,
                                         )
                                     },
                                     onClick = {
@@ -832,7 +832,7 @@ internal fun ChatPage(
                         },
                         conversation =
                             ConversationConnection(
-                                chat?.agentName?.ifBlank { null } ?: selectedAgent?.name ?: "Agent",
+                                agentName,
                                 chat?.projectName ?: state.projects.find { it.id == project }?.name,
                                 chat?.run,
                             ),

@@ -98,17 +98,20 @@ private fun CairnAppContent(
         }
         return
     }
+    // Pages outside the workspace Scaffold each apply the system bar insets once themselves.
     if (state.restoringSession) {
-        Page {
-            Heading(
-                "Connexion à Beacon",
-                "Votre session est conservée sur cet appareil.",
-            )
-            Text(state.error.orEmpty())
-            Button(onClick = { vm.perform { retrySession() } }, enabled = !state.busy) {
-                Text("Réessayer")
+        Box(Modifier.fillMaxSize().systemBarsPadding()) {
+            Page {
+                Heading(
+                    "Connexion à Beacon",
+                    "Votre session est conservée sur cet appareil.",
+                )
+                Text(state.error.orEmpty())
+                Button(onClick = { vm.perform { retrySession() } }, enabled = !state.busy) {
+                    Text("Réessayer")
+                }
+                if (state.busy) LinearProgressIndicator(Modifier.fillMaxWidth())
             }
-            if (state.busy) LinearProgressIndicator(Modifier.fillMaxWidth())
         }
         return
     }
@@ -146,34 +149,38 @@ private fun CairnAppContent(
 
     if (state.installation == null) {
         val context = LocalContext.current
-        Page {
-            Heading(
-                "Aucune installation",
-                "Ajoutez ou revendiquez une installation depuis Beacon.",
-            )
-            Text(state.session.account?.email.orEmpty())
-            Text("Les installations de votre compte Cairn apparaîtront ici.")
-            Text(
-                "Obtenez la commande d’installation dans Beacon, ou associez une installation existante avec cairn claim."
-            )
-            Button(onClick = { browse(context, state.origin.trimEnd('/') + "/claim") }) {
-                Text("Ajouter une installation")
+        Box(Modifier.fillMaxSize().systemBarsPadding()) {
+            Page {
+                Heading(
+                    "Aucune installation",
+                    "Ajoutez ou revendiquez une installation depuis Beacon.",
+                )
+                Text(state.session.account?.email.orEmpty())
+                Text("Les installations de votre compte Cairn apparaîtront ici.")
+                Text(
+                    "Obtenez la commande d’installation dans Beacon, ou associez une installation existante avec cairn claim."
+                )
+                Button(onClick = { browse(context, state.origin.trimEnd('/') + "/claim") }) {
+                    Text("Ajouter une installation")
+                }
+                TextButton(onClick = { vm.perform { refreshInstallations() } }) {
+                    Text("Actualiser")
+                }
+                AccountSettings(vm, state)
+                NotificationSettings(vm)
+                TextButton(onClick = { vm.perform { logout() } }) { Text("Se déconnecter") }
+                state.error?.let { ErrorNotice(it, vm::clearMessage) }
             }
-            TextButton(onClick = { vm.perform { refreshInstallations() } }) { Text("Actualiser") }
-            AccountSettings(vm, state)
-            NotificationSettings(vm)
-            TextButton(onClick = { vm.perform { logout() } }) { Text("Se déconnecter") }
-            state.error?.let { ErrorNotice(it, vm::clearMessage) }
         }
         return
     }
     val installation = checkNotNull(state.installation)
     // No installation row above the workspace: each screen's own header shows it, and only the
-    // workspace Scaffold (or the offline page below) applies the status bar inset.
+    // workspace Scaffold (or the offline page below) applies the system bar insets.
     key(installation.id, installation.role, state.session.csrf) {
         if (!installation.online) {
-            var connection by remember { mutableStateOf(false) }
-            Box(Modifier.fillMaxSize().statusBarsPadding()) {
+            var connection by rememberSaveable { mutableStateOf(false) }
+            Box(Modifier.fillMaxSize().systemBarsPadding()) {
                 Page {
                     if (pushReenrollmentRequired) PushReenrollmentNotice()
                     InstallationHeader(state, openConnection = { connection = true })
