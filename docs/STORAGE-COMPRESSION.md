@@ -245,6 +245,50 @@ Native codec process-CPU medians, including encryption and verified decode:
 | Half random / half source | 4.278 → 3.373 | 4.945 → 3.198 |
 | Incompressible | 4.387 → 5.590 | 4.955 → 5.529 |
 
+## Blocking-startup reference
+
+The [startup qualification run](https://github.com/leo91000/cairn/actions/runs/38161779663)
+measured PR head `cd6741ca` on a four-CPU Linux x86-64 Azure runner (kernel
+6.17, glibc 2.39, Rust 1.97.1), with the same release profile, corpus and input
+hashes as the original reference. The
+[complete JSON](benchmarks/storage-compression-startup-reference.json) records
+all sixteen codec/read/write rows and three startup trials. Native and loopback
+process CPU, wall p50/p95/mean and warm reads remain available for comparison.
+
+Fresh loopback medians against the raw reference in that same run:
+
+| Input | New bytes | Write ms, raw → v2 | Cold read ms, raw → v2 |
+| --- | ---: | ---: | ---: |
+| Sparse | 192 | 23.675 → 3.072 | 10.084 → 4.503 |
+| Repeated source | 3,290 | 23.976 → 3.256 | 9.845 → 4.578 |
+| Half random / half source | 2,099,126 | 23.978 → 13.863 | 9.808 → 7.625 |
+| Incompressible | 4,194,345 | 23.361 → 25.598 | 9.800 → 11.187 |
+
+Warm 4 KiB medians were 0.26–0.29 microseconds, with no warm GETs. Native
+process-CPU medians for the same run:
+
+| Input | Encode CPU ms, raw → v2 | Decode CPU ms, raw → v2 |
+| --- | ---: | ---: |
+| Sparse | 3.371 → 0.885 | 3.775 → 0.789 |
+| Repeated source | 3.373 → 0.957 | 3.781 → 0.850 |
+| Half random / half source | 3.374 → 2.492 | 3.782 → 2.398 |
+| Incompressible | 3.332 → 4.168 | 3.763 → 4.103 |
+
+Each startup trial converted one object from each of those four cases, totaling
+16 MiB plaintext. Stored bytes went from 16,777,360 to 6,296,953 in every trial.
+This equal-weight synthetic mix is not a production savings forecast.
+
+| Trial | Startup without migration ms | Startup with migration ms | CPU without migration ms | CPU with migration ms |
+| ---: | ---: | ---: | ---: | ---: |
+| 0 | 10.111 | 322.520 | 9.585 | 89.704 |
+| 1 | 9.732 | 472.226 | 9.232 | 83.576 |
+| 2 | 9.697 | 479.419 | 9.244 | 82.372 |
+
+The startup median was 472 ms with conversion versus 9.7 ms with a completed
+marker. Conversion includes verification and old-key/version purge. This is a
+small loopback reference; it excludes WAN, Moto CPU and production contention,
+and must not be extrapolated into installation downtime.
+
 ## Qualification
 
 The PR records the reference workflow run and measured comparison. Preserve its
