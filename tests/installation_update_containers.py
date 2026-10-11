@@ -289,8 +289,8 @@ fetch('http://127.0.0.1:%d/internal/deployment-lease', {
                     journal = json.loads((root / 'installation.json').read_text())
                     # Simulate the new supervisor's durable pre-update checkpoint.
                     # This fixture changes only runtime identity, not storage format.
-                    database = (root / 'data/manager.db').resolve().as_uri() + '?mode=ro'
-                    with closing(sqlite3.connect(database, uri=True)) as db:
+                    manager_database_uri = (root / 'data/manager.db').resolve().as_uri() + '?mode=ro'
+                    with closing(sqlite3.connect(manager_database_uri, uri=True)) as db:
                         version = db.execute('PRAGMA user_version').fetchone()[0]
                     journal.update(pendingImage=image, leaseOwner=owner, leaseAcquired=True,
                                    pendingDatabaseVersion=version)
