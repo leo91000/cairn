@@ -1,5 +1,5 @@
 //! Publish the current disk to S3, then collect unreachable generations.
-//! New publications share immutable objects; existing run-scoped objects remain readable.
+//! Publications share immutable objects; startup migrates older encoded objects.
 //! Persisted record and object names remain compatible with existing disks.
 use super::{shared_blocks, snapshots};
 use crate::{
@@ -125,8 +125,8 @@ fn root(s: &Service, run: &str) -> PathBuf {
     s.config.data_dir.join("node-backups").join(run)
 }
 
-fn key(run: &str, hash: &str) -> String {
-    format!("node-backups/{run}/blocks/{hash}")
+pub(crate) fn key(run: &str, hash: &str) -> String {
+    format!("node-backups/{run}/blocks-v2/{hash}")
 }
 
 fn manifest_key(run: &str, point: &str) -> String {
@@ -826,7 +826,7 @@ pub async fn read_block(s: &Service, backup: &Value, hash: &str) -> Result<Vec<u
         return Err(Error::bad("Invalid backup block."));
     }
     if !shared_format(backup) {
-        return read_legacy_block(s, backup, hash).await;
+        return read_run_scoped_block(s, backup, hash).await;
     }
     let manifest = manifest(s, backup).await?;
     let block = snapshots::find_block(&manifest, hash)
@@ -843,7 +843,7 @@ pub(crate) async fn read_manifest_block(
 ) -> Result<Vec<u8>> {
     let hash = text(block, "hash");
     if !shared_format(backup) {
-        return read_legacy_block(s, backup, hash).await;
+        return read_run_scoped_block(s, backup, hash).await;
     }
     let object = text(block, "object");
     crate::validation::uuid(object)?;
@@ -875,7 +875,7 @@ pub(crate) async fn read_manifest_block(
     result
 }
 
-async fn read_legacy_block(s: &Service, backup: &Value, hash: &str) -> Result<Vec<u8>> {
+async fn read_run_scoped_block(s: &Service, backup: &Value, hash: &str) -> Result<Vec<u8>> {
     let run = text(backup, "runId");
     let path = root(s, run).join("blocks").join(hash);
     let permit = s.hot_s3.block_codec.read_permit().await?;
@@ -904,7 +904,10 @@ async fn read_legacy_block(s: &Service, backup: &Value, hash: &str) -> Result<Ve
     let recovered = async {
         let permit = s.hot_s3.block_codec.read_permit().await?;
         let encoded = storage
-            .download_bytes(&key(run, hash), snapshots::BLOCK * 3 + 4096)
+            .download_bytes(
+                &key(run, hash),
+                crate::storage::block_codec::MAX_ENCODED_BYTES,
+            )
             .await?;
         decode_block(s, run, hash, encoded, permit).await
     }

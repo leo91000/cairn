@@ -2469,9 +2469,8 @@ async fn assert_s3_outage_is_transient(
     std::fs::write(&config_path, original_config).unwrap();
 }
 
-/// The previous JSON/base64 envelope and the binary format can coexist: a
-/// recovery point without a block format reads the run-scoped `key`.
-async fn assert_legacy_block_envelope_is_readable(
+/// Normal recovery rejects old envelopes immediately after startup migration.
+async fn assert_legacy_block_envelope_is_rejected(
     owner: &Owner,
     key: &str,
     retained: &Value,
@@ -2492,12 +2491,16 @@ async fn assert_legacy_block_envelope_is_readable(
         .unwrap();
     let mut legacy_point = retained.clone();
     legacy_point.as_object_mut().unwrap().remove("blockFormat");
-    assert_eq!(
+    assert!(
         publication::read_block(&owner.service, &legacy_point, block)
             .await
-            .unwrap(),
-        original[..4 * MIB]
+            .is_err()
     );
+    Storage::configured(&owner.service)
+        .unwrap()
+        .purge_key(key)
+        .await
+        .unwrap();
 }
 
 #[tokio::test]
@@ -2599,7 +2602,7 @@ async fn encrypted_recovery_points_cross_the_outbound_relay_and_reject_incomplet
         original[..4 * MIB],
     );
     let legacy_key = format!("node-backups/{run}/blocks/{block}");
-    assert_legacy_block_envelope_is_readable(&owner, &legacy_key, &retained, block, &original)
+    assert_legacy_block_envelope_is_rejected(&owner, &legacy_key, &retained, block, &original)
         .await;
     original[4 * MIB] = 2;
     std::fs::write(&source, &original).unwrap();
@@ -4451,11 +4454,13 @@ async fn corrupted_recovery_ciphertext_is_terminal_and_invalidates_the_baseline(
     owner.add_run(&record).await;
     let data = b"durable conversation work";
     let hash = hex::encode(Sha256::digest(data));
-    let key = format!("node-backups/{run}/blocks/{hash}");
-    let mut encoded = b"CAIRNB\x01\0".to_vec();
-    encoded.extend(owner.service.vault.encrypt_bytes(&key, data).unwrap());
+    let key = format!("node-backups/{run}/blocks-v2/{hash}");
+    let mut encoded = cairn_installation::storage::block_codec::BlockCodec::default()
+        .encode(owner.service.vault.clone(), key.clone(), data.to_vec())
+        .await
+        .unwrap();
     *encoded.last_mut().unwrap() ^= 1;
-    let path = owner.service.config.data_dir.join(&key);
+    let path = owner.backup_directory(&run).join("blocks").join(&hash);
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
     std::fs::write(&path, encoded).unwrap();
     let error = publication::read_block(
@@ -5089,8 +5094,8 @@ sys.exit(subprocess.call(['aws']+sys.argv[1:]))
         .unwrap();
     drain_remote_deletions(s).await;
 
-    // Legacy incremental captures can omit unchanged bytes on the node. Migrate
-    // them from their old authenticated object instead of requesting absent data.
+    // Run-scoped manifests migrated at startup can omit unchanged bytes on the
+    // node. Reuse their v2 object instead of requesting absent data.
     let legacy_run = new_run().await;
     let run_id = legacy_run["id"].as_str().unwrap();
     let point_id = id();
@@ -5102,9 +5107,11 @@ sys.exit(subprocess.call(['aws']+sys.argv[1:]))
         .as_str()
         .unwrap()
         .to_owned();
-    let old_key = format!("node-backups/{run_id}/blocks/{hash}");
-    let mut encoded = b"CAIRNB\x01\0".to_vec();
-    encoded.extend(s.vault.encrypt_bytes(&old_key, legacy_bytes).unwrap());
+    let old_key = format!("node-backups/{run_id}/blocks-v2/{hash}");
+    let encoded = cairn_installation::storage::block_codec::BlockCodec::default()
+        .encode(s.vault.clone(), old_key.clone(), legacy_bytes.to_vec())
+        .await
+        .unwrap();
     Storage::configured(s)
         .unwrap()
         .upload_bytes(encoded, &old_key)

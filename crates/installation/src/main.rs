@@ -311,7 +311,15 @@ where
 {
     let config = Config::load()?;
     cairn_installation::toolkit::environment(&config.home, std::env::vars().collect()).await?;
-    let service = Service::new(config).await?;
+    std::fs::create_dir_all(&config.data_dir)?;
+    let _manager_lock = cairn_installation::file_lock::exclusive(
+        &config.data_dir.join("manager.lock"),
+        "Another manager owns this installation. Stop it before starting this manager.",
+    )?;
+    let service = tokio::select! {
+        () = stop.cancelled() => return Ok(()),
+        service = Service::new(config) => service?,
+    };
     let listener =
         tokio::net::TcpListener::bind((service.config.host.as_str(), service.config.port)).await?;
     let router = make_router(service.clone()).await?;

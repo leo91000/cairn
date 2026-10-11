@@ -97,7 +97,7 @@ Wants=network-online.target
 Type=oneshot
 Environment="CAIRN_INSTALLATION_ROOT={root.replace('%', '%%')}"
 ExecStart={command}
-TimeoutStartSec=3000
+TimeoutStartSec=infinity
 ''')
 Path('/etc/systemd/system/cairn-installation-update.timer').write_text('''[Unit]
 Description=Check the beacon approved Cairn installation release

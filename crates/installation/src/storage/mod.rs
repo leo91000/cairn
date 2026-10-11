@@ -16,6 +16,7 @@ pub mod block_codec;
 pub mod digest;
 mod lazy;
 pub(crate) mod metrics;
+pub(crate) mod migration;
 
 pub(crate) use lazy::NodeBlockCache;
 pub use lazy::{BlockSource, LazyDisk};

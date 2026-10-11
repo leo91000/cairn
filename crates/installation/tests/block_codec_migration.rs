@@ -28,11 +28,11 @@ async fn upgrades_version_five_without_changing_records_and_fences_older_binarie
     let version: i64 = db
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 6);
+    assert_eq!(version, 7);
     // The previous executable refuses every database newer than version 5.
-    assert!(version > 5);
+    assert!(version > 6);
     drop(reopened);
-    db.execute_batch("PRAGMA user_version=7;").unwrap();
+    db.execute_batch("PRAGMA user_version=8;").unwrap();
     assert_eq!(
         Store::open(root.path()).err().unwrap().message,
         "This database belongs to a newer application version."
@@ -41,7 +41,7 @@ async fn upgrades_version_five_without_changing_records_and_fences_older_binarie
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .unwrap();
     assert_eq!(
-        version, 7,
+        version, 8,
         "A refused newer database must never be downgraded"
     );
 }

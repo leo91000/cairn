@@ -22,7 +22,7 @@ const PAYLOAD_HEADER: usize = 5;
 
 /// Eight version bytes, twelve nonce bytes, sixteen tag bytes, codec and u32 length.
 pub const MAX_ENCODED_BYTES: u64 = BLOCK + 8 + 28 + PAYLOAD_HEADER as u64;
-const MAX_LEGACY_BYTES: u64 = BLOCK * 3 + 4096;
+pub(crate) const MAX_LEGACY_BYTES: u64 = BLOCK * 3 + 4096;
 const CPU_CONCURRENCY: usize = 4;
 const READ_CONCURRENCY: usize = 16;
 
@@ -70,7 +70,7 @@ impl BlockCodec {
             "decodedInputBytes": self.metrics.decoded_input_bytes.load(Relaxed),
             "rawWrites": self.metrics.raw_writes.load(Relaxed),
             "zstdWrites": self.metrics.zstd_writes.load(Relaxed),
-            "legacyReads": self.metrics.legacy_reads.load(Relaxed),
+            "migrationLegacyReads": self.metrics.legacy_reads.load(Relaxed),
             "rawReads": self.metrics.raw_reads.load(Relaxed),
             "zstdReads": self.metrics.zstd_reads.load(Relaxed)
         })
@@ -145,6 +145,43 @@ impl BlockCodec {
         encoded: Vec<u8>,
         read_permit: OwnedSemaphorePermit,
     ) -> Result<Vec<u8>> {
+        self.decode_admitted(
+            vault,
+            scope,
+            hash,
+            expected_size,
+            encoded,
+            read_permit,
+            false,
+        )
+        .await
+    }
+
+    /// Old envelopes are accepted only by the blocking startup migration.
+    pub(crate) async fn decode_for_migration(
+        &self,
+        vault: Vault,
+        scope: String,
+        hash: String,
+        expected_size: Option<u64>,
+        encoded: Vec<u8>,
+    ) -> Result<Vec<u8>> {
+        let permit = self.read_permit().await?;
+        self.decode_admitted(vault, scope, hash, expected_size, encoded, permit, true)
+            .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn decode_admitted(
+        &self,
+        vault: Vault,
+        scope: String,
+        hash: String,
+        expected_size: Option<u64>,
+        encoded: Vec<u8>,
+        read_permit: OwnedSemaphorePermit,
+        migration: bool,
+    ) -> Result<Vec<u8>> {
         let admission = self.metrics.admission.start();
         let permit = self
             .workers
@@ -159,8 +196,13 @@ impl BlockCodec {
             let _permit = permit;
             let _read_permit = read_permit;
             let sample = metrics.decode.start();
-            let (bytes, codec) = decode(&vault, &scope, &hash, expected_size, &encoded)
-                .map_err(|_| Error::conflict("Recovery block integrity check failed."))?;
+            let result = if migration {
+                decode_for_migration(&vault, &scope, &hash, expected_size, &encoded)
+            } else {
+                decode(&vault, &scope, &hash, expected_size, &encoded)
+            };
+            let (bytes, codec) =
+                result.map_err(|_| Error::conflict("Recovery block integrity check failed."))?;
             metrics
                 .decoded_input_bytes
                 .fetch_add(encoded.len() as u64, Relaxed);
@@ -212,6 +254,21 @@ fn encode(vault: &Vault, scope: &str, bytes: &[u8]) -> Result<(Vec<u8>, u8)> {
 }
 
 fn decode(
+    vault: &Vault,
+    scope: &str,
+    hash: &str,
+    expected_size: Option<u64>,
+    encoded: &[u8],
+) -> Result<(Vec<u8>, Option<u8>)> {
+    if !encoded.starts_with(V2) || encoded.len() as u64 > MAX_ENCODED_BYTES {
+        return Err(Error::bad(
+            "Unsupported disk block envelope; startup migration required.",
+        ));
+    }
+    decode_for_migration(vault, scope, hash, expected_size, encoded)
+}
+
+fn decode_for_migration(
     vault: &Vault,
     scope: &str,
     hash: &str,
@@ -363,10 +420,11 @@ mod tests {
         for encoded in [binary, legacy] {
             for hash in [digest::block(bytes), hex::encode(Sha256::digest(bytes))] {
                 assert_eq!(
-                    decode(&vault, "legacy", &hash, None, &encoded).unwrap(),
+                    decode_for_migration(&vault, "legacy", &hash, None, &encoded).unwrap(),
                     (bytes.to_vec(), None)
                 );
-                assert!(decode(&vault, "other", &hash, None, &encoded).is_err());
+                assert!(decode(&vault, "legacy", &hash, None, &encoded).is_err());
+                assert!(decode_for_migration(&vault, "other", &hash, None, &encoded).is_err());
             }
         }
     }
@@ -385,8 +443,9 @@ mod tests {
         let legacy = br#""DA0ODxAREhMUFRYXMrDIT9vylI46fQ774Su21LqfLrQFErtqTksfm/npZaU+YrWghDRzzu3Bl5PZgg==""#.to_vec();
         let bytes = b"historical disk work";
         for encoded in [binary, legacy] {
+            assert!(decode(&vault, "legacy", &digest::block(bytes), None, &encoded).is_err());
             assert_eq!(
-                decode(
+                decode_for_migration(
                     &vault,
                     "legacy",
                     &digest::block(bytes),

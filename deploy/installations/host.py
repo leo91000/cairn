@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """One-machine installation. The manager owns claiming; containers have no Docker socket."""
 import argparse
+from contextlib import closing
 import fcntl
 import importlib.util
 import json
@@ -9,6 +10,7 @@ from pathlib import Path
 import re
 import secrets
 import stat
+import sqlite3
 import uuid
 import shlex
 import subprocess
@@ -42,6 +44,25 @@ def atomic(path, data):
         os.fsync(descriptor)
     finally:
         os.close(descriptor)
+
+
+class StorageMigrationError(Exception):
+    """The previous binary cannot safely reopen a database advanced by the candidate."""
+
+
+def storage_state():
+    database = ROOT / 'data/manager.db'
+    if not database.exists():
+        return 0, False
+    try:
+        with closing(sqlite3.connect(database.resolve().as_uri() + '?mode=ro', uri=True, timeout=5)) as db:
+            version = db.execute('PRAGMA user_version').fetchone()[0]
+            pending = version >= 7 and db.execute(
+                "SELECT 1 FROM kv WHERE key='migration:disk-blocks-v2'"
+            ).fetchone() is None
+            return version, pending
+    except (OSError, sqlite3.Error):
+        raise StorageMigrationError('Cannot verify the storage migration state. Candidate retained; inspect manager logs before retrying.') from None
 
 
 def run(args, timeout=120):
@@ -236,6 +257,8 @@ api_bind_addr = "0.0.0.0:3900"
                 run(docker + ['exec', '-T', 'manager', 'node', '-e', health], timeout=10)
                 break
             except RuntimeError:
+                if storage_state()[1]:
+                    deadline = time.monotonic() + 120
                 if time.monotonic() >= deadline:
                     raise RuntimeError('The manager did not become healthy. Inspect docker compose logs; existing data is retained.')
                 time.sleep(1)
@@ -360,12 +383,40 @@ fetch('http://127.0.0.1:4310/health', {{ signal: AbortSignal.timeout(5000) }}).t
         # deployment may hold the lease. Its lease still wins.
         return False
 
+    def storage_advanced():
+        version, pending = storage_state()
+        return pending or version > config.get('pendingDatabaseVersion', 6)
+
+    def wait_for_migration(image, runtime):
+        deadline = time.monotonic() + 120
+        print('Waiting for blocking storage migration; the candidate image is retained…', flush=True)
+        while True:
+            try:
+                if manager_health(runtime):
+                    return
+            except (OSError, ValueError, RuntimeError, subprocess.TimeoutExpired):
+                pass
+            containers = docker_output(docker[1:] + ['ps', '--all', '--format', 'json', 'manager'])
+            container = containers[0] if isinstance(containers, list) and containers else containers
+            if not container or container.get('Image') != image:
+                raise StorageMigrationError('Migration candidate is missing or changed externally. Automatic rollback refused; inspect the deployment.')
+            if container.get('State') in ('exited', 'dead', 'restarting'):
+                raise StorageMigrationError('Storage migration stopped before readiness. Candidate retained; inspect manager logs and retry the same image.')
+            if storage_state()[1]:
+                deadline = time.monotonic() + 120
+            if time.monotonic() >= deadline:
+                raise StorageMigrationError('The upgraded manager did not become ready. Candidate retained because the previous binary cannot reopen its database.')
+            time.sleep(1)
+
     health_failed = False
 
     def launch(image):
         nonlocal health_failed
-        # Inspection + stop + startup + HTTP verification total at most 550s.
-        # Candidate and rollback, including failure inspection, fit in the lease.
+        # Ordinary startup and rollback fit in the lease. Blocking migration can
+        # outlast it while the manager is offline; the schema fence then requires
+        # retaining this candidate until conversion and readiness complete.
+        if image != config.get('pendingImage') and storage_advanced():
+            raise StorageMigrationError('Storage migration advanced the database. Automatic rollback refused; resume the candidate or restore a consistent pre-upgrade snapshot.')
         runtime = inspect(image)
         deployment = json.loads((ROOT / 'compose.json').read_text())
         deployment['services']['manager']['image'] = image
@@ -380,12 +431,18 @@ fetch('http://127.0.0.1:4310/health', {{ signal: AbortSignal.timeout(5000) }}).t
         try:
             run(docker + ['up', '-d', '--wait', '--wait-timeout', '120', '--pull', 'never', '--no-deps', 'runner', 'manager'], timeout=150)
         except (OSError, ValueError, RuntimeError, subprocess.TimeoutExpired):
+            if image == config.get('pendingImage') and storage_advanced():
+                wait_for_migration(image, runtime)
+                return
             if image == config.get('pendingImage'):
                 health_failed = failed_candidate_container(image)
             raise
 
         # A JSON verdict proves the probe ran. Docker exec failures before the
         # probe starts remain transient, rather than blacklisting an untested image.
+        if image == config.get('pendingImage') and storage_advanced():
+            wait_for_migration(image, runtime)
+            return
         if not manager_health(runtime):
             if image == config.get('pendingImage'):
                 health_failed = True
@@ -394,12 +451,27 @@ fetch('http://127.0.0.1:4310/health', {{ signal: AbortSignal.timeout(5000) }}).t
     def finish(updated):
         pending = config.pop('pendingImage')
         config.pop('leaseAcquired', None)
+        config.pop('pendingDatabaseVersion', None)
         if updated:
             config.update(previousImage=config['image'], image=pending, failedImage=None)
         elif updated is False:
             config['failedImage'] = pending
         # Keep the lease acknowledgement durable, including a lost DELETE reply.
         atomic(config_file, json.dumps(config))
+
+    if config.get('pendingImage') and storage_advanced():
+        # Once the candidate changes storage, restore that same compatible image,
+        # rather than opening the new database with the previous executable.
+        managers = docker_output(docker[1:] + ['ps', '--all', '--format', 'json', 'manager'])
+        manager = managers[0] if isinstance(managers, list) and managers else managers
+        if manager and manager.get('Image') not in (config['image'], config['pendingImage']):
+            raise StorageMigrationError('Installation image changed externally during migration; refusing to replace it.')
+        if not config.get('leaseAcquired'):
+            lease(config['leaseOwner'])
+            config['leaseAcquired'] = True
+            atomic(config_file, json.dumps(config))
+        launch(config['pendingImage'])
+        finish(True)
 
     if config.get('pendingImage'):
         # A stopped supervisor never guesses whether the candidate was healthy.
@@ -442,7 +514,7 @@ fetch('http://127.0.0.1:4310/health', {{ signal: AbortSignal.timeout(5000) }}).t
     def prepare():
         owner = str(uuid.uuid4())
         # Record before requesting the lease: its response can be lost.
-        config.update(pendingImage=image, leaseOwner=owner)
+        config.update(pendingImage=image, leaseOwner=owner, pendingDatabaseVersion=storage_state()[0])
         atomic(config_file, json.dumps(config))
 
         lease(owner)
@@ -488,7 +560,7 @@ if __name__ == '__main__':
                 update(args.origin)
             else:
                 install(args.origin, args.claim_code)
-    except RuntimeError as error:
+    except (RuntimeError, StorageMigrationError) as error:
         print(str(error), file=sys.stderr)
         sys.exit(1)
     except (OSError, ValueError, subprocess.TimeoutExpired):

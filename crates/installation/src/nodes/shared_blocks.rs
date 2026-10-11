@@ -37,7 +37,7 @@ pub(crate) struct Object {
 }
 
 pub fn key(hash: &str, object: &str) -> String {
-    format!("shared-blocks/v1/{hash}/{object}")
+    format!("shared-blocks/v2/{hash}/{object}")
 }
 
 fn location(point: &Value) -> Value {

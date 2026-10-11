@@ -98,6 +98,7 @@ impl Service {
             vault,
             shutdown: CancellationToken::new(),
         });
+        crate::storage::migration::run(&service).await?;
         service.migrate_agents().await?;
         service.store.transaction(crate::accounts::migrate).await?;
         service

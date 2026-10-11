@@ -43,28 +43,66 @@ history instead of allocating a streaming window from the frame's advertised siz
 Invalid objects return a terminal integrity conflict and trigger the existing
 invalidation/baseline repair path; network outages retain their transient status.
 
-The existing binary v1 and JSON/base64 formats remain readable with their original
-AAD and identity rules. Shared manifests and object keys still use `shared-v1`:
-their locator format did not change. Envelope versions are identified by the
-object itself after an authorized manifest supplies its locator and hash.
+Normal recovery accepts only the v2 envelope. Binary v1, JSON/base64 and prior v2
+objects are accepted only by the blocking startup migrator, with their original
+AAD and identity rules. Shared manifests still use `shared-v1` because their
+hash/object-ID schema is unchanged. Shared object keys now use
+`shared-blocks/v2/{hash}/{object}`; run-scoped keys use
+`node-backups/{run}/blocks-v2/{hash}`. Normal reads never fall back to old keys or
+envelopes.
 
 ## Rollout and rollback
 
-The manager database version advances from 5 to 6, in the existing migration
-transaction, before compressed objects can be published. Older executables reject
-that database instead of opening publications they cannot restore. Version-5
-records and objects are preserved; no bulk rewrite or upload happens at startup.
+The manager database version advances from 5 or 6 to 7, fencing older binaries.
+The manager must be stopped before upgrading; this is a downtime deployment.
+Before `Service::new` returns, and before a listener, relay or publication worker
+starts, migration completes these steps:
 
-New immutable incarnations use v2. Existing ready objects continue to be reused,
-including raw objects. Republish alone therefore does not recompress unchanged
-content. Savings appear as genuinely new content is uploaded or an invalid object
-is replaced. There is no automatic migration of the existing bucket in this PR.
-Any future migration must publish new locators and retain old copies for all
-readers and publications; it must not rewrite objects in place.
+1. Authenticate every published manifest, including points retained by disk grants
+   and conversations in trash. Journal unique referenced objects, reusable ready
+   objects and local encoded caches in SQLite. Known obsolete shared objects and
+   abandoned run-scoped upload intents are included for old-key cleanup.
+2. Download an old object, authenticate/decode it and verify its original content
+   hash and declared size. Encode it under its new locator, upload, download and
+   verify the replacement. A replacement already uploaded by an interrupted
+   attempt is verified and reused, without overwriting it.
+3. Checkpoint the verified replacement before purging the old key and its versions.
+   Checkpoint deletion separately. Local caches use a synced atomic rename and
+   recognize an already-converted cache after a crash before its checkpoint.
+4. Record completion atomically. Only then can normal service operation begin;
+   normal reads immediately reject old envelopes. Later starts skip conversion.
 
-Roll back to a binary that understands database version 6 and the v2 envelope.
+Publication IDs, object incarnation IDs, plaintext hashes, authenticated manifests
+and disk-grant dependencies stay unchanged. New keys disjoin replacements from
+old objects and queued deletions, preserving immutability and preventing delayed
+cleanup from deleting migrated data. A process lock prevents concurrent upgraded
+manager processes. This does not coordinate with an old executable: stop the old
+manager before installing the upgrade.
+
+Refresh the host installer/supervisor before enabling this image for automatic
+updates: previously installed host scripts are not refreshed by a container
+update. The revised supervisor records the pre-update database version, waits
+while migration is pending, and resumes the candidate after interruption. Once
+storage advances, it refuses automatic rollback to the prior binary. The systemd
+update service allows the one-time migration to outlast its former 50-minute
+limit. Custom deployment controllers must also allow startup downtime and retain
+the candidate after migration begins; a health timeout must not trigger rollback.
+
+Migration processes one object at a time with bounded downloads and existing CPU
+admission. It adds S3 downloads, verified uploads, deletion/version-list requests
+and temporary space for the current replacement; downtime depends on the object
+count, throughput and provider latency. Progress logs contain aggregate counts
+and elapsed time. The durable `migration:disk-blocks-v2` summary records object
+count, old/new encoded bytes and the last attempt's elapsed time. Separate S3
+byte totals exclude local cache copies and unknown obsolete-object sizes. Failures leave
+the service offline and resume on the next start; there is no silent data reset.
+Restore any required previous storage configuration before restarting. Unknown
+remote orphans are outside the authenticated inventory and are not bucket-scanned.
+
+Rollback to a binary that understands database version 7, v2 keys and v2 envelopes.
 Using an older binary requires restoring a consistent pre-upgrade database and
-its referenced objects. Do not lower `user_version` on a live installation.
+its referenced objects; the migrator deletes the old copies after verification.
+Do not lower `user_version` on a live installation.
 
 The manager compresses/decompresses S3 objects. The node publication stream and
 manager-to-node restored bytes remain plaintext 4 MiB regions over their existing
@@ -95,7 +133,7 @@ over the same interval and record workload, process restarts and concurrency.
   measures process CPU, and production CPU usage needs the host's profiler.
 - `encodedBytes` and `decodedInputBytes`: successful envelope bytes produced or
   consumed; compare these with the respective plaintext bytes for storage ratio.
-- `rawWrites`, `zstdWrites`, `legacyReads`, `rawReads`, `zstdReads`: format counts.
+- `rawWrites`, `zstdWrites`, `migrationLegacyReads`, `rawReads`, `zstdReads`: format counts.
 - `admission`: wait to acquire a codec permit. Execution counters start in the
   blocking worker; blocking-pool scheduling delay is not in those counters.
 - `readAdmission`: wait for the recovery fetch/decode budget, before fetching
@@ -203,5 +241,6 @@ Required checks are `pnpm lint:fix`, `pnpm check`, `pnpm test:backend` and
 `cargo clippy --locked --workspace --all-targets -- -D warnings`. The normal S3
 fixture suite also exercises compressed publication, deduplication, full restore,
 corruption repair with a replacement incarnation, and ownership-aware collection.
-Codec tests include independently produced legacy/v2 fixtures, authenticated
+Startup tests cover blocking migration, partial failure, restart checkpoints, shared ownership, versioned source deletion and strict normal-format rejection.
+Codec tests include independently produced migration-input/v2 fixtures, authenticated
 malformed frames and cancellation while a blocking decode is queued.

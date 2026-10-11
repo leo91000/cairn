@@ -271,7 +271,7 @@ async fn loopback_s3_write_and_cold_warm_disk_read_reference() {
                 [true, false]
             } {
                 let object = cairn_installation::config::id();
-                let scope = format!("shared-blocks/v1/{hash}/{object}");
+                let scope = format!("shared-blocks/v2/{hash}/{object}");
                 let input = bytes.clone();
                 let cpu = cpu_ms();
                 let start = Instant::now();

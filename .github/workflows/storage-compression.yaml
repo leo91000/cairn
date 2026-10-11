@@ -7,6 +7,11 @@ on:
       - crates/installation/Cargo.toml
       - 'crates/installation/src/storage/**'
       - crates/installation/src/nodes/publication.rs
+      - crates/installation/src/nodes/shared_blocks.rs
+      - crates/installation/src/service.rs
+      - crates/installation/src/store.rs
+      - crates/installation/src/main.rs
+      - crates/installation/tests/storage_startup_migration.rs
       - crates/installation/src/object_storage.rs
       - crates/installation/tests/block_codec_performance.rs
       - crates/installation/tests/fixtures/block-codec-source.txt
@@ -51,6 +56,9 @@ jobs:
           import json, os, pathlib, platform, subprocess
           lines = pathlib.Path('storage-compression.log').read_text().splitlines()
           rows = [json.loads(line.split('BLOCK_CODEC_PERF ', 1)[1]) for line in lines if 'BLOCK_CODEC_PERF ' in line]
+          migration_rows = [json.loads(line.split('STORAGE_MIGRATION_PERF ', 1)[1]) for line in lines if 'STORAGE_MIGRATION_PERF ' in line]
+          if len(migration_rows) != 3:
+              raise SystemExit(f'Expected 3 startup migration rows, got {len(migration_rows)}')
           if len(rows) != 16:
               raise SystemExit(f'Expected 16 result rows, got {len(rows)}')
           output = {
@@ -61,6 +69,7 @@ jobs:
               'profile': 'release (repository settings)',
               'scope': 'Synthetic data, native codec and isolated loopback S3; no WAN or VM startup measurement.',
               'results': rows,
+              'migrationResults': migration_rows,
           }
           pathlib.Path('storage-compression-reference.json').write_text(json.dumps(output, indent=2) + '\n')
           with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as summary:
