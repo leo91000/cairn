@@ -151,6 +151,7 @@ async function edit(item?: any) {
             skills: null,
             mcps: null,
             mcpTools: {},
+            installation: false,
             github: true,
             sandbox: 'yolo',
           },
@@ -164,6 +165,7 @@ async function edit(item?: any) {
         }
   if (isAgent.value) {
     form.value.provider ??= 'codex'
+    form.value.access.installation ??= false
     form.value.access.nodes ??= form.value.access.nodes === null ? null : [LOCAL_NODE_ID]
     try {
       nodes.value = await api<ExecutionNode[]>('/nodes')
@@ -418,6 +420,8 @@ async function remove() {
             <p v-else>
               The main agent has access to all registered projects, skills, and shared connections.
             </p>
+            <label class="checkbox"><input v-model="form.access.installation" type="checkbox">Allow access to the current Cairn installation</label>
+            <small>Manage missions on behalf of the installation owner, and view or stop runs using this agent.</small>
             <label class="checkbox"><input v-model="allNodes" type="checkbox">All nodes, including future nodes</label>
             <fieldset v-if="!allNodes" class="access-choices">
               <legend>Allowed nodes</legend>

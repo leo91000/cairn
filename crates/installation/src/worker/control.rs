@@ -17,11 +17,25 @@ use std::{
 
 impl Worker {
     pub async fn cancel(&self, s: &Service, id: &str) -> Result<()> {
+        self.cancel_with_grant(s, id, None).await
+    }
+
+    pub(crate) async fn cancel_from_run(&self, s: &Service, id: &str, bearer: &str) -> Result<()> {
+        self.cancel_with_grant(s, id, Some(bearer.to_owned())).await
+    }
+
+    async fn cancel_with_grant(&self, s: &Service, id: &str, bearer: Option<String>) -> Result<()> {
         let active = self.active.lock().await;
         let is_active = active.contains_key(id);
         let run_id = id.to_owned();
         s.store
-            .transaction(move |db| request_cancel(db, &run_id, is_active))
+            .transaction(move |db| {
+                if let Some(bearer) = bearer {
+                    let target = required(db.run(&run_id)?, "Run not found")?;
+                    crate::installation_mcp::authorize_target_run_in(db, &bearer, &target)?;
+                }
+                request_cancel(db, &run_id, is_active)
+            })
             .await?;
         if let Some(cancel) = active.get(id) {
             cancel.cancel();

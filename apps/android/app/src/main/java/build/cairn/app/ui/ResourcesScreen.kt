@@ -239,6 +239,13 @@ private fun AgentEditor(vm: CairnViewModel, state: Workspace, initial: Agent, cl
             }
         }
         Text("Accès de l’agent", style = MaterialTheme.typography.titleMedium)
+        Toggle("Autoriser l’accès à l’installation Cairn courante", form.access.installation) {
+            form = form.copy(access = form.access.copy(installation = it))
+        }
+        Text(
+            "Consulter les exécutions et gérer les missions de cet agent au nom du propriétaire.",
+            style = MaterialTheme.typography.bodySmall,
+        )
         Choice(
             "Environnement",
             form.access.sandbox,

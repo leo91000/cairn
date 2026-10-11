@@ -235,6 +235,7 @@ impl Service {
         input: Value,
         existing: Option<&str>,
         author: Option<cairn_protocol::TaskAuthorGrant>,
+        bearer: Option<String>,
     ) -> Result<Value> {
         let mut task = parse("task", input)?;
         let agent = self.get("agents", text(&task, "agentId")).await?;
@@ -268,7 +269,22 @@ impl Service {
         } else {
             Value::Null
         };
-        self.store.save("tasks", task, "task.saved").await
+        let existing = existing.map(str::to_owned);
+        self.store
+            .transaction(move |db| {
+                if let Some(bearer) = bearer {
+                    crate::installation_mcp::authorize_task_in(
+                        db,
+                        &bearer,
+                        &task,
+                        existing.as_deref(),
+                    )?;
+                }
+                db.put("tasks", &task)?;
+                db.audit("task.saved", &json!({ "id": task["id"] }))?;
+                Ok(task)
+            })
+            .await
     }
 
     pub async fn remove(&self, kind: &str, id: &str) -> Result<()> {
@@ -386,9 +402,14 @@ impl Service {
         if trigger == "schedule" {
             let _guard = self.task_author_lock.lock().await;
             self.require_task_author(&run["snapshot"]["task"]).await?;
-            return self.queue_run(run, dedupe).await;
+            return self.queue_run(run, dedupe, None).await;
         }
-        self.queue_run(run, dedupe).await
+        self.queue_run(run, dedupe, None).await
+    }
+
+    pub(crate) async fn enqueue_from_run(&self, task_id: &str, bearer: &str) -> Result<Value> {
+        let run = self.prepare_run(task_id, "mcp").await?;
+        self.queue_run(run, None, Some(bearer.to_owned())).await
     }
 
     async fn prepare_run(&self, task_id: &str, trigger: &str) -> Result<Value> {
@@ -416,10 +437,24 @@ impl Service {
         Ok(())
     }
 
-    async fn queue_run(&self, run: Value, dedupe: Option<String>) -> Result<Value> {
+    async fn queue_run(
+        &self,
+        run: Value,
+        dedupe: Option<String>,
+        bearer: Option<String>,
+    ) -> Result<Value> {
         let result = self
             .store
             .transaction(move |db| {
+                if let Some(bearer) = bearer {
+                    crate::installation_mcp::authorize_target_run_in(db, &bearer, &run)?;
+                    crate::installation_mcp::authorize_task_in(
+                        db,
+                        &bearer,
+                        &run["snapshot"]["task"],
+                        None,
+                    )?;
+                }
                 db.add_run(&run, dedupe.as_deref())?;
                 db.event(text(&run, "id"), "status", "Queued", None)?;
                 let detail = json!({
@@ -481,7 +516,7 @@ impl Service {
 
                     self.schedule_wait(&task, None).await?;
                     let dedupe = Some(format!("{}:{}", text(&task, "id"), task["nextRun"]));
-                    self.queue_run(run, dedupe).await
+                    self.queue_run(run, dedupe, None).await
                 }
                 Err(error) => {
                     // The authority recovered; this task's preparation is now the failure.
@@ -651,7 +686,7 @@ fn inherit_agent_settings(input: &mut Value, existing: &Value) {
     if !input["access"].is_object() {
         return;
     }
-    for key in ["nodes"] {
+    for key in ["nodes", "installation"] {
         if input["access"].get(key).is_none() {
             input["access"][key] = policy(existing)[key].clone();
         }
@@ -715,6 +750,7 @@ pub fn policy(agent: &Value) -> Value {
         "skills": null,
         "mcps": null,
         "mcpTools": {},
+        "installation": false,
         "github": true,
         "sandbox": "yolo",
         "nodes": [crate::nodes::LOCAL_NODE_ID],
@@ -752,8 +788,9 @@ pub fn covers(current: &Value, granted: &Value) -> bool {
         .flatten()
         .all(|(server, selection)| within(&granted["mcpTools"][server], selection));
     let github = current["github"] == true || granted["github"] != true;
+    let installation = current["installation"] == true || granted["installation"] != true;
     let sandbox = sandbox_rank(&current["sandbox"]) >= sandbox_rank(&granted["sandbox"]);
-    scopes && tools && github && sandbox
+    scopes && tools && github && installation && sandbox
 }
 
 /// Whether a granted scope stays within the current one; `null` means everything.

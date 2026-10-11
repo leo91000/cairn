@@ -118,8 +118,10 @@ pub(crate) fn empty_listing(method: &str) -> Option<Value> {
     Some(Value::Object(Map::from_iter([(key.to_owned(), json!([]))])))
 }
 
-/// The three MCP endpoints this server exposes.
+/// The MCP endpoints this server exposes.
 enum Endpoint {
+    /// `/mcp-installation`: opt-in installation tools, authorized by a run grant.
+    Installation,
     /// `/mcp`: the owner's management tools, authorized by personal tokens.
     Management,
     /// `/mcp-workspace`: run-scoped workspace tools.
@@ -134,6 +136,7 @@ impl Endpoint {
         match path {
             "/api/mcp" => Some(Self::Management),
             "/mcp-workspace" => Some(Self::Workspace),
+            "/mcp-installation" => Some(Self::Installation),
             _ => path
                 .strip_prefix("/mcp-gateway/")
                 .filter(|id| !id.is_empty() && !id.contains('/'))
@@ -168,6 +171,9 @@ async fn resource_metadata(s: &Service) -> String {
 /// get the OAuth challenge that starts their sign-in.
 async fn authenticate(s: &Service, endpoint: &Endpoint, bearer: &str) -> Result<Option<Response>> {
     match endpoint {
+        Endpoint::Installation => {
+            crate::installation_mcp::authorize(s, bearer).await?;
+        }
         Endpoint::Workspace => {
             crate::project_workspaces::authorize(s, bearer).await?;
         }
@@ -208,10 +214,13 @@ pub async fn handle(State(app): State<App>, request: Request) -> Result<Response
 }
 
 /// Run-scoped MCP received on the channel of `run`: a VM reaches only the
-/// workspace and gateway endpoints, with a token granted to that same run.
+/// workspace, installation and gateway endpoints, with a token granted to that same run.
 pub(crate) async fn run_scoped(s: &Arc<Service>, run: &str, request: Request) -> Result<Response> {
     let endpoint = Endpoint::of(request.uri().path());
-    if !matches!(endpoint, Some(Endpoint::Workspace | Endpoint::Gateway(_))) {
+    if !matches!(
+        endpoint,
+        Some(Endpoint::Workspace | Endpoint::Installation | Endpoint::Gateway(_))
+    ) {
         return Err(Error::not_found("Not found."));
     }
     let granted = crate::mcps::granted_run(s, &bearer(&request)).await?;
@@ -295,6 +304,7 @@ async fn respond(s: &Arc<Service>, request: Request) -> Result<Response> {
         let (endpoint, connection_id) = match &endpoint {
             Endpoint::Management => ("management", "unknown"),
             Endpoint::Workspace => ("workspace", "unknown"),
+            Endpoint::Installation => ("installation", "unknown"),
             Endpoint::Gateway(id) => ("gateway", crate::performance::identity(id)),
         };
         tracing::info!(target: "cairn_performance", operation = "mcp_startup", event = "completed",
@@ -393,6 +403,7 @@ async fn dispatch(
             Endpoint::Workspace => crate::project_workspaces::rpc(s, bearer, method, params).await,
             Endpoint::Gateway(id) => proxy(s, id, bearer, method, params.clone()).await,
             Endpoint::Management => management(s, scopes, method, params).await,
+            Endpoint::Installation => crate::installation_mcp::rpc(s, bearer, method, params).await,
         },
     }
 }
@@ -440,7 +451,7 @@ struct ToolDescriptor {
     annotations: ToolAnnotations,
 }
 
-fn catalog() -> Vec<ToolDescriptor> {
+pub(crate) fn catalog() -> Vec<Value> {
     CATALOG
         .iter()
         .map(|tool| {
@@ -450,7 +461,7 @@ fn catalog() -> Vec<ToolDescriptor> {
                 || scope == "run"
                 || name.starts_with("update_")
                 || name == "save_skill";
-            ToolDescriptor {
+            serde_json::to_value(ToolDescriptor {
                 name,
                 description: &tool.description,
                 title: name.replace('_', " "),
@@ -466,7 +477,8 @@ fn catalog() -> Vec<ToolDescriptor> {
                     destructive_hint: destructive,
                     open_world_hint: scope != "read",
                 },
-            }
+            })
+            .expect("serializable tool descriptor")
         })
         .collect()
 }
@@ -544,7 +556,7 @@ struct RunHistory {
     has_more: bool,
 }
 
-fn run_history(db: &Db<'_>, id: &str, after: i64) -> Result<Value> {
+pub(crate) fn run_history(db: &Db<'_>, id: &str, after: i64) -> Result<Value> {
     let run = required(db.run(id)?, "Run not found")?;
     let (run, _) = run_record_preview(
         run,
@@ -603,7 +615,7 @@ struct RunContentChunk<'a> {
     next_offset: Option<usize>,
 }
 
-fn read_run_content(db: &Db<'_>, args: &Value) -> Result<Value> {
+pub(crate) fn read_run_content(db: &Db<'_>, args: &Value) -> Result<Value> {
     let id = text(args, "runId");
     let data = if let Some(event_id) = args["eventId"].as_i64() {
         db.require_run(id)?;

@@ -339,21 +339,29 @@ impl RunConfiguration {
     }
 
     fn add_workspace(&mut self, origin: &str) -> Result<()> {
-        let url = format!("{origin}/mcp-workspace");
+        self.add_internal(origin, "cairn_workspace", "/mcp-workspace", Some(3660))
+    }
+
+    fn add_internal(
+        &mut self,
+        origin: &str,
+        name: &str,
+        path: &str,
+        timeout: Option<u64>,
+    ) -> Result<()> {
+        let url = format!("{origin}{path}");
         let claude = ClaudeServer::Http {
             url: url.clone(),
             headers: self.bearer_headers(),
         };
-        self.claude_mcps
-            .mcp_servers
-            .insert("cairn_workspace".into(), claude);
+        self.claude_mcps.mcp_servers.insert(name.into(), claude);
         let codex = CodexServer::Http {
             url,
             bearer_token_env_var: RUN_TOKEN_ENV,
-            tool_timeout_sec: Some(3660),
+            tool_timeout_sec: timeout,
             enabled_tools: None,
         };
-        self.add_codex("cairn_workspace", &codex)
+        self.add_codex(name, &codex)
     }
 }
 
@@ -621,13 +629,18 @@ impl Mcps {
         if workspace {
             configuration.add_workspace(origin)?;
         }
-        if workspace || !servers.is_empty() {
+        let installation = access["installation"] == true;
+        if installation {
+            configuration.add_internal(origin, "cairn_installation", "/mcp-installation", None)?;
+        }
+        if workspace || installation || !servers.is_empty() {
             configuration.env.insert(RUN_TOKEN_ENV, token.clone());
             let grant = RunGrant {
                 run_id: text(run, "id").to_owned(),
                 message_id: run["chatExecution"]["messageId"].clone(),
                 servers,
                 workspace,
+                installation,
             };
             let expires = crate::run_limits::budget_ms(agent).map(|budget| now() + budget);
             s.store

@@ -208,6 +208,8 @@ pub struct RunGrant {
     pub message_id: Value,
     pub servers: BTreeMap<String, GrantScope>,
     pub workspace: bool,
+    #[serde(default)]
+    pub installation: bool,
 }
 
 /// An OAuth authorization in flight (`mcp-oauth:{digest(state)}`).

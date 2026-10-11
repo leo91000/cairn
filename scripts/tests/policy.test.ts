@@ -31,6 +31,7 @@ describe('agent access and task inheritance', () => {
       skills: null,
       mcps: null,
       mcpTools: {},
+      installation: false,
       github: true,
       sandbox: 'yolo',
     })

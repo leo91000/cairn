@@ -12,6 +12,7 @@ export const accessPolicy = z.object({
   skills: z.array(z.string().max(160)).max(100).nullable().default(null),
   mcps: z.array(id).max(100).nullable().default(null),
   mcpTools: z.record(id, z.array(z.string().min(1).max(200)).max(500)).default({}),
+  installation: z.boolean().default(false),
   github: z.boolean().default(true),
   sandbox: z.enum(['yolo', 'workspace-write', 'read-only']).default('yolo'),
 })
@@ -37,6 +38,7 @@ export const agentUpdate = z.object({
   access: accessPolicy.extend({
     // A partial update from an older client must not restore local-runner access.
     nodes: accessPolicy.shape.nodes.removeDefault().optional(),
+    installation: accessPolicy.shape.installation.removeDefault().optional(),
   }).optional(),
 })
 export const projectInput = z.object({

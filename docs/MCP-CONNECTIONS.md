@@ -3,6 +3,12 @@
 Open **MCPs → Add MCP** to connect an external server. This is separate from the
 manager’s inbound `/mcp` endpoint described in [MCP.md](MCP.md).
 
+For access to Cairn itself, enable **Allow access to the current Cairn installation**
+in the agent editor instead of adding a self-connection. This supplies a private,
+run-authorized MCP for missions and run history within the agent's permissions;
+see [agent access](AGENT-ACCESS.md). External management clients and explicitly
+configured self-connections retain their separate OAuth permissions.
+
 ## Managing connections through MCP
 
 Agents and external clients can use the manager's own MCP tools:

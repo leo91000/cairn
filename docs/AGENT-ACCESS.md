@@ -8,6 +8,29 @@ its resource access cannot be reduced and it cannot be deleted.
 under **Connections → 1Password**. Those grants can be revoked live; see
 [1Password access](ONEPASSWORD.md).
 
+**Allow access to the current Cairn installation** is also opt-in, including for
+Main and existing agents. The owner enables it in the web or Android agent editor.
+It automatically supplies `cairn_installation` to Codex and Claude Code, without
+a server URL, personal access token, or OAuth setup. The agent can list its
+profile, permitted projects, missions and runs; create or schedule missions;
+update or start them; inspect run history; and cancel runs. Agent, project, skill,
+account and MCP connection administration are not exposed through this execution
+grant.
+
+Missions and runs must use the calling agent, with resource, tool, execution
+and node permissions within its snapshotted permissions. Another agent may have
+different GitHub credentials or 1Password grants even with an identical access
+policy, so creating or changing a mission cannot select another agent. New
+missions default to the calling agent when no agent ID is supplied. The owner
+delegates these operations through the agent setting; newly created scheduled
+missions use the owner's authorship, as with the existing management MCP. The
+ordinary author reconciliation still ends them if that owner's access ends.
+Disabling installation access denies active calls immediately. Completed,
+cancelled or superseded chat turns cannot reuse their token. Tokens issued
+without installation access cannot acquire it by enabling the setting; a new
+run or chat turn receives the updated setting. Older profile editors preserve
+it when omitted.
+
 Other agents can select projects, skills, MCP connections and tools, and disable the shared GitHub
 connection. New agents default to full access and YOLO. A task inherits its
 agent's resources, or can choose its initial project context and skills under
