@@ -1,0 +1,580 @@
+{
+  "commit": "8cc05c924dbacf5ecd81ff5e2a6bbb3943427dc8",
+  "platform": "Linux-6.17.0-1022-azure-x86_64-with-glibc2.39",
+  "cpuCount": 4,
+  "rust": "rustc 1.97.1 (8bab26f4f 2026-07-14)",
+  "profile": "release (repository settings)",
+  "scope": "Synthetic data, native codec and isolated loopback S3; no WAN or VM startup measurement.",
+  "results": [
+    {
+      "case": "sparse",
+      "encodedBytes": 4194340,
+      "format": "v1-raw-reference",
+      "inputHash": "b3-70ba6ea38b41401334ad5e5358b6d51bb9bfe46f73f4879971c8c4d7ff2e6077",
+      "plaintextBytes": 4194304,
+      "processReadCpu": {
+        "meanMs": 10.229187500000016,
+        "p50Ms": 10.284999999999968,
+        "p95Ms": 10.622000000000014,
+        "samples": 16
+      },
+      "processWriteCpu": {
+        "meanMs": 16.139000000000006,
+        "p50Ms": 16.099999999999994,
+        "p95Ms": 16.62900000000002,
+        "samples": 16
+      },
+      "read": {
+        "meanMs": 12.867391125000001,
+        "p50Ms": 12.841685,
+        "p95Ms": 13.615806,
+        "samples": 16
+      },
+      "transport": "loopback-s3-and-lazy-disk",
+      "warm4KiB": {
+        "meanMs": 0.00035578881835937506,
+        "p50Ms": 0.000346859375,
+        "p95Ms": 0.0004451328125,
+        "samples": 16
+      },
+      "write": {
+        "meanMs": 28.600284187500005,
+        "p50Ms": 28.583346,
+        "p95Ms": 30.150056000000003,
+        "samples": 16
+      }
+    },
+    {
+      "case": "sparse",
+      "encodedBytes": 192,
+      "format": "v2-zstd-or-raw",
+      "inputHash": "b3-70ba6ea38b41401334ad5e5358b6d51bb9bfe46f73f4879971c8c4d7ff2e6077",
+      "plaintextBytes": 4194304,
+      "processReadCpu": {
+        "meanMs": 4.151874999999977,
+        "p50Ms": 4.165999999999997,
+        "p95Ms": 4.391999999999939,
+        "samples": 16
+      },
+      "processWriteCpu": {
+        "meanMs": 1.686812499999986,
+        "p50Ms": 1.5759999999999081,
+        "p95Ms": 3.1359999999999673,
+        "samples": 16
+      },
+      "read": {
+        "meanMs": 6.5066078125,
+        "p50Ms": 6.447468,
+        "p95Ms": 7.8926229999999995,
+        "samples": 16
+      },
+      "transport": "loopback-s3-and-lazy-disk",
+      "warm4KiB": {
+        "meanMs": 0.0004785263671875001,
+        "p50Ms": 0.00036055859375,
+        "p95Ms": 0.0021475,
+        "samples": 16
+      },
+      "write": {
+        "meanMs": 4.15256625,
+        "p50Ms": 4.042816999999999,
+        "p95Ms": 6.509785,
+        "samples": 16
+      }
+    },
+    {
+      "case": "source",
+      "encodedBytes": 4194340,
+      "format": "v1-raw-reference",
+      "inputHash": "b3-e724110c5d32b2ecc2a4b6cce8b8684bb61a452defe82aacda591748cb54d860",
+      "plaintextBytes": 4194304,
+      "processReadCpu": {
+        "meanMs": 10.064875,
+        "p50Ms": 10.039999999999964,
+        "p95Ms": 10.390999999999963,
+        "samples": 16
+      },
+      "processWriteCpu": {
+        "meanMs": 15.980875000000019,
+        "p50Ms": 16.001999999999953,
+        "p95Ms": 16.070000000000164,
+        "samples": 16
+      },
+      "read": {
+        "meanMs": 12.712686437499999,
+        "p50Ms": 12.614134,
+        "p95Ms": 13.347996,
+        "samples": 16
+      },
+      "transport": "loopback-s3-and-lazy-disk",
+      "warm4KiB": {
+        "meanMs": 0.000358017333984375,
+        "p50Ms": 0.00035652734375,
+        "p95Ms": 0.00042689453125,
+        "samples": 16
+      },
+      "write": {
+        "meanMs": 28.053967562500002,
+        "p50Ms": 28.047081000000002,
+        "p95Ms": 28.865835999999998,
+        "samples": 16
+      }
+    },
+    {
+      "case": "source",
+      "encodedBytes": 3290,
+      "format": "v2-zstd-or-raw",
+      "inputHash": "b3-e724110c5d32b2ecc2a4b6cce8b8684bb61a452defe82aacda591748cb54d860",
+      "plaintextBytes": 4194304,
+      "processReadCpu": {
+        "meanMs": 4.1227500000000035,
+        "p50Ms": 4.120000000000118,
+        "p95Ms": 4.224999999999909,
+        "samples": 16
+      },
+      "processWriteCpu": {
+        "meanMs": 1.7144375000000167,
+        "p50Ms": 1.711999999999989,
+        "p95Ms": 1.8010000000001583,
+        "samples": 16
+      },
+      "read": {
+        "meanMs": 6.233082187500001,
+        "p50Ms": 6.220692,
+        "p95Ms": 6.523159,
+        "samples": 16
+      },
+      "transport": "loopback-s3-and-lazy-disk",
+      "warm4KiB": {
+        "meanMs": 0.00033593725585937494,
+        "p50Ms": 0.00033825,
+        "p95Ms": 0.00034787890625,
+        "samples": 16
+      },
+      "write": {
+        "meanMs": 3.9903915624999993,
+        "p50Ms": 3.9913190000000003,
+        "p95Ms": 4.169455,
+        "samples": 16
+      }
+    },
+    {
+      "case": "mixed",
+      "encodedBytes": 4194340,
+      "format": "v1-raw-reference",
+      "inputHash": "b3-c0573d08fabc8c0b0d6f26ea8ed6305ee6247e3db8ddc4c60da2de1207d28931",
+      "plaintextBytes": 4194304,
+      "processReadCpu": {
+        "meanMs": 9.98743750000007,
+        "p50Ms": 9.960000000000036,
+        "p95Ms": 10.597000000000207,
+        "samples": 16
+      },
+      "processWriteCpu": {
+        "meanMs": 15.998749999999944,
+        "p50Ms": 16.029999999999745,
+        "p95Ms": 16.145999999999958,
+        "samples": 16
+      },
+      "read": {
+        "meanMs": 12.5810846875,
+        "p50Ms": 12.535737,
+        "p95Ms": 13.053687,
+        "samples": 16
+      },
+      "transport": "loopback-s3-and-lazy-disk",
+      "warm4KiB": {
+        "meanMs": 0.0003627236328125,
+        "p50Ms": 0.000359421875,
+        "p95Ms": 0.00040873828125,
+        "samples": 16
+      },
+      "write": {
+        "meanMs": 28.1792184375,
+        "p50Ms": 28.283303,
+        "p95Ms": 28.877768000000003,
+        "samples": 16
+      }
+    },
+    {
+      "case": "mixed",
+      "encodedBytes": 2099126,
+      "format": "v2-zstd-or-raw",
+      "inputHash": "b3-c0573d08fabc8c0b0d6f26ea8ed6305ee6247e3db8ddc4c60da2de1207d28931",
+      "plaintextBytes": 4194304,
+      "processReadCpu": {
+        "meanMs": 7.572437499999964,
+        "p50Ms": 7.552999999999884,
+        "p95Ms": 7.977000000000089,
+        "samples": 16
+      },
+      "processWriteCpu": {
+        "meanMs": 9.671625000000006,
+        "p50Ms": 9.665999999999713,
+        "p95Ms": 10.213999999999942,
+        "samples": 16
+      },
+      "read": {
+        "meanMs": 10.0493436875,
+        "p50Ms": 9.988695,
+        "p95Ms": 10.484063,
+        "samples": 16
+      },
+      "transport": "loopback-s3-and-lazy-disk",
+      "warm4KiB": {
+        "meanMs": 0.00034939208984374997,
+        "p50Ms": 0.0003434921875,
+        "p95Ms": 0.00045147265625,
+        "samples": 16
+      },
+      "write": {
+        "meanMs": 17.1673430625,
+        "p50Ms": 17.109139,
+        "p95Ms": 18.478866,
+        "samples": 16
+      }
+    },
+    {
+      "case": "incompressible",
+      "encodedBytes": 4194340,
+      "format": "v1-raw-reference",
+      "inputHash": "b3-6e63cf97299c1804aedf1e62eee1def9b91520529b6e805d271dfee8ae1402ff",
+      "plaintextBytes": 4194304,
+      "processReadCpu": {
+        "meanMs": 10.002062499999909,
+        "p50Ms": 9.893999999999778,
+        "p95Ms": 10.830999999999676,
+        "samples": 16
+      },
+      "processWriteCpu": {
+        "meanMs": 15.950249999999983,
+        "p50Ms": 15.961999999999989,
+        "p95Ms": 16.159000000000106,
+        "samples": 16
+      },
+      "read": {
+        "meanMs": 12.696161937500003,
+        "p50Ms": 12.674836,
+        "p95Ms": 13.427973,
+        "samples": 16
+      },
+      "transport": "loopback-s3-and-lazy-disk",
+      "warm4KiB": {
+        "meanMs": 0.000362337890625,
+        "p50Ms": 0.0003544921875,
+        "p95Ms": 0.000462078125,
+        "samples": 16
+      },
+      "write": {
+        "meanMs": 27.99275925,
+        "p50Ms": 27.937559,
+        "p95Ms": 28.570571,
+        "samples": 16
+      }
+    },
+    {
+      "case": "incompressible",
+      "encodedBytes": 4194345,
+      "format": "v2-zstd-or-raw",
+      "inputHash": "b3-6e63cf97299c1804aedf1e62eee1def9b91520529b6e805d271dfee8ae1402ff",
+      "plaintextBytes": 4194304,
+      "processReadCpu": {
+        "meanMs": 11.515437500000047,
+        "p50Ms": 11.443000000000211,
+        "p95Ms": 12.08999999999969,
+        "samples": 16
+      },
+      "processWriteCpu": {
+        "meanMs": 17.781687499999975,
+        "p50Ms": 17.773999999999887,
+        "p95Ms": 17.936999999999898,
+        "samples": 16
+      },
+      "read": {
+        "meanMs": 14.2656713125,
+        "p50Ms": 14.152285000000001,
+        "p95Ms": 14.974632,
+        "samples": 16
+      },
+      "transport": "loopback-s3-and-lazy-disk",
+      "warm4KiB": {
+        "meanMs": 0.00034368261718750005,
+        "p50Ms": 0.00034044140625,
+        "p95Ms": 0.0004207109375,
+        "samples": 16
+      },
+      "write": {
+        "meanMs": 30.568573124999997,
+        "p50Ms": 30.475747000000002,
+        "p95Ms": 31.631848999999995,
+        "samples": 16
+      }
+    },
+    {
+      "case": "sparse",
+      "encodedBytes": 4194340,
+      "format": "v1-raw-reference",
+      "inputHash": "b3-70ba6ea38b41401334ad5e5358b6d51bb9bfe46f73f4879971c8c4d7ff2e6077",
+      "plaintextBytes": 4194304,
+      "processReadCpu": {
+        "meanMs": 4.906562500000007,
+        "p50Ms": 4.923000000000229,
+        "p95Ms": 4.967000000000098,
+        "samples": 16
+      },
+      "processWriteCpu": {
+        "meanMs": 4.363250000000079,
+        "p50Ms": 4.273000000000138,
+        "p95Ms": 5.911000000000058,
+        "samples": 16
+      },
+      "read": {
+        "meanMs": 4.9094891875,
+        "p50Ms": 4.926013,
+        "p95Ms": 4.9692549999999995,
+        "samples": 16
+      },
+      "transport": "native-codec",
+      "warm4KiB": null,
+      "write": {
+        "meanMs": 4.3641285,
+        "p50Ms": 4.273217,
+        "p95Ms": 5.910882999999999,
+        "samples": 16
+      }
+    },
+    {
+      "case": "sparse",
+      "encodedBytes": 192,
+      "format": "v2-zstd-or-raw",
+      "inputHash": "b3-70ba6ea38b41401334ad5e5358b6d51bb9bfe46f73f4879971c8c4d7ff2e6077",
+      "plaintextBytes": 4194304,
+      "processReadCpu": {
+        "meanMs": 1.2023750000000462,
+        "p50Ms": 1.248000000000502,
+        "p95Ms": 1.2950000000000728,
+        "samples": 16
+      },
+      "processWriteCpu": {
+        "meanMs": 1.0765625000000512,
+        "p50Ms": 1.0870000000004438,
+        "p95Ms": 1.1320000000000618,
+        "samples": 16
+      },
+      "read": {
+        "meanMs": 1.2057111249999999,
+        "p50Ms": 1.2511,
+        "p95Ms": 1.297407,
+        "samples": 16
+      },
+      "transport": "native-codec",
+      "warm4KiB": null,
+      "write": {
+        "meanMs": 1.0774396250000002,
+        "p50Ms": 1.087372,
+        "p95Ms": 1.134581,
+        "samples": 16
+      }
+    },
+    {
+      "case": "source",
+      "encodedBytes": 4194340,
+      "format": "v1-raw-reference",
+      "inputHash": "b3-e724110c5d32b2ecc2a4b6cce8b8684bb61a452defe82aacda591748cb54d860",
+      "plaintextBytes": 4194304,
+      "processReadCpu": {
+        "meanMs": 4.9151250000000175,
+        "p50Ms": 4.929000000000087,
+        "p95Ms": 4.9650000000001455,
+        "samples": 16
+      },
+      "processWriteCpu": {
+        "meanMs": 4.267500000000069,
+        "p50Ms": 4.275000000000091,
+        "p95Ms": 4.337999999999738,
+        "samples": 16
+      },
+      "read": {
+        "meanMs": 4.917238000000001,
+        "p50Ms": 4.931393,
+        "p95Ms": 4.970617,
+        "samples": 16
+      },
+      "transport": "native-codec",
+      "warm4KiB": null,
+      "write": {
+        "meanMs": 4.26823525,
+        "p50Ms": 4.277343999999999,
+        "p95Ms": 4.338991,
+        "samples": 16
+      }
+    },
+    {
+      "case": "source",
+      "encodedBytes": 3290,
+      "format": "v2-zstd-or-raw",
+      "inputHash": "b3-e724110c5d32b2ecc2a4b6cce8b8684bb61a452defe82aacda591748cb54d860",
+      "plaintextBytes": 4194304,
+      "processReadCpu": {
+        "meanMs": 1.273499999999956,
+        "p50Ms": 1.3030000000003383,
+        "p95Ms": 1.4329999999999927,
+        "samples": 16
+      },
+      "processWriteCpu": {
+        "meanMs": 1.2377499999999202,
+        "p50Ms": 1.2539999999999054,
+        "p95Ms": 1.2969999999995707,
+        "samples": 16
+      },
+      "read": {
+        "meanMs": 1.2764609375,
+        "p50Ms": 1.306454,
+        "p95Ms": 1.436679,
+        "samples": 16
+      },
+      "transport": "native-codec",
+      "warm4KiB": null,
+      "write": {
+        "meanMs": 1.238197125,
+        "p50Ms": 1.2562689999999999,
+        "p95Ms": 1.29853,
+        "samples": 16
+      }
+    },
+    {
+      "case": "mixed",
+      "encodedBytes": 4194340,
+      "format": "v1-raw-reference",
+      "inputHash": "b3-c0573d08fabc8c0b0d6f26ea8ed6305ee6247e3db8ddc4c60da2de1207d28931",
+      "plaintextBytes": 4194304,
+      "processReadCpu": {
+        "meanMs": 4.938437499999964,
+        "p50Ms": 4.944999999999709,
+        "p95Ms": 5.01299999999992,
+        "samples": 16
+      },
+      "processWriteCpu": {
+        "meanMs": 4.290499999999952,
+        "p50Ms": 4.278000000000247,
+        "p95Ms": 4.413000000000466,
+        "samples": 16
+      },
+      "read": {
+        "meanMs": 4.9561195625,
+        "p50Ms": 4.963995,
+        "p95Ms": 5.035298,
+        "samples": 16
+      },
+      "transport": "native-codec",
+      "warm4KiB": null,
+      "write": {
+        "meanMs": 4.307150125,
+        "p50Ms": 4.298728,
+        "p95Ms": 4.434241999999999,
+        "samples": 16
+      }
+    },
+    {
+      "case": "mixed",
+      "encodedBytes": 2099126,
+      "format": "v2-zstd-or-raw",
+      "inputHash": "b3-c0573d08fabc8c0b0d6f26ea8ed6305ee6247e3db8ddc4c60da2de1207d28931",
+      "plaintextBytes": 4194304,
+      "processReadCpu": {
+        "meanMs": 3.1971875000000978,
+        "p50Ms": 3.19800000000032,
+        "p95Ms": 3.2269999999998618,
+        "samples": 16
+      },
+      "processWriteCpu": {
+        "meanMs": 3.3615625000001046,
+        "p50Ms": 3.373000000000502,
+        "p95Ms": 3.4440000000004147,
+        "samples": 16
+      },
+      "read": {
+        "meanMs": 3.212899,
+        "p50Ms": 3.217621,
+        "p95Ms": 3.2464049999999998,
+        "samples": 16
+      },
+      "transport": "native-codec",
+      "warm4KiB": null,
+      "write": {
+        "meanMs": 3.377774375,
+        "p50Ms": 3.393641,
+        "p95Ms": 3.4639330000000004,
+        "samples": 16
+      }
+    },
+    {
+      "case": "incompressible",
+      "encodedBytes": 4194340,
+      "format": "v1-raw-reference",
+      "inputHash": "b3-6e63cf97299c1804aedf1e62eee1def9b91520529b6e805d271dfee8ae1402ff",
+      "plaintextBytes": 4194304,
+      "processReadCpu": {
+        "meanMs": 4.952375000000018,
+        "p50Ms": 4.954999999999927,
+        "p95Ms": 5.0219999999999345,
+        "samples": 16
+      },
+      "processWriteCpu": {
+        "meanMs": 4.35612500000002,
+        "p50Ms": 4.386999999999716,
+        "p95Ms": 4.439000000000306,
+        "samples": 16
+      },
+      "read": {
+        "meanMs": 4.957283687499999,
+        "p50Ms": 4.949015999999999,
+        "p95Ms": 5.054805,
+        "samples": 16
+      },
+      "transport": "native-codec",
+      "warm4KiB": null,
+      "write": {
+        "meanMs": 4.358767187500001,
+        "p50Ms": 4.379338,
+        "p95Ms": 4.431506,
+        "samples": 16
+      }
+    },
+    {
+      "case": "incompressible",
+      "encodedBytes": 4194345,
+      "format": "v2-zstd-or-raw",
+      "inputHash": "b3-6e63cf97299c1804aedf1e62eee1def9b91520529b6e805d271dfee8ae1402ff",
+      "plaintextBytes": 4194304,
+      "processReadCpu": {
+        "meanMs": 5.514875000000131,
+        "p50Ms": 5.528999999999542,
+        "p95Ms": 5.640000000000327,
+        "samples": 16
+      },
+      "processWriteCpu": {
+        "meanMs": 5.582812499999761,
+        "p50Ms": 5.5900000000001455,
+        "p95Ms": 5.725999999999658,
+        "samples": 16
+      },
+      "read": {
+        "meanMs": 5.5207123125,
+        "p50Ms": 5.523733,
+        "p95Ms": 5.661582,
+        "samples": 16
+      },
+      "transport": "native-codec",
+      "warm4KiB": null,
+      "write": {
+        "meanMs": 5.585013374999999,
+        "p50Ms": 5.585199,
+        "p95Ms": 5.747452,
+        "samples": 16
+      }
+    }
+  ],
+  "workflowRunUrl": "https://github.com/leo91000/cairn/actions/runs/38141454326",
+  "pullRequestHeadCommit": "61112373a0142da8abfddc2b57c8dfc012869e53"
+}

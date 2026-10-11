@@ -139,6 +139,7 @@ This is a local reference, not production cold-start latency: the provider's pag
 cache, DNS/TLS/WAN, VM boot, metadata bootstrap and production contention are not
 measured. Small compressed objects can improve S3 transfer time while adding
 codec work; incompressible data adds a compression attempt without network savings.
+The loopback source also omits manager-to-node plaintext transport.
 Record comparable workload and host conditions for future changes. Do not turn
 these timings into flaky CI thresholds.
 
@@ -152,6 +153,44 @@ Production deployment should preserve these counters and compare equivalent
 intervals for S3 bytes, codec execution time, manager CPU usage, cold-fetch latency
 and synchronization lag.
 This PR does not deploy to production or generate benchmark writes there.
+
+## Recorded reference
+
+The [release run](https://github.com/leo91000/cairn/actions/runs/38141454326)
+measured the implementation at PR head `61112373` on a four-CPU Linux x86-64
+Azure runner (kernel 6.17, glibc 2.39, Rust 1.97.1), using the repository's
+release settings with thin LTO. Two warmups precede sixteen alternating measured
+trials per policy and input. The [full JSON reference](benchmarks/storage-compression-reference.json)
+preserves input hashes, the tested merge revision, host metadata, byte counts,
+wall/process-CPU p50/p95/mean and warm-cache timings.
+
+Every input is 4 MiB; the old raw envelope is 4,194,340 bytes. These deliberately
+constructed inputs establish a comparison, not a workload-weighted savings forecast.
+The following medians include encoding plus loopback S3 PUT for writes and a
+fresh LazyDisk/S3 fetch plus verified decode/cache admission for cold 4 KiB reads:
+
+| Input | New envelope bytes | Write ms, raw → v2 | Cold read ms, raw → v2 |
+| --- | ---: | ---: | ---: |
+| Sparse | 192 | 28.583 → 4.043 | 12.842 → 6.447 |
+| Repeated source | 3,290 | 28.047 → 3.991 | 12.614 → 6.221 |
+| Half random / half source | 2,099,126 | 28.283 → 17.109 | 12.536 → 9.989 |
+| Incompressible | 4,194,345 | 27.938 → 30.476 | 12.675 → 14.152 |
+
+Compressible inputs reduced write medians by 40–86% and cold-read medians by
+20–51% in this loopback reference. Incompressible input added five stored bytes,
+about 9% write time and 12% cold-read time. Warm 4 KiB read medians across both
+policies were 0.34–0.36 microseconds; every trial asserted exactly one cold fetch
+and no warm fetches. Production plaintext transport, WAN and startup costs are
+outside these measurements.
+
+Native codec process-CPU medians, including encryption and verified decode:
+
+| Input | Encode CPU ms, raw → v2 | Decode CPU ms, raw → v2 |
+| --- | ---: | ---: |
+| Sparse | 4.273 → 1.087 | 4.923 → 1.248 |
+| Repeated source | 4.275 → 1.254 | 4.929 → 1.303 |
+| Half random / half source | 4.278 → 3.373 | 4.945 → 3.198 |
+| Incompressible | 4.387 → 5.590 | 4.955 → 5.529 |
 
 ## Qualification
 
