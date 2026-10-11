@@ -12,6 +12,7 @@ mod view;
 
 pub use view::DiskView;
 
+pub mod block_codec;
 pub mod digest;
 mod lazy;
 pub(crate) mod metrics;

@@ -5164,6 +5164,134 @@ sys.exit(subprocess.call(['aws']+sys.argv[1:]))
     server.abort();
 }
 
+#[tokio::test]
+#[ignore = "requires loopback S3; run scripts/tests/node_s3_test.py --case compressed_publications"]
+async fn compressed_publications_restore_mixed_blocks_reuse_objects_and_repair_corruption() {
+    use cairn_installation::storage::block_codec::MAX_ENCODED_BYTES;
+    use rand::{RngCore, SeedableRng};
+
+    let root = TempDir::new().unwrap();
+    let disk = root.path().join("source");
+    let mut original = vec![42u8; 8 * MIB + 23];
+    rand::rngs::StdRng::seed_from_u64(42).fill_bytes(&mut original[4 * MIB..8 * MIB]);
+    std::fs::write(&disk, &original).unwrap();
+    let mut manifest = snapshots::index(&disk).await.unwrap();
+    // Mixed identity algorithms are independent of the storage representation.
+    manifest["blocks"][1]["hash"] = hex::encode(Sha256::digest(&original[4 * MIB..8 * MIB])).into();
+    let state = Arc::new(tokio::sync::Mutex::new(manifest.clone()));
+    let gates = SharedPublicationGates::default();
+    let (url, server) =
+        common::serve_locally(shared_publication_controller(disk, state, gates.clone())).await;
+    let owner = Owner::with_runner(common::HOST.into(), url).await;
+    let s = &owner.service;
+    let first_run = local_run(&id());
+    let second_run = local_run(&id());
+    add_local_run(&owner, &first_run).await;
+    add_local_run(&owner, &second_run).await;
+    let first = publication::capture(s, &first_run).await.unwrap();
+    let second = publication::capture(s, &second_run).await.unwrap();
+    assert_eq!(first["uploadedBytes"], original.len());
+    assert_eq!(second["uploadedBytes"], 0);
+    assert_eq!(gates.requests.load(Ordering::SeqCst), 3);
+    let first = s
+        .get("node-backups", first["id"].as_str().unwrap())
+        .await
+        .unwrap();
+    let second = s
+        .get("node-backups", second["id"].as_str().unwrap())
+        .await
+        .unwrap();
+    let first_manifest = publication::manifest(s, &first).await.unwrap();
+    let second_manifest = publication::manifest(s, &second).await.unwrap();
+    assert_eq!(first_manifest["blocks"], second_manifest["blocks"]);
+    let storage = Storage::configured(s).unwrap();
+    let hashes: Vec<_> = manifest["blocks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|block| block["hash"].as_str())
+        .collect();
+    for (index, hash) in hashes.iter().enumerate() {
+        let encoded = storage
+            .download_bytes(&shared_object_key(&first_manifest, hash), MAX_ENCODED_BYTES)
+            .await
+            .unwrap();
+        assert!(encoded.starts_with(b"CAIRNB\x02\0"));
+        if index == 0 {
+            assert!(encoded.len() < 4096);
+        } else if index == 1 {
+            assert_eq!(encoded.len() as u64, MAX_ENCODED_BYTES);
+        }
+    }
+    let restored = root.path().join("restored");
+    snapshots::restore(&restored, &second_manifest, |hash| {
+        let (s, second) = (s.clone(), second.clone());
+        async move { publication::read_block(&s, &second, &hash).await }
+    })
+    .await
+    .unwrap();
+    assert_eq!(std::fs::read(restored).unwrap(), original);
+
+    // Corruption is terminal, invalidates reuse and forces a new immutable incarnation.
+    let old_key = shared_object_key(&first_manifest, hashes[0]);
+    let mut corrupt = storage
+        .download_bytes(&old_key, MAX_ENCODED_BYTES)
+        .await
+        .unwrap();
+    *corrupt.last_mut().unwrap() ^= 1;
+    storage.upload_bytes(corrupt, &old_key).await.unwrap();
+    assert_eq!(
+        publication::read_block(s, &second, hashes[0])
+            .await
+            .unwrap_err()
+            .status,
+        409
+    );
+    assert!(owner.run(second_run["id"].as_str().unwrap()).await["backup"]["snapshotId"].is_null());
+    let repaired = publication::capture(s, &second_run).await.unwrap();
+    assert_eq!(repaired["uploadedBytes"], 4 * MIB);
+    let repaired = s
+        .get("node-backups", repaired["id"].as_str().unwrap())
+        .await
+        .unwrap();
+    let repaired_manifest = publication::manifest(s, &repaired).await.unwrap();
+    assert_ne!(shared_object_key(&repaired_manifest, hashes[0]), old_key);
+    assert_eq!(
+        publication::read_block(s, &repaired, hashes[0])
+            .await
+            .unwrap(),
+        original[..4 * MIB]
+    );
+    assert_eq!(
+        publication::read_block(s, &first, hashes[1]).await.unwrap(),
+        original[4 * MIB..8 * MIB]
+    );
+
+    publication::purge(s, first_run["id"].as_str().unwrap())
+        .await
+        .unwrap();
+    drain_remote_deletions(s).await;
+    assert_eq!(
+        publication::read_block(s, &repaired, hashes[0])
+            .await
+            .unwrap(),
+        original[..4 * MIB]
+    );
+    publication::purge(s, second_run["id"].as_str().unwrap())
+        .await
+        .unwrap();
+    drain_remote_deletions(s).await;
+    assert_eq!(
+        storage
+            .download_bytes(&old_key, MAX_ENCODED_BYTES)
+            .await
+            .unwrap_err()
+            .status,
+        409
+    );
+    server.abort();
+}
+
 /// A local-node owner whose runner is `runner` and whose S3 is never reached.
 async fn owner_without_reachable_s3(runner: Router) -> (Owner, tokio::task::JoinHandle<()>) {
     let (url, server) = common::serve_locally(runner).await;

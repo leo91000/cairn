@@ -117,6 +117,7 @@ webrtc = { version = "=0.21.0", default-features = false, features = [
   "crypto-aws-lc-rs"
 ] }
 rtc = { version = "=0.21.0", default-features = false, features = [ "crypto-aws-lc-rs" ] }
+zstd = { version = "0.14.0", default-features = false }
 
 [dev-dependencies]
 tempfile = "3"
