@@ -10,7 +10,12 @@ import {
   watch,
 } from 'vue'
 import { useRouter } from 'vue-router'
-import { logoutAccount, redirect, state } from './api'
+import {
+  installationRoute,
+  logoutAccount,
+  redirect,
+  state,
+} from './api'
 import App from './App.vue'
 import AccountMenu from './components/AccountMenu.vue'
 import AccountMethods from './components/AccountMethods.vue'
@@ -37,6 +42,7 @@ interface AccountSession {
   csrf: string | null
   installations: Array<{
     id: string
+    slug?: string
     name: string
     role: 'owner' | 'member'
     online: boolean
@@ -82,6 +88,7 @@ const confirmDetach = ref(false)
 const confirmForget = ref(false)
 const installation = ref<{
   id: string
+  slug?: string
   name: string
   online: boolean
   updateRequired: boolean
@@ -108,13 +115,23 @@ watch(deviceCode, () => deviceReview.value = null)
 watch(session, (value) => {
   state.accountId = value?.account?.id || ''
   state.csrf = value?.csrf || ''
+  const requested = installationRoute
+  installation.value = value?.authenticated
+    ? value.installations.find(item => item.id === requested || item.slug === requested) || null
+    : null
+  state.installationId = installation.value?.id || ''
   state.authenticated = value?.authenticated || false
   state.ready = ready.value
   if (!value?.authenticated)
     return
 
-  const requested = state.installationId
-  installation.value = value.installations.find(item => item.id === requested) || null
+  if (installation.value?.slug && requested !== installation.value.slug) {
+    const destination = new URL(window.location.href)
+    destination.pathname = destination.pathname.replace(`/installations/${requested}`, `/installations/${installation.value.slug}`)
+    redirect(`${destination.pathname}${destination.search}${destination.hash}`)
+    return
+  }
+
   state.installationOnline = installation.value?.online
   state.installationUpdateRequired = installation.value?.updateRequired ?? false
   if (requested && !installation.value) {
@@ -414,7 +431,7 @@ async function oauth(provider: 'google' | 'github') {
     const start = await accountRequest(`oauth/${provider}/start`, {})
     try {
       sessionStorage.removeItem(beaconReturnKey)
-      if (state.installationId || claimPage || authorizePage) {
+      if (installationRoute || claimPage || authorizePage) {
         const destination = claimPage ? '/claim' : `${window.location.pathname}${window.location.search}${window.location.hash}`
         sessionStorage.setItem(beaconReturnKey, destination)
       }
@@ -429,7 +446,7 @@ async function oauth(provider: 'google' | 'github') {
   }
 }
 
-function openInstallation(value: { id: string, name: string }) {
+function openInstallation(value: { id: string, slug?: string, name: string }) {
   if (state.redirecting)
     return
   try {
@@ -437,7 +454,7 @@ function openInstallation(value: { id: string, name: string }) {
   }
   catch {}
 
-  redirect(`/installations/${encodeURIComponent(value.id)}/`)
+  redirect(`/installations/${encodeURIComponent(value.slug || value.id)}/`)
 }
 
 async function renameInstallation() {

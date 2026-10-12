@@ -646,7 +646,33 @@ async fn run_pages(s: &Service, input: &Input) -> Result<Option<Response>> {
     Ok(Some(json_bytes(bytes)))
 }
 
-async fn api(State(app): State<App>, request: Request) -> Result<Response> {
+async fn api(State(app): State<App>, mut request: Request) -> Result<Response> {
+    if let Some(rest) = request.uri().path().strip_prefix("/api/chats/") {
+        let (key, tail) = rest.split_once('/').unwrap_or((rest, ""));
+        if key != "stream" && uuid(key).is_err() {
+            let slug = key.to_owned();
+            let id = app
+                .service
+                .store
+                .read(move |db| {
+                    crate::error::required(db.chat_id_for_slug(&slug)?, "Chat not found")
+                })
+                .await?;
+            let tail = if tail.is_empty() {
+                String::new()
+            } else {
+                format!("/{tail}")
+            };
+            let query = request
+                .uri()
+                .query()
+                .map_or(String::new(), |query| format!("?{query}"));
+            *request.uri_mut() = format!("/api/chats/{id}{tail}{query}")
+                .parse()
+                .map_err(Error::internal)?;
+        }
+    }
+
     let path = request.uri().path().to_owned();
     let request = match raw_route(&app, &path, request).await? {
         Route::Done(response) => return Ok(response),

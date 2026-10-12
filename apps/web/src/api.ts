@@ -11,7 +11,7 @@ import { InstallationTransport } from './installation-transport'
 
 // Resolve the beacon context before any shared view reads its local cache.
 export const beaconEntry = typeof document !== 'undefined' && document.getElementById('app')?.hasAttribute('data-beacon')
-const installationId = beaconEntry ? /^\/installations\/([\w-]+)(?:\/|$)/.exec(window.location.pathname)?.[1] || '' : ''
+export const installationRoute = beaconEntry ? /^\/installations\/([\w-]+)(?:\/|$)/.exec(window.location.pathname)?.[1] || '' : ''
 
 export const state = reactive({
   transportRoute: 'relay' as 'direct' | 'relay',
@@ -20,7 +20,7 @@ export const state = reactive({
   signingOut: false,
   redirecting: false,
   csrf: '',
-  installationId,
+  installationId: '',
   installationOnline: undefined as boolean | undefined,
   installationUpdateRequired: false,
   accountId: '',
