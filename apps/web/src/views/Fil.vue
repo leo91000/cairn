@@ -1,13 +1,19 @@
 <script setup lang="ts">
-import { watch } from 'vue'
+import { computed, watch } from 'vue'
+import { useRoute } from 'vue-router'
 import { chatList, publishChats } from '../chat-list'
 import FilColumn from '../components/FilColumn.vue'
 import Icon from '../components/Icon.vue'
+import RunWorkspace from '../components/RunWorkspace.vue'
 import { Plus } from '../icons'
 import { modifier } from '../shortcuts'
+import { filRunPath } from '../signal'
 import { useLiveRun } from '../use-live-run'
 
-// Home: the Fil beside an empty reading pane on wide screens, the Fil alone on phones.
+// Home: the Fil beside its reading pane on wide screens, the Fil alone on phones. A mission opened
+// from the Fil reads in that pane; on narrow screens it takes the page, as a conversation does.
+const route = useRoute()
+const runId = computed(() => route.params.id as string | undefined)
 const live = useLiveRun(() => '/chats/stream')
 watch(live.snapshot, (value) => {
   if (value?.chats)
@@ -17,10 +23,23 @@ watch(live.snapshot, (value) => {
 
 <template>
   <div class="fil-page flex h-full min-h-0">
-    <div class="w-96 shrink-0 border-r border-line bg-inset tablet:w-full tablet:border-0 tablet:bg-transparent">
-      <FilColumn :chats="chatList" />
+    <div class="w-96 shrink-0 border-r border-line bg-inset tablet:w-full tablet:border-0 tablet:bg-transparent" :class="{ 'tablet:hidden': runId }">
+      <FilColumn :chats="chatList" :selected-run="runId" />
     </div>
-    <section class="flex min-w-0 flex-1 flex-col items-center justify-center gap-5 px-8 text-center tablet:hidden" aria-label="Reading pane">
+    <section
+      v-if="runId"
+      class="fil-run flex min-h-0 min-w-0 flex-1 flex-col px-9 pt-8 pb-7 tablet:px-6 phone:px-3 phone:pt-[max(14px,env(safe-area-inset-top))] phone:pb-3 [&_.back-link]:hidden tablet:[&_.back-link]:inline-flex"
+      aria-label="Reading pane"
+    >
+      <RunWorkspace
+        :key="runId"
+        :run-id="runId"
+        :run-path="filRunPath"
+        :back="{ to: '/', label: 'Back to the Fil' }"
+        mission
+      />
+    </section>
+    <section v-else class="flex min-w-0 flex-1 flex-col items-center justify-center gap-5 px-8 text-center tablet:hidden" aria-label="Reading pane">
       <p class="font-heading text-2xl font-bold tracking-tight text-ink">
         Pick up where your agents are.
       </p>

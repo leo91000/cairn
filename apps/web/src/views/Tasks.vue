@@ -10,12 +10,7 @@ import {
   watch,
 } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import {
-  api,
-  notify,
-  refresh,
-  state,
-} from '../api'
+import { api, state } from '../api'
 import AgentAvatar from '../components/AgentAvatar.vue'
 import Empty from '../components/Empty.vue'
 import Icon from '../components/Icon.vue'
@@ -32,6 +27,7 @@ import {
   Plus,
   Search,
 } from '../icons'
+import { useMissionActions } from '../mission-actions'
 import {
   activeRun,
   describeSchedule,
@@ -55,9 +51,6 @@ const searching = ref(false)
 const searchInput = ref<HTMLInputElement>()
 const filter = ref<MissionFilter>('all')
 const editor = ref<Task | true | null>(null)
-const error = ref('')
-const busy = ref('')
-const deleting = ref<Task | null>(null)
 const now = ref(Date.now())
 const wideQuery = window.matchMedia('(width > 900px)')
 const wide = ref(wideQuery.matches)
@@ -92,57 +85,29 @@ function closeSheet() {
   void router.replace({ query: rest })
 }
 
+const {
+  busy,
+  error,
+  deleting,
+  run,
+  pause,
+  archive,
+  duplicate,
+  remove,
+} = useMissionActions({
+  started: queued => router.push(`/runs/${queued.id}`),
+  removed: (task) => {
+    if (route.query.task === task.id)
+      closeSheet()
+  },
+})
+
 async function toggleSearch() {
   searching.value = !searching.value
   if (searching.value) {
     await nextTick()
     searchInput.value?.focus()
   }
-}
-
-async function run(task: Task) {
-  busy.value = task.id
-  error.value = ''
-  try {
-    const started = await api<RunListItem>(`/tasks/${task.id}/run`, { method: 'POST' })
-    notify('Mission added to the queue')
-    await router.push(`/runs/${started.id}`)
-  }
-  catch (e) { error.value = (e as Error).message }
-  finally { busy.value = '' }
-}
-
-async function save(task: Task, message: string, method = 'PUT', path = `/tasks/${task.id}`) {
-  try {
-    await api(path, { method, body: JSON.stringify(task) })
-    await refresh()
-    notify(message)
-  }
-  catch (e) { error.value = (e as Error).message }
-}
-
-const pause = (task: Task) => save({ ...task, enabled: !task.enabled }, task.enabled ? 'Schedule paused' : 'Schedule resumed')
-const archive = (task: Task) => save({ ...task, archived: !task.archived, enabled: false }, task.archived ? 'Mission restored with its schedule paused' : 'Mission archived')
-
-function duplicate(task: Task) {
-  return save({
-    ...task,
-    name: `${task.name.slice(0, 92)} (copy)`,
-    enabled: false,
-    archived: false,
-  }, 'Mission duplicated with its schedule paused', 'POST', '/tasks')
-}
-
-async function remove() {
-  try {
-    await api(`/tasks/${deleting.value!.id}`, { method: 'DELETE' })
-    if (route.query.task === deleting.value!.id)
-      closeSheet()
-    deleting.value = null
-    await refresh()
-    notify('Mission removed')
-  }
-  catch (e) { error.value = (e as Error).message }
 }
 
 function saved(task: Task) {
@@ -202,7 +167,7 @@ const runColor = (status: RunListItem['status']) => status === 'succeeded' ? 'bg
     {{ error }}
   </UiAlert>
   <div class="missions flex min-h-0 flex-1">
-    <section class="flex min-h-0 w-105 shrink-0 flex-col tablet:w-full" aria-label="Mission list">
+    <section class="flex min-h-0 w-111 shrink-0 flex-col pr-6 tablet:w-full tablet:pr-0" aria-label="Mission list">
       <header class="flex items-start gap-2 pr-1">
         <div class="min-w-0 flex-1">
           <h1 class="m-0! font-heading text-[32px] leading-9 font-bold tracking-[-0.8px]">
@@ -238,7 +203,8 @@ const runColor = (status: RunListItem['status']) => status === 'succeeded' ? 'bg
           aria-label="Search missions"
         >
       </label>
-      <div class="-mx-1 mt-2 flex shrink-0 gap-2 overflow-x-auto px-1 py-1.5 [scrollbar-width:none]" role="group" aria-label="Filter missions">
+      <!-- The end padding lies under the fade, so the last filter clears it once scrolled into view. -->
+      <div class="-ml-1 mt-2 flex shrink-0 gap-2 overflow-x-auto py-1.5 pr-8 pl-1 [mask-image:linear-gradient(to_right,#000_calc(100%-32px),transparent)] [scrollbar-width:none]" role="group" aria-label="Filter missions">
         <button
           v-for="option in missionFilters"
           :key="option.value"
@@ -319,6 +285,7 @@ const runColor = (status: RunListItem['status']) => status === 'succeeded' ? 'bg
       <MissionDetail
         v-if="shown"
         :key="shown.id"
+        class="max-w-180"
         :task="shown"
         :latest="latest.get(shown.id)"
         :busy="busy === shown.id"
