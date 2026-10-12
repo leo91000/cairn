@@ -58,10 +58,7 @@ for (const kind of ['chat', 'task'] as const) {
     // Loading older pages must keep following the latest output.
     const scroller = page.getByRole('region', { name: 'Activity output' })
     await expect.poll(() => scroller.evaluate(el => el.scrollHeight - el.clientHeight - el.scrollTop)).toBeLessThan(2)
-    if (kind === 'chat')
-      await expect(page.getByRole('button', { name: 'Follow output', exact: true, includeHidden: true })).toHaveAttribute('aria-pressed', 'true')
-    else
-      await expect(page.getByLabel('Follow output')).toBeChecked()
+    await expect(page.getByRole('button', { name: kind === 'chat' ? 'Latest messages' : 'Latest activity', exact: true })).toHaveCount(0)
     await page.screenshot({ path: test.info().outputPath(`${kind}-automatic-history.png`), animations: 'disabled' })
   })
 }
@@ -106,7 +103,7 @@ test('automatic history pauses on errors and resumes only after retry', async ({
   await retry.click()
   await expect(retry).not.toBeVisible()
   await expect.poll(() => requests).toBeGreaterThanOrEqual(3)
-  await expect(page.getByLabel('Follow output')).toBeChecked()
+  await expect(page.getByRole('button', { name: 'Latest activity', exact: true })).toHaveCount(0)
 })
 
 test('signing out closes live subscriptions before the session is revoked', async ({ page, workspace }) => {
@@ -324,9 +321,10 @@ test('a cached run restores the reading offset while its stream is still connect
   await authenticateWorkspace(page)
   await page.getByRole('button', { name: /^Conversation/ }).click()
   await expect(page.locator('.activity-message').filter({ hasText: 'Saved reading position 39.' })).toBeVisible()
-  await page.getByLabel('Follow output').uncheck()
   const scroller = page.getByRole('region', { name: 'Activity output' })
+  // Reading older output pauses following.
   await scroller.evaluate(element => element.scrollTop = 300)
+  await expect(page.getByRole('button', { name: 'Latest activity', exact: true })).toBeVisible()
   await expect.poll(() => scroller.evaluate(element => element.scrollTop)).toBe(300)
   await expect.poll(() => page.evaluate(() => new Promise<number>((resolve) => {
     const request = indexedDB.open('cairn-history-v1', 1)
@@ -384,7 +382,7 @@ test('a cached run restores the reading offset while its stream is still connect
     // A run opens on its conversation, restoring the cached reading offset before the stream connects.
     await expect(page.getByRole('button', { name: /^Conversation/ })).toHaveAttribute('aria-pressed', 'true')
     await expect.poll(() => scroller.evaluate(element => element.scrollTop)).toBe(300)
-    await expect(page.getByLabel('Follow output')).not.toBeChecked()
+    await expect(page.getByRole('button', { name: 'Latest activity', exact: true })).toBeVisible()
   }
   finally {
     release()
@@ -393,6 +391,9 @@ test('a cached run restores the reading offset while its stream is still connect
 
   await expect(page.getByRole('status').filter({ hasText: 'Updating…' })).toHaveCount(0)
   await expect(page.getByRole('button', { name: /^Conversation/ })).toHaveAttribute('aria-pressed', 'true')
+  // Scrolling back to the end resumes following, as on Android.
+  await scroller.evaluate(element => element.scrollTop = element.scrollHeight)
+  await expect(page.getByRole('button', { name: 'Latest activity', exact: true })).toHaveCount(0)
 })
 
 test('recent history loads older pages without moving the reader and survives a blocked reconnect', async ({ page, workspace }) => {
@@ -408,7 +409,6 @@ test('recent history loads older pages without moving the reader and survives a 
   await page.getByRole('button', { name: /^Conversation/ }).click()
   await expect(page.locator('.activity-message').filter({ hasText: 'Paged line 349' })).toBeVisible()
   await expect(page.locator('.activity-message').filter({ hasText: 'Paged line 249' })).toHaveCount(0)
-  await page.getByLabel('Follow output').uncheck()
   let release!: () => void
   const gate = new Promise<void>((resolve) => {
     release = resolve
@@ -433,7 +433,7 @@ test('recent history loads older pages without moving the reader and survives a 
   await page.unrouteAll({ behavior: 'wait' })
   await useRelayForHttpMocks(page)
   // Move back to the latest content and let its bounded disk snapshot commit.
-  await page.getByLabel('Follow output').check()
+  await page.getByRole('button', { name: 'Latest activity', exact: true }).click()
   await expect(page.locator('.activity-message').filter({ hasText: 'Paged line 349' })).toBeVisible()
   await expect.poll(() => page.evaluate(() => new Promise<number>((resolve) => {
     const open = indexedDB.open('cairn-history-v1', 1)
