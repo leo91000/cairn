@@ -7,8 +7,9 @@ import {
 } from 'vue'
 import { api, state } from './api'
 
-// Recent mission runs shared by the Fil, the palette and the shell badges: one slow poll while any
-// view needs it, because the server rate-limits each client. Actions refresh it immediately.
+// The latest run of each mission, shared by the Fil, the palette and the shell badges, with what
+// the account has not read: one slow poll while any view needs it, because the server
+// rate-limits each client. Actions refresh it immediately.
 const runs = ref<RunListItem[]>([])
 let users = 0
 let fetchedAt = 0
@@ -26,7 +27,7 @@ export async function refreshMissionRuns() {
     return
   fetchedAt = Date.now()
   try {
-    runs.value = await api<RunListItem[]>('/runs?offset=0&limit=50')
+    runs.value = await api<RunListItem[]>('/tasks/activity')
   }
   catch {
     // Keep the last known runs; the Fil stays usable while the server reconnects.

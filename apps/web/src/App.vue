@@ -32,8 +32,9 @@ import {
   Search,
 } from './icons'
 import { useMissionRuns } from './mission-runs'
+import { localReads } from './reads'
 import { modifier, typingTarget } from './shortcuts'
-import { filOf } from './signal'
+import { filOf, isUnread } from './signal'
 import { workspaceActionsKey } from './workspace-actions'
 
 useAgentPortraits()
@@ -96,8 +97,12 @@ const place = computed(() => filPage.value || route.path.startsWith('/chats') ? 
 const reading = computed(() => route.path.startsWith('/chats') || /^\/(?:fil\/)?runs\/./.test(route.path) || route.path === '/authorize' || route.path.startsWith('/settings/'))
 const chats = useChatList()
 const runs = useMissionRuns({ eager: false })
-const fil = computed(() => filOf(chats.value, state.tasks, runs.value))
-const needsYou = computed(() => fil.value.forYou.length)
+const fil = computed(() => filOf(chats.value, state.tasks, runs.value, localReads))
+const toRead = computed(() => fil.value.forYou.filter(isUnread).length)
+const needsYou = computed(() => fil.value.forYou.length - toRead.value)
+// The Fil's badge: coral when something needs the user, the accent when work only waits to be read.
+const filBadge = computed(() => needsYou.value || toRead.value)
+const filBadgeLabel = computed(() => [needsYou.value ? `${needsYou.value} need you` : '', toRead.value ? `${toRead.value} to read` : ''].filter(Boolean).join(' · '))
 const missionRunning = computed(() => fil.value.live.some(item => item.taskId && item.kind === 'running'))
 
 onMounted(async () => {
@@ -202,7 +207,7 @@ function openShortcuts() {
           :class="{ 'text-ink!': place === index }"
           :aria-current="place === index ? 'page' : undefined"
           :aria-label="item.label"
-          :aria-description="index === 0 && needsYou ? `${needsYou} need you` : undefined"
+          :aria-description="index === 0 && filBadge ? filBadgeLabel : undefined"
           :data-tip="item.label"
           :data-kbd="item.keys"
           data-side="right"
@@ -211,11 +216,12 @@ function openShortcuts() {
             <Icon :name="item.icon" :size="20" />
             <span class="text-[10.5px] font-semibold">{{ item.label }}</span>
             <span
-              v-if="index === 0 && needsYou"
-              class="absolute -right-2.5 -top-1.5 grid h-4 min-w-4 place-items-center rounded-full bg-coral px-1 text-[10px] font-bold text-white"
+              v-if="index === 0 && filBadge"
+              class="absolute -right-2.5 -top-1.5 grid h-4 min-w-4 place-items-center rounded-full px-1 text-[10px] font-bold"
+              :class="needsYou ? 'bg-coral text-white' : 'bg-accent text-surface'"
               aria-hidden="true"
-              :title="`${needsYou} need you`"
-            >{{ needsYou }}</span>
+              :title="filBadgeLabel"
+            >{{ filBadge }}</span>
             <span
               v-if="index === 1 && missionRunning"
               class="live-dot absolute -right-1.5 -top-1"
@@ -329,7 +335,12 @@ function openShortcuts() {
         <span class="relative flex flex-col items-center gap-0.5">
           <Icon :name="item.icon" :size="20" />
           <span class="text-[10.5px] font-semibold">{{ item.label }}</span>
-          <span v-if="index === 0 && needsYou" class="absolute -right-3 -top-1.5 grid h-4 min-w-4 place-items-center rounded-full bg-coral px-1 text-[10px] font-bold text-white" aria-hidden="true">{{ needsYou }}</span>
+          <span
+            v-if="index === 0 && filBadge"
+            class="absolute -right-3 -top-1.5 grid h-4 min-w-4 place-items-center rounded-full px-1 text-[10px] font-bold"
+            :class="needsYou ? 'bg-coral text-white' : 'bg-accent text-surface'"
+            aria-hidden="true"
+          >{{ filBadge }}</span>
           <span v-if="index === 1 && missionRunning" class="live-dot absolute -right-2 -top-1" aria-hidden="true" />
         </span>
       </RouterLink>

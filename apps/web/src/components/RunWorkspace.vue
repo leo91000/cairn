@@ -17,6 +17,7 @@ import {
   Square,
   Terminal,
 } from '../icons'
+import { useReadWhileOpen } from '../reads'
 import { useRetryNotice } from '../run-retry'
 import { useLiveRun } from '../use-live-run'
 import ActivityFeed from './ActivityFeed.vue'
@@ -49,6 +50,8 @@ const router = useRouter()
 const live = useLiveRun(() => `/runs/${props.runId}/stream`)
 const { events, connectionNotice, catchingUp: loading } = live
 const run = computed(() => live.snapshot.value?.run ?? undefined)
+// Opening a finished mission run reads its mission in the Fil, on every device.
+useReadWhileOpen(() => run.value?.trigger !== 'chat' && run.value?.status === 'succeeded' && run.value.finishedAt ? { key: `task:${run.value.taskId}`, at: run.value.finishedAt } : null)
 const retryNotice = useRetryNotice(() => run.value)
 const waitNotice = computed(() => retryNotice.value ?? run.value?.accountWaitReason)
 const deliverables = computed(() => live.snapshot.value?.artifacts ?? [])

@@ -61,6 +61,7 @@ import {
   Zap,
 } from '../icons'
 import { connectionTone, installationKey, routeLabel } from '../installation-context'
+import { useReadWhileOpen } from '../reads'
 import { useRetryNotice } from '../run-retry'
 import { backgroundWait } from '../signal'
 import { chatSkills } from '../skill-mentions'
@@ -271,6 +272,11 @@ watch(live.snapshot, (value) => {
   detail.value = value?.chat ?? null
   if (value?.chats)
     publishChats(value.chats)
+})
+// The open conversation's finished turns are read while the page is visible.
+useReadWhileOpen(() => {
+  const chat = chats.value.find(chat => chat.id === chatId.value)
+  return chat?.unread ? { key: `chat:${chat.id}`, at: chat.finishedAt ?? chat.updatedAt } : null
 })
 watch(live.error, (value) => {
   if (value)

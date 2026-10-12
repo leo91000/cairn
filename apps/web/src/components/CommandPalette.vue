@@ -29,8 +29,9 @@ import {
   X,
 } from '../icons'
 import { refreshMissionRuns, useMissionRuns } from '../mission-runs'
+import { localReads } from '../reads'
 import { modifier } from '../shortcuts'
-import { filOf } from '../signal'
+import { filOf, isUnread } from '../signal'
 import { setThemePreference, themePreference } from '../theme'
 import AgentAvatar from './AgentAvatar.vue'
 import Icon from './Icon.vue'
@@ -160,13 +161,13 @@ const commands = computed<Command[]>(() => {
     }
   }
 
-  const fil = filOf(chatList.value, state.tasks, runs.value)
+  const fil = filOf(chatList.value, state.tasks, runs.value, localReads)
   for (const item of fil.forYou) {
     items.push({
       id: `need-${item.key}`,
-      group: 'Needs you',
+      group: isUnread(item) ? 'To read' : 'Needs you',
       label: item.title,
-      hint: item.subtitle,
+      hint: item.preview || item.subtitle,
       avatar: { name: item.agent, key: item.agentKey },
       run: go(item.to),
     })

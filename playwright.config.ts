@@ -44,6 +44,7 @@ export default defineConfig({
     { name: 'layout-webkit-models', testMatch: 'models.spec.ts', use: { browserName: 'webkit', hasTouch: true } },
     { name: 'journeys-signal', testMatch: 'signal.spec.ts' },
     { name: 'layout-webkit-signal', testMatch: 'signal.spec.ts', use: { browserName: 'webkit', hasTouch: true } },
+    { name: 'journeys-unread', testMatch: 'unread.spec.ts' },
     { name: 'journeys-chats', testMatch: 'chats.spec.ts' },
     { name: 'journeys-chat-switch', testMatch: 'chat-switch.spec.ts' },
     { name: 'journeys-chat-attachments', testMatch: 'chat-attachments.spec.ts' },

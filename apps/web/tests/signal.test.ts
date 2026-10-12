@@ -160,6 +160,53 @@ describe('the Fil', () => {
       runId: 'triage-1',
     }])
   })
+
+  it('keeps finished work the user has not read in For you, below what needs an answer', () => {
+    const fil = filOf([
+      chat('done', {
+        status: 'succeeded',
+        unread: true,
+        finishedAt: 40,
+        updatedAt: 30,
+        preview: 'Shipped the notes.',
+      }),
+      chat('read', { status: 'succeeded', unread: false, finishedAt: 50 }),
+      chat('question', {
+        pendingQuestions: 1,
+        status: 'succeeded',
+        unread: true,
+        updatedAt: 2,
+      }),
+      chat('paused', { status: 'succeeded', paused: true, unread: false }),
+    ], [task('digest'), task('audit')], [
+      run('digest-1', 'digest', { finishedAt: 60, unread: true, preview: 'Three stories today.' }),
+      run('audit-1', 'audit', {
+        finishedAt: 70,
+        unread: true,
+        outcome: {
+          status: 'needs_input',
+          reason: 'Pick a scope',
+          evidence: [],
+          reportedAt: 70,
+        },
+      }),
+    ])
+    expect(fil.forYou.map(item => [item.title, item.kind])).toEqual([
+      ['audit', 'review'],
+      ['question', 'question'],
+      ['digest', 'unread'],
+      ['done', 'unread'],
+    ])
+    expect(fil.forYou[3]).toMatchObject({ at: 40, subtitle: 'Finished', preview: 'Shipped the notes.' })
+    expect(fil.forYou[2]).toMatchObject({ key: 'task:digest', subtitle: 'Mission finished', preview: 'Three stories today.' })
+    expect(fil.recent.map(item => item.title).sort()).toEqual(['paused', 'read'])
+  })
+
+  it('treats work read on this page as read until the server catches up, but not a later turn', () => {
+    const chats = [chat('done', { status: 'succeeded', unread: true, finishedAt: 40 })]
+    expect(filOf(chats, [], [], { 'chat:done': 40 }).recent.map(item => item.title)).toEqual(['done'])
+    expect(filOf(chats, [], [], { 'chat:done': 39 }).forYou.map(item => item.kind)).toEqual(['unread'])
+  })
 })
 
 describe('the working indicator', () => {
