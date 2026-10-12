@@ -324,7 +324,7 @@ export function initializeRepository(projectPath: string) {
 // Mobile keeps status in Chat details instead of a permanent metadata row.
 export async function expectChatReady(page: Page) {
   const details = page.getByRole('button', { name: 'Chat details', exact: true })
-  const mobile = await details.isVisible()
+  const mobile = (page.viewportSize()?.width ?? 1280) <= 640
   if (mobile)
     await details.click()
   const context = mobile ? page.getByRole('dialog', { name: 'Chat details', exact: true }) : page

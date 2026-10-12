@@ -61,7 +61,8 @@ test('reviews the open workspace layout and compact chat controls across themes 
   }
 
   await page.setViewportSize({ width: 1440, height: 1000 })
-  await page.getByRole('button', { name: 'Conversations', exact: true }).click()
+  await page.getByRole('button', { name: 'Chat details', exact: true }).click()
+  await page.getByRole('dialog', { name: 'Chat details', exact: true }).getByRole('button', { name: 'Search conversations', exact: true }).click()
   await expect(page.getByRole('dialog', { name: 'Conversations' })).toBeVisible()
   await expect(page.locator('.activity-scroll')).toBeVisible()
   await expectSingleScroll(page)

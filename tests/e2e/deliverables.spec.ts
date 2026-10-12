@@ -73,7 +73,7 @@ test('persistent deliverables have a gallery, revisions, mobile viewer, and play
   await page.goto(workspacePath(`/chats/${chat.id}`))
   await page.setViewportSize({ width: 1440, height: 1000 })
   await page.emulateMedia({ colorScheme: 'dark' })
-  await expect(page.getByRole('button', { name: 'Files · 6', exact: true })).toBeVisible()
+  await expect(page.getByRole('button', { name: 'Files: 6', exact: true })).toBeVisible()
   await expect(page.getByRole('button', { name: 'Open Mobile · refined', exact: true })).toBeVisible()
   // Message links open the authenticated viewer; external links keep browser behavior.
   await page.getByRole('link', { name: 'Read the report', exact: true }).click()
