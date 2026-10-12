@@ -401,6 +401,10 @@ test('a cached run restores the reading offset while its stream is still connect
   // Scrolling up pauses following again; scrolling back to the end resumes it, as on Android.
   await scroller.evaluate(element => element.scrollTop = 300)
   await expect(latest).toBeVisible()
+  // A scroll while the way back holds keyboard focus keeps it there.
+  await latest.focus()
+  await scroller.evaluate(element => element.scrollTop -= 40)
+  await expect(latest).toBeFocused()
   await scroller.evaluate(element => element.scrollTop = element.scrollHeight)
   await expect(latest).toHaveCount(0)
   await expectFollowing(page)

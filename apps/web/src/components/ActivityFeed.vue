@@ -99,6 +99,8 @@ const conversation = ref<HTMLElement>()
 const atStart = ref(true)
 const scrolling = ref(false)
 const atEnd = ref(true)
+// A scroll would hide the way back; keep it while it holds keyboard focus.
+const latestFocused = ref(false)
 let scrollEnd: ReturnType<typeof setTimeout> | undefined
 let restoredTop: number | undefined
 let pagingFrame: number | undefined
@@ -387,11 +389,13 @@ defineExpose({
             leave-to-class="opacity-0"
           >
             <button
-              v-if="!follow && !atEnd && !scrolling"
+              v-if="!follow && !atEnd && (!scrolling || latestFocused)"
               class="absolute bottom-2 left-1/2 z-10 grid size-9 -translate-x-1/2 place-items-center rounded-full border border-line bg-raised text-ink shadow-sm hover:bg-hover focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent phone:size-11"
               :aria-label="chat ? 'Latest messages' : 'Latest activity'"
               :title="chat ? 'Latest messages' : 'Latest activity'"
               @click="jumpToLatest"
+              @focus="latestFocused = true"
+              @blur="latestFocused = false"
             >
               <Icon :name="ArrowDown" :size="18" />
             </button>
