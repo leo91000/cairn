@@ -45,6 +45,7 @@ export default defineConfig({
     { name: 'journeys-signal', testMatch: 'signal.spec.ts' },
     { name: 'layout-webkit-signal', testMatch: 'signal.spec.ts', use: { browserName: 'webkit', hasTouch: true } },
     { name: 'journeys-chats', testMatch: 'chats.spec.ts' },
+    { name: 'journeys-installation-subdomains', testMatch: 'installation-subdomains.spec.ts' },
     { name: 'journeys-chat-switch', testMatch: ['chat-switch.spec.ts', 'readable-slugs.spec.ts'] },
     { name: 'journeys-chat-attachments', testMatch: 'chat-attachments.spec.ts' },
     { name: 'layout-webkit-chat-attachments', testMatch: 'chat-attachments.spec.ts', use: { browserName: 'webkit', hasTouch: true } },

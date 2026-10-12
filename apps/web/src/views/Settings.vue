@@ -15,6 +15,7 @@ import {
   notify,
   state,
 } from '../api'
+import { beaconOrigin } from '../beacon-location'
 import AccountConfirmation from '../components/AccountConfirmation.vue'
 import Icon from '../components/Icon.vue'
 import Modal from '../components/Modal.vue'
@@ -65,7 +66,7 @@ async function load() {
       api('/audit'),
     ])
     if (beaconEntry)
-      settings.value.mcpUrl = `${location.origin}/mcp`
+      settings.value.mcpUrl = `${beaconOrigin}/mcp`
   }
   catch (e) {
     error.value = (e as Error).message

@@ -18,15 +18,12 @@ use axum::{
 use cairn_beacon::html::escape_html;
 use cairn_beacon::{
     AccountPushSender, EmailSender, FcmPushSender, OAuthProvider, OAuthProviders, Relay,
-    TrustedProxies, WebPushSender, router_with_network_and_push,
+    TrustedProxies, WebPushSender, router_with_installation_hosts,
 };
 use reqwest::Client;
 use serde_json::json;
 use sqlx_postgres::PgPoolOptions;
-use tower_http::{
-    services::{ServeDir, ServeFile},
-    set_header::SetResponseHeaderLayer,
-};
+use tower_http::{services::ServeDir, set_header::SetResponseHeaderLayer};
 use url::Url;
 
 struct HttpEmailSender {
@@ -166,10 +163,9 @@ fn configured_oauth(name: &str, loopback: bool) -> Result<Option<OAuthProvider>,
 async fn run() -> Result<(), String> {
     let configured_origin = required("CAIRN_BEACON_ORIGIN")?;
     let origin_url = Url::parse(&configured_origin).map_err(|_| "Invalid CAIRN_BEACON_ORIGIN")?;
-    let loopback = matches!(
-        origin_url.host_str(),
-        Some("localhost" | "127.0.0.1" | "[::1]")
-    );
+    let loopback = origin_url.host_str().is_some_and(|host| {
+        matches!(host, "localhost" | "127.0.0.1" | "[::1]") || host.ends_with(".localhost")
+    });
     if !(origin_url.scheme() == "https" || origin_url.scheme() == "http" && loopback)
         || origin_url.path() != "/"
         || origin_url.query().is_some()
@@ -182,6 +178,12 @@ async fn run() -> Result<(), String> {
         );
     }
     let origin = origin_url.origin().ascii_serialization();
+    let subdomains = match env::var("CAIRN_BEACON_INSTALLATION_SUBDOMAINS").as_deref() {
+        Ok("true") => true,
+        Ok("false") | Err(_) => false,
+        _ => return Err("CAIRN_BEACON_INSTALLATION_SUBDOMAINS must be true or false".into()),
+    };
+    let hosts = cairn_beacon::InstallationHosts::new(&origin, subdomains)?;
 
     let endpoint = env::var("CAIRN_BEACON_EMAIL_ENDPOINT")
         .unwrap_or_else(|_| "https://api.resend.com/emails".into());
@@ -306,10 +308,26 @@ async fn run() -> Result<(), String> {
     let health_readiness = readiness.clone();
     let commit = env::var("APP_COMMIT").unwrap_or_else(|_| "development".into());
     let runtime_id = env::var("APP_RUNTIME_ID").unwrap_or_else(|_| commit.clone());
-    let mut app = router_with_network_and_push(
+    let shell = Arc::new(
+        hosts.shell(
+            &tokio::fs::read_to_string(web.join("beacon.html"))
+                .await
+                .map_err(|_| "Could not read the Beacon browser shell")?,
+        ),
+    );
+    let shell_page = get(move || {
+        let shell = shell.clone();
+        async move {
+            (
+                [(header::CACHE_CONTROL, "no-store")],
+                axum::response::Html(shell.as_str().to_owned()),
+            )
+        }
+    });
+    let mut app = router_with_installation_hosts(
         pool.clone(),
         Arc::new(sender),
-        origin,
+        hosts.clone(),
         oauth,
         relay.clone(),
         proxies,
@@ -347,9 +365,9 @@ async fn run() -> Result<(), String> {
         }),
     )
     .route("/api/{*path}", any(|| async { StatusCode::NOT_FOUND }))
-    .route_service("/", ServeFile::new(web.join("beacon.html")))
-    .route_service("/index.html", ServeFile::new(web.join("beacon.html")))
-    .fallback_service(ServeDir::new(&web).fallback(ServeFile::new(web.join("beacon.html"))))
+    .route("/", shell_page.clone())
+    .route("/index.html", shell_page.clone())
+    .fallback_service(ServeDir::new(&web).fallback(shell_page))
     .layer(SetResponseHeaderLayer::if_not_present(
         header::CONTENT_SECURITY_POLICY,
         HeaderValue::from_static("frame-ancestors 'none'"),
@@ -366,6 +384,8 @@ async fn run() -> Result<(), String> {
             HeaderValue::from_static("max-age=31536000"),
         ));
     }
+
+    app = hosts.layer(app, pool.clone());
 
     let listener = tokio::net::TcpListener::bind(address)
         .await

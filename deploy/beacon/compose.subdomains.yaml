@@ -1,0 +1,10 @@
+# Merge with compose.production.yaml after preparing wildcard DNS and DNS-01 TLS.
+services:
+  beacon:
+    environment:
+      CAIRN_BEACON_INSTALLATION_SUBDOMAINS: 'true'
+    labels:
+      traefik.http.routers.cairn-beacon.rule: 'Host(`cairn.build`) || HostRegexp(`^[a-z0-9-]+\.cairn\.build$`)'
+      traefik.http.routers.cairn-beacon.tls.certresolver: ${CAIRN_PROXY_WILDCARD_CERT_RESOLVER:?Set the DNS-01 wildcard certificate resolver}
+      traefik.http.routers.cairn-beacon.tls.domains[0].main: cairn.build
+      traefik.http.routers.cairn-beacon.tls.domains[0].sans: '*.cairn.build'

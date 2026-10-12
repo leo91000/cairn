@@ -177,6 +177,17 @@ def postgres(aliases):
         READS,
         cpu,
     )
+    if aliases:
+        host_slugs = [row[0] for row in connection.execute(
+            "SELECT slug FROM installations ORDER BY id"
+        ).fetchall()]
+        result["warm_host_resolution"] = measure(
+            lambda i: connection.execute(
+                "SELECT id FROM installations WHERE slug=%s", (host_slugs[i % ROWS],)
+            ).fetchone(),
+            READS,
+            cpu,
+        )
     result["write_commit"] = measure(
         lambda i: connection.execute(
             "INSERT INTO installations(id,name) VALUES (%s,'Example installation')",

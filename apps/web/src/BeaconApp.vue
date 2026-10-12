@@ -17,6 +17,17 @@ import {
   state,
 } from './api'
 import App from './App.vue'
+import {
+  accountSettingsUrl,
+  beaconOrigin,
+  centralAccount,
+  installationHost,
+  installationSubdomains,
+  installationUrl,
+  rememberPreference,
+  sharedPreference,
+  workspaceReturn,
+} from './beacon-location'
 import AccountMenu from './components/AccountMenu.vue'
 import AccountMethods from './components/AccountMethods.vue'
 import AccountSecurity from './components/AccountSecurity.vue'
@@ -30,6 +41,7 @@ import ThemeControl from './components/ThemeControl.vue'
 import UiAlert from './components/UiAlert.vue'
 import UiButton from './components/UiButton.vue'
 import VirtualSelect from './components/VirtualSelect.vue'
+import { transferInstallationDrafts } from './draft-transfer'
 import { Settings } from './icons'
 import { installationKey } from './installation-context'
 import Authorize from './views/Authorize.vue'
@@ -58,6 +70,7 @@ const showIdentityConfirmation = ref(false)
 const confirmationTitle = ref('')
 const showNotifications = ref(false)
 const ready = ref(false)
+const navigationPending = ref(false)
 const email = ref('')
 const code = ref('')
 const challenge = ref('')
@@ -67,7 +80,7 @@ const error = ref('')
 const claimCode = ref('')
 const installationCommand = computed(() => {
   const quote = (value: string) => `'${value.replaceAll('\'', '\'"\'"\'')}'`
-  return `curl -fsSL ${quote(`${window.location.origin}/install.sh`)} | sudo bash -s -- --claim-code ${quote(claimCode.value)}`
+  return `curl -fsSL ${quote(`${beaconOrigin}/install.sh`)} | sudo bash -s -- --claim-code ${quote(claimCode.value)}`
 })
 const installationInstructions = 'This code expires in 10 minutes. Run this command on your Linux x86-64 machine. No domain, certificate, incoming port or S3 setup is needed.'
 const showSharing = ref(false)
@@ -109,6 +122,8 @@ const beaconReturnKey = 'cairn-installation-return'
 const authorizePage = window.location.pathname === '/authorize'
 const claimPage = window.location.pathname === '/claim'
 const privacyPage = window.location.pathname === '/privacy'
+const accountPage = window.location.pathname.endsWith('/settings/account')
+const accountReturn = new URL(window.location.href).searchParams.get('return_to')
 
 watch(deviceCode, () => deviceReview.value = null)
 
@@ -122,14 +137,44 @@ watch(session, (value) => {
   state.installationId = installation.value?.id || ''
   state.authenticated = value?.authenticated || false
   state.ready = ready.value
-  if (!value?.authenticated)
-    return
+  if (!value?.authenticated) {
+    if (installationHost && !state.signingOut) {
+      const login = new URL('/', beaconOrigin)
+      login.searchParams.set('return_to', window.location.href)
+      redirect(login.href)
+    }
 
-  if (installation.value?.slug && requested !== installation.value.slug) {
-    const destination = new URL(window.location.href)
-    destination.pathname = destination.pathname.replace(`/installations/${requested}`, `/installations/${installation.value.slug}`)
-    redirect(`${destination.pathname}${destination.search}${destination.hash}`)
     return
+  }
+
+  if (installationHost && accountPage) {
+    redirect(accountSettingsUrl(installationHost))
+    return
+  }
+
+  const returnTo = workspaceReturn(accountReturn, value.installations)
+  if (centralAccount && returnTo && !accountPage) {
+    redirect(returnTo)
+    return
+  }
+
+  if (installation.value?.slug) {
+    const current = new URL(window.location.href)
+    const rest = installationHost
+      ? `${current.pathname}${current.search}${current.hash}`
+      : `${current.pathname.slice(`/installations/${requested}`.length) || '/'}${current.search}${current.hash}`
+    if (!(installationSubdomains && centralAccount && accountPage)) {
+      const destination = installationUrl(installation.value.slug, rest)
+      if (destination !== current.href) {
+        void navigateInstallation(installation.value, destination)
+        return
+      }
+    }
+    else if (requested !== installation.value.slug) {
+      current.pathname = current.pathname.replace(`/installations/${requested}`, `/installations/${installation.value.slug}`)
+      redirect(current.href)
+      return
+    }
   }
 
   state.installationOnline = installation.value?.online
@@ -144,6 +189,7 @@ watch(session, (value) => {
   if (installation.value) {
     try {
       localStorage.setItem(`cairn-current-installation:${value.account?.id}`, installation.value.id)
+      rememberPreference(`cairn_installation_${value.account?.id}`, installation.value.id)
     }
     catch {}
   }
@@ -151,7 +197,7 @@ watch(session, (value) => {
   if (!requested && value.installations.length && !claimPage && !invitationsPage && !authorizePage) {
     let remembered = ''
     try {
-      remembered = localStorage.getItem(`cairn-current-installation:${value.account?.id}`) || ''
+      remembered = sharedPreference(`cairn_installation_${value.account?.id}`) || localStorage.getItem(`cairn-current-installation:${value.account?.id}`) || ''
     }
     catch {}
 
@@ -226,6 +272,9 @@ async function submit() {
 }
 
 async function signOut() {
+  if (state.signingOut)
+    return
+  state.signingOut = true
   const leavingInstallation = !!state.installationId
   busy.value = true
   error.value = ''
@@ -247,13 +296,14 @@ async function signOut() {
     code.value = ''
     challenge.value = ''
     if (leavingInstallation)
-      window.location.assign('/')
+      window.location.assign(`${beaconOrigin}/`)
   }
   catch (cause) {
     error.value = cause instanceof Error ? cause.message : 'Unable to sign out. Please try again.'
   }
   finally {
     busy.value = false
+    state.signingOut = false
   }
 }
 
@@ -265,6 +315,11 @@ function openMethods() {
 }
 
 function openIdentityConfirmation(title: string) {
+  if (installationHost) {
+    redirect(accountSettingsUrl(installationHost, true))
+    return
+  }
+
   confirmationTitle.value = title
   showIdentityConfirmation.value = true
 }
@@ -446,15 +501,45 @@ async function oauth(provider: 'google' | 'github') {
   }
 }
 
+async function navigateInstallation(value: { id: string, slug?: string }, destination: string) {
+  if (navigationPending.value || state.redirecting)
+    return
+  navigationPending.value = true
+  try {
+    if (value.slug)
+      await transferInstallationDrafts(value.id, value.slug, session.value?.account?.id || '')
+    redirect(destination)
+  }
+  catch (cause) {
+    navigationPending.value = false
+    error.value = cause instanceof Error ? cause.message : 'Unable to open this installation.'
+  }
+}
+
+function identityConfirmed() {
+  showIdentityConfirmation.value = false
+  error.value = ''
+  const destination = workspaceReturn(accountReturn, session.value?.installations || [])
+  if (installationSubdomains && centralAccount && destination)
+    redirect(destination)
+}
+
 function openInstallation(value: { id: string, slug?: string, name: string }) {
   if (state.redirecting)
     return
   try {
     localStorage.setItem(`cairn-current-installation:${session.value?.account?.id}`, value.id)
+    rememberPreference(`cairn_installation_${session.value?.account?.id}`, value.id)
   }
   catch {}
 
-  redirect(`/installations/${encodeURIComponent(value.slug || value.id)}/`)
+  const known = value.slug ? value : session.value?.installations.find(item => item.id === value.id)
+  if (installationSubdomains && !known?.slug) {
+    redirect(new URL(`/installations/${encodeURIComponent(value.id)}/`, beaconOrigin).href)
+    return
+  }
+
+  void navigateInstallation(known || value, installationUrl(known?.slug || value.id))
 }
 
 async function renameInstallation() {
@@ -624,6 +709,8 @@ onMounted(async () => {
   catch {}
 
   await loadSession()
+  if (centralAccount && accountPage && url.searchParams.get('confirm_identity') === '1' && session.value?.authenticated)
+    openIdentityConfirmation('Confirm identity before continuing')
   const signInError = url.searchParams.get('sign_in_error')
   const oauthErrors: Record<string, string> = {
     oauth: 'Sign-in was cancelled or could not be verified. Try another method.',
@@ -720,8 +807,14 @@ onMounted(async () => {
     <UiAlert v-if="installation.updateRequired" class="mx-4 my-2">
       Mise à jour nécessaire. This installation must finish updating before it can be used here.
     </UiAlert>
-    <App v-if="!installation.updateRequired || router.currentRoute.value.path.startsWith('/settings')">
+    <p v-if="navigationPending" role="status" class="px-6 py-4 text-muted">
+      Opening installation…
+    </p>
+    <App v-if="!navigationPending && (!installation.updateRequired || router.currentRoute.value.path.startsWith('/settings'))">
       <template #settings-account>
+        <UiButton v-if="installationSubdomains && centralAccount" size="small" @click="openInstallation(installation)">
+          Back to installation
+        </UiButton>
         <section aria-label="Profile" class="border-b border-line py-6">
           <h2>Profile</h2>
           <p class="mt-3 break-all text-muted">
@@ -903,7 +996,7 @@ onMounted(async () => {
           :confirmation-title="confirmationTitle"
           return-label="Back to settings"
           @close="showIdentityConfirmation = false"
-          @confirmed="showIdentityConfirmation = false; error = ''"
+          @confirmed="identityConfirmed"
           @signed-out="redirect('/')"
         />
       </div>
@@ -935,7 +1028,7 @@ onMounted(async () => {
         :return-label="showSecurity ? 'Back to account security' : 'Back to installation'"
         @close="showIdentityConfirmation ? showIdentityConfirmation = false : showSecurity = false"
         @confirm-identity="openIdentityConfirmation('Confirm identity before revoking other devices')"
-        @confirmed="showIdentityConfirmation = false; error = ''"
+        @confirmed="identityConfirmed"
         @signed-out="redirect('/')"
       />
       <AccountMethods

@@ -484,3 +484,18 @@ describe('coolify deployment over HTTP', () => {
     expect(() => persistentRunnerCompose(input)).toThrow('Cannot verify runner storage')
   })
 })
+
+it('routes the optional wildcard overlay to Beacon with a DNS-01 certificate resolver', () => {
+  const overlay = parse(readFileSync(new URL('../../deploy/beacon/compose.subdomains.yaml', import.meta.url), 'utf8'))
+  expect(Object.keys(overlay.services)).toEqual(['beacon'])
+  const { environment, labels } = overlay.services.beacon
+  expect(environment.CAIRN_BEACON_INSTALLATION_SUBDOMAINS).toBe('true')
+  expect(labels['traefik.http.routers.cairn-beacon.tls.certresolver']).toContain('CAIRN_PROXY_WILDCARD_CERT_RESOLVER:?')
+  expect(labels['traefik.http.routers.cairn-beacon.tls.domains[0].main']).toBe('cairn.build')
+  expect(labels['traefik.http.routers.cairn-beacon.tls.domains[0].sans']).toBe('*.cairn.build')
+  const expression = labels['traefik.http.routers.cairn-beacon.rule'].match(/HostRegexp\(`(.+)`\)/)[1]
+  const hostname = new RegExp(expression)
+  expect(hostname.test('quiet-cedar-1234abcd.cairn.build')).toBe(true)
+  for (const host of ['cairn.build.evil.test', 'a.b.cairn.build', 'quiet-cedar.cairnXbuild'])
+    expect(hostname.test(host)).toBe(false)
+})

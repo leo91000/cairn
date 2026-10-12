@@ -395,10 +395,11 @@ async fn complete_callback(
 
     // Provider tokens are deliberately discarded: GitHub identification grants no agent access.
     let mut response = Redirect::to("/").into_response();
-    response.headers_mut().insert(
-        header::SET_COOKIE,
-        session_response.headers()[header::SET_COOKIE].clone(),
-    );
+    for cookie in session_response.headers().get_all(header::SET_COOKIE) {
+        response
+            .headers_mut()
+            .append(header::SET_COOKIE, cookie.clone());
+    }
 
     Ok(response)
 }

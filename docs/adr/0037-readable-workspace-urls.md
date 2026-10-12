@@ -24,18 +24,44 @@ Les slugs des conversations restent conservés dans l’installation, conformém
 
 ## Sous-domaines
 
-`{slug}.cairn.build` reste une option possible pour l’interface servie par Beacon,
-mais ne fait pas partie de cette modification. Ce ne serait pas une adresse
-HTTPS directe de la machine de l’installation (ADR-0033).
+Avec `CAIRN_BEACON_INSTALLATION_SUBDOMAINS=true`, l’interface utilise
+`https://{slug}.cairn.build/chats/{conversation-slug}`. Chaque hôte sert la même
+application Beacon ; les machines des installations restent derrière le relais
+et la connexion directe décrits par l’ADR-0033. Le mode est désactivé par défaut
+jusqu’à la préparation du DNS et du certificat wildcard.
 
-Changer le nom d’hôte change [l’origine du navigateur](https://developer.mozilla.org/en-US/docs/Glossary/Origin).
-Les sessions actuelles, les contrôles d’origine, le stockage du navigateur,
-les callbacks OAuth, les passkeys, les notifications et le déploiement DNS/TLS
-doivent être examinés ensemble. Les cookies sans attribut `Domain` restent
-[limités à leur hôte](https://developer.mozilla.org/en-US/docs/Web/HTTP/Reference/Headers/Set-Cookie).
-La préférence actuelle est une origine unique avec des chemins lisibles ; les
-sous-domaines pourront être ajoutés dans un changement distinct et validé de bout
-en bout si leur intérêt produit justifie cette complexité.
+Beacon accepte uniquement son hôte canonique et les slugs enregistrés des
+installations réclamées, avec le port attendu. Sur un sous-domaine, les API
+privées restent liées au UUID de cette installation. Les mutations requièrent
+l’origine exacte de la requête et le jeton CSRF ; les lectures portant un en-tête
+Origin sont également contrôlées. Un suffixe ressemblant, un sous-domaine imbriqué
+ou une autre installation ne passent pas ce contrôle.
+
+La session HttpOnly, Secure en HTTPS et SameSite=Lax est partagée via
+`Domain=cairn.build`. Cette décision impose que tous les sous-domaines de ce
+domaine soient de confiance : **ne pas y héberger ni déléguer des sites contrôlés
+par des utilisateurs**. Ces hôtes ne constituent pas une frontière de sécurité
+pour le cookie partagé. Les autorisations côté serveur restent obligatoires.
+La migration efface d’abord l’ancien cookie limité à l’hôte puis réémet le même
+jeton, avec l’échéance restante ; elle ne crée pas de session et ne renouvelle
+pas la preuve d’identité. Le nom du cookie conserve le contrat Android.
+
+Connexion, passkeys, callbacks OAuth, confirmations d’identité, paramètres du
+compte et notifications restent sur l’origine canonique. Le retour vers une
+installation vérifie son appartenance au compte et l’origine complète. Les
+commandes d’installation et URLs MCP continuent d’utiliser cette origine.
+
+Lors de l’ouverture d’un ancien lien, une iframe limitée à l’origine canonique
+transfère les brouillons de cette installation entre les sessionStorage du
+navigateur. Elle vérifie la source, l’origine, le compte et l’installation ; elle
+conserve les brouillons d’origine et n’écrase pas les nouveaux. Leur contenu ne
+transite pas par le backend. Le thème et l’installation récemment sélectionnée
+utilisent des cookies de préférence non sensibles pour traverser les origines.
+
+Un retour au mode désactivé retire le cookie partagé au profit du cookie limité
+à l’hôte, sans changer la session serveur. Les anciens liens par sous-domaine
+redirigent vers les chemins canoniques si le DNS et le proxy wildcard sont
+conservés. Les brouillons restent dans leur stockage navigateur d’origine.
 
 ## Mesures
 
