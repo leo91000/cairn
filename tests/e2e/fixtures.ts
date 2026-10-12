@@ -321,6 +321,15 @@ export function initializeRepository(projectPath: string) {
   execFileSync('git', ['-C', projectPath, '-c', 'user.name=Test', '-c', 'user.email=test@example.test', 'commit', '--allow-empty', '-m', 'Initial'])
 }
 
+// A followed reader stays at the end when its viewport shrinks; a paused one keeps its offset.
+export async function expectFollowing(page: Page) {
+  const scroller = page.getByRole('region', { name: 'Activity output' })
+  const viewport = page.viewportSize()!
+  await page.setViewportSize({ ...viewport, height: viewport.height - 120 })
+  await expect.poll(() => scroller.evaluate(el => el.scrollHeight - el.clientHeight - el.scrollTop)).toBeLessThan(2)
+  await page.setViewportSize(viewport)
+}
+
 // Mobile keeps status in Chat details instead of a permanent metadata row.
 export async function expectChatReady(page: Page) {
   const details = page.getByRole('button', { name: 'Chat details', exact: true })

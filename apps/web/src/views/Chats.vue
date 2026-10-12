@@ -554,7 +554,7 @@ function key(event: KeyboardEvent) {
         v-if="history"
         :chats="chats"
         :selected="chatId"
-        :anchor="switcherAnchor()"
+        :anchor="switcherAnchor"
         @close="history = false"
         @create="newConversation"
       />
@@ -608,7 +608,7 @@ function key(event: KeyboardEvent) {
               <button
                 ref="tabletHistoryButton"
                 :class="iconButton"
-                class="hidden! size-7! tablet:inline-flex!"
+                class="-my-2 hidden! size-10! tablet:inline-flex!"
                 aria-label="Conversations"
                 aria-haspopup="dialog"
                 :aria-expanded="history"

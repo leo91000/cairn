@@ -98,6 +98,7 @@ const scroller = ref<HTMLElement>()
 const conversation = ref<HTMLElement>()
 const atStart = ref(true)
 const scrolling = ref(false)
+const atEnd = ref(true)
 let scrollEnd: ReturnType<typeof setTimeout> | undefined
 let restoredTop: number | undefined
 let pagingFrame: number | undefined
@@ -115,6 +116,7 @@ watch([scroller, conversation], ([element, content]) => {
   resizeObserver = new ResizeObserver(() => {
     if (follow.value)
       jump()
+    measureEnd()
     schedulePaging()
   })
   resizeObserver.observe(element)
@@ -134,6 +136,13 @@ function jump() {
   scroller.value?.scrollTo({ top: scroller.value.scrollHeight })
 }
 
+// As Android's canScrollForward: a resize can leave nothing below without a scroll event.
+function measureEnd() {
+  const el = scroller.value
+  if (el)
+    atEnd.value = el.scrollHeight - el.scrollTop - el.clientHeight < 2
+}
+
 function restore(el: HTMLElement, top: number) {
   el.scrollTop = top
   restoredTop = el.scrollTop
@@ -148,6 +157,12 @@ function followLatest() {
   follow.value = true
   jump()
   savePosition()
+}
+
+// The button disappears once following resumes; keep keyboard focus in the reader.
+function jumpToLatest() {
+  scroller.value?.focus({ preventScroll: true })
+  followLatest()
 }
 
 function loadOlder() {
@@ -205,6 +220,7 @@ function scrolled() {
     follow.value = false
   else if (el && !restored)
     follow.value = true
+  measureEnd()
   scrolling.value = true
   clearTimeout(scrollEnd)
   scrollEnd = setTimeout(() => scrolling.value = false, 150)
@@ -371,11 +387,11 @@ defineExpose({
             leave-to-class="opacity-0"
           >
             <button
-              v-if="!follow && !scrolling"
+              v-if="!follow && !atEnd && !scrolling"
               class="absolute bottom-2 left-1/2 z-10 grid size-9 -translate-x-1/2 place-items-center rounded-full border border-line bg-raised text-ink shadow-sm hover:bg-hover focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent phone:size-11"
               :aria-label="chat ? 'Latest messages' : 'Latest activity'"
               :title="chat ? 'Latest messages' : 'Latest activity'"
-              @click="followLatest"
+              @click="jumpToLatest"
             >
               <Icon :name="ArrowDown" :size="18" />
             </button>

@@ -4,6 +4,7 @@ import {
   signIn as authenticateWorkspace,
   expect,
   expectChatReady,
+  expectFollowing,
   expectSingleScroll,
   initializeRepository,
   test,
@@ -58,7 +59,7 @@ for (const kind of ['chat', 'task'] as const) {
     // Loading older pages must keep following the latest output.
     const scroller = page.getByRole('region', { name: 'Activity output' })
     await expect.poll(() => scroller.evaluate(el => el.scrollHeight - el.clientHeight - el.scrollTop)).toBeLessThan(2)
-    await expect(page.getByRole('button', { name: kind === 'chat' ? 'Latest messages' : 'Latest activity', exact: true })).toHaveCount(0)
+    await expectFollowing(page)
     await page.screenshot({ path: test.info().outputPath(`${kind}-automatic-history.png`), animations: 'disabled' })
   })
 }
@@ -103,7 +104,7 @@ test('automatic history pauses on errors and resumes only after retry', async ({
   await retry.click()
   await expect(retry).not.toBeVisible()
   await expect.poll(() => requests).toBeGreaterThanOrEqual(3)
-  await expect(page.getByRole('button', { name: 'Latest activity', exact: true })).toHaveCount(0)
+  await expectFollowing(page)
 })
 
 test('signing out closes live subscriptions before the session is revoked', async ({ page, workspace }) => {
@@ -391,9 +392,18 @@ test('a cached run restores the reading offset while its stream is still connect
 
   await expect(page.getByRole('status').filter({ hasText: 'Updating…' })).toHaveCount(0)
   await expect(page.getByRole('button', { name: /^Conversation/ })).toHaveAttribute('aria-pressed', 'true')
-  // Scrolling back to the end resumes following, as on Android.
+  // The way back resumes following and keeps keyboard focus in the reader.
+  const latest = page.getByRole('button', { name: 'Latest activity', exact: true })
+  await latest.focus()
+  await page.keyboard.press('Enter')
+  await expect(scroller).toBeFocused()
+  await expectFollowing(page)
+  // Scrolling up pauses following again; scrolling back to the end resumes it, as on Android.
+  await scroller.evaluate(element => element.scrollTop = 300)
+  await expect(latest).toBeVisible()
   await scroller.evaluate(element => element.scrollTop = element.scrollHeight)
-  await expect(page.getByRole('button', { name: 'Latest activity', exact: true })).toHaveCount(0)
+  await expect(latest).toHaveCount(0)
+  await expectFollowing(page)
 })
 
 test('recent history loads older pages without moving the reader and survives a blocked reconnect', async ({ page, workspace }) => {

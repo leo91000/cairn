@@ -135,6 +135,16 @@ test('conversation switcher preserves drafts and supports search, keyboard and m
     }
   }
 
+  // Crossing a breakpoint while open hides the tablet trigger: focus returns to the ⋯ menu instead.
+  await page.setViewportSize({ width: 800, height: 900 })
+  await trigger.click()
+  await expect(dialog).toBeVisible()
+  await page.setViewportSize({ width: 1440, height: 900 })
+  expect((await dialog.boundingBox())!.y).toBeGreaterThan(40)
+  await page.keyboard.press('Escape')
+  await expect(page.getByRole('button', { name: 'Chat details', exact: true })).toBeFocused()
+
+  await page.setViewportSize({ width: 320, height: 600 })
   await trigger.click()
   const search = page.getByRole('searchbox', { name: 'Search conversations' })
   await search.fill('nothing-matches-this')
