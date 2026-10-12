@@ -18,7 +18,7 @@ import org.junit.Test
 abstract class ModelCatalogCases {
     @get:Rule val compose = createComposeRule()
 
-    @Test fun openPickerLoadsNewCodexModelsAndRetryPreservesSelection() = exercise("codex")
+    @Test fun openPickerLoadsNewCodingAgentModelsAndRetryPreservesSelection() = exercise("codex")
 
     @Test fun openPickerRefreshesOnlyTheClaudeCatalog() = exercise("claude")
 
@@ -77,7 +77,7 @@ abstract class ModelCatalogCases {
                     vm.state.first { it.ready }
                     vm.connect(server.url("/").toString())
                 }
-                val catalog = if (provider == "claude") state.claudeModels else state.models
+                val catalog = state.modelCatalog(provider)
                 CairnTheme {
                     if (catalog.models.isNotEmpty())
                         Page {

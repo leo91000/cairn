@@ -112,8 +112,13 @@ async fn installation_access_is_opt_in_and_older_profile_updates_preserve_it() {
         configuration["codexConfig"]["cairn_installation"]["url"],
         "http://localhost:4310/mcp-installation"
     );
+    assert!(configuration.get("claudeMcps").is_none());
+    let mut claude = enabled.clone();
+    claude["provider"] = "claude".into();
+    let (_, claude_configuration) = active_run(&s, &claude).await;
+    assert!(claude_configuration.get("codexConfig").is_none());
     assert_eq!(
-        configuration["claudeMcps"]["mcpServers"]["cairn_installation"]["url"],
+        claude_configuration["claudeMcps"]["mcpServers"]["cairn_installation"]["url"],
         "http://localhost:4310/mcp-installation"
     );
     let token = configuration["env"]["CAIRN_MCP_RUN_TOKEN"]

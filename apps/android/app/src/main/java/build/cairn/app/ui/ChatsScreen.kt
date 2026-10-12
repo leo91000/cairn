@@ -1295,8 +1295,7 @@ internal fun ChatPage(
                                         }
                                         Box(Modifier.weight(1f).padding(end = 4.dp)) {
                                             ModelPicker(
-                                                if (chosenProvider == "claude") state.claudeModels
-                                                else state.models,
+                                                state.modelCatalog(chosenProvider),
                                                 model,
                                                 reasoning,
                                                 defaultModel,

@@ -13,7 +13,6 @@ use crate::{
     error::{Error, Result},
     nodes::Resources,
     performance::Operation,
-    provider::Provider,
     skills::{atomic_write, private_dir},
     storage::Disk,
 };
@@ -776,12 +775,10 @@ impl Vm {
         let mcp_listener = UnixListener::bind(&mcp_path)?;
         std::os::unix::fs::chown(&mcp_path, Some(self.uid), Some(self.uid))?;
 
-        let auth_socket = match plan.chat_provider() {
-            Provider::Claude => ".claude/cairn-auth.sock",
-            Provider::Codex => ".codex/cairn-auth.sock",
-        };
+        let adapter = plan.chat_provider()?.adapter();
+        let auth_socket = format!("{}/cairn-auth.sock", adapter.state_directory());
         let home = plan.import_to(HOME);
-        let manager = home.map(|home| home.source.join(auth_socket));
+        let manager = home.map(|home| home.source.join(&auth_socket));
         let channel = home.map(|home| home.source.join(mcp::SOCKET));
         let relay_stop = CancellationToken::new();
         let relay = auth_relay(listener, manager, relay_stop.clone());
@@ -910,10 +907,12 @@ async fn refresh_imports(socket: &Path, plan: &Plan) -> Result<()> {
         if import.target != HOME {
             continue;
         }
-        if plan.chat_provider() == Provider::Claude {
-            let source = import.source.join(".claude");
+        let adapter = plan.chat_provider()?.adapter();
+        if adapter.refresh_state_on_resume() {
+            let source = import.source.join(adapter.state_directory());
+            let target = format!("{HOME}/{}", adapter.state_directory());
             if source.exists() {
-                host::import(socket, &source, "/home/node/.claude").await?;
+                host::import(socket, &source, &target).await?;
             }
         }
         let source = import.source.join(".config/gh");

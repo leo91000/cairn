@@ -165,7 +165,9 @@ impl Service {
             inherit_agent_settings(&mut input, existing);
         }
         let mut agent = parse("agent", input)?;
-        crate::claude::validate_agent(&agent)?;
+        crate::provider::Provider::of_agent(&agent)?
+            .adapter()
+            .validate_agent(&agent)?;
         agent["id"] = existing_id.map_or_else(id, str::to_owned).into();
         agent["createdAt"] = existing
             .as_ref()
@@ -680,9 +682,10 @@ fn inherit_agent_settings(input: &mut Value, existing: &Value) {
         input["access"] = policy(existing);
     }
     if input.get("provider").is_none() {
-        input["provider"] = crate::provider::Provider::of_agent(existing)
-            .as_str()
-            .into();
+        input["provider"] = existing
+            .get("provider")
+            .cloned()
+            .unwrap_or_else(|| "codex".into());
     }
     if !input["access"].is_object() {
         return;

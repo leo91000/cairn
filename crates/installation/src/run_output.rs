@@ -191,76 +191,9 @@ pub fn exhausted(event: &Value) -> bool {
         || EXHAUSTED.is_match(text(error, "message"))
 }
 
+/// Compatibility entrypoint for the legacy Codex exec protocol.
 pub fn args(run: &Value, output: &str, session: Option<&str>) -> Vec<String> {
-    let agent = &run["snapshot"]["agent"];
-    let access = policy(agent);
-    let mut args = if access["sandbox"] == "yolo" {
-        vec!["--dangerously-bypass-approvals-and-sandbox".into()]
-    } else {
-        vec![
-            "--sandbox".into(),
-            text(&access, "sandbox").into(),
-            "-a".into(),
-            "never".into(),
-        ]
-    };
-    args.extend(
-        [
-            "-c",
-            "forced_login_method=\"chatgpt\"",
-            "-c",
-            "cli_auth_credentials_store=\"file\"",
-        ]
-        .map(str::to_owned),
-    );
-    let roots = || {
-        let mut roots = vec![
-            Path::new(output)
-                .parent()
-                .unwrap_or(Path::new("."))
-                .to_string_lossy()
-                .into_owned(),
-        ];
-        roots.extend(
-            run["workspaces"]
-                .as_array()
-                .into_iter()
-                .flatten()
-                .map(|w| text(w, "path").to_owned()),
-        );
-        roots
-            .into_iter()
-            .flat_map(|r| vec!["--add-dir".into(), r])
-            .collect::<Vec<_>>()
-    };
-    if session.is_some() && access["sandbox"] == "workspace-write" {
-        args.extend(roots());
-    }
-    args.push("exec".into());
-    if let Some(session) = session {
-        args.extend(["resume".into(), session.into()]);
-    }
-    args.extend(["--json", "--skip-git-repo-check"].map(str::to_owned));
-    if session.is_none() {
-        args.extend(["--color", "never"].map(str::to_owned));
-    }
-    if !text(agent, "reasoning").is_empty() {
-        args.extend([
-            "-c".into(),
-            format!("model_reasoning_effort={}", agent["reasoning"]),
-        ]);
-    }
-    if !text(agent, "model").is_empty() {
-        args.extend(["--model".into(), text(agent, "model").into()]);
-    }
-    if access["sandbox"] == "workspace-write" {
-        args.extend(["-c", "sandbox_workspace_write.network_access=true"].map(str::to_owned));
-        if session.is_none() {
-            args.extend(roots());
-        }
-    }
-    args.extend(["--output-last-message".into(), output.into(), "-".into()]);
-    args
+    crate::coding_agent::codex_args(run, output, session)
 }
 
 pub fn prompt(run: &Value, chat: bool) -> String {
@@ -373,7 +306,7 @@ pub fn chat_plan(
     directory: &Path,
     mcp: &Value,
     session: Option<&str>,
-) -> Value {
+) -> crate::error::Result<Value> {
     let mut context = run.clone();
     context["snapshot"]["task"]["prompt"] = "".into();
     if prepared["isolated"] == true {
@@ -403,18 +336,9 @@ pub fn chat_plan(
         directory.join("chat-input")
     };
     let agent = &run["snapshot"]["agent"];
-    let provider = crate::provider::Provider::of_run(run);
-    // MCP access belongs to the current thread lease. Duplicating it in CLI
-    // options prevents an already initialized Codex process from being reused.
-    let args = if provider == crate::provider::Provider::Codex {
-        json!([])
-    } else {
-        mcp["args"].clone()
-    };
+    let provider = crate::provider::Provider::of_run(run)?;
     let mut plan = json!({
         "provider": provider,
-        "claudeMcps": mcp["claudeMcps"],
-        "claudeDeniedTools": mcp["claudeDeniedTools"],
         "execution": run["chatExecution"],
         "instructions": prompt(&context, true),
         "inputDirectory": input_directory,
@@ -424,13 +348,12 @@ pub fn chat_plan(
         "reasoning": agent["reasoning"],
         "sandbox": policy(agent)["sandbox"],
         "writableRoots": roots,
-        "args": args,
-        "codexConfig": { "mcp_servers": mcp["codexConfig"] },
     });
+    crate::store::merge(&mut plan, &provider.adapter().chat_mcp(mcp));
     if let Some(session) = session {
         plan["sessionId"] = session.into();
     }
-    plan
+    Ok(plan)
 }
 
 #[cfg(test)]

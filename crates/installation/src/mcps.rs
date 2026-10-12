@@ -87,22 +87,6 @@ pub(crate) fn cancel_pending(db: &Db<'_>, id: &str) -> Result<()> {
     Ok(())
 }
 
-fn toml(value: &Value) -> String {
-    match value {
-        Value::Array(items) => {
-            format!("[{}]", items.iter().map(toml).collect::<Vec<_>>().join(","))
-        }
-        Value::Object(map) => format!(
-            "{{{}}}",
-            map.iter()
-                .map(|(k, v)| format!("{}={}", Value::from(k.as_str()), toml(v)))
-                .collect::<Vec<_>>()
-                .join(",")
-        ),
-        _ => value.to_string(),
-    }
-}
-
 fn reserved_env(key: &str) -> bool {
     RESERVED_ENV.contains(&key) || key.starts_with("CAIRN_") || key.starts_with("RUNNER_")
 }
@@ -186,60 +170,11 @@ struct McpView<'a> {
     callback_url: String,
 }
 
-/// A server entry of Codex's `mcp_servers` configuration, passed as TOML.
-#[derive(Serialize)]
-#[serde(untagged)]
-enum CodexServer<'a> {
-    Http {
-        url: String,
-        bearer_token_env_var: &'static str,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        tool_timeout_sec: Option<u64>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        enabled_tools: Option<Vec<String>>,
-    },
-    Stdio {
-        command: &'a str,
-        args: &'a [String],
-        env: BTreeMap<String, String>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        enabled_tools: Option<Vec<String>>,
-    },
-}
-
-/// A server entry of Claude's MCP configuration document.
-#[derive(Serialize)]
-#[serde(tag = "type", rename_all = "lowercase")]
-enum ClaudeServer {
-    Http {
-        url: String,
-        headers: BTreeMap<&'static str, String>,
-    },
-    Stdio {
-        command: String,
-        args: Vec<String>,
-        env: BTreeMap<String, String>,
-    },
-}
-
-#[derive(Default, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct ClaudeMcps {
-    mcp_servers: BTreeMap<String, ClaudeServer>,
-}
-
-/// MCP servers exposed to one run, for both agent runtimes.
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
+/// Authorized MCP servers and shared secrets for one execution.
 struct RunConfiguration {
-    args: Vec<String>,
-    codex_config: BTreeMap<String, Value>,
+    native: crate::coding_agent::mcp::Configuration,
     env: BTreeMap<&'static str, String>,
     redactions: Vec<String>,
-    claude_mcps: ClaudeMcps,
-    claude_denied_tools: Vec<String>,
-    #[serde(skip)]
-    token: String,
 }
 
 fn server_name(server: &McpServer) -> String {
@@ -249,61 +184,22 @@ fn server_name(server: &McpServer) -> String {
 impl RunConfiguration {
     fn new(token: String) -> Self {
         Self {
-            args: Vec::new(),
-            codex_config: BTreeMap::new(),
+            native: crate::coding_agent::mcp::Configuration::new(token.clone()),
             env: BTreeMap::new(),
-            redactions: vec![token.clone()],
-            claude_mcps: ClaudeMcps::default(),
-            claude_denied_tools: Vec::new(),
-            token,
+            redactions: vec![token],
         }
-    }
-
-    fn bearer_headers(&self) -> BTreeMap<&'static str, String> {
-        BTreeMap::from([("Authorization", format!("Bearer {}", self.token))])
-    }
-
-    fn add_codex(&mut self, name: &str, config: &CodexServer<'_>) -> Result<()> {
-        let mut value = serde_json::to_value(config)?;
-        let config = toml(&value);
-        self.args.push("-c".to_owned());
-        self.args.push(format!("mcp_servers.{name}={config}"));
-
-        // A resident's environment is deliberately independent of an attempt.
-        // Supply the current gateway lease with the thread configuration instead.
-        if let Some(server) = value.as_object_mut()
-            && server.remove("bearer_token_env_var").is_some()
-        {
-            server.insert(
-                "http_headers".into(),
-                serde_json::json!(self.bearer_headers()),
-            );
-        }
-        self.codex_config.insert(name.into(), value);
-        Ok(())
     }
 
     /// HTTP servers are reached through this server's gateway with the run token.
-    fn add_http(
-        &mut self,
-        origin: &str,
-        server: &McpServer,
-        tools: Option<Vec<String>>,
-    ) -> Result<()> {
-        let name = server_name(server);
-        let url = format!("{origin}/mcp-gateway/{}", server.id);
-        let claude = ClaudeServer::Http {
-            url: url.clone(),
-            headers: self.bearer_headers(),
-        };
-        self.claude_mcps.mcp_servers.insert(name.clone(), claude);
-        let codex = CodexServer::Http {
-            url,
-            bearer_token_env_var: RUN_TOKEN_ENV,
-            tool_timeout_sec: None,
-            enabled_tools: tools,
-        };
-        self.add_codex(&name, &codex)
+    fn add_http(&mut self, origin: &str, server: &McpServer, tools: Option<Vec<String>>) {
+        self.native.servers.insert(
+            server_name(server),
+            crate::coding_agent::mcp::Server::Http {
+                url: format!("{origin}/mcp-gateway/{}", server.id),
+                timeout: None,
+                enabled_tools: tools,
+            },
+        );
     }
 
     /// Command servers run inside the task environment with their own secrets.
@@ -312,56 +208,36 @@ impl RunConfiguration {
         server: &McpServer,
         tools: Option<Vec<String>>,
         env: BTreeMap<String, String>,
-    ) -> Result<()> {
-        let name = server_name(server);
-        if let Some(selected) = &tools {
-            for tool in &server.tools {
-                let tool = text(tool, "name");
-                if !selected.iter().any(|name| name == tool) {
-                    self.claude_denied_tools
-                        .push(format!("mcp__{name}__{tool}"));
-                }
-            }
-        }
-        let claude = ClaudeServer::Stdio {
-            command: server.command.clone(),
-            args: server.args.clone(),
-            env: env.clone(),
-        };
-        self.claude_mcps.mcp_servers.insert(name.clone(), claude);
-        let codex = CodexServer::Stdio {
-            command: &server.command,
-            args: &server.args,
-            env,
-            enabled_tools: tools,
-        };
-        self.add_codex(&name, &codex)
+    ) {
+        self.native.servers.insert(
+            server_name(server),
+            crate::coding_agent::mcp::Server::Stdio {
+                command: server.command.clone(),
+                args: server.args.clone(),
+                env,
+                enabled_tools: tools,
+                tools: server
+                    .tools
+                    .iter()
+                    .map(|tool| text(tool, "name").to_owned())
+                    .collect(),
+            },
+        );
     }
 
-    fn add_workspace(&mut self, origin: &str) -> Result<()> {
-        self.add_internal(origin, "cairn_workspace", "/mcp-workspace", Some(3660))
+    fn add_workspace(&mut self, origin: &str) {
+        self.add_internal(origin, "cairn_workspace", "/mcp-workspace", Some(3660));
     }
 
-    fn add_internal(
-        &mut self,
-        origin: &str,
-        name: &str,
-        path: &str,
-        timeout: Option<u64>,
-    ) -> Result<()> {
-        let url = format!("{origin}{path}");
-        let claude = ClaudeServer::Http {
-            url: url.clone(),
-            headers: self.bearer_headers(),
-        };
-        self.claude_mcps.mcp_servers.insert(name.into(), claude);
-        let codex = CodexServer::Http {
-            url,
-            bearer_token_env_var: RUN_TOKEN_ENV,
-            tool_timeout_sec: timeout,
-            enabled_tools: None,
-        };
-        self.add_codex(name, &codex)
+    fn add_internal(&mut self, origin: &str, name: &str, path: &str, timeout: Option<u64>) {
+        self.native.servers.insert(
+            name.into(),
+            crate::coding_agent::mcp::Server::Http {
+                url: format!("{origin}{path}"),
+                timeout,
+                enabled_tools: None,
+            },
+        );
     }
 }
 
@@ -597,6 +473,7 @@ impl Mcps {
 
     pub async fn run_configuration(&self, s: &Service, run: &Value) -> Result<Value> {
         let agent = &run["snapshot"]["agent"];
+        let provider = crate::provider::Provider::of_agent(agent)?;
         let access = policy(agent);
         let token = token();
         let mut configuration = RunConfiguration::new(token.clone());
@@ -620,18 +497,18 @@ impl Mcps {
                     tools: tools.clone(),
                 };
                 servers.insert(server.id.clone(), scope);
-                configuration.add_http(origin, &server, tools)?;
+                configuration.add_http(origin, &server, tools);
             } else {
-                configuration.add_stdio(&server, tools, env)?;
+                configuration.add_stdio(&server, tools, env);
             }
         }
         let workspace = !s.config.runner_url.is_empty();
         if workspace {
-            configuration.add_workspace(origin)?;
+            configuration.add_workspace(origin);
         }
         let installation = access["installation"] == true;
         if installation {
-            configuration.add_internal(origin, "cairn_installation", "/mcp-installation", None)?;
+            configuration.add_internal(origin, "cairn_installation", "/mcp-installation", None);
         }
         if workspace || installation || !servers.is_empty() {
             configuration.env.insert(RUN_TOKEN_ENV, token.clone());
@@ -648,7 +525,12 @@ impl Mcps {
                 .await?;
         }
         configuration.redactions.retain(|r| r.len() > 3);
-        Ok(serde_json::to_value(configuration)?)
+        let mut rendered = provider
+            .adapter()
+            .mcp_configuration(&configuration.native)?;
+        rendered["env"] = serde_json::to_value(configuration.env)?;
+        rendered["redactions"] = serde_json::to_value(configuration.redactions)?;
+        Ok(rendered)
     }
 
     pub async fn grant(
