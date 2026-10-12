@@ -446,6 +446,48 @@ internal fun RunStrip(runs: List<Run>, modifier: Modifier = Modifier) {
     }
 }
 
+/**
+ * The mission behind a run opened from the Fil: its detail as in Missions, with runs it starts
+ * opening beside the Fil. Deleting it returns to the Fil.
+ */
+@Composable
+internal fun MissionPanel(
+    vm: CairnViewModel,
+    state: Workspace,
+    task: Task,
+    openRun: (String) -> Unit,
+    removed: () -> Unit,
+) {
+    var editing by rememberSaveable(task.id) { mutableStateOf(false) }
+    var deleting by rememberSaveable(task.id) { mutableStateOf(false) }
+    val actions =
+        MissionActions(
+            launch = {
+                vm.perform { openRun(api.send<Run>("POST", "/tasks/${segment(it.id)}/run").id) }
+            },
+            edit = { editing = true },
+            delete = { deleting = true },
+            openRun = openRun,
+            close = {},
+        )
+    MissionDetail(vm, state, task, null, actions, sheet = false)
+    if (editing) TaskEditor(vm, state, task) { editing = false }
+    if (deleting)
+        Confirm(
+            "Supprimer cette mission ?",
+            "La planification sera supprimée. Les exécutions restent dans l’historique.",
+            state.busy,
+            state.error,
+            { deleting = false },
+        ) {
+            vm.perform {
+                delete("/tasks/${segment(task.id)}")
+                deleting = false
+                removed()
+            }
+        }
+}
+
 @Composable
 private fun MissionDetail(
     vm: CairnViewModel,
