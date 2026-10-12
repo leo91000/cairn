@@ -2,9 +2,15 @@
 import { computed, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { latestArtifacts } from '../../../../packages/contracts/artifacts'
-import { api, date, notify } from '../api'
+import {
+  api,
+  date,
+  notify,
+  state,
+} from '../api'
 import {
   ArrowLeft,
+  CalendarClock,
   Copy,
   FileText,
   RotateCw,
@@ -16,6 +22,7 @@ import { useLiveRun } from '../use-live-run'
 import ActivityFeed from './ActivityFeed.vue'
 import ArtifactGallery from './ArtifactGallery.vue'
 import ArtifactViewer from './ArtifactViewer.vue'
+import FilMission from './FilMission.vue'
 import Icon from './Icon.vue'
 import Markdown from './Markdown.vue'
 import Modal from './Modal.vue'
@@ -26,7 +33,18 @@ import UiAlert from './UiAlert.vue'
 import UiButton from './UiButton.vue'
 import UiSegments from './UiSegments.vue'
 
-const props = defineProps<{ runId: string }>()
+// From the Fil, a mission run stays beside it: its runs open there and its Mission tab holds the
+// mission itself, with what this run used below.
+const props = withDefaults(defineProps<{
+  runId: string
+  runPath?: (runId: string) => string
+  back?: { to: string, label: string }
+  mission?: boolean
+}>(), {
+  runPath: (runId: string) => `/runs/${runId}`,
+  back: () => ({ to: '/runs', label: 'Back to runs' }),
+  mission: false,
+})
 const router = useRouter()
 const live = useLiveRun(() => `/runs/${props.runId}/stream`)
 const { events, connectionNotice, catchingUp: loading } = live
@@ -43,6 +61,13 @@ const confirmCleanup = ref(false)
 const active = computed(
   () => run.value && ['running', 'queued'].includes(run.value.status),
 )
+const task = computed(() => props.mission && run.value && run.value.trigger !== 'chat' ? state.tasks.find(task => task.id === run.value!.taskId) : undefined)
+const tabs = computed(() => [
+  { value: 'events', label: 'Conversation', icon: Terminal },
+  { value: 'result', label: 'Result', icon: FileText },
+  { value: 'files', label: 'Files', count: latestArtifacts(deliverables.value).length },
+  task.value ? { value: 'mission', label: 'Mission', icon: CalendarClock } : { value: 'brief', label: 'Mission brief' },
+])
 watch(live.error, (value) => {
   if (value)
     error.value = value
@@ -74,7 +99,7 @@ async function resume() {
 async function retry() {
   try {
     const next = await api(`/runs/${run.value!.id}/retry`, { method: 'POST' })
-    router.push(`/runs/${next.id}`)
+    router.push(props.runPath(next.id))
   }
   catch (e) {
     error.value = (e as Error).message
@@ -106,8 +131,8 @@ async function copy() {
 <template>
   <div class="run-workspace flex flex-col flex-1 min-w-0 min-h-0">
     <div class="run-navigation flex items-center justify-between gap-3 mb-4 phone:mb-2.5">
-      <RouterLink to="/runs" class="back-link inline-flex items-center gap-[7px] text-muted text-xs mb-[25px]">
-        <Icon :name="ArrowLeft" :size="16" />Back to runs
+      <RouterLink :to="back.to" class="back-link inline-flex items-center gap-[7px] text-muted text-xs mb-[25px]">
+        <Icon :name="ArrowLeft" :size="16" />{{ back.label }}
       </RouterLink>
       <UiButton v-if="run && active" variant="danger-outline" @click="confirm = true">
         <Icon :name="Square" :size="15" />Stop run
@@ -151,7 +176,7 @@ async function copy() {
       </p>
       <section class="panel run-panel flex flex-1 min-h-0 flex-col overflow-hidden">
         <header class="run-panel-head flex shrink-0 items-center justify-between border-b border-line p-[7px] phone:p-[5px]">
-          <UiSegments v-model="tab" label="Run view" :options="[{ value: 'events', label: 'Conversation', icon: Terminal }, { value: 'result', label: 'Result', icon: FileText }, { value: 'files', label: 'Files', count: latestArtifacts(deliverables).length }, { value: 'brief', label: 'Mission brief' }]" />
+          <UiSegments v-model="tab" label="Run view" :options="tabs" />
         </header>
         <div v-if="tab === 'result' && run.summary" class="run-panel-actions flex items-center justify-end border-b border-line px-5 py-2 phone:px-4 phone:py-1">
           <UiButton
@@ -204,6 +229,13 @@ async function copy() {
           <p v-else class="text-sm text-muted">
             No files published yet.
           </p>
+        </div>
+        <div v-else-if="tab === 'mission' && task" class="result-content flex-1 min-h-0 overflow-auto overscroll-contain [scrollbar-width:thin] text-sm p-7.5 phone:p-5.5">
+          <FilMission :task="task" />
+          <h3 class="mt-8!">
+            This run
+          </h3>
+          <RunDetails :run="run" :active="!!active" @cleanup="confirmCleanup = true" />
         </div>
         <div v-else class="result-content flex-1 min-h-0 overflow-auto overscroll-contain [scrollbar-width:thin] text-sm leading-[1.8] p-7.5 phone:p-5.5">
           <RunDetails :run="run" :active="!!active" @cleanup="confirmCleanup = true" />
