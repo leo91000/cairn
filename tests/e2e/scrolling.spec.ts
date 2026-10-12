@@ -44,9 +44,9 @@ test('keeps activity scrolling inside the workspace and gives tabs breathing roo
       await page.goto(workspacePath(`/runs/${runs[0].id}`))
       await page.getByRole('button', { name: /^Conversation/ }).click()
       await expect(page.locator('.activity-message').first()).toBeAttached()
-      await page.getByLabel('Follow output').uncheck()
-      await expectSingleScroll(page)
       const scroller = page.getByRole('region', { name: 'Activity output' })
+      await scroller.evaluate(element => element.scrollTop = 0)
+      await expectSingleScroll(page)
       const box = await scroller.boundingBox()
       expect(box!.height).toBeGreaterThan(65)
       const geometry = await scroller.evaluate((element) => {

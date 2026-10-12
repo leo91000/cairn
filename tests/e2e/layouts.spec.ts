@@ -135,8 +135,9 @@ async function checkMobileLayouts(page: Page, workspace: Workspace, testInfo: Te
     const head = await page.locator('.run-panel-head').boundingBox()
     const actions = await page.locator('.activity-toolbar').boundingBox()
     expect(actions!.y).toBeGreaterThanOrEqual(head!.y + head!.height)
-    await page.getByLabel('Follow output').uncheck()
-    await expect(page.getByLabel('Follow output')).not.toBeChecked()
+    // Reading older output pauses following and offers a way back to the latest activity.
+    await page.locator('.activity-scroll').evaluate(element => element.scrollTop = 0)
+    await expect(page.getByRole('button', { name: 'Latest activity', exact: true })).toBeVisible()
     await screenshot(`${viewport.width}-activity`)
     // The agent's actions collapse into a sentence, expand into a timeline and open one step in a sheet.
     const sheet = page.getByTestId('agent-step-sheet')
