@@ -6,6 +6,7 @@ export function workspaceRouter(base = '/') {
     history: createWebHistory(base),
     routes: [
       { path: '/', component: () => import('./views/Fil.vue') },
+      { path: '/fil/runs/:id', component: () => import('./views/Fil.vue') },
       { path: '/atelier', component: () => import('./views/Atelier.vue') },
       { path: '/chats/:id?', component: () => import('./views/Chats.vue') },
       { path: '/mcps', component: () => import('./views/Mcps.vue') },

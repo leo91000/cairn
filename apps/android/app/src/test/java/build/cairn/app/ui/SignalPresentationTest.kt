@@ -135,6 +135,32 @@ class SignalPresentationTest {
     }
 
     @Test
+    fun `swipes move through conversations and missions in the order of the Fil`() {
+        val chats =
+            listOf(
+                Chat("question", "Choisir", pendingQuestions = 1, updatedAt = 5),
+                Chat("live", "Refonte", status = "running", updatedAt = 4),
+                Chat("idle", "Relecture", updatedAt = 3),
+            )
+        val activity =
+            listOf(
+                Run("failed", taskId = "a", status = "failed", finishedAt = 6),
+                Run("running", taskId = "b", status = "running", startedAt = 1),
+            )
+        val fil = buildFeed(chats, activity, listOf(Task("a", "Audit"), Task("b", "Veille"))).keys()
+        assertEquals(
+            listOf("chat:question", "run:failed", "run:running", "chat:live", "chat:idle"),
+            fil,
+        )
+        assertEquals(fil, pagerKeys(fil, listOf("run:failed"), 0))
+        // A mission that finishes while read keeps its place among its neighbours.
+        val finished = fil - "run:running"
+        assertEquals(fil, pagerKeys(finished, fil, 2))
+        // A page opened from outside the Fil does not swipe into it.
+        assertEquals(listOf("run:elsewhere"), pagerKeys(fil, listOf("run:elsewhere"), 0))
+    }
+
+    @Test
     fun `summary and greeting describe the feed`() {
         assertEquals("Tout est calme.", feedSummary(Feed(emptyList(), emptyList(), emptyList())))
         val item = FeedItem("k", FeedKind.CHAT, "t", "s", "a", "a")
@@ -274,6 +300,8 @@ class SignalPresentationTest {
     fun `dock selection follows the section a screen belongs to`() {
         assertEquals("fil", dockSelection("fil"))
         assertEquals("fil", dockSelection("chat/{id}"))
+        // A mission opened from the Fil reads beside its conversations.
+        assertEquals("fil", dockSelection("fil/run/{id}"))
         assertEquals("fil", dockSelection("new-chat?agent={agent}&project={project}"))
         assertEquals("fil", dockSelection("search"))
         assertEquals("missions", dockSelection("missions"))

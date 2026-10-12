@@ -34,12 +34,16 @@ private fun focusedRoute(route: String) =
     route.startsWith("chat/") ||
         route.startsWith("new-chat") ||
         route.startsWith("run/") ||
+        route.startsWith("fil/run/") ||
         route == "search"
 
 internal fun dockSelection(route: String): String =
     when {
         route in topLevel -> route
-        route.startsWith("chat/") || route.startsWith("new-chat") || route == "search" -> "fil"
+        route.startsWith("chat/") ||
+            route.startsWith("fil/run/") ||
+            route.startsWith("new-chat") ||
+            route == "search" -> "fil"
         route.startsWith("run/") -> "missions"
         else -> "atelier"
     }
@@ -255,9 +259,10 @@ private fun WorkspaceApp(
     LaunchedEffect(targetChat, vm.api.cacheScope) {
         if (targetChat.isNotBlank() && targetCacheScope == vm.api.cacheScope) {
             nav.navigate("chat/${segment(targetChat)}") {
-                // A pager may now display a different chat from its route's starting id.
-                if (nav.currentDestination?.route == "chat/{id}") {
-                    popUpTo("chat/{id}") { inclusive = true }
+                // A pager may now display a different page from its route's starting id.
+                val pager = nav.currentDestination?.route
+                if (pager == "chat/{id}" || pager == "fil/run/{id}") {
+                    popUpTo(pager) { inclusive = true }
                 }
                 launchSingleTop = true
             }
@@ -374,7 +379,7 @@ private fun WorkspaceApp(
                                     vm,
                                     state,
                                     openChat = { nav.navigate("chat/$it") },
-                                    openRun = { nav.navigate("run/$it") },
+                                    openRun = { nav.navigate("fil/run/$it") },
                                     openConnections = ::openConnections,
                                     search = { nav.navigate("search") },
                                     openAccount = ::openSettings,
@@ -403,6 +408,7 @@ private fun WorkspaceApp(
                                     entry.arguments?.getString("id"),
                                     openChat = { nav.navigate("chat/$it") { popUpTo("fil") } },
                                     openRun = { nav.navigate("run/$it") },
+                                    openFilRun = { nav.navigate("fil/run/$it") { popUpTo("fil") } },
                                     back = { nav.popBackStack() },
                                     create = { nav.navigate("new-chat") },
                                     openConnections = ::openConnections,
@@ -421,6 +427,20 @@ private fun WorkspaceApp(
                                         entry.arguments?.getString("project").orEmpty(),
                                     openChat = { nav.navigate("chat/$it") { popUpTo("fil") } },
                                     openRun = { nav.navigate("run/$it") },
+                                    back = { nav.popBackStack() },
+                                    create = { nav.navigate("new-chat") },
+                                    openConnections = ::openConnections,
+                                    openSettings = ::openSettings,
+                                )
+                            }
+                            composable("fil/run/{id}") { entry ->
+                                FilRunScreen(
+                                    vm,
+                                    state,
+                                    entry.arguments?.getString("id").orEmpty(),
+                                    openChat = { nav.navigate("chat/$it") { popUpTo("fil") } },
+                                    openRun = { nav.navigate("run/$it") },
+                                    openFilRun = { nav.navigate("fil/run/$it") { popUpTo("fil") } },
                                     back = { nav.popBackStack() },
                                     create = { nav.navigate("new-chat") },
                                     openConnections = ::openConnections,
