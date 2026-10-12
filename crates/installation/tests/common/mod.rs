@@ -177,6 +177,10 @@ impl RelayContext {
         }
     }
 
+    pub fn token(&self) -> &str {
+        &self.token
+    }
+
     /// The test adapter verifies this token before attaching trusted identity.
     pub fn authorize(&self, request: Builder) -> Builder {
         request.header("x-test-relay-token", &self.token)

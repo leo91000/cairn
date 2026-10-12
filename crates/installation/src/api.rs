@@ -37,6 +37,9 @@ pub async fn dispatch(s: &Arc<Service>, input: &Input) -> Result<Value> {
     if let Some(result) = crate::worker::routes(s, input).await {
         return result;
     }
+    if let Some(result) = crate::reads::routes(s, input).await {
+        return result;
+    }
     let segments = input
         .path
         .trim_start_matches("/api/")
@@ -119,14 +122,14 @@ async fn record_routes(s: &Arc<Service>, input: &Input, route: Route<'_>) -> Res
             )?;
             json!({ "occurrences": occurrences })
         }
-        ("GET", ["tasks", "activity"]) => task_activity(s).await?,
+        ("GET", ["tasks", "activity"]) => task_activity(s, crate::reads::account(input)?).await?,
         _ => return Ok(None),
     };
     Ok(Some(result))
 }
 
-/// The latest run of every task.
-async fn task_activity(s: &Service) -> Result<Value> {
+/// The latest run of every task, with what the account has not read yet.
+async fn task_activity(s: &Service, account: &str) -> Result<Value> {
     let query = format!(
         "SELECT {RUN_SUMMARY} FROM runs
          WHERE id IN (
@@ -135,8 +138,14 @@ async fn task_activity(s: &Service) -> Result<Value> {
          )
          ORDER BY created_at DESC,id DESC"
     );
+    crate::reads::begin(s, account).await?;
+    let account = account.to_owned();
     s.store
-        .read(move |db| Ok(db.json_rows(&query, [])?.into()))
+        .read(move |db| {
+            let mut runs = db.json_rows(&query, [])?;
+            crate::reads::Reads::load(db, &account)?.runs(db, &mut runs)?;
+            Ok(runs.into())
+        })
         .await
 }
 
@@ -218,7 +227,9 @@ async fn chat_routes(s: &Arc<Service>, input: &Input, route: Route<'_>) -> Resul
     let result = match route {
         ("GET", ["chats"]) => {
             let view = input.query.get("view").map_or("active", String::as_str);
-            s.chat_list_view(view).await?.into()
+            s.chat_list_view(view, crate::reads::account(input)?)
+                .await?
+                .into()
         }
         ("DELETE", ["chats", id]) => s.chat_trash(id, confirmed).await?,
         ("POST", ["chats", id, "new-session"]) => s.chat_new_session(id, confirmed).await?,

@@ -207,17 +207,21 @@ fn restore(db: &Db<'_>, id: &str) -> Result<Value> {
 }
 
 impl Service {
-    pub async fn chat_list_view(&self, view: &str) -> Result<Vec<Value>> {
+    /// Conversations in `view`, with those `account` has not read since their agent finished.
+    pub async fn chat_list_view(&self, view: &str, account: &str) -> Result<Vec<Value>> {
         if View::parse(view).is_none() {
             return Err(Error::bad("Choose active or trash."));
         }
-        let view = view.to_owned();
+        crate::reads::begin(self, account).await?;
+        let (view, account) = (view.to_owned(), account.to_owned());
         self.store
             .read(move |db| {
-                Ok(crate::chats::list_all(db)?
+                let mut chats = crate::chats::list_all(db)?
                     .into_iter()
                     .filter(|chat| in_view(chat, &view))
-                    .collect())
+                    .collect::<Vec<_>>();
+                crate::reads::Reads::load(db, &account)?.chats(db, &mut chats)?;
+                Ok(chats)
             })
             .await
     }

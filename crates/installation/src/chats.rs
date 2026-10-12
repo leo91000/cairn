@@ -146,9 +146,12 @@ fn view(db: &Db<'_>, mut chat: Value) -> Result<Value> {
     } else {
         record_name(db, &chat, "projects", "projectName", "Deleted project")?
     };
-    chat["status"] = db
-        .run(text(&chat, "runId"))?
+    let run = db.run(text(&chat, "runId"))?;
+    chat["status"] = run
+        .as_ref()
         .map_or_else(|| "idle".into(), |run| run["status"].clone());
+    // When the agent's latest turn ended, for what the Fil shows as unread.
+    chat["finishedAt"] = run.map_or(Value::Null, |run| run["finishedAt"].clone());
     Ok(chat)
 }
 

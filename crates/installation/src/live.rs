@@ -23,13 +23,16 @@ const MAX_HISTORY_VERSION: usize = 200;
 struct Scope {
     chat: bool,
     id: String,
+    /// The subscriber's Cairn account, whose read marks the conversation list carries.
+    account: String,
 }
 
 impl Scope {
-    fn new(kind: &str, id: &str) -> Self {
+    fn new(kind: &str, id: &str, account: &str) -> Self {
         Self {
             chat: kind == "chats",
             id: id.to_owned(),
+            account: account.to_owned(),
         }
     }
 
@@ -172,7 +175,7 @@ fn read_page(db: &Db<'_>, scope: &Scope, request: Request) -> Result<Page> {
         cache_revision: db
             .kv("conversation-cache-revision")?
             .unwrap_or_else(|| "initial".into()),
-        chats: scope.chat.then(|| crate::chats::list(db)).transpose()?,
+        chats: scope.chat.then(|| conversations(db, scope)).transpose()?,
     };
     // Delivered messages already live in the event history. Do not resend
     // the entire conversation as metadata on every paginated stream update.
@@ -191,6 +194,12 @@ fn read_page(db: &Db<'_>, scope: &Scope, request: Request) -> Result<Page> {
         oldest,
         has_older,
     })
+}
+
+fn conversations(db: &Db<'_>, scope: &Scope) -> Result<Vec<Value>> {
+    let mut chats = crate::chats::list(db)?;
+    crate::reads::Reads::load(db, &scope.account)?.chats(db, &mut chats)?;
+    Ok(chats)
 }
 
 async fn page(s: &Service, scope: Scope, request: Request) -> Result<Page> {
@@ -226,10 +235,11 @@ pub async fn http(s: Arc<Service>, kind: &str, id: &str, input: Input) -> Result
         uuid(id)?;
     }
     let after = cursor(&input)?;
-    if input.identity.is_none() {
-        return Err(Error::unauthorized("Access through the Beacon."));
+    let account = crate::reads::account(&input)?;
+    if kind == "chats" {
+        crate::reads::begin(&s, account).await?;
     }
-    let scope = Scope::new(kind, id);
+    let scope = Scope::new(kind, id, account);
     // Subscribe before reading: commits during replay remain observable.
     let changes = s.store.subscribe();
     let expected = input.query.get("history").cloned();
@@ -378,7 +388,7 @@ pub async fn history(s: &Service, kind: &str, id: &str, input: &Input) -> Result
         window: true,
         before: Some(before),
     };
-    let page = page(s, Scope::new(kind, id), request).await?;
+    let page = page(s, Scope::new(kind, id, ""), request).await?;
     Ok(serde_json::to_value(HistoryPage {
         events: page.events,
         history: page.history,
