@@ -432,6 +432,79 @@ async fn native_in_flight_question_accepts_answer_and_preserves_receipt() {
 }
 
 #[tokio::test]
+async fn subagent_threads_show_as_steps_of_their_subagent() {
+    let root = TempDir::new().unwrap();
+    let home = prepare(&root);
+    let config = config(&root);
+    let plan = plan(&root, "fixture:subagents");
+    let (tx, mut rx) = mpsc::channel(256);
+    let task = tokio::spawn(async move {
+        chat_process::run(&config, &home, plan, tx, CancellationToken::new()).await
+    });
+    let mut events = Vec::new();
+    while let Some(event) = rx.recv().await {
+        events.push(event);
+    }
+    task.await.unwrap().unwrap();
+
+    let subagent: Vec<_> = events
+        .iter()
+        .filter(|e| e["item"]["type"] == "subagent")
+        .map(|e| {
+            (
+                e["type"].as_str().unwrap(),
+                e["item"]["status"].as_str().unwrap(),
+            )
+        })
+        .collect();
+    // The spawn call completes at once; the child's turn and the wait settle the subagent.
+    // Closing it afterwards keeps its completion.
+    assert_eq!(
+        subagent,
+        vec![
+            ("item.started", "in_progress"),
+            ("item.completed", "in_progress"),
+            ("item.updated", "completed"),
+        ]
+    );
+    let last = events
+        .iter()
+        .rfind(|e| e["item"]["type"] == "subagent")
+        .unwrap();
+    assert_eq!(last["item"]["name"], "Review the keyboard handling");
+    assert_eq!(last["item"]["model"], "gpt-fixture-mini");
+    assert_eq!(last["item"]["result"], "Keyboard handling looks right.");
+
+    let spawn = last["item"]["id"].as_str().unwrap();
+    let children: Vec<_> = events
+        .iter()
+        .filter(|e| e["item"]["parent_id"] == spawn)
+        .map(|e| e["item"]["type"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        children,
+        vec![
+            "command_execution",
+            "subagent_message",
+            "subagent_message",
+            "subagent_message"
+        ]
+    );
+    // Waiting only refreshes statuses; closing the subagent remains a visible step.
+    let tools: Vec<_> = events
+        .iter()
+        .filter(|e| e["item"]["type"] == "collab_tool_call")
+        .map(|e| e["item"]["tool"].as_str().unwrap())
+        .collect();
+    assert_eq!(tools, vec!["closeAgent"]);
+    let output = std::fs::read_to_string(root.path().join("result.md")).unwrap();
+    assert!(
+        !output.contains("Keyboard handling looks right."),
+        "{output}"
+    );
+}
+
+#[tokio::test]
 async fn replay_of_completed_turn_does_not_submit_the_instruction_again() {
     let root = TempDir::new().unwrap();
     let home = prepare(&root);

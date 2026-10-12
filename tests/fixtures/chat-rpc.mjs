@@ -289,6 +289,61 @@ export function chatFixture() {
         return true
       }
 
+      if (text.includes('fixture:subagents')) {
+        // Codex names the spawned thread once the spawn completes, then reports that thread's
+        // own activity and the statuses its collaboration tools observe.
+        const child = 'fixture-child'
+        const collab = (id, tool, status, fields) => ({
+          id,
+          type: 'collabAgentToolCall',
+          tool,
+          status,
+          senderThreadId: thread.id,
+          receiverThreadIds: [child],
+          prompt: null,
+          model: null,
+          reasoningEffort: null,
+          agentsStates: {},
+          ...fields,
+        })
+        const spawn = collab(`spawn-${active.id}`, 'spawnAgent', 'inProgress', { receiverThreadIds: [], prompt: 'Review the keyboard handling\nCheck every shortcut.', model: 'gpt-fixture-mini' })
+        notify('item/started', { threadId: thread.id, item: spawn })
+        const spawned = {
+          ...spawn,
+          status: 'completed',
+          receiverThreadIds: [child],
+          agentsStates: { [child]: { status: 'pendingInit', message: null } },
+        }
+        active.items.push(spawned)
+        notify('item/completed', { threadId: thread.id, item: spawned })
+        const childTurn = { id: 'child-turn', status: 'inProgress', items: [] }
+        notify('turn/started', { threadId: child, turn: childTurn })
+        notify('item/completed', {
+          threadId: child,
+          item: {
+            id: 'child-command',
+            type: 'commandExecution',
+            command: 'rg -n shortcut src',
+            status: 'completed',
+            exitCode: 0,
+            aggregatedOutput: 'src/shortcuts.ts:1',
+            durationMs: 9,
+          },
+        })
+        notify('item/started', { threadId: child, item: { id: 'child-reply', type: 'agentMessage', text: '' } })
+        notify('item/agentMessage/delta', { threadId: child, itemId: 'child-reply', delta: 'Keyboard handling looks right.' })
+        notify('item/completed', { threadId: child, item: { id: 'child-reply', type: 'agentMessage', text: 'Keyboard handling looks right.' } })
+        notify('turn/completed', { threadId: child, turn: { ...childTurn, status: 'completed' } })
+        const waited = collab(`wait-${active.id}`, 'wait', 'completed', { agentsStates: { [child]: { status: 'completed', message: 'Keyboard handling looks right.' } } })
+        const closed = collab(`close-${active.id}`, 'closeAgent', 'completed', { agentsStates: { [child]: { status: 'shutdown', message: null } } })
+        for (const item of [waited, closed]) {
+          active.items.push(item)
+          notify('item/completed', { threadId: thread.id, item })
+        }
+
+        save()
+      }
+
       if (text.includes('fixture:disconnect'))
         process.exit(1)
       if (text.includes('finish now'))

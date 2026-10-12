@@ -83,6 +83,10 @@ pub fn compact_activity(event: &Value, secrets: &[String]) -> Value {
         "exitCode",
         "duration_ms",
         "durationMs",
+        "parent_id",
+        "name",
+        "agent_type",
+        "background",
     ] {
         if let Some(value) = source
             .get(key)

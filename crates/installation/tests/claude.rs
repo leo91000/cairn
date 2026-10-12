@@ -680,6 +680,89 @@ async fn background_work_and_its_followup_finish_before_the_run_completes() {
 }
 
 #[tokio::test]
+async fn subagents_report_their_own_steps_without_replacing_the_reply() {
+    let root = TempDir::new().unwrap();
+    let c = setup(&root);
+    let events = run_events(&c, plan(&root, "fixture:subagents")).await;
+    let subagent = |id: &str| {
+        events
+            .iter()
+            .filter(|e| e["item"]["type"] == "subagent" && e["item"]["id"] == id)
+            .map(|e| (e["type"].as_str().unwrap(), e["item"].clone()))
+            .collect::<Vec<_>>()
+    };
+
+    let count = subagent("agent-count");
+    assert_eq!(count[0].0, "item.started", "{count:#?}");
+    assert_eq!(count[0].1["name"], "Count lines");
+    assert_eq!(count[0].1["agent_type"], "general-purpose");
+    assert_eq!(count[0].1["prompt"], "Count lines in the workspace.");
+    assert!(
+        count
+            .iter()
+            .any(|(_, item)| item["activity"] == "Running wc -l")
+    );
+    let (kind, last) = count.last().unwrap();
+    assert_eq!(*kind, "item.completed");
+    assert_eq!(last["status"], "completed");
+    // The report drops Claude Code's hand-back framing and keeps the final usage.
+    assert_eq!(last["result"], "Total: 3 lines.");
+    assert_eq!(last["tokens"], 1510);
+    assert_eq!(last["duration_ms"], 1150);
+
+    // A background subagent outlives its tool call and settles with its notification.
+    let list = subagent("agent-list");
+    let launched = list
+        .iter()
+        .find(|(kind, _)| *kind == "item.completed")
+        .unwrap();
+    assert_eq!(launched.1["status"], "in_progress");
+    assert_eq!(launched.1["background"], true);
+    let (kind, last) = list.last().unwrap();
+    assert_eq!(*kind, "item.updated");
+    assert_eq!(last["status"], "completed");
+    assert_eq!(last["result"], "Files: one.txt, two.txt");
+
+    let children: Vec<_> = events
+        .iter()
+        .filter(|e| e["item"]["parent_id"].is_string())
+        .map(|e| {
+            (
+                e["item"]["parent_id"].as_str().unwrap(),
+                e["item"]["type"].as_str().unwrap(),
+            )
+        })
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    assert_eq!(
+        children,
+        vec![
+            ("agent-count", "command_execution"),
+            ("agent-count", "subagent_message"),
+            ("agent-list", "command_execution"),
+            ("agent-list", "subagent_message"),
+        ]
+    );
+    let replies: Vec<_> = events
+        .iter()
+        .filter(|e| e["item"]["type"] == "agent_message" && e["type"] == "item.completed")
+        .map(|e| e["item"]["text"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        replies,
+        vec![
+            "Counted while the listing continues",
+            "Both subagents reported back"
+        ]
+    );
+    assert_eq!(
+        std::fs::read_to_string(root.path().join("result.md")).unwrap(),
+        "Both subagents reported back"
+    );
+}
+
+#[tokio::test]
 async fn task_updates_during_a_streamed_response_do_not_announce_an_idle_agent() {
     let root = TempDir::new().unwrap();
     let c = setup(&root);

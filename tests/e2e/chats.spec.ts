@@ -38,6 +38,48 @@ test('verbose tool calls keep their action steps with abbreviated details', asyn
   }
 })
 
+test('subagents show as a team with their own steps and report', async ({ page, workspace }) => {
+  const chat = await workspace.api('/api/chats', 'POST', {})
+  await workspace.api(`/api/chats/${chat.id}/messages`, 'POST', {
+    id: randomUUID(),
+    text: 'fixture:subagents',
+  })
+  await expect.poll(async () => (await workspace.api(`/api/chats/${chat.id}`)).run?.status, { timeout: 15000 }).toBe('succeeded')
+  await page.goto(workspacePath(`/chats/${chat.id}`))
+  await authenticateWorkspace(page)
+  await expect(page.getByText('Ready for the next step.', { exact: false }).last()).toBeVisible()
+  const team = page.getByTestId('subagent-team')
+  await expect(team).toContainText('1 subagent')
+  await expect(team).toContainText('1 done')
+  // A team that finished without failures folds into its summary.
+  const header = team.locator(':scope > button')
+  await expect(header).toHaveAttribute('aria-expanded', 'false')
+  await header.click()
+  const row = team.getByTestId('subagent').filter({ hasText: 'Review the keyboard handling' })
+  await expect(row).toContainText('Keyboard handling looks right.')
+  await expect(row).toContainText('Done')
+  await row.locator(':scope > button').click()
+  const detail = row.getByTestId('subagent-detail')
+  await expect(detail).toContainText('Check every shortcut.')
+  await expect(detail).toContainText('Report')
+  await expect(detail).toContainText('gpt-fixture-mini')
+  const steps = detail.getByTestId('agent-actions')
+  await expect(steps).toContainText('Searched once')
+  await steps.locator(':scope > button').click()
+  await expect(steps.getByTestId('agent-step').filter({ hasText: 'rg -n shortcut src' })).toHaveCount(1)
+  // The subagent's messages stay with it instead of reading as the agent's reply.
+  await expect(page.locator('.activity-message').filter({ hasText: 'Keyboard handling looks right.' })).toHaveCount(0)
+  for (const colorScheme of ['light', 'dark'] as const) {
+    await page.emulateMedia({ colorScheme })
+    for (const width of [1280, 390]) {
+      await page.setViewportSize({ width, height: 844 })
+      await team.scrollIntoViewIfNeeded()
+      await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth - innerWidth)).toBeLessThanOrEqual(1)
+      await page.screenshot({ path: test.info().outputPath(`subagent-team-${colorScheme}-${width}.png`), animations: 'disabled' })
+    }
+  }
+})
+
 test('a transient agent error shows a retry countdown and resumes without user input', async ({ page, workspace }) => {
   const chat = await workspace.api('/api/chats', 'POST', {})
   await workspace.api(`/api/chats/${chat.id}/messages`, 'POST', {
