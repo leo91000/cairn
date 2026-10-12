@@ -159,6 +159,13 @@ private fun FilPager(
         }
         val selectedKey = keys.getOrNull(pager.settledPage)
         LaunchedEffect(selectedKey) { focus.clearFocus() }
+        ReadWhileOpen(
+            vm,
+            conversations.state
+                ?.chats
+                ?.find { "chat:${it.id}" == selectedKey && it.unread }
+                ?.let { "chat:${it.id}" to (it.finishedAt ?: it.updatedAt) },
+        )
         fun show(target: String, elsewhere: () -> Unit) {
             val index = keys.indexOf(target)
             if (index < 0) elsewhere() else scope.launch { pager.scrollToPage(index) }

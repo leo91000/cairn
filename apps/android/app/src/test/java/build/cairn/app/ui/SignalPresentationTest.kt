@@ -135,6 +135,57 @@ class SignalPresentationTest {
     }
 
     @Test
+    fun `finished work not read yet waits in For you below what needs an answer`() {
+        val chats =
+            listOf(
+                Chat(
+                    "done",
+                    "Notes de version",
+                    agentName = "Rédacteur",
+                    status = "succeeded",
+                    finishedAt = 40,
+                    updatedAt = 30,
+                    unread = true,
+                    preview = "J'ai publié les notes.",
+                ),
+                Chat("read", "Relecture", status = "succeeded", finishedAt = 50, updatedAt = 50),
+                Chat("question", "Choisir", pendingQuestions = 1, updatedAt = 1),
+            )
+        val activity =
+            listOf(
+                Run(
+                    "digest-1",
+                    taskId = "d",
+                    status = "succeeded",
+                    finishedAt = 60,
+                    unread = true,
+                    preview = "Trois sujets aujourd'hui.",
+                )
+            )
+        val feed = buildFeed(chats, activity, listOf(Task("d", "Veille")))
+        assertEquals(
+            listOf(
+                FeedKind.QUESTION to "Choisir",
+                FeedKind.UNREAD_TASK to "Veille",
+                FeedKind.UNREAD_CHAT to "Notes de version",
+            ),
+            feed.forYou.map { it.kind to it.title },
+        )
+        assertEquals(listOf("task:d" to 60L, "chat:done" to 40L), feed.unread.map { it.read })
+        assertEquals("J'ai publié les notes.", feed.forYou.last().preview)
+        assertEquals(listOf("read"), feed.recent.map { it.chatId })
+        assertEquals(
+            "1 élément pour vous · 2 résultats à lire",
+            feedSummary(feed),
+        )
+        // Read on this device, before the server's lists catch up; a later turn is new again.
+        val read = buildFeed(chats, activity, emptyList(), mapOf("chat:done" to 40L))
+        assertEquals(setOf("read", "done"), read.recent.mapNotNull { it.chatId }.toSet())
+        val later = buildFeed(chats, activity, emptyList(), mapOf("chat:done" to 39L))
+        assertTrue(later.forYou.any { it.chatId == "done" && it.unread })
+    }
+
+    @Test
     fun `swipes move through conversations and missions in the order of the Fil`() {
         val chats =
             listOf(

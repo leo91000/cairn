@@ -16,8 +16,10 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.add
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
+import kotlinx.serialization.json.putJsonArray
 
 fun body(vararg pairs: Pair<String, String>) = buildJsonObject {
     pairs.forEach { put(it.first, it.second) }
@@ -171,6 +173,34 @@ constructor(
                             report(refreshError)
                     }
                 }
+            }
+        }
+    }
+
+    /**
+     * Fil items read on this device, by the end of the agent's work that was read, until the
+     * server's lists catch up. Keeping the finish time lets a later turn show as unread again.
+     */
+    val localReads = androidx.compose.runtime.mutableStateMapOf<String, Long>()
+
+    /** Marks finished work (`chat:<id>` or `task:<id>` with its finish time) as read everywhere. */
+    fun markRead(items: List<Pair<String, Long>>) {
+        val unread = items.filter { (key, at) -> (localReads[key] ?: Long.MIN_VALUE) < at }
+        if (unread.isEmpty()) return
+        val previous = unread.map { (key, _) -> key to localReads[key] }
+        unread.forEach { (key, at) -> localReads[key] = at }
+        viewModelScope.launch {
+            try {
+                api.request(
+                    "POST",
+                    "/reads",
+                    buildJsonObject { putJsonArray("items") { unread.forEach { add(it.first) } } },
+                )
+            } catch (e: Exception) {
+                previous.forEach { (key, at) ->
+                    if (at == null) localReads.remove(key) else localReads[key] = at
+                }
+                report(e)
             }
         }
     }

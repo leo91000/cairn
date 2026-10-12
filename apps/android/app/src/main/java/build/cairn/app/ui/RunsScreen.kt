@@ -141,6 +141,13 @@ fun RunScreen(
 ) {
     val live = rememberLive(vm, state, "/runs/${segment(id)}/stream", streaming = selected)
     val run = live.state?.run
+    // Opening a finished mission run reads its mission in the Fil, on every device.
+    ReadWhileOpen(
+        vm,
+        run?.takeIf { selected && it.trigger != "chat" && it.status == "succeeded" }
+            ?.finishedAt
+            ?.let { "task:${run.taskId}" to it },
+    )
     val events = live.events
     val more = live.catchingUp
     val timelineKeys = remember(id) { TimelineKeys() }

@@ -63,6 +63,12 @@ data class Chat(
     val agentName: String = "",
     val projectName: String? = null,
     val status: String = "idle",
+    /** When the agent's latest turn ended. */
+    val finishedAt: Long? = null,
+    /** The agent finished a turn this account has not opened since. */
+    val unread: Boolean = false,
+    /** The opening of the agent's final message, while unread. */
+    val preview: String? = null,
     val questions: List<ChatQuestion> = emptyList(),
     val run: Run? = null,
     val messages: List<ChatMessage> = emptyList(),

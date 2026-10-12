@@ -65,6 +65,8 @@ internal fun initial(name: String): String =
 internal enum class AvatarBadge {
     LIVE,
     ATTENTION,
+    /** Finished work the user has not read yet. */
+    DONE,
 }
 
 @Composable
@@ -101,8 +103,11 @@ internal fun AgentAvatar(
                     .padding(3.dp)
                     .clip(CircleShape)
                     .background(
-                        if (badge == AvatarBadge.LIVE) MaterialTheme.colorScheme.primary
-                        else signal.attention
+                        when (badge) {
+                            AvatarBadge.LIVE -> MaterialTheme.colorScheme.primary
+                            AvatarBadge.ATTENTION -> signal.attention
+                            AvatarBadge.DONE -> signal.success
+                        }
                     )
             )
     }
