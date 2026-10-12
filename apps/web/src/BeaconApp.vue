@@ -275,7 +275,7 @@ async function signOut() {
   if (state.signingOut)
     return
   state.signingOut = true
-  const leavingInstallation = !!state.installationId
+  const leavingInstallation = !!installationRoute
   busy.value = true
   error.value = ''
   try {
