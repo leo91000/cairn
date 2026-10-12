@@ -99,8 +99,18 @@ const conversation = ref<HTMLElement>()
 const atStart = ref(true)
 const scrolling = ref(false)
 const atEnd = ref(true)
-// A scroll would hide the way back; keep it while it holds keyboard focus.
+// The way back stays mounted while paused, so a scroll (including an older page
+// anchoring the reader) only fades it out and never takes its keyboard focus.
 const latestFocused = ref(false)
+const showLatest = computed(() => !follow.value && !atEnd.value)
+// Reaching the end removes it anyway: hand focus to the reader first. WebKit
+// fires no blur for a removed element, which would leave latestFocused set.
+watch(showLatest, (shown) => {
+  if (shown || !latestFocused.value)
+    return
+  latestFocused.value = false
+  scroller.value?.focus({ preventScroll: true })
+})
 let scrollEnd: ReturnType<typeof setTimeout> | undefined
 let restoredTop: number | undefined
 let pagingFrame: number | undefined
@@ -389,8 +399,9 @@ defineExpose({
             leave-to-class="opacity-0"
           >
             <button
-              v-if="!follow && !atEnd && (!scrolling || latestFocused)"
-              class="absolute bottom-2 left-1/2 z-10 grid size-9 -translate-x-1/2 place-items-center rounded-full border border-line bg-raised text-ink shadow-sm hover:bg-hover focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent phone:size-11"
+              v-if="showLatest"
+              class="absolute bottom-2 left-1/2 z-10 grid size-9 -translate-x-1/2 place-items-center rounded-full border border-line bg-raised text-ink shadow-sm transition-opacity hover:bg-hover focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent phone:size-11"
+              :class="scrolling && !latestFocused ? 'pointer-events-none opacity-0 duration-120' : 'duration-180 delay-120'"
               :aria-label="chat ? 'Latest messages' : 'Latest activity'"
               :title="chat ? 'Latest messages' : 'Latest activity'"
               @click="jumpToLatest"

@@ -405,8 +405,10 @@ test('a cached run restores the reading offset while its stream is still connect
   await latest.focus()
   await scroller.evaluate(element => element.scrollTop -= 40)
   await expect(latest).toBeFocused()
+  // Reaching the end removes it, handing focus to the reader.
   await scroller.evaluate(element => element.scrollTop = element.scrollHeight)
   await expect(latest).toHaveCount(0)
+  await expect(scroller).toBeFocused()
   await expectFollowing(page)
 })
 
