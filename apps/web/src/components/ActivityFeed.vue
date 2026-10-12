@@ -103,8 +103,9 @@ const atEnd = ref(true)
 // anchoring the reader) only fades it out and never takes its keyboard focus.
 const latestFocused = ref(false)
 const showLatest = computed(() => !follow.value && !atEnd.value)
-// Reaching the end removes it anyway: hand focus to the reader first. WebKit
-// fires no blur for a removed element, which would leave latestFocused set.
+// Resuming removes it: a keyboard user's focus moves to the reader first. A tap
+// in Safari never focuses the button, so the composer keeps its keyboard. WebKit
+// also fires no blur for a removed element, which would leave latestFocused set.
 watch(showLatest, (shown) => {
   if (shown || !latestFocused.value)
     return
@@ -169,12 +170,6 @@ function followLatest() {
   follow.value = true
   jump()
   savePosition()
-}
-
-// The button disappears once following resumes; keep keyboard focus in the reader.
-function jumpToLatest() {
-  scroller.value?.focus({ preventScroll: true })
-  followLatest()
 }
 
 function loadOlder() {
@@ -404,7 +399,7 @@ defineExpose({
               :class="scrolling && !latestFocused ? 'pointer-events-none opacity-0 duration-120' : 'duration-180 delay-120'"
               :aria-label="chat ? 'Latest messages' : 'Latest activity'"
               :title="chat ? 'Latest messages' : 'Latest activity'"
-              @click="jumpToLatest"
+              @click="followLatest"
               @focus="latestFocused = true"
               @blur="latestFocused = false"
             >
