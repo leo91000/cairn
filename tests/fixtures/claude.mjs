@@ -6,6 +6,7 @@ import {
   mkdirSync,
   readFileSync,
   rmSync,
+  statSync,
   writeFileSync,
 } from 'node:fs'
 import path from 'node:path'
@@ -81,7 +82,14 @@ else {
   const log = path.join(home, 'invocations.jsonl')
   const seenFile = path.join(home, 'seen-message-ids.json')
   const seen = new Set(args.includes('--resume') && existsSync(seenFile) ? JSON.parse(readFileSync(seenFile, 'utf8')) : [])
-  appendFileSync(log, `${JSON.stringify({ args })}\n`)
+  const instructionsFile = args.indexOf('--append-system-prompt-file')
+  const instructions = instructionsFile >= 0
+    ? readFileSync(args[instructionsFile + 1], 'utf8')
+    : args[args.indexOf('--append-system-prompt') + 1]
+  const instructionsMode = instructionsFile >= 0
+    ? statSync(args[instructionsFile + 1]).mode & 0o777
+    : undefined
+  appendFileSync(log, `${JSON.stringify({ args, instructions, instructionsMode })}\n`)
   out({ type: 'system', subtype: 'init', session_id: session })
   let question
   let serial = 0

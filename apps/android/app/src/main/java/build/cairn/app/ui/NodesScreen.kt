@@ -17,7 +17,7 @@ private const val UNINSTALL_COMMAND =
     "sudo systemctl disable --now cairn-node; sudo docker rm -f cairn-execution-node; sudo rm -rf /etc/systemd/system/cairn-node.service /opt/cairn-node /var/lib/cairn-node"
 
 @Composable
-fun NodesScreen(vm: CairnViewModel, state: Workspace) {
+fun NodesScreen(vm: CairnViewModel, state: Workspace, openRun: (String) -> Unit = {}) {
     var nodes by remember { mutableStateOf<List<ExecutionNode>>(emptyList()) }
     var adding by remember { mutableStateOf(false) }
     var storage by remember { mutableStateOf<ExecutionNode?>(null) }
@@ -119,6 +119,54 @@ fun NodesScreen(vm: CairnViewModel, state: Workspace) {
                         Text(
                             "Utilisée par ${node.agents.joinToString(", ") { if (it.allNodes) "${it.name} (toutes les nodes)" else it.name }}"
                         )
+                    node.exclusiveReservation?.let { reservation ->
+                        Panel {
+                            Text(
+                                "Réservation exclusive",
+                                style = MaterialTheme.typography.titleSmall,
+                            )
+                            Text(exclusiveReservationState(reservation.state))
+                            Text(reservation.reason)
+                            Text(
+                                "${reservation.pausedRunIds.size} tâche${if (reservation.pausedRunIds.size == 1) "" else "s"} suspendue${if (reservation.pausedRunIds.size == 1) "" else "s"}"
+                            )
+                            Text(
+                                reservation.expiresAt?.let { "Expire le ${date(it)}" }
+                                    ?: "Attente jusqu’au ${date(reservation.waitUntil)}"
+                            )
+                            if (reservation.renewalPending) Text("Prolongation en attente")
+                            if (reservation.minimumAvailableMemoryMiB > 0)
+                                Text(
+                                    "RAM disponible demandée : ${formatMiB(reservation.minimumAvailableMemoryMiB)}"
+                                )
+                            reservation.error?.let {
+                                Text(it, color = MaterialTheme.colorScheme.error)
+                            }
+                            FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                TextButton(onClick = { openRun(reservation.ownerRunId) }) {
+                                    Text("Ouvrir l’exécution")
+                                }
+                                OutlinedButton(
+                                    enabled =
+                                        !state.busy &&
+                                            reservation.state in
+                                                listOf("queued", "acquiring", "acquired"),
+                                    onClick = {
+                                        vm.perform {
+                                            api.request(
+                                                "POST",
+                                                "/nodes/${segment(node.id)}/exclusive/${segment(reservation.id)}/release",
+                                            )
+                                            load()
+                                            notify("Libération de la réservation demandée")
+                                        }
+                                    },
+                                ) {
+                                    Text("Libérer la réservation")
+                                }
+                            }
+                        }
+                    }
                     if (node.staleDisks.count > 0)
                         Row(verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
                             Text(
@@ -419,6 +467,7 @@ private fun NodeEditor(
     var tags by remember(node.id) { mutableStateOf(node.tags.joinToString(", ")) }
     var accepting by remember(node.id) { mutableStateOf(node.accepting) }
     var slots by remember(node.id) { mutableStateOf(node.slots.toString()) }
+    var exclusiveAgents by remember(node.id) { mutableStateOf(node.exclusiveAgents.toSet()) }
     var cpu by remember(node.id) { mutableStateOf(node.limits.cpu.toString()) }
     // Ceilings are edited in Gio and stored in Mio.
     var memory by remember(node.id) { mutableStateOf(gib(node.limits.memoryMiB)) }
@@ -444,6 +493,7 @@ private fun NodeEditor(
                     tags.split(',').map(String::trim).filter(String::isNotEmpty),
                     NodeResources(cpu.toInt(), memoryMiB!!, diskMiB!!),
                     slots.toInt(),
+                    exclusiveAgents.toList(),
                 )
             )
         },
@@ -464,6 +514,21 @@ private fun NodeEditor(
                 "Détecté sur cette machine : ${node.capabilities.cpu} CPU · ${formatMiB(node.capabilities.memoryMiB)} RAM · ${formatMiB(node.capabilities.diskMiB)} disque.",
                 style = MaterialTheme.typography.bodySmall,
             )
+        }
+        Panel {
+            Text("Réservation exclusive", style = MaterialTheme.typography.titleSmall)
+            Text(
+                "Les agents autorisés peuvent suspendre les autres tâches de cette machine pendant leurs travaux intensifs. Cet accès est distinct du droit d’y exécuter une conversation."
+            )
+            if (!node.exclusiveReservations)
+                Text("Mettez à jour le runtime de cette machine pour activer les réservations.")
+            state.agents.forEach { agent ->
+                Toggle("Autoriser ${agent.name}", agent.id in exclusiveAgents) {
+                    if (!state.busy)
+                        exclusiveAgents =
+                            if (it) exclusiveAgents + agent.id else exclusiveAgents - agent.id
+                }
+            }
         }
         Toggle("Accepter de nouveaux travaux", accepting, { if (!state.busy) accepting = it })
     }

@@ -57,7 +57,8 @@ const flat = computed(() => sections.value.flatMap(section => section.items))
 const summary = computed(() => {
   const need = fil.value.forYou.length
   const working = fil.value.live.filter(item => item.kind === 'running').length
-  return [need ? `${need} need${need === 1 ? 's' : ''} you` : 'Nothing needs you', working ? `${working} working` : ''].filter(Boolean).join(' · ')
+  const suspended = fil.value.live.filter(item => item.kind === 'suspended').length
+  return [need ? `${need} need${need === 1 ? 's' : ''} you` : 'Nothing needs you', working ? `${working} working` : '', suspended ? `${suspended} suspended` : ''].filter(Boolean).join(' · ')
 })
 watch(() => props.selected, (id) => {
   if (id)
@@ -76,7 +77,7 @@ function current(item: FilItem) {
 }
 
 function badge(item: FilItem) {
-  return item.kind === 'question' ? 'question' : item.kind === 'failed' || item.kind === 'failed-mission' ? 'failed' : item.kind === 'queued' ? 'queued' : item.kind === 'paused' ? 'paused' : null
+  return item.kind === 'question' ? 'question' : item.kind === 'failed' || item.kind === 'failed-mission' ? 'failed' : item.kind === 'queued' ? 'queued' : item.kind === 'paused' || item.kind === 'suspended' ? 'paused' : null
 }
 
 const labels: Partial<Record<FilItem['kind'], string>> = {
@@ -276,6 +277,9 @@ onBeforeUnmount(() => document.removeEventListener('keydown', key))
                     <template v-else-if="item.kind === 'queued'">
                       <span class="shrink-0 font-semibold text-muted">Queued</span>
                       <span class="ml-1.5 truncate text-subtle">· {{ item.subtitle }}</span>
+                    </template>
+                    <template v-else-if="item.kind === 'suspended'">
+                      <span class="truncate font-medium text-muted">{{ item.subtitle }}</span>
                     </template>
                     <template v-else>
                       <span class="shrink-0 font-medium text-muted">{{ item.agent }}</span>

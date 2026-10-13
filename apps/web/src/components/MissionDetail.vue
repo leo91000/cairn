@@ -30,6 +30,7 @@ import {
   successRate,
   upcomingStamp,
 } from '../missions'
+import { exclusiveSuspensionLabel, isExclusivelySuspended } from '../run-status'
 import AgentAvatar from './AgentAvatar.vue'
 import Icon from './Icon.vue'
 import Markdown from './Markdown.vue'
@@ -104,7 +105,13 @@ function act(event: 'duplicate' | 'archive' | 'remove') {
     emit('remove')
 }
 
-const tile = (status: RunListItem['status']) => status === 'succeeded' ? { icon: Check, class: 'bg-success/14 text-success' } : status === 'failed' || status === 'interrupted' ? { icon: X, class: 'bg-coral/14 text-coral' } : activeRun(status) ? { icon: Play, class: 'bg-accent/14 text-accent' } : { icon: Pause, class: 'bg-muted/14 text-muted' }
+function tile(run: RunListItem) {
+  if (isExclusivelySuspended(run))
+    return { icon: Pause, class: 'bg-muted/14 text-muted' }
+  const status = run.status
+  return status === 'succeeded' ? { icon: Check, class: 'bg-success/14 text-success' } : status === 'failed' || status === 'interrupted' ? { icon: X, class: 'bg-coral/14 text-coral' } : activeRun(status) ? { icon: Play, class: 'bg-accent/14 text-accent' } : { icon: Pause, class: 'bg-muted/14 text-muted' }
+}
+
 const statusLabels: Record<RunListItem['status'], string> = {
   queued: 'Queued',
   running: 'Running',
@@ -238,10 +245,10 @@ const statusLabels: Record<RunListItem['status'], string> = {
     <ul v-else class="m-0! list-none p-0!" aria-label="Run history">
       <li v-for="item in history" :key="item.id">
         <RouterLink :to="runPath(item.id)" class="flex min-h-14 items-center gap-3 rounded-xl py-1.5 hover:bg-hover/60">
-          <span class="grid size-7.5 shrink-0 place-items-center rounded-[10px]" :class="tile(item.status).class"><Icon :name="tile(item.status).icon" :size="14" /></span>
+          <span class="grid size-7.5 shrink-0 place-items-center rounded-[10px]" :class="tile(item).class"><Icon :name="tile(item).icon" :size="14" /></span>
           <span class="min-w-0 flex-1">
             <span class="block text-base font-semibold text-ink">{{ date(item.startedAt ?? item.createdAt) }}</span>
-            <span class="block truncate text-xs text-muted">{{ item.outcome?.reason?.split('\n')[0] || statusLabels[item.status] }}</span>
+            <span class="block truncate text-xs text-muted">{{ isExclusivelySuspended(item) ? exclusiveSuspensionLabel : item.outcome?.reason?.split('\n')[0] || statusLabels[item.status] }}</span>
           </span>
           <span class="shrink-0 text-xs text-muted">{{ activeRun(item.status) ? elapsedMinutes(item.startedAt) : runDuration(item) }}</span>
           <Icon :name="ChevronRight" :size="16" class="shrink-0 text-muted" />

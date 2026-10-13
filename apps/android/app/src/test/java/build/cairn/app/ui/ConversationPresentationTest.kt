@@ -10,6 +10,36 @@ class ConversationPresentationTest {
     private val second = ChatMessage("two", text = "Ensuite")
 
     @Test
+    fun `exclusive suspension stops working presentation without replacing failures or a user pause`() {
+        val reservation = ExclusiveReservation("reservation", "node", "owner", "Build", "acquired")
+        val running = Run("run", status = "running", suspendedByExclusive = reservation)
+        val chat = Chat("chat", status = "running", run = running)
+        assertEquals(
+            ConversationState("Suspendue (exclusivité)", null),
+            conversationState(chat, "Cairn", BackgroundWait(listOf("Build"), 1), "Maison"),
+        )
+        assertEquals(
+            ConversationState("Suspendue (exclusivité)", null),
+            conversationState(
+                chat.copy(run = null, suspendedByExclusive = reservation),
+                "Cairn",
+                null,
+            ),
+        )
+        assertEquals("En pause", conversationState(chat.copy(paused = true), "Cairn", null).status)
+        assertEquals(
+            ConversationState("Échec · Cairn · Maison", null),
+            conversationState(
+                chat.copy(run = running.copy(status = "failed")),
+                "Cairn",
+                null,
+                "Maison",
+            ),
+        )
+        assertEquals("failed", runPresentationStatus(running.copy(status = "failed")))
+    }
+
+    @Test
     fun `condition wait distinguishes a result from its fallback deadline`() {
         val condition = buildJsonObject {
             put("type", "run_finished")

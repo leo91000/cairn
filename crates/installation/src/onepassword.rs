@@ -13,7 +13,7 @@ use serde_json::{Value, json};
 use std::time::Duration;
 
 const KIND: &str = "onepassword";
-pub const AGENT_INSTRUCTIONS: &str = "1Password: When a task needs credentials, use cairn_workspace.onepassword, backed by the server-side 1Password CLI. Start with accounts to discover the enabled service accounts explicitly authorized for this agent, then vaults, items, fields and read as needed. Service account tokens stay on the server; do not expect an authenticated op CLI in the task environment. Some website accounts require a passkey. This integration cannot retrieve or use passkeys. If a sign-in requires a passkey, stop that sign-in and ask the user to enable a TOTP authenticator on the website and save its one-time password configuration in the matching 1Password item, if the website supports it. Wait for the user to confirm setup before retrying. Do not try to bypass the passkey requirement or change authentication settings yourself. If TOTP is unavailable, report the blocked sign-in and ask the user how to proceed. For unattended tasks, report the required user action instead of retrying. Never ask the user to paste passwords, TOTP seeds or recovery codes into chat, and never print credentials in messages, logs or artifacts.";
+pub const AGENT_INSTRUCTIONS: &str = "1Password: Discover authorized accounts and field references using cairn_workspace.onepassword or cairn plugin onepassword. Read secrets only with cairn plugin onepassword read --account ACCOUNT_ID op://vault/item/field and pipe stdout directly into the consuming command, or capture it inside a script without printing it. Never run a bare read that exposes stdout to the conversation. The server holds service account tokens; do not expect an authenticated op CLI in this VM. Never print credentials, use shell tracing around them, put them in command arguments, or include them in messages or artifacts. This integration cannot use passkeys. If a website requires a passkey, stop that sign-in and ask the user to configure TOTP in the matching 1Password item if supported; wait for confirmation. Never request passwords, TOTP seeds or recovery codes in chat.";
 
 const TOKEN_SIZE_LIMIT: usize = 16384;
 const UNAUTHORIZED: &str = "This 1Password account is not authorized.";
@@ -163,7 +163,7 @@ pub async fn routes(s: &Service, input: &Input) -> Result<Value> {
 
 pub fn tool() -> Value {
     let description = format!(
-        "Read-only secret access. items requires vault; fields requires vault and item and returns field references without values; read resolves an op://vault/item/field reference. {AGENT_INSTRUCTIONS}"
+        "Read-only secret access. items requires vault; fields requires vault and item and returns field references without values; Secret reads are available only through the Cairn plugin CLI for direct piping into commands. {AGENT_INSTRUCTIONS}"
     );
     json!({
         "name": "onepassword",
@@ -173,7 +173,7 @@ pub fn tool() -> Value {
             "properties": {
                 "operation": {
                     "type": "string",
-                    "enum": ["accounts", "vaults", "items", "fields", "read"],
+                    "enum": ["accounts", "vaults", "items", "fields"],
                 },
                 "accountId": { "type": "string", "format": "uuid" },
                 "vault": { "type": "string", "minLength": 1, "maxLength": 200 },

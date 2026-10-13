@@ -60,6 +60,8 @@ impl Worker {
         self.tasks
             .spawn(crate::nodes::shared_blocks::maintain(s.clone()));
         self.tasks.spawn(crate::nodes::storage::monitor(s.clone()));
+        self.tasks
+            .spawn(crate::nodes::exclusive::maintain(s.clone()));
         self.tasks.spawn(clean_conversations(s.clone()));
         self.tasks.spawn(schedule_tasks(s.clone()));
         self.tasks.spawn(self.clone().run_forever(s));

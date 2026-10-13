@@ -199,6 +199,21 @@ fn open_project_tool() -> Value {
 async fn call_tool(s: &Service, bearer: &str, name: &str, args: &Value) -> Result<Value> {
     let summary = Value::to_string;
     match name {
+        "acquire_exclusive" => ToolResult::from_result(
+            crate::nodes::exclusive::acquire(s, bearer, args).await,
+            summary,
+        ),
+        "release_exclusive" => ToolResult::from_result(
+            crate::nodes::exclusive::release(s, bearer, args).await,
+            summary,
+        ),
+        "exclusive_status" => {
+            ToolResult::from_result(crate::nodes::exclusive::status(s, bearer).await, summary)
+        }
+        "renew_exclusive" => ToolResult::from_result(
+            crate::nodes::exclusive::renew(s, bearer, args).await,
+            summary,
+        ),
         "wait_for" => ToolResult::from_result(
             crate::chats::wait_for::schedule(s, bearer, args).await,
             |result| {
@@ -228,7 +243,14 @@ async fn call_tool(s: &Service, bearer: &str, name: &str, args: &Value) -> Resul
             ToolResult::from_result(result, summary)
         }
         "onepassword" => {
-            ToolResult::from_result(crate::onepassword::call(s, bearer, args).await, summary)
+            let result = if args["operation"] == "read" {
+                Err(Error::bad(
+                    "Read secrets through the Cairn plugin CLI and pipe them directly to the consuming command.",
+                ))
+            } else {
+                crate::onepassword::call(s, bearer, args).await
+            };
+            ToolResult::from_result(result, summary)
         }
         "report_outcome" => {
             ToolResult::from_result(crate::outcome::report(s, bearer, args).await, |_| {
@@ -287,6 +309,10 @@ pub async fn rpc(s: &Service, bearer: &str, method: &str, params: &Value) -> Res
         crate::onepassword::tool(),
         crate::chats::sleep::tool(),
         crate::chats::wait_for::tool(),
+        crate::nodes::exclusive::acquire_tool(),
+        crate::nodes::exclusive::release_tool(),
+        crate::nodes::exclusive::status_tool(),
+        crate::nodes::exclusive::renew_tool(),
     ];
     Ok(json!({ "tools": tools }))
 }

@@ -18,6 +18,7 @@ import {
   Terminal,
 } from '../icons'
 import { useRetryNotice } from '../run-retry'
+import { exclusiveSuspensionLabel, isExclusivelySuspended, runDisplayStatus } from '../run-status'
 import { useLiveRun } from '../use-live-run'
 import ActivityFeed from './ActivityFeed.vue'
 import ArtifactGallery from './ArtifactGallery.vue'
@@ -49,6 +50,7 @@ const router = useRouter()
 const live = useLiveRun(() => `/runs/${props.runId}/stream`)
 const { events, connectionNotice, catchingUp: loading } = live
 const run = computed(() => live.snapshot.value?.run ?? undefined)
+const suspended = computed(() => isExclusivelySuspended(run.value))
 const retryNotice = useRetryNotice(() => run.value)
 const waitNotice = computed(() => retryNotice.value ?? run.value?.accountWaitReason)
 const deliverables = computed(() => live.snapshot.value?.artifacts ?? [])
@@ -167,7 +169,7 @@ async function copy() {
             {{ run.snapshot.task.name }}
           </h1>
           <div class="run-title-meta flex items-center gap-3 mt-3.5 text-subtle text-xs phone:flex-wrap phone:text-xs">
-            <Status :status="run.status" /><Outcome :outcome="run.outcome" :status="run.status" /><span v-if="run.accountName">{{ run.accountName }}</span><span>{{ run.snapshot.agent.name }} · {{ date(run.createdAt) }}</span>
+            <Status :status="runDisplayStatus(run)" /><Outcome :outcome="run.outcome" :status="run.status" /><span v-if="run.accountName">{{ run.accountName }}</span><span>{{ run.snapshot.agent.name }} · {{ date(run.createdAt) }}</span>
           </div>
         </div>
       </div>
@@ -197,8 +199,8 @@ async function copy() {
           />
           <Markdown v-if="run.summary" :content="run.summary" />
           <div v-else class="mini-empty flex flex-col items-center text-center pt-7 pb-8.5 text-subtle px-6">
-            <span class="pulse-ring w-8 h-8 rounded-full border-2 border-line [border-top-color:light-dark(#6660a5,_var(--dark-border))] animate-spin mb-[17px]" />
-            <h3>{{ active ? "Work is underway" : "No summary yet" }}</h3>
+            <span v-if="!suspended" class="pulse-ring w-8 h-8 rounded-full border-2 border-line [border-top-color:light-dark(#6660a5,_var(--dark-border))] animate-spin mb-[17px]" />
+            <h3>{{ suspended ? exclusiveSuspensionLabel : active ? "Work is underway" : "No summary yet" }}</h3>
             <p>
               Open Conversation to follow this run.
             </p>
@@ -212,6 +214,7 @@ async function copy() {
           :deliverables="deliverables"
           :events="events"
           :active="!!active"
+          :suspended="suspended"
           :agent-id="run.snapshot.agent.id"
           :agent="run.snapshot.agent.name"
           :task="run.snapshot.task.name"

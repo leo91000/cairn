@@ -12,7 +12,7 @@ use crate::{
     performance::{Activity, Operation},
     process::Environment,
     provider::Provider,
-    recovery, run_limits, run_output,
+    recovery, run_output,
     run_status::RunStatus,
     service::{Service, covers, policy},
     skills::{atomic_write, private_dir},
@@ -664,7 +664,7 @@ impl Execution<'_> {
             cwd: &prepared["cwd"],
             prompt,
             imports,
-            expires: self.checkpoint.deadline,
+            expires: self.checkpoint.deadline(),
             sandbox: policy(&self.run["snapshot"]["agent"])["sandbox"].clone(),
             mcp_env: &workspace.mcp["env"],
             resources: &placement["resources"],
@@ -777,8 +777,8 @@ impl Execution<'_> {
         let mut open = true;
         let mut activity = Activity::new(&self.id, &self.attempt_id, "worker", self.provider);
         let mut heartbeat = crate::performance::heartbeat();
-        let timeout = run_limits::wait_until(self.checkpoint.deadline);
-        tokio::pin!(timeout);
+        let mut timeout = tokio::time::interval(Duration::from_millis(250));
+        timeout.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         while exit.code.is_none() || open {
             let running = exit.code.is_none();
             tokio::select! {
@@ -790,10 +790,14 @@ impl Execution<'_> {
                     child.stop().await;
                     exit.code = Some(STOPPED);
                 }
-                () = &mut timeout, if running => {
-                    exit.timed_out = true;
-                    child.stop().await;
-                    exit.code = Some(STOPPED);
+                _ = timeout.tick(), if running && self.checkpoint.expired() => {
+                    // The controller owns confirmed suspension timing. An unavailable
+                    // observation must not turn an administratively paused VM into a timeout.
+                    if self.checkpoint.refresh_pause(s).await.is_ok() && self.checkpoint.expired() {
+                        exit.timed_out = true;
+                        child.stop().await;
+                        exit.code = Some(STOPPED);
+                    }
                 }
                 code = child.child.wait(), if running => {
                     exit.code = Some(code?.code().unwrap_or(STOPPED));

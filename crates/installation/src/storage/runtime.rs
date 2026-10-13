@@ -401,7 +401,7 @@ impl Volume {
         attempt: &str,
         stop: &CancellationToken,
     ) -> Result<()> {
-        use crate::microvm::host;
+        use crate::microvm::suspension::{self, Reason};
         use std::time::Duration;
         // A journal can be open while boot is still preparing the VM. Its
         // execution identity is installed only after activation.
@@ -437,13 +437,12 @@ impl Volume {
         let blocked = reason.is_some();
         let pending = self.transition.lock().map_err(Error::internal)?.is_some();
         if blocked != self.paused() || pending {
+            if self.paused() || pending {
+                suspension::adopt_storage_state(state, attempt, self.paused(), pending).await?;
+            }
             let transition_started = std::time::Instant::now();
             tracing::info!(target: "cairn_performance", operation = "storage_backpressure", id = attempt, phase = "requested", paused = blocked, reason = reason.unwrap_or("ready"));
-            let result = if blocked {
-                host::pause_attempt(state, attempt).await
-            } else {
-                host::resume_attempt(state, attempt).await
-            };
+            let result = suspension::set_reason(state, attempt, &Reason::Storage, blocked).await;
             if let Err(error) = result {
                 if error.status == 408 {
                     // A lost response is an unknown transition, not VM death.

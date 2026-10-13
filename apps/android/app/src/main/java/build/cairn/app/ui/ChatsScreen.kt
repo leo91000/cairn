@@ -209,6 +209,7 @@ internal fun ConversationList(
                                                 val working =
                                                     chat.pendingQuestions == 0 &&
                                                         !chat.paused &&
+                                                        !chat.exclusiveSuspended &&
                                                         chat.status == "running"
                                                 if (working)
                                                     WorkingAvatar(
@@ -229,6 +230,7 @@ internal fun ConversationList(
                                                                         "interrupted",
                                                                     ) -> AvatarBadge.ATTENTION
                                                             !chat.paused &&
+                                                                !chat.exclusiveSuspended &&
                                                                 chat.status == "queued" ->
                                                                 AvatarBadge.LIVE
                                                             else -> null
@@ -250,6 +252,8 @@ internal fun ConversationList(
                                                                 chat.pendingQuestions > 0 ->
                                                                     "${chat.pendingQuestions} question(s) en attente"
                                                                 chat.paused -> "En pause"
+                                                                chat.exclusiveSuspended ->
+                                                                    "Suspendue (exclusivité)"
                                                                 chat.status in
                                                                     listOf(
                                                                         "running",
@@ -847,6 +851,7 @@ internal fun ChatPage(
                         Text(chat?.projectName ?: "Tous les projets autorisés")
                         Text(
                             if (chat?.paused == true) "En pause"
+                            else if (chat?.exclusiveSuspended == true) "Suspendue (exclusivité)"
                             else if (chat?.run?.status == "queued") "En attente"
                             else if (waitingTasks != null) {
                                 val now = rememberNow(waitingTasks.since)
@@ -1069,7 +1074,14 @@ internal fun ChatPage(
                                             )
                                         }
                                     }
-                                    if (chat?.run?.status == "running" && !live.catchingUp)
+                                    if (chat?.exclusiveSuspended == true)
+                                        item(key = "exclusive-suspended") {
+                                            Text(
+                                                "Suspendue (exclusivité) · ${chat.suspendedByExclusive?.reason ?: chat.run?.suspendedByExclusive?.reason.orEmpty()}",
+                                                color = signal.warning,
+                                            )
+                                        }
+                                    else if (chat?.run?.status == "running" && !live.catchingUp)
                                         item(key = "agent-working") {
                                             WorkingIndicator(
                                                 remember(

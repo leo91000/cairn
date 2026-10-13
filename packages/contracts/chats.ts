@@ -33,6 +33,11 @@ export interface ChatWakeup {
     projectId: string
     runId: number
     headSha: string
+  } | {
+    type: 'github_pr_checks'
+    projectId: string
+    prNumber: number
+    headSha: string
   }
   observation?: Record<string, unknown> | null
   id: string
@@ -76,6 +81,7 @@ export interface ChatMessage {
   createdAt: number
 }
 export interface ChatView extends Chat {
+  suspendedByExclusive?: Run['suspendedByExclusive']
   pendingQuestions: number
   agentName: string
   projectName: string | null

@@ -50,7 +50,7 @@ class Updates(unittest.TestCase):
                     'name': 'cairn-installation',
                     'services': {
                         'manager': {'image': initial_image, 'environment': {'CAIRN_NODE_IMAGE': initial_image}, 'mem_limit': '6g'},
-                        'runner': {'image': initial_image, 'mem_limit': '18g'},
+                        'runner': {'image': initial_image, 'mem_limit': '18g', 'cap_add': ['SYS_ADMIN', 'IPC_LOCK'], 'environment': {'OPERATOR_SETTING': '${KEEP_THIS_EXPRESSION}'}},
                         'garage': {'image': 'retained-storage'},
                     },
                 }))
@@ -189,6 +189,12 @@ if 'exec' in args:
                         self.assertEqual(compose['services']['runner']['image'], updated['image'])
                         self.assertEqual(compose['services']['manager']['mem_limit'], '6g')
                         self.assertEqual(compose['services']['runner']['mem_limit'], '18g')
+                        capabilities = compose['services']['runner']['cap_add']
+                        self.assertIn('SYS_ADMIN', capabilities)
+                        self.assertIn('IPC_LOCK', capabilities)
+                        self.assertIn('SYS_PTRACE', capabilities)
+                        self.assertIn('SYS_NICE', capabilities)
+                        self.assertEqual(compose['services']['runner']['environment']['OPERATOR_SETTING'], '${KEEP_THIS_EXPRESSION}')
                         self.assertEqual(compose['services']['garage']['image'], 'retained-storage')
                         self.assertNotIn('pendingImage', updated)
                     if failure in ('interrupted', 'interrupted-created', 'interrupted-unhealthy', 'interrupted-exec-once', 'lease', 'stop-once', 'up-once', 'exec-once'):

@@ -216,6 +216,15 @@ pub async fn handle(State(app): State<App>, request: Request) -> Result<Response
 /// Run-scoped MCP received on the channel of `run`: a VM reaches only the
 /// workspace, installation and gateway endpoints, with a token granted to that same run.
 pub(crate) async fn run_scoped(s: &Arc<Service>, run: &str, request: Request) -> Result<Response> {
+    if request.uri().path() == "/plugin-command" {
+        let granted = crate::mcps::granted_run(s, &bearer(&request)).await?;
+        if granted.as_deref() != Some(run) {
+            return Err(Error::unauthorized(
+                "Plugin run access expired or was revoked.",
+            ));
+        }
+        return crate::plugins::command_response(s, request).await;
+    }
     let endpoint = Endpoint::of(request.uri().path());
     if !matches!(
         endpoint,

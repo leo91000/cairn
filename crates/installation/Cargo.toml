@@ -19,6 +19,9 @@ ublk-prototype = [ "ublk" ]
 
 [dependencies]
 cairn-protocol = { path = "../protocol" }
+cairn-plugin-api = { path = "../plugin-api" }
+cairn-plugin-host = { path = "../plugin-host" }
+cairn-plugin-runtime = { path = "../plugin-runtime" }
 axum = { version = "0.8.9", features = [
   "macros",
   "form"
