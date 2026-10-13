@@ -216,6 +216,7 @@ test('installation subdomains preserve browser drafts and canonical account acce
     await expect(page).toHaveURL(`${hostedOrigin}/chats/${chat.slug}`)
     await expect(page.getByRole('heading', { name: 'Keep this draft across origins', exact: true })).toBeVisible()
     await page.getByRole('navigation', { name: 'Workspace navigation', exact: true }).getByRole('button', { name: 'Sign out', exact: true }).click()
+    await expect(page).toHaveURL(`${origin}/`)
     const oauthDeepLink = `${hostedOrigin}/chats/${chat.slug}?source=oauth#reply`
     await page.goto(oauthDeepLink)
     await expect(page.getByLabel('Email address')).toBeVisible()
