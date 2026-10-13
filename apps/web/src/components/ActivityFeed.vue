@@ -365,7 +365,7 @@ defineExpose({
               <div v-if="active && !sending?.length && events.length && !(subagentBar && working.subagents)" class="activity-working mt-4 mb-0.5">
                 <WorkingIndicator :step="working" />
               </div>
-              <div v-else-if="active && !sending?.length" class="activity-working flex items-center justify-center gap-3 text-muted text-3xs mt-7.5 mb-0.5 mx-0">
+              <div v-else-if="active && !sending?.length && !events.length" class="activity-working flex items-center justify-center gap-3 text-muted text-3xs mt-7.5 mb-0.5 mx-0">
                 <span class="activity-presence w-[7px] h-[7px] rounded-full bg-[light-dark(#8e8baa,_var(--dark-accent-surface))] shrink-0 live" />Waiting for the worker…
               </div>
               <div v-else-if="!chat && !events.length" class="activity-end flex items-center justify-center gap-3 text-muted text-3xs mt-7.5 mb-0.5 mx-0">

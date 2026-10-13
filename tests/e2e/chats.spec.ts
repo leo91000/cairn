@@ -104,6 +104,7 @@ test('working subagents stay in sight beside the composer and open as a drawer o
   await expect(bar).toContainText('1 running')
   // The bar replaces the working indicator while the agent only waits for its subagent.
   await expect(page.locator('.agent-working')).toHaveCount(0)
+  await expect(page.getByText('Waiting for the worker…')).toHaveCount(0)
   const chip = bar.getByTestId('subagent-chip').filter({ hasText: 'Review the keyboard handling' })
   await chip.click()
   await expect(chip).toHaveAttribute('aria-pressed', 'true')
