@@ -178,7 +178,7 @@ fn activity_preview(value: &Value, limit: usize, secrets: &[String]) -> Value {
 }
 
 pub fn exhausted(event: &Value) -> bool {
-    if !["turn.failed", "error"].contains(&text(event, "type")) {
+    if event["willRetry"] == true || !["turn.failed", "error"].contains(&text(event, "type")) {
         return false;
     }
     let error = if event["type"] == "turn.failed" {
@@ -383,6 +383,12 @@ mod tests {
         assert!(exhausted(
             &json!({"type":"error","code":"usage_limit_reached"})
         ));
+        assert!(!exhausted(&json!({
+            "type": "error",
+            "code": "usage_limit_reached",
+            "message": "Usage limit reached",
+            "willRetry": true,
+        })));
         for message in ["Rate limit exceeded, retrying", "The usage limit docs say"] {
             assert!(
                 !exhausted(&json!({"type":"turn.failed","error":{"message":message}})),

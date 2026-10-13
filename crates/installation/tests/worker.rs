@@ -232,7 +232,7 @@ fn message(text: &str) -> Value {
 #[tokio::test]
 async fn transient_agent_failure_resumes_same_session_and_workspace_after_restart() {
     let mut fixture = Fixture::new().await;
-    let prompt = "fixture:agent-failures:[{\"message\":\"workspace routing discovery timed out\"}]";
+    let prompt = "fixture:agent-failures:[{\"codexErrorInfo\":\"other\",\"message\":\"workspace routing discovery timed out\"}]";
     let chat_id = fixture.start_chat(message(prompt)).await;
     let run_id = fixture.chat_run(&chat_id).await;
     let waiting = fixture
@@ -241,6 +241,7 @@ async fn transient_agent_failure_resumes_same_session_and_workspace_after_restar
     assert_eq!(waiting["status"], RunStatus::Queued, "{waiting}");
     assert_eq!(waiting["retry"]["attempt"], 1);
     assert_eq!(waiting["retry"]["limit"], 3);
+    assert_eq!(waiting["retry"]["cause"]["kind"], "timeout");
     assert!(waiting["retry"]["nextAttemptAt"].as_i64().unwrap() > now());
     assert_eq!(waiting["sessionId"], "fixture-chat");
     fixture.stop(false).await;

@@ -105,6 +105,61 @@ impl Fixture {
 }
 
 #[tokio::test]
+async fn native_retry_notices_survive_log_budget_without_claiming_the_final_failure() {
+    let mut fixture = Fixture::new().await;
+    fixture.log_total = LOG_BUDGET;
+    fixture
+        .event(json!({
+            "type": "error",
+            "willRetry": true,
+            "error": {
+                "message": "Reconnecting... 2/5 sensitive-tool-credential",
+                "codexErrorInfo": "other",
+            },
+        }))
+        .await;
+    let saved = fixture.checkpoint.snapshot().await;
+    assert!(saved.last_error().is_empty());
+    assert!(saved.retry_cause.is_none());
+
+    let id = fixture.id.clone();
+    let events = fixture
+        .service
+        .store
+        .read(move |db| db.events(&id, 0, 1000))
+        .await
+        .unwrap();
+    let notice = events
+        .iter()
+        .find(|event| event["type"] == "error")
+        .unwrap();
+    assert_eq!(notice["payload"]["willRetry"], true);
+    assert!(
+        notice["text"]
+            .as_str()
+            .unwrap()
+            .contains("Reconnecting... 2/5")
+    );
+    assert!(!notice.to_string().contains("sensitive-tool-credential"));
+
+    fixture
+        .event(json!({
+            "type": "turn.failed",
+            "error": {
+                "message": "workspace routing discovery timed out",
+                "codexErrorInfo": "other",
+            },
+        }))
+        .await;
+    let saved = fixture.checkpoint.snapshot().await;
+    assert_eq!(saved.last_error(), "workspace routing discovery timed out");
+    assert_eq!(
+        saved.retry_cause.unwrap().unwrap().kind,
+        crate::run_retry::FailureKind::Timeout,
+    );
+}
+
+#[tokio::test]
 async fn tool_calls_remain_recorded_after_diagnostic_budget() {
     let mut fixture = Fixture::new().await;
     fixture.event(json!({

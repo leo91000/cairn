@@ -113,7 +113,7 @@ test('a transient agent error shows a retry countdown and resumes without user i
   const chat = await workspace.api('/api/chats', 'POST', {})
   await workspace.api(`/api/chats/${chat.id}/messages`, 'POST', {
     id: randomUUID(),
-    text: 'fixture:agent-failures:[{"message":"workspace routing discovery timed out"}]',
+    text: 'fixture:agent-failures:[{"codexErrorInfo":"other","message":"workspace routing discovery timed out"}]',
   })
   await expect.poll(async () => (await workspace.api(`/api/chats/${chat.id}`)).run?.retry?.attempt).toBe(1)
   const waiting = (await workspace.api(`/api/chats/${chat.id}`)).run
@@ -136,6 +136,34 @@ test('a transient agent error shows a retry countdown and resumes without user i
   await expect.poll(async () => (await workspace.api(`/api/chats/${chat.id}`)).run?.status).toBe('succeeded')
   await expect(page.getByText('Ready for the next step.', { exact: false }).last()).toBeVisible()
   await expect(notice).toHaveCount(0)
+})
+
+test('native Codex reconnect notices remain visible until work continues', async ({ page, workspace }) => {
+  const chat = await workspace.api('/api/chats', 'POST', {})
+  await workspace.api(`/api/chats/${chat.id}/messages`, 'POST', {
+    id: randomUUID(),
+    text: 'fixture:codex-reconnect fixture:chat-hang',
+  })
+  await expect.poll(async () => (await workspace.api(`/api/chats/${chat.id}`)).run?.status).toBe('running')
+  await page.goto(workspacePath(`/chats/${chat.id}`))
+  await authenticateWorkspace(page)
+  for (const width of [1280, 390]) {
+    await page.setViewportSize({ width, height: 844 })
+    await expect(page.getByText('Connection interrupted', { exact: true })).toBeVisible()
+    await expect(page.getByText('Reconnecting... 2/5', { exact: true })).toBeVisible()
+    await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth - innerWidth)).toBeLessThanOrEqual(1)
+  }
+
+  await expect(page.getByText('Ignored retry notification', { exact: true })).toHaveCount(0)
+  const active = (await workspace.api(`/api/chats/${chat.id}`)).run
+  expect(active.retry ?? null).toBeNull()
+  await workspace.api(`/api/chats/${chat.id}/messages`, 'POST', { id: randomUUID(), text: 'finish now', mode: 'steer' })
+  await expect.poll(async () => (await workspace.api(`/api/chats/${chat.id}`)).run?.status).toBe('succeeded')
+  const completed = (await workspace.api(`/api/chats/${chat.id}`)).run
+  expect(completed.id).toBe(active.id)
+  expect(completed.sessionId).toBe(active.sessionId)
+  expect(completed.retry).toBeNull()
+  await expect(page.getByText('Connection interrupted', { exact: true })).toHaveCount(0)
 })
 
 test('queued Claude conversation explains the missing account and continues after sign-in', async ({ page, workspace }) => {
