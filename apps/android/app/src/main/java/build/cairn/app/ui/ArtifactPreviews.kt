@@ -1,6 +1,7 @@
 package build.cairn.app.ui
 
 import android.util.Base64
+import android.view.ViewGroup
 import android.webkit.WebResourceRequest
 import android.webkit.WebResourceResponse
 import android.webkit.WebView
@@ -128,6 +129,13 @@ internal fun InertWebPage(html: String, description: String, modifier: Modifier 
         AndroidView(
             factory = { context ->
                 WebView(context).apply {
+                    // WRAP_CONTENT makes WebView use a zero CSS viewport height, collapsing
+                    // vh-sized images.
+                    layoutParams =
+                        ViewGroup.LayoutParams(
+                            ViewGroup.LayoutParams.MATCH_PARENT,
+                            ViewGroup.LayoutParams.MATCH_PARENT,
+                        )
                     contentDescription = description
                     settings.javaScriptEnabled = false
                     settings.blockNetworkLoads = true

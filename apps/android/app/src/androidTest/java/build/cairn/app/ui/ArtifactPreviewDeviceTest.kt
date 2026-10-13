@@ -85,6 +85,29 @@ class ArtifactPreviewDeviceTest {
         }
     }
 
+    @Test
+    fun svgImageRendersWithinTheViewport() {
+        val bytes =
+            """<svg xmlns="http://www.w3.org/2000/svg" width="2048" height="64"><rect width="2048" height="64" fill="red"/></svg>"""
+                .toByteArray()
+        compose.setContent { InertWebPage(imageDocument(bytes, "image/svg+xml"), "vector.svg") }
+        compose.waitUntil(15000) { screenContains(Color.RED) }
+        val bitmap =
+            checkNotNull(InstrumentationRegistry.getInstrumentation().uiAutomation.takeScreenshot())
+        try {
+            val renderedHeight =
+                (0 until bitmap.height).count { y ->
+                    bitmap.getPixel(bitmap.width / 2, y) == Color.RED
+                }
+            assertTrue(
+                "The wide SVG must fit the viewport while preserving its aspect ratio",
+                renderedHeight in 1..(bitmap.width / 32 + 2),
+            )
+        } finally {
+            bitmap.recycle()
+        }
+    }
+
     private fun screenContains(color: Int): Boolean = screenColorCount(color) > 20
 
     private fun screenColorCount(vararg colors: Int): Int {
