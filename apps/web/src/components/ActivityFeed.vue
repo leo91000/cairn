@@ -18,7 +18,7 @@ import { deliveryEntries } from '../deliverables'
 import { ArrowDown, Maximize2, Minimize2 } from '../icons'
 import { backgroundWait, waitingStep, workingStep } from '../signal'
 import { mentionSegments } from '../skill-mentions'
-import { currentSubagents } from '../subagents'
+import { currentSubagents, subagentTeams, waitingForSubagents } from '../subagents'
 import { iconButton } from '../ui'
 import ActivityContent from './ActivityContent.vue'
 import AgentActions from './AgentActions.vue'
@@ -75,14 +75,14 @@ const entries = computed(() => {
 
   return deliveryEntries(entries, props.deliverables ?? [])
 })
+const teams = computed(() => subagentTeams(entries.value))
+const subagents = computed(() => currentSubagents(entries.value))
 const working = computed(() => {
   const wait = backgroundWait(props.events)
   if (wait)
-    return waitingStep(wait)
+    return { ...waitingStep(wait), subagents: waitingForSubagents(props.events, subagents.value) }
   return workingStep(entries.value.filter((entry): entry is ActivityEntry => entry.kind !== 'deliverables'), props.agent, props.events[0]?.createdAt ?? null)
 })
-const teams = computed(() => entries.value.flatMap(entry => entry.kind === 'team' ? [entry.agents] : []))
-const subagents = computed(() => currentSubagents(entries.value))
 const visibleOutcome = computed(() => !props.active && !props.sending?.length && !props.loading ? props.outcome : null)
 const outcomeEntryId = computed(() => {
   const items = entries.value

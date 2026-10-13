@@ -699,7 +699,9 @@ impl Turn<'_> {
         } else if launched {
             item["background"] = true.into();
         } else {
-            item["status"] = "completed".into();
+            if item["status"] == "in_progress" {
+                item["status"] = "completed".into();
+            }
             item["result"] = subagent_report(block, outcome).into();
             for (source, target) in [
                 ("totalDurationMs", "duration_ms"),
@@ -727,6 +729,9 @@ impl Turn<'_> {
             return Ok(());
         };
         let before = item.clone();
+        if !text(value, "task_id").is_empty() {
+            item["task_id"] = value["task_id"].clone();
+        }
         let usage = &value["usage"];
         match text(value, "subtype") {
             "task_started" => {

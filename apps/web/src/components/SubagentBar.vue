@@ -12,7 +12,7 @@ import SubagentAvatar from './SubagentAvatar.vue'
 // The subagents of the current request, beside the composer so they stay in sight while the
 // conversation scrolls. Each one opens its full activity; on phones they fold into one button.
 const props = defineProps<{ agents: ActivityArtifact[], active: boolean, selected?: string | null }>()
-const emit = defineEmits<{ open: [id: string] }>()
+const emit = defineEmits<{ open: [id: string, opener: HTMLElement] }>()
 const now = ref(Date.now())
 const timer = setInterval(() => now.value = Date.now(), 1000)
 onBeforeUnmount(() => clearInterval(timer))
@@ -34,7 +34,7 @@ const first = computed(() => running.value[0] ?? props.agents[0])
         :aria-label="`${agent.title}, ${subagentLabels[state(agent)]}. Open its activity`"
         :aria-pressed="selected === agent.id"
         data-testid="subagent-chip"
-        @click="emit('open', agent.id)"
+        @click="emit('open', agent.id, $event.currentTarget as HTMLElement)"
       >
         <SubagentAvatar :agent="agent" :size="20" />
         <span class="max-w-40 truncate">{{ agent.title }}</span>
@@ -47,7 +47,7 @@ const first = computed(() => running.value[0] ?? props.agents[0])
       v-if="first"
       class="hidden min-h-11 min-w-0 flex-1 items-center gap-2 text-left phone:flex"
       :aria-label="`${running.length === 1 ? '1 subagent' : `${running.length} subagents`} working. Open their activity`"
-      @click="emit('open', first.id)"
+      @click="emit('open', first.id, $event.currentTarget as HTMLElement)"
     >
       <span class="flex shrink-0 -space-x-1.5">
         <SubagentAvatar

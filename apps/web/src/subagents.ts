@@ -1,5 +1,7 @@
 import type { InjectionKey } from 'vue'
+import type { RunEvent } from '../../../packages/contracts/contracts'
 import type { ActivityArtifact, ActivityEntry, ActivitySubagent } from './activity'
+import { teamEntries } from './activity'
 import { identityColor, liveElapsed } from './signal'
 
 export type SubagentState = ActivitySubagent['state']
@@ -26,7 +28,7 @@ export const subagentDots: Record<SubagentState, string> = {
 }
 
 /** Opens a subagent's full activity beside the conversation, when the page offers it. */
-export const openSubagentKey: InjectionKey<(id: string) => void> = Symbol('open-subagent')
+export const openSubagentKey: InjectionKey<(id: string, opener?: HTMLElement) => void> = Symbol('open-subagent')
 
 // A subagent still marked as working once the run has ended will not report anymore.
 export function subagentState(agent: ActivityArtifact, active: boolean): SubagentState {
@@ -80,8 +82,36 @@ export function subagentDetails(subagent: ActivitySubagent) {
   ].filter(Boolean).join(' · ')
 }
 
-/** The subagents started since the latest user message. */
+/** Teams include nested delegations so every visible subagent can open its own panel. */
+export function subagentTeams(entries: { kind: string }[]): ActivityArtifact[][] {
+  const teams: ActivityArtifact[][] = []
+  for (const entry of entries) {
+    if (entry.kind !== 'team')
+      continue
+    const agents = (entry as Extract<ActivityEntry, { kind: 'team' }>).agents
+    teams.push(agents)
+    for (const agent of agents) {
+      const steps = teamEntries([{ kind: 'group', id: agent.id, artifacts: agent.subagent?.steps ?? [] }])
+      teams.push(...subagentTeams(steps))
+    }
+  }
+
+  return teams
+}
+
+/** Current-request agents and any earlier children still working in the same execution. */
 export function currentSubagents(entries: { kind: string }[]): ActivityArtifact[] {
   const start = entries.findLastIndex(entry => entry.kind === 'message' && (entry as Extract<ActivityEntry, { kind: 'message' }>).role === 'user')
-  return entries.slice(start + 1).flatMap(entry => entry.kind === 'team' ? (entry as Extract<ActivityEntry, { kind: 'team' }>).agents : [])
+  const current = new Set(subagentTeams(entries.slice(start + 1)).flat().map(agent => agent.id))
+  return subagentTeams(entries).flat().filter(agent => current.has(agent.id) || agent.subagent?.state === 'running')
+}
+
+/** The bar replaces the explicit background wait only if it represents every awaited task. */
+export function waitingForSubagents(events: RunEvent[], agents: ActivityArtifact[]) {
+  const announcement = events.findLast(event => event.type === 'turn.waiting')
+  const tasks = Array.isArray(announcement?.payload?.tasks) ? announcement.payload.tasks : []
+  return tasks.length > 0 && tasks.every((task) => {
+    const id = task && typeof task === 'object' ? (task as Record<string, unknown>).id : undefined
+    return typeof id === 'string' && agents.some(agent => agent.subagent?.taskId === id)
+  })
 }

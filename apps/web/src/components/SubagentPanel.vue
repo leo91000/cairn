@@ -2,8 +2,10 @@
 import type { ActivityArtifact } from '../activity'
 import {
   computed,
+  nextTick,
   onBeforeUnmount,
   ref,
+  useId,
   watch,
 } from 'vue'
 import { X } from '../icons'
@@ -20,6 +22,7 @@ import ActivityArtifactCard from './ActivityArtifactCard.vue'
 import ActivityContent from './ActivityContent.vue'
 import Icon from './Icon.vue'
 import SubagentAvatar from './SubagentAvatar.vue'
+import SubagentTeam from './SubagentTeam.vue'
 
 // A subagent's full activity beside the conversation: its prompt, every step with its output,
 // and its report. Subagents started together share the panel as tabs.
@@ -30,6 +33,9 @@ const timer = setInterval(() => now.value = Date.now(), 1000)
 onBeforeUnmount(() => clearInterval(timer))
 const promptOpen = ref(false)
 const opened = ref(new Set<string>())
+const panelId = useId()
+const content = ref<HTMLElement>()
+const tabId = (index: number) => `${panelId}-tab-${index}`
 
 const agent = computed(() => props.team.find(item => item.id === props.selected) ?? props.team[0]!)
 const subagent = computed(() => agent.value.subagent!)
@@ -40,9 +46,11 @@ const meta = computed(() => [
   subagentDetails(subagent.value),
 ].filter(Boolean).join(' · '))
 
-watch(() => props.selected, () => {
+watch(() => props.selected, async () => {
   promptOpen.value = false
   opened.value = new Set()
+  await nextTick()
+  content.value?.scrollTo({ top: 0 })
 })
 
 function toggle(id: string) {
@@ -50,6 +58,21 @@ function toggle(id: string) {
   if (!next.delete(id))
     next.add(id)
   opened.value = next
+}
+
+function tabKey(event: KeyboardEvent, index: number) {
+  const last = props.team.length - 1
+  const next = event.key === 'ArrowRight'
+    ? (index + 1) % props.team.length
+    : event.key === 'ArrowLeft'
+      ? (index + last) % props.team.length
+      : event.key === 'Home' ? 0 : event.key === 'End' ? last : undefined
+  if (next === undefined)
+    return
+  event.preventDefault()
+  emit('select', props.team[next]!.id)
+  const tabs = (event.currentTarget as HTMLElement).parentElement?.querySelectorAll<HTMLButtonElement>('[role="tab"]')
+  tabs?.[next]?.focus()
 }
 </script>
 
@@ -63,13 +86,17 @@ function toggle(id: string) {
         aria-label="Subagents"
       >
         <button
-          v-for="item in team"
+          v-for="(item, index) in team"
+          :id="tabId(index)"
           :key="item.id"
           role="tab"
           class="inline-flex min-h-10 shrink-0 items-center gap-1.5 border-b-2 px-2 text-xs font-semibold"
           :class="item.id === agent.id ? 'border-accent text-ink' : 'border-transparent text-muted hover:text-ink'"
           :aria-selected="item.id === agent.id"
+          :aria-controls="panelId"
+          :tabindex="item.id === agent.id ? 0 : -1"
           @click="emit('select', item.id)"
+          @keydown="tabKey($event, index)"
         >
           <SubagentAvatar :agent="item" :size="16" />
           <span class="max-w-32 truncate">{{ item.title }}</span>
@@ -88,7 +115,14 @@ function toggle(id: string) {
         <Icon :name="X" :size="16" />
       </button>
     </div>
-    <div class="min-h-0 flex-1 overflow-auto overscroll-contain px-4 pt-4 pb-6 [scrollbar-width:thin]">
+    <div
+      :id="panelId"
+      ref="content"
+      class="min-h-0 flex-1 overflow-auto overscroll-contain px-4 pt-4 pb-6 [scrollbar-width:thin]"
+      :role="team.length > 1 ? 'tabpanel' : undefined"
+      :aria-labelledby="team.length > 1 ? tabId(team.indexOf(agent)) : undefined"
+      :tabindex="team.length > 1 ? 0 : undefined"
+    >
       <header class="flex items-start gap-3">
         <SubagentAvatar :agent="agent" :size="36" />
         <div class="min-w-0 flex-1">
@@ -121,7 +155,9 @@ function toggle(id: string) {
         data-testid="subagent-steps"
       >
         <li v-for="step in subagent.steps" :key="step.id" class="border-b border-line/70 last:border-b-0">
+          <SubagentTeam v-if="step.subagent" :agents="[step]" :active="active" />
           <ActivityArtifactCard
+            v-else
             :artifact="step"
             :active="state === 'running'"
             :expanded="opened.has(step.id)"

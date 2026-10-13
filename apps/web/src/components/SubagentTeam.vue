@@ -8,6 +8,7 @@ import {
   useId,
   watchEffect,
 } from 'vue'
+import { teamEntries } from '../activity'
 import { ChevronDown, GitFork, Maximize2 } from '../icons'
 import {
   openSubagentKey,
@@ -122,8 +123,11 @@ function toggle(id: string) {
           <p v-if="agent.subagent!.prompt" class="m-0! line-clamp-4 whitespace-pre-wrap text-xs text-muted">
             <span class="font-semibold text-ink">Prompt · </span>{{ agent.subagent!.prompt }}
           </p>
-          <AgentActions v-if="agent.subagent!.steps.length" :artifacts="agent.subagent!.steps" :active="state(agent) === 'running'" />
-          <p v-else-if="state(agent) === 'running'" class="m-0! text-xs text-muted">
+          <template v-for="entry in teamEntries([{ kind: 'group', id: agent.id, artifacts: agent.subagent!.steps }])" :key="entry.id">
+            <AgentActions v-if="entry.kind === 'group'" :artifacts="entry.artifacts" :active="state(agent) === 'running'" />
+            <SubagentTeam v-else-if="entry.kind === 'team'" :agents="entry.agents" :active="active" />
+          </template>
+          <p v-if="!agent.subagent!.steps.length && state(agent) === 'running'" class="m-0! text-xs text-muted">
             No steps yet.
           </p>
           <div v-if="agent.subagent!.result || agent.subagent!.message" class="rounded-xl border border-line bg-surface px-3 py-2">
@@ -140,7 +144,7 @@ function toggle(id: string) {
               v-if="openSubagent"
               class="inline-flex min-h-8 items-center gap-1.5 rounded-lg border border-line bg-surface px-2.5 text-2xs font-semibold text-ink hover:bg-hover phone:min-h-11"
               data-testid="open-subagent"
-              @click="openSubagent(agent.id)"
+              @click="openSubagent(agent.id, $event.currentTarget as HTMLElement)"
             >
               <Icon :name="Maximize2" :size="12" />Open full activity
             </button>

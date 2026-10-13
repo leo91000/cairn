@@ -2,7 +2,13 @@ import type { RunEvent } from '../../../packages/contracts/contracts'
 import { describe, expect, it } from 'vitest'
 import { activityEntries } from '../src/activity'
 import { backgroundWait, workingStep } from '../src/signal'
-import { currentSubagents, subagentState, subagentSummary } from '../src/subagents'
+import {
+  currentSubagents,
+  subagentState,
+  subagentSummary,
+  subagentTeams,
+  waitingForSubagents,
+} from '../src/subagents'
 
 let serial = 0
 
@@ -33,6 +39,102 @@ function subagent(type: string, id: string, values: Record<string, unknown> = {}
 }
 
 describe('subagents', () => {
+  it('clears the previous report and message when a subagent starts a follow-up', () => {
+    const [team] = activityEntries([
+      subagent('item.started', 'worker'),
+      item('item.completed', {
+        id: 'reply',
+        type: 'subagent_message',
+        text: 'Old report',
+        parent_id: 'worker',
+      }),
+      subagent('item.completed', 'worker', { status: 'completed', result: 'Old report' }),
+      subagent('item.updated', 'worker', { result: '' }),
+    ], true)
+    expect(team?.kind === 'team' && team.agents[0]?.subagent).toMatchObject({ state: 'running', result: '', message: '' })
+  })
+
+  it('folds early lifecycle activity into its spawn without losing metadata or steps', () => {
+    const entries = activityEntries([
+      subagent('item.started', 'spawn'),
+      item('item.started', {
+        id: 'early',
+        type: 'subagent',
+        name: 'worker',
+        status: 'in_progress',
+      }),
+      item('item.completed', {
+        id: 'read',
+        type: 'command_execution',
+        command: 'pwd',
+        parent_id: 'early',
+        status: 'completed',
+      }),
+      subagent('item.completed', 'spawn', { replaces_id: 'early', name: 'worker' }),
+      subagent('item.updated', 'spawn', { replaces_id: 'early', status: 'completed', result: 'Done' }),
+    ], true)
+    expect(entries).toHaveLength(1)
+    const team = entries[0]!
+    expect(team.kind === 'team' && team.agents).toHaveLength(1)
+    const agent = team.kind === 'team' ? team.agents[0]! : undefined
+    expect(agent?.subagent).toMatchObject({ prompt: 'Prompt for spawn', result: 'Done', type: 'Explore' })
+    expect(agent?.subagent?.steps.map(step => step.command)).toEqual(['pwd'])
+  })
+
+  it('keeps child step identities stable across parent turns and separate between siblings', () => {
+    const entries = activityEntries([
+      subagent('item.started', 'First'),
+      subagent('item.started', 'Second'),
+      item('item.started', {
+        id: 'command',
+        type: 'command_execution',
+        command: 'pwd',
+        parent_id: 'First',
+        status: 'in_progress',
+      }),
+      item('item.completed', {
+        id: 'command',
+        type: 'command_execution',
+        command: 'ls',
+        parent_id: 'Second',
+        status: 'completed',
+      }),
+      event('turn.started', { type: 'turn.started' }),
+      item('item.completed', {
+        id: 'command',
+        type: 'command_execution',
+        command: 'pwd',
+        parent_id: 'First',
+        status: 'completed',
+        aggregated_output: '/workspace',
+      }),
+    ], true)
+    const team = entries[0]!
+    expect(team.kind === 'team' && team.agents.map(agent => agent.subagent?.steps.map(step => [step.command, step.status]))).toEqual([
+      [['pwd', 'done']],
+      [['ls', 'done']],
+    ])
+  })
+
+  it('keeps unfinished subagents stopped after another execution starts', () => {
+    const entries = activityEntries([
+      subagent('item.started', 'Previous'),
+      item('item.started', {
+        id: 'unfinished',
+        type: 'command_execution',
+        command: 'pnpm test',
+        parent_id: 'Previous',
+        status: 'in_progress',
+      }),
+      event('turn.failed', { type: 'turn.failed' }),
+      { ...event('turn.started', { type: 'turn.started' }), runId: 'next-run' },
+      { ...subagent('item.started', 'Previous'), runId: 'next-run' },
+    ], true)
+    const agents = entries.flatMap(entry => entry.kind === 'team' ? entry.agents : [])
+    expect(agents.map(agent => agent.subagent?.state)).toEqual(['stopped', 'running'])
+    expect(agents[0]?.subagent?.steps[0]).toMatchObject({ status: 'info', statusLabel: 'Stopped' })
+  })
+
   it('groups subagents started together and keeps their steps and messages out of the reply', () => {
     const entries = activityEntries([
       user('Audit the webhooks'),
@@ -194,5 +296,39 @@ describe('subagents', () => {
     expect(subagentState(current[0]!, false)).toBe('stopped')
     const earlier = activityEntries([subagent('item.completed', 'Earlier', { status: 'completed', result: '## Findings\nAll good' })])
     expect(earlier[0]?.kind === 'team' && subagentSummary(earlier[0].agents[0]!, false)).toBe('Findings')
+  })
+
+  it('keeps earlier workers and nested children reachable after another user message', () => {
+    const entries = activityEntries([
+      user('First'),
+      subagent('item.started', 'Earlier'),
+      subagent('item.completed', 'Done', { status: 'completed' }),
+      subagent('item.started', 'Nested', { parent_id: 'Earlier' }),
+      user('Keep going'),
+      subagent('item.started', 'New'),
+    ], true)
+    expect(currentSubagents(entries).map(agent => agent.title)).toEqual(['Earlier', 'Nested', 'New'])
+    expect(subagentTeams(entries).map(team => team.map(agent => agent.title))).toEqual([
+      ['Earlier', 'Done'],
+      ['Nested'],
+      ['New'],
+    ])
+  })
+
+  it('replaces an explicit wait only when every awaited task is represented in the bar', () => {
+    const events = [
+      subagent('item.completed', 'Worker', { background: true, task_id: 'worker-task' }),
+      event('turn.waiting', { type: 'turn.waiting', tasks: [{ id: 'worker-task', description: 'Worker' }] }),
+    ]
+    const agents = currentSubagents(activityEntries(events, true))
+    expect(waitingForSubagents(events, agents)).toBe(true)
+    const mixed = [...events, event('turn.waiting', {
+      tasks: [
+        { id: 'worker-task', description: 'Worker' },
+        { id: 'build-task', description: 'Build' },
+      ],
+    })]
+    expect(waitingForSubagents(mixed, agents)).toBe(false)
+    expect(waitingForSubagents([event('turn.waiting', { tasks: [] })], agents)).toBe(false)
   })
 })

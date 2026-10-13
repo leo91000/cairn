@@ -102,6 +102,7 @@ const history = ref(false)
 const detailsOpen = ref(false)
 const detailsButton = ref<HTMLButtonElement>()
 const activity = ref<InstanceType<typeof ActivityFeed>>()
+const textarea = ref<InstanceType<typeof SkillTextarea>>()
 const workspaceActions = inject(workspaceActionsKey)
 const installation = inject(installationKey, null)
 const currentInstallation = computed(() => installation?.current.value ?? null)
@@ -111,14 +112,29 @@ const fileCount = computed(() => latestArtifacts(deliverables.value).length)
 // A subagent's full activity opens beside the conversation on wide screens, in a drawer otherwise.
 // The current request's subagents stay in sight beside the composer while one of them works.
 const openedSubagent = ref<string | null>(null)
+let subagentOpener: HTMLElement | null = null
 const wideQuery = window.matchMedia('(width > 1200px)')
 const wide = ref(wideQuery.matches)
 const onWide = () => wide.value = wideQuery.matches
 wideQuery.addEventListener('change', onWide)
 onBeforeUnmount(() => wideQuery.removeEventListener('change', onWide))
-provide(openSubagentKey, (id) => {
+
+function openSubagent(id: string, opener?: HTMLElement) {
+  subagentOpener = opener ?? (document.activeElement instanceof HTMLElement ? document.activeElement : null)
   openedSubagent.value = id
-})
+}
+
+async function closeSubagent() {
+  openedSubagent.value = null
+  await nextTick()
+  if (subagentOpener?.isConnected && subagentOpener.getClientRects().length)
+    subagentOpener.focus()
+  else
+    textarea.value?.focus()
+  subagentOpener = null
+}
+
+provide(openSubagentKey, openSubagent)
 const runActive = computed(() => detail.value?.run?.status === 'running')
 const subagentTeam = computed(() => activity.value?.teams.find(team => team.some(agent => agent.id === openedSubagent.value)))
 const currentSubagents = computed(() => activity.value?.subagents ?? [])
@@ -150,7 +166,6 @@ const submitting = ref(false)
 const editing = ref<string | null>(null)
 const agentId = ref(typeof route.query.agent === 'string' ? route.query.agent : MAIN_AGENT_ID)
 const projectId = ref(typeof route.query.project === 'string' ? route.query.project : '')
-const textarea = ref<InstanceType<typeof SkillTextarea>>()
 const fileInput = ref<HTMLInputElement>()
 const attachments = ref<ChatAttachment[]>([])
 const previews = ref<Record<string, string>>({})
@@ -862,7 +877,7 @@ function key(event: KeyboardEvent) {
               :agents="currentSubagents"
               :active="runActive"
               :selected="openedSubagent"
-              @open="openedSubagent = $event"
+              @open="openSubagent"
             />
             <form
               class="chat-composer relative rounded-[26px] border border-line bg-surface p-1 focus-within:border-accent/50"
@@ -1028,7 +1043,7 @@ function key(event: KeyboardEvent) {
         :selected="openedSubagent!"
         :active="runActive"
         @select="openedSubagent = $event"
-        @close="openedSubagent = null"
+        @close="closeSubagent"
       />
     </aside>
   </div>
@@ -1037,14 +1052,14 @@ function key(event: KeyboardEvent) {
     title="Subagent activity"
     drawer
     headless
-    @close="openedSubagent = null"
+    @close="closeSubagent"
   >
     <SubagentPanel
       :team="subagentTeam"
       :selected="openedSubagent!"
       :active="runActive"
       @select="openedSubagent = $event"
-      @close="openedSubagent = null"
+      @close="closeSubagent"
     />
   </Modal>
 </template>
