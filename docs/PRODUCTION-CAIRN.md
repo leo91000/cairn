@@ -597,3 +597,38 @@ After review and #105 qualification, before the first approved release:
 
 No DNS, provider setting, repository rename, release or deployment is performed
 by implementing #122/#132.
+
+## Optional readable installation hostnames
+
+The slug migration is automatic. Subdomain routing is disabled by default and
+requires a separate activation after these prerequisites are ready:
+
+1. Point `*.cairn.build` to the same Beacon proxy as `cairn.build`, including
+   correct IPv6 behavior. Do not delegate any child hostname to untrusted hosting:
+   the HttpOnly session cookie is shared across this domain.
+2. Prepare a Traefik DNS-01 certificate resolver for `cairn.build` and
+   `*.cairn.build`. An HTTP-01 resolver cannot issue the wildcard certificate.
+   Supply its existing name as `CAIRN_PROXY_WILDCARD_CERT_RESOLVER`; credentials
+   belong in the proxy’s secret configuration, never in this repository.
+3. Merge `deploy/beacon/compose.subdomains.yaml` with the production compose file.
+   Review the rendered configuration before deploying. The overlay retains the
+   single Beacon service and adds the wildcard route, certificate names and
+   `CAIRN_BEACON_INSTALLATION_SUBDOMAINS=true`.
+
+```sh
+docker compose -f deploy/beacon/compose.production.yaml \
+  -f deploy/beacon/compose.subdomains.yaml config
+```
+
+Keep `CAIRN_BEACON_ORIGIN=https://cairn.build`. OAuth registrations, passkey RP ID,
+MCP endpoints, push service worker and installation enrollment remain canonical.
+The proxy must preserve Host. Unknown or unclaimed installation hostnames return
+404; malformed hosts return 421. Session deadlines and identity proofs are
+preserved when cookies migrate to the shared domain.
+
+To roll back routing, remove the overlay or set the flag to `false` and deploy.
+Keep wildcard DNS/TLS and the proxy hostname route temporarily so existing child
+links can redirect to `/installations/{slug}/...` on the canonical origin. Account
+session refresh restores the host-only cookie and clears the shared cookie.
+Browser drafts are retained in their original per-origin storage; rollback does
+not automatically copy drafts created on child origins back to the root.

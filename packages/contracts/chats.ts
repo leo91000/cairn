@@ -37,6 +37,7 @@ export interface ChatWakeup {
 }
 export interface Chat {
   wakeup?: ChatWakeup | null
+  slug?: string
   lifecycle?: ConversationLifecycle
   trashedAt?: number | null
   purgeAt?: number | null

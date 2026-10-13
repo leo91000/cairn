@@ -270,7 +270,7 @@ test('selects installations, remembers the last one and honours deep workspace U
     const file = await page.request.get(new URL((await download.getAttribute('href'))!, url).href)
     expect(file.status()).toBe(200)
     expect(await file.text()).toBe('A relayed file')
-    const chat = seed.store.list('chats').find(item => page.url().endsWith(item.id))!
+    const chat = seed.store.list('chats').find(item => page.url().endsWith(item.slug || item.id))!
     const task = seed.task({ name: 'Relayed files', prompt: 'Publish notes', agentId: chat.agentId })
     const run = await seed.enqueue(task.id)
     seed.store.updateRun(run.id, { status: 'succeeded', finishedAt: Date.now() })
@@ -435,7 +435,7 @@ test('selects installations, remembers the last one and honours deep workspace U
     await installationExit
     await expect.poll(async () => {
       const installations = await (await page.request.get(`${url}/api/installations`)).json()
-      return installations.find((item: any) => item.id === firstUrl.split('/')[4]).online
+      return installations.find((item: any) => item.slug === new URL(firstUrl).pathname.split('/')[2]).online
     }).toBe(false)
     const recipient = await page.context().browser()!.newContext()
     try {

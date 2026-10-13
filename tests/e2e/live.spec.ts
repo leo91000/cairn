@@ -138,14 +138,14 @@ test('signIn settles an authenticated root redirect before reloading', async ({ 
   // Keep the transient authenticated root observable before its navigation
   // begins. A stalled destination request alone makes Playwright locators wait
   // for navigation, hiding the race rather than exercising it.
-  await page.addInitScript((installationId) => {
+  await page.addInitScript((installationSlug) => {
     if (location.pathname !== '/')
       return
     const target = window as typeof window & { releaseRootNavigation?: () => void }
     let destination = ''
     let blocked = true
     window.navigation?.addEventListener('navigate', (event) => {
-      if (blocked && event.cancelable && new URL(event.destination.url).pathname === `/installations/${installationId}/`) {
+      if (blocked && event.cancelable && new URL(event.destination.url).pathname === `/installations/${installationSlug}/`) {
         event.preventDefault()
         destination = event.destination.url
       }
@@ -155,12 +155,12 @@ test('signIn settles an authenticated root redirect before reloading', async ({ 
       if (destination)
         location.assign(destination)
     }
-  }, workspace.installationId)
+  }, workspace.installationSlug)
   await page.goto(workspace.url, { waitUntil: 'commit' })
   await expect(page.getByRole('button', { name: 'Sign out', exact: true, includeHidden: true }).first()).toBeAttached()
   const reload = page.reload.bind(page)
   page.reload = async (options) => {
-    expect(new URL(page.url()).pathname, 'the fixture must settle the root redirect before reload').toBe(`/installations/${workspace.installationId}/`)
+    expect(new URL(page.url()).pathname, 'the fixture must settle the root redirect before reload').toBe(`/installations/${workspace.installationSlug}/`)
     return reload(options)
   }
 
@@ -170,7 +170,7 @@ test('signIn settles an authenticated root redirect before reloading', async ({ 
   await page.waitForTimeout(500)
   await page.evaluate(() => (window as typeof window & { releaseRootNavigation?: () => void }).releaseRootNavigation?.())
   expect(await authenticated).toBeUndefined()
-  await expect(page).toHaveURL(new RegExp(`/installations/${workspace.installationId}/$`))
+  await expect(page).toHaveURL(new RegExp(`/installations/${workspace.installationSlug}/$`))
   await expect(page.getByRole('heading', { name: 'Fil', exact: true })).toBeVisible()
 })
 

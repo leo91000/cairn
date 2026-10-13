@@ -66,12 +66,24 @@ import { chatSkills } from '../skill-mentions'
 import { iconButton } from '../ui'
 import { useLiveRun } from '../use-live-run'
 import { workspaceActionsKey } from '../workspace-actions'
+import { chatPath } from '../workspace-links'
 
 const router = useRouter()
 const route = useRoute()
 const detail = ref<(ChatDetail & { error?: string }) | null>(null)
 const inactive = computed(() => !!detail.value?.lifecycle && detail.value.lifecycle !== 'active')
 const chatId = computed(() => typeof route.params.id === 'string' ? route.params.id : undefined)
+const selectedChatId = computed(() => {
+  const key = chatId.value
+  if (!key)
+    return undefined
+  const known = chats.value.find(chat => chat.id === key || chat.slug === key)
+  if (known)
+    return known.id
+  if (detail.value && (detail.value.id === key || detail.value.slug === key))
+    return detail.value.id
+  return key
+})
 const streamPath = computed(() => chatId.value ? `/chats/${chatId.value}/stream` : '/chats/stream')
 const live = useLiveRun(() => streamPath.value, { hold: 1000 })
 const { events, connectionNotice, catchingUp } = live
@@ -127,7 +139,7 @@ const uploaded = new Set<string>()
 const dragging = ref(0)
 const uploadProgress = ref('')
 const hasDraft = computed(() => !!draft.value.trim() || attachments.value.length > 0)
-const canSend = computed(() => !inactive.value && (!route.params.id || detail.value?.id === route.params.id) && !live.error.value && (!!draft.value.trim() || attachments.value.length > 0))
+const canSend = computed(() => !inactive.value && (!route.params.id || (detail.value?.id === route.params.id || detail.value?.slug === route.params.id)) && !live.error.value && (!!draft.value.trim() || attachments.value.length > 0))
 
 function removeAttachment(id: string) {
   if (previews.value[id])
@@ -264,11 +276,17 @@ const draftScope = state.installationId ? `${state.installationId}:` : ''
 let draftKey = ''
 
 function loadDraft() {
-  draftKey = `cairn-chat-draft:${draftScope}${chatId.value || `new:${agentId.value}:${projectId.value}`}`
+  draftKey = `cairn-chat-draft:${draftScope}${selectedChatId.value || `new:${agentId.value}:${projectId.value}`}`
   draft.value = sessionStorage.getItem(draftKey) ?? (typeof route.query.draft === 'string' ? route.query.draft : '')
 }
 
 loadDraft()
+watch(selectedChatId, (id, previous) => {
+  // A user can type while a bookmarked slug is still resolving to its UUID.
+  if (id && previous === chatId.value && id !== previous && draft.value)
+    sessionStorage.setItem(`cairn-chat-draft:${draftScope}${id}`, draft.value)
+  loadDraft()
+})
 watch(draft, value => sessionStorage.setItem(draftKey, value))
 watch(agentId, () => {
   if (!projects.value.some(project => project.value === projectId.value))
@@ -373,7 +391,7 @@ async function send(mode: 'queue' | 'steer' = 'queue') {
     submission = undefined
     if (!detail.value) {
       sessionStorage.setItem(`cairn-chat-draft:${draftScope}${chat.id}`, draft.value)
-      await router.push(`/chats/${chat.id}`)
+      await router.push(chatPath(chat))
     }
 
     textarea.value?.focus()
@@ -440,9 +458,10 @@ watch(chatId, (id) => {
   model.value = ''
   reasoning.value = ''
   submission = undefined
+  const destinationId = createdChat && createdChat.slug === id ? createdChat.id : selectedChatId.value
   createdChat = undefined
   // A first message keeps its optimistic bubble while the new chat opens.
-  if (outgoing.value?.chatId !== id)
+  if (outgoing.value?.chatId !== destinationId)
     outgoing.value = null
   if (!id) {
     agentId.value = typeof route.query.agent === 'string' ? route.query.agent : MAIN_AGENT_ID
@@ -551,13 +570,13 @@ function key(event: KeyboardEvent) {
   />
   <div class="flex h-full min-h-0">
     <aside class="w-88 shrink-0 border-r border-line bg-inset tablet:hidden" aria-label="Fil">
-      <FilColumn :chats="chats" :selected="chatId" compact />
+      <FilColumn :chats="chats" :selected="selectedChatId" compact />
     </aside>
     <div class="chat-page flex h-full min-h-0 min-w-0 flex-1 flex-col gap-3 px-6 pb-4 pt-3 phone:gap-0 phone:px-3 phone:pb-2 phone:pt-[env(safe-area-inset-top)]">
       <ChatSwitcher
         v-if="history"
         :chats="chats"
-        :selected="chatId"
+        :selected="selectedChatId"
         :anchor="switcherAnchor"
         @close="history = false"
         @create="newConversation"

@@ -48,6 +48,8 @@ test('switching conversations is seamless', async ({ page, workspace }) => {
   await authenticateWorkspace(page)
   await expect(page.locator('.activity-message').getByText('First conversation message', { exact: true }).first()).toBeVisible({ timeout: 30000 })
   const fil = page.getByRole('complementary', { name: 'Fil' })
+  // The first message batch can precede the initial conversation list.
+  await expect(fil.locator('[data-fil-key]')).toHaveCount(2)
   const summaries: Record<string, unknown>[] = []
   for (const [target, text] of [['Beta conversation', 'Second conversation message'], ['Alpha conversation', 'First conversation message'], ['Beta conversation', 'Second conversation message']] as const) {
     await recordFrames(page)
