@@ -18,12 +18,15 @@ pub fn tool() -> Value {
     json!({
         "name": "wait_for",
         "description": "Wait durably for an authorized Cairn run to finish or a specific GitHub Actions \
-            workflow run to complete. If already complete, returns the observed result: continue this turn. \
+            workflow run or the required checks of a pull request to complete. If already complete, returns the observed result: continue this turn. \
             Otherwise saves a wakeup: end this turn so execution resources can be released. Cairn checks \
             the condition without waking the LLM and resumes this conversation when a result is available \
             or the timeout expires, subject to capacity. Completion includes failure and cancellation; \
             inspect the result before taking action. Pin GitHub waits to the project, workflow run ID \
-            and full commit SHA. Never use this for local background processes that need this VM. \
+            and full commit SHA; PR checks require the project, PR number and full head SHA. A changed PR head \
+            returns superseded; a closed or merged PR returns closed. No configured required checks returns \
+            no_required_checks, not a CI success or permission to merge. Required check failures and cancellations \
+            wake immediately; success waits for all required checks. Never use this for local background processes that need this VM. \
             Run dependencies require the existing installation grant; GitHub uses the agent's existing connection. \
             One wait is stored per conversation. Identical repeated requests preserve the deadline; \
             a different request replaces the previous wait, including sleep. A new user message, stop, deletion, \
@@ -40,6 +43,17 @@ pub fn tool() -> Value {
                                 "runId": { "type": "string", "format": "uuid" },
                             },
                             "required": ["type", "runId"],
+                            "additionalProperties": false,
+                        },
+                        {
+                            "type": "object",
+                            "properties": {
+                                "type": { "const": "github_pr_checks" },
+                                "projectId": { "type": "string", "format": "uuid" },
+                                "prNumber": { "type": "integer", "minimum": 1, "maximum": 2147483647 },
+                                "headSha": { "type": "string", "pattern": "^[a-fA-F0-9]{40}$" },
+                            },
+                            "required": ["type", "projectId", "prNumber", "headSha"],
                             "additionalProperties": false,
                         },
                         {
@@ -80,7 +94,12 @@ fn input(input: &Value) -> Result<Value> {
         uuid(text(condition, "runId"))?;
     } else {
         uuid(text(condition, "projectId"))?;
-        condition["runId"] = (condition["runId"].as_f64().unwrap() as u64).into();
+        let id_key = if condition["type"] == "github_pr_checks" {
+            "prNumber"
+        } else {
+            "runId"
+        };
+        condition[id_key] = (condition[id_key].as_f64().unwrap() as u64).into();
         condition["headSha"] = text(condition, "headSha").to_ascii_lowercase().into();
     }
     Ok(input)
@@ -176,7 +195,7 @@ pub(super) fn access(db: &Db<'_>, run: &Value, condition: &Value) -> Result<()> 
                 ));
             }
         }
-        "github_workflow" => {
+        "github_workflow" | "github_pr_checks" => {
             github::project(db, run, condition)?;
         }
         _ => return Err(Error::bad("Unsupported wait condition.")),
@@ -226,7 +245,7 @@ pub async fn schedule(s: &Service, bearer: &str, raw: &Value) -> Result<Value> {
     if same_request(&chat["wakeup"], &run, &input) {
         return Ok(json!({ "deferred": true, "wakeup": chat["wakeup"] }));
     }
-    let observed = if input["condition"]["type"] == "github_workflow" {
+    let observed = if github::is_condition(&input["condition"]) {
         github::observe(s, &run, &input["condition"]).await?
     } else {
         None
@@ -268,7 +287,7 @@ pub async fn schedule(s: &Service, bearer: &str, raw: &Value) -> Result<Value> {
                 "wakeAt": created + seconds * 1000,
                 "condition": input["condition"],
             });
-            if input["condition"]["type"] == "github_workflow" {
+            if github::is_condition(&input["condition"]) {
                 wakeup["nextCheckAt"] = created.into();
             }
             chat["wakeup"] = wakeup.clone();
