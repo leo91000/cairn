@@ -113,8 +113,16 @@ async fn installation_access_is_opt_in_and_older_profile_updates_preserve_it() {
         "http://localhost:4310/mcp-installation"
     );
     assert!(configuration.get("claudeMcps").is_none());
-    let mut claude = enabled.clone();
-    claude["provider"] = "claude".into();
+    let claude = s
+        .agent(
+            json!({
+                "name": "Claude", "provider": "claude",
+                "access": { "installation": true },
+            }),
+            None,
+        )
+        .await
+        .unwrap();
     let (_, claude_configuration) = active_run(&s, &claude).await;
     assert!(claude_configuration.get("codexConfig").is_none());
     assert_eq!(
