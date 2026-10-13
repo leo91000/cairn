@@ -49,10 +49,9 @@ test('reviews the open workspace layout and compact chat controls across themes 
   await page.getByRole('button', { name: 'Send', exact: true }).click()
   await expect(page.locator('.activity-working')).toBeVisible()
   await expect(page.locator('.activity-message').filter({ hasText: 'component boundaries' })).toBeVisible()
-  // The follow control lives in the desktop activity toolbar.
+  // A conversation that fits on screen has nothing to scroll back to.
   await page.setViewportSize({ width: 1440, height: 1000 })
-  await page.getByRole('button', { name: 'Follow output', exact: true }).click()
-  await expect(page.getByRole('button', { name: 'Follow output', exact: true })).toHaveAttribute('aria-pressed', 'false')
+  await expect(page.getByRole('button', { name: 'Latest messages', exact: true })).toHaveCount(0)
   for (const viewport of [{ width: 1440, height: 1000 }, { width: 390, height: 844 }, { width: 320, height: 600 }]) {
     await page.setViewportSize(viewport)
     await page.emulateMedia({ colorScheme: 'dark' })
@@ -62,7 +61,8 @@ test('reviews the open workspace layout and compact chat controls across themes 
   }
 
   await page.setViewportSize({ width: 1440, height: 1000 })
-  await page.getByRole('button', { name: 'Conversations', exact: true }).click()
+  await page.getByRole('button', { name: 'Chat details', exact: true }).click()
+  await page.getByRole('dialog', { name: 'Chat details', exact: true }).getByRole('button', { name: 'Search conversations', exact: true }).click()
   await expect(page.getByRole('dialog', { name: 'Conversations' })).toBeVisible()
   await expect(page.locator('.activity-scroll')).toBeVisible()
   await expectSingleScroll(page)

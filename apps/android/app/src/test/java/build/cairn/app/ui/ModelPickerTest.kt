@@ -37,7 +37,7 @@ class ModelPickerTest : ModelPickerCases() {
         val codex =
             ModelCatalog(
                 listOf(
-                    CodexModel(
+                    CodingAgentModel(
                         "gpt-6-sol",
                         "GPT-6 Sol",
                         "Le plus capable pour le code complexe.",
@@ -45,7 +45,7 @@ class ModelPickerTest : ModelPickerCases() {
                         defaultReasoningEffort = "medium",
                         supportedReasoningEfforts = efforts,
                     ),
-                    CodexModel(
+                    CodingAgentModel(
                         "gpt-6-luna",
                         "GPT-6 Luna",
                         "Rapide et économique pour les tâches courantes.",
@@ -57,7 +57,7 @@ class ModelPickerTest : ModelPickerCases() {
         val claude =
             ModelCatalog(
                 listOf(
-                    CodexModel(
+                    CodingAgentModel(
                         "default",
                         "Par défaut",
                         "Modèle recommandé pour votre abonnement.",
@@ -65,14 +65,14 @@ class ModelPickerTest : ModelPickerCases() {
                         defaultReasoningEffort = "high",
                         supportedReasoningEfforts = efforts,
                     ),
-                    CodexModel(
+                    CodingAgentModel(
                         "opus",
                         "Opus",
                         "Pour les travaux les plus exigeants.",
                         defaultReasoningEffort = "high",
                         supportedReasoningEfforts = efforts,
                     ),
-                    CodexModel(
+                    CodingAgentModel(
                         "sonnet",
                         "Sonnet",
                         "Équilibre entre vitesse et qualité.",

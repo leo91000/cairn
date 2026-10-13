@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import type { Provider } from '../../../../packages/contracts/accounts'
 import type {
   Chat,
   ChatAttachment,
@@ -30,7 +31,6 @@ import FilColumn from '../components/FilColumn.vue'
 import Icon from '../components/Icon.vue'
 import Modal from '../components/Modal.vue'
 import NodeExecution from '../components/NodeExecution.vue'
-import NotificationSettings from '../components/NotificationSettings.vue'
 import QueueStrip from '../components/QueueStrip.vue'
 import SkillTextarea from '../components/SkillTextarea.vue'
 import ThemeControl from '../components/ThemeControl.vue'
@@ -51,7 +51,6 @@ import {
   LoaderCircle,
   Maximize2,
   Menu,
-  MessageCircle,
   MoreHorizontal,
   Paperclip,
   Plug,
@@ -82,8 +81,7 @@ const deliverables = computed(() => live.snapshot.value?.artifacts ?? [])
 const draft = ref('')
 const model = ref('')
 const reasoning = ref('')
-const provider = ref<'' | 'codex' | 'claude'>('')
-const notifications = ref(false)
+const provider = ref<'' | Provider>('')
 const history = ref(false)
 const detailsOpen = ref(false)
 const detailsButton = ref<HTMLButtonElement>()
@@ -102,6 +100,12 @@ async function detailAction(action: () => void) {
 }
 
 const historyButton = ref<HTMLButtonElement>()
+const tabletHistoryButton = ref<HTMLButtonElement>()
+
+// Desktop lists conversations in the Fil column; narrower layouts open them from the header.
+function switcherAnchor() {
+  return [historyButton.value, tabletHistoryButton.value, detailsButton.value].find(button => button?.getClientRects().length)
+}
 
 const error = ref('')
 const dismissedError = ref(false)
@@ -240,7 +244,7 @@ const agents = computed(() => state.agents.map(agent => ({
 const currentProvider = computed(() => detail.value?.run?.snapshot.agent.provider || selectedAgent.value?.provider || 'codex')
 const chosenProvider = computed({
   get: () => provider.value || currentProvider.value,
-  set: (value: 'codex' | 'claude') => {
+  set: (value: Provider) => {
     provider.value = value
     model.value = ''
     reasoning.value = ''
@@ -284,7 +288,7 @@ let submission: {
   id: string
   text: string
   mode: 'queue' | 'steer'
-  provider: 'codex' | 'claude'
+  provider: Provider
   model: string
   reasoning: string
   attachmentIds: string[]
@@ -468,11 +472,6 @@ function key(event: KeyboardEvent) {
       </UiButton>
     </div>
   </Modal>
-  <Modal v-if="notifications" title="Notifications" @close="notifications = false">
-    <div class="p-6">
-      <NotificationSettings />
-    </div>
-  </Modal>
   <Modal
     v-if="detailsOpen"
     title="Chat details"
@@ -515,9 +514,9 @@ function key(event: KeyboardEvent) {
       <button class="chat-detail-action" @click="detailAction(() => { history = true })">
         <Icon :name="Search" :size="18" />Search conversations
       </button>
-      <button class="chat-detail-action" @click="detailAction(() => { notifications = true })">
+      <RouterLink to="/settings/account" class="chat-detail-action" @click="detailsOpen = false">
         <Icon :name="Bell" :size="18" />Question notifications
-      </button>
+      </RouterLink>
       <button class="chat-detail-action" aria-haspopup="dialog" @click="detailAction(() => { connectionOpen = true })">
         <Icon :name="Plug" :size="18" />Connection
       </button>
@@ -559,13 +558,14 @@ function key(event: KeyboardEvent) {
         v-if="history"
         :chats="chats"
         :selected="chatId"
-        :anchor="historyButton"
+        :anchor="switcherAnchor"
         @close="history = false"
         @create="newConversation"
       />
-      <header class="chat-header flex shrink-0 items-center justify-between gap-2 border-b border-line/70 pb-3 phone:h-15 phone:pb-0">
-        <h1 v-if="detail" class="sr-only hidden phone:block">
-          {{ detail.title }}
+      <!-- One row, as on Android: who and what on the left, files and the ⋯ menu on the right. -->
+      <header class="chat-header flex min-h-15 shrink-0 items-center gap-3 border-b border-line/70 pb-3 phone:h-15 phone:gap-2 phone:pb-0">
+        <h1 class="sr-only hidden phone:block">
+          {{ detail?.title || 'New conversation' }}
         </h1>
         <RouterLink to="/" class="hidden size-11 shrink-0 place-items-center rounded-full text-ink hover:bg-hover phone:grid" aria-label="Back to the Fil">
           <Icon :name="ChevronLeft" :size="22" />
@@ -573,17 +573,13 @@ function key(event: KeyboardEvent) {
         <!-- On phones the trigger is the conversation itself: agent, title and where it runs. -->
         <button
           ref="historyButton"
-          class="flex min-h-10 items-center gap-2 rounded-lg border border-accent/25 bg-accent/10 px-3 py-2 text-xs font-semibold text-accent phone:min-w-0 phone:flex-1 phone:justify-start phone:border-0 phone:bg-transparent phone:px-0.5 phone:py-1"
+          class="hidden min-w-0 flex-1 items-center justify-start px-0.5 py-1 phone:flex"
           aria-label="Conversations"
           aria-haspopup="dialog"
           :aria-expanded="history"
           @click="history = true"
         >
-          <span class="flex items-center gap-2 phone:hidden"><Icon :name="MessageCircle" :size="18" />Conversations
-            <span class="rounded bg-accent/10 px-1.5 py-0.5 text-[10px]">{{ chats.length }}</span>
-            <Icon :name="ChevronDown" :size="14" />
-          </span>
-          <span class="hidden min-w-0 items-center gap-2.5 phone:flex">
+          <span class="flex min-w-0 items-center gap-2.5">
             <AgentAvatar
               :name="detail?.agentName || selectedAgent?.name || 'Main agent'"
               :identity="detail?.agentId || selectedAgent?.id"
@@ -600,23 +596,51 @@ function key(event: KeyboardEvent) {
             </span>
           </span>
         </button>
-        <div class="flex items-center gap-1">
+        <div class="flex min-w-0 flex-1 items-center gap-3 phone:hidden">
+          <AgentAvatar
+            v-if="detail"
+            :name="detail.agentName"
+            :identity="detail.agentId"
+            :size="36"
+            :working="detail.run?.status === 'running' && !detail.paused"
+          />
+          <div class="min-w-0 flex-1">
+            <div class="flex min-w-0 items-center gap-1">
+              <h1 class="truncate text-base! font-semibold! leading-snug! tracking-tight!">
+                {{ detail?.title || 'New conversation' }}
+              </h1>
+              <button
+                ref="tabletHistoryButton"
+                :class="iconButton"
+                class="-my-2 hidden! size-10! tablet:inline-flex!"
+                aria-label="Conversations"
+                aria-haspopup="dialog"
+                :aria-expanded="history"
+                @click="history = true"
+              >
+                <Icon :name="ChevronDown" :size="16" />
+              </button>
+            </div>
+            <div v-if="detail" class="m-0! mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px] text-muted">
+              <span class="flex min-w-0 items-center gap-1.5"><Icon :name="Bot" :size="13" /><span class="truncate max-w-40">{{ detail.agentName }}</span></span>
+              <template v-if="detail.projectName">
+                <span aria-hidden="true" class="text-muted/40">/</span>
+                <span class="flex min-w-0 items-center gap-1.5"><Icon :name="FolderGit2" :size="13" /><span class="truncate max-w-48">{{ detail.projectName }}</span></span>
+              </template>
+              <span class="flex items-center gap-1.5 font-semibold" :class="chatStatus === 'Working' ? 'text-accent' : chatStatus === 'Failed' || chatStatus === 'Interrupted' ? 'text-coral' : ''"><span v-if="chatStatus !== 'Working'" class="size-1 shrink-0 rounded-full" :class="active ? 'bg-accent' : 'bg-muted'" />{{ chatStatus }}<span v-if="chatStatus === 'Working'" class="working-wave"><i /><i /><i /></span></span>
+              <NodeExecution v-if="detail.run && state.installationRole === 'owner'" :key="detail.run.id" :run="detail.run" />
+            </div>
+          </div>
+        </div>
+        <div class="flex shrink-0 items-center gap-1">
           <button
-            :class="iconButton"
-            class="phone:hidden!"
-            aria-label="Question notifications"
-            @click="notifications = true"
+            v-if="detail?.run && fileCount"
+            class="mr-1 flex min-h-9 items-center gap-2 rounded-full bg-accent/12 px-3.5 text-xs font-semibold text-accent hover:bg-accent/20 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent phone:hidden"
+            :aria-label="`Files: ${fileCount}`"
+            @click="activity?.openFiles()"
           >
-            <Icon :name="Bell" :size="19" />
+            <Icon :name="Layers" :size="16" />Files<span aria-hidden="true" class="grid h-4.5 min-w-4.5 place-items-center rounded-full bg-accent px-1 text-[10px] font-bold text-surface">{{ fileCount }}</span>
           </button>
-          <RouterLink
-            to="/chats"
-            aria-label="New chat"
-            class="flex min-h-10 shrink-0 items-center gap-2 whitespace-nowrap rounded-lg border border-line px-3 py-2 text-xs font-medium text-muted hover:bg-hover hover:text-ink phone:hidden"
-            @click.prevent="newConversation"
-          >
-            <Icon :name="Plus" :size="18" />New chat
-          </RouterLink>
           <button
             v-if="detail?.run"
             :class="iconButton"
@@ -629,9 +653,17 @@ function key(event: KeyboardEvent) {
             <span v-if="fileCount" aria-hidden="true" class="absolute right-1 top-1 grid h-4 min-w-4 place-items-center rounded-full bg-accent px-1 text-[10px] font-bold text-surface">{{ fileCount }}</span>
           </button>
           <button
+            v-if="detail?.run"
+            :class="iconButton"
+            class="phone:hidden!"
+            aria-label="Open activity fullscreen"
+            @click="activity?.enterFullscreen()"
+          >
+            <Icon :name="Maximize2" :size="18" />
+          </button>
+          <button
             ref="detailsButton"
             :class="iconButton"
-            class="hidden! phone:inline-flex!"
             aria-label="Chat details"
             aria-haspopup="dialog"
             :aria-expanded="detailsOpen"
@@ -641,32 +673,6 @@ function key(event: KeyboardEvent) {
           </button>
         </div>
       </header>
-      <div v-if="detail" class="phone:hidden mx-auto flex w-full max-w-205 shrink-0 items-start gap-3.5 px-9 pb-1 pt-3 phone:px-4 phone:pt-1">
-        <AgentAvatar
-          :name="detail.agentName"
-          :identity="detail.agentId"
-          :size="40"
-          :working="detail.run?.status === 'running' && !detail.paused"
-          class="mt-0.5"
-        />
-        <div class="min-w-0 flex-1">
-          <h1 class="line-clamp-2 text-xl! leading-snug! tracking-tight! phone:text-base! wrap-anywhere">
-            {{ detail.title }}
-          </h1>
-          <div class="m-0! mt-1.5! flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px] text-muted phone:mt-1! phone:text-[10px]">
-            <span class="flex min-w-0 items-center gap-1.5"><Icon :name="Bot" :size="13" /><span class="truncate max-w-40">{{ detail.agentName }}</span></span>
-            <template v-if="detail.projectName">
-              <span aria-hidden="true" class="text-muted/40">/</span>
-              <span class="flex min-w-0 items-center gap-1.5"><Icon :name="FolderGit2" :size="13" /><span class="truncate max-w-48 phone:max-w-32">{{ detail.projectName }}</span></span>
-            </template>
-            <span class="flex items-center gap-1.5 font-semibold" :class="chatStatus === 'Working' ? 'text-accent' : chatStatus === 'Failed' || chatStatus === 'Interrupted' ? 'text-coral' : ''"><span v-if="chatStatus !== 'Working'" class="size-1 shrink-0 rounded-full" :class="active ? 'bg-accent' : 'bg-muted'" />{{ chatStatus }}<span v-if="chatStatus === 'Working'" class="working-wave"><i /><i /><i /></span></span>
-            <NodeExecution v-if="detail.run && state.installationRole === 'owner'" :key="detail.run.id" :run="detail.run" />
-          </div>
-        </div>
-      </div>
-      <h1 v-else class="sr-only">
-        Chats
-      </h1>
       <div class="flex min-h-0 flex-1 flex-col">
         <section
           class="relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden transition-opacity"
@@ -745,6 +751,7 @@ function key(event: KeyboardEvent) {
             :loading="catchingUp"
             :trimmed="0"
             :skills="skillNames"
+            compact-toolbar
             chat
             @load="live.loadOlder"
             @position="live.savePosition"

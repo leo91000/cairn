@@ -147,7 +147,7 @@ data class HistoryPage(
 @Serializable data class ReasoningOption(val reasoningEffort: String, val description: String = "")
 
 @Serializable
-data class CodexModel(
+data class CodingAgentModel(
     val model: String,
     val displayName: String = "",
     val description: String = "",
@@ -159,7 +159,7 @@ data class CodexModel(
 
 @Serializable
 data class ModelCatalog(
-    val models: List<CodexModel> = emptyList(),
+    val models: List<CodingAgentModel> = emptyList(),
     val checkedAt: Long? = null,
     val stale: Boolean = false,
     val error: String = "",
