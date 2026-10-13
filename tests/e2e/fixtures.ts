@@ -90,7 +90,7 @@ export const test = base.extend<object, { workspace: Workspace }>({
     const configuration = path.join(directory, 'config.json')
     const usageFile = path.join(directory, 'usage.json')
     const usage: Record<string, unknown> = {}
-    await writeFile(configuration, JSON.stringify({ ...config, claudeBin: path.resolve('tests/fixtures/claude.mjs') }))
+    await writeFile(configuration, JSON.stringify({ ...config, claudeBin: path.resolve('tests/fixtures/claude.mjs'), opencodeBin: path.resolve('tests/fixtures/opencode.mjs') }))
     await writeFile(usageFile, '{}')
     // A developer may rebuild Cargo while this fixture is active. Keep the
     // supervisor's current executable stable for the entire browser journey.

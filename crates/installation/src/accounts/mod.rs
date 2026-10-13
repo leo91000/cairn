@@ -8,6 +8,7 @@ pub mod broker;
 pub mod claude;
 pub mod codex;
 pub(crate) mod lenient;
+pub mod opencode;
 mod record;
 mod sign_in;
 pub mod usage;
@@ -54,6 +55,24 @@ pub struct Lease {
 
 #[async_trait::async_trait]
 pub trait Driver: Send + Sync {
+    fn accepts_api_keys(&self) -> bool {
+        false
+    }
+
+    async fn api_key_providers(&self, _s: &Service) -> Result<Value> {
+        Err(Error::bad("This coding agent does not accept API keys."))
+    }
+
+    async fn connect_api_key(
+        &self,
+        _s: &Service,
+        _account: &Account,
+        _model_provider: &str,
+        _api_key: &str,
+    ) -> Result<()> {
+        Err(Error::bad("This coding agent does not accept API keys."))
+    }
+
     /// Cleans up interrupted work and migrates state from earlier versions, once per start.
     async fn initialize(&self, s: &Service) -> Result<()>;
 
@@ -112,6 +131,7 @@ impl Provider {
         match self {
             Provider::Codex => &codex::Codex,
             Provider::Claude => &claude::Claude,
+            Provider::Opencode => &opencode::Opencode,
         }
     }
 }
@@ -788,6 +808,62 @@ impl Accounts {
         self.begin(s, &mut current, &account).await
     }
 
+    /// Saves an API-key account, fencing edits against admission and active leases.
+    pub async fn connect_api_key(
+        &self,
+        s: &Service,
+        provider: Provider,
+        name: &str,
+        model_provider: &str,
+        api_key: &str,
+        id: Option<&str>,
+    ) -> Result<Value> {
+        let name = valid_name(name)?;
+        let api_key = api_key.trim();
+        if api_key.is_empty()
+            || api_key.len() > 8192
+            || api_key.chars().any(|c| c.is_whitespace() || c.is_control())
+        {
+            return Err(Error::bad("Enter a valid provider API key."));
+        }
+        self.initialize(s).await?;
+        let _selection = self.selection.lock().await;
+        let account = if let Some(id) = id {
+            let account = self.account(s, id).await?;
+            if account.provider != provider {
+                return Err(Error::bad(
+                    "The coding agent of this account cannot change.",
+                ));
+            }
+            if self.busy(s, id).await? || !self.active(id).await.is_empty() {
+                return Err(Error::conflict(
+                    "Wait for this account’s runs to finish before replacing its key.",
+                ));
+            }
+            account
+        } else {
+            if self.of(s, provider).await?.len() >= MAX_ACCOUNTS {
+                return Err(Error::bad(format!(
+                    "A maximum of {MAX_ACCOUNTS} {} accounts can be connected.",
+                    provider.label()
+                )));
+            }
+            Account::new(provider, name, AccountState::Pending)
+        };
+        let id = account.id.clone();
+        let _guard = self.lock(&id).await;
+        provider
+            .driver()
+            .connect_api_key(s, &account, model_provider, api_key)
+            .await?;
+        Ok(self
+            .list(s)
+            .await?
+            .into_iter()
+            .find(|a| a["id"] == id)
+            .unwrap_or(Value::Null))
+    }
+
     pub async fn reconnect(&self, s: &Arc<Service>, id: &str) -> Result<Value> {
         self.initialize(s).await?;
         let _selection = self.selection.lock().await;
@@ -987,9 +1063,28 @@ pub async fn routes(s: &Arc<Service>, input: &Input) -> Result<Value> {
             accounts.initialize(s).await?;
             accounts.overview(s).await
         }
+        ("GET", ["providers", provider]) => {
+            Provider::parse(provider)?
+                .driver()
+                .api_key_providers(s)
+                .await
+        }
         ("POST", []) => {
             let provider = Provider::parse(input.string("provider", 20)?)?;
-            accounts.add(s, provider, input.string("name", 200)?).await
+            if provider.driver().accepts_api_keys() {
+                accounts
+                    .connect_api_key(
+                        s,
+                        provider,
+                        input.string("name", 200)?,
+                        input.string("modelProvider", 80)?,
+                        input.string("apiKey", 8192)?,
+                        None,
+                    )
+                    .await
+            } else {
+                accounts.add(s, provider, input.string("name", 200)?).await
+            }
         }
         ("POST", ["refresh"]) => {
             accounts.poll(s, false).await?;
@@ -1012,6 +1107,20 @@ pub async fn routes(s: &Arc<Service>, input: &Input) -> Result<Value> {
         ("POST", [id, "sign-in"]) => {
             uuid(id)?;
             accounts.reconnect(s, id).await
+        }
+        ("POST", [id, "api-key"]) => {
+            uuid(id)?;
+            let account = accounts.account(s, id).await?;
+            accounts
+                .connect_api_key(
+                    s,
+                    account.provider,
+                    &account.name,
+                    input.string("modelProvider", 80)?,
+                    input.string("apiKey", 8192)?,
+                    Some(id),
+                )
+                .await
         }
         ("PATCH", [id]) => {
             uuid(id)?;

@@ -70,14 +70,18 @@ const models = computed(() => {
 })
 const missing = computed(() => !!model.value && !catalog.value.models.some(item => item.model === model.value))
 const choices = computed(() => [
-  {
-    value: '',
-    label: props.inherit ? 'Agent default' : `${current.value.label} default`,
-    description: (!props.inherit && alias.value?.description) || (fallback.value
-      ? `${fallback.value} · ${props.inherit ? 'the agent’s setting' : `chosen by ${current.value.label}`}`
-      : props.inherit ? 'Follow the agent’s model' : 'Follow provider settings'),
-    recommended: !props.inherit && !!alias.value,
-  },
+  ...(!current.value.requiresModel || (props.inherit && props.defaultModel)
+    ? [
+        {
+          value: '',
+          label: props.inherit ? 'Agent default' : `${current.value.label} default`,
+          description: (!props.inherit && alias.value?.description) || (fallback.value
+            ? `${fallback.value} · ${props.inherit ? 'the agent’s setting' : `chosen by ${current.value.label}`}`
+            : props.inherit ? 'Follow the agent’s model' : 'Follow provider settings'),
+          recommended: !props.inherit && !!alias.value,
+        },
+      ]
+    : []),
   ...models.value.map(item => ({
     value: item.model,
     label: item.displayName || item.model,
@@ -93,6 +97,13 @@ const choices = computed(() => [
       }]
     : []),
 ])
+
+watch([provider, () => catalog.value.models, () => props.defaultModel], () => {
+  if (current.value.requiresModel && !model.value && !(props.inherit && props.defaultModel)) {
+    model.value = catalog.value.models.find(item => item.isDefault && !item.hidden)?.model
+      || catalog.value.models.find(item => !item.hidden)?.model || ''
+  }
+}, { immediate: true })
 const efforts = computed(() => [...new Map((selected.value?.supportedReasoningEfforts ?? []).map(effort => [effort.reasoningEffort, effort])).values()]
   .sort((a, b) => (order.indexOf(a.reasoningEffort) + 1 || 99) - (order.indexOf(b.reasoningEffort) + 1 || 99)))
 const effortDescription = computed(() => efforts.value.find(effort => effort.reasoningEffort === effectiveEffort.value)?.description)
@@ -249,7 +260,7 @@ onBeforeUnmount(() => removeEventListener('resize', place))
           <h3 :id="`${id}-agent`" class="section-label">
             Coding agent
           </h3>
-          <div class="grid grid-cols-2 gap-2" role="radiogroup" aria-label="Coding agent">
+          <div class="grid grid-cols-3 gap-2" role="radiogroup" aria-label="Coding agent">
             <button
               v-for="item in providers"
               :key="item.value"
@@ -257,7 +268,7 @@ onBeforeUnmount(() => removeEventListener('resize', place))
               role="radio"
               :aria-checked="provider === item.value"
               :aria-label="item.label"
-              class="provider-tile flex items-center gap-2.5 rounded-xl border px-3 py-2.5 text-left transition-[border-color,background,box-shadow] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
+              class="provider-tile flex flex-col items-center gap-2 rounded-xl border px-2 py-2.5 text-center transition-[border-color,background,box-shadow] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
               :class="provider === item.value ? item.chosen : 'border-line hover:border-control hover:bg-hover/40'"
               :disabled="disabled"
               @click="chooseProvider(item.value)"

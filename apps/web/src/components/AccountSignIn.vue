@@ -1,9 +1,10 @@
 <script setup lang="ts">
-import type { Provider } from '../../../../packages/contracts/accounts'
+import type { Account, ApiKeyProvider, Provider } from '../../../../packages/contracts/accounts'
 import type { AccountsState } from '../accounts'
 import { computed, ref, watch } from 'vue'
 import { providers } from '../../../../packages/contracts/accounts'
 import { brands } from '../accounts'
+import { api, notify } from '../api'
 import {
   ArrowUpRight,
   Check,
@@ -19,10 +20,16 @@ import UiButton from './UiButton.vue'
 
 // Adds an account or signs one in again, with the same steps for every coding agent: the
 // beacon page opens in a new tab and this window follows until the account is verified.
-const props = defineProps<{ accounts: AccountsState, provider?: Provider }>()
+const props = defineProps<{ accounts: AccountsState, provider?: Provider, account?: Account }>()
 const emit = defineEmits<{ close: [] }>()
 const chosen = ref<Provider>(props.provider ?? 'codex')
-const name = ref('')
+const name = ref(props.account?.name ?? '')
+const apiKey = ref('')
+const modelProvider = ref(props.account?.modelProvider ?? 'opencode')
+const keyProviders = ref<ApiKeyProvider[]>([])
+const providerError = ref('')
+const loadingProviders = ref(false)
+const usesKey = computed(() => providers[chosen.value].connection === 'apiKey')
 const code = ref('')
 const submitted = ref(false)
 const copied = ref(false)
@@ -31,10 +38,41 @@ const flow = computed(() => props.accounts.signIn.value?.state === 'pending' || 
 const busy = computed(() => props.accounts.busy.value)
 const title = computed(() => {
   if (!flow.value)
-    return 'Add an account'
+    return props.account ? 'Replace API key' : 'Add an account'
   if (flow.value.state === 'failed')
     return 'Let’s try that again'
   return `Connect your ${providers[flow.value.provider].subscription}`
+})
+watch(chosen, async (value, _previous, onCleanup) => {
+  apiKey.value = ''
+  providerError.value = ''
+  keyProviders.value = []
+  if (providers[value].connection !== 'apiKey')
+    return
+  let current = true
+  onCleanup(() => {
+    current = false
+  })
+  loadingProviders.value = true
+  try {
+    const values = await api<ApiKeyProvider[]>(`/accounts/providers/${value}`)
+    if (current) {
+      keyProviders.value = values
+      if (!values.some(item => item.id === modelProvider.value))
+        modelProvider.value = values[0]?.id ?? ''
+    }
+  }
+  catch (error) {
+    if (current)
+      providerError.value = (error as Error).message
+  }
+  finally {
+    if (current)
+      loadingProviders.value = false
+  }
+}, { immediate: true })
+watch(modelProvider, () => {
+  apiKey.value = ''
 })
 watch(() => props.accounts.signIn.value?.state, (state) => {
   if (state === 'complete')
@@ -48,7 +86,18 @@ watch([() => flow.value?.code, () => flow.value?.state], () => {
 })
 
 async function add() {
-  await props.accounts.add(chosen.value, name.value.trim() || `${providers[chosen.value].label} account`)
+  const accountName = name.value.trim() || `${providers[chosen.value].label} account`
+  if (usesKey.value) {
+    const saved = await props.accounts.connectKey(chosen.value, accountName, modelProvider.value, apiKey.value, props.account?.id)
+    if (saved) {
+      apiKey.value = ''
+      notify(`${saved.name} API key saved`)
+      emit('close')
+    }
+  }
+  else {
+    await props.accounts.add(chosen.value, accountName)
+  }
 }
 
 async function copyCode() {
@@ -92,7 +141,12 @@ async function close() {
       </UiAlert>
 
       <form v-if="!flow" class="grid gap-5" @submit.prevent="add">
-        <div class="grid grid-cols-2 gap-2.5 phone:grid-cols-1" role="radiogroup" aria-label="Coding agent">
+        <div
+          v-if="!account"
+          class="grid grid-cols-3 gap-2.5 phone:grid-cols-1"
+          role="radiogroup"
+          aria-label="Coding agent"
+        >
           <button
             v-for="(item, key) in providers"
             :key="key"
@@ -117,13 +171,46 @@ async function close() {
             maxlength="100"
             autocomplete="off"
             placeholder="e.g. Work"
+            :disabled="busy || !!account"
           >
         </label>
-        <p class="text-xs text-muted">
+        <template v-if="usesKey">
+          <UiAlert v-if="providerError">
+            {{ providerError }}
+          </UiAlert>
+          <label class="gap-1.5 text-sm text-ink">
+            Model provider
+            <select v-model="modelProvider" :disabled="busy || loadingProviders || !!account">
+              <option v-for="item in keyProviders" :key="item.id" :value="item.id">{{ item.name }}</option>
+            </select>
+          </label>
+          <label class="gap-1.5 text-sm text-ink">
+            API key
+            <input
+              v-model="apiKey"
+              type="password"
+              autocomplete="new-password"
+              spellcheck="false"
+              maxlength="8192"
+              required
+              placeholder="Paste your model-provider key"
+              :disabled="busy || loadingProviders"
+            >
+          </label>
+          <p class="text-xs text-muted">
+            The key is encrypted on your installation and used only for this model provider. Provider usage isn’t reported here.
+          </p>
+        </template>
+        <p v-else class="text-xs text-muted">
           You sign in on {{ providers[chosen].vendor }}’s page. Your password stays there.
         </p>
-        <UiButton type="submit" variant="primary" :disabled="busy">
-          Continue to sign-in<Icon :name="ArrowUpRight" :size="15" />
+        <UiButton type="submit" variant="primary" :disabled="busy || (usesKey && (loadingProviders || !keyProviders.length || !apiKey.trim()))">
+          <template v-if="usesKey">
+            {{ account ? 'Replace API key' : 'Save API key' }}
+          </template>
+          <template v-else>
+            Continue to sign-in<Icon :name="ArrowUpRight" :size="15" />
+          </template>
         </UiButton>
       </form>
 

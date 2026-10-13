@@ -23,6 +23,7 @@ fun ConnectionsScreen(vm: CairnViewModel, state: Workspace, openRun: (String) ->
     var opened by remember { mutableStateOf<String?>(null) }
     var adding by remember { mutableStateOf<String?>(null) }
     var addingAny by remember { mutableStateOf(false) }
+    var replacing by remember { mutableStateOf<Account?>(null) }
     fun show(next: AccountsView) {
         val previous = view?.signIn
         if (previous?.state == "pending" && next.signIn?.state == "complete") {
@@ -131,9 +132,14 @@ fun ConnectionsScreen(vm: CairnViewModel, state: Workspace, openRun: (String) ->
                 openRun,
                 reconnect = {
                     opened = null
-                    vm.perform {
-                        api.request("POST", "/accounts/${segment(account.id)}/sign-in")
-                        load()
+                    if (codingAgent(account.provider).apiKeys) {
+                        replacing = account
+                        adding = account.provider
+                    } else {
+                        vm.perform {
+                            api.request("POST", "/accounts/${segment(account.id)}/sign-in")
+                            load()
+                        }
                     }
                 },
                 changed = { load() },
@@ -143,9 +149,10 @@ fun ConnectionsScreen(vm: CairnViewModel, state: Workspace, openRun: (String) ->
     // A sign-in that is still pending or failed reopens its sheet, including after a restart.
     val flow = view?.signIn?.takeIf { it.state == "pending" || it.state == "failed" }
     if (addingAny || adding != null || flow != null)
-        AccountSignInSheet(vm, state, flow, adding, changed = { load() }) {
+        AccountSignInSheet(vm, state, flow, adding, account = replacing, changed = { load() }) {
             addingAny = false
             adding = null
+            replacing = null
         }
 }
 

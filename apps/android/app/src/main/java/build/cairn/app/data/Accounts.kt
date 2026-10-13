@@ -47,6 +47,8 @@ data class Account(
     val enabled: Boolean = true,
     val email: String? = null,
     val plan: String? = null,
+    val modelProvider: String? = null,
+    val modelProviderName: String? = null,
     val state: String = "pending",
     /** signIn, reconnect, paused, unavailable, waiting, full, next, low or ready. */
     val status: String = "ready",
@@ -59,6 +61,8 @@ data class Account(
     val resetsAt: Long? = null,
     val stale: Boolean = true,
 )
+
+@Serializable data class ApiKeyProvider(val id: String, val name: String)
 
 @Serializable
 data class AccountSignIn(

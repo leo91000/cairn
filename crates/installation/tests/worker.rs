@@ -48,6 +48,7 @@ impl Fixture {
         let config = Config {
             codex_bin: common::fixture("codex.mjs"),
             claude_bin: common::fixture("claude.mjs"),
+            opencode_bin: "opencode".into(),
             concurrency: 2,
             worker_enabled: true,
             ..common::config(root.path())

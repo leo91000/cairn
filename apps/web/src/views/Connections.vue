@@ -18,6 +18,7 @@ import { Plus, RefreshCw } from '../icons'
 const accounts = useAccounts()
 const opened = ref<string>()
 const adding = ref<Provider | 'any'>()
+const replacing = ref<Account>()
 const detail = computed<Account | undefined>(() => accounts.accounts.value.find(a => a.id === opened.value))
 const groups = computed(() => (Object.keys(providers) as Provider[]).map((provider) => {
   const items = accounts.accounts.value.filter(a => a.provider === provider)
@@ -33,7 +34,18 @@ const signingIn = computed(() => adding.value !== undefined || ['pending', 'fail
 
 async function reconnect(account: Account) {
   opened.value = undefined
-  await accounts.reconnect(account.id)
+  if (providers[account.provider].connection === 'apiKey') {
+    replacing.value = account
+    adding.value = account.provider
+  }
+  else {
+    await accounts.reconnect(account.id)
+  }
+}
+
+function closeSignIn() {
+  adding.value = undefined
+  replacing.value = undefined
 }
 </script>
 
@@ -145,6 +157,7 @@ async function reconnect(account: Account) {
     v-if="signingIn"
     :accounts="accounts"
     :provider="adding === 'any' ? undefined : adding"
-    @close="adding = undefined"
+    :account="replacing"
+    @close="closeSignIn"
   />
 </template>

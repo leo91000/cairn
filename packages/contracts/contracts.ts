@@ -18,7 +18,7 @@ export const accessPolicy = z.object({
 })
 export const agentInput = z.object({
   name,
-  provider: z.enum(['codex', 'claude']).default('codex'),
+  provider: z.enum(['codex', 'claude', 'opencode']).default('codex'),
   description: z.string().max(500).default(''),
   model: z.string().max(100).default(''),
   reasoning: reasoningEffort.default('high'),

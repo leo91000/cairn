@@ -104,11 +104,19 @@ private val OpenAiMark by lazy {
 internal fun ProviderMark(provider: String, size: Dp = 20.dp, tint: Color? = null) {
     val claude = provider == "claude"
     Icon(
-        if (claude) ClaudeMark else OpenAiMark,
+        when (provider) {
+            "claude" -> ClaudeMark
+            "opencode" -> OpenCodeMark
+            else -> OpenAiMark
+        },
         null,
         Modifier.size(size),
         tint = tint ?: if (claude) ClaudeTint else MaterialTheme.colorScheme.onSurface,
     )
+}
+
+private val OpenCodeMark by lazy {
+    brandMark("OpenCode", "M22 24H2V0h20zM17 4.8H7v14.4h10z")
 }
 
 /**
@@ -151,6 +159,18 @@ fun ModelPicker(
         }
     }
     val selected = selectedModel(catalog, model, defaultModel)
+    LaunchedEffect(provider, catalog.models, model, defaultModel, inherit) {
+        if (
+            codingAgent(provider).requiresModel &&
+                model.isBlank() &&
+                !(inherit && defaultModel.isNotBlank())
+        ) {
+            val next =
+                catalog.models.find { it.isDefault && !it.hidden }
+                    ?: catalog.models.find { !it.hidden }
+            if (next != null) change(next.model, "")
+        }
+    }
     val inheritedEffort =
         if (inherit && model.isBlank())
             defaultReasoning.ifBlank { selected?.defaultReasoningEffort.orEmpty() }
@@ -295,24 +315,25 @@ fun ModelPicker(
                     selectedModel(catalog, "", defaultModel)?.let {
                         it.displayName.ifBlank { it.model }
                     } ?: defaultModel
-                ModelCard(
-                    if (inherit) "Modèle de l’agent" else "Modèle par défaut",
-                    if (inherit)
-                        fallback.ifBlank { null }?.let { "$it · réglage de l’agent" }
-                            ?: "Suivre le réglage de l’agent"
-                    else
-                        alias?.description?.ifBlank { null }
-                            ?: fallback
-                                .ifBlank { null }
-                                ?.let { "$it · choisi par ${providerLabel(provider)}" }
-                            ?: "Suivre le réglage par défaut de ${providerLabel(provider)}",
-                    model.isBlank(),
-                    enabled,
-                    badge = if (alias != null && !inherit) "Recommandé" else "",
-                    reasoning = reasoningFor,
-                ) {
-                    change("", "")
-                }
+                if (!codingAgent(provider).requiresModel || (inherit && defaultModel.isNotBlank()))
+                    ModelCard(
+                        if (inherit) "Modèle de l’agent" else "Modèle par défaut",
+                        if (inherit)
+                            fallback.ifBlank { null }?.let { "$it · réglage de l’agent" }
+                                ?: "Suivre le réglage de l’agent"
+                        else
+                            alias?.description?.ifBlank { null }
+                                ?: fallback
+                                    .ifBlank { null }
+                                    ?.let { "$it · choisi par ${providerLabel(provider)}" }
+                                ?: "Suivre le réglage par défaut de ${providerLabel(provider)}",
+                        model.isBlank(),
+                        enabled,
+                        badge = if (alias != null && !inherit) "Recommandé" else "",
+                        reasoning = reasoningFor,
+                    ) {
+                        change("", "")
+                    }
                 models.forEach { item ->
                     ModelCard(
                         item.displayName.ifBlank { item.model },
