@@ -199,6 +199,15 @@ fn open_project_tool() -> Value {
 async fn call_tool(s: &Service, bearer: &str, name: &str, args: &Value) -> Result<Value> {
     let summary = Value::to_string;
     match name {
+        "sleep" => ToolResult::from_result(
+            crate::chats::sleep::schedule(s, bearer, args).await,
+            |result| {
+                format!(
+                    "Wakeup saved for {} (Unix milliseconds). End this turn; Cairn will resume automatically when due and capacity is available.",
+                    result["wakeAt"]
+                )
+            },
+        ),
         "list_nodes" => {
             let run = authorize(s, bearer).await?;
             ToolResult::from_result(crate::nodes::moves::list(s, &run).await, summary)
@@ -266,6 +275,7 @@ pub async fn rpc(s: &Service, bearer: &str, method: &str, params: &Value) -> Res
         crate::artifacts::sharing::tool(),
         crate::outcome::tool(),
         crate::onepassword::tool(),
+        crate::chats::sleep::tool(),
     ];
     Ok(json!({ "tools": tools }))
 }

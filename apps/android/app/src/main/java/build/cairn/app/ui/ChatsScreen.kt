@@ -758,7 +758,7 @@ internal fun ChatPage(
                                             },
                                         )
                                     }
-                                    if (active)
+                                    if (active || current.wakeup != null)
                                         DropdownMenuItem(
                                             text = {
                                                 Text(
@@ -852,6 +852,7 @@ internal fun ChatPage(
                                 val now = rememberNow(waitingTasks.since)
                                 "${waitingStep(waitingTasks).title} · ${elapsed(waitingTasks.since, now)}"
                             } else if (active) "L’agent travaille…"
+                            else if (chatSleepNotice(chat) != null) "Attente planifiée"
                             else if (chat?.run?.status in listOf("failed", "interrupted"))
                                 statusLabel(chat?.run?.status.orEmpty())
                             else "Prêt"
@@ -878,7 +879,7 @@ internal fun ChatPage(
                         )
                         ActionIcon("Masquer l’erreur", CairnIcons.Close) { errorDismissed = true }
                     }
-                chatWaitNotice(chat?.run)?.let {
+                (chatWaitNotice(chat?.run) ?: chatSleepNotice(chat))?.let {
                     ChatWaitingNotice(it, openConnections, state.isOwner)
                 }
                 if (gallery) {
@@ -1335,7 +1336,11 @@ internal fun ChatPage(
                                             ) {
                                                 send(if (switchingProvider) "queue" else "steer")
                                             }
-                                        if (active && draft.isBlank() && attachments.isEmpty())
+                                        if (
+                                            (active || chat?.wakeup != null) &&
+                                                draft.isBlank() &&
+                                                attachments.isEmpty()
+                                        )
                                             RoundAction(
                                                 "Arrêter",
                                                 CairnIcons.StopSolid,

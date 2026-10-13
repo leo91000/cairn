@@ -10,6 +10,77 @@ import {
   workspacePath,
 } from './fixtures'
 
+test('a durable scheduled wait survives restart and resumes without a user message', async ({ page, workspace }) => {
+  test.setTimeout(90000)
+  const chat = await workspace.api('/api/chats', 'POST', {})
+  await workspace.api(`/api/chats/${chat.id}/messages`, 'POST', { id: randomUUID(), text: 'Check CI and finish the original task' })
+  await expect.poll(async () => (await workspace.api(`/api/chats/${chat.id}`)).run?.status).toBe('succeeded')
+  const detail = await workspace.api(`/api/chats/${chat.id}`)
+  const wakeup = {
+    id: randomUUID(),
+    messageId: detail.run.chatExecution.messageId,
+    seconds: 420,
+    reason: 'Wait for CI',
+    createdAt: Date.now(),
+    wakeAt: Date.now() + 420000,
+  }
+  workspace.service.store.put('chats', { ...workspace.service.store.get('chats', chat.id)!, wakeup })
+  await workspace.restart()
+  await page.goto(workspacePath(`/chats/${chat.id}`))
+  await authenticateWorkspace(page)
+  const notice = page.getByRole('status').filter({ hasText: 'Wait for CI · Automatic resume from' })
+  await expect(notice).toBeVisible()
+  await expect(page.getByText('Scheduled wait', { exact: true }).first()).toBeVisible()
+  await expect(page.getByRole('button', { name: 'Cancel scheduled wait', exact: true })).toBeVisible()
+  await expect(page.locator('.agent-waiting')).toHaveCount(0)
+  for (const width of [1280, 390]) {
+    await page.setViewportSize({ width, height: 844 })
+    await expect(notice).toBeVisible()
+    await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth - innerWidth)).toBeLessThanOrEqual(1)
+  }
+
+  await page.getByRole('button', { name: 'Pause wait', exact: true }).click()
+  await expect.poll(async () => (await workspace.api(`/api/chats/${chat.id}`)).paused).toBe(true)
+  workspace.service.store.put('chats', { ...workspace.service.store.get('chats', chat.id)!, wakeup: { ...wakeup, wakeAt: Date.now() } })
+  await expect(page.getByRole('button', { name: 'Resume', exact: true })).toBeVisible()
+  expect((await workspace.api(`/api/chats/${chat.id}`)).run.status).toBe('succeeded')
+  await page.getByRole('button', { name: 'Resume', exact: true }).click()
+  await expect.poll(async () => (await workspace.api(`/api/chats/${chat.id}`)).run?.summary).toContain('Cairn resumed this conversation')
+  await expect(notice).toHaveCount(0)
+  const resumed = await workspace.api(`/api/chats/${chat.id}`)
+  expect(resumed.run.id).toBe(detail.run.id)
+  expect(resumed.run.sessionId).toBe(detail.run.sessionId)
+  const userEvents = workspace.service.store.events(detail.run.id, 0, 100).filter(event => event.type === 'chat.user')
+  expect(userEvents).toHaveLength(1)
+  expect(userEvents[0].text).toBe('Check CI and finish the original task')
+  expect(resumed.wakeup).toBeNull()
+})
+
+test('stopping a scheduled wait cancels its wakeup and pauses the conversation', async ({ page, workspace }) => {
+  const chat = await workspace.api('/api/chats', 'POST', {})
+  await workspace.api(`/api/chats/${chat.id}/messages`, 'POST', { id: randomUUID(), text: 'Wait for a remote review' })
+  await expect.poll(async () => (await workspace.api(`/api/chats/${chat.id}`)).run?.status).toBe('succeeded')
+  const detail = await workspace.api(`/api/chats/${chat.id}`)
+  workspace.service.store.put('chats', {
+    ...workspace.service.store.get('chats', chat.id)!,
+    wakeup: {
+      id: randomUUID(),
+      messageId: detail.run.chatExecution.messageId,
+      seconds: 420,
+      reason: 'Wait for review',
+      createdAt: Date.now(),
+      wakeAt: Date.now() + 420000,
+    },
+  })
+  await page.goto(workspacePath(`/chats/${chat.id}`))
+  await authenticateWorkspace(page)
+  await expect(page.getByRole('status').filter({ hasText: 'Wait for review' })).toBeVisible()
+  await page.getByRole('button', { name: 'Cancel scheduled wait', exact: true }).click()
+  await expect.poll(async () => (await workspace.api(`/api/chats/${chat.id}`)).paused).toBe(true)
+  expect((await workspace.api(`/api/chats/${chat.id}`)).wakeup).toBeNull()
+  await expect(page.getByRole('status').filter({ hasText: 'Wait for review' })).toHaveCount(0)
+})
+
 test('verbose tool calls keep their action steps with abbreviated details', async ({ page, workspace }) => {
   const chat = await workspace.api('/api/chats', 'POST', {})
   await workspace.api(`/api/chats/${chat.id}/messages`, 'POST', {

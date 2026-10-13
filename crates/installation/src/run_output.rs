@@ -278,7 +278,8 @@ pub fn prompt(run: &Value, chat: bool) -> String {
             artifact, and share its returned publicUrl. Never make an artifact public \
             merely because it is a deliverable. Store export files in the current run \
             workspace or /tmp. Wait for successful publication and include the returned \
-            durable URL in your reply. Before your final response call \
+            durable URL in your reply. Before your final response, unless ending a \
+            confirmed scheduled wait with cairn_workspace.sleep, call \
             cairn_workspace.report_outcome with completed, blocked, or needs_input, a \
             concrete reason, and validation/delivery evidence. A successful process or \
             local commit is not a completed request when an authorized push, CI check, \
@@ -333,7 +334,7 @@ pub fn prompt(run: &Value, chat: bool) -> String {
             it.\n\nSelected skills (use their supporting resources from the supplied \
             paths):\n{skills}\n\n{onepassword}\n\nRun this task to completion within \
             its stated scope. Preserve unrelated files. Do not expose credentials. \
-            {interaction}\n{deliverables} All task-authorized effects such as creating \
+            {interaction}\n{deliverables}\n{waiting} All task-authorized effects such as creating \
             PRs or releasing must follow their checks. Use .agents/skills for skills. \
             Summarize actual changes, validation, external links and remaining blockers \
             at the end.",
@@ -343,7 +344,12 @@ pub fn prompt(run: &Value, chat: bool) -> String {
             "No projects assigned; use the task workspace."
         } else {
             &projects
-        }
+        },
+        waiting = if chat && run["isolated"] == true {
+            crate::chats::sleep::INSTRUCTIONS
+        } else {
+            ""
+        },
     )
 }
 

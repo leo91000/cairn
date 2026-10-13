@@ -17,7 +17,7 @@ import { useRoute, useRouter } from 'vue-router'
 import { latestArtifacts } from '../../../../packages/contracts/artifacts'
 import { MAIN_AGENT_ID } from '../../../../packages/contracts/constants'
 import { api, state } from '../api'
-import { chatDelivery, chatWaitNotice } from '../chat-delivery'
+import { chatDelivery, chatSleepNotice, chatWaitNotice } from '../chat-delivery'
 import { chatList as chats, publishChats } from '../chat-list'
 import ActivityFeed from '../components/ActivityFeed.vue'
 import AgentAvatar from '../components/AgentAvatar.vue'
@@ -196,9 +196,10 @@ function pasteFiles(event: ClipboardEvent) {
 
 const active = computed(() => !!detail.value?.run && ['queued', 'running'].includes(detail.value.run.status))
 const retryNotice = useRetryNotice(() => detail.value?.run)
+const sleepNotice = computed(() => chatSleepNotice(detail.value))
 const waitNotice = computed(() => retryNotice.value
   ? { account: null, message: retryNotice.value }
-  : chatWaitNotice(detail.value?.run))
+  : chatWaitNotice(detail.value?.run) ?? sleepNotice.value)
 const backgroundTasks = computed(() => detail.value?.run?.status === 'running' ? backgroundWait(events.value)?.tasks.length ?? 0 : 0)
 const chatStatus = computed(() => {
   if (detail.value?.paused)
@@ -217,6 +218,8 @@ const chatStatus = computed(() => {
     return 'Failed'
   if (status === 'interrupted')
     return 'Interrupted'
+  if (sleepNotice.value)
+    return 'Scheduled wait'
   return 'Ready'
 })
 const outgoing = ref<ChatMessage | null>(null)
@@ -767,7 +770,18 @@ function key(event: KeyboardEvent) {
               <p v-if="waitNotice.account" class="mb-1 font-semibold">
                 {{ waitNotice.account }} account needed
               </p>
-              <p>{{ waitNotice.message }}</p>
+              <p class="wrap-anywhere">
+                {{ waitNotice.message }}
+              </p>
+              <UiButton
+                v-if="sleepNotice"
+                size="small"
+                class="mt-2"
+                :disabled="busy"
+                @click="action('pause', { paused: true })"
+              >
+                Pause wait
+              </UiButton>
               <RouterLink v-if="waitNotice.account && state.installationRole === 'owner'" to="/connections" class="mt-2 inline-flex font-semibold text-accent underline">
                 Open Connections
               </RouterLink>
@@ -918,11 +932,11 @@ function key(event: KeyboardEvent) {
                       <Icon :name="Zap" :size="16" />
                     </button>
                     <button
-                      v-if="active && !editing && !hasDraft"
+                      v-if="(active || detail?.wakeup) && !editing && !hasDraft"
                       type="button"
                       class="round-action border border-line text-coral"
-                      aria-label="Stop response"
-                      title="Stop response and pause queue"
+                      :aria-label="sleepNotice ? 'Cancel scheduled wait' : 'Stop response'"
+                      :title="sleepNotice ? 'Cancel wakeup and pause queue' : 'Stop response and pause queue'"
                       :disabled="busy"
                       @click="action('stop')"
                     >
