@@ -82,7 +82,8 @@ function abilities(connection: DiscordConnection) {
     project(connection)
       ? { allowed: true, text: `Read and change ${project(connection)!.name}` }
       : { allowed: false, text: 'Open any project' },
-    { allowed: true, text: `Reply in #${connection.settings.channelName || connection.settings.channelId} only` },
+    { allowed: true, text: `Reply in #${connection.settings.channelName || connection.settings.channelId} and its threads only` },
+    { allowed: true, text: 'Let allowed people answer its questions and stop it from Discord' },
     secrets.length
       ? { allowed: true, warn: true, text: `Use 1Password: ${secrets.map(account => account.name).join(', ')}` }
       : { allowed: false, text: 'Read 1Password secrets' },
@@ -135,6 +136,7 @@ const activityTones = {
   working: ['bg-soft text-accent', 'Working'],
   replied: ['bg-[light-dark(#dff3ee,#163a33)] text-success', 'Replied'],
   failed: ['bg-coral-soft text-coral', 'Not delivered'],
+  stopped: ['bg-hover text-muted', 'Stopped'],
 } as const
 
 onMounted(async () => {
@@ -183,7 +185,7 @@ onBeforeUnmount(() => clearInterval(timer))
         Your agents, right in Discord.
       </h2>
       <p class="mt-2.5 max-w-140 text-sm leading-relaxed text-muted">
-        Mention the bot in a channel and an agent picks up the request, works in its sandbox, and replies in the thread. Every exchange is also a Cairn conversation.
+        Mention the bot in a channel and an agent picks up the request in its own thread: it shows what it’s doing, asks when it needs you, and replies with its answer and files. Every exchange is also a Cairn conversation.
       </p>
       <ul class="mt-4 grid gap-2 text-xs">
         <li v-for="line in ['Only people you approve can trigger it', 'Uses one dedicated agent, with its own limits', 'No public URL — the bot connects outward']" :key="line" class="flex items-center gap-2.5">

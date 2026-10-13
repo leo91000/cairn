@@ -222,16 +222,31 @@ pub async fn pump(s: &Service, connection: &Connection, session: &mut Session) -
             work::finish(s, &delivery, "failed").await?;
             continue;
         }
-        let Some(text) = work::reply(s, connection, &delivery).await? else {
+        let Some(reply) = work::reply(s, connection, &delivery).await? else {
+            follow(s, connection, session, &mut delivery).await?;
+            if !session.alive() {
+                return Err(Error::bad_gateway("Plugin worker stopped."));
+            }
             continue;
         };
         let payload = json!({
             "deliveryId": delivery["id"],
-            "text": text,
+            "conversation": delivery["chatId"],
+            "thread": delivery["thread"],
+            "text": reply.text,
+            "status": reply.status,
+            "files": reply.files,
             "reply": delivery["reply"],
             "state": delivery["state"],
         });
-        let event = json!({ "name": "reply", "revision": connection.revision });
+        // Uploads are limited to this reply's deliverables.
+        let event =
+            json!({ "name": "reply", "revision": connection.revision, "files": reply.files });
+        let outcome = match reply.status {
+            "completed" => "replied",
+            "cancelled" => "stopped",
+            _ => "failed",
+        };
         match dispatch(s, connection, session, &event, "reply", payload).await {
             // A plugin asks to be called again later, e.g. after a platform rate limit.
             Ok(value) if value["retryAfter"].is_number() => {
@@ -244,7 +259,7 @@ pub async fn pump(s: &Service, connection: &Connection, session: &mut Session) -
                 s.store.put(DELIVERIES, delivery).await?;
                 break;
             }
-            Ok(_) => work::finish(s, &delivery, "replied").await?,
+            Ok(_) => work::finish(s, &delivery, outcome).await?,
             Err(_) => {
                 if retry_later(s, DELIVERIES, &mut delivery).await? {
                     work::finish(s, &delivery, "failed").await?;
@@ -254,6 +269,63 @@ pub async fn pump(s: &Service, connection: &Connection, session: &mut Session) -
         if !session.alive() {
             return Err(Error::bad_gateway("Plugin worker stopped."));
         }
+    }
+    Ok(())
+}
+
+/// While the agent works: each new question once, and progress every eight seconds
+/// (long enough for a platform's typing indicator to stay visible).
+async fn follow(
+    s: &Service,
+    connection: &Connection,
+    session: &mut Session,
+    delivery: &mut Value,
+) -> Result<()> {
+    let mut changed = false;
+    for question in work::questions(s, delivery).await? {
+        let asked = delivery["asked"]
+            .as_array()
+            .is_some_and(|asked| asked.contains(&question["id"]));
+        if asked {
+            continue;
+        }
+        let payload = json!({
+            "deliveryId": delivery["id"],
+            "conversation": delivery["chatId"],
+            "thread": delivery["thread"],
+            "question": question,
+            "reply": delivery["reply"],
+        });
+        let event = json!({ "name": "question", "revision": connection.revision });
+        if dispatch(s, connection, session, &event, "question", payload)
+            .await
+            .is_ok()
+        {
+            match delivery["asked"].as_array_mut() {
+                Some(asked) => asked.push(question["id"].clone()),
+                None => delivery["asked"] = json!([question["id"]]),
+            }
+            changed = true;
+        }
+    }
+    if now() - delivery["progressAt"].as_i64().unwrap_or(0) >= 8000
+        && let Some(progress) = work::progress(s, connection, delivery).await?
+    {
+        let payload = json!({
+            "deliveryId": delivery["id"],
+            "conversation": delivery["chatId"],
+            "thread": delivery["thread"],
+            "state": progress["state"],
+            "step": progress["step"],
+            "reply": delivery["reply"],
+        });
+        let event = json!({ "name": "progress", "revision": connection.revision });
+        let _ = dispatch(s, connection, session, &event, "progress", payload).await;
+        delivery["progressAt"] = json!(now());
+        changed = true;
+    }
+    if changed {
+        s.store.put(DELIVERIES, delivery.clone()).await?;
     }
     Ok(())
 }

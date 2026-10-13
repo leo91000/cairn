@@ -10,7 +10,7 @@ use crate::{
 };
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{Value, json};
-use std::time::Duration;
+use std::{collections::HashSet, time::Duration};
 use tokio_tungstenite::{
     connect_async_with_config,
     tungstenite::{Message, protocol::WebSocketConfig},
@@ -26,6 +26,8 @@ pub(super) struct Session {
     sequence: Option<u64>,
     resume_url: Option<String>,
     bot_id: String,
+    /// Active threads under the configured channel, learned from Gateway events.
+    threads: HashSet<String>,
 }
 
 pub(super) async fn run(
@@ -103,7 +105,7 @@ async fn run_at(
             "op": 2,
             "d": {
                 "token": token,
-                "intents": 513,
+                "intents": intents(connection),
                 "properties": {
                     "os": "linux",
                     "browser": "cairn",
@@ -174,10 +176,22 @@ async fn run_at(
                             }
                             Some("RESUMED") => status(s, connection, "connected").await,
                             Some("MESSAGE_CREATE") if !session.bot_id.is_empty() => {
-                                if let Some(inbound) = inbound(connection, &session.bot_id, &value["d"]) {
+                                if let Some(inbound) = inbound(connection, &session.bot_id, &session.threads, &value["d"]) {
                                     accept(s, connection, inbound).await?;
                                 }
                             }
+                            Some("INTERACTION_CREATE") if !session.bot_id.is_empty() => {
+                                interaction(s, connection, &session.bot_id, &session.threads, &value["d"]).await?;
+                            }
+                            Some("GUILD_CREATE" | "THREAD_LIST_SYNC") => {
+                                if value["d"]["id"] == connection.settings["guildId"] || value["d"]["guild_id"] == connection.settings["guildId"] {
+                                    for thread in value["d"]["threads"].as_array().into_iter().flatten() {
+                                        track(connection, &mut session.threads, thread);
+                                    }
+                                }
+                            }
+                            Some("THREAD_CREATE" | "THREAD_UPDATE") => track(connection, &mut session.threads, &value["d"]),
+                            Some("THREAD_DELETE") => { session.threads.remove(text(&value["d"], "id")); }
                             _ => {},
                         }
                         // Advance only after durable admission; replayed messages deduplicate.
@@ -203,40 +217,154 @@ async fn run_at(
     }
 }
 
-/// The transport's scope: a person mentioning this bot in the configured channel.
-/// Without the Message Content intent, other messages carry no text anyway.
-pub fn inbound(connection: &Connection, bot: &str, message: &Value) -> Option<Inbound> {
-    let author = &message["author"];
+/// Guild messages and guilds; Message Content only when the owner enabled it in
+/// both the Developer Portal and the connection settings.
+fn intents(connection: &Connection) -> u64 {
+    let content = if connection.settings["messageContent"] == true {
+        1 << 15
+    } else {
+        0
+    };
+    513 | content
+}
+
+fn track(connection: &Connection, threads: &mut HashSet<String>, thread: &Value) {
+    let id = text(thread, "id");
+    if !snowflake(id) || thread["guild_id"] != connection.settings["guildId"] {
+        return;
+    }
+    if thread["parent_id"] == connection.settings["channelId"]
+        && thread["thread_metadata"]["archived"] != true
+    {
+        threads.insert(id.to_owned());
+    } else {
+        threads.remove(id);
+    }
+}
+
+fn person(user: &Value) -> Option<Label> {
+    let id = text(user, "id");
+    if !snowflake(id) || user["bot"] == true {
+        return None;
+    }
+    let name = user["global_name"]
+        .as_str()
+        .filter(|name| !name.is_empty())
+        .unwrap_or_else(|| text(user, "username"));
+    Some(Label {
+        id: id.to_owned(),
+        name: label(name),
+    })
+}
+
+/// The transport's scope: the configured channel and its threads. A message is for
+/// the bot when it mentions it, or, with Message Content enabled, when it is posted
+/// in one of those threads or replies to the bot.
+pub fn inbound(
+    connection: &Connection,
+    bot: &str,
+    threads: &HashSet<String>,
+    message: &Value,
+) -> Option<Inbound> {
+    let channel = text(message, "channel_id");
+    let in_thread = threads.contains(channel);
+    let mentioned = message["mentions"]
+        .as_array()
+        .is_some_and(|mentions| mentions.iter().any(|mention| mention["id"] == bot));
+    let content = connection.settings["messageContent"] == true;
+    let replies_to_bot = message["referenced_message"]["author"]["id"] == bot;
     let addressed = message["guild_id"] == connection.settings["guildId"]
-        && message["channel_id"] == connection.settings["channelId"]
-        && author["id"].as_str().is_some_and(snowflake)
-        && author["bot"] != true
+        && (channel == text(&connection.settings, "channelId") || in_thread)
         && message["webhook_id"].is_null()
         && text(message, "content").len() <= 50_000
         && snowflake(text(message, "id"))
-        && message["mentions"]
-            .as_array()
-            .is_some_and(|mentions| mentions.iter().any(|mention| mention["id"] == bot));
-    if !addressed {
-        return None;
-    }
-    let name = author["global_name"]
-        .as_str()
-        .filter(|name| !name.is_empty())
-        .unwrap_or_else(|| text(author, "username"));
+        && (mentioned || (content && (in_thread || replies_to_bot)));
+    let author = person(&message["author"]).filter(|_| addressed)?;
+    let attachments = message["attachments"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .take(4)
+        .map(|file| {
+            json!({
+                "url": file["url"],
+                "name": label(text(file, "filename")),
+                "contentType": file["content_type"],
+                "size": file["size"],
+            })
+        })
+        .collect::<Vec<_>>();
     Some(Inbound {
+        kind: "message",
         id: text(message, "id").to_owned(),
-        author: Label {
-            id: text(author, "id").to_owned(),
-            name: label(name),
-        },
+        author,
         context: json!({
             "botId": bot,
             "guildId": message["guild_id"],
-            "channelId": message["channel_id"],
+            "channelId": text(&connection.settings, "channelId"),
+            "threadId": if in_thread { json!(channel) } else { Value::Null },
+            "mentioned": mentioned,
         }),
-        body: json!({ "content": message["content"] }),
+        body: json!({ "content": message["content"], "attachments": attachments }),
     })
+}
+
+/// Button clicks must be acknowledged within three seconds, so the transport answers
+/// Discord itself, then queues the click for the plugin like any other event.
+pub async fn interaction(
+    s: &Service,
+    connection: &Connection,
+    bot: &str,
+    threads: &HashSet<String>,
+    value: &Value,
+) -> Result<()> {
+    let channel = text(value, "channel_id");
+    let in_scope = value["guild_id"] == connection.settings["guildId"]
+        && (channel == text(&connection.settings, "channelId") || threads.contains(channel))
+        && value["type"] == 3
+        && value["message"]["author"]["id"] == bot;
+    let (id, token) = (text(value, "id"), text(value, "token"));
+    if !in_scope || !snowflake(id) || token.is_empty() || token.len() > 500 {
+        return Ok(());
+    }
+    // Type 6: acknowledge without changing the message; the plugin updates it later.
+    let _ = s
+        .http
+        .post(super::api(
+            s,
+            &format!("/interactions/{id}/{token}/callback"),
+        ))
+        .header("user-agent", super::USER_AGENT)
+        .json(&json!({ "type": 6 }))
+        .timeout(Duration::from_secs(3))
+        .send()
+        .await;
+    let Some(author) = person(&value["member"]["user"]) else {
+        return Ok(());
+    };
+    let custom = text(&value["data"], "custom_id");
+    if custom.is_empty() || custom.len() > 100 {
+        return Ok(());
+    }
+    accept(
+        s,
+        connection,
+        Inbound {
+            kind: "interaction",
+            id: id.to_owned(),
+            author,
+            context: json!({
+                "botId": bot,
+                "guildId": value["guild_id"],
+                "channelId": text(&connection.settings, "channelId"),
+                "threadId": if threads.contains(channel) { json!(channel) } else { Value::Null },
+                "messageId": value["message"]["id"],
+            }),
+            body: json!({ "customId": custom }),
+        },
+    )
+    .await
+    .map(|_| ())
 }
 
 fn safe_resume_url(value: &str) -> bool {
@@ -256,6 +384,50 @@ mod tests {
     use super::*;
     use tokio::net::TcpListener;
     use tokio_tungstenite::accept_async;
+
+    #[tokio::test]
+    async fn scope_covers_channel_threads_and_optional_message_content() {
+        let (_root, _s, mut connection) = super::super::tests::fixture().await;
+        let mut threads = HashSet::new();
+        track(
+            &connection,
+            &mut threads,
+            &json!({ "id": "700", "guild_id": "100", "parent_id": "200" }),
+        );
+        track(
+            &connection,
+            &mut threads,
+            &json!({ "id": "701", "guild_id": "100", "parent_id": "999" }),
+        );
+        assert!(threads.contains("700") && !threads.contains("701"));
+        let message = |channel: &str, mention: bool| {
+            json!({
+                "id": "500", "guild_id": "100", "channel_id": channel, "content": "hi",
+                "author": { "id": "300", "username": "sarah" },
+                "mentions": if mention { json!([{ "id": "400" }]) } else { json!([]) },
+                "attachments": [{ "url": "https://cdn.discordapp.com/a.png", "filename": "a.png", "size": 3 }],
+            })
+        };
+        let seen = inbound(&connection, "400", &threads, &message("700", true)).unwrap();
+        assert_eq!(seen.context["threadId"], "700");
+        assert_eq!(seen.body["attachments"][0]["name"], "a.png");
+        assert!(inbound(&connection, "400", &threads, &message("700", false)).is_none());
+        assert!(inbound(&connection, "400", &threads, &message("701", true)).is_none());
+        let mut reply = message("200", false);
+        reply["referenced_message"] = json!({ "author": { "id": "400" } });
+        assert!(inbound(&connection, "400", &threads, &reply).is_none());
+        connection.settings["messageContent"] = json!(true);
+        assert_eq!(intents(&connection), 513 | 1 << 15);
+        assert!(inbound(&connection, "400", &threads, &message("700", false)).is_some());
+        assert!(inbound(&connection, "400", &threads, &reply).is_some());
+        assert!(inbound(&connection, "400", &threads, &message("200", false)).is_none());
+        track(
+            &connection,
+            &mut threads,
+            &json!({ "id": "700", "guild_id": "100", "parent_id": "200", "thread_metadata": { "archived": true } }),
+        );
+        assert!(threads.is_empty());
+    }
 
     #[tokio::test]
     async fn gateway_identifies_heartbeats_persists_mentions_and_retains_resume_state() {

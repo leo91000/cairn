@@ -12,8 +12,22 @@ const ADMINISTRATOR: u64 = 1 << 3;
 const VIEW_CHANNEL: u64 = 1 << 10;
 const SEND_MESSAGES: u64 = 1 << 11;
 const READ_MESSAGE_HISTORY: u64 = 1 << 16;
-/// Exactly what mention replies need; the invite never requests more.
-pub const INVITE_PERMISSIONS: u64 = VIEW_CHANNEL | SEND_MESSAGES | READ_MESSAGE_HISTORY;
+const ADD_REACTIONS: u64 = 1 << 6;
+const ATTACH_FILES: u64 = 1 << 15;
+const CREATE_PUBLIC_THREADS: u64 = 1 << 35;
+const SEND_MESSAGES_IN_THREADS: u64 = 1 << 38;
+
+/// What the bot needs: reply, react, upload deliverables and keep each conversation
+/// in its own thread. The invite never requests more.
+pub const INVITE_PERMISSIONS: u64 = VIEW_CHANNEL
+    | SEND_MESSAGES
+    | READ_MESSAGE_HISTORY
+    | ADD_REACTIONS
+    | ATTACH_FILES
+    | CREATE_PUBLIC_THREADS
+    | SEND_MESSAGES_IN_THREADS;
+
+const THREADS: u64 = CREATE_PUBLIC_THREADS | SEND_MESSAGES_IN_THREADS;
 
 pub async fn discover(s: &Service, plugin_id: &str, input: &Value) -> Result<Value> {
     let token = token(s, plugin_id, input).await?;
@@ -153,6 +167,7 @@ pub(super) async fn discover_at(
                     "canRead": read,
                     "canReply": read && allowed & (SEND_MESSAGES | READ_MESSAGE_HISTORY)
                         == SEND_MESSAGES | READ_MESSAGE_HISTORY,
+                    "canThread": read && allowed & THREADS == THREADS,
                 })
             })
             .collect::<Vec<_>>();
@@ -277,7 +292,7 @@ mod tests {
             0
         );
         assert_eq!(permissions(&guild(), &member, "1", &hidden), u64::MAX);
-        assert_eq!(INVITE_PERMISSIONS, 68_608);
+        assert_eq!(INVITE_PERMISSIONS, 309_237_746_752);
     }
 
     async fn users(headers: HeaderMap, Path(id): Path<String>) -> Json<Value> {
@@ -320,7 +335,7 @@ mod tests {
         assert_eq!(result["bot"]["name"], "cairn");
         assert_eq!(
             result["inviteUrl"],
-            "https://discord.com/oauth2/authorize?client_id=401&scope=bot&permissions=68608"
+            "https://discord.com/oauth2/authorize?client_id=401&scope=bot&permissions=309237746752"
         );
         assert_eq!(result["guilds"][0]["name"], "Acme");
         let channels = result["channels"].as_array().unwrap();

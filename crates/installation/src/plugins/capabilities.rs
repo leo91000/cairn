@@ -47,9 +47,9 @@ pub async fn call(
             }
             "http.request" => http(s, context, &args).await,
             "timers.after" | "timers.cancel" => timers(s, &context.connection, method, &args).await,
-            "conversations.submit" => {
-                super::work::submit(s, &context.connection, &context.event, &args).await
-            }
+            "conversations.submit" => super::work::submit(s, context, &args).await,
+            "conversations.answer" => super::work::answer(s, context, &args).await,
+            "conversations.cancel" => super::work::cancel(s, context, &args).await,
             _ => Err(Error::forbidden("Unknown plugin capability.")),
         }
     }
@@ -125,6 +125,101 @@ async fn storage(
         .await
 }
 
+/// Checks a URL against the hosts the plugin declares: HTTPS, default port, no
+/// credentials in the URL. Tests may route it to a local server.
+pub(crate) fn target(s: &Service, manifest: &Manifest, raw: &str) -> Result<String> {
+    let url = url::Url::parse(raw).map_err(|_| Error::bad("Invalid URL."))?;
+    let host = url.host_str().unwrap_or("");
+    if url.scheme() != "https"
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.port().is_some()
+        || !manifest.hosts.iter().any(|allowed| allowed == host)
+    {
+        return Err(Error::forbidden("This host is not declared by the plugin."));
+    }
+    Ok(match s.plugins.test_origin() {
+        Some(origin) => format!(
+            "{origin}{}{}",
+            url.path(),
+            url.query()
+                .map(|query| format!("?{query}"))
+                .unwrap_or_default()
+        ),
+        None => url.to_string(),
+    })
+}
+
+/// Builds a multipart body from a JSON part and deliverables of the reply being
+/// handled. Only files listed in that `reply` event can be attached.
+async fn multipart(s: &Service, context: &Context, spec: &Value) -> Result<(String, Vec<u8>)> {
+    let allowed = context.event["files"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    let boundary = format!("cairn-{}", crate::config::id().replace('-', ""));
+    let mut body = Vec::new();
+    let mut part = |headers: String, bytes: &[u8]| {
+        body.extend_from_slice(format!("--{boundary}\r\n{headers}\r\n\r\n").as_bytes());
+        body.extend_from_slice(bytes);
+        body.extend_from_slice(b"\r\n");
+    };
+    let field = |value: &str, fallback: &str| -> Result<String> {
+        let name = if value.is_empty() { fallback } else { value };
+        if name.len() > 60
+            || !name
+                .bytes()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, b'_' | b'[' | b']' | b'-'))
+        {
+            return Err(Error::bad("Invalid multipart field."));
+        }
+        Ok(name.to_owned())
+    };
+    if let Some(json) = spec.get("json").filter(|value| !value.is_null()) {
+        let name = field(text(spec, "jsonField"), "payload_json")?;
+        part(
+            format!(
+                "Content-Disposition: form-data; name=\"{name}\"\r\nContent-Type: application/json"
+            ),
+            serde_json::to_string(json)?.as_bytes(),
+        );
+    }
+    let files = spec["files"].as_array().cloned().unwrap_or_default();
+    if files.len() > 10 {
+        return Err(Error::bad("Attach up to ten files."));
+    }
+    let mut total = 0;
+    for (index, file) in files.iter().enumerate() {
+        let artifact = text(file, "artifact");
+        crate::validation::uuid(artifact)?;
+        let listed = allowed
+            .iter()
+            .find(|item| item["id"] == artifact)
+            .ok_or_else(|| Error::forbidden("Only deliverables of this reply can be uploaded."))?;
+        let path = s.config.data_dir.join("artifacts").join(artifact);
+        let metadata = std::fs::symlink_metadata(&path)?;
+        total += metadata.len();
+        if !metadata.is_file() || metadata.len() > 25 * 1024 * 1024 || total > 50 * 1024 * 1024 {
+            return Err(Error::too_large("Deliverables are too large to upload."));
+        }
+        let bytes = tokio::fs::read(&path).await?;
+        let name = super::connections::label(text(listed, "name")).replace(['"', '\\'], "_");
+        let media = listed["mediaType"]
+            .as_str()
+            .filter(|media| media.len() < 100 && !media.contains(['\r', '\n']))
+            .unwrap_or("application/octet-stream");
+        part(
+            format!(
+                "Content-Disposition: form-data; name=\"{}\"; filename=\"{name}\"\r\nContent-Type: {media}",
+                field(text(file, "field"), &format!("files[{index}]"))?
+            ),
+            &bytes,
+        );
+    }
+    body.extend_from_slice(format!("--{boundary}--\r\n").as_bytes());
+    Ok((format!("multipart/form-data; boundary={boundary}"), body))
+}
+
 /// HTTPS to hosts the manifest lists. With `auth = true`, the host adds the
 /// connection's credential using the manifest's rule; scripts never see it.
 async fn http(s: &Service, context: &Context, args: &Value) -> Result<Value> {
@@ -137,26 +232,7 @@ async fn http(s: &Service, context: &Context, args: &Value) -> Result<Value> {
         "DELETE" => reqwest::Method::DELETE,
         _ => return Err(invalid("Unsupported HTTP method.")),
     };
-    let url = url::Url::parse(text(args, "url")).map_err(|_| invalid("Invalid URL."))?;
-    let host = url.host_str().unwrap_or("");
-    if url.scheme() != "https"
-        || !url.username().is_empty()
-        || url.password().is_some()
-        || url.port().is_some()
-        || !context.manifest.hosts.iter().any(|allowed| allowed == host)
-    {
-        return Err(Error::forbidden("This host is not declared by the plugin."));
-    }
-    let target = match s.plugins.test_origin() {
-        Some(origin) => format!(
-            "{origin}{}{}",
-            url.path(),
-            url.query()
-                .map(|query| format!("?{query}"))
-                .unwrap_or_default()
-        ),
-        None => url.to_string(),
-    };
+    let target = target(s, &context.manifest, text(args, "url"))?;
     let mut request = s
         .plugins
         .http
@@ -177,7 +253,10 @@ async fn http(s: &Service, context: &Context, args: &Value) -> Result<Value> {
             request = request.header(name, value);
         }
     }
-    if let Some(body) = args.get("json").filter(|value| !value.is_null()) {
+    if let Some(spec) = args.get("multipart").filter(|value| value.is_object()) {
+        let (kind, body) = multipart(s, context, spec).await?;
+        request = request.header("content-type", kind).body(body);
+    } else if let Some(body) = args.get("json").filter(|value| !value.is_null()) {
         if serde_json::to_string(body)?.len() > 262_144 {
             return Err(Error::too_large("Request body is too large."));
         }

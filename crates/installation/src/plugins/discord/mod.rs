@@ -12,7 +12,7 @@ use crate::{
     validation::text,
 };
 pub use discover::discover;
-pub use gateway::inbound;
+pub use gateway::{inbound, interaction as interact};
 use serde_json::{Value, json};
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
@@ -22,6 +22,14 @@ pub const USER_AGENT: &str = concat!(
     env!("CARGO_PKG_VERSION"),
     ")"
 );
+
+/// Discord's REST API, or the local test server when one is configured.
+pub(crate) fn api(s: &Service, path: &str) -> String {
+    match s.plugins.test_origin() {
+        Some(origin) => format!("{origin}/api/v10{path}"),
+        None => format!("https://discord.com/api/v10{path}"),
+    }
+}
 
 pub fn snowflake(value: &str) -> bool {
     !value.is_empty() && value.len() <= 20 && value.bytes().all(|c| c.is_ascii_digit())

@@ -1,5 +1,5 @@
 mod handoff;
-mod questions;
+pub(crate) mod questions;
 
 pub use handoff::{execution_text, with_invoked_skills};
 pub use questions::{Question, QuestionField, QuestionStatus, question_prefix};

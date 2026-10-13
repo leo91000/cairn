@@ -34,6 +34,8 @@ cairn.timers = {
 }
 cairn.conversations = {
     submit = function(message) return call("conversations.submit", message) end,
+    answer = function(answer) return call("conversations.answer", answer) end,
+    cancel = function(target) return call("conversations.cancel", target) end,
 }
 "#;
 

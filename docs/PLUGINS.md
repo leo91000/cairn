@@ -43,7 +43,7 @@ requires removing the package's connections first.
 
 A manifest declares:
 
-- `capabilities`: `conversations.submit`, `storage`, `http`, `timers`,
+- `capabilities`: `conversations.submit`, `conversations.control`, `storage`, `http`, `timers`,
   `transport.discord`, and (built-in only) `onepassword.read`;
 - `hosts`: the exact HTTPS hostnames `http` may reach;
 - `credential`: how Cairn adds a connection's secret to authorized requests
@@ -77,20 +77,37 @@ Events, all durable until handled (retried up to five times):
 | Event | When | Payload |
 |---|---|---|
 | `start` | each time the worker starts | `{ connectionId }` |
-| `message` | an allowed person wrote through the transport | `{ id, author, content, … }` |
+| `message` | an allowed person wrote through the transport | `{ id, author, content, attachments, … }` |
+| `interaction` | an allowed person pressed a button | `{ id, author, customId, … }` |
 | `access_requested` | someone new asked (approval mode) | `{ id, author, … }`, never content |
-| `reply` | the agent's final answer is ready | `{ deliveryId, text, reply, state }` |
+| `progress` | every ~8 s while the agent works | `{ deliveryId, conversation, state, step, reply }` |
+| `question` | the agent asks a question (once each) | `{ deliveryId, conversation, question, reply }` |
+| `reply` | the agent's final answer is ready | `{ deliveryId, conversation, text, status, files, reply, state }` |
 | `timer` | a timer scheduled by the package fired | `{ id, name, payload }` |
 | `command` | a run-scoped CLI command (1Password) | command arguments |
 
 A `reply` handler may return `{ retryAfter = seconds, state = … }` to be called again
 later, for example after a platform rate limit. Capabilities exposed to scripts:
 
-- `cairn.conversations.submit({ text, thread?, reply? })`: only while handling
-  `message`, on behalf of that message's author. The host applies quotas,
-  deduplication and the conversation binding (author is always part of it).
+- `cairn.conversations.submit({ text, thread?, shared?, files?, reply? })`: only while
+  handling `message`, on behalf of that message's author. The host applies quotas,
+  deduplication and the conversation binding: by author and thread, or, with
+  `shared = true`, one conversation per thread for everyone allowed. `files` are
+  fetched from declared hosts (four, 10 MB each) and attached to the message. Writing
+  again resumes a stopped conversation.
+- `cairn.conversations.answer({ conversation|thread, question, answers })` and
+  `cairn.conversations.cancel({ conversation|thread })` (capability
+  `conversations.control`): while handling `message` or `interaction`, for an allowed
+  person, only in conversations the connection started. Cancel works like Stop in
+  Cairn. Private (secret) question fields can only be answered in Cairn.
+- `progress.step` is a short description such as “Running `pnpm test`” or “Editing
+  deploy.ts”; it never contains command output. `reply.status` is `completed`,
+  `failed` or `cancelled`, and `reply.files` lists deliverables published during that
+  turn (up to ten).
 - `cairn.storage.get/set/delete/list`: up to 1000 values of 64 KB per connection.
-- `cairn.http.request{ method, url, headers?, json?|body?, auth? }`: HTTPS to declared
+- `cairn.http.request{ method, url, headers?, json?|body?|multipart?, auth? }`:
+  `multipart` sends a JSON part and deliverables of the reply being handled (by
+  artifact ID, 25 MB each); nothing else can be uploaded. HTTPS to declared
   hosts only, no redirects followed, 15-second timeout, 1 MB responses.
 - `cairn.timers.after(seconds, name, payload)` / `cancel(id)`: 1 s to 7 days, 100 per
   connection.
@@ -155,11 +172,28 @@ bot can do) and a four-step setup:
    project. Set the name and per-hour message limit, review the summary and activate.
 
 The Discord package splits native and scripted work. Rust keeps the Gateway
-connection (heartbeat, resume, reconnects) and delivers only mentions of the bot in
-the configured server and channel; setup discovery is native too. The Luau script
-strips the mention, submits the conversation, answers access requests once (using
-storage to remember who was told), and posts replies in Discord-sized chunks with
-deterministic nonces through `cairn.http` and the bot token Cairn injects.
+connection (heartbeat, resume, reconnects), tracks threads under the configured
+channel, acknowledges button presses within Discord's three-second limit, and
+delivers only messages for the bot: mentions in the channel or its threads, plus,
+when the owner enables Message Content in both the Developer Portal and the setup,
+replies in those threads or to the bot without a mention. Setup discovery is native
+too. The Luau script does the rest:
+
+- reacts 👀 on receipt and opens a thread named after the request, so each
+  conversation lives in its own thread (it stays in the channel if the bot can't
+  create threads); attachments go to the agent with the message;
+- while the agent works, keeps “typing…” visible and edits one status message with
+  the current step and a Stop button; “stop” or “cancel” in the thread does the same;
+- posts the agent's questions with one button per option (free-text fields are
+  answered by replying in the thread; private fields must be answered in Cairn);
+- posts the final answer in Discord-sized chunks with deterministic nonces, uploads
+  the turn's deliverables as files (up to 10 MB each, otherwise noted as available
+  in Cairn), then marks the request ✅, ❌ or ⏹;
+- answers access requests once, using storage to remember who was told.
+
+The bot needs View Channel, Send Messages, Read Message History, Add Reactions,
+Attach Files, Create Public Threads and Send Messages in Threads; the generated
+invite requests exactly these.
 
 Setup discovery (bot identity, servers, channels and permission resolution, user
 names) runs on the installation with the pasted or saved token; the token is never
@@ -168,7 +202,10 @@ Discord avatars are not loaded, keeping the browser off Discord's CDN.
 
 Live test: activate the bot, wait for Online, mention it from an approved person and
 confirm a shared Cairn conversation appears and its final answer returns to Discord.
-Then mention it from someone new and approve or deny them, pause it with “Accept new
+Check the 👀 reaction, the thread, the status message and its Stop button, a
+question with buttons (ask the agent to confirm something), an attached screenshot,
+and a deliverable coming back as a file. Then mention it from someone new and
+approve or deny them, pause it with “Accept new
 messages”, and restart the manager with work pending. Check continuity, denial and
 revocation.
 
@@ -198,8 +235,8 @@ next reply in a global-limit pass. Deterministic nonces suppress duplicates with
 Discord's nonce window; a crash followed by a late retry can still duplicate a post.
 Replies expire after 24 hours and are capped at 16,000 characters. Gateway resume
 state is currently in memory, so events missed while the installation is offline
-are not recovered after a manager restart. Attachments, slash commands, private
-question replies and notifications are deferred.
+are not recovered after a manager restart. Slash commands, direct messages and
+reading channel history are deliberately out of scope.
 
 ## Validation
 

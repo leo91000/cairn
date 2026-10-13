@@ -12,6 +12,10 @@ pub const CAPABILITIES: &[(&str, &str)] = &[
         "conversations.submit",
         "Start or continue conversations with the connection's agent, for people you allow",
     ),
+    (
+        "conversations.control",
+        "Answer the agent's questions and stop its work, for people you allow",
+    ),
     ("storage", "Keep small private notes for each connection"),
     (
         "http",
@@ -38,6 +42,7 @@ pub fn capability(method: &str) -> Option<&'static str> {
         "http.request" => "http",
         "timers.after" | "timers.cancel" => "timers",
         "conversations.submit" => "conversations.submit",
+        "conversations.answer" | "conversations.cancel" => "conversations.control",
         "onepassword.read" => "onepassword.read",
         _ => return None,
     };
@@ -272,5 +277,6 @@ mod tests {
         assert!(!manifest.permits("http.request"));
         assert!(!manifest.permits("storage"));
         assert!(!manifest.permits("native.execute"));
+        assert!(!manifest.permits("conversations.cancel"));
     }
 }

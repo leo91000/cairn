@@ -7,6 +7,7 @@ import {
   BrandOnePassword,
   BrandSlack,
   BrandTelegram,
+  CirclePause,
   Clock,
   Globe,
   HardDrive,
@@ -81,7 +82,7 @@ export interface Activity {
   userId: string
   name: string
   preview: string
-  status: 'working' | 'replied' | 'failed'
+  status: 'working' | 'replied' | 'failed' | 'stopped'
   createdAt: number
 }
 
@@ -108,7 +109,7 @@ export interface Discovery {
   applicationId: string
   inviteUrl: string
   guilds: Label[]
-  channels?: (Label & { canRead: boolean, canReply: boolean })[]
+  channels?: (Label & { canRead: boolean, canReply: boolean, canThread?: boolean })[]
   users?: Label[]
 }
 
@@ -128,6 +129,7 @@ export type DiscordConnection = PluginConnection & {
 export const capabilityLabels: Record<string, [IconName, string]> = {
   'transport.discord': [Bot, 'Discord bot'],
   'conversations.submit': [MessageSquare, 'Conversations'],
+  'conversations.control': [CirclePause, 'Answer and stop'],
   'http': [Globe, 'Web requests'],
   'storage': [HardDrive, 'Storage'],
   'timers': [Clock, 'Timers'],

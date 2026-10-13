@@ -57,6 +57,7 @@ const discovery = ref<Discovery>()
 const guildId = ref('')
 const channelId = ref('')
 const accessMode = ref<'requests' | 'allowlist'>('requests')
+const messageContent = ref(false)
 const people = ref<Label[]>([])
 const addition = ref('')
 const agentId = ref('')
@@ -151,6 +152,7 @@ async function save() {
         channelName: channel.value?.name ?? '',
         botId: discovery.value?.bot.id ?? '',
         botName: discovery.value?.bot.name ?? '',
+        messageContent: messageContent.value,
       },
       accessMode: accessMode.value,
       userIds: people.value.map(person => person.id),
@@ -190,6 +192,7 @@ onMounted(async () => {
     guildId.value = existing.settings.guildId
     channelId.value = existing.settings.channelId
     accessMode.value = existing.accessMode
+    messageContent.value = existing.settings.messageContent === true
     people.value = existing.userIds.map(id => existing.people.find(person => person.id === id) ?? { id, name: '' })
     agentId.value = existing.agentId
     limit.value = existing.maxMessagesPerHour
@@ -400,7 +403,8 @@ const radio = 'size-4.5 shrink-0 accent-[var(--color-accent)]'
                     >
                     <Icon :name="item.canRead ? Hash : Lock" :size="15" class="text-muted" />
                     <span class="min-w-0 flex-1 truncate text-xs font-semibold">{{ item.name }}</span>
-                    <span v-if="item.canReply" class="rounded-full bg-[light-dark(#dff3ee,#163a33)] px-2 py-px text-3xs font-semibold text-success">Can reply</span>
+                    <span v-if="item.canReply && item.canThread === false" class="text-2xs text-muted">No threads · replies in channel</span>
+                    <span v-else-if="item.canReply" class="rounded-full bg-[light-dark(#dff3ee,#163a33)] px-2 py-px text-3xs font-semibold text-success">Can reply</span>
                     <span v-else class="text-2xs text-muted">{{ item.canRead ? 'Can’t send messages' : 'Bot can’t read' }}</span>
                   </label>
                   <p v-if="checking && !discovery.channels" class="text-2xs text-muted">
@@ -445,6 +449,11 @@ const radio = 'size-4.5 shrink-0 accent-[var(--color-accent)]'
                   <span class="mt-1 block text-2xs leading-relaxed text-muted">Other mentions are ignored silently.</span></span>
               </label>
             </fieldset>
+            <label :class="twMerge(option, 'mt-2.5 items-start')">
+              <input v-model="messageContent" type="checkbox" :class="twMerge(radio, 'mt-0.5')">
+              <span><span class="block text-xs font-semibold">Read replies without a mention</span>
+                <span class="mt-1 block text-2xs leading-relaxed text-muted">Each conversation gets its own thread. With this on, allowed people can simply reply in the thread or to the bot. First turn on “Message Content Intent” on the Bot page of the Developer Portal, or Discord will refuse the connection.</span></span>
+            </label>
             <h3 class="mt-5.5 text-xs! font-semibold">
               Allowed now
             </h3>

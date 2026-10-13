@@ -6,11 +6,11 @@ use axum::{
     extract::State,
     http::{HeaderMap, StatusCode},
     response::IntoResponse,
-    routing::{get, post},
 };
 use cairn_installation::{
     config::{MAIN_AGENT_ID, now},
     plugins::{
+        capabilities,
         connections::{self, Connection},
         discord, registry, runtime, work,
     },
@@ -94,9 +94,18 @@ async fn accept(
     connection: &Connection,
     value: Value,
 ) -> cairn_installation::error::Result<bool> {
-    match discord::inbound(connection, "400", &value) {
+    match discord::inbound(connection, "400", &std::collections::HashSet::new(), &value) {
         Some(inbound) => work::accept(s, connection, inbound).await,
         None => Ok(false),
+    }
+}
+
+/// What a handler acts for: here, the Discord package handling `event`.
+fn context(connection: &Connection, event: &Value) -> capabilities::Context {
+    capabilities::Context {
+        connection: connection.clone(),
+        manifest: registry::builtin("discord").unwrap().manifest,
+        event: event.clone(),
     }
 }
 
@@ -109,83 +118,97 @@ async fn session(s: &Service, plugin: &str) -> Session {
         .unwrap()
 }
 
-/// Records requests for any path and answers from a script of statuses.
+/// A fake Discord (and status API): records every call and answers like the real one.
 #[derive(Default)]
 struct Mock {
-    requests: Mutex<Vec<(String, HeaderMap, Value)>>,
+    requests: Mutex<Vec<Call>>,
+    /// Statuses for the next message posts, consumed first to last.
     statuses: Mutex<Vec<u16>>,
 }
 
+struct Call {
+    method: String,
+    path: String,
+    headers: HeaderMap,
+    body: Value,
+}
+
+impl Mock {
+    async fn posts(&self, path: &str) -> Vec<Value> {
+        self.requests
+            .lock()
+            .await
+            .iter()
+            .filter(|call| call.method == "POST" && call.path == path)
+            .map(|call| call.body.clone())
+            .collect()
+    }
+
+    async fn called(&self, method: &str, prefix: &str) -> usize {
+        self.requests
+            .lock()
+            .await
+            .iter()
+            .filter(|call| call.method == method && call.path.starts_with(prefix))
+            .count()
+    }
+}
+
+const PNG: &[u8] = b"\x89PNG\r\n\x1a\nsynthetic";
+
 async fn record(
     State(mock): State<Arc<Mock>>,
+    method: axum::http::Method,
     uri: axum::http::Uri,
     headers: HeaderMap,
     body: axum::body::Bytes,
 ) -> axum::response::Response {
-    let body = serde_json::from_slice(&body).unwrap_or(Value::Null);
-    mock.requests
-        .lock()
-        .await
-        .push((uri.path().to_owned(), headers, body));
-    let status = mock.statuses.lock().await.pop().unwrap_or(200);
-    match status {
-        429 => (
-            StatusCode::TOO_MANY_REQUESTS,
-            Json(json!({ "retry_after": 1 })),
-        )
-            .into_response(),
-        302 => (
+    let path = uri.path().to_owned();
+    let parsed = serde_json::from_slice(&body)
+        .unwrap_or_else(|_| Value::String(String::from_utf8_lossy(&body).into_owned()));
+    let posting = method == "POST" && path.ends_with("/messages");
+    mock.requests.lock().await.push(Call {
+        method: method.to_string(),
+        path: path.clone(),
+        headers,
+        body: parsed,
+    });
+    if posting {
+        let mut statuses = mock.statuses.lock().await;
+        if !statuses.is_empty() && statuses.remove(0) == 429 {
+            return (
+                StatusCode::TOO_MANY_REQUESTS,
+                Json(json!({ "retry_after": 1 })),
+            )
+                .into_response();
+        }
+        let count = mock.requests.lock().await.len();
+        return Json(json!({ "id": format!("{}", 9000 + count) })).into_response();
+    }
+    if path.ends_with("/threads") {
+        return Json(json!({ "id": "700" })).into_response();
+    }
+    if path.starts_with("/attachments/") {
+        return PNG.into_response();
+    }
+    if path == "/v1/redirect" {
+        return (
             StatusCode::FOUND,
             [("location", "http://127.0.0.1:9/elsewhere")],
         )
-            .into_response(),
-        _ => Json(json!({ "id": "600" })).into_response(),
+            .into_response();
     }
+    Json(json!({ "id": "600" })).into_response()
 }
 
 async fn mock(s: &Service) -> (Arc<Mock>, tokio::task::JoinHandle<()>) {
     let mock = Arc::new(Mock::default());
-    let app = Router::new()
-        .route("/api/v10/channels/{channel}/messages", post(record))
-        .route("/v1/ping", post(record))
-        .route("/v1/redirect", get(record))
-        .with_state(mock.clone());
+    let app = Router::new().fallback(record).with_state(mock.clone());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     s.plugins
         .route_http_to(Some(format!("http://{}", listener.local_addr().unwrap())));
     let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
     (mock, server)
-}
-
-/// Completes the conversation turn for a delivery, as the agent worker would.
-async fn complete(s: &Service, delivery: &Value, answer: &str) {
-    s.chat_tick(&std::collections::HashSet::new())
-        .await
-        .unwrap();
-    let chat = s.get("chats", text(delivery, "chatId")).await.unwrap();
-    let run_id = text(&chat, "runId").to_owned();
-    s.store
-        .event(
-            &run_id,
-            "chat.user",
-            "",
-            Some(json!({ "messageId": delivery["id"] })),
-        )
-        .await
-        .unwrap();
-    s.store
-        .event(
-            &run_id,
-            "item.completed",
-            answer,
-            Some(json!({ "item": { "type": "agent_message", "text": answer } })),
-        )
-        .await
-        .unwrap();
-    s.store
-        .event(&run_id, "turn.completed", "", None)
-        .await
-        .unwrap();
 }
 
 #[tokio::test]
@@ -311,10 +334,20 @@ async fn worker_sessions_enforce_capabilities_deadlines_and_keep_state() {
     next.stop().await;
 }
 
+/// Moves the delivery's next attempt and progress throttle to now.
+async fn due(s: &Service) {
+    for mut delivery in s.store.list(work::DELIVERIES).await.unwrap() {
+        delivery["nextAttemptAt"] = json!(now());
+        delivery["progressAt"] = json!(0);
+        s.store.put(work::DELIVERIES, delivery).await.unwrap();
+    }
+}
+
 #[tokio::test]
-async fn discord_script_submits_mentions_and_delivers_chunked_replies() {
-    let (_root, s, connection) = fixture().await;
+async fn discord_script_runs_a_conversation_in_a_thread_end_to_end() {
+    let (root, s, connection) = fixture().await;
     let (mock, server) = mock(&s).await;
+    let mut session = session(&s, "discord").await;
     for (id, content) in [("498", "<@400>   "), ("499", "no mention")] {
         let mut value = message(id, "300", content);
         if id == "499" {
@@ -322,67 +355,271 @@ async fn discord_script_submits_mentions_and_delivers_chunked_replies() {
         }
         accept(&s, &connection, value).await.unwrap();
     }
-    assert!(
-        accept(&s, &connection, message("500", "300", "<@400> hello"))
-            .await
-            .unwrap()
+    let mut request = message(
+        "500",
+        "300",
+        "<@400> Fix the flaky deploy\nIt fails on main",
     );
+    request["attachments"] = json!([{ "url": "https://cdn.discordapp.com/attachments/1/2/shot.png", "filename": "shot.png", "size": 17 }]);
+    assert!(accept(&s, &connection, request.clone()).await.unwrap());
     // Replays from the Gateway deduplicate.
-    assert!(
-        !accept(&s, &connection, message("500", "300", "<@400> hello"))
-            .await
-            .unwrap()
-    );
-    let mut session = session(&s, "discord").await;
+    assert!(!accept(&s, &connection, request).await.unwrap());
     runtime::pump(&s, &connection, &mut session).await.unwrap();
-    assert!(s.store.list(work::EVENTS).await.unwrap().is_empty());
+
+    // 👀 on receipt, then a thread named after the request.
+    assert_eq!(
+        mock.called(
+            "PUT",
+            "/api/v10/channels/200/messages/500/reactions/%F0%9F%91%80/@me"
+        )
+        .await,
+        1
+    );
+    let thread = mock
+        .posts("/api/v10/channels/200/messages/500/threads")
+        .await;
+    assert_eq!(
+        thread,
+        vec![json!({ "name": "Fix the flaky deploy", "auto_archive_duration": 1440 })]
+    );
     let deliveries = s.store.list(work::DELIVERIES).await.unwrap();
     assert_eq!(deliveries.len(), 1, "the empty mention starts nothing");
     let delivery = deliveries[0].clone();
     assert_eq!(
         delivery["reply"],
-        json!({ "channel": "200", "message": "500" })
+        json!({ "channel": "700", "source": "200", "message": "500", "threaded": true })
     );
-    let answer = format!("{}{}", "é".repeat(1900), "done");
-    complete(&s, &delivery, &answer).await;
+    let chat = text(&delivery, "chatId").to_owned();
+    let prefix = format!("chat-attachment:{chat}:");
+    let stored = s.store.read(move |db| db.keys(&prefix)).await.unwrap();
+    assert_eq!(
+        stored.len(),
+        1,
+        "the screenshot is attached to the conversation"
+    );
+    assert_eq!(stored[0].1["mediaType"], "image/png");
 
-    mock.statuses.lock().await.push(429);
+    // While the agent works: typing, a status message with Stop, then the question.
+    s.chat_tick(&std::collections::HashSet::new())
+        .await
+        .unwrap();
+    let run_id = text(&s.get("chats", &chat).await.unwrap(), "runId").to_owned();
+    s.store
+        .event(
+            &run_id,
+            "chat.user",
+            "",
+            Some(json!({ "messageId": delivery["id"] })),
+        )
+        .await
+        .unwrap();
+    s.store
+        .event(&run_id, "item.started", "", Some(json!({ "item": { "type": "command_execution", "command": "pnpm   test --filter deploy" } })))
+        .await
+        .unwrap();
+    let question = "a".repeat(64);
+    s.question_receive(
+        &run_id,
+        json!({
+            "id": question,
+            "blocking": true,
+            "fields": [{ "id": "0", "title": "Retry the deploy?", "secret": false, "options": [
+                { "label": "Yes", "description": "" }, { "label": "No", "description": "Leave it" }
+            ] }],
+        }),
+    )
+    .await
+    .unwrap();
+    due(&s).await;
     runtime::pump(&s, &connection, &mut session).await.unwrap();
-    let mut waiting = s.store.list(work::DELIVERIES).await.unwrap().remove(0);
-    assert!(waiting["nextAttemptAt"].as_i64().unwrap() > now());
-    waiting["nextAttemptAt"] = json!(now());
-    s.store.put(work::DELIVERIES, waiting).await.unwrap();
+    assert!(mock.called("POST", "/api/v10/channels/700/typing").await >= 1);
+    let posts = mock.posts("/api/v10/channels/700/messages").await;
+    let status = posts
+        .iter()
+        .find(|post| text(post, "content").starts_with('⏳'))
+        .unwrap();
+    assert_eq!(status["content"], "⏳ Running `pnpm test --filter deploy`");
+    assert_eq!(
+        status["components"][0]["components"][0]["custom_id"],
+        "stop"
+    );
+    let asked = posts
+        .iter()
+        .find(|post| text(post, "content").contains("Retry the deploy?"))
+        .unwrap();
+    let buttons = &asked["components"][0]["components"];
+    assert_eq!(buttons[1]["label"], "No");
+    let custom = text(&buttons[1], "custom_id").to_owned();
+
+    // A button press is acknowledged by the transport and answers the agent.
+    let mut threads = std::collections::HashSet::new();
+    threads.insert("700".to_owned());
+    let click = json!({
+        "id": "800", "token": "synthetic_interaction", "type": 3, "guild_id": "100", "channel_id": "700",
+        "member": { "user": { "id": "300", "username": "sarah" } },
+        "message": { "id": "9002", "author": { "id": "400" } },
+        "data": { "custom_id": custom },
+    });
+    discord::interact(&s, &connection, "400", &threads, &click)
+        .await
+        .unwrap();
+    assert_eq!(
+        mock.called(
+            "POST",
+            "/api/v10/interactions/800/synthetic_interaction/callback"
+        )
+        .await,
+        1
+    );
+    runtime::pump(&s, &connection, &mut session).await.unwrap();
+    let pending = s
+        .store
+        .kv(&format!("chat-question:{chat}:{question}"))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(pending["status"], "answering");
+    assert!(
+        mock.called("PATCH", "/api/v10/channels/700/messages/")
+            .await
+            >= 1
+    );
+
+    // The final answer arrives in the thread with the turn's deliverable attached.
+    let artifact = cairn_installation::config::id();
+    std::fs::create_dir_all(root.path().join("data/artifacts")).unwrap();
+    std::fs::write(
+        root.path().join(format!("data/artifacts/{artifact}")),
+        "report body",
+    )
+    .unwrap();
+    s.store
+        .event(&run_id, "artifact", "Report", Some(json!({ "id": artifact, "name": "report.md", "mediaType": "text/markdown", "size": 11 })))
+        .await
+        .unwrap();
+    let answer = format!("{}{}", "é".repeat(1900), "done");
+    s.store
+        .event(
+            &run_id,
+            "item.completed",
+            &answer,
+            Some(json!({ "item": { "type": "agent_message", "text": answer } })),
+        )
+        .await
+        .unwrap();
+    s.store
+        .event(&run_id, "turn.completed", "", None)
+        .await
+        .unwrap();
+    mock.statuses.lock().await.push(429);
+    due(&s).await;
+    runtime::pump(&s, &connection, &mut session).await.unwrap();
+    assert_eq!(
+        s.store.list(work::DELIVERIES).await.unwrap().len(),
+        1,
+        "rate limited, retried later"
+    );
+    due(&s).await;
     runtime::pump(&s, &connection, &mut session).await.unwrap();
     assert!(s.store.list(work::DELIVERIES).await.unwrap().is_empty());
-    let activity = s.store.list("plugin-activity").await.unwrap();
-    assert_eq!(activity[0]["status"], "replied");
-    assert_eq!(activity[0]["preview"], "hello");
-
-    let requests = mock.requests.lock().await;
-    assert_eq!(requests.len(), 3);
-    for (path, headers, body) in requests.iter() {
-        assert_eq!(path, "/api/v10/channels/200/messages");
-        assert_eq!(headers["authorization"], "Bot synthetic_discord_token");
-        assert!(
-            headers["user-agent"]
-                .to_str()
-                .unwrap()
-                .starts_with("DiscordBot")
-        );
-        assert_eq!(body["allowed_mentions"]["parse"], json!([]));
-        assert_eq!(body["enforce_nonce"], true);
-    }
-    assert_eq!(requests[0].2["nonce"], requests[1].2["nonce"]);
-    assert_ne!(requests[1].2["nonce"], requests[2].2["nonce"]);
-    assert_eq!(requests[1].2["message_reference"]["message_id"], "500");
-    assert!(requests[2].2["message_reference"].is_null());
-    let sent = format!(
-        "{}{}",
-        text(&requests[1].2, "content"),
-        text(&requests[2].2, "content")
+    assert_eq!(
+        s.store.list("plugin-activity").await.unwrap()[0]["status"],
+        "replied"
     );
-    assert_eq!(sent, answer);
-    drop(requests);
+
+    let posts = mock.posts("/api/v10/channels/700/messages").await;
+    let replies = &posts[posts.len() - 3..];
+    assert_eq!(
+        replies[0]["nonce"], replies[1]["nonce"],
+        "the retry reuses its nonce"
+    );
+    assert!(
+        replies[1]["message_reference"].is_null(),
+        "threads need no reference"
+    );
+    assert_eq!(replies[1]["allowed_mentions"]["parse"], json!([]));
+    let upload = replies[2].as_str().unwrap();
+    assert!(
+        upload.contains("filename=\"report.md\"")
+            && upload.contains("report body")
+            && upload.contains("\"content\":\"done\"")
+    );
+    let calls = mock.requests.lock().await;
+    let multipart = calls
+        .iter()
+        .find(|call| {
+            call.body
+                .as_str()
+                .is_some_and(|body| body.contains("report body"))
+        })
+        .unwrap();
+    assert!(
+        multipart.headers["content-type"]
+            .to_str()
+            .unwrap()
+            .starts_with("multipart/form-data; boundary=")
+    );
+    assert!(calls.iter().all(|call| {
+        call.path.starts_with("/attachments/")
+            || call.path.contains("/interactions/")
+            || call
+                .headers
+                .get("authorization")
+                .is_some_and(|value| value == "Bot synthetic_discord_token")
+    }));
+    drop(calls);
+    assert_eq!(
+        mock.called("DELETE", "/api/v10/channels/700/messages/")
+            .await,
+        1,
+        "the status message is removed"
+    );
+    assert_eq!(
+        mock.called(
+            "PUT",
+            "/api/v10/channels/200/messages/500/reactions/%E2%9C%85/@me"
+        )
+        .await,
+        1
+    );
+
+    // "stop" in the thread cancels the agent's work on the next request.
+    let mut follow = message("501", "300", "<@400> also check staging");
+    follow["channel_id"] = json!("700");
+    assert!(
+        work::accept(
+            &s,
+            &connection,
+            discord::inbound(&connection, "400", &threads, &follow).unwrap()
+        )
+        .await
+        .unwrap()
+    );
+    runtime::pump(&s, &connection, &mut session).await.unwrap();
+    assert_eq!(
+        s.store.list(work::DELIVERIES).await.unwrap()[0]["chatId"],
+        chat,
+        "same thread, same conversation"
+    );
+    let mut stop = message("502", "300", "<@400> stop");
+    stop["channel_id"] = json!("700");
+    work::accept(
+        &s,
+        &connection,
+        discord::inbound(&connection, "400", &threads, &stop).unwrap(),
+    )
+    .await
+    .unwrap();
+    runtime::pump(&s, &connection, &mut session).await.unwrap();
+    assert_eq!(s.get("chats", &chat).await.unwrap()["paused"], true);
+    assert_eq!(
+        mock.called(
+            "PUT",
+            "/api/v10/channels/700/messages/502/reactions/%E2%8F%B9%EF%B8%8F/@me"
+        )
+        .await,
+        1
+    );
     session.stop().await;
     server.abort();
 }
@@ -437,7 +674,7 @@ async fn access_requests_wait_for_approval_without_storing_content() {
     assert_eq!(requests[0]["mentions"], 3);
     // The script answered once, and nothing the person wrote was kept anywhere.
     assert_eq!(mock.requests.lock().await.len(), 1);
-    assert!(text(&mock.requests.lock().await[0].2, "content").contains("approve"));
+    assert!(text(&mock.requests.lock().await[0].body, "content").contains("approve"));
     for kind in [
         "plugin-requests",
         "plugin-events",
@@ -527,15 +764,18 @@ async fn rate_limits_and_changed_agent_access_stop_admission() {
         })
     };
     for id in ["500", "501"] {
-        work::submit(&s, &connection, &event(id), &json!({ "text": "hello" }))
-            .await
-            .unwrap();
+        work::submit(
+            &s,
+            &context(&connection, &event(id)),
+            &json!({ "text": "hello" }),
+        )
+        .await
+        .unwrap();
     }
     assert_eq!(
         work::submit(
             &s,
-            &connection,
-            &event("502"),
+            &context(&connection, &event("502")),
             &json!({ "text": "too many" })
         )
         .await
@@ -547,16 +787,20 @@ async fn rate_limits_and_changed_agent_access_stop_admission() {
     let mut stranger = event("503");
     stranger["authorId"] = json!("999");
     assert_eq!(
-        work::submit(&s, &connection, &stranger, &json!({ "text": "x" }))
-            .await
-            .unwrap_err()
-            .status,
+        work::submit(
+            &s,
+            &context(&connection, &stranger),
+            &json!({ "text": "x" })
+        )
+        .await
+        .unwrap_err()
+        .status,
         403
     );
     let mut timer = event("504");
     timer["name"] = json!("timer");
     assert_eq!(
-        work::submit(&s, &connection, &timer, &json!({ "text": "x" }))
+        work::submit(&s, &context(&connection, &timer), &json!({ "text": "x" }))
             .await
             .unwrap_err()
             .status,
@@ -613,9 +857,13 @@ async fn replies_export_only_the_correlated_completed_turn_and_revoke_immediatel
         "authorId": "300",
         "payload": { "id": "500", "author": { "id": "300", "name": "Sarah" } },
     });
-    let receipt = work::submit(&s, &connection, &event, &json!({ "text": "hello" }))
-        .await
-        .unwrap();
+    let receipt = work::submit(
+        &s,
+        &context(&connection, &event),
+        &json!({ "text": "hello" }),
+    )
+    .await
+    .unwrap();
     s.chat_tick(&std::collections::HashSet::new())
         .await
         .unwrap();
@@ -674,12 +922,13 @@ async fn replies_export_only_the_correlated_completed_turn_and_revoke_immediatel
         .event(run_id, "turn.completed", "", None)
         .await
         .unwrap();
+    let reply = work::reply(&s, &connection, &delivery)
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(
-        work::reply(&s, &connection, &delivery)
-            .await
-            .unwrap()
-            .unwrap(),
-        "hello back"
+        (reply.text.as_str(), reply.status),
+        ("hello back", "completed")
     );
     connections::remove(&s, "discord", &connection.id)
         .await
@@ -774,14 +1023,13 @@ async fn installed_packages_need_approval_and_reach_only_declared_hosts() {
     assert!(timer["at"].as_i64().unwrap() > now() + 50_000);
     timer["at"] = json!(now());
     s.store.put("plugin-timers", timer).await.unwrap();
-    mock.statuses.lock().await.extend([302, 200]);
     runtime::pump(&s, &connection, &mut session).await.unwrap();
     let requests = mock.requests.lock().await;
     assert_eq!(requests.len(), 2, "the undeclared host was never contacted");
-    assert_eq!(requests[0].0, "/v1/ping");
-    assert_eq!(requests[0].1["x-api-key"], "secret-key");
-    assert_eq!(requests[0].2, json!({ "team": "core" }));
-    assert!(requests[1].1.get("x-api-key").is_none());
+    assert_eq!(requests[0].path, "/v1/ping");
+    assert_eq!(requests[0].headers["x-api-key"], "secret-key");
+    assert_eq!(requests[0].body, json!({ "team": "core" }));
+    assert!(requests[1].headers.get("x-api-key").is_none());
     drop(requests);
     let stored = s.store.list("plugin-storage").await.unwrap();
     let value = |key: &str| stored.iter().find(|item| item["key"] == key).unwrap()["value"].clone();

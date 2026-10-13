@@ -181,7 +181,6 @@ impl Service {
             .get("name")
             .filter(|s| !s.trim().is_empty() && s.len() <= 1000)
             .ok_or_else(|| Error::bad("A file name is required."))?;
-        let name = filename(name);
         let bytes = tokio::time::timeout(
             Duration::from_secs(30),
             to_bytes(request.into_body(), MAX_FILE),
@@ -189,7 +188,27 @@ impl Service {
         .await
         .map_err(|_| Error::timeout("Upload timed out."))?
         .map_err(|_| Error::too_large("Files must be 10 MB or smaller."))?;
-        let digest = hex::encode(Sha256::digest(&bytes));
+        let attachment = self.store_attachment(chat, id, name, &bytes).await?;
+        Ok(Json(attachment).into_response())
+    }
+
+    /// Stores one file for a chat and returns its record, for HTTP uploads and for
+    /// files plugins receive (Discord attachments). Callers hold `attachment_upload`
+    /// when they need uploads serialized; the name is cleaned here.
+    pub async fn store_attachment(
+        &self,
+        chat: &str,
+        id: &str,
+        name: &str,
+        bytes: &[u8],
+    ) -> Result<Value> {
+        uuid(chat)?;
+        uuid(id)?;
+        if bytes.len() > MAX_FILE {
+            return Err(Error::too_large("Files must be 10 MB or smaller."));
+        }
+        let name = filename(name);
+        let digest = hex::encode(Sha256::digest(bytes));
         let k = key(chat, id);
         if let Some(existing) = self.store.kv(&k).await? {
             if existing["digest"] != digest || existing["name"] != name {
@@ -197,7 +216,7 @@ impl Service {
                     "This attachment identifier has already been used.",
                 ));
             }
-            return Ok(Json(existing).into_response());
+            return Ok(existing);
         }
         let prefix = format!("chat-attachment:{chat}:");
         let used = self
@@ -215,7 +234,7 @@ impl Service {
                 "This chat has reached its 200 MB attachment limit. Start a new chat.",
             ));
         }
-        let media_type = media(&bytes);
+        let media_type = media(bytes);
         let kind = if media_type.starts_with("image/") {
             AttachmentKind::Image
         } else {
@@ -233,7 +252,7 @@ impl Service {
         })?;
         let path = self.attachment_path(chat, id);
         private_dir(path.parent().unwrap()).await?;
-        atomic_write(&path, &bytes).await?;
+        atomic_write(&path, bytes).await?;
         let chat_id = chat.to_owned();
         let saved = attachment.clone();
         let commit = self
@@ -250,7 +269,7 @@ impl Service {
             }
             return Err(error);
         }
-        Ok(Json(attachment).into_response())
+        Ok(attachment)
     }
 
     async fn download_attachment(&self, chat: &str, id: &str) -> Result<Response> {

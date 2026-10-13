@@ -1,8 +1,12 @@
 -- Authoring reference for plugin API v1. Runtime globals are host-owned and frozen.
 -- A package's main.luau returns a table of handlers keyed by event name:
---   message           a message from an allowed person      { id, author, content, … }
+--   message           a message from an allowed person      { id, author, content, attachments, … }
+--   interaction       a button an allowed person pressed     { id, author, customId, … }
 --   access_requested  someone new asked to use the plugin    { id, author, … } (no content)
---   reply             an agent's final answer to deliver     { deliveryId, text, reply, state }
+--   progress          every ~8 s while the agent works       { deliveryId, conversation, state, step, reply }
+--   question          the agent asks something, once each    { deliveryId, conversation, question, reply }
+--   reply             the agent's final answer to deliver    { deliveryId, conversation, text, status,
+--                                                              files, reply, state }
 --                     return { retryAfter = seconds, state = … } to be called again later
 --   timer             a timer scheduled with cairn.timers    { id, name, payload }
 --   start             when Cairn starts the worker           { connectionId }
@@ -23,6 +27,12 @@ export type HttpRequest = {
     headers: { [string]: string }?,
     json: Json?,
     body: string?,
+    -- multipart/form-data: a JSON part plus deliverables of the reply being handled.
+    multipart: {
+        json: Json?,
+        jsonField: string?, -- default "payload_json"
+        files: { { artifact: string, field: string? } }?, -- field default "files[n]"
+    }?,
     -- Adds the connection's credential using the manifest's "credential" rule.
     auth: boolean?,
 }
@@ -53,10 +63,25 @@ export type Cairn = {
         cancel: (id: string) -> (),
     },
     -- capability "conversations.submit": only while handling `message`, on behalf of
-    -- its author. `thread` groups messages into one conversation; `reply` comes back
-    -- unchanged in the `reply` event.
+    -- its author. `files` are fetched from declared hosts (4 × 10 MB). With
+    -- `shared = true`, everyone allowed who writes in `thread` continues one conversation.
     conversations: {
-        submit: (message: { text: string, thread: string?, reply: Json? }) -> { chatId: string, messageId: string },
+        submit: (message: {
+            text: string,
+            thread: string?,
+            shared: boolean?,
+            files: { { url: string, name: string? } }?,
+            reply: Json?,
+        }) -> { chatId: string, messageId: string },
+        -- capability "conversations.control": while handling `message` or `interaction`.
+        -- Name the conversation by ID or by its shared thread.
+        answer: (answer: {
+            conversation: string?,
+            thread: string?,
+            question: string,
+            answers: { [string]: string },
+        }) -> { status: string },
+        cancel: (target: { conversation: string?, thread: string? }) -> { stopped: boolean },
     },
 }
 

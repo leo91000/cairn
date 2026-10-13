@@ -84,6 +84,7 @@ test('Discord setup guides the owner and keeps the bot token private', async ({ 
   await continueButton.click()
 
   await expect(page.getByRole('radio', { name: /Approve people as they ask/ })).toBeChecked()
+  await expect(page.getByRole('checkbox', { name: /Read replies without a mention/ })).not.toBeChecked()
   await page.getByLabel('Discord user ID').fill('300')
   await page.getByRole('button', { name: 'Add', exact: true }).click()
   await expect(page.getByText('Sarah')).toBeVisible()
@@ -114,6 +115,7 @@ test('Discord setup guides the owner and keeps the bot token private', async ({ 
       channelName: 'support',
       botId: '400',
       botName: 'Cairn Bot',
+      messageContent: false,
     },
     userIds: ['300'],
     people: [{ id: '300', name: 'Sarah' }],
