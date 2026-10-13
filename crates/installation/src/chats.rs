@@ -1,6 +1,7 @@
 mod handoff;
 mod questions;
 pub mod sleep;
+pub mod wait_for;
 
 pub use handoff::{execution_text, with_invoked_skills};
 pub use questions::{Question, QuestionField, QuestionStatus, question_prefix};
@@ -546,6 +547,11 @@ fn launch_turn(
         sleep::ready(db, &chat, current.as_ref(), now())?
             && chat["wakeup"] == message["wakeup"]
             && current.as_ref().map(|run| &run["id"]) == run.as_ref().map(|run| &run["id"])
+            && (!message["wakeup"]["condition"].is_object()
+                || current.as_ref().is_some_and(|run| {
+                    wait_for::observation(db, &chat, run, now())
+                        .is_ok_and(|observation| observation.as_ref() == message.get("observation"))
+                }))
     } else {
         find_message(db, chat_id, text(&message, "id"))?.is_some_and(|current| {
             current["status"] == MessageStatus::Queued && same_content(&current, &message)
@@ -573,11 +579,15 @@ fn launch_turn(
     chat["wakeup"] = Value::Null;
     db.put("chats", &chat)?;
     if waking {
+        let mut observed_wakeup = message["wakeup"].clone();
+        if message["observation"].is_object() {
+            observed_wakeup["observation"] = message["observation"].clone();
+        }
         db.event(
             text(&chat, "runId"),
             "chat.wakeup",
             "Resuming after scheduled wait",
-            Some(&message["wakeup"]),
+            Some(&observed_wakeup),
         )?;
         return Ok(());
     }

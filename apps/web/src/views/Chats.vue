@@ -235,7 +235,7 @@ const chatStatus = computed(() => {
   if (status === 'interrupted')
     return 'Interrupted'
   if (sleepNotice.value)
-    return 'Scheduled wait'
+    return detail.value?.wakeup?.condition ? 'Waiting for a result' : 'Scheduled wait'
   return 'Ready'
 })
 const outgoing = ref<ChatMessage | null>(null)

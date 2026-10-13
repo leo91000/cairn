@@ -17,7 +17,10 @@ export function chatSleepNotice(chat: ChatDetail | null | undefined) {
     minute: '2-digit',
     second: '2-digit',
   })
-  return { account: null, message: `${chat.wakeup.reason} · Automatic resume from ${when}, when capacity is available.` }
+  const timing = chat.wakeup.condition
+    ? `Automatic resume when a result is available or the wait deadline ${when} expires, when capacity is available.`
+    : `Automatic resume from ${when}, when capacity is available.`
+  return { account: null, message: `${chat.wakeup.reason} · ${timing}` }
 }
 
 export function chatWaitNotice(run: Run | null | undefined) {

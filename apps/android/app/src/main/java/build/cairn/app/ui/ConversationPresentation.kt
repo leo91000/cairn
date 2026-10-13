@@ -39,9 +39,11 @@ internal fun chatSleepNotice(chat: Chat?): ChatWaitNotice? {
                 java.text.DateFormat.MEDIUM,
             )
             .format(java.util.Date(wakeup.wakeAt))
-    return ChatWaitNotice(
-        "${wakeup.reason} · Reprise automatique à partir de $time, selon la capacité disponible."
-    )
+    val timing =
+        if (wakeup.condition != null)
+            "Reprise automatique au résultat ou à l’échéance $time, selon la capacité disponible."
+        else "Reprise automatique à partir de $time, selon la capacité disponible."
+    return ChatWaitNotice("${wakeup.reason} · $timing")
 }
 
 internal fun chatWaitNotice(run: Run?): ChatWaitNotice? {
@@ -77,7 +79,8 @@ internal fun conversationState(
         when {
             chat.paused -> "En pause"
             run == "queued" -> "En attente"
-            chatSleepNotice(chat) != null -> "Attente planifiée"
+            chatSleepNotice(chat) != null ->
+                if (chat.wakeup?.condition != null) "Attente d’un résultat" else "Attente planifiée"
             run in listOf("failed", "interrupted") -> "${statusLabel(run)} · $identity"
             else -> identity
         }

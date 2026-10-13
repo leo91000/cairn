@@ -982,6 +982,104 @@ async fn sleeping_chat_survives_worker_restart_and_releases_capacity_before_waki
 const PNG: &[u8] = b"\x89PNG\r\n\x1a\nfixture";
 
 #[tokio::test]
+async fn condition_wait_yields_the_only_slot_to_its_dependency_and_resumes_the_same_session() {
+    let mut fixture = Fixture::with_concurrency(1).await;
+    let s = fixture.service.clone();
+    s.agent(
+        json!({ "name": "Main agent", "access": { "installation": true } }),
+        Some(MAIN_AGENT_ID),
+    )
+    .await
+    .unwrap();
+    let chat = fixture
+        .start_chat(message("fixture:slow-finish Finish after other work"))
+        .await;
+    let run = fixture.chat_run(&chat).await;
+    let current = fixture
+        .until(&run, |r| {
+            r["status"] == "running" && r["sessionId"].is_string()
+        })
+        .await;
+    fixture
+        .until_chat(&chat, async |detail| {
+            detail["messages"][0]["status"] == "delivered"
+        })
+        .await;
+    let other = fixture
+        .enqueue("Dependency runs while the conversation waits")
+        .await;
+    let token = "synthetic-condition-token";
+    s.store
+        .set(
+            &format!("mcp-grant:{}", cairn_installation::auth::hex_digest(token)),
+            json!({
+                "runId": run,
+                "messageId": current["chatExecution"]["messageId"],
+                "servers": {},
+                "workspace": true,
+                "installation": true,
+            }),
+            None,
+        )
+        .await
+        .unwrap();
+    let wait = cairn_installation::chats::wait_for::schedule(
+        &s,
+        token,
+        &json!({
+            "condition": { "type": "run_finished", "runId": other["id"] },
+            "reason": "Join the dependency",
+            "timeoutSeconds": 60,
+        }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(wait["deferred"], true);
+    assert_eq!(
+        fixture.until_finished(text(&other, "id")).await["status"],
+        "succeeded"
+    );
+    let resumed = fixture
+        .until(&run, |r| {
+            r["status"] == "succeeded"
+                && text(r, "summary").contains("Cairn resumed this conversation")
+        })
+        .await;
+    assert_eq!(resumed["sessionId"], current["sessionId"]);
+    assert!(
+        now() < wait["wakeup"]["wakeAt"].as_i64().unwrap(),
+        "The result resumes the conversation before the fallback timer"
+    );
+    assert!(text(&resumed, "summary").contains(text(&other, "id")));
+    let thread: Value = serde_json::from_slice(
+        &std::fs::read(
+            fixture
+                .run_directory(&run)
+                .join("codex/fixture-conversation.json"),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(thread["turns"].as_array().unwrap().len(), 2);
+    let detail = s.chat_detail(&chat).await.unwrap();
+    assert!(detail["wakeup"].is_null());
+    let run_id = run.clone();
+    let events = s
+        .store
+        .read(move |db| db.events(&run_id, 0, 100))
+        .await
+        .unwrap();
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| event["type"] == "chat.user")
+            .count(),
+        1
+    );
+    fixture.stop(false).await;
+}
+
+#[tokio::test]
 async fn chat_attachments_survive_worker_restart_and_reach_codex() {
     let mut fixture = Fixture::new().await;
     let s = fixture.service.clone();
