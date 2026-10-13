@@ -338,9 +338,10 @@ test('authenticated browser and Rust client keep using the observed route under 
       await member.getByRole('button', { name: 'Sign in', exact: true }).click()
       await member.getByRole('button', { name: 'Accept invitation', exact: true }).click()
       await expect(member).toHaveURL(/\/installations\/[^/]+\/$/)
+      await expect(member.getByRole('link', { name: 'New conversation', exact: true }).first()).toBeVisible()
       const memberSession = await (await member.request.get(`${url}/api/account/session`)).json()
       const chatId = new URL(page.url()).pathname.split('/').at(-1)!
-      await member.goto(`${url}/installations/${installationId}/chats/${chatId}`)
+      await member.goto(page.url())
       await expect(member.getByRole('heading', { name: marker, exact: true })).toBeVisible()
       await expect(member.getByRole('status', { name: 'Connection route' })).toHaveAttribute('data-transport-route', expected, { timeout: 35000 })
       await activeStream(member, expected)

@@ -239,8 +239,9 @@ fn next_version(existing: &[Value], key: &str) -> u64 {
         + 1
 }
 
-fn preview_status(kind: &str) -> PreviewStatus {
-    if ["image", "video", "audio", "pdf"].contains(&kind) {
+fn preview_status(kind: &str, media_type: &str) -> PreviewStatus {
+    // Vector images are displayed directly; they are never handed to a rasterizer.
+    if media_type != "image/svg+xml" && ["image", "video", "audio", "pdf"].contains(&kind) {
         PreviewStatus::Pending
     } else {
         PreviewStatus::None
@@ -324,7 +325,7 @@ impl Artifacts {
             digest: &download.digest,
             created_at: now(),
             url: format!("/api/runs/{run_id}/artifacts/{artifact_id}"),
-            preview_status: preview_status(kind),
+            preview_status: preview_status(kind, media_type),
             excerpt: excerpt(kind, &download.sample),
         };
         let record = serde_json::to_value(artifact)?;
@@ -546,7 +547,10 @@ async fn serve(s: &Service, record: &Value, request: Request) -> Result<Response
     );
     let name: String =
         url::form_urlencoded::byte_serialize(text(record, "name").as_bytes()).collect();
-    let disposition = if query.contains_key("download") || record["kind"] == "file" {
+    let disposition = if query.contains_key("download")
+        || record["kind"] == "file"
+        || record["mediaType"] == "image/svg+xml"
+    {
         "attachment"
     } else {
         "inline"

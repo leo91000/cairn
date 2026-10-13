@@ -39,6 +39,7 @@ pub mod onepassword;
 pub mod opencode;
 pub mod outcome;
 pub mod performance;
+pub mod plugins;
 pub mod process;
 pub mod project_git;
 pub mod project_workspaces;

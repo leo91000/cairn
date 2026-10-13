@@ -54,6 +54,8 @@ impl Worker {
         self.initialize(&s).await?;
         self.tasks.spawn(crate::chat_titles::run(s.clone()));
         self.tasks
+            .spawn(crate::chats::wait_for::github::maintain(s.clone()));
+        self.tasks
             .spawn(crate::nodes::publication::maintain(s.clone()));
         self.tasks
             .spawn(crate::nodes::shared_blocks::maintain(s.clone()));

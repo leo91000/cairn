@@ -1,6 +1,7 @@
 mod handoff;
-mod questions;
+pub(crate) mod questions;
 pub mod sleep;
+pub mod wait_for;
 
 pub use handoff::{execution_text, with_invoked_skills};
 pub use questions::{Question, QuestionField, QuestionStatus, question_prefix};
@@ -562,6 +563,11 @@ fn launch_turn(
         sleep::ready(db, &chat, current.as_ref(), now())?
             && chat["wakeup"] == message["wakeup"]
             && current.as_ref().map(|run| &run["id"]) == run.as_ref().map(|run| &run["id"])
+            && (!message["wakeup"]["condition"].is_object()
+                || current.as_ref().is_some_and(|run| {
+                    wait_for::observation(db, &chat, run, now())
+                        .is_ok_and(|observation| observation.as_ref() == message.get("observation"))
+                }))
     } else {
         find_message(db, chat_id, text(&message, "id"))?.is_some_and(|current| {
             current["status"] == MessageStatus::Queued && same_content(&current, &message)
@@ -589,17 +595,43 @@ fn launch_turn(
     chat["wakeup"] = Value::Null;
     db.put("chats", &chat)?;
     if waking {
+        let mut observed_wakeup = message["wakeup"].clone();
+        if message["observation"].is_object() {
+            observed_wakeup["observation"] = message["observation"].clone();
+        }
         db.event(
             text(&chat, "runId"),
             "chat.wakeup",
             "Resuming after scheduled wait",
-            Some(&message["wakeup"]),
+            Some(&observed_wakeup),
         )?;
         return Ok(());
     }
     message["status"] = MessageStatus::Sending.into();
     db.put_message(&message)?;
     Ok(())
+}
+
+pub(crate) fn create_in(db: &Db<'_>, input: Value) -> Result<Value> {
+    let input = parse_as::<ChatInput>("chat", input)?;
+    let agent = required(db.get("agents", &input.agent_id)?, "Agent not found")?;
+    let created_at = now();
+    let chat = serde_json::to_value(NewChat {
+        id: id(),
+        title: "New chat",
+        agent_id: input.agent_id,
+        project_id: input.project_id,
+        run_id: None,
+        paused: false,
+        created_at,
+        updated_at: created_at,
+    })?;
+    task_projects(&agent, &chat, &db.list("projects")?)?;
+    db.put("chats", &chat)
+}
+
+pub(crate) fn send_in(db: &Db<'_>, chat: &str, input: Value) -> Result<Value> {
+    send(db, chat, parse("message", input)?, None)
 }
 
 impl Service {
@@ -613,25 +645,7 @@ impl Service {
     }
 
     pub async fn chat_create(&self, input: Value) -> Result<Value> {
-        let input = parse_as::<ChatInput>("chat", input)?;
-        self.store
-            .transaction(move |db| {
-                let agent = required(db.get("agents", &input.agent_id)?, "Agent not found")?;
-                let created_at = now();
-                let chat = serde_json::to_value(NewChat {
-                    id: id(),
-                    title: "New chat",
-                    agent_id: input.agent_id,
-                    project_id: input.project_id,
-                    run_id: None,
-                    paused: false,
-                    created_at,
-                    updated_at: created_at,
-                })?;
-                task_projects(&agent, &chat, &db.list("projects")?)?;
-                db.put("chats", &chat)
-            })
-            .await
+        self.store.transaction(move |db| create_in(db, input)).await
     }
 
     pub async fn chat_send(&self, id: &str, input: Value) -> Result<Value> {

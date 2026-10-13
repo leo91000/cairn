@@ -81,6 +81,63 @@ test('stopping a scheduled wait cancels its wakeup and pauses the conversation',
   await expect(page.getByRole('status').filter({ hasText: 'Wait for review' })).toHaveCount(0)
 })
 
+test('a durable condition wait follows a dependency across restart and queue pause', async ({ page, workspace }) => {
+  test.setTimeout(90000)
+  const agent = workspace.service.store.get('agents', '00000000-0000-4000-8000-000000000001')!
+  workspace.service.store.put('agents', { ...agent, access: { ...agent.access, installation: true } })
+  const chat = await workspace.api('/api/chats', 'POST', {})
+  await workspace.api(`/api/chats/${chat.id}/messages`, 'POST', { id: randomUUID(), text: 'Finish after the dependency' })
+  await expect.poll(async () => (await workspace.api(`/api/chats/${chat.id}`)).run?.status).toBe('succeeded')
+  const detail = await workspace.api(`/api/chats/${chat.id}`)
+  workspace.service.store.set('deployment-lease', 'condition-wait-fixture', Date.now() + 120000)
+  try {
+    const task = await workspace.api('/api/tasks', 'POST', {
+      name: 'Condition dependency',
+      prompt: 'Other work',
+      agentId: agent.id,
+      worktree: false,
+    })
+    const target = await workspace.api(`/api/tasks/${task.id}/run`, 'POST', {})
+    const wakeup = {
+      id: randomUUID(),
+      messageId: detail.run.chatExecution.messageId,
+      reason: 'Join dependency',
+      seconds: 420,
+      createdAt: Date.now(),
+      wakeAt: Date.now() + 420000,
+      condition: { type: 'run_finished' as const, runId: target.id },
+    }
+    workspace.service.store.put('chats', { ...workspace.service.store.get('chats', chat.id)!, wakeup })
+    await workspace.restart()
+    await page.goto(workspacePath(`/chats/${chat.id}`))
+    await authenticateWorkspace(page)
+    const notice = page.getByRole('status').filter({ hasText: 'Join dependency · Automatic resume when a result is available' })
+    await expect(notice).toBeVisible()
+    await expect(page.getByText('Waiting for a result', { exact: true }).first()).toBeVisible()
+    await expect(notice).toContainText('wait deadline')
+    await expect(page.locator('.agent-waiting')).toHaveCount(0)
+    for (const width of [1280, 390]) {
+      await page.setViewportSize({ width, height: 844 })
+      await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth - innerWidth)).toBeLessThanOrEqual(1)
+    }
+
+    await page.getByRole('button', { name: 'Pause wait', exact: true }).click()
+    await expect.poll(async () => (await workspace.api(`/api/chats/${chat.id}`)).paused).toBe(true)
+    workspace.service.store.delete('deployment-lease')
+    await expect.poll(async () => (await workspace.api(`/api/runs/${target.id}`)).status, { timeout: 15000 }).toBe('succeeded')
+    expect((await workspace.api(`/api/chats/${chat.id}`)).run.status).toBe('succeeded')
+    await page.getByRole('button', { name: 'Resume', exact: true }).click()
+    await expect.poll(async () => (await workspace.api(`/api/chats/${chat.id}`)).run?.summary).toContain('Cairn resumed this conversation')
+    const resumed = await workspace.api(`/api/chats/${chat.id}`)
+    expect(resumed.run.sessionId).toBe(detail.run.sessionId)
+    expect(resumed.wakeup).toBeNull()
+    expect(workspace.service.store.events(detail.run.id, 0, 100).filter(event => event.type === 'chat.user')).toHaveLength(1)
+  }
+  finally {
+    workspace.service.store.delete('deployment-lease')
+  }
+})
+
 test('verbose tool calls keep their action steps with abbreviated details', async ({ page, workspace }) => {
   const chat = await workspace.api('/api/chats', 'POST', {})
   await workspace.api(`/api/chats/${chat.id}/messages`, 'POST', {
@@ -113,7 +170,7 @@ test('a transient agent error shows a retry countdown and resumes without user i
   const chat = await workspace.api('/api/chats', 'POST', {})
   await workspace.api(`/api/chats/${chat.id}/messages`, 'POST', {
     id: randomUUID(),
-    text: 'fixture:agent-failures:[{"message":"workspace routing discovery timed out"}]',
+    text: 'fixture:agent-failures:[{"codexErrorInfo":"other","message":"workspace routing discovery timed out"}]',
   })
   await expect.poll(async () => (await workspace.api(`/api/chats/${chat.id}`)).run?.retry?.attempt).toBe(1)
   const waiting = (await workspace.api(`/api/chats/${chat.id}`)).run
@@ -136,6 +193,34 @@ test('a transient agent error shows a retry countdown and resumes without user i
   await expect.poll(async () => (await workspace.api(`/api/chats/${chat.id}`)).run?.status).toBe('succeeded')
   await expect(page.getByText('Ready for the next step.', { exact: false }).last()).toBeVisible()
   await expect(notice).toHaveCount(0)
+})
+
+test('native Codex reconnect notices remain visible until work continues', async ({ page, workspace }) => {
+  const chat = await workspace.api('/api/chats', 'POST', {})
+  await workspace.api(`/api/chats/${chat.id}/messages`, 'POST', {
+    id: randomUUID(),
+    text: 'fixture:codex-reconnect fixture:chat-hang',
+  })
+  await expect.poll(async () => (await workspace.api(`/api/chats/${chat.id}`)).run?.status).toBe('running')
+  await page.goto(workspacePath(`/chats/${chat.id}`))
+  await authenticateWorkspace(page)
+  for (const width of [1280, 390]) {
+    await page.setViewportSize({ width, height: 844 })
+    await expect(page.getByText('Connection interrupted', { exact: true })).toBeVisible()
+    await expect(page.getByText('Reconnecting... 2/5', { exact: true })).toBeVisible()
+    await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth - innerWidth)).toBeLessThanOrEqual(1)
+  }
+
+  await expect(page.getByText('Ignored retry notification', { exact: true })).toHaveCount(0)
+  const active = (await workspace.api(`/api/chats/${chat.id}`)).run
+  expect(active.retry ?? null).toBeNull()
+  await workspace.api(`/api/chats/${chat.id}/messages`, 'POST', { id: randomUUID(), text: 'finish now', mode: 'steer' })
+  await expect.poll(async () => (await workspace.api(`/api/chats/${chat.id}`)).run?.status).toBe('succeeded')
+  const completed = (await workspace.api(`/api/chats/${chat.id}`)).run
+  expect(completed.id).toBe(active.id)
+  expect(completed.sessionId).toBe(active.sessionId)
+  expect(completed.retry).toBeNull()
+  await expect(page.getByText('Connection interrupted', { exact: true })).toHaveCount(0)
 })
 
 test('queued Claude conversation explains the missing account and continues after sign-in', async ({ page, workspace }) => {

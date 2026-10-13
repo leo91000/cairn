@@ -78,7 +78,7 @@ fn task_allowed(db: &Db<'_>, caller: &Value, task: &Value) -> Result<bool> {
             || allowed(&policy(caller)["projects"], text(task, "projectId"))))
 }
 
-fn run_allowed(caller: &Value, run: &Value) -> bool {
+pub(crate) fn run_allowed(caller: &Value, run: &Value) -> bool {
     agent_allowed(caller, &run["snapshot"]["agent"])
         && run_projects(run)
             .iter()

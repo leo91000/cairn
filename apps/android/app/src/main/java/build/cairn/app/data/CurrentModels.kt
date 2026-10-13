@@ -2,6 +2,7 @@ package build.cairn.app.data
 
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.JsonObject
 
 @Serializable
 data class ChatAttachment(
@@ -57,6 +58,8 @@ data class ChatWakeup(
     val seconds: Long,
     val createdAt: Long,
     val wakeAt: Long,
+    val condition: JsonObject? = null,
+    val observation: JsonObject? = null,
 )
 
 @Serializable

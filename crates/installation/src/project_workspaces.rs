@@ -199,6 +199,16 @@ fn open_project_tool() -> Value {
 async fn call_tool(s: &Service, bearer: &str, name: &str, args: &Value) -> Result<Value> {
     let summary = Value::to_string;
     match name {
+        "wait_for" => ToolResult::from_result(
+            crate::chats::wait_for::schedule(s, bearer, args).await,
+            |result| {
+                if result["deferred"] == true {
+                    "Wait saved. End this turn; Cairn will resume when the condition resolves or the timeout expires, subject to capacity.".into()
+                } else {
+                    "Condition already completed. Inspect the observation and continue this turn; no wakeup was scheduled.".into()
+                }
+            },
+        ),
         "sleep" => ToolResult::from_result(
             crate::chats::sleep::schedule(s, bearer, args).await,
             |result| {
@@ -218,7 +228,14 @@ async fn call_tool(s: &Service, bearer: &str, name: &str, args: &Value) -> Resul
             ToolResult::from_result(result, summary)
         }
         "onepassword" => {
-            ToolResult::from_result(crate::onepassword::call(s, bearer, args).await, summary)
+            let result = if args["operation"] == "read" {
+                Err(Error::bad(
+                    "Read secrets through the Cairn plugin CLI and pipe them directly to the consuming command.",
+                ))
+            } else {
+                crate::onepassword::call(s, bearer, args).await
+            };
+            ToolResult::from_result(result, summary)
         }
         "report_outcome" => {
             ToolResult::from_result(crate::outcome::report(s, bearer, args).await, |_| {
@@ -276,6 +293,7 @@ pub async fn rpc(s: &Service, bearer: &str, method: &str, params: &Value) -> Res
         crate::outcome::tool(),
         crate::onepassword::tool(),
         crate::chats::sleep::tool(),
+        crate::chats::wait_for::tool(),
     ];
     Ok(json!({ "tools": tools }))
 }

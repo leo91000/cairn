@@ -287,6 +287,55 @@ fn completes(events: &[Value]) -> bool {
 }
 
 #[tokio::test]
+async fn large_system_instructions_reach_claude_unchanged() {
+    let root = TempDir::new().unwrap();
+    let c = setup(&root);
+    let mut p = plan(&root, "Inspect the workspace");
+    let instructions = format!("{}\nKeep accents: é and 漢字.\n", "x".repeat(135_518));
+    for (index, instructions) in [instructions, "é".repeat(140_000)].into_iter().enumerate() {
+        p["instructions"] = instructions.clone().into();
+        if index > 0 {
+            p["sessionId"] = RESUMED_SESSION.into();
+            p["execution"]["messageId"] = "continued".into();
+        }
+
+        let (result, events) = run_to_end(&c, p.clone()).await;
+        result.unwrap();
+        assert!(completes(&events));
+        let invocations =
+            std::fs::read_to_string(c.home.join(".claude/invocations.jsonl")).unwrap();
+        let invocation: Value =
+            serde_json::from_str(invocations.lines().nth(index).unwrap()).unwrap();
+        assert_eq!(invocation["instructions"], instructions);
+        assert_eq!(invocation["instructionsMode"], 0o600);
+        let args = invocation["args"].as_array().unwrap();
+        let file = args
+            .windows(2)
+            .find(|pair| pair[0] == "--append-system-prompt-file")
+            .unwrap();
+        assert!(!std::path::Path::new(file[1].as_str().unwrap()).exists());
+    }
+}
+
+#[tokio::test]
+async fn launch_errors_report_the_os_failure_without_exposing_instructions() {
+    let root = TempDir::new().unwrap();
+    let mut c = setup(&root);
+    c.claude_bin = root
+        .path()
+        .join("missing-claude")
+        .to_string_lossy()
+        .into_owned();
+    let mut p = plan(&root, "Inspect the workspace");
+    p["instructions"] = "never-return-this-secret".into();
+
+    let error = run_to_end(&c, p).await.0.unwrap_err();
+    assert!(error.message.contains("Unable to start Claude Code"));
+    assert!(error.message.contains("os error 2"));
+    assert!(!error.message.contains("never-return-this-secret"));
+}
+
+#[tokio::test]
 async fn corrupted_session_environment_blocks_launch_until_repaired() {
     let root = TempDir::new().unwrap();
     let c = setup(&root);
@@ -564,7 +613,7 @@ fn provider_defaults_and_sandbox_arguments_preserve_boundaries() {
     let root = TempDir::new().unwrap();
     let mut p = plan(&root, "test");
     p["sandbox"] = "workspace-write".into();
-    let a = claude_process::args(&p);
+    let a = claude_process::args(&p, &root.path().join("instructions.txt"));
     assert!(!a.contains(&"--dangerously-skip-permissions".into()));
     assert!(a.iter().any(|s| s.contains("failIfUnavailable")));
     assert!(a.contains(&"--strict-mcp-config".into()));

@@ -8,7 +8,7 @@ Cairn permet de conduire des conversations avec des agents et de retrouver leur 
 Le service hébergé par Cairn qui fournit l’interface web et mobile, les comptes Cairn et l’accès à toutes les installations d’un compte. Il ne conserve pas le travail des agents.
 
 **Compte Cairn** :
-L’identité d’une personne sur Beacon, définie par une adresse e-mail vérifiée. Le code par e-mail, Google, GitHub et les passkeys ne sont que des moyens de s’y connecter. C’est la seule manière d’accéder à une installation.
+L’identité d’une personne sur Beacon, définie par une adresse e-mail vérifiée. Le code par e-mail, Google, GitHub et les passkeys ne sont que des moyens de s’y connecter. Cette identité est requise pour accéder à l’interface et à l’API d’une installation. Une délégation externe d’un plugin autorise seulement les opérations explicitement accordées.
 _Avoid_ : utilisateur GitHub, compte d’agent de code
 
 **Installation** :
@@ -109,3 +109,12 @@ Une remise à zéro de fenêtre d’usage offerte par Codex, utilisée automatiq
 
 **Auteur d’une tâche** :
 Le compte Cairn qui a créé une tâche. Le retrait de cet auteur met fin aux déclenchements planifiés de ses tâches ; leur travail reste partagé avec toute l’installation.
+
+**Délégation externe d’un plugin** :
+L’accès précis que le propriétaire accorde à des identités externes, par exemple
+à des utilisateurs Discord dans un canal, pour faire travailler un agent dédié et
+recevoir ses réponses. Ces identités ne deviennent pas membres de l’installation
+et n’obtiennent aucun accès général à son interface, ses conversations ou sa gestion.
+Les conversations créées restent partagées dans Cairn ; les réponses du bot sont
+visibles dans le canal externe autorisé. La délégation reste liée à l’accès courant
+du propriétaire et aux permissions d’agent qu’il a approuvées.

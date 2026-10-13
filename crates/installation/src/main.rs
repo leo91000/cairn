@@ -37,6 +37,12 @@ where
     F: FnOnce(Arc<Service>) -> Fut,
     Fut: std::future::Future<Output = Result<axum::Router>>,
 {
+    if std::env::args().nth(1).as_deref() == Some("plugin-worker") {
+        return match cairn_plugin_runtime::worker() {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(_) => ExitCode::FAILURE,
+        };
+    }
     cairn_installation::tls::install_provider();
 
     let args = std::env::args().skip(1).collect::<Vec<_>>();
@@ -172,6 +178,7 @@ where
             return cairn_installation::runner::client(runner, stop).await;
         }
         "chat" => return chat_command(args.get(1), stop).await,
+        "plugin" => cairn_installation::plugins::cli::run(&args[1..]).await?,
         "codex-service" => {
             let config = Config::load()?;
             let home =
@@ -369,6 +376,7 @@ where
 
     if service.config.worker_enabled {
         service.worker.start(service.clone()).await?;
+        background.push(tokio::spawn(service.plugins.clone().start(service.clone())));
         background.push(spawn_periodic(
             &service,
             "accounts",

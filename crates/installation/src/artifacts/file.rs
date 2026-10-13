@@ -70,6 +70,69 @@ pub async fn snapshot(path: &Path, root: &Path) -> Result<(tempfile::NamedTempFi
     Ok((temporary, size))
 }
 
+/// Text extensions previewed as source. Markup such as HTML stays `text/plain`:
+/// viewers render it only inside a sandbox, never as an active document.
+const CODE_EXTENSIONS: &[&str] = &[
+    "txt",
+    "log",
+    "csv",
+    "tsv",
+    "json",
+    "jsonl",
+    "ndjson",
+    "yaml",
+    "yml",
+    "toml",
+    "ini",
+    "cfg",
+    "conf",
+    "xml",
+    "html",
+    "htm",
+    "css",
+    "scss",
+    "less",
+    "js",
+    "mjs",
+    "cjs",
+    "jsx",
+    "ts",
+    "mts",
+    "cts",
+    "tsx",
+    "vue",
+    "svelte",
+    "rs",
+    "py",
+    "rb",
+    "php",
+    "go",
+    "java",
+    "kt",
+    "kts",
+    "swift",
+    "c",
+    "h",
+    "cc",
+    "cpp",
+    "hpp",
+    "cs",
+    "lua",
+    "sh",
+    "bash",
+    "zsh",
+    "fish",
+    "sql",
+    "graphql",
+    "proto",
+    "tf",
+    "diff",
+    "patch",
+    "dockerfile",
+    "makefile",
+    "gradle",
+];
+
 pub fn classify(name: &str, bytes: &[u8]) -> (&'static str, &'static str) {
     if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
         return ("image", "image/png");
@@ -89,8 +152,14 @@ pub fn classify(name: &str, bytes: &[u8]) -> (&'static str, &'static str) {
     let extension = Path::new(name)
         .extension()
         .and_then(|s| s.to_str())
-        .unwrap_or("")
+        .unwrap_or_else(|| name.strip_prefix('.').unwrap_or(name))
         .to_lowercase();
+    if bytes.starts_with(b"BM") && extension == "bmp" {
+        return ("image", "image/bmp");
+    }
+    if bytes.get(4..8) == Some(b"ftyp") && matches!(bytes.get(8..12), Some(b"avif" | b"avis")) {
+        return ("image", "image/avif");
+    }
     if bytes.get(4..8) == Some(b"ftyp") {
         return if extension == "m4a" {
             ("audio", "audio/mp4")
@@ -124,12 +193,11 @@ pub fn classify(name: &str, bytes: &[u8]) -> (&'static str, &'static str) {
         if ["md", "markdown"].contains(&extension.as_str()) {
             return ("markdown", "text/plain; charset=utf-8");
         }
-        if [
-            "txt", "rs", "js", "ts", "tsx", "jsx", "json", "css", "py", "yaml", "yml", "toml",
-            "sh", "sql", "csv", "log",
-        ]
-        .contains(&extension.as_str())
-        {
+        // Served with a sandbox CSP and as an attachment; viewers only load it as an image.
+        if extension == "svg" && String::from_utf8_lossy(bytes).contains("<svg") {
+            return ("image", "image/svg+xml");
+        }
+        if CODE_EXTENSIONS.contains(&extension.as_str()) {
             return ("code", "text/plain; charset=utf-8");
         }
     }

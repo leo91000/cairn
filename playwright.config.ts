@@ -29,6 +29,8 @@ export default defineConfig({
     { name: 'layout-webkit-opencode', testMatch: 'opencode.spec.ts', use: { browserName: 'webkit', isMobile: true, hasTouch: true } },
     { name: 'journeys-claude', testMatch: 'claude.spec.ts' },
     { name: 'layout-webkit-claude', testMatch: 'claude.spec.ts', use: { browserName: 'webkit', isMobile: true, hasTouch: true } },
+    { name: 'journeys-plugins', testMatch: 'plugins.spec.ts' },
+    { name: 'layout-webkit-plugins', testMatch: 'plugins.spec.ts', use: { browserName: 'webkit', isMobile: true, hasTouch: true } },
     { name: 'journeys-onepassword', testMatch: 'onepassword.spec.ts' },
     { name: 'layout-webkit-onepassword', testMatch: 'onepassword.spec.ts', use: { browserName: 'webkit', isMobile: true, hasTouch: true } },
     { name: 'journeys-live', testMatch: 'live.spec.ts' },
