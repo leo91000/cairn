@@ -27,9 +27,11 @@ acquisitions roll back; a release installs a durable epoch tombstone so a delaye
 acquire cannot reclaim the node. Manager recovery observes the controller's epoch
 and reconciles a reservation absent from a restored manager database.
 
-`acquire_exclusive` has a duration of 1–900 seconds and an acquisition wait of
-0–3,600 seconds. A zero wait returns the queued state immediately; it does not
-claim acquisition. `exclusive_status`, `release_exclusive` and `renew_exclusive`
+`acquire_exclusive` has a duration of 1–900 seconds and a response wait of
+0–3,600 seconds. The independent `acquisitionTimeoutSeconds` bounds queued
+eligibility to 1–3,600 seconds (default 300). A zero response wait returns the
+queued state immediately without expiring its queue entry or claiming acquisition.
+`exclusive_status`, `release_exclusive` and `renew_exclusive`
 operate on the same request. Repetition does not extend its original duration.
 Explicit renewals may extend a live acquisition up to a one-hour lifetime;
 the manager reports the old confirmed expiry until renewal is acknowledged.

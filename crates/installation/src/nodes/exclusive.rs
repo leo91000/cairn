@@ -31,7 +31,8 @@ pub fn acquire_tool() -> Value {
             "type": "object",
             "properties": {
                 "durationSeconds": { "type": "integer", "minimum": 1, "maximum": MAX_DURATION },
-                "waitSeconds": { "type": "integer", "minimum": 0, "maximum": MAX_WAIT },
+                "waitSeconds": { "type": "integer", "minimum": 0, "maximum": MAX_WAIT, "description": "How long this call waits for a result (default 300). Zero returns immediately; the request remains queued." },
+                "acquisitionTimeoutSeconds": { "type": "integer", "minimum": 1, "maximum": MAX_WAIT, "description": "How long the queued request remains eligible for acquisition (default 300), independently of the call's response wait." },
                 "reason": { "type": "string", "minLength": 1, "maxLength": 500 },
                 "memberRunIds": { "type": "array", "maxItems": 16, "uniqueItems": true, "items": { "type": "string", "format": "uuid" } },
                 "minimumAvailableMemoryMiB": { "type": "integer", "minimum": 0, "maximum": 1073741824 },
@@ -213,6 +214,7 @@ pub async fn acquire(s: &Service, bearer: &str, input: &Value) -> Result<Value> 
     for (field, default) in [
         ("durationSeconds", 1),
         ("waitSeconds", 300),
+        ("acquisitionTimeoutSeconds", 300),
         ("minimumAvailableMemoryMiB", 0),
     ] {
         input[field] = (input[field].as_f64().map_or(default, |value| value as u64)).into();
@@ -301,7 +303,7 @@ pub async fn acquire(s: &Service, bearer: &str, input: &Value) -> Result<Value> 
                 "input": input,
                 "createdAt": created,
                 "order": order,
-                "waitUntil": created + input["waitSeconds"].as_u64().unwrap() as i64 * 1000,
+                "waitUntil": created + input["acquisitionTimeoutSeconds"].as_u64().unwrap() as i64 * 1000,
                 "state": "queued",
             });
             db.put(KIND, &request)?;
@@ -316,7 +318,7 @@ pub async fn acquire(s: &Service, bearer: &str, input: &Value) -> Result<Value> 
         .await?;
     s.worker.notify();
     let request_id = text(&request, "id");
-    let until = request["waitUntil"].as_i64().unwrap_or(now());
+    let until = now() + request["input"]["waitSeconds"].as_u64().unwrap_or(300) as i64 * 1000;
     loop {
         let current = s
             .store
@@ -467,7 +469,7 @@ async fn reconcile_node(s: &Service, node_id: &str) -> Result<()> {
         .transaction(move |db| {
             let mut requests = pending_requests(db)?;
             requests.sort_by_key(|record| record["order"].as_u64().unwrap_or(0));
-            let mut chosen = None;
+            let mut chosen: Option<Value> = None;
             for mut record in requests
                 .into_iter()
                 .filter(|record| record["nodeId"] == node && !terminal(record))
@@ -491,8 +493,15 @@ async fn reconcile_node(s: &Service, node_id: &str) -> Result<()> {
                         record["state"] = "releasing".into();
                         db.put(KIND, &record)?;
                     }
-                    chosen = Some(record);
-                    break;
+                    if chosen
+                        .as_ref()
+                        .is_none_or(|chosen| chosen["state"] == "queued")
+                    {
+                        chosen = Some(record);
+                    }
+                    // Expire every queued waiter even while a holder still owns
+                    // this node; a timed-out caller can submit a fresh request.
+                    continue;
                 }
                 if chosen.is_none() {
                     chosen = Some(record);

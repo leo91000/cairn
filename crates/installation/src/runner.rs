@@ -158,6 +158,25 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn quarantined_pool_preserves_liveness_without_advertising_execution_readiness() {
+        let root = tempfile::tempdir().unwrap();
+        let broker = fixture_broker(root.path()).await;
+        broker.pool.quarantine();
+        let request = axum::http::Request::builder()
+            .uri("/health")
+            .body(Body::empty())
+            .unwrap();
+        let response = router(broker).oneshot(request).await.unwrap();
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        let bytes = axum::body::to_bytes(response.into_body(), 16_384)
+            .await
+            .unwrap();
+        let health: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(health["status"], "quarantined");
+        assert_eq!(health["pool"]["quarantined"], true);
+    }
+
+    #[tokio::test]
     async fn snapshot_batch_reuses_one_journal_and_releases_the_stopped_disk() {
         snapshot_reader_lifetime("blocks", 2).await;
     }

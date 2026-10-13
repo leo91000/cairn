@@ -360,6 +360,7 @@ impl Broker {
                 "Exclusive acquisition expired during memory qualification.",
             ));
         }
+        self.pool.ensure_not_quarantined()?;
         ledger.reservation.as_mut().unwrap().state = "acquired".into();
         self.save_exclusive(ledger).await
     }

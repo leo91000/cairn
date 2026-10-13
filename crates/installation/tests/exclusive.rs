@@ -308,3 +308,37 @@ async fn replaced_attempt_and_invalid_input_cannot_reuse_a_reservation() {
     f.until(|record| record["state"] == "released").await;
     assert!(acquired["expiresAt"].as_i64().unwrap() > now());
 }
+
+#[tokio::test]
+async fn nonblocking_requests_remain_queued_until_their_independent_acquisition_timeout() {
+    let mut f = Fixture::new().await;
+    let held = exclusive::acquire(&f.s, &f.token, &request())
+        .await
+        .unwrap();
+    let (_, token) = f.new_run().await;
+    let mut nonblocking = request();
+    nonblocking["waitSeconds"] = 0.into();
+    nonblocking["acquisitionTimeoutSeconds"] = 1.into();
+    let expired = exclusive::acquire(&f.s, &token, &nonblocking)
+        .await
+        .unwrap();
+    assert_eq!(expired["state"], "queued");
+    assert!(expired["waitUntil"].as_i64().unwrap() > now());
+    f.token = token;
+    f.until(|record| record["id"] == expired["id"] && record["state"] == "expired")
+        .await;
+    assert_eq!(f.remote.lock().await["reservation"]["id"], held["id"]);
+
+    nonblocking["acquisitionTimeoutSeconds"] = 30.into();
+    let queued = exclusive::acquire(&f.s, &f.token, &nonblocking)
+        .await
+        .unwrap();
+    assert_eq!(queued["state"], "queued");
+    assert!(queued["waitUntil"].as_i64().unwrap() > now() + 20_000);
+    exclusive::release_owned(&f.s, text(&held, "id"), None)
+        .await
+        .unwrap();
+    f.until(|record| record["id"] == queued["id"] && record["state"] == "acquired")
+        .await;
+    assert_eq!(f.remote.lock().await["reservation"]["id"], queued["id"]);
+}

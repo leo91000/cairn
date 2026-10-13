@@ -226,6 +226,7 @@ impl Broker {
         if self.stop.is_cancelled() || self.has_stopped(id) {
             return Err(Error::conflict("This execution attempt has stopped."));
         }
+        self.pool.ensure_not_quarantined()?;
         validate(&plan, id, &self.data)?;
         if active.values().any(|a| a.plan.run_id() == plan.run_id()) {
             return Err(Error::conflict(
@@ -327,9 +328,11 @@ impl Broker {
                     return Ok::<bool, Error>(false);
                 }
                 let mut teardown = physical_teardown.ok_or_else(|| {
+                    self.pool.quarantine();
                     Error::unavailable("VM completion was lost; teardown is not confirmed.")
                 })?;
                 teardown.wait_for(|finished| *finished).await.map_err(|_| {
+                    self.pool.quarantine();
                     Error::unavailable(
                         "VM teardown completion was lost; physical cleanup is not confirmed.",
                     )
@@ -652,6 +655,7 @@ mod ownership_tests {
             assert!(broker.active.lock().await.contains_key(&id));
             assert!(broker.state_file(&id, "active").exists());
             assert!(!broker.state_file(&id, "exit").exists());
+            assert!(broker.pool.health().await.quarantined);
         }
     }
 }

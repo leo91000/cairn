@@ -172,6 +172,7 @@ console.log('exclusive-live-ok '+mode+' pid='+process.pid);
       docker,
       name,
       api,
+      maxDirtySeconds: 3600,
     })
     const owner = await makeEntry(fixture.storage, 'owner')
     const victim = await makeEntry(fixture.storage, 'victim')
@@ -196,7 +197,7 @@ console.log('exclusive-live-ok '+mode+' pid='+process.pid);
       epoch: epoch++,
       ownerAttemptId: owner.id,
       memberAttemptIds: [],
-      expiresAt: Date.now() + 30000,
+      expiresAt: Date.now() + 120000,
       reason: 'Disposable live VM qualification',
     })
     const held = reservation()
@@ -226,6 +227,7 @@ console.log('exclusive-live-ok '+mode+' pid='+process.pid);
     const memoryRequest = { ...reservation(), minimumAvailableMemoryMiB: headroom + 64 }
     const memoryStart = snapshot(victim)
     const memoryResponse = await request('/exclusive/acquire', 'POST', memoryRequest)
+    await setTimeout(300)
     const memoryNestedCounter = nestedProgress()
     let memoryAfter
     if (memoryResponse.ok) {
@@ -248,6 +250,7 @@ console.log('exclusive-live-ok '+mode+' pid='+process.pid);
 
     const expiring = { ...reservation(), expiresAt: Date.now() + 1500 }
     await api('/exclusive/acquire', 'POST', expiring)
+    await setTimeout(300)
     const expiringNestedCounter = nestedProgress()
     await until(async () => (await (await api('/exclusive')).json()).reservation === null, 15000)
     await requireNestedProgress(expiringNestedCounter)

@@ -107,8 +107,9 @@ async fn health(broker: &Broker) -> Result<Response> {
         capabilities["memoryMiB"] = hardware["memoryMiB"].clone();
     }
     let (usage, pressure) = broker.pool.usage().await?;
+    let pool = broker.pool.health().await;
     json_response(json!({
-        "status": "ok",
+        "status": if pool.quarantined { "quarantined" } else { "ok" },
         "backend": Backend::Firecracker,
         "runtimeId": runtime_id,
         "nodeProtocol": NODE_PROTOCOL,
@@ -118,7 +119,7 @@ async fn health(broker: &Broker) -> Result<Response> {
         "dataRoot": broker.data,
         "activeRuns": active_runs,
         "capabilities": capabilities,
-        "pool": broker.pool.health().await,
+        "pool": pool,
         "budget": broker.pool.budget().await,
         "usage": usage,
         "pressure": pressure,
