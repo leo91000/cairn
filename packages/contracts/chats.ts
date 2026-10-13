@@ -28,6 +28,7 @@ export interface ChatAttachment {
 }
 export type ConversationLifecycle = 'active' | 'trash' | 'purging'
 export interface Chat {
+  slug?: string
   lifecycle?: ConversationLifecycle
   trashedAt?: number | null
   purgeAt?: number | null

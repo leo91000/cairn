@@ -152,7 +152,7 @@ test('conversation switcher preserves drafts and supports search, keyboard and m
   await search.fill('release notes')
   await expect(dialog.getByRole('link')).toHaveCount(1)
   await dialog.getByRole('link', { name: /Review the release notes/ }).click()
-  await expect(page).toHaveURL(workspacePath(`/chats/${second.id}`))
+  await expect(page).toHaveURL(workspacePath(`/chats/${second.slug}`))
   await expect(dialog).toHaveCount(0)
   await expect(message).toHaveValue('')
   await trigger.click()
@@ -554,7 +554,7 @@ test('starts project chats, steers, edits the queue and preserves a compact mobi
   await page.screenshot({ path: test.info().outputPath('chat-new-desktop-light.png'), animations: 'disabled' })
   await page.getByRole('textbox', { name: 'Message', exact: true }).fill('Review our component architecture. fixture:chat-hang')
   await page.getByRole('button', { name: 'Send', exact: true }).click()
-  await expect(page).toHaveURL(/\/chats\/[a-f0-9-]+$/)
+  await expect(page).toHaveURL(/\/chats\/[a-z]+-[a-z]+-[a-f0-9]{8}$/)
   await expect(page.getByText('Working', { exact: true }).first()).toBeVisible()
   await expect(page.getByTestId('agent-actions').filter({ hasText: 'Followed the run' })).toHaveCount(0)
   await expect(page.locator('.activity-message').filter({ hasText: 'Review our component architecture' })).toBeVisible()
@@ -641,7 +641,8 @@ test('answers in-flight questions with choices or free text on desktop and mobil
   await expect(page.getByRole('dialog')).not.toBeVisible()
   await expect(page.getByRole('button', { name: 'Answer pending questions' })).not.toBeVisible()
   await expectChatReady(page)
-  const chatId = page.url().split('/').at(-1)!
+  const chatKey = new URL(page.url()).pathname.split('/').at(-1)!
+  const chatId = (await workspace.api(`/api/chats/${chatKey}`)).id
   expect(workspace.service.questions.list(chatId)[0].status).toBe('answered')
   await page.setViewportSize({ width: 390, height: 844 })
   await page.getByRole('button', { name: 'Chat details', exact: true }).click()

@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { onMounted, ref } from 'vue'
 import { accountApi, redirect } from '../api'
+import { accountSettingsUrl, installationHost } from '../beacon-location'
 import AccountSecurity from './AccountSecurity.vue'
 import UiAlert from './UiAlert.vue'
 import UiButton from './UiButton.vue'
@@ -12,6 +13,11 @@ const passkeys = ref(false)
 const error = ref('')
 
 async function load() {
+  if (installationHost) {
+    redirect(accountSettingsUrl(installationHost, true))
+    return
+  }
+
   error.value = ''
   try {
     const [session, options] = await Promise.all([accountApi('/session'), accountApi('/options')])

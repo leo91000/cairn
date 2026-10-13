@@ -74,7 +74,7 @@ class Peer extends EventTarget {
   close() { this.channel.close() }
 }
 
-beforeEach(() => {
+beforeEach(async () => {
   vi.resetModules()
   vi.useFakeTimers()
   Source.all = []
@@ -84,6 +84,9 @@ beforeEach(() => {
   vi.stubGlobal('navigator', { onLine: true })
   vi.stubGlobal('EventSource', Source)
   vi.stubGlobal('RTCPeerConnection', Peer)
+  const { state } = await import('../src/api')
+  // The account shell resolves the URL alias before enabling the transport.
+  state.installationId = 'install'
 })
 afterEach(async () => {
   const { state } = await import('../src/api')

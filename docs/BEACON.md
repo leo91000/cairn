@@ -69,6 +69,7 @@ variables through the operator's secret management:
 | --- | --- |
 | `CAIRN_BEACON_DATABASE_URL` | Required Postgres URL, separate from installation SQLite |
 | `CAIRN_BEACON_ORIGIN` | Required browser origin, HTTPS except localhost/loopback development; no path, query, or fragment |
+| `CAIRN_BEACON_INSTALLATION_SUBDOMAINS` | Optional boolean, default `false`; serve registered installation slugs on child hostnames after wildcard DNS/TLS is ready |
 | `CAIRN_BEACON_LISTEN` | Bind address, default `127.0.0.1:4311` |
 | `CAIRN_BEACON_TRUSTED_PROXIES` | Comma-separated proxy IPs/CIDRs; empty by default |
 | `CAIRN_BEACON_WEB_DIR` | Frontend output directory, default `dist` |
@@ -713,3 +714,19 @@ installation reconciles before admitting scheduled work and on reconnection.
 No account session or member list is persisted on the installation for access
 control. See [ADR-0029](adr/0029-sharing-whole-installations.md) for authorship,
 manual work and public-link decisions.
+
+## Installation subdomains
+
+Enable `CAIRN_BEACON_INSTALLATION_SUBDOMAINS=true` only after the proxy serves
+both the canonical origin and its wildcard with valid TLS. The canonical origin
+stays unchanged for login, OAuth callbacks, passkeys, account settings,
+notifications, MCP and installation enrollment. Workspace URLs become
+`https://{installation-slug}.cairn.build/chats/{chat-slug}`. Legacy paths and UUID
+links remain usable. See [ADR-0037](adr/0037-readable-workspace-urls.md) for the
+shared-cookie trust boundary and browser-storage migration.
+
+For local testing, use the bundled Beacon web build, set the origin to
+`http://cairn.localhost:<port>`, and enable the flag. Plain `localhost` and IP
+addresses cannot share a browser cookie across installation subdomains. The
+HTTP exception is restricted to `.localhost`; other enabled origins require HTTPS.
+The proxy must preserve the request Host, including any configured port.

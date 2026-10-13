@@ -28,16 +28,17 @@ pub(super) async fn list<'e>(
     account: &str,
     relay: &super::relay::Relay,
 ) -> Result<Vec<Value>, ApiError> {
-    let rows: Vec<(String, String, bool, bool)> =
-        query_as("SELECT i.id, i.name, i.owner_id = $1, i.update_required FROM installations i LEFT JOIN installation_members m ON m.installation_id = i.id AND m.account_id = $1 WHERE i.owner_id IS NOT NULL AND (i.owner_id = $1 OR m.account_id = $1) ORDER BY i.created_at, i.id")
+    let rows: Vec<(String, String, String, bool, bool)> =
+        query_as("SELECT i.id, i.slug, i.name, i.owner_id = $1, i.update_required FROM installations i LEFT JOIN installation_members m ON m.installation_id = i.id AND m.account_id = $1 WHERE i.owner_id IS NOT NULL AND (i.owner_id = $1 OR m.account_id = $1) ORDER BY i.created_at, i.id")
             .bind(account)
             .fetch_all(executor)
             .await?;
     Ok(rows
         .into_iter()
-        .map(|(id, name, owner, update_required)| {
+        .map(|(id, slug, name, owner, update_required)| {
             json!({
                 "id": id,
+                "slug": slug,
                 "name": name,
                 "role": if owner { "owner" } else { "member" },
                 "online": relay.online(&id),
@@ -152,13 +153,7 @@ pub(super) async fn claim(
 
     let installation = uuid::Uuid::new_v4().to_string();
     let token = random_token();
-    query("INSERT INTO installations (id, owner_id, name, token_digest) VALUES ($1, $2, $3, $4)")
-        .bind(&installation)
-        .bind(&owner)
-        .bind(name)
-        .bind(digest(&token))
-        .execute(&mut *transaction)
-        .await?;
+    insert(&mut transaction, &installation, &owner, name, &token).await?;
     super::audit::record(
         &mut transaction,
         super::audit::Event {
@@ -178,6 +173,27 @@ pub(super) async fn claim(
             "token": token,
         })),
     ))
+}
+
+async fn insert(
+    connection: &mut sqlx_postgres::PgConnection,
+    installation: &str,
+    owner: &str,
+    name: &str,
+    token: &str,
+) -> Result<(), ApiError> {
+    loop {
+        let inserted = query("INSERT INTO installations (id, owner_id, name, token_digest) VALUES ($1, $2, $3, $4) ON CONFLICT (slug) DO NOTHING")
+            .bind(installation)
+            .bind(owner)
+            .bind(name)
+            .bind(digest(token))
+            .execute(&mut *connection)
+            .await?;
+        if inserted.rows_affected() == 1 {
+            return Ok(());
+        }
+    }
 }
 
 /// Forget permanently revokes machine proofs and removes only the beacon record.
@@ -624,15 +640,7 @@ pub(super) async fn poll_device(
             .execute(&mut *transaction)
             .await?;
     } else {
-        query(
-            "INSERT INTO installations (id, owner_id, name, token_digest) VALUES ($1, $2, $3, $4)",
-        )
-        .bind(&installation)
-        .bind(&owner)
-        .bind(name)
-        .bind(digest(&token))
-        .execute(&mut *transaction)
-        .await?;
+        insert(&mut transaction, &installation, &owner, &name, &token).await?;
     }
     query("DELETE FROM installation_device_claims WHERE device_digest = $1")
         .bind(device_digest)

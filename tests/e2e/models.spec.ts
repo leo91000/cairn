@@ -50,8 +50,9 @@ test('selects live models and supported reasoning for agents and queued chat tur
   await page.keyboard.press('Escape')
   await page.getByRole('textbox', { name: 'Message', exact: true }).fill('Review the layout. fixture:chat-hang')
   await page.getByRole('button', { name: 'Send', exact: true }).click()
-  await expect(page).toHaveURL(/\/chats\/[a-f0-9-]+$/)
-  const chatId = page.url().split('/').at(-1)!
+  await expect(page).toHaveURL(/\/chats\/[a-z]+-[a-z]+-[a-f0-9]{8}$/)
+  const chatKey = new URL(page.url()).pathname.split('/').at(-1)!
+  const chatId = (await workspace.api(`/api/chats/${chatKey}`)).id
   await expect.poll(() => workspace.service.chats.detail(chatId).run?.status, { timeout: 30000 }).toBe('running')
   expect(workspace.service.chats.detail(chatId).run?.snapshot.agent).toMatchObject({ model: 'fixture-fast', reasoning: 'high' })
   await picker.click()
