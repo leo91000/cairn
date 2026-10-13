@@ -17,7 +17,7 @@ val codingAgents =
         CodingAgent(
             "opencode",
             "Fournisseurs de modèles",
-            "Clé API du fournisseur",
+            "Clé API",
             "OpenCode",
             apiKeys = true,
             requiresModel = true,

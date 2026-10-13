@@ -241,9 +241,10 @@ async fn each_coding_agent_has_its_own_next_account_and_paused_accounts_are_skip
     let list = s.accounts.list(&s).await.unwrap();
     assert_eq!(status(&list, &ids[0]), "next");
     assert_eq!(status(&list, &ids[1]), "paused");
+    // OpenCode requires a managed API-key account even before one is connected.
     assert_eq!(
         s.accounts.overview(&s).await.unwrap()["required"],
-        json!([])
+        json!(["opencode"])
     );
     // Once every Claude account is paused, Claude runs wait for the user.
     s.accounts
@@ -252,7 +253,7 @@ async fn each_coding_agent_has_its_own_next_account_and_paused_accounts_are_skip
         .unwrap();
     assert_eq!(
         s.accounts.overview(&s).await.unwrap()["required"],
-        json!(["claude"])
+        json!(["claude", "opencode"])
     );
     assert!(
         s.accounts

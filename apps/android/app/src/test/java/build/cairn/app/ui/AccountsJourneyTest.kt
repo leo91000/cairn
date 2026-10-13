@@ -337,13 +337,27 @@ class AccountsJourneyTest {
             },
         ) {
             waitText("AGENTS DE CODE")
+            compose.waitUntil(15000) {
+                compose
+                    .onAllNodes(hasContentDescription("Ajouter un compte") and isEnabled())
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
+            }
             compose.onNodeWithContentDescription("Ajouter un compte").performClick()
             waitText("Ajouter un compte")
-            compose.onNodeWithText("Clé API du fournisseur").performClick()
+            compose
+                .onNode(
+                    hasText("OpenCode") and
+                        hasClickAction() and
+                        hasAnyAncestor(hasTestTag("account-sign-in"))
+                )
+                .performClick()
             waitText("Une clé API par fournisseur de modèles.")
             compose.onNodeWithText("Nom").performTextInput("Zen")
             capture("opencode-connect-light")
-            compose.onNodeWithText("Clé API").performTextInput("synthetic-android-zen-key")
+            compose
+                .onNode(hasText("Clé API") and hasSetTextAction())
+                .performTextInput("synthetic-android-zen-key")
             compose.onNodeWithText("Enregistrer la clé API").performScrollTo().performClick()
             compose.waitUntil(15000) {
                 server.requests.any { it.first == "POST /api/installations/fixture/api/accounts" }
