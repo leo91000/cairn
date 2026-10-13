@@ -314,6 +314,68 @@ async fn user_input_cancel_and_trash_prevent_obsolete_wakeups() {
 }
 
 #[tokio::test]
+async fn failed_paused_turn_cannot_replay_its_wakeup_after_manual_resume() {
+    for tick_before_resume in [true, false] {
+        let f = Fixture::new().await;
+        let wake = f.schedule().await;
+        f.service.chat_pause(&f.chat, true).await.unwrap();
+        f.due().await;
+        f.service
+            .store
+            .patch_run(
+                &f.run,
+                json!({
+                    "status": "failed",
+                    "resumeAvailable": true,
+                    "recoveryPending": false,
+                }),
+            )
+            .await
+            .unwrap();
+        f.service
+            .store
+            .set(
+                &format!("run-checkpoint:{}", f.run),
+                json!({
+                    "completed": true,
+                    "launched": true,
+                    "prepared": { "backend": "fixture" },
+                }),
+                None,
+            )
+            .await
+            .unwrap();
+
+        if tick_before_resume {
+            let failed = f.tick().await;
+            assert!(failed["wakeup"].is_null());
+            assert_eq!(failed["paused"], true);
+            assert_eq!(failed["run"]["status"], "failed");
+        }
+
+        // Resume can race ahead of the first worker tick after the failure.
+        let resumed = f.service.worker.resume(&f.service, &f.run).await.unwrap();
+        assert_eq!(resumed["chatExecution"]["messageId"], wake["messageId"]);
+        assert!(f.service.chat_detail(&f.chat).await.unwrap()["wakeup"].is_null());
+        f.service.chat_pause(&f.chat, false).await.unwrap();
+        f.finish().await;
+        f.service
+            .store
+            .patch_run(&f.run, json!({ "recoveryPending": false }))
+            .await
+            .unwrap();
+
+        let finished = f.tick().await;
+        assert_eq!(finished["run"]["status"], "succeeded");
+        assert_eq!(
+            finished["run"]["chatExecution"]["messageId"],
+            wake["messageId"]
+        );
+        assert!(finished["wakeup"].is_null());
+    }
+}
+
+#[tokio::test]
 async fn sleep_rejects_invalid_inputs_non_chat_runs_and_pending_user_messages() {
     let f = Fixture::new().await;
     for input in [

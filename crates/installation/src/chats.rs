@@ -687,17 +687,23 @@ impl Service {
             let busy = run.as_ref().is_some_and(|run| {
                 active.contains(text(run, "id")) || run["recoveryPending"] == true
             });
-            if chat["paused"] == true || busy {
+            if busy {
                 continue;
             }
             let id = text(&chat, "id").to_owned();
             if needs_attention(&chat, run.as_ref()) {
+                self.chat_cancel_sleep(&id).await?;
+                if chat["paused"] == true {
+                    continue;
+                }
                 let chat_id = id.clone();
                 self.store
                     .transaction(move |db| next_queued(db, &chat_id).map(|_| ()))
                     .await?;
                 self.chat_pause(&id, true).await?;
-                self.chat_cancel_sleep(&id).await?;
+                continue;
+            }
+            if chat["paused"] == true {
                 continue;
             }
             let chat_id = id.clone();

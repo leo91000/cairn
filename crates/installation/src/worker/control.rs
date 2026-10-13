@@ -162,6 +162,9 @@ fn requeue(db: &Db<'_>, id: &str) -> Result<Value> {
     if db.active()?.iter().any(|a| a["taskId"] == run["taskId"]) {
         return Err(Error::conflict("This task already has an active run."));
     }
+    // A manual resume may arrive before chat_tick observes the terminal turn.
+    // Its scheduled continuation must not survive into the resumed execution.
+    crate::chats::sleep::cancel_for_run(db, id)?;
     if let Some(mut checkpoint) = checkpoint {
         checkpoint.remaining_ms = Some(crate::run_limits::budget_ms(&run["snapshot"]["agent"]));
         if !before_launch {
