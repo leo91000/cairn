@@ -5,6 +5,7 @@ local API = "https://discord.com/api/v10"
 local HEADERS = { ["user-agent"] = "DiscordBot (https://github.com/leo91000/cairn, 1)" }
 local WAITING = "Thanks! The owner of this bot needs to approve you first. Mention me again once they have."
 local LIMIT = 1900
+local SILENT = "NO_REPLY"
 local UPLOAD_LIMIT = 10 * 1024 * 1024
 local EMOJI = {
     seen = "%F0%9F%91%80", -- 👀
@@ -85,6 +86,26 @@ local function stopButton(): any
     } }
 end
 
+-- Where a reply goes. Unmentioned messages in a support channel get their thread only
+-- once the agent decides to answer, so chatter never creates threads.
+local function destination(reply: any): string?
+    if not reply.deferred then
+        return reply.channel
+    end
+    local key = "thread:" .. reply.message
+    local existing = cairn.storage.get(key)
+    if existing then
+        return existing
+    end
+    local ok, response = pcall(request, "POST", "/channels/" .. reply.channel .. "/messages/" .. reply.message .. "/threads", {
+        name = reply.title or "Support request",
+        auto_archive_duration = 1440,
+    })
+    local thread = if ok and response.status < 300 and response.json then response.json.id else reply.channel
+    cairn.storage.set(key, thread)
+    return thread
+end
+
 -- A question waits for answers to all its fields before it goes back to the agent.
 local function questionKey(channel: string): string
     return "question:" .. channel
@@ -156,8 +177,21 @@ return {
             return nil
         end
 
-        react(origin, event.id, EMOJI.seen, true)
+        -- In a support channel, messages that don't mention the bot are handled quietly:
+        -- no reaction or thread until the agent decides an answer is needed.
+        local quiet = event.everyMessage and not event.mentioned and not event.threadId
+        local prompt = value
+        if event.everyMessage and not event.threadId then
+            prompt = "(Message from " .. event.author.name .. " in the Discord support channel. "
+                .. "If it needs no answer from you, reply with exactly " .. SILENT .. ".)\n\n" .. value
+        end
         local thread = event.threadId
+        if quiet then
+            -- A thread created from this message later reuses the message's ID.
+            thread = event.id
+        else
+            react(origin, event.id, EMOJI.seen, true)
+        end
         if not thread then
             -- Each new request gets its own thread; without permission, stay in the channel.
             local ok, response = pcall(request, "POST", "/channels/" .. event.channelId .. "/messages/" .. event.id .. "/threads", {
@@ -172,14 +206,17 @@ return {
         for _, file in attachments do
             table.insert(files, { url = file.url, name = file.name })
         end
+        local reply = if quiet
+            then { channel = event.channelId, source = origin, message = event.id, deferred = true, title = title(value) }
+            else { channel = thread or event.channelId, source = origin, message = event.id, threaded = thread ~= nil }
         local ok, code = pcall(cairn.conversations.submit, {
-            text = value,
+            text = prompt,
             files = files,
             thread = thread or event.channelId,
             shared = thread ~= nil,
-            reply = { channel = thread or event.channelId, source = origin, message = event.id, threaded = thread ~= nil },
+            reply = reply,
         })
-        if not ok then
+        if not ok and not quiet then
             react(origin, event.id, EMOJI.seen, false)
             react(origin, event.id, EMOJI.failed, true)
             local reason = "I couldn’t start this request. The owner can check the bot in Cairn."
@@ -231,7 +268,11 @@ return {
 
     -- Every few seconds while the agent works: keep "typing…" visible and show the step.
     progress = function(event)
-        local channel = event.reply.channel
+        -- Quiet requests stay invisible until the agent decides to answer.
+        if event.reply.deferred and not cairn.storage.get("thread:" .. event.reply.message) then
+            return nil
+        end
+        local channel = destination(event.reply)
         quietly(request, "POST", "/channels/" .. channel .. "/typing")
         if event.state ~= "working" or not event.step then
             return nil
@@ -261,7 +302,7 @@ return {
     end,
 
     question = function(event)
-        local channel = event.reply.channel
+        local channel = destination(event.reply)
         local question = event.question
         local lines, rows, secret = { "**The agent has a question**" }, {}, false
         for index, field in question.fields do
@@ -315,8 +356,18 @@ return {
     end,
 
     reply = function(event)
-        local channel = event.reply.channel
         local key = "status:" .. event.deliveryId
+        -- The agent decided this message needs no answer: say nothing.
+        if string.match(event.text, "^%s*" .. SILENT .. "%s*$") then
+            local status = cairn.storage.get(key)
+            if status then
+                quietly(request, "DELETE", "/channels/" .. destination(event.reply) .. "/messages/" .. status.id)
+                cairn.storage.delete(key)
+            end
+            react(event.reply.source or event.reply.channel, event.reply.message, EMOJI.seen, false)
+            return { done = true }
+        end
+        local channel = destination(event.reply)
         local status = cairn.storage.get(key)
         if status then
             quietly(request, "DELETE", "/channels/" .. channel .. "/messages/" .. status.id)
@@ -346,7 +397,7 @@ return {
                 nonce = nonce .. tostring(index),
                 enforce_nonce = true,
             }
-            if index == 0 and not event.reply.threaded then
+            if index == 0 and not event.reply.threaded and channel == event.reply.channel and not event.reply.deferred then
                 body.message_reference = { message_id = event.reply.message, fail_if_not_exists = false }
             end
             local last = index == #parts - 1

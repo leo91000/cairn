@@ -33,7 +33,7 @@ import {
   UserPlus,
   X,
 } from '../icons'
-import { eligibleAgent } from '../plugins'
+import { eligibleAgent, publicProblem } from '../plugins'
 import { iconButton } from '../ui'
 
 const route = useRoute()
@@ -56,8 +56,11 @@ const token = ref('')
 const discovery = ref<Discovery>()
 const guildId = ref('')
 const channelId = ref('')
-const accessMode = ref<'requests' | 'allowlist'>('requests')
+const accessMode = ref<'requests' | 'allowlist' | 'everyone'>('requests')
 const messageContent = ref(false)
+const everyMessage = ref(false)
+const perPerson = ref(5)
+const onepassword = ref<{ agentIds: string[] }[]>([])
 const people = ref<Label[]>([])
 const addition = ref('')
 const agentId = ref('')
@@ -67,14 +70,16 @@ const enabled = ref(true)
 
 const guild = computed(() => discovery.value?.guilds.find(item => item.id === guildId.value))
 const channel = computed(() => discovery.value?.channels?.find(item => item.id === channelId.value))
-const agents = computed(() => [...state.agents].sort((a, b) => Number(eligibleAgent(b)) - Number(eligibleAgent(a))))
+// Anyone in the channel needs a strictly limited agent; others a dedicated one.
+const problem = (item: (typeof state.agents)[number]) => accessMode.value === 'everyone' ? publicProblem(item, onepassword.value) : eligibleAgent(item) ? '' : 'Too broad'
+const agents = computed(() => [...state.agents].sort((a, b) => Number(!problem(b)) - Number(!problem(a))))
 const agent = computed(() => state.agents.find(item => item.id === agentId.value))
 const project = computed(() => state.projects.find(item => item.id === agent.value?.access.projects?.[0]))
 const ready = computed(() => [
   !!discovery.value,
   !!guild.value && !!channel.value?.canReply,
-  accessMode.value === 'requests' || people.value.length > 0,
-  !!agent.value && eligibleAgent(agent.value) && name.value.trim().length > 0,
+  accessMode.value !== 'allowlist' || people.value.length > 0,
+  !!agent.value && !problem(agent.value) && name.value.trim().length > 0,
 ])
 
 async function discover(extra: Record<string, unknown> = {}) {
@@ -152,7 +157,8 @@ async function save() {
         channelName: channel.value?.name ?? '',
         botId: discovery.value?.bot.id ?? '',
         botName: discovery.value?.bot.name ?? '',
-        messageContent: messageContent.value,
+        messageContent: messageContent.value || everyMessage.value,
+        everyMessage: everyMessage.value,
       },
       accessMode: accessMode.value,
       userIds: people.value.map(person => person.id),
@@ -160,6 +166,7 @@ async function save() {
       agentId: agentId.value,
       projectId: agent.value?.access.projects?.[0] ?? null,
       maxMessagesPerHour: limit.value,
+      maxPerPersonPerHour: perPerson.value,
       enabled: enabled.value,
     }
     await api(`/plugins/discord/connections${editing.value ? `/${editing.value}` : ''}`, {
@@ -179,6 +186,7 @@ async function save() {
 }
 
 onMounted(async () => {
+  onepassword.value = await api('/onepassword').catch(() => [])
   if (!editing.value)
     return
   try {
@@ -193,6 +201,8 @@ onMounted(async () => {
     channelId.value = existing.settings.channelId
     accessMode.value = existing.accessMode
     messageContent.value = existing.settings.messageContent === true
+    everyMessage.value = existing.settings.everyMessage === true
+    perPerson.value = existing.maxPerPersonPerHour ?? 5
     people.value = existing.userIds.map(id => existing.people.find(person => person.id === id) ?? { id, name: '' })
     agentId.value = existing.agentId
     limit.value = existing.maxMessagesPerHour
@@ -448,9 +458,31 @@ const radio = 'size-4.5 shrink-0 accent-[var(--color-accent)]'
                 <span><span class="block text-xs font-semibold">Only people I add</span>
                   <span class="mt-1 block text-2xs leading-relaxed text-muted">Other mentions are ignored silently.</span></span>
               </label>
+              <label :class="twMerge(option, 'items-start')">
+                <input
+                  v-model="accessMode"
+                  type="radio"
+                  name="access"
+                  value="everyone"
+                  :class="twMerge(radio, 'mt-0.5')"
+                >
+                <span><span class="flex items-center gap-2 text-xs font-semibold">Anyone in the channel<span class="rounded-full bg-warning-surface px-2 py-px text-3xs text-warning">Public</span></span>
+                  <span class="mt-1 block text-2xs leading-relaxed text-muted">For a public support channel. Anyone can make the agent work, so it must be read-only, with no GitHub, MCP or 1Password access and one project at most. Each person gets their own hourly limit, and only they (or people you list) can stop their conversation.</span></span>
+              </label>
             </fieldset>
             <label :class="twMerge(option, 'mt-2.5 items-start')">
-              <input v-model="messageContent" type="checkbox" :class="twMerge(radio, 'mt-0.5')">
+              <input v-model="everyMessage" type="checkbox" :class="twMerge(radio, 'mt-0.5')">
+              <span><span class="block text-xs font-semibold">Answer every message in the channel</span>
+                <span class="mt-1 block text-2xs leading-relaxed text-muted">Every new message is a request, not only mentions. Messages that need no answer (thanks, chatter) stay silent: the agent can reply “NO_REPLY”, and a thread only opens once it has something to say. Needs Message Content, below.</span></span>
+            </label>
+            <label :class="twMerge(option, 'mt-2.5 items-start')">
+              <input
+                :checked="messageContent || everyMessage"
+                :disabled="everyMessage"
+                type="checkbox"
+                :class="twMerge(radio, 'mt-0.5')"
+                @change="messageContent = ($event.target as HTMLInputElement).checked"
+              >
               <span><span class="block text-xs font-semibold">Read replies without a mention</span>
                 <span class="mt-1 block text-2xs leading-relaxed text-muted">Each conversation gets its own thread. With this on, allowed people can simply reply in the thread or to the bot. First turn on “Message Content Intent” on the Bot page of the Developer Portal, or Discord will refuse the connection.</span></span>
             </label>
@@ -497,7 +529,9 @@ const radio = 'size-4.5 shrink-0 accent-[var(--color-accent)]'
               Which agent answers?
             </h2>
             <p class="mt-1.5 text-[13px] leading-relaxed text-muted">
-              Pick a dedicated agent. Only agents limited to one project at most, without installation access, are eligible.
+              {{ accessMode === 'everyone'
+                ? 'Anyone can reach this agent, so it must be read-only, with no GitHub, MCP or 1Password access and one project at most.'
+                : 'Pick a dedicated agent. Only agents limited to one project at most, without installation access, are eligible.' }}
             </p>
             <fieldset class="mt-4.5 grid gap-2.5">
               <legend class="sr-only">
@@ -510,14 +544,14 @@ const radio = 'size-4.5 shrink-0 accent-[var(--color-accent)]'
                   name="agent"
                   :class="radio"
                   :value="item.id"
-                  :disabled="!eligibleAgent(item)"
+                  :disabled="!!problem(item)"
                 >
                 <AgentAvatar :name="item.name" :identity="item.id" :size="32" />
                 <span class="min-w-0 flex-1">
                   <span class="block truncate text-xs font-semibold">{{ item.name }}</span>
                   <span class="block truncate text-2xs text-muted">{{ item.provider === 'claude' ? 'Claude Code' : 'Codex' }} · {{ item.access.projects === null ? 'all projects' : state.projects.find(p => p.id === item.access.projects?.[0])?.name ?? 'no project' }}{{ item.access.installation ? ' · installation access' : '' }}</span>
                 </span>
-                <span v-if="!eligibleAgent(item)" class="inline-flex shrink-0 items-center gap-1 rounded-full bg-warning-surface px-2.25 py-0.5 text-2xs font-semibold text-warning"><Icon :name="TriangleAlert" :size="12" />Too broad</span>
+                <span v-if="problem(item)" class="inline-flex shrink-0 items-center gap-1 rounded-full bg-warning-surface px-2.25 py-0.5 text-2xs font-semibold text-warning"><Icon :name="TriangleAlert" :size="12" />{{ problem(item) }}</span>
               </label>
               <RouterLink to="/agents" class="inline-flex items-center gap-1.5 px-0.5 py-1 text-2xs font-semibold text-accent">
                 <Icon :name="Plus" :size="13" />Create a dedicated agent
@@ -538,15 +572,26 @@ const radio = 'size-4.5 shrink-0 accent-[var(--color-accent)]'
                   class="mt-2 w-full accent-[var(--color-accent)] border-0! p-0! shadow-none!"
                 >
               </label>
+              <label v-if="accessMode === 'everyone'" class="grid gap-1.75 text-xs font-semibold">
+                <span class="flex justify-between">Per person<span class="font-normal"><b>{{ perPerson }}</b> <span class="text-muted">per hour</span></span></span>
+                <input
+                  v-model.number="perPerson"
+                  type="range"
+                  min="1"
+                  max="50"
+                  aria-label="Messages per person per hour"
+                  class="mt-2 w-full accent-[var(--color-accent)] border-0! p-0! shadow-none!"
+                >
+              </label>
             </div>
             <div v-if="agent && channel" class="mt-5 rounded-[14px] border border-line bg-inset px-4.5 py-4">
               <div class="text-xs font-semibold">
                 Summary
               </div>
               <p class="mt-1.5 text-2xs leading-[1.7] text-muted">
-                <b class="text-ink">{{ accessMode === 'requests' ? `${people.length ? `${people.length} ${people.length === 1 ? 'person' : 'people'}, and anyone you approve,` : 'People you approve'}` : `${people.length} ${people.length === 1 ? 'person' : 'people'}` }}</b>
-                can mention <b class="text-ink">{{ discovery?.bot.name }}</b> in <b class="text-ink">#{{ channel.name }}</b> on {{ guild?.name }}.
-                <b class="text-ink">{{ agent.name }}</b> answers{{ project ? `, working in ` : ' without project access' }}<b v-if="project" class="text-ink">{{ project.name }}</b>, up to {{ limit }} messages an hour.
+                <b class="text-ink">{{ accessMode === 'everyone' ? 'Anyone in the channel' : accessMode === 'requests' ? `${people.length ? `${people.length} ${people.length === 1 ? 'person' : 'people'}, and anyone you approve,` : 'People you approve'}` : `${people.length} ${people.length === 1 ? 'person' : 'people'}` }}</b>
+                can {{ everyMessage ? 'write to' : 'mention' }} <b class="text-ink">{{ discovery?.bot.name }}</b> in <b class="text-ink">#{{ channel.name }}</b> on {{ guild?.name }}.
+                <b class="text-ink">{{ agent.name }}</b> answers{{ project ? `, working in ` : ' without project access' }}<b v-if="project" class="text-ink">{{ project.name }}</b>, up to {{ limit }} messages an hour{{ accessMode === 'everyone' ? ` and ${perPerson} per person` : '' }}.
               </p>
             </div>
           </template>

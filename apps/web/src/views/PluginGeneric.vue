@@ -356,6 +356,12 @@ onBeforeUnmount(() => {
               value="allowlist"
               class="w-auto!"
             >Only people listed below</label>
+            <label class="flex flex-row! items-center gap-2!"><input
+              v-model="form.accessMode"
+              type="radio"
+              value="everyone"
+              class="w-auto!"
+            >Anyone (needs a read-only agent without GitHub, MCP or 1Password)</label>
           </fieldset>
           <label>People’s IDs<input v-model="form.userIds" placeholder="Separate IDs with commas"></label>
           <label>Messages per hour<input

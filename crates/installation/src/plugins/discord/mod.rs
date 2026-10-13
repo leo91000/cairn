@@ -41,6 +41,12 @@ pub fn validate_scope(settings: &Value) -> Result<()> {
     if !snowflake(text(settings, "guildId")) || !snowflake(text(settings, "channelId")) {
         return Err(Error::bad("Choose a Discord server and channel."));
     }
+    // Without Message Content, Discord sends no text for messages that don't mention the bot.
+    if settings["everyMessage"] == true && settings["messageContent"] != true {
+        return Err(Error::bad(
+            "Answering every message needs “Read replies without a mention” (Message Content).",
+        ));
+    }
     Ok(())
 }
 

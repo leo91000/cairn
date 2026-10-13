@@ -85,7 +85,7 @@ pub async fn accept(s: &Service, connection: &Connection, inbound: Inbound) -> R
                 &inbound.context,
                 &json!({ "id": inbound.id, "author": author }),
             );
-            if !current.user_ids.contains(&inbound.author.id) {
+            if !current.allows(&inbound.author.id) {
                 if current.access_mode == AccessMode::Requests && inbound.kind == "message" {
                     request(db, &current, &inbound.author, &base)?;
                 }
@@ -184,23 +184,46 @@ fn binding(connection: &Connection, author: &str, thread: &str, shared: bool) ->
 fn admit(db: &Db<'_>, expected: &Connection, event: &Value) -> Result<(Connection, String)> {
     let connection = authorize(db, expected)?;
     let author = text(event, "authorId").to_owned();
-    if !connection.user_ids.contains(&author) || event["revision"] != connection.revision {
+    if !connection.allows(&author) || event["revision"] != connection.revision {
         return Err(Error::forbidden("This person is no longer allowed."));
     }
     Ok((connection, author))
 }
 
-fn limits(db: &Db<'_>, connection: &Connection) -> Result<(String, u64)> {
+/// Hourly counters to increment when the submission is accepted.
+struct Counters(Vec<(String, u64)>);
+
+impl Counters {
+    fn increment(&self, db: &Db<'_>) -> Result<()> {
+        let hour = now() / 3_600_000;
+        for (key, count) in &self.0 {
+            db.set(key, &json!(count + 1), Some((hour + 1) * 3_600_000))?;
+        }
+        Ok(())
+    }
+}
+
+fn limits(db: &Db<'_>, connection: &Connection, author: &str) -> Result<Counters> {
     let hour = now() / 3_600_000;
+    let used = |key: &str| -> Result<u64> {
+        Ok(db.kv(key)?.and_then(|value| value.as_u64()).unwrap_or(0))
+    };
     let rate_key = format!("plugin-rate:{}:{hour}", connection.id);
-    let count = db
-        .kv(&rate_key)?
-        .and_then(|value| value.as_u64())
-        .unwrap_or(0);
+    let count = used(&rate_key)?;
     if count >= u64::from(connection.max_messages_per_hour) {
         return Err(Error::too_many_requests(
             "Connection message limit reached.",
         ));
+    }
+    let mut counters = vec![(rate_key, count)];
+    // When anyone can write, nobody may use up the whole connection alone.
+    if connection.access_mode == AccessMode::Everyone {
+        let key = format!("plugin-rate:{}:{author}:{hour}", connection.id);
+        let personal = used(&key)?;
+        if personal >= u64::from(connection.max_per_person_per_hour) {
+            return Err(Error::too_many_requests("Personal message limit reached."));
+        }
+        counters.push((key, personal));
     }
     let outstanding = db
         .list(DELIVERIES)?
@@ -212,7 +235,7 @@ fn limits(db: &Db<'_>, connection: &Connection) -> Result<(String, u64)> {
             "Connection has too much pending work.",
         ));
     }
-    Ok((rate_key, count))
+    Ok(Counters(counters))
 }
 
 /// Files a person attached, fetched from hosts the plugin declares (at most four,
@@ -308,7 +331,7 @@ pub async fn submit(s: &Service, context: &Context, args: &Value) -> Result<Valu
                 if let Some(receipt) = db.kv(&dedupe)? {
                     return Ok(Err(receipt));
                 }
-                limits(db, &connection)?;
+                limits(db, &connection, &author)?;
                 let binding_key = binding(&connection, &author, &thread, shared);
                 let bound = db.kv(&binding_key)?.and_then(|value| value.as_str().map(str::to_owned));
                 let usable = bound
@@ -334,9 +357,14 @@ pub async fn submit(s: &Service, context: &Context, args: &Value) -> Result<Valu
                 }
                 let chat_id = text(&chat, "id").to_owned();
                 db.set(&binding_key, &json!(chat_id), None)?;
+                let owner_key = format!("plugin-conversation:{chat_id}");
+                let started_by = db
+                    .kv(&owner_key)?
+                    .and_then(|owner| owner["startedBy"].as_str().map(str::to_owned))
+                    .unwrap_or_else(|| author.clone());
                 db.set(
-                    &format!("plugin-conversation:{chat_id}"),
-                    &json!({ "connectionId": connection.id, "thread": thread }),
+                    &owner_key,
+                    &json!({ "connectionId": connection.id, "thread": thread, "startedBy": started_by }),
                     None,
                 )?;
                 Ok(Ok(chat_id))
@@ -363,15 +391,14 @@ pub async fn submit(s: &Service, context: &Context, args: &Value) -> Result<Valu
             if let Some(receipt) = db.kv(&dedupe)? {
                 return Ok(receipt);
             }
-            let (rate_key, count) = limits(db, &connection)?;
+            let counters = limits(db, &connection, &author)?;
             let message_id = id();
             let queued = crate::chats::send_in(
                 db,
                 &chat_id,
                 json!({ "id": message_id, "text": content, "attachmentIds": attachment_ids }),
             )?;
-            let hour = now() / 3_600_000;
-            db.set(&rate_key, &json!(count + 1), Some((hour + 1) * 3_600_000))?;
+            counters.increment(db)?;
             let receipt = json!({ "chatId": chat_id, "messageId": queued["id"] });
             db.set(&dedupe, &receipt, Some(now() + 30 * 86_400_000))?;
             db.put(
@@ -428,7 +455,12 @@ pub async fn submit(s: &Service, context: &Context, args: &Value) -> Result<Valu
 }
 
 /// A conversation this connection started, named by ID or by its shared thread.
-fn conversation(db: &Db<'_>, connection: &Connection, args: &Value) -> Result<String> {
+fn conversation(
+    db: &Db<'_>,
+    connection: &Connection,
+    author: &str,
+    args: &Value,
+) -> Result<String> {
     let chat = match args["conversation"].as_str() {
         Some(chat) => chat.to_owned(),
         None => db
@@ -437,11 +469,18 @@ fn conversation(db: &Db<'_>, connection: &Connection, args: &Value) -> Result<St
             .ok_or_else(|| Error::not_found("Conversation not found."))?,
     };
     let owner = db.kv(&format!("plugin-conversation:{chat}"))?;
-    if owner
-        .as_ref()
-        .is_none_or(|owner| owner["connectionId"] != connection.id)
-    {
+    let Some(owner) = owner.filter(|owner| owner["connectionId"] == connection.id) else {
         return Err(Error::not_found("Conversation not found."));
+    };
+    // When anyone can write, only listed people and whoever started the conversation
+    // may answer for it or stop it.
+    if connection.access_mode == AccessMode::Everyone
+        && !connection.user_ids.iter().any(|id| id == author)
+        && owner["startedBy"] != author
+    {
+        return Err(Error::forbidden(
+            "Only the person who started this conversation can do that.",
+        ));
     }
     Ok(chat)
 }
@@ -461,8 +500,8 @@ pub async fn answer(s: &Service, context: &Context, args: &Value) -> Result<Valu
     let chat = s
         .store
         .read(move |db| {
-            let (connection, _) = admit(db, &expected, &event)?;
-            conversation(db, &connection, &input)
+            let (connection, author) = admit(db, &expected, &event)?;
+            conversation(db, &connection, &author, &input)
         })
         .await?;
     let question = text(args, "question");
@@ -495,8 +534,8 @@ pub async fn cancel(s: &Service, context: &Context, args: &Value) -> Result<Valu
     let chat = s
         .store
         .read(move |db| {
-            let (connection, _) = admit(db, &expected, &event)?;
-            conversation(db, &connection, &input)
+            let (connection, author) = admit(db, &expected, &event)?;
+            conversation(db, &connection, &author, &input)
         })
         .await?;
     let detail = s.get("chats", &chat).await?;
@@ -532,12 +571,7 @@ enum Turn {
 }
 
 fn turn(db: &Db<'_>, connection: &Connection, delivery: &Value) -> Result<Turn> {
-    if delivery["revision"] != connection.revision
-        || !connection
-            .user_ids
-            .iter()
-            .any(|id| delivery["userId"] == *id)
-    {
+    if delivery["revision"] != connection.revision || !connection.allows(text(delivery, "userId")) {
         return Err(Error::forbidden("Reply authorization was revoked."));
     }
     let chat = db

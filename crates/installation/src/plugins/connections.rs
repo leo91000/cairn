@@ -32,6 +32,13 @@ pub enum AccessMode {
     Allowlist,
     /// Unknown people who reach the plugin create a request the owner can approve.
     Requests,
+    /// Anyone who reaches the plugin, e.g. everyone in a public support channel. Only
+    /// with a strictly limited agent (see `public_safe`) and a per-person limit.
+    Everyone,
+}
+
+fn per_person() -> u32 {
+    5
 }
 
 /// Display labels chosen by the owner. Never used for authorization.
@@ -61,7 +68,40 @@ pub struct Connection {
     pub user_ids: Vec<String>,
     pub people: Vec<Label>,
     pub max_messages_per_hour: u32,
+    /// Hourly limit for each person when anyone can use the connection.
+    #[serde(default = "per_person")]
+    pub max_per_person_per_hour: u32,
     pub updated_at: i64,
+}
+
+impl Connection {
+    /// Whether this person may use the connection right now.
+    pub fn allows(&self, person: &str) -> bool {
+        self.access_mode == AccessMode::Everyone || self.user_ids.iter().any(|id| id == person)
+    }
+}
+
+/// An agent anyone may reach: read-only sandbox, one project at most, and no
+/// installation, GitHub, MCP or 1Password access. Checked on save and on every effect.
+pub(crate) fn public_safe(db: &Db<'_>, agent_id: &str, access: &Value) -> Result<()> {
+    let projects = access["projects"].as_array().map_or(usize::MAX, Vec::len);
+    let secrets = db.list("onepassword")?.iter().any(|account| {
+        account["agentIds"]
+            .as_array()
+            .is_some_and(|ids| ids.iter().any(|id| id == agent_id))
+    });
+    if access["sandbox"] != "read-only"
+        || access["installation"] == true
+        || access["github"] == true
+        || access["mcps"] != json!([])
+        || projects > 1
+        || secrets
+    {
+        return Err(Error::bad(
+            "For anyone in the channel, choose an agent with a read-only sandbox, at most one project, and no installation, GitHub, MCP or 1Password access.",
+        ));
+    }
+    Ok(())
 }
 
 pub fn label(value: &str) -> String {
@@ -112,6 +152,12 @@ pub(crate) fn authorize(db: &Db<'_>, expected: &Connection) -> Result<Connection
     if !current.agent_id.is_empty() {
         let agent = db.get("agents", &current.agent_id)?.ok_or_else(denied)?;
         if policy(&agent) != current.granted_access {
+            return Err(denied());
+        }
+        // 1Password grants can change without changing the agent's policy.
+        if current.access_mode == AccessMode::Everyone
+            && public_safe(db, &current.agent_id, &current.granted_access).is_err()
+        {
             return Err(denied());
         }
     }
@@ -253,6 +299,7 @@ pub async fn save(
     let access_mode = match input["accessMode"].as_str() {
         None | Some("allowlist") => AccessMode::Allowlist,
         Some("requests") => AccessMode::Requests,
+        Some("everyone") if delegates => AccessMode::Everyone,
         Some(_) => return Err(Error::bad("Choose who can use this connection.")),
     };
     if users.len() > 100
@@ -294,6 +341,10 @@ pub async fn save(
         .as_u64()
         .filter(|value| (1..=100).contains(value))
         .unwrap_or(20) as u32;
+    let per_person = input["maxPerPersonPerHour"]
+        .as_u64()
+        .filter(|value| (1..=50).contains(value))
+        .unwrap_or(5) as u32;
     let token = text(input, "token").trim();
     if input.get("token").is_some_and(|value| !value.is_string())
         || token.len() > 4096
@@ -331,6 +382,7 @@ pub async fn save(
         user_ids,
         people,
         max_messages_per_hour: limit,
+        max_per_person_per_hour: per_person,
         updated_at: now(),
     };
     let updating = existing.is_some();
@@ -354,9 +406,12 @@ pub async fn save(
             if let Some(project) = &connection.project_id
                 && db.get("projects", project)?.is_none()
             { return Err(Error::bad("Project not found.")); }
+            if connection.access_mode == AccessMode::Everyone {
+                public_safe(db, &connection.agent_id, &access)?;
+            }
             connection.granted_access = access;
         }
-        if connection.access_mode == AccessMode::Allowlist {
+        if connection.access_mode != AccessMode::Requests {
             for request in db.list("plugin-requests")? {
                 if request["connectionId"] == connection.id && request["status"] == "pending" {
                     db.remove("plugin-requests", text(&request, "id"))?;

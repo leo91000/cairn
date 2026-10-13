@@ -94,7 +94,8 @@ export interface PluginConnection {
   settings: Record<string, any>
   userIds: string[]
   people: Label[]
-  accessMode: 'allowlist' | 'requests'
+  accessMode: 'allowlist' | 'requests' | 'everyone'
+  maxPerPersonPerHour?: number
   agentId: string
   projectId: string | null
   maxMessagesPerHour: number
@@ -161,4 +162,22 @@ export function personName(connection: PluginConnection, id: string) {
 /** External people may only reach a dedicated agent: one project at most, no installation access. */
 export function eligibleAgent(agent: Agent) {
   return agent.access.installation !== true && Array.isArray(agent.access.projects) && agent.access.projects.length <= 1
+}
+
+/**
+ * Why an agent can't serve anyone in a channel, or '' when it can. Mirrors the server:
+ * read-only sandbox, one project at most, no installation, GitHub, MCP or 1Password.
+ */
+export function publicProblem(agent: Agent, onepassword: { agentIds: string[] }[]) {
+  if (!eligibleAgent(agent))
+    return 'Too broad'
+  if (agent.access.sandbox !== 'read-only')
+    return 'Not read-only'
+  if (agent.access.github)
+    return 'Has GitHub'
+  if (!Array.isArray(agent.access.mcps) || agent.access.mcps.length)
+    return 'Has MCPs'
+  if (onepassword.some(account => account.agentIds.includes(agent.id)))
+    return 'Has 1Password'
+  return ''
 }

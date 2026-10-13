@@ -85,6 +85,13 @@ test('Discord setup guides the owner and keeps the bot token private', async ({ 
 
   await expect(page.getByRole('radio', { name: /Approve people as they ask/ })).toBeChecked()
   await expect(page.getByRole('checkbox', { name: /Read replies without a mention/ })).not.toBeChecked()
+  // A public channel needs a read-only agent; the default agent isn't one.
+  await page.getByRole('radio', { name: /Anyone in the channel/ }).check()
+  await continueButton.click()
+  await expect(page.getByRole('radio', { name: /Discord helper/ })).toBeDisabled()
+  await expect(page.getByText('Not read-only').first()).toBeVisible()
+  await page.getByRole('button', { name: 'Back' }).click()
+  await page.getByRole('radio', { name: /Approve people as they ask/ }).check()
   await page.getByLabel('Discord user ID').fill('300')
   await page.getByRole('button', { name: 'Add', exact: true }).click()
   await expect(page.getByText('Sarah')).toBeVisible()

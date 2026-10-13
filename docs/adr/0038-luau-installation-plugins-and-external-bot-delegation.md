@@ -28,6 +28,12 @@ management access. These identities need no Cairn account and are not installati
 members. Grants are bound to the current owner access and the agent's recorded
 permission policy; policy changes require review and resaving the connection.
 
+For public channels the owner may instead let anyone in the channel use the bot. That
+delegation is only available with an agent that cannot change anything: a read-only
+sandbox, at most one project, and no installation, GitHub, MCP or 1Password access,
+rechecked before every effect. Each person has an hourly limit, and only listed people
+or a conversation's starter can answer for it or stop it.
+
 This extends ADR-0028's rule that a Cairn account is the only way to access an
 installation: access through Cairn's UI/API still requires that account, while a
 plugin can provide narrowly delegated external ingress and replies. It does not

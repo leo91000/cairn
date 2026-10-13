@@ -273,12 +273,16 @@ pub fn inbound(
         .is_some_and(|mentions| mentions.iter().any(|mention| mention["id"] == bot));
     let content = connection.settings["messageContent"] == true;
     let replies_to_bot = message["referenced_message"]["author"]["id"] == bot;
+    // A support channel: every new message in the channel itself is a request.
+    let every = content
+        && connection.settings["everyMessage"] == true
+        && channel == text(&connection.settings, "channelId");
     let addressed = message["guild_id"] == connection.settings["guildId"]
         && (channel == text(&connection.settings, "channelId") || in_thread)
         && message["webhook_id"].is_null()
         && text(message, "content").len() <= 50_000
         && snowflake(text(message, "id"))
-        && (mentioned || (content && (in_thread || replies_to_bot)));
+        && (mentioned || every || (content && (in_thread || replies_to_bot)));
     let author = person(&message["author"]).filter(|_| addressed)?;
     let attachments = message["attachments"]
         .as_array()
@@ -304,6 +308,7 @@ pub fn inbound(
             "channelId": text(&connection.settings, "channelId"),
             "threadId": if in_thread { json!(channel) } else { Value::Null },
             "mentioned": mentioned,
+            "everyMessage": every,
         }),
         body: json!({ "content": message["content"], "attachments": attachments }),
     })
@@ -421,6 +426,15 @@ mod tests {
         assert!(inbound(&connection, "400", &threads, &message("700", false)).is_some());
         assert!(inbound(&connection, "400", &threads, &reply).is_some());
         assert!(inbound(&connection, "400", &threads, &message("200", false)).is_none());
+        connection.settings["everyMessage"] = json!(true);
+        let every = inbound(&connection, "400", &threads, &message("200", false)).unwrap();
+        assert_eq!(every.context["everyMessage"], true);
+        assert_eq!(
+            inbound(&connection, "400", &threads, &message("700", true))
+                .unwrap()
+                .context["everyMessage"],
+            false
+        );
         track(
             &connection,
             &mut threads,

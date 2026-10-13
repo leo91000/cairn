@@ -14,6 +14,7 @@
     { "key": "channelName", "title": "Channel name", "type": "string", "hidden": true },
     { "key": "botId", "title": "Bot ID", "type": "string", "hidden": true, "maxLength": 20 },
     { "key": "botName", "title": "Bot name", "type": "string", "hidden": true },
-    { "key": "messageContent", "title": "Read replies without a mention", "type": "boolean", "hidden": true }
+    { "key": "messageContent", "title": "Read replies without a mention", "type": "boolean", "hidden": true },
+    { "key": "everyMessage", "title": "Answer every message in the channel", "type": "boolean", "hidden": true }
   ]
 }

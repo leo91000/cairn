@@ -78,6 +78,8 @@ function abilities(connection: DiscordConnection) {
   const access = agent(connection)?.access
   const secrets = onepassword.value.filter(account => account.agentIds.includes(connection.agentId))
   return [
+    ...(connection.accessMode === 'everyone' ? [{ allowed: true, warn: true, text: 'Anyone in the channel can make the agent work (read-only)' }] : []),
+    ...(connection.settings.everyMessage ? [{ allowed: true, text: 'Answer every message, staying silent when nothing is needed' }] : []),
     { allowed: true, text: `Start conversations with ${agent(connection)?.name ?? 'its agent'}` },
     project(connection)
       ? { allowed: true, text: `Read and change ${project(connection)!.name}` }
@@ -291,7 +293,8 @@ onBeforeUnmount(() => clearInterval(timer))
                   :size="26"
                 />
               </span>
-              <span class="text-2xs text-muted">{{ connection.userIds.length }} {{ connection.userIds.length === 1 ? 'person' : 'people' }}{{ connection.accessMode === 'requests' ? ' · approve as they ask' : '' }}</span>
+              <span v-if="connection.accessMode === 'everyone'" class="text-2xs text-muted">Anyone in the channel · {{ connection.maxPerPersonPerHour ?? 5 }}/hour each</span>
+              <span v-else class="text-2xs text-muted">{{ connection.userIds.length }} {{ connection.userIds.length === 1 ? 'person' : 'people' }}{{ connection.accessMode === 'requests' ? ' · approve as they ask' : '' }}</span>
             </button>
             <div class="flex min-w-0 flex-col gap-1.5 rounded-xl border border-line bg-inset px-4 py-3.5">
               <span class="text-3xs font-semibold uppercase tracking-[.12em] text-subtle">Answers as</span>

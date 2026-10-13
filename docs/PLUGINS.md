@@ -57,7 +57,12 @@ A manifest declares:
 Every plugin uses the same connection model: name, settings, optional credential
 (encrypted in the vault), and, when the package can start conversations, an owner
 delegation: one dedicated agent (one project at most, no installation access), the
-people allowed (listed or approved as they ask), and an hourly message limit. The
+people allowed (listed, approved as they ask, or anyone), and an hourly message limit.
+“Anyone” is meant for public channels such as customer support: it requires an agent
+with a read-only sandbox and no installation, GitHub, MCP or 1Password access
+(rechecked before every effect, so a later grant suspends the connection), adds a
+per-person hourly limit, and lets only listed people or a conversation's starter
+answer for it or stop it. The
 connection is bound to the owner's current access and the agent's recorded policy.
 Routes are generic: `/api/plugins/{id}/connections[/{connection}]` with `enabled`,
 `test` and `people/{user}/{approve|deny|remove}` actions, and
@@ -189,7 +194,12 @@ too. The Luau script does the rest:
 - posts the final answer in Discord-sized chunks with deterministic nonces, uploads
   the turn's deliverables as files (up to 10 MB each, otherwise noted as available
   in Cairn), then marks the request ✅, ❌ or ⏹;
-- answers access requests once, using storage to remember who was told.
+- answers access requests once, using storage to remember who was told;
+- with “Answer every message in the channel” (needs Message Content), treats every
+  new message in the channel as a request. Messages that don't mention the bot are
+  handled quietly: the agent is told it may answer exactly `NO_REPLY`, in which case
+  nothing is posted; otherwise the thread opens only when the answer, a question or
+  progress needs to be shown.
 
 The bot needs View Channel, Send Messages, Read Message History, Add Reactions,
 Attach Files, Create Public Threads and Send Messages in Threads; the generated

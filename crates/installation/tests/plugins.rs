@@ -185,8 +185,10 @@ async fn record(
         let count = mock.requests.lock().await.len();
         return Json(json!({ "id": format!("{}", 9000 + count) })).into_response();
     }
-    if path.ends_with("/threads") {
-        return Json(json!({ "id": "700" })).into_response();
+    if let Some(source) = path.strip_suffix("/threads") {
+        // Like Discord, a thread started from a message reuses the message's ID.
+        let id = source.rsplit('/').next().unwrap_or("700");
+        return Json(json!({ "id": id })).into_response();
     }
     if path.starts_with("/attachments/") {
         return PNG.into_response();
@@ -387,7 +389,7 @@ async fn discord_script_runs_a_conversation_in_a_thread_end_to_end() {
     let delivery = deliveries[0].clone();
     assert_eq!(
         delivery["reply"],
-        json!({ "channel": "700", "source": "200", "message": "500", "threaded": true })
+        json!({ "channel": "500", "source": "200", "message": "500", "threaded": true })
     );
     let chat = text(&delivery, "chatId").to_owned();
     let prefix = format!("chat-attachment:{chat}:");
@@ -432,8 +434,8 @@ async fn discord_script_runs_a_conversation_in_a_thread_end_to_end() {
     .unwrap();
     due(&s).await;
     runtime::pump(&s, &connection, &mut session).await.unwrap();
-    assert!(mock.called("POST", "/api/v10/channels/700/typing").await >= 1);
-    let posts = mock.posts("/api/v10/channels/700/messages").await;
+    assert!(mock.called("POST", "/api/v10/channels/500/typing").await >= 1);
+    let posts = mock.posts("/api/v10/channels/500/messages").await;
     let status = posts
         .iter()
         .find(|post| text(post, "content").starts_with('⏳'))
@@ -453,9 +455,9 @@ async fn discord_script_runs_a_conversation_in_a_thread_end_to_end() {
 
     // A button press is acknowledged by the transport and answers the agent.
     let mut threads = std::collections::HashSet::new();
-    threads.insert("700".to_owned());
+    threads.insert("500".to_owned());
     let click = json!({
-        "id": "800", "token": "synthetic_interaction", "type": 3, "guild_id": "100", "channel_id": "700",
+        "id": "800", "token": "synthetic_interaction", "type": 3, "guild_id": "100", "channel_id": "500",
         "member": { "user": { "id": "300", "username": "sarah" } },
         "message": { "id": "9002", "author": { "id": "400" } },
         "data": { "custom_id": custom },
@@ -480,7 +482,7 @@ async fn discord_script_runs_a_conversation_in_a_thread_end_to_end() {
         .unwrap();
     assert_eq!(pending["status"], "answering");
     assert!(
-        mock.called("PATCH", "/api/v10/channels/700/messages/")
+        mock.called("PATCH", "/api/v10/channels/500/messages/")
             .await
             >= 1
     );
@@ -527,7 +529,7 @@ async fn discord_script_runs_a_conversation_in_a_thread_end_to_end() {
         "replied"
     );
 
-    let posts = mock.posts("/api/v10/channels/700/messages").await;
+    let posts = mock.posts("/api/v10/channels/500/messages").await;
     let replies = &posts[posts.len() - 3..];
     assert_eq!(
         replies[0]["nonce"], replies[1]["nonce"],
@@ -569,7 +571,7 @@ async fn discord_script_runs_a_conversation_in_a_thread_end_to_end() {
     }));
     drop(calls);
     assert_eq!(
-        mock.called("DELETE", "/api/v10/channels/700/messages/")
+        mock.called("DELETE", "/api/v10/channels/500/messages/")
             .await,
         1,
         "the status message is removed"
@@ -585,7 +587,7 @@ async fn discord_script_runs_a_conversation_in_a_thread_end_to_end() {
 
     // "stop" in the thread cancels the agent's work on the next request.
     let mut follow = message("501", "300", "<@400> also check staging");
-    follow["channel_id"] = json!("700");
+    follow["channel_id"] = json!("500");
     assert!(
         work::accept(
             &s,
@@ -602,7 +604,7 @@ async fn discord_script_runs_a_conversation_in_a_thread_end_to_end() {
         "same thread, same conversation"
     );
     let mut stop = message("502", "300", "<@400> stop");
-    stop["channel_id"] = json!("700");
+    stop["channel_id"] = json!("500");
     work::accept(
         &s,
         &connection,
@@ -615,10 +617,232 @@ async fn discord_script_runs_a_conversation_in_a_thread_end_to_end() {
     assert_eq!(
         mock.called(
             "PUT",
-            "/api/v10/channels/700/messages/502/reactions/%E2%8F%B9%EF%B8%8F/@me"
+            "/api/v10/channels/500/messages/502/reactions/%E2%8F%B9%EF%B8%8F/@me"
         )
         .await,
         1
+    );
+    session.stop().await;
+    server.abort();
+}
+
+/// Completes the agent's turn for a delivery with `answer`, as the worker would.
+async fn finish_turn(s: &Service, delivery: &Value, answer: &str) {
+    s.chat_tick(&std::collections::HashSet::new())
+        .await
+        .unwrap();
+    let chat = s.get("chats", text(delivery, "chatId")).await.unwrap();
+    let run_id = text(&chat, "runId").to_owned();
+    s.store
+        .event(
+            &run_id,
+            "chat.user",
+            "",
+            Some(json!({ "messageId": delivery["id"] })),
+        )
+        .await
+        .unwrap();
+    s.store
+        .event(
+            &run_id,
+            "item.completed",
+            answer,
+            Some(json!({ "item": { "type": "agent_message", "text": answer } })),
+        )
+        .await
+        .unwrap();
+    s.store
+        .event(&run_id, "turn.completed", "", None)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn public_support_channels_need_a_limited_agent_and_stay_quiet_when_nothing_is_needed() {
+    let (_root, s, connection) = fixture().await;
+    let (mock, server) = mock(&s).await;
+    let support = s
+        .agent(
+            json!({
+                "name": "Support",
+                "access": { "projects": [], "skills": [], "mcps": [], "github": false, "installation": false, "sandbox": "read-only" },
+            }),
+            None,
+        )
+        .await
+        .unwrap();
+    let input = |agent: &Value, settings: Value| {
+        json!({
+            "name": "#support",
+            "settings": settings,
+            "accessMode": "everyone",
+            "userIds": [],
+            "agentId": agent["id"],
+            "projectId": null,
+            "maxMessagesPerHour": 20,
+            "maxPerPersonPerHour": 2,
+            "enabled": true,
+        })
+    };
+    let channel = json!({ "guildId": "100", "channelId": "200", "messageContent": true, "everyMessage": true });
+    // The fixture's agent can run commands: not acceptable for anyone in a channel.
+    let broad = s.get("agents", &connection.agent_id).await.unwrap();
+    assert!(
+        connections::save(
+            &s,
+            "discord",
+            &input(&broad, channel.clone()),
+            Some(&connection.id)
+        )
+        .await
+        .is_err()
+    );
+    let missing = json!({ "guildId": "100", "channelId": "200", "everyMessage": true });
+    assert!(
+        connections::save(
+            &s,
+            "discord",
+            &input(&support, missing),
+            Some(&connection.id)
+        )
+        .await
+        .is_err()
+    );
+    let saved = connections::save(
+        &s,
+        "discord",
+        &input(&support, channel),
+        Some(&connection.id),
+    )
+    .await
+    .unwrap();
+    let connection: Connection = serde_json::from_value(saved).unwrap();
+    let mut session = session(&s, "discord").await;
+
+    // A stranger's unmentioned message is a request, handled without any visible trace.
+    let chatter = |id: &str, author: &str, content: &str| {
+        let mut value = message(id, author, content);
+        value["mentions"] = json!([]);
+        value
+    };
+    assert!(
+        accept(
+            &s,
+            &connection,
+            chatter("600", "301", "thanks, that worked")
+        )
+        .await
+        .unwrap()
+    );
+    due(&s).await;
+    runtime::pump(&s, &connection, &mut session).await.unwrap();
+    let delivery = s.store.list(work::DELIVERIES).await.unwrap().remove(0);
+    assert_eq!(delivery["reply"]["deferred"], true);
+    let activity = s.store.list("plugin-activity").await.unwrap();
+    assert!(text(&activity[0], "preview").starts_with("(Message from Sarah"));
+    finish_turn(&s, &delivery, "NO_REPLY").await;
+    due(&s).await;
+    runtime::pump(&s, &connection, &mut session).await.unwrap();
+    assert!(s.store.list(work::DELIVERIES).await.unwrap().is_empty());
+    assert!(
+        mock.requests
+            .lock()
+            .await
+            .iter()
+            .all(|call| call.method == "DELETE"),
+        "no post, reaction, typing or thread"
+    );
+
+    // A real question gets its thread once the agent has an answer.
+    assert!(
+        accept(
+            &s,
+            &connection,
+            chatter("601", "301", "How do I reset my password?")
+        )
+        .await
+        .unwrap()
+    );
+    runtime::pump(&s, &connection, &mut session).await.unwrap();
+    let delivery = s.store.list(work::DELIVERIES).await.unwrap().remove(0);
+    finish_turn(&s, &delivery, "Use the reset link on the sign-in page.").await;
+    due(&s).await;
+    runtime::pump(&s, &connection, &mut session).await.unwrap();
+    assert_eq!(
+        mock.posts("/api/v10/channels/200/messages/601/threads")
+            .await[0]["name"],
+        "How do I reset my password?"
+    );
+    assert_eq!(
+        mock.posts("/api/v10/channels/601/messages").await[0]["content"],
+        "Use the reset link on the sign-in page."
+    );
+    assert_eq!(
+        mock.called(
+            "PUT",
+            "/api/v10/channels/200/messages/601/reactions/%E2%9C%85/@me"
+        )
+        .await,
+        1
+    );
+
+    // Each person has an hourly limit; the third message stays silent and starts nothing.
+    assert!(
+        accept(&s, &connection, chatter("602", "301", "one more thing"))
+            .await
+            .unwrap()
+    );
+    runtime::pump(&s, &connection, &mut session).await.unwrap();
+    assert!(s.store.list(work::DELIVERIES).await.unwrap().is_empty());
+    assert!(
+        mock.posts("/api/v10/channels/200/messages")
+            .await
+            .is_empty()
+    );
+
+    // Only whoever started a conversation can stop it.
+    let mut threads = std::collections::HashSet::new();
+    threads.insert("601".to_owned());
+    let stop = |id: &str, author: &str| {
+        let mut value = message(id, author, "<@400> stop");
+        value["channel_id"] = json!("601");
+        value
+    };
+    let binding = s.store.list(connections::KIND).await.unwrap();
+    assert_eq!(binding[0]["accessMode"], "everyone");
+    for (id, author) in [("603", "302"), ("604", "301")] {
+        let inbound = discord::inbound(&connection, "400", &threads, &stop(id, author)).unwrap();
+        work::accept(&s, &connection, inbound).await.unwrap();
+        runtime::pump(&s, &connection, &mut session).await.unwrap();
+    }
+    assert_eq!(
+        mock.called(
+            "PUT",
+            "/api/v10/channels/601/messages/603/reactions/%E2%9D%8C/@me"
+        )
+        .await,
+        1
+    );
+    assert_eq!(
+        mock.called(
+            "PUT",
+            "/api/v10/channels/601/messages/604/reactions/%E2%8F%B9%EF%B8%8F/@me"
+        )
+        .await,
+        1
+    );
+
+    // Granting the agent 1Password later suspends the public connection.
+    s.store
+        .put("onepassword", json!({ "id": cairn_installation::config::id(), "name": "Prod", "agentIds": [support["id"]] }))
+        .await
+        .unwrap();
+    assert_eq!(
+        accept(&s, &connection, chatter("605", "303", "hello?"))
+            .await
+            .unwrap_err()
+            .status,
+        403
     );
     session.stop().await;
     server.abort();
