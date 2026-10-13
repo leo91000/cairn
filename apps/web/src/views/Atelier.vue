@@ -65,6 +65,12 @@ const workspace = computed<Array<{
     detail: 'Codex, Claude Code, GitHub and 1Password',
   },
   {
+    to: '/plugins',
+    label: 'Plugins',
+    icon: Plug,
+    detail: 'Integrations and bots',
+  },
+  {
     to: '/nodes',
     label: 'Nodes',
     icon: Activity,

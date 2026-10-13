@@ -1,0 +1,10 @@
+{
+  "id": "onepassword",
+  "name": "1Password",
+  "version": "0.1.0",
+  "description": "Agents pipe secrets straight into commands. Values never appear in the conversation.",
+  "apiVersion": 1,
+  "capabilities": [
+    "onepassword.read"
+  ]
+}

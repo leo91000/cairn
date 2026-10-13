@@ -1,0 +1,10 @@
+{
+  "id": "discord",
+  "name": "Discord",
+  "version": "0.1.0",
+  "description": "Mention a bot in your server to start a conversation with one of your agents.",
+  "apiVersion": 1,
+  "capabilities": [
+    "conversations.submit"
+  ]
+}
