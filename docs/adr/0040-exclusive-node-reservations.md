@@ -115,7 +115,11 @@ private swap, and release-before-wait. Existing storage capture, retained startu
 and inbox behavior retain their tests.
 
 The image CI runs `tests/runner-exclusive-smoke.mjs` against the exact candidate
-image, with private zram on a disposable host and required memory reclamation.
+image. With private zram on a disposable host it requires actual memory reclamation.
+If the host kernel cannot load zram (observed on hosted Azure 6.17.0-1022),
+the positive reclamation check is skipped and the probe still verifies that
+unqualified memory acquisition fails with rollback. CPU and nested-vCPU continuity
+remain required. A skipped check does not qualify RAM reclamation on that host.
 It checks the same command/VMM PIDs and buffer contents, nested-vCPU progress,
 admission fencing, checkpoint arbitration, reservation expiry and automatic resumption.
 Optional Android mode checks that the same booted emulator survives pause/reclamation.

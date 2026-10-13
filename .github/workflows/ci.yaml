@@ -545,16 +545,20 @@ jobs:
           CAIRN_EXCLUSIVE_ANDROID: ${{ inputs.exclusive-android && 'true' || 'false' }}
         run: |
           if [[ "$CAIRN_EXCLUSIVE_ANDROID" != true ]]; then
-            echo 'Nested Android continuity skipped: the hosted AMD platform is unqualified; CPU/RAM and nested-vCPU continuity remain required.'
+            echo 'Nested Android continuity skipped: the hosted AMD platform is unqualified.'
           fi
           # This runner is disposable. Never page conversation credentials to
           # the hosted image's default plaintext swap.
-          sudo swapoff -a
-          sudo modprobe zram num_devices=1
-          echo zstd | sudo tee /sys/block/zram0/comp_algorithm > /dev/null
-          echo 4G | sudo tee /sys/block/zram0/disksize > /dev/null
-          sudo mkswap /dev/zram0
-          sudo swapon --priority 100 /dev/zram0
+          if sudo modprobe zram num_devices=1; then
+            sudo swapoff -a
+            echo zstd | sudo tee /sys/block/zram0/comp_algorithm > /dev/null
+            echo 4G | sudo tee /sys/block/zram0/disksize > /dev/null
+            sudo mkswap /dev/zram0
+            sudo swapon --priority 100 /dev/zram0
+          else
+            export CAIRN_EXCLUSIVE_REQUIRE_RECLAIM=false
+            echo 'Positive RAM reclamation skipped: zram is unavailable. Unqualified-memory refusal and rollback, live CPU/KVM continuity and admission fencing are still tested.'
+          fi
           node tests/runner-exclusive-smoke.mjs "$SMOKE_IMAGE"
       - name: Remove the disposable beacon database
         if: always()
