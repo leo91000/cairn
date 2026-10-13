@@ -1,6 +1,7 @@
 # Wait metadata measurements
 
 Measured on 2026-10-13 against `cairn_workspace.sleep` as the reference operation.
+Remeasured after making initial registration checks and the input revision atomic.
 Both cases use the same SQLite schema and JSON encoding. `wait_for` adds a named
 condition and extra authorization/state checks; it changes no object compression,
 disk codec or journal policy.
@@ -21,7 +22,7 @@ Every registration records a new wakeup/event; identical-request shortcuts are
 excluded. No GitHub CLI/network request is used by this workload.
 
 Host: Linux 6.12.109, Intel Xeon virtual CPU, 12 CPU threads available to the
-process, 32,363,544 KiB memory reported, about 15 GiB available during inspection.
+process, 32,363,544 KiB memory reported, about 30 GiB available during inspection.
 SQLite files reside on `/tmp`, a tmpfs. This is a shared execution VM; other host
 workloads and memory pressure are not controlled. Rust 1.97.1, development profile,
 debug information and incremental compilation disabled, one build job. Compilation
@@ -39,20 +40,20 @@ useful alongside the mean.
 | Metric | Reference `sleep` | `wait_for: run_finished` |
 | --- | ---: | ---: |
 | Encoded wakeup JSON bytes | 185 | 268 |
-| Encoded conversation JSON bytes | 574 | 657 |
-| Write median, ms | 0.577 | 2.058 |
-| Write p95, ms | 0.734 | 3.183 |
-| Write mean, ms | 1.146 | 2.235 |
-| Process CPU for 100 writes, ms | 115.235 | 215.817 |
-| Warm read median, ms | 0.034 | 0.033 |
-| Warm read p95, ms | 0.054 | 0.054 |
-| First read with fresh pool median, ms | 0.366 | 0.314 |
-| First read with fresh pool p95, ms | 0.432 | 0.357 |
-| Fresh pool open median, ms | 0.583 | 0.565 |
+| Encoded conversation JSON bytes | 576 | 659 |
+| Write median, ms | 0.340 | 1.489 |
+| Write p95, ms | 0.455 | 2.011 |
+| Write mean, ms | 0.887 | 1.582 |
+| Process CPU for 100 writes, ms | 88.911 | 159.169 |
+| Warm read median, ms | 0.031 | 0.033 |
+| Warm read p95, ms | 0.043 | 0.047 |
+| First read with fresh pool median, ms | 0.279 | 0.275 |
+| First read with fresh pool p95, ms | 0.372 | 0.376 |
+| Fresh pool open median, ms | 0.541 | 0.543 |
 | `events_user_input` index allocated bytes in the fixture | 4,096 | 4,096 |
 
 The conditional wakeup adds 83 encoded bytes in this fixture. Its registration
-costs about 1.5 ms more at the median while pooled read latency remains in the
+costs about 1.1 ms more at the median while pooled read latency remains in the
 same range. The index is a shared schema cost: one initial `chat.user` event is
 indexed in each case, and wait bookkeeping does not add index entries. Real
 histories can require more index pages. Whole-conversation bytes include a

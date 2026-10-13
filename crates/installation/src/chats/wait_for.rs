@@ -213,9 +213,11 @@ pub async fn schedule(s: &Service, bearer: &str, raw: &Value) -> Result<Value> {
     let input = input(raw)?;
     let token = bearer.to_owned();
     let request = input.clone();
+    // Keep the input checks and revision atomic: an acknowledged steering
+    // message must not become the baseline of an already-started registration.
     let (run, chat, revision) = s
         .store
-        .read(move |db| {
+        .transaction(move |db| {
             let (run, chat) = registering(db, &token, &request)?;
             let revision = input_revision(db, &run)?;
             Ok((run, chat, revision))

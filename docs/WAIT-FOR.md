@@ -121,8 +121,10 @@ périmètre de la demande initiale et des permissions courantes.
 - Un nouveau message, un arrêt, une annulation, une suppression, un échec terminal
   ou une reprise manuelle d’un run invalide son ancien réveil. La pause de file
   conserve la demande et son échéance.
-- L’inscription revalide le grant après une lecture GitHub et vérifie aussi les
-  messages déjà délivrés pendant cette lecture. Le callback ne peut pas restaurer
+- L’inscription capture ses contrôles initiaux et la révision des messages dans
+  une transaction courte, sans requête réseau. Elle revalide le grant après une
+  lecture GitHub et vérifie aussi les messages déjà délivrés pendant cette
+  lecture. Le callback ne peut pas restaurer
   une attente annulée ou remplacée.
 - Le lancement revalide le réveil, les permissions et l’observation dans sa
   transaction. Le résultat ne devient jamais un faux message utilisateur.

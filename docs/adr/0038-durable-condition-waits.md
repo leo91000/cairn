@@ -26,9 +26,11 @@ a finished dependency. Reject self-dependencies, cycles and chains exceeding
 32 runs. A completion observation includes unsuccessful terminal states so an
 agent can diagnose them without waiting for the deadline.
 
-Registration rechecks its live grant and user-input revision after an external
-probe. A partial index on `chat.user` events bounds that revision lookup for long
-histories. Observers recheck the current condition, lifecycle and access before
+Registration captures its initial live grant, conversation checks and user-input
+revision in one short transaction, then rechecks them after an external probe.
+Network calls remain outside transactions. A partial index on `chat.user` events
+bounds that revision lookup for long histories. Observers recheck the current
+condition, lifecycle and access before
 recording a result. The launch transaction rechecks both the wakeup and the
 observed state. New input, stop, deletion, failure and manual resume retain
 ADR-0037's cancellation behavior. Queue pause retains the deadline.
