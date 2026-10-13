@@ -300,7 +300,7 @@ watch(live.snapshot, (value) => {
 })
 // The open conversation's finished turns are read while the page is visible.
 useReadWhileOpen(() => {
-  const chat = chats.value.find(chat => chat.id === chatId.value)
+  const chat = chats.value.find(chat => chat.id === selectedChatId.value)
   return chat?.unread ? { key: `chat:${chat.id}`, at: chat.finishedAt ?? chat.updatedAt } : null
 })
 watch(live.error, (value) => {

@@ -83,7 +83,7 @@ test('finished work waits in For you until it is read, on the desktop and the ph
 
   // Reading the conversation marks it read for the account; it stays in place, read, while open.
   await conversation.getByRole('button', { name: /^Read “/ }).click()
-  await expect(page).toHaveURL(workspacePath(`/chats/${chat.id}`))
+  await expect(page).toHaveURL(workspacePath(`/chats/${chat.slug}`))
   await expect.poll(() => unreadOf(workspace, chat.id)).toBe(false)
   const beside = page.getByRole('complementary', { name: 'Fil' }).getByRole('region', { name: 'For you', exact: true })
   const opened = beside.locator(`[data-fil-key="chat:${chat.id}"]`)
