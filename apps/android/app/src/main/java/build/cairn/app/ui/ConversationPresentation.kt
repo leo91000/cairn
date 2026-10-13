@@ -30,6 +30,20 @@ internal data class ChatDelivery(val sending: List<SendingMessage>, val queued: 
 /** [account] names the coding agent whose account the user must connect, reconnect or resume. */
 internal data class ChatWaitNotice(val message: String, val account: String? = null)
 
+internal fun chatSleepNotice(chat: Chat?): ChatWaitNotice? {
+    val wakeup = chat?.wakeup ?: return null
+    if (chat.paused || chat.lifecycle != "active" || chat.run?.status != "succeeded") return null
+    val time =
+        java.text.DateFormat.getDateTimeInstance(
+                java.text.DateFormat.SHORT,
+                java.text.DateFormat.MEDIUM,
+            )
+            .format(java.util.Date(wakeup.wakeAt))
+    return ChatWaitNotice(
+        "${wakeup.reason} · Reprise automatique à partir de $time, selon la capacité disponible."
+    )
+}
+
 internal fun chatWaitNotice(run: Run?): ChatWaitNotice? {
     if (run?.status != "queued") return null
     val reason = run.accountWaitReason?.trim()?.takeIf { it.isNotEmpty() } ?: return null
@@ -63,6 +77,7 @@ internal fun conversationState(
         when {
             chat.paused -> "En pause"
             run == "queued" -> "En attente"
+            chatSleepNotice(chat) != null -> "Attente planifiée"
             run in listOf("failed", "interrupted") -> "${statusLabel(run)} · $identity"
             else -> identity
         }

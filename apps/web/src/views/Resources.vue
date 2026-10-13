@@ -2,6 +2,7 @@
 import type { GithubRepository } from '../../../../packages/contracts/contracts'
 import type { ExecutionNode } from '../../../../packages/contracts/nodes'
 import { computed, ref } from 'vue'
+import { providers as codingAgents } from '../../../../packages/contracts/accounts'
 import { MAIN_AGENT_ID } from '../../../../packages/contracts/constants'
 import { LOCAL_NODE_ID } from '../../../../packages/contracts/nodes'
 import {
@@ -280,7 +281,7 @@ async function remove() {
           </p>
         </div>
         <div v-if="'reasoning' in item" class="mt-3 flex flex-wrap items-center gap-x-4 gap-y-1.5 text-xs text-muted">
-          <span class="max-w-full truncate" :title="item.model || 'Provider default'">{{ (item.provider === 'claude' ? 'Claude Code · ' : 'Codex · ') + (item.model || 'Provider default') }}</span>
+          <span class="max-w-full truncate" :title="item.model || 'Provider default'">{{ `${codingAgents[item.provider || 'codex'].label} · ${item.model || 'Provider default'}` }}</span>
           <span class="inline-flex items-center gap-1.5"><Icon :name="ShieldCheck" :size="13" />{{ item.access.projects === null ? 'All projects' : item.access.projects.length === 0 ? 'No projects' : item.access.projects.length === 1 ? '1 project' : `${item.access.projects.length} projects` }}</span>
         </div>
         <div v-else-if="'path' in item" class="flex shrink-0 items-center gap-5 pr-6 text-xs text-muted phone:mt-2 phone:gap-4 phone:pr-0">

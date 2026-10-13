@@ -10,6 +10,77 @@ import {
   workspacePath,
 } from './fixtures'
 
+test('a durable scheduled wait survives restart and resumes without a user message', async ({ page, workspace }) => {
+  test.setTimeout(90000)
+  const chat = await workspace.api('/api/chats', 'POST', {})
+  await workspace.api(`/api/chats/${chat.id}/messages`, 'POST', { id: randomUUID(), text: 'Check CI and finish the original task' })
+  await expect.poll(async () => (await workspace.api(`/api/chats/${chat.id}`)).run?.status).toBe('succeeded')
+  const detail = await workspace.api(`/api/chats/${chat.id}`)
+  const wakeup = {
+    id: randomUUID(),
+    messageId: detail.run.chatExecution.messageId,
+    seconds: 420,
+    reason: 'Wait for CI',
+    createdAt: Date.now(),
+    wakeAt: Date.now() + 420000,
+  }
+  workspace.service.store.put('chats', { ...workspace.service.store.get('chats', chat.id)!, wakeup })
+  await workspace.restart()
+  await page.goto(workspacePath(`/chats/${chat.id}`))
+  await authenticateWorkspace(page)
+  const notice = page.getByRole('status').filter({ hasText: 'Wait for CI · Automatic resume from' })
+  await expect(notice).toBeVisible()
+  await expect(page.getByText('Scheduled wait', { exact: true }).first()).toBeVisible()
+  await expect(page.getByRole('button', { name: 'Cancel scheduled wait', exact: true })).toBeVisible()
+  await expect(page.locator('.agent-waiting')).toHaveCount(0)
+  for (const width of [1280, 390]) {
+    await page.setViewportSize({ width, height: 844 })
+    await expect(notice).toBeVisible()
+    await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth - innerWidth)).toBeLessThanOrEqual(1)
+  }
+
+  await page.getByRole('button', { name: 'Pause wait', exact: true }).click()
+  await expect.poll(async () => (await workspace.api(`/api/chats/${chat.id}`)).paused).toBe(true)
+  workspace.service.store.put('chats', { ...workspace.service.store.get('chats', chat.id)!, wakeup: { ...wakeup, wakeAt: Date.now() } })
+  await expect(page.getByRole('button', { name: 'Resume', exact: true })).toBeVisible()
+  expect((await workspace.api(`/api/chats/${chat.id}`)).run.status).toBe('succeeded')
+  await page.getByRole('button', { name: 'Resume', exact: true }).click()
+  await expect.poll(async () => (await workspace.api(`/api/chats/${chat.id}`)).run?.summary).toContain('Cairn resumed this conversation')
+  await expect(notice).toHaveCount(0)
+  const resumed = await workspace.api(`/api/chats/${chat.id}`)
+  expect(resumed.run.id).toBe(detail.run.id)
+  expect(resumed.run.sessionId).toBe(detail.run.sessionId)
+  const userEvents = workspace.service.store.events(detail.run.id, 0, 100).filter(event => event.type === 'chat.user')
+  expect(userEvents).toHaveLength(1)
+  expect(userEvents[0].text).toBe('Check CI and finish the original task')
+  expect(resumed.wakeup).toBeNull()
+})
+
+test('stopping a scheduled wait cancels its wakeup and pauses the conversation', async ({ page, workspace }) => {
+  const chat = await workspace.api('/api/chats', 'POST', {})
+  await workspace.api(`/api/chats/${chat.id}/messages`, 'POST', { id: randomUUID(), text: 'Wait for a remote review' })
+  await expect.poll(async () => (await workspace.api(`/api/chats/${chat.id}`)).run?.status).toBe('succeeded')
+  const detail = await workspace.api(`/api/chats/${chat.id}`)
+  workspace.service.store.put('chats', {
+    ...workspace.service.store.get('chats', chat.id)!,
+    wakeup: {
+      id: randomUUID(),
+      messageId: detail.run.chatExecution.messageId,
+      seconds: 420,
+      reason: 'Wait for review',
+      createdAt: Date.now(),
+      wakeAt: Date.now() + 420000,
+    },
+  })
+  await page.goto(workspacePath(`/chats/${chat.id}`))
+  await authenticateWorkspace(page)
+  await expect(page.getByRole('status').filter({ hasText: 'Wait for review' })).toBeVisible()
+  await page.getByRole('button', { name: 'Cancel scheduled wait', exact: true }).click()
+  await expect.poll(async () => (await workspace.api(`/api/chats/${chat.id}`)).paused).toBe(true)
+  expect((await workspace.api(`/api/chats/${chat.id}`)).wakeup).toBeNull()
+  await expect(page.getByRole('status').filter({ hasText: 'Wait for review' })).toHaveCount(0)
+})
+
 test('verbose tool calls keep their action steps with abbreviated details', async ({ page, workspace }) => {
   const chat = await workspace.api('/api/chats', 'POST', {})
   await workspace.api(`/api/chats/${chat.id}/messages`, 'POST', {
@@ -111,7 +182,8 @@ test('conversation switcher preserves drafts and supports search, keyboard and m
   const dialog = page.getByRole('dialog', { name: /Conversations/ })
   for (const colorScheme of ['dark', 'light'] as const) {
     await page.emulateMedia({ colorScheme })
-    for (const width of [1440, 390, 320]) {
+    // Desktop lists conversations in the Fil column; tablets and phones open them from the header.
+    for (const width of [800, 390, 320]) {
       await page.setViewportSize({ width, height: width === 320 ? 600 : 900 })
       await trigger.click()
       await expect(dialog).toBeVisible()
@@ -134,6 +206,16 @@ test('conversation switcher preserves drafts and supports search, keyboard and m
     }
   }
 
+  // Crossing a breakpoint while open hides the tablet trigger: focus returns to the ⋯ menu instead.
+  await page.setViewportSize({ width: 800, height: 900 })
+  await trigger.click()
+  await expect(dialog).toBeVisible()
+  await page.setViewportSize({ width: 1440, height: 900 })
+  expect((await dialog.boundingBox())!.y).toBeGreaterThan(40)
+  await page.keyboard.press('Escape')
+  await expect(page.getByRole('button', { name: 'Chat details', exact: true })).toBeFocused()
+
+  await page.setViewportSize({ width: 320, height: 600 })
   await trigger.click()
   const search = page.getByRole('searchbox', { name: 'Search conversations' })
   await search.fill('nothing-matches-this')
@@ -141,7 +223,7 @@ test('conversation switcher preserves drafts and supports search, keyboard and m
   await search.fill('release notes')
   await expect(dialog.getByRole('link')).toHaveCount(1)
   await dialog.getByRole('link', { name: /Review the release notes/ }).click()
-  await expect(page).toHaveURL(workspacePath(`/chats/${second.id}`))
+  await expect(page).toHaveURL(workspacePath(`/chats/${second.slug}`))
   await expect(dialog).toHaveCount(0)
   await expect(message).toHaveValue('')
   await trigger.click()
@@ -225,8 +307,10 @@ test('compact mobile toolbar keeps details and workspace controls accessible', a
   await expect(message).toHaveValue('Keep my draft while browsing details')
   await page.setViewportSize({ width: 1440, height: 1000 })
   await expect(page.getByRole('navigation', { name: 'Workspace navigation' })).toBeVisible()
-  await expect(page.locator('.activity-toolbar')).toBeVisible()
-  await expect(details).not.toBeVisible()
+  // Desktop keeps one header row: fullscreen and the same ⋯ menu, no separate activity toolbar.
+  await expect(page.locator('.activity-toolbar')).not.toBeVisible()
+  await expect(page.getByRole('button', { name: 'Open activity fullscreen', exact: true })).toBeVisible()
+  await expect(details).toBeVisible()
   await expect(message).toHaveValue('Keep my draft while browsing details')
   await page.setViewportSize({ width: 390, height: 844 })
   // New chat moves from the phone header into the ⋯ menu.
@@ -283,9 +367,10 @@ test('phone headers carry the installation, its route and the conversation conne
   await connection.getByRole('button', { name: 'Close dialog', exact: true }).click()
   await expect(connection).toHaveCount(0)
 
-  // Desktop keeps its conversation toolbar, and on the Fil its installation bar.
+  // Desktop starts conversations from the navigation rail, and keeps its installation bar on the Fil.
   await page.setViewportSize({ width: 1280, height: 800 })
-  await expect(page.getByRole('link', { name: 'New chat', exact: true })).toBeVisible()
+  await expect(header.getByRole('heading', { name: 'Check the phone header.', exact: true })).toBeVisible()
+  await expect(page.getByRole('link', { name: 'New chat', exact: true })).toHaveCount(0)
   await expect(header.getByRole('button', { name: /^Files: / })).toBeHidden()
   await page.goto(workspacePath('/'))
   await expect(page.locator('.installation-header')).toHaveCount(1)
@@ -540,7 +625,7 @@ test('starts project chats, steers, edits the queue and preserves a compact mobi
   await page.screenshot({ path: test.info().outputPath('chat-new-desktop-light.png'), animations: 'disabled' })
   await page.getByRole('textbox', { name: 'Message', exact: true }).fill('Review our component architecture. fixture:chat-hang')
   await page.getByRole('button', { name: 'Send', exact: true }).click()
-  await expect(page).toHaveURL(/\/chats\/[a-f0-9-]+$/)
+  await expect(page).toHaveURL(/\/chats\/[a-z]+-[a-z]+-[a-f0-9]{8}$/)
   await expect(page.getByText('Working', { exact: true }).first()).toBeVisible()
   await expect(page.getByTestId('agent-actions').filter({ hasText: 'Followed the run' })).toHaveCount(0)
   await expect(page.locator('.activity-message').filter({ hasText: 'Review our component architecture' })).toBeVisible()
@@ -627,11 +712,13 @@ test('answers in-flight questions with choices or free text on desktop and mobil
   await expect(page.getByRole('dialog')).not.toBeVisible()
   await expect(page.getByRole('button', { name: 'Answer pending questions' })).not.toBeVisible()
   await expectChatReady(page)
-  const chatId = page.url().split('/').at(-1)!
+  const chatKey = new URL(page.url()).pathname.split('/').at(-1)!
+  const chatId = (await workspace.api(`/api/chats/${chatKey}`)).id
   expect(workspace.service.questions.list(chatId)[0].status).toBe('answered')
   await page.setViewportSize({ width: 390, height: 844 })
   await page.getByRole('button', { name: 'Chat details', exact: true }).click()
-  await page.getByRole('button', { name: 'Question notifications' }).click()
+  await page.getByRole('link', { name: 'Question notifications' }).click()
+  await expect(page).toHaveURL(workspacePath('/settings/account'))
   await expect(page.getByRole('heading', { name: 'Question notifications' })).toBeVisible()
   await page.screenshot({ path: test.info().outputPath('notifications-mobile.png'), animations: 'disabled' })
 })
@@ -640,7 +727,10 @@ test('installation push registration is removed in favor of the beacon account',
   await workspace.restart()
   await page.goto(workspacePath('/chats'))
   await authenticateWorkspace(page)
-  await page.getByRole('button', { name: 'Question notifications' }).click()
+  // Notifications belong to the account, not to a conversation.
+  await page.getByRole('button', { name: 'Chat details', exact: true }).click()
+  await page.getByRole('link', { name: 'Question notifications' }).click()
+  await expect(page).toHaveURL(workspacePath('/settings/account'))
   await expect(page.getByText('Know when your agent needs your input, across all your installations, even with the app closed. Question content stays private.')).toBeVisible()
   await expect(page.getByText('Sign in to your Cairn account to manage push notifications on this device.')).toHaveCount(0)
   expect((await page.request.get(`${workspace.url}/api/installations/${workspace.installationId}/api/notifications`)).status()).toBe(404)
@@ -704,7 +794,13 @@ test('conversation trash stays secondary and restores a deleted conversation', a
   workspace.service.store.put('chats', { ...chat, title: 'Conversation to recover' })
   await page.goto(workspacePath('/chats'))
   await authenticateWorkspace(page)
-  await page.getByRole('button', { name: 'Conversations', exact: true }).click()
+  // On desktop, archived and deleted conversations stay one step away in the ⋯ menu.
+  const openConversations = async () => {
+    await page.getByRole('button', { name: 'Chat details', exact: true }).click()
+    await page.getByRole('dialog', { name: 'Chat details', exact: true }).getByRole('button', { name: 'Search conversations', exact: true }).click()
+  }
+
+  await openConversations()
   const dialog = page.getByRole('dialog', { name: /Conversations/ })
   await expect(dialog.getByRole('combobox', { name: 'Conversation view', exact: true })).toHaveValue('Active conversations')
   await page.screenshot({ path: testInfo.outputPath('active-conversations.png') })
@@ -720,7 +816,7 @@ test('conversation trash stays secondary and restores a deleted conversation', a
   await expect(page.getByRole('textbox', { name: 'Message', exact: true })).toHaveCount(0)
   await page.getByRole('button', { name: 'Restore conversation', exact: true }).click()
   await expect(page.getByRole('textbox', { name: 'Message', exact: true })).toBeVisible()
-  await page.getByRole('button', { name: 'Conversations', exact: true }).click()
+  await openConversations()
   await expect(dialog.getByRole('combobox', { name: 'Conversation view', exact: true })).toHaveValue('Active conversations')
   await expect(dialog.getByRole('link', { name: /Conversation to recover/ })).toBeVisible()
 })

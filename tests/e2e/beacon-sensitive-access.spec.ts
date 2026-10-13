@@ -42,11 +42,13 @@ const test = base.extend<{ installation: InstallationFixture }>({
         await page.getByRole('button', { name: 'Refresh installations', exact: true }).click()
         await expect(page).toHaveURL(/\/installations\/[^/]+\/$/)
       }).toPass()
+      const account = await (await page.request.get(`${url}/api/account/session`)).json()
+      const installationKey = new URL(page.url()).pathname.split('/')[2]!
       await use({
         ...fixture,
         email,
         databaseUrl: database.toString(),
-        installationId: page.url().split('/')[4]!,
+        installationId: account.installations.find((item: { id: string, slug: string }) => item.id === installationKey || item.slug === installationKey)!.id,
       })
     }
     finally {

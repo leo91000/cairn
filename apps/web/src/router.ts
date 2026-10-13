@@ -1,5 +1,16 @@
 import { createRouter, createWebHistory } from 'vue-router'
-import { ownerPage, state } from './api'
+import {
+  installationRoute,
+  ownerPage,
+  redirect,
+  state,
+} from './api'
+import {
+  accountSettingsUrl,
+  centralAccount,
+  installationSubdomains,
+  installationUrl,
+} from './beacon-location'
 
 export function workspaceRouter(base = '/') {
   const router = createRouter({
@@ -35,6 +46,20 @@ export function workspaceRouter(base = '/') {
       { path: '/:pathMatch(.*)*', redirect: '/' },
     ],
   })
-  router.beforeEach(to => state.installationRole === 'member' && ownerPage(to.path) ? '/atelier' : true)
+  router.beforeEach((to) => {
+    if (installationSubdomains && installationRoute && state.ready && state.authenticated) {
+      if (!centralAccount && to.path === '/settings/account') {
+        redirect(accountSettingsUrl(installationRoute))
+        return false
+      }
+
+      if (centralAccount && to.path !== '/settings/account') {
+        redirect(installationUrl(installationRoute, to.fullPath))
+        return false
+      }
+    }
+
+    return state.installationRole === 'member' && ownerPage(to.path) ? '/atelier' : true
+  })
   return router
 }

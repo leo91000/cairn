@@ -11,6 +11,7 @@ pub mod claude;
 pub mod claude_process;
 mod codex_background;
 mod codex_login;
+pub mod coding_agent;
 pub mod config;
 pub mod connections;
 pub mod conversation_deletion;

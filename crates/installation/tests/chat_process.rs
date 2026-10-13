@@ -119,7 +119,8 @@ fn manager_chat_plans_keep_mcp_configuration_out_of_process_arguments() {
         "args": ["-c", "mcp_servers.fixture={url=\"http://fixture\"}"],
         "codexConfig": { "fixture": { "url": "http://fixture" } },
     });
-    let plan = cairn_installation::run_output::chat_plan(&run, &prepared, root.path(), &mcp, None);
+    let plan = cairn_installation::run_output::chat_plan(&run, &prepared, root.path(), &mcp, None)
+        .unwrap();
     assert_eq!(
         plan["args"],
         json!([]),
@@ -129,7 +130,8 @@ fn manager_chat_plans_keep_mcp_configuration_out_of_process_arguments() {
 
     let claude = json!({ "snapshot": { "agent": { "provider": "claude" } } });
     let plan =
-        cairn_installation::run_output::chat_plan(&claude, &prepared, root.path(), &mcp, None);
+        cairn_installation::run_output::chat_plan(&claude, &prepared, root.path(), &mcp, None)
+            .unwrap();
     assert_eq!(plan["args"], mcp["args"]);
 }
 

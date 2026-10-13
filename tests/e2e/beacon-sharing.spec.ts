@@ -143,8 +143,9 @@ test('owner shares an installation and member works without management controls'
     await expect(member.getByRole('region', { name: 'Pending invitations' }).getByText('Shared home', { exact: true })).toBeVisible()
     await member.getByRole('button', { name: 'Accept invitation', exact: true }).click()
     await expect(member).toHaveURL(/\/installations\/[^/]+\/$/)
-    const installationUrl = member.url()
     const memberSession = await (await member.request.get(`${url}/api/account/session`)).json()
+    const installationUrl = `${url}/installations/${memberSession.installations[0].slug}/`
+    await expect(member).toHaveURL(installationUrl)
     const apiRoot = `${url}/api/installations/${memberSession.installations[0].id}/api`
     const agents = await (await member.request.get(`${apiRoot}/agents`)).json()
     const taskResponse = await member.request.post(`${apiRoot}/tasks`, {

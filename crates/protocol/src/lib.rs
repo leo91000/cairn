@@ -2,6 +2,7 @@
 //! Requests are independent: future streaming frames can share their request ID.
 pub mod data_channel;
 pub mod direct;
+pub mod slugs;
 
 use serde::{Deserialize, Serialize};
 

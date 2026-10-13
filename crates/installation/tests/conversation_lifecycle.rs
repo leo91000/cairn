@@ -294,3 +294,126 @@ async fn expired_trash_removes_files_and_records_without_archival() {
     assert_eq!(app.get(&path).await.0, StatusCode::NOT_FOUND);
     assert!(!directory.exists());
 }
+
+#[tokio::test]
+async fn readable_slugs_resolve_live_requests_and_keep_uuid_links_and_lifecycle() {
+    let app = App::new().await;
+    let chat = app.create_chat().await;
+    let slug = chat["slug"].as_str().unwrap();
+    let path = format!("{CHATS}/{slug}");
+    assert_ne!(chat["id"], chat["slug"]);
+    assert_eq!(slug.split('-').count(), 3);
+    assert_eq!(app.get(&path).await.1["id"], chat["id"]);
+    assert_eq!(app.get(&chat_path(&chat)).await.1["slug"], slug);
+
+    let response = common::send(
+        &app.router,
+        app.session
+            .authorize(common::request("GET", &format!("{path}/stream?after=0")))
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    drop(response);
+
+    let (_, message) = app
+        .request(
+            "POST",
+            &format!("{path}/messages"),
+            json!({
+                "id": id(),
+                "text": "A readable conversation link",
+            }),
+        )
+        .await;
+    assert_eq!(message["chatId"], chat["id"]);
+    assert_eq!(app.get(&path).await.1["slug"], slug);
+    assert_eq!(
+        app.get("/api/chats/quiet-cedar-00000000").await.0,
+        StatusCode::NOT_FOUND
+    );
+
+    assert_eq!(
+        app.request("DELETE", &path, json!({ "confirm": true }))
+            .await
+            .1["lifecycle"],
+        "trash"
+    );
+    assert_eq!(
+        app.request("POST", &format!("{path}/restore"), json!({}))
+            .await
+            .1["lifecycle"],
+        "active"
+    );
+    assert_eq!(app.get(&path).await.1["slug"], slug);
+}
+
+#[tokio::test]
+async fn legacy_conversations_get_stable_slugs_without_changing_activity_or_uuid() {
+    use cairn_installation::store::Store;
+    let root = TempDir::new().unwrap();
+    let store = Store::open(root.path()).unwrap();
+    let chat_id = id();
+    let legacy = json!({ "id": chat_id, "title": "Legacy conversation", "updatedAt": 123 });
+    let record = legacy.clone();
+    store
+        .write(move |db| {
+            db.0.execute(
+                "INSERT INTO records VALUES(?1,'chats',?2,123)",
+                rusqlite::params![record["id"].as_str(), record.to_string()],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    drop(store);
+
+    let store = Store::open(root.path()).unwrap();
+    let migrated = store.get("chats", &chat_id).await.unwrap().unwrap();
+    assert_eq!(migrated["id"], legacy["id"]);
+    assert_eq!(migrated["updatedAt"], 123);
+    let timestamp = store
+        .read(|db| {
+            Ok(db.0.query_row(
+                "SELECT updated_at FROM records WHERE kind='chats'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )?)
+        })
+        .await
+        .unwrap();
+    assert_eq!(timestamp, 123);
+    let mut edited = migrated.clone();
+    edited["slug"] = "changed-slug".into();
+    edited["title"] = "Renamed conversation".into();
+    let saved = store.put("chats", edited).await.unwrap();
+    assert_eq!(saved["slug"], migrated["slug"]);
+    drop(store);
+
+    let reopened = Store::open(root.path()).unwrap();
+    assert_eq!(
+        reopened.get("chats", &chat_id).await.unwrap().unwrap()["slug"],
+        migrated["slug"]
+    );
+}
+
+#[tokio::test]
+async fn chat_aliases_keep_json_body_limits_before_lookup_and_live_subscription() {
+    let app = App::new().await;
+    let chat = app.create_chat().await;
+    let known = chat["slug"].as_str().unwrap();
+    let body = json!({ "id": id(), "text": "x".repeat(1_000_000) });
+    for key in [known, "missing", "quiet-cedar-00000000"] {
+        for suffix in ["messages", "stream"] {
+            let (status, _) = app
+                .request("POST", &format!("{CHATS}/{key}/{suffix}"), body.clone())
+                .await;
+            assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE, "{key}/{suffix}");
+        }
+    }
+    assert_eq!(
+        app.get(&format!("{CHATS}/quiet-cedar-00000000")).await.0,
+        StatusCode::NOT_FOUND
+    );
+}

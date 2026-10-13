@@ -4,6 +4,7 @@ import {
   signIn as authenticateWorkspace,
   expect,
   expectChatReady,
+  expectFollowing,
   expectSingleScroll,
   initializeRepository,
   test,
@@ -58,10 +59,7 @@ for (const kind of ['chat', 'task'] as const) {
     // Loading older pages must keep following the latest output.
     const scroller = page.getByRole('region', { name: 'Activity output' })
     await expect.poll(() => scroller.evaluate(el => el.scrollHeight - el.clientHeight - el.scrollTop)).toBeLessThan(2)
-    if (kind === 'chat')
-      await expect(page.getByRole('button', { name: 'Follow output', exact: true, includeHidden: true })).toHaveAttribute('aria-pressed', 'true')
-    else
-      await expect(page.getByLabel('Follow output')).toBeChecked()
+    await expectFollowing(page)
     await page.screenshot({ path: test.info().outputPath(`${kind}-automatic-history.png`), animations: 'disabled' })
   })
 }
@@ -106,7 +104,7 @@ test('automatic history pauses on errors and resumes only after retry', async ({
   await retry.click()
   await expect(retry).not.toBeVisible()
   await expect.poll(() => requests).toBeGreaterThanOrEqual(3)
-  await expect(page.getByLabel('Follow output')).toBeChecked()
+  await expectFollowing(page)
 })
 
 test('signing out closes live subscriptions before the session is revoked', async ({ page, workspace }) => {
@@ -140,14 +138,14 @@ test('signIn settles an authenticated root redirect before reloading', async ({ 
   // Keep the transient authenticated root observable before its navigation
   // begins. A stalled destination request alone makes Playwright locators wait
   // for navigation, hiding the race rather than exercising it.
-  await page.addInitScript((installationId) => {
+  await page.addInitScript((installationSlug) => {
     if (location.pathname !== '/')
       return
     const target = window as typeof window & { releaseRootNavigation?: () => void }
     let destination = ''
     let blocked = true
     window.navigation?.addEventListener('navigate', (event) => {
-      if (blocked && event.cancelable && new URL(event.destination.url).pathname === `/installations/${installationId}/`) {
+      if (blocked && event.cancelable && new URL(event.destination.url).pathname === `/installations/${installationSlug}/`) {
         event.preventDefault()
         destination = event.destination.url
       }
@@ -157,12 +155,12 @@ test('signIn settles an authenticated root redirect before reloading', async ({ 
       if (destination)
         location.assign(destination)
     }
-  }, workspace.installationId)
+  }, workspace.installationSlug)
   await page.goto(workspace.url, { waitUntil: 'commit' })
   await expect(page.getByRole('button', { name: 'Sign out', exact: true, includeHidden: true }).first()).toBeAttached()
   const reload = page.reload.bind(page)
   page.reload = async (options) => {
-    expect(new URL(page.url()).pathname, 'the fixture must settle the root redirect before reload').toBe(`/installations/${workspace.installationId}/`)
+    expect(new URL(page.url()).pathname, 'the fixture must settle the root redirect before reload').toBe(`/installations/${workspace.installationSlug}/`)
     return reload(options)
   }
 
@@ -172,7 +170,7 @@ test('signIn settles an authenticated root redirect before reloading', async ({ 
   await page.waitForTimeout(500)
   await page.evaluate(() => (window as typeof window & { releaseRootNavigation?: () => void }).releaseRootNavigation?.())
   expect(await authenticated).toBeUndefined()
-  await expect(page).toHaveURL(new RegExp(`/installations/${workspace.installationId}/$`))
+  await expect(page).toHaveURL(new RegExp(`/installations/${workspace.installationSlug}/$`))
   await expect(page.getByRole('heading', { name: 'Fil', exact: true })).toBeVisible()
 })
 
@@ -324,9 +322,10 @@ test('a cached run restores the reading offset while its stream is still connect
   await authenticateWorkspace(page)
   await page.getByRole('button', { name: /^Conversation/ }).click()
   await expect(page.locator('.activity-message').filter({ hasText: 'Saved reading position 39.' })).toBeVisible()
-  await page.getByLabel('Follow output').uncheck()
   const scroller = page.getByRole('region', { name: 'Activity output' })
+  // Reading older output pauses following.
   await scroller.evaluate(element => element.scrollTop = 300)
+  await expect(page.getByRole('button', { name: 'Latest activity', exact: true })).toBeVisible()
   await expect.poll(() => scroller.evaluate(element => element.scrollTop)).toBe(300)
   await expect.poll(() => page.evaluate(() => new Promise<number>((resolve) => {
     const request = indexedDB.open('cairn-history-v1', 1)
@@ -384,7 +383,7 @@ test('a cached run restores the reading offset while its stream is still connect
     // A run opens on its conversation, restoring the cached reading offset before the stream connects.
     await expect(page.getByRole('button', { name: /^Conversation/ })).toHaveAttribute('aria-pressed', 'true')
     await expect.poll(() => scroller.evaluate(element => element.scrollTop)).toBe(300)
-    await expect(page.getByLabel('Follow output')).not.toBeChecked()
+    await expect(page.getByRole('button', { name: 'Latest activity', exact: true })).toBeVisible()
   }
   finally {
     release()
@@ -393,6 +392,24 @@ test('a cached run restores the reading offset while its stream is still connect
 
   await expect(page.getByRole('status').filter({ hasText: 'Updating…' })).toHaveCount(0)
   await expect(page.getByRole('button', { name: /^Conversation/ })).toHaveAttribute('aria-pressed', 'true')
+  // The way back resumes following and keeps keyboard focus in the reader.
+  const latest = page.getByRole('button', { name: 'Latest activity', exact: true })
+  await latest.focus()
+  await page.keyboard.press('Enter')
+  await expect(scroller).toBeFocused()
+  await expectFollowing(page)
+  // Scrolling up pauses following again; scrolling back to the end resumes it, as on Android.
+  await scroller.evaluate(element => element.scrollTop = 300)
+  await expect(latest).toBeVisible()
+  // A scroll while the way back holds keyboard focus keeps it there.
+  await latest.focus()
+  await scroller.evaluate(element => element.scrollTop -= 40)
+  await expect(latest).toBeFocused()
+  // Reaching the end removes it, handing focus to the reader.
+  await scroller.evaluate(element => element.scrollTop = element.scrollHeight)
+  await expect(latest).toHaveCount(0)
+  await expect(scroller).toBeFocused()
+  await expectFollowing(page)
 })
 
 test('recent history loads older pages without moving the reader and survives a blocked reconnect', async ({ page, workspace }) => {
@@ -408,7 +425,6 @@ test('recent history loads older pages without moving the reader and survives a 
   await page.getByRole('button', { name: /^Conversation/ }).click()
   await expect(page.locator('.activity-message').filter({ hasText: 'Paged line 349' })).toBeVisible()
   await expect(page.locator('.activity-message').filter({ hasText: 'Paged line 249' })).toHaveCount(0)
-  await page.getByLabel('Follow output').uncheck()
   let release!: () => void
   const gate = new Promise<void>((resolve) => {
     release = resolve
@@ -433,7 +449,7 @@ test('recent history loads older pages without moving the reader and survives a 
   await page.unrouteAll({ behavior: 'wait' })
   await useRelayForHttpMocks(page)
   // Move back to the latest content and let its bounded disk snapshot commit.
-  await page.getByLabel('Follow output').check()
+  await page.getByRole('button', { name: 'Latest activity', exact: true }).click()
   await expect(page.locator('.activity-message').filter({ hasText: 'Paged line 349' })).toBeVisible()
   await expect.poll(() => page.evaluate(() => new Promise<number>((resolve) => {
     const open = indexedDB.open('cairn-history-v1', 1)

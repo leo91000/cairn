@@ -59,7 +59,7 @@ export async function beaconRelayFixture(port = 4395, listen = '127.0.0.1', dire
     }
   }
 
-  function beacon(databaseUrl = process.env.CAIRN_BEACON_TEST_DATABASE_URL) {
+  function beacon(databaseUrl = process.env.CAIRN_BEACON_TEST_DATABASE_URL, overrides: NodeJS.ProcessEnv = {}) {
     return start('target/debug/cairn-beacon', {
       CAIRN_BEACON_DATABASE_URL: databaseUrl,
       CAIRN_BEACON_ORIGIN: url,
@@ -67,6 +67,7 @@ export async function beaconRelayFixture(port = 4395, listen = '127.0.0.1', dire
       CAIRN_BEACON_EMAIL_ENDPOINT: `http://127.0.0.1:${mailPort}/emails`,
       CAIRN_BEACON_EMAIL_KEY: 'fixture-only',
       CAIRN_BEACON_EMAIL_FROM: 'cairn@example.test',
+      ...overrides,
     })
   }
 
