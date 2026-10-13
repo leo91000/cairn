@@ -203,7 +203,7 @@ fn run_result(db: &Db<'_>, condition: &Value) -> Result<Option<Value>> {
             "type": "run_finished",
             "runId": target["id"],
             "status": status,
-        "outcomeStatus": target["outcome"]["status"],
+            "outcomeStatus": target["outcome"]["status"],
             "finishedAt": target["finishedAt"],
         })
     }))
