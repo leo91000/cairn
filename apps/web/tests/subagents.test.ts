@@ -2,6 +2,7 @@ import type { RunEvent } from '../../../packages/contracts/contracts'
 import { describe, expect, it } from 'vitest'
 import { activityEntries } from '../src/activity'
 import { backgroundWait, workingStep } from '../src/signal'
+import { currentSubagents, subagentState, subagentSummary } from '../src/subagents'
 
 let serial = 0
 
@@ -148,7 +149,7 @@ describe('subagents', () => {
       subagent('item.started', 'Webhooks'),
       subagent('item.started', 'Tests'),
     ]
-    expect(workingStep(activityEntries(events, true), 'Claude', null)).toMatchObject({ title: 'Waiting for 2 subagents', detail: 'Webhooks · Tests' })
+    expect(workingStep(activityEntries(events, true), 'Claude', null)).toMatchObject({ title: 'Waiting for 2 subagents', detail: 'Webhooks · Tests', subagents: true })
     const one = [...events, subagent('item.completed', 'Tests', { status: 'completed' })]
     expect(workingStep(activityEntries(one, true), 'Claude', null)).toMatchObject({ title: 'Waiting for a subagent', detail: 'Webhooks' })
     const acting = [...one, item('item.started', {
@@ -175,5 +176,23 @@ describe('subagents', () => {
       subagent('item.updated', 'List files', { background: true, activity: 'Running ls' }),
     ])).toMatchObject({ tasks: ['List files'] })
     expect(backgroundWait([...events, item('item.started', { id: 'msg', type: 'agent_message', text: '' })])).toBeNull()
+  })
+
+  it('finds the subagents of the current request and what each one does', () => {
+    const entries = activityEntries([
+      user('First'),
+      subagent('item.completed', 'Earlier', { status: 'completed', result: '## Findings\nAll good' }),
+      user('Second'),
+      subagent('item.started', 'Webhooks', { activity: 'Reading webhook.rs' }),
+      item('item.completed', { id: 'note', type: 'agent_message', text: 'Meanwhile…' }),
+      subagent('item.started', 'Tests'),
+    ], true)
+    const current = currentSubagents(entries)
+    expect(current.map(agent => agent.title)).toEqual(['Webhooks', 'Tests'])
+    expect(current.map(agent => subagentSummary(agent, true))).toEqual(['Reading webhook.rs', 'Starting…'])
+    // Once the run ends, a subagent that never reported shows as stopped.
+    expect(subagentState(current[0]!, false)).toBe('stopped')
+    const earlier = activityEntries([subagent('item.completed', 'Earlier', { status: 'completed', result: '## Findings\nAll good' })])
+    expect(earlier[0]?.kind === 'team' && subagentSummary(earlier[0].agents[0]!, false)).toBe('Findings')
   })
 })

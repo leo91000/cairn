@@ -118,6 +118,8 @@ export interface WorkingStep {
   detail: string
   since: number | null
   waiting?: string[]
+  /** The agent only waits for its subagents. */
+  subagents?: boolean
 }
 
 /**
@@ -185,7 +187,12 @@ export function workingStep(entries: ActivityEntry[], agent: string, fallbackSta
   const subagents = artifacts.filter(artifact => artifact.kind === 'subagent' && artifact.status === 'running')
   if (latest.kind === 'subagent' && subagents.length) {
     const title = subagents.length === 1 ? 'Waiting for a subagent' : `Waiting for ${subagents.length} subagents`
-    return { title, detail: subagents.map(subagent => subagent.title).join(' · '), since }
+    return {
+      title,
+      detail: subagents.map(subagent => subagent.title).join(' · '),
+      since,
+      subagents: true,
+    }
   }
 
   if (latest.status === 'running')

@@ -18,6 +18,7 @@ import { deliveryEntries } from '../deliverables'
 import { ArrowDown, Maximize2, Minimize2 } from '../icons'
 import { backgroundWait, waitingStep, workingStep } from '../signal'
 import { mentionSegments } from '../skill-mentions'
+import { currentSubagents } from '../subagents'
 import { iconButton } from '../ui'
 import ActivityContent from './ActivityContent.vue'
 import AgentActions from './AgentActions.vue'
@@ -50,6 +51,8 @@ const props = defineProps<{
   loadingOlder?: boolean
   olderError?: string
   skills?: string[]
+  /** The page shows the current subagents beside the composer, so the feed need not. */
+  subagentBar?: boolean
 }>()
 const emit = defineEmits<{ load: [], position: [value: ReadingPosition, key?: string] }>()
 const skillNames = computed(() => new Set(props.skills ?? []))
@@ -78,6 +81,8 @@ const working = computed(() => {
     return waitingStep(wait)
   return workingStep(entries.value.filter((entry): entry is ActivityEntry => entry.kind !== 'deliverables'), props.agent, props.events[0]?.createdAt ?? null)
 })
+const teams = computed(() => entries.value.flatMap(entry => entry.kind === 'team' ? [entry.agents] : []))
+const subagents = computed(() => currentSubagents(entries.value))
 const visibleOutcome = computed(() => !props.active && !props.sending?.length && !props.loading ? props.outcome : null)
 const outcomeEntryId = computed(() => {
   const items = entries.value
@@ -227,6 +232,8 @@ async function exitFullscreen() {
 
 onBeforeUnmount(() => viewer.value?.close())
 defineExpose({
+  teams,
+  subagents,
   following: follow,
   toggleFollow: () => {
     follow.value = !follow.value
@@ -355,7 +362,7 @@ defineExpose({
                 :agent="agent"
               />
 
-              <div v-if="active && !sending?.length && events.length" class="activity-working mt-4 mb-0.5">
+              <div v-if="active && !sending?.length && events.length && !(subagentBar && working.subagents)" class="activity-working mt-4 mb-0.5">
                 <WorkingIndicator :step="working" />
               </div>
               <div v-else-if="active && !sending?.length" class="activity-working flex items-center justify-center gap-3 text-muted text-3xs mt-7.5 mb-0.5 mx-0">

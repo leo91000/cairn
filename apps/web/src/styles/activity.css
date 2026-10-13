@@ -572,3 +572,19 @@
   font-size: 10px;
   padding-bottom: 10px;
 }
+
+/* A subagent at work: its status dot pulses until it reports back. */
+.subagent-pulse {
+  animation: subagent-pulse 1.4s ease-in-out infinite;
+}
+@keyframes subagent-pulse {
+  50% {
+    opacity: 0.35;
+    transform: scale(0.7);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .subagent-pulse {
+    animation: none;
+  }
+}

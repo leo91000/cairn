@@ -330,15 +330,21 @@ export function chatFixture() {
             durationMs: 9,
           },
         })
-        notify('item/started', { threadId: child, item: { id: 'child-reply', type: 'agentMessage', text: '' } })
-        notify('item/agentMessage/delta', { threadId: child, itemId: 'child-reply', delta: 'Keyboard handling looks right.' })
-        notify('item/completed', { threadId: child, item: { id: 'child-reply', type: 'agentMessage', text: 'Keyboard handling looks right.' } })
-        notify('turn/completed', { threadId: child, turn: { ...childTurn, status: 'completed' } })
-        const waited = collab(`wait-${active.id}`, 'wait', 'completed', { agentsStates: { [child]: { status: 'completed', message: 'Keyboard handling looks right.' } } })
-        const closed = collab(`close-${active.id}`, 'closeAgent', 'completed', { agentsStates: { [child]: { status: 'shutdown', message: null } } })
-        for (const item of [waited, closed]) {
-          active.items.push(item)
-          notify('item/completed', { threadId: thread.id, item })
+        // `fixture:subagents-working` leaves the subagent at work until the user says "finish now".
+        if (text.includes('fixture:subagents-working')) {
+          hold = true
+        }
+        else {
+          notify('item/started', { threadId: child, item: { id: 'child-reply', type: 'agentMessage', text: '' } })
+          notify('item/agentMessage/delta', { threadId: child, itemId: 'child-reply', delta: 'Keyboard handling looks right.' })
+          notify('item/completed', { threadId: child, item: { id: 'child-reply', type: 'agentMessage', text: 'Keyboard handling looks right.' } })
+          notify('turn/completed', { threadId: child, turn: { ...childTurn, status: 'completed' } })
+          const waited = collab(`wait-${active.id}`, 'wait', 'completed', { agentsStates: { [child]: { status: 'completed', message: 'Keyboard handling looks right.' } } })
+          const closed = collab(`close-${active.id}`, 'closeAgent', 'completed', { agentsStates: { [child]: { status: 'shutdown', message: null } } })
+          for (const item of [waited, closed]) {
+            active.items.push(item)
+            notify('item/completed', { threadId: thread.id, item })
+          }
         }
 
         save()

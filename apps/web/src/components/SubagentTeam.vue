@@ -1,48 +1,42 @@
 <script setup lang="ts">
-import type { ActivityArtifact, ActivitySubagent } from '../activity'
+import type { ActivityArtifact } from '../activity'
 import {
   computed,
+  inject,
   onBeforeUnmount,
   ref,
   useId,
   watchEffect,
 } from 'vue'
-import { ChevronDown, GitFork } from '../icons'
-import { liveElapsed } from '../signal'
+import { ChevronDown, GitFork, Maximize2 } from '../icons'
+import {
+  openSubagentKey,
+  subagentDetails,
+  subagentElapsed,
+  subagentLabels,
+  subagentPills,
+  subagentState,
+  subagentSummary,
+} from '../subagents'
 import ActivityContent from './ActivityContent.vue'
 import AgentActions from './AgentActions.vue'
 import Icon from './Icon.vue'
+import SubagentAvatar from './SubagentAvatar.vue'
 
 // The subagents the agent started together: who works, on what, and for how long. A row expands
 // into the subagent's own steps and its report. The card folds once every subagent has finished.
 const props = defineProps<{ agents: ActivityArtifact[], active: boolean }>()
+const openSubagent = inject(openSubagentKey, null)
 const listId = useId()
 const toggled = ref<boolean | null>(null)
 const expanded = ref(new Set<string>())
 const now = ref(Date.now())
+const labels = subagentLabels
+const pills = subagentPills
 
-type State = ActivitySubagent['state']
-
-const labels: Record<State, string> = {
-  running: 'Running',
-  done: 'Done',
-  failed: 'Failed',
-  stopped: 'Stopped',
-}
-const pills: Record<State, string> = {
-  running: 'bg-soft text-accent',
-  done: 'bg-variant text-success',
-  failed: 'bg-coral-soft text-coral',
-  stopped: 'bg-variant text-muted',
-}
-const colors = ['#2f6f9f', '#7a5aa6', '#12806f', '#a8692a', '#b5475f', '#4b6bb5']
-
-// A subagent still marked as working once the run has ended will not report anymore.
-function state(agent: ActivityArtifact): State {
-  const value = agent.subagent?.state ?? 'running'
-  return value === 'running' && !props.active ? 'stopped' : value
-}
-
+const state = (agent: ActivityArtifact) => subagentState(agent, props.active)
+const summary = (agent: ActivityArtifact) => subagentSummary(agent, props.active)
+const elapsed = (agent: ActivityArtifact) => subagentElapsed(agent, props.active, now.value)
 const states = computed(() => props.agents.map(state))
 const running = computed(() => states.value.filter(value => value === 'running').length)
 const failed = computed(() => states.value.filter(value => value === 'failed').length)
@@ -57,49 +51,6 @@ watchEffect(() => {
   timer = running.value ? setInterval(() => now.value = Date.now(), 1000) : undefined
 })
 onBeforeUnmount(() => clearInterval(timer))
-
-function initials(name: string) {
-  const words = name.split(/\s+/).filter(word => /\w/.test(word))
-  const letters = words.length > 1 ? words[0]![0]! + words[1]![0]! : name.replace(/\W/g, '').slice(0, 2)
-  return letters.toUpperCase() || '·'
-}
-
-function firstLine(value: string) {
-  return value.split('\n').map(line => line.replace(/^[#>*\s-]+/, '').trim()).find(Boolean) ?? ''
-}
-
-// What the subagent does now, or what it reported.
-function summary(agent: ActivityArtifact) {
-  const subagent = agent.subagent!
-  const current = state(agent)
-  if (current === 'running') {
-    const latest = subagent.steps.findLast(step => step.kind !== 'notice')
-    const step = latest && [latest.title, latest.command || latest.subtitle].filter(Boolean).join(' · ')
-    return subagent.activity || step || 'Starting…'
-  }
-
-  const report = firstLine(subagent.result) || firstLine(subagent.message)
-  if (current === 'failed')
-    return report || 'Failed without a report'
-  if (current === 'stopped')
-    return report || 'Stopped before reporting back'
-  return report || 'Finished'
-}
-
-function elapsed(agent: ActivityArtifact) {
-  if (state(agent) === 'running')
-    return liveElapsed(agent.time, now.value)
-  // liveElapsed formats any span; anchor this one at an arbitrary positive start.
-  return agent.durationMs === undefined ? '' : liveElapsed(1, 1 + agent.durationMs)
-}
-
-function details(subagent: ActivitySubagent) {
-  return [
-    subagent.model,
-    subagent.toolUses === undefined ? '' : subagent.toolUses === 1 ? '1 tool use' : `${subagent.toolUses.toLocaleString()} tool uses`,
-    subagent.tokens === undefined ? '' : `${subagent.tokens.toLocaleString()} tokens`,
-  ].filter(Boolean).join(' · ')
-}
 
 function toggle(id: string) {
   const next = new Set(expanded.value)
@@ -141,7 +92,7 @@ function toggle(id: string) {
     </button>
     <ul v-if="open" :id="listId" class="m-0! list-none border-t border-line p-0">
       <li
-        v-for="(agent, index) in agents"
+        v-for="agent in agents"
         :key="agent.id"
         class="border-b border-line last:border-b-0"
         data-testid="subagent"
@@ -153,12 +104,12 @@ function toggle(id: string) {
           :aria-label="[agent.title, labels[state(agent)], summary(agent)].join(', ')"
           @click="toggle(agent.id)"
         >
-          <span class="grid size-7 shrink-0 place-items-center rounded-lg text-[10.5px] font-bold text-white" :style="{ background: colors[index % colors.length] }" aria-hidden="true">{{ initials(agent.title) }}</span>
+          <SubagentAvatar :agent="agent" />
           <span class="min-w-0 flex-1" aria-hidden="true">
             <span class="flex min-w-0 items-baseline gap-1.5">
-              <span class="truncate text-base font-semibold text-ink">{{ agent.title }}</span>
-              <span v-if="agent.subagent!.type" class="shrink-0 truncate text-2xs text-muted">{{ agent.subagent!.type }}</span>
-              <span v-if="agent.subagent!.background" class="shrink-0 text-2xs text-muted">· background</span>
+              <span class="max-w-full shrink-0 truncate text-base font-semibold text-ink">{{ agent.title }}</span>
+              <span v-if="agent.subagent!.type" class="min-w-0 truncate text-2xs text-muted phone:hidden">{{ agent.subagent!.type }}</span>
+              <span v-if="agent.subagent!.background" class="shrink-0 text-2xs text-muted phone:hidden">· background</span>
             </span>
             <span class="block truncate text-2xs text-muted">{{ summary(agent) }}</span>
           </span>
@@ -181,28 +132,21 @@ function toggle(id: string) {
             </p>
             <ActivityContent :content="agent.subagent!.result || agent.subagent!.message" />
           </div>
-          <p v-if="details(agent.subagent!)" class="m-0! text-2xs text-muted">
-            {{ details(agent.subagent!) }}
-          </p>
+          <div v-if="openSubagent || subagentDetails(agent.subagent!)" class="flex flex-wrap items-center justify-between gap-2">
+            <p class="m-0! text-2xs text-muted">
+              {{ subagentDetails(agent.subagent!) }}
+            </p>
+            <button
+              v-if="openSubagent"
+              class="inline-flex min-h-8 items-center gap-1.5 rounded-lg border border-line bg-surface px-2.5 text-2xs font-semibold text-ink hover:bg-hover phone:min-h-11"
+              data-testid="open-subagent"
+              @click="openSubagent(agent.id)"
+            >
+              <Icon :name="Maximize2" :size="12" />Open full activity
+            </button>
+          </div>
         </div>
       </li>
     </ul>
   </section>
 </template>
-
-<style scoped>
-.subagent-pulse {
-  animation: subagent-pulse 1.4s ease-in-out infinite;
-}
-@keyframes subagent-pulse {
-  50% {
-    opacity: 0.35;
-    transform: scale(0.7);
-  }
-}
-@media (prefers-reduced-motion: reduce) {
-  .subagent-pulse {
-    animation: none;
-  }
-}
-</style>
