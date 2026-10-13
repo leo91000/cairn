@@ -1,4 +1,5 @@
 import type { Deliverable } from '../../packages/contracts/artifacts'
+import type { Workspace } from './fixtures'
 import { randomUUID } from 'node:crypto'
 import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import path from 'node:path'
@@ -11,8 +12,8 @@ import {
   workspacePath,
 } from './fixtures'
 
-test('persistent deliverables have a gallery, revisions, mobile viewer, and playable media', async ({ page, browser, workspace }) => {
-  test.setTimeout(60000)
+/** Completes a conversation turn and seeds deliverables directly into its run. */
+async function deliverableRun(workspace: Workspace) {
   initializeRepository(workspace.projectPath)
   const chat = await workspace.api('/api/chats', 'POST', {})
   await workspace.api(`/api/chats/${chat.id}/messages`, 'POST', { id: randomUUID(), text: 'Prepare a mobile review with screenshots and a short walkthrough.' })
@@ -21,10 +22,9 @@ test('persistent deliverables have a gallery, revisions, mobile viewer, and play
     detail = await workspace.api(`/api/chats/${chat.id}`)
     return detail.run?.status
   }).toBe('succeeded')
-  const runId = detail.run.id
+  const runId: string = detail.run.id
   const directory = path.join(workspace.service.config.dataDir, 'artifacts')
   await mkdir(directory, { recursive: true })
-  const image = await readFile('docs/screenshots/model-selectors/chat-mobile-dark.png')
   const files: Deliverable[] = []
   const publish = async (title: string, name: string, kind: Deliverable['kind'], bytes: Uint8Array, key = title, version = 1) => {
     const item: Deliverable = {
@@ -38,6 +38,10 @@ test('persistent deliverables have a gallery, revisions, mobile viewer, and play
       kind,
       size: bytes.length,
       mediaType: ({
+        svg: 'image/svg+xml',
+        gif: 'image/gif',
+      } as Record<string, string>)[name.split('.').at(-1)!]
+      || ({
         image: 'image/png',
         video: 'video/mp4',
         audio: 'audio/wav',
@@ -57,6 +61,23 @@ test('persistent deliverables have a gallery, revisions, mobile viewer, and play
     return item
   }
 
+  return {
+    chat,
+    runId,
+    files,
+    publish,
+  }
+}
+
+test('persistent deliverables have a gallery, revisions, mobile viewer, and playable media', async ({ page, browser, workspace }) => {
+  test.setTimeout(60000)
+  const {
+    chat,
+    runId,
+    files,
+    publish,
+  } = await deliverableRun(workspace)
+  const image = await readFile('docs/screenshots/model-selectors/chat-mobile-dark.png')
   await publish('Mobile · before', 'mobile-before.png', 'image', image, 'mobile', 1)
   const second = await publish('Mobile · refined', 'mobile.png', 'image', await readFile('docs/screenshots/chat-questions/questions-mobile-dark.png'), 'mobile', 2)
   await publish('Review notes', 'review.md', 'markdown', new TextEncoder().encode('# Mobile review\n\nThe controls stay within reach.\n\n- More room for the conversation\n- A clear place for every deliverable\n\n**Ready for your feedback.**'))
@@ -181,4 +202,74 @@ test('persistent deliverables have a gallery, revisions, mobile viewer, and play
   await page.getByRole('button', { name: 'Open Mobile · refined', exact: true }).click()
   await expect(page.getByRole('dialog', { name: 'Deliverables viewer' })).toBeVisible()
   await page.getByRole('button', { name: 'Close viewer', exact: true }).click()
+})
+
+test('structured documents preview as tables, formatted data, inert pages, and vector images', async ({ page, workspace }) => {
+  test.setTimeout(60000)
+  const { chat, publish } = await deliverableRun(workspace)
+  const encode = (text: string) => new TextEncoder().encode(text)
+  await publish('Quarterly figures', 'figures.csv', 'code', encode('Region,Revenue,Notes\nNorth,"1,200","Steady, ""strong"""\nSouth,950,"New\nstores"\n'))
+  await publish('Launch page', 'launch.html', 'code', encode([
+    '<!doctype html><html><head><style>h1 { color: rgb(0, 128, 0) }</style></head><body>',
+    '<h1>Launch ready</h1><img alt="Tracker" src="https://example.test/pixel.png">',
+    '<a href="https://example.test/escape">External link</a>',
+    '<meta http-equiv="refresh" content="0;url=https://example.test/refresh">',
+    '<script>parent.document.title = "escaped"; document.body.dataset.ran = "yes"</script>',
+    '</body></html>',
+  ].join('')))
+  await publish('Run summary', 'summary.json', 'code', encode('{"status":"ready","checks":[1,2]}'))
+  await publish('Architecture', 'architecture.svg', 'image', encode('<svg xmlns="http://www.w3.org/2000/svg" width="320" height="160"><rect width="320" height="160" fill="#2f855a"/></svg>'))
+  await publish('Animated walkthrough', 'animated.gif', 'image', await readFile('tests/fixtures/artifacts/animated.gif'))
+  let tracked = false
+  await page.context().route('https://example.test/**', (route) => {
+    tracked = true
+    return route.fulfill({ status: 204 })
+  })
+  await page.goto(workspacePath('/'))
+  await authenticateWorkspace(page)
+  await page.goto(workspacePath(`/chats/${chat.id}`))
+  await page.setViewportSize({ width: 1440, height: 1000 })
+  await page.getByRole('button', { name: 'Open Quarterly figures', exact: true }).click()
+  const viewer = page.getByRole('dialog', { name: 'Deliverables viewer' })
+  const table = viewer.getByRole('table', { name: 'Quarterly figures' })
+  await expect(table.getByRole('columnheader')).toHaveText(['Region', 'Revenue', 'Notes'])
+  await expect(table.getByRole('row').nth(1).getByRole('cell')).toHaveText(['North', '1,200', 'Steady, "strong"'])
+  await expect(table.getByRole('row').nth(2).getByRole('cell').nth(2)).toHaveText('New\nstores')
+  await page.screenshot({ animations: 'disabled', path: test.info().outputPath('deliverables-csv-table.png') })
+  await viewer.getByRole('button', { name: 'Source', exact: true }).click()
+  await expect(viewer.locator('pre')).toContainText('North,"1,200"')
+  await expect(table).toBeHidden()
+
+  await viewer.getByRole('button', { name: 'All deliverables', exact: true }).click()
+  await viewer.getByRole('button', { name: 'Open Launch page', exact: true }).click()
+  const frame = viewer.frameLocator('iframe[title="Launch page"]')
+  await expect(frame.getByRole('heading', { name: 'Launch ready' })).toHaveCSS('color', 'rgb(0, 128, 0)')
+  await expect(viewer.locator('iframe')).toHaveAttribute('sandbox', '')
+  expect(await frame.locator('body').evaluate(element => element.ownerDocument.compatMode)).toBe('CSS1Compat')
+  await expect(frame.locator('body')).not.toHaveAttribute('data-ran', 'yes')
+  expect(await page.title()).not.toBe('escaped')
+  await expect(frame.getByText('External link', { exact: true })).not.toHaveAttribute('href')
+  await frame.getByText('External link', { exact: true }).click()
+  await expect(frame.getByRole('heading', { name: 'Launch ready' })).toBeVisible()
+  expect(tracked).toBe(false)
+  await page.screenshot({ animations: 'disabled', path: test.info().outputPath('deliverables-html-page.png') })
+  await viewer.getByRole('button', { name: 'Source', exact: true }).click()
+  await expect(viewer.locator('pre')).toContainText('<h1>Launch ready</h1>')
+
+  await viewer.getByRole('button', { name: 'All deliverables', exact: true }).click()
+  await viewer.getByRole('button', { name: 'Open Run summary', exact: true }).click()
+  await expect(viewer.locator('pre')).toContainText('"status": "ready",\n  "checks": [')
+
+  await viewer.getByRole('button', { name: 'All deliverables', exact: true }).click()
+  await viewer.getByRole('button', { name: 'Open Architecture', exact: true }).click()
+  const vector = viewer.getByRole('img', { name: 'Architecture', exact: true })
+  await expect.poll(() => vector.evaluate((image: HTMLImageElement) => image.naturalWidth)).toBe(320)
+  await page.screenshot({ animations: 'disabled', path: test.info().outputPath('deliverables-svg.png') })
+
+  await viewer.getByRole('button', { name: 'All deliverables', exact: true }).click()
+  await viewer.getByRole('button', { name: 'Open Animated walkthrough', exact: true }).click()
+  const animation = viewer.getByRole('img', { name: 'Animated walkthrough', exact: true })
+  await expect.poll(() => animation.evaluate((image: HTMLImageElement) => image.naturalWidth)).toBe(64)
+  const firstFrame = await animation.screenshot()
+  await expect.poll(async () => !(await animation.screenshot()).equals(firstFrame)).toBe(true)
 })
