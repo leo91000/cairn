@@ -1,4 +1,5 @@
 import type { Route } from '@playwright/test'
+import { Buffer } from 'node:buffer'
 import {
   expect,
   signIn,
@@ -56,7 +57,7 @@ test('Discord setup guides the owner and keeps the bot token private', async ({ 
   await useRelayForHttpMocks(page)
   await page.route('**/plugins/discord/discover', discord)
   // Keep the journey offline: the saved bot starts paused instead of opening a Gateway session.
-  await page.route('**/plugins/discord', async (route) => {
+  await page.route('**/plugins/discord/connections', async (route) => {
     if (route.request().method() !== 'POST')
       return route.continue()
     await route.continue({ postData: JSON.stringify({ ...route.request().postDataJSON(), enabled: false }) })
@@ -103,14 +104,20 @@ test('Discord setup guides the owner and keeps the bot token private', async ({ 
   const catalog = await workspace.api('/api/plugins')
   expect(catalog.connections).toHaveLength(1)
   expect(catalog.connections[0]).toMatchObject({
+    pluginId: 'discord',
     agentId: helper.id,
     projectId: null,
-    guildName: 'Acme',
-    channelName: 'support',
+    settings: {
+      guildId: '100',
+      guildName: 'Acme',
+      channelId: '200',
+      channelName: 'support',
+      botId: '400',
+      botName: 'Cairn Bot',
+    },
     userIds: ['300'],
     people: [{ id: '300', name: 'Sarah' }],
     accessMode: 'requests',
-    bot: { id: '400', name: 'Cairn Bot' },
   })
   expect(JSON.stringify(catalog)).not.toContain(token)
 
@@ -137,4 +144,59 @@ test('Discord setup guides the owner and keeps the bot token private', async ({ 
   await bot.getByRole('button', { name: 'Remove bot' }).click()
   await page.getByRole('dialog').getByRole('button', { name: 'Remove bot' }).click()
   await expect(page.getByRole('heading', { name: 'Your agents, right in Discord.' })).toBeVisible()
+})
+
+test('installed packages wait for review and connect through a generated form', async ({ page, workspace }) => {
+  test.setTimeout(90000)
+  const manifest = {
+    id: 'notes',
+    name: 'Team notes',
+    version: '1.0.0',
+    description: 'Keeps a note for each team.',
+    apiVersion: 1,
+    capabilities: ['storage', 'timers'],
+    settings: [{
+      key: 'team',
+      title: 'Team',
+      type: 'string',
+      required: true,
+    }],
+  }
+  const source = 'return { start = function(event) cairn.storage.set("started", true) end }'
+  await page.goto(workspacePath('/plugins'))
+  await signIn(page)
+  await page.getByRole('button', { name: 'Install package' }).click()
+  const install = page.getByRole('dialog', { name: 'Install a plugin package' })
+  await install.getByLabel('Package files').setInputFiles([
+    { name: 'manifest.json', mimeType: 'application/json', buffer: Buffer.from(JSON.stringify(manifest)) },
+    { name: 'main.luau', mimeType: 'text/plain', buffer: Buffer.from(source) },
+  ])
+  await install.getByRole('button', { name: 'Install', exact: true }).click()
+
+  const review = page.getByRole('dialog', { name: 'Review Team notes' })
+  await expect(review.getByText('Storage', { exact: true })).toBeVisible()
+  await expect(review.getByText('Timers', { exact: true })).toBeVisible()
+  await review.getByRole('button', { name: 'Approve and activate' }).click()
+  await expect(review).not.toBeVisible()
+  await page.getByRole('link', { name: 'Team notes · Set up' }).click()
+
+  await page.getByRole('button', { name: 'Add connection' }).click()
+  const form = page.getByRole('dialog', { name: 'Connect Team notes' })
+  await form.getByLabel('Team').fill('core')
+  await form.getByRole('button', { name: 'Save connection' }).click()
+  const connection = page.getByRole('article', { name: 'Team notes' })
+  await expect(connection.getByText('core', { exact: true })).toBeVisible()
+  await expect(connection.getByRole('status')).toHaveText('Online', { timeout: 20000 })
+
+  const catalog = await workspace.api('/api/plugins')
+  expect(catalog.packages.find((item: { id: string }) => item.id === 'notes')).toMatchObject({ status: 'active', active: '1.0.0' })
+  expect(catalog.connections[0]).toMatchObject({ pluginId: 'notes', settings: { team: 'core' }, agentId: '' })
+
+  await connection.getByRole('button', { name: 'Delete Team notes' }).click()
+  await page.getByRole('dialog').getByRole('button', { name: 'Delete connection' }).click()
+  await expect(page.getByText('No connections yet.')).toBeVisible()
+  await page.getByRole('button', { name: 'Access and versions' }).click()
+  await page.getByRole('dialog').getByRole('button', { name: 'Uninstall' }).click()
+  await page.getByRole('dialog').getByRole('button', { name: 'Confirm uninstall' }).click()
+  await expect(page.getByText('This plugin isn’t installed.')).toBeVisible()
 })

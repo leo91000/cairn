@@ -1,35 +1,110 @@
-# Installation plugins: first dogfood slice
+# Installation plugins
 
-Cairn runs bundled Luau packages in a separate `cairn plugin-worker` process.
-Packages declare a versioned manifest and a source handler that returns a function.
-The interpreter exposes `cairn.call(method, arguments)`; the installation authorizes
-and performs each host operation. Plugin code never receives `Service`, SQLite or
-the vault key. The manager supplies invocation identity rather than trusting IDs
-chosen by a script.
+A plugin is a package: a `manifest.json` and a `main.luau`. Cairn runs each package
+in its own long-lived `cairn plugin-worker` process and reaches it only through
+events; the package reaches Cairn only through host capabilities its manifest
+declares and the owner approved. Plugin code never receives `Service`, SQLite, the
+vault key or a connection's credential, and identities always come from the host.
 
-## Packages and boundaries
+## Code layout
 
-- `crates/plugin-api`: manifests and framed invocation/call/reply contracts, API v1.
-- `crates/plugin-host`: process supervision and declared capability dispatch.
-- `crates/plugin-runtime`: source compilation, Luau sandbox and call bindings.
-- `crates/installation/src/plugins`: installation permissions and application adapters.
-- `plugins/`: bundled 1Password and Discord manifests, handlers and configuration.
-- `packages/plugin-types`: Luau authoring types.
+```text
+crates/plugin-api/      Manifest, capability list, frames between host and worker (API v1)
+crates/plugin-host/     Worker processes: sessions, per-event deadlines, capability gate
+crates/plugin-runtime/  Luau sandbox, handler table, prelude (cairn.storage, http, …)
+crates/installation/src/plugins/
+  registry.rs           Bundled and installed packages, approvals, versions
+  connections.rs        Generic connections: delegation + manifest-declared settings
+  runtime.rs            One supervisor per connection: worker, transport, event pump
+  capabilities.rs       storage, http, timers, conversations.submit for scripts
+  work.rs               Admission, access requests, event queue, replies
+  discord/              Native Gateway transport and setup discovery only
+  cli.rs                `cairn plugin onepassword …` inside conversations
+plugins/                Bundled packages (1Password, Discord)
+packages/plugin-types/  Luau declarations for package authors
+apps/web/src/           Catalogue, review, generic plugin page, Discord pages
+```
 
-Worker processes inherit no environment, run in a temporary private directory,
-and have a 35-second invocation deadline, 16 MiB Luau allocation limit, 1 MiB frame
-limit and bounded host calls. At most eight invocations run concurrently. Input is
-source compiled by Cairn, never third-party bytecode. Native modules, arbitrary
-filesystem access and arbitrary subprocess execution are not exposed. Host I/O has
-its own deadlines. The process is terminated and reaped on completion or failure;
-script diagnostics cannot become another transcript or credential output channel.
+Dependencies point one way: `installation → plugin-host → plugin-api ← plugin-runtime`.
+The host and runtime know nothing about Cairn's storage or agents; installation
+supplies the callback that turns an approved capability call into an effect.
 
-This is a bundled-package dogfood release, not a marketplace security claim. There
-is no local package installer, automatic update mechanism, general OAuth provider
-binding, or generic HTTP/WebSocket/shell capability yet. The host contract leaves
-those additions separate from the runtime. The Discord transport currently lives
-in its installation adapter; Luau owns mention handling and conversation submission.
-No Codex plugin catalog is enabled or downloaded.
+## Packages and the registry
+
+Bundled packages are embedded in the binary and always active. Installed packages
+live in `<data>/plugins/<id>/<version>/`, either uploaded from Atelier → Plugins
+(“Install package”) or copied there by the owner. A version runs only after the
+owner approves it. Approval records a digest of the exact manifest and source, so
+any later edit on disk withdraws the package until it is approved again. A new
+version waits for approval while the previous one keeps running, and the owner can
+switch back to any earlier approved version. Only bundled packages may request
+`onepassword.read`, and installed packages can't reuse built-in IDs. Uninstalling
+requires removing the package's connections first.
+
+A manifest declares:
+
+- `capabilities`: `conversations.submit`, `storage`, `http`, `timers`,
+  `transport.discord`, and (built-in only) `onepassword.read`;
+- `hosts`: the exact HTTPS hostnames `http` may reach;
+- `credential`: how Cairn adds a connection's secret to authorized requests
+  (header and prefix); the script only sets `auth = true`;
+- `settings`: an ordered list of connection fields Cairn renders and validates
+  (`key`, `title`, `type` string/number/boolean, `required`, `hidden`, `maxLength`,
+  `minimum`, `maximum`, `description`).
+
+## Connections and delegation
+
+Every plugin uses the same connection model: name, settings, optional credential
+(encrypted in the vault), and, when the package can start conversations, an owner
+delegation: one dedicated agent (one project at most, no installation access), the
+people allowed (listed or approved as they ask), and an hourly message limit. The
+connection is bound to the owner's current access and the agent's recorded policy.
+Routes are generic: `/api/plugins/{id}/connections[/{connection}]` with `enabled`,
+`test` and `people/{user}/{approve|deny|remove}` actions, and
+`/api/plugins/packages[/{id}/approve|activate]` for the registry.
+
+## Runtime
+
+For each enabled connection a supervisor starts the package's worker, its native
+transport if it declares one, and a pump. The worker loads the source once and keeps
+its Luau state between events. Handlers run one at a time under a 35-second deadline
+and a 16 MiB memory limit; a stuck or misbehaving worker is killed and restarted with
+backoff. Workers inherit no environment, run in a private temporary directory, never
+load bytecode, and have no files, processes, `print` or other network access.
+
+Events, all durable until handled (retried up to five times):
+
+| Event | When | Payload |
+|---|---|---|
+| `start` | each time the worker starts | `{ connectionId }` |
+| `message` | an allowed person wrote through the transport | `{ id, author, content, … }` |
+| `access_requested` | someone new asked (approval mode) | `{ id, author, … }`, never content |
+| `reply` | the agent's final answer is ready | `{ deliveryId, text, reply, state }` |
+| `timer` | a timer scheduled by the package fired | `{ id, name, payload }` |
+| `command` | a run-scoped CLI command (1Password) | command arguments |
+
+A `reply` handler may return `{ retryAfter = seconds, state = … }` to be called again
+later, for example after a platform rate limit. Capabilities exposed to scripts:
+
+- `cairn.conversations.submit({ text, thread?, reply? })`: only while handling
+  `message`, on behalf of that message's author. The host applies quotas,
+  deduplication and the conversation binding (author is always part of it).
+- `cairn.storage.get/set/delete/list`: up to 1000 values of 64 KB per connection.
+- `cairn.http.request{ method, url, headers?, json?|body?, auth? }`: HTTPS to declared
+  hosts only, no redirects followed, 15-second timeout, 1 MB responses.
+- `cairn.timers.after(seconds, name, payload)` / `cancel(id)`: 1 s to 7 days, 100 per
+  connection.
+
+Refused calls raise a short error code (`forbidden`, `invalid`, `rate_limited`,
+`unavailable`…); host error messages never reach scripts. JSON `null` arrives as
+`nil`; wrap tables meant as JSON arrays with `cairn.array()`. See
+`packages/plugin-types/cairn.luau` for the full typed reference, and
+`plugins/discord/main.luau` for a complete package.
+
+Separate processes, capability checks and Luau's sandbox are dogfood boundaries,
+not yet a marketplace guarantee: a public catalogue still needs signed packages,
+OS-level isolation of workers and an update policy. No Codex plugin catalog is
+enabled or downloaded.
 
 ## 1Password CLI
 
@@ -79,6 +154,13 @@ bot can do) and a four-step setup:
    installation access disabled, can be selected; the bot works in that agent's
    project. Set the name and per-hour message limit, review the summary and activate.
 
+The Discord package splits native and scripted work. Rust keeps the Gateway
+connection (heartbeat, resume, reconnects) and delivers only mentions of the bot in
+the configured server and channel; setup discovery is native too. The Luau script
+strips the mention, submits the conversation, answers access requests once (using
+storage to remember who was told), and posts replies in Discord-sized chunks with
+deterministic nonces through `cairn.http` and the bot token Cairn injects.
+
 Setup discovery (bot identity, servers, channels and permission resolution, user
 names) runs on the installation with the pasted or saved token; the token is never
 returned to the browser. Names are display labels only; authorization always uses IDs.
@@ -104,8 +186,8 @@ The adapter maintains Gateway heartbeat, ACK checks, resumable sessions and reco
 backoff. It uses guild and guild-message intents, ignores bots/webhooks, and checks
 server/channel/user grants before persisting message content. People approved,
 denied or removed on the bot's page apply to the next message without restarting the
-Gateway session. Accepted messages have
-a durable inbox and deduplicate for 30 days. Submission and conversation binding are
+Gateway session. Accepted messages enter the connection's durable event queue and
+deduplicate for 30 days. Submission and conversation binding are
 atomic; per-connection hourly admission and pending-work ceilings limit consumption.
 
 Only the final assistant answer for the admitted message's completed turn is sent;
@@ -121,12 +203,18 @@ question replies and notifications are deferred.
 
 ## Validation
 
-Synthetic tests cover worker sandboxing, capability denial, memory limits, hard
-process deadlines, API incompatibility, owner-only management, encrypted credentials,
-MCP secret-read denial, live grants, ingress deduplication/restart recovery, rate
-limits, changed agent access, final-answer correlation, Gateway heartbeats/resume
-state, reply retries/nonces, disabled mentions, channel permission resolution,
-access requests and approvals. Browser journeys cover the guided setup with private
-token entry, editing, people management and removal on desktop and mobile.
+Synthetic tests cover manifest validation, worker sandboxing, persistent script
+state, refused-call codes, capability denial, memory limits, per-event deadlines,
+API incompatibility, owner-only management, encrypted credentials, MCP secret-read
+denial, live grants, ingress deduplication, rate limits, changed agent access,
+final-answer correlation, Gateway heartbeats/resume state, channel permission
+resolution, access requests and approvals. The real Discord script runs end to end
+against a mock Discord API (mention handling, chunked replies, rate-limit retries
+with stable nonces, disabled mentions, one-time notices). Registry tests cover
+upload validation, approval, tamper detection, updates, rollback, uninstall and an
+installed package using timers, storage and credentialed HTTP limited to declared
+hosts without following redirects. Browser journeys cover the guided Discord setup,
+people management, and installing, approving, connecting and uninstalling a package,
+on desktop and mobile.
 These are local fixture tests, not evidence of a real Discord connection or a
 production deployment.

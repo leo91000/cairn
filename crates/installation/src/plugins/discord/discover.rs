@@ -15,13 +15,13 @@ const READ_MESSAGE_HISTORY: u64 = 1 << 16;
 /// Exactly what mention replies need; the invite never requests more.
 pub const INVITE_PERMISSIONS: u64 = VIEW_CHANNEL | SEND_MESSAGES | READ_MESSAGE_HISTORY;
 
-pub async fn discover(s: &Service, input: &Value) -> Result<Value> {
-    let token = token(s, input).await?;
+pub async fn discover(s: &Service, plugin_id: &str, input: &Value) -> Result<Value> {
+    let token = token(s, plugin_id, input).await?;
     discover_at(s, &token, input, ORIGIN).await
 }
 
 /// A pasted token is checked before it is saved; editing reuses the vault copy.
-async fn token(s: &Service, input: &Value) -> Result<String> {
+async fn token(s: &Service, plugin_id: &str, input: &Value) -> Result<String> {
     let token = text(input, "token").trim();
     if !token.is_empty() {
         if token.len() > 4096 || token.chars().any(|c| c.is_whitespace() || c.is_control()) {
@@ -31,6 +31,7 @@ async fn token(s: &Service, input: &Value) -> Result<String> {
     }
     let id = text(input, "connectionId");
     uuid(id)?;
+    crate::plugins::connections::get(s, plugin_id, id).await?;
     let saved = s
         .vault
         .get(&credential_key(id))

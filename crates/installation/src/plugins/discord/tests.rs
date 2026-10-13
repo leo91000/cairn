@@ -1,4 +1,4 @@
-use super::*;
+use crate::plugins::connections::{Connection, save};
 use crate::{config::Config, service::Service};
 use serde_json::{Value, json};
 use std::sync::Arc;
@@ -41,17 +41,16 @@ pub(super) async fn fixture() -> (TempDir, Arc<Service>, Connection) {
         .unwrap();
     let connection = save(
         &s,
+        "discord",
         &json!({
             "name": "Discord",
             "agentId": agent["id"],
             "projectId": null,
-            "guildId": "100",
-            "channelId": "200",
+            "settings": { "guildId": "100", "channelId": "200" },
             "userIds": ["300"],
             "enabled": true,
             "token": "synthetic_discord_token",
             "maxMessagesPerHour": 20,
-
         }),
         None,
     )

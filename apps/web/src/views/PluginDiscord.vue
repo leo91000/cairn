@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import type { DiscordConnection, PluginPackage } from '../plugins'
+import type { Catalog, DiscordConnection, Manifest } from '../plugins'
 import { twMerge } from 'tailwind-merge'
 import { onBeforeUnmount, onMounted, ref } from 'vue'
 import {
@@ -38,7 +38,7 @@ import {
   iconButton,
 } from '../ui'
 
-const manifest = ref<PluginPackage>()
+const manifest = ref<Manifest | null>()
 const connections = ref<DiscordConnection[]>([])
 const onepassword = ref<{ name: string, agentIds: string[] }[]>([])
 const loaded = ref(false)
@@ -50,9 +50,9 @@ let timer: ReturnType<typeof setInterval> | undefined
 const primary = twMerge(buttonBase, buttonVariants.primary, buttonSizes.default)
 
 async function load() {
-  const [catalog, accounts] = await Promise.all([api('/plugins'), api('/onepassword')])
-  manifest.value = catalog.packages.find((item: PluginPackage) => item.id === 'discord')
-  connections.value = catalog.connections
+  const [catalog, accounts] = await Promise.all([api<Catalog>('/plugins'), api('/onepassword')])
+  manifest.value = catalog.packages.find(item => item.id === 'discord')?.manifest
+  connections.value = catalog.connections.filter(item => item.pluginId === 'discord') as DiscordConnection[]
   onepassword.value = accounts
   loaded.value = true
 }
@@ -82,7 +82,7 @@ function abilities(connection: DiscordConnection) {
     project(connection)
       ? { allowed: true, text: `Read and change ${project(connection)!.name}` }
       : { allowed: false, text: 'Open any project' },
-    { allowed: true, text: `Reply in #${connection.channelName || connection.channelId} only` },
+    { allowed: true, text: `Reply in #${connection.settings.channelName || connection.settings.channelId} only` },
     secrets.length
       ? { allowed: true, warn: true, text: `Use 1Password: ${secrets.map(account => account.name).join(', ')}` }
       : { allowed: false, text: 'Read 1Password secrets' },
@@ -94,28 +94,28 @@ function abilities(connection: DiscordConnection) {
 
 async function test(connection: DiscordConnection) {
   await action(async () => {
-    const result = await api(`/plugins/discord/${connection.id}/test`, { method: 'POST' })
+    const result = await api(`/plugins/discord/connections/${connection.id}/test`, { method: 'POST' })
     notify(`Token works · signed in as ${result.name}`)
   })
 }
 
 async function toggle(connection: DiscordConnection) {
   await action(async () => {
-    await api(`/plugins/discord/${connection.id}/enabled`, { method: 'POST', body: JSON.stringify({ enabled: !connection.enabled }) })
+    await api(`/plugins/discord/connections/${connection.id}/enabled`, { method: 'POST', body: JSON.stringify({ enabled: !connection.enabled }) })
     await load()
   })
 }
 
 async function person(connection: DiscordConnection, userId: string, operation: 'approve' | 'deny' | 'remove') {
   await action(async () => {
-    await api(`/plugins/discord/${connection.id}/people/${userId}/${operation}`, { method: 'POST' })
+    await api(`/plugins/discord/connections/${connection.id}/people/${userId}/${operation}`, { method: 'POST' })
     await load()
   })
 }
 
 async function remove() {
   await action(async () => {
-    await api(`/plugins/discord/${removing.value!.id}`, { method: 'DELETE' })
+    await api(`/plugins/discord/connections/${removing.value!.id}`, { method: 'DELETE' })
     removing.value = undefined
     await load()
   })
@@ -229,7 +229,7 @@ onBeforeUnmount(() => clearInterval(timer))
           <header class="flex items-center justify-between gap-3">
             <div class="flex min-w-0 items-center gap-3">
               <span class="relative">
-                <PersonAvatar :name="connection.bot?.name || connection.name" :identity="connection.bot?.id || connection.id" :size="42" />
+                <PersonAvatar :name="connection.settings.botName || connection.name" :identity="connection.settings.botId || connection.id" :size="42" />
                 <span class="absolute -bottom-px -right-px size-3 rounded-full border-2 border-surface" :class="connectionState(connection).tone === 'ok' ? 'bg-[#23a55a]' : 'bg-control'" />
               </span>
               <div class="min-w-0">
@@ -237,8 +237,8 @@ onBeforeUnmount(() => clearInterval(timer))
                   {{ connection.name }}
                 </h2>
                 <p class="mt-0.5 truncate text-2xs text-muted">
-                  <template v-if="connection.bot">
-                    Signed in as <b class="text-ink">{{ connection.bot.name }}</b>
+                  <template v-if="connection.settings.botName">
+                    Signed in as <b class="text-ink">{{ connection.settings.botName }}</b>
                   </template><template v-else>
                     Discord bot
                   </template>
@@ -271,8 +271,8 @@ onBeforeUnmount(() => clearInterval(timer))
           <div class="mt-5 grid grid-cols-3 gap-3 phone:grid-cols-1">
             <div class="flex min-w-0 flex-col gap-1.5 rounded-xl border border-line bg-inset px-4 py-3.5">
               <span class="text-3xs font-semibold uppercase tracking-[.12em] text-subtle">Listens in</span>
-              <span class="flex items-center gap-1.5 truncate text-[13px] font-semibold"><Icon :name="Hash" :size="14" class="text-muted" />{{ connection.channelName || connection.channelId }}</span>
-              <span class="truncate text-2xs text-muted">{{ connection.guildName || 'Discord server' }}</span>
+              <span class="flex items-center gap-1.5 truncate text-[13px] font-semibold"><Icon :name="Hash" :size="14" class="text-muted" />{{ connection.settings.channelName || connection.settings.channelId }}</span>
+              <span class="truncate text-2xs text-muted">{{ connection.settings.guildName || 'Discord server' }}</span>
             </div>
             <button
               class="flex min-w-0 flex-col items-start gap-1.5 rounded-xl border border-line bg-inset px-4 py-3.5 text-left hover:border-control"
@@ -318,7 +318,7 @@ onBeforeUnmount(() => clearInterval(timer))
             Recent activity
           </h3>
           <p v-if="!connection.activity.length" class="mt-2 text-xs text-muted">
-            Nothing yet. Mention <b class="text-ink">@{{ connection.bot?.name || 'the bot' }}</b> in #{{ connection.channelName || connection.channelId }} to try it.
+            Nothing yet. Mention <b class="text-ink">@{{ connection.settings.botName || 'the bot' }}</b> in #{{ connection.settings.channelName || connection.settings.channelId }} to try it.
           </p>
           <ul class="mt-1.5">
             <li v-for="item in connection.activity" :key="item.id" class="grid grid-cols-[28px_minmax(0,1fr)_auto] items-start gap-3 border-t border-line py-3 first:border-0">

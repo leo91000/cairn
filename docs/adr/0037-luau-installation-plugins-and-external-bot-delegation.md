@@ -4,13 +4,17 @@ Date: 2026-10-12.
 
 ## Decision
 
-Installation plugins use a versioned host contract and source-only Luau handlers
-executed in dedicated worker processes. Rust retains credentials, permissions,
-conversation execution and durable delivery. The initial packages are bundled:
-1Password and a Discord mention bot. Package installation, marketplace distribution,
-general OAuth and arbitrary native execution are deferred until these packages have
-been dogfooded. Plugin API types, process host and Luau runtime are separate crates;
-installation application adapters implement authorized host operations.
+Installation plugins use a versioned host contract and source-only Luau packages
+executed in dedicated, long-lived worker processes, one per connection. Packages
+receive durable events and act only through declared capabilities (conversation
+submission, connection storage, HTTPS to declared hosts with host-injected
+credentials, timers, native transports). Rust retains credentials, permissions,
+conversation execution, durable queues and platform transports such as Discord's
+Gateway. Bundled packages (1Password, Discord) ship in the binary; owners can install
+packages from disk or by upload, and each exact version runs only after the owner
+approves its manifest and source. Marketplace distribution, general OAuth and
+arbitrary native execution are deferred. Plugin API types, process host and Luau
+runtime are separate crates; installation adapters implement the capabilities.
 
 MCP and the run-local CLI are plugin interfaces. 1Password metadata stays on MCP;
 secret values are available only through CLI stdout for direct script/pipe consumption.
@@ -44,8 +48,10 @@ constitute a complete hostile-code isolation guarantee.
 
 Bot services run at installation scope between agent turns. Durable inbox admission,
 message deduplication, conversation routing and reply progress belong to Cairn.
-Platform transport is currently implemented in the bundled adapter and can move
-behind generic host networking capabilities without changing the conversation API.
+Platform transports stay native and shared (heartbeats, resumes and reconnects need
+long-lived sockets); platform behaviour lives in Luau. A connection is one generic
+model (delegation plus manifest-declared settings), so new integrations add a
+package and, at most, a transport.
 
 See [plugin implementation and live-test procedure](../PLUGINS.md) for current
 capabilities and delivery limits.

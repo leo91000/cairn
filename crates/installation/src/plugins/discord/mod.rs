@@ -1,24 +1,21 @@
-//! Discord is an owner-delegated ingress, never an installation-wide reader.
-mod admin;
-mod delivery;
+//! Discord's native transport: the Gateway connection and setup discovery. What the
+//! bot does with a message (mentions, notices, reply formatting) lives in Luau, in
+//! `plugins/discord/main.luau`, behind the generic plugin capabilities.
 mod discover;
 mod gateway;
 
+use super::connections::{Connection, credential, status};
+pub(crate) use super::connections::{credential_key, label};
 use crate::{
     error::{Error, Result},
-    service::{Service, policy},
-    store::Db,
+    service::Service,
     validation::text,
 };
-pub use admin::{overview, people, remove, save, set_enabled, test};
-pub use delivery::{accept, process_pending, reply, submit};
 pub use discover::discover;
-use serde::{Deserialize, Serialize};
-use serde_json::Value;
-use std::{collections::HashMap, sync::Arc, time::Duration};
+pub use gateway::inbound;
+use serde_json::{Value, json};
+use std::time::Duration;
 use tokio_util::sync::CancellationToken;
-
-pub const KIND: &str = "plugin-connections";
 
 pub const USER_AGENT: &str = concat!(
     "DiscordBot (https://github.com/leo91000/cairn, ",
@@ -26,207 +23,67 @@ pub const USER_AGENT: &str = concat!(
     ")"
 );
 
-#[derive(Clone, Copy, Default, Deserialize, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub enum AccessMode {
-    /// Only listed users; other mentions are discarded without a trace.
-    #[default]
-    Allowlist,
-    /// Unknown users who mention the bot create a request the owner can approve.
-    Requests,
-}
-
-/// Display labels chosen by the owner. Never used for authorization.
-#[derive(Clone, Default, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct Label {
-    pub id: String,
-    pub name: String,
-}
-
-#[derive(Clone, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct Connection {
-    pub id: String,
-    pub plugin_id: String,
-    pub name: String,
-    pub enabled: bool,
-    pub revision: String,
-    pub guild_id: String,
-    pub channel_id: String,
-    pub user_ids: Vec<String>,
-    pub agent_id: String,
-    pub project_id: Option<String>,
-    pub max_messages_per_hour: u32,
-    pub granted_access: Value,
-    pub owner_access_id: Option<String>,
-    pub updated_at: i64,
-    #[serde(default)]
-    pub access_mode: AccessMode,
-    #[serde(default)]
-    pub people: Vec<Label>,
-    #[serde(default)]
-    pub bot: Option<Label>,
-    #[serde(default)]
-    pub guild_name: String,
-    #[serde(default)]
-    pub channel_name: String,
-}
-
 pub fn snowflake(value: &str) -> bool {
     !value.is_empty() && value.len() <= 20 && value.bytes().all(|c| c.is_ascii_digit())
 }
 
-pub(crate) fn label(value: &str) -> String {
-    value
-        .chars()
-        .filter(|c| !c.is_control())
-        .take(100)
-        .collect::<String>()
-        .trim()
-        .to_owned()
-}
-
-fn credential_key(id: &str) -> String {
-    format!("plugin-discord:{id}")
-}
-
-pub(crate) async fn ensure_owner(s: &Service, connection: &Connection) -> Result<()> {
-    let current = crate::relay::task_author_policy(s).await?;
-    let access_id = current
-        .as_ref()
-        .map(|policy| policy.owner.access_id.as_str());
-    if access_id != connection.owner_access_id.as_deref() {
-        return Err(Error::forbidden(
-            "Discord delegation no longer belongs to this installation owner.",
-        ));
+/// The server and channel are the transport's scope: messages elsewhere never reach
+/// storage or the plugin.
+pub fn validate_scope(settings: &Value) -> Result<()> {
+    if !snowflake(text(settings, "guildId")) || !snowflake(text(settings, "channelId")) {
+        return Err(Error::bad("Choose a Discord server and channel."));
     }
     Ok(())
 }
 
-pub(crate) fn authorize(db: &Db<'_>, expected: &Connection) -> Result<Connection> {
-    let denied = || {
-        Error::forbidden(
-            "Discord connection or agent grant was revoked. Review the connection settings.",
-        )
-    };
-    let value = db.get(KIND, &expected.id)?.ok_or_else(denied)?;
-    let current: Connection = serde_json::from_value(value)?;
-    if !current.enabled || current.revision != expected.revision {
-        return Err(denied());
-    }
-    let agent = db.get("agents", &current.agent_id)?.ok_or_else(denied)?;
-    if policy(&agent) != current.granted_access {
-        return Err(denied());
-    }
-    Ok(current)
-}
-
-pub(crate) async fn credential(s: &Service, connection: &Connection) -> Result<String> {
-    ensure_owner(s, connection).await?;
-    let expected = connection.clone();
-    s.store.read(move |db| authorize(db, &expected)).await?;
-    let value = s
+/// Owner-only token check for a saved connection, even while it is paused.
+pub async fn test(s: &Service, connection: &Connection) -> Result<Value> {
+    let saved = s
         .vault
         .get(&credential_key(&connection.id))
         .await?
-        .ok_or_else(|| Error::forbidden("Discord token is missing."))?;
-    Ok(text(&value, "token").to_owned())
-}
-
-pub async fn maintain(s: Arc<Service>) {
-    let mut active: HashMap<String, (String, CancellationToken, tokio::task::JoinHandle<()>)> =
-        HashMap::new();
-    let mut timer = tokio::time::interval(Duration::from_secs(2));
-    timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-    loop {
-        tokio::select! {
-            () = s.shutdown.cancelled() => break,
-            () = s.plugins.changed.notified() => {},
-            _ = timer.tick() => {},
-        }
-        let connections = match s.store.list(KIND).await {
-            Ok(values) => values
-                .into_iter()
-                .filter_map(|value| serde_json::from_value::<Connection>(value).ok())
-                .filter(|value| value.enabled && value.plugin_id == "discord")
-                .collect::<Vec<_>>(),
-            Err(_) => continue,
-        };
-        let stale = active
-            .iter()
-            .filter(|(id, (revision, _, _))| {
-                !connections
-                    .iter()
-                    .any(|value| value.id == **id && value.revision == *revision)
-            })
-            .map(|(id, _)| id.clone())
-            .collect::<Vec<_>>();
-        for id in stale {
-            if let Some((_, stop, task)) = active.remove(&id) {
-                stop.cancel();
-                task.abort();
-                let _ = task.await;
-            }
-        }
-        for connection in connections {
-            if active.contains_key(&connection.id) {
-                continue;
-            }
-            let stop = s.shutdown.child_token();
-            let task = tokio::spawn(run(s.clone(), connection.clone(), stop.clone()));
-            active.insert(connection.id, (connection.revision, stop, task));
-        }
+        .ok_or_else(|| Error::bad("Discord token is missing."))?;
+    let response = s
+        .http
+        .get("https://discord.com/api/v10/users/@me")
+        .header("user-agent", USER_AGENT)
+        .header("authorization", format!("Bot {}", text(&saved, "token")))
+        .send()
+        .await
+        .map_err(|_| Error::bad_gateway("Discord is unavailable."))?;
+    if !response.status().is_success() {
+        return Err(Error::bad_gateway("Discord rejected the bot token."));
     }
-    for (_, (_, stop, task)) in active {
-        stop.cancel();
-        task.abort();
-        let _ = task.await;
+    let user: Value = response
+        .json()
+        .await
+        .map_err(|_| Error::bad_gateway("Invalid Discord response."))?;
+    if user["bot"] != true {
+        return Err(Error::bad("Use a bot token, not a user account token."));
     }
+    Ok(json!({ "ok": true, "botId": user["id"], "name": user["username"] }))
 }
 
-async fn status(s: &Service, connection: &Connection, state: &str) {
-    let key = format!("plugin-status:{}", connection.id);
-    let _ = s
-        .store
-        .set(
-            &key,
-            serde_json::json!({
-                "state": state,
-                "updatedAt": crate::config::now()
-            }),
-            None,
-        )
-        .await;
-}
-
-async fn run(s: Arc<Service>, connection: Connection, stop: CancellationToken) {
+/// Keeps the Gateway session alive until stopped. Returns an error only when Discord
+/// or Cairn refuses the connection for good (token reset, revoked grant…).
+pub async fn transport(
+    s: &Service,
+    connection: &Connection,
+    stop: &CancellationToken,
+) -> Result<()> {
     let mut retry = Duration::from_secs(5);
     let mut session = gateway::Session::default();
     loop {
-        if stop.is_cancelled() {
-            break;
-        }
-        status(&s, &connection, "connecting").await;
-        let operation = async {
-            let token = credential(&s, &connection).await?;
-            let delivery =
-                delivery::maintain(s.clone(), connection.clone(), token.clone(), stop.clone());
-            let socket = gateway::run(&s, &connection, &token, &stop, &mut session);
-            tokio::try_join!(socket, delivery).map(|_| ())
-        };
-        tokio::select! {
-            () = stop.cancelled() => break,
-            result = operation => {
-                if let Err(error) = result {
-                    let state = if matches!(error.status, 401 | 403) { "needs_review" } else { "disconnected" };
-                    status(&s, &connection, state).await;
-                    if matches!(error.status, 401 | 403) { break; }
-                }
-            },
+        let token = credential(s, connection)
+            .await?
+            .ok_or_else(|| Error::forbidden("Discord token is missing."))?;
+        match gateway::run(s, connection, &token, stop, &mut session).await {
+            Ok(()) => return Ok(()),
+            Err(error) if matches!(error.status, 401 | 403) => return Err(error),
+            Err(_) => status(s, connection, "connecting").await,
         }
         tokio::select! {
-            () = stop.cancelled() => break,
+            () = stop.cancelled() => return Ok(()),
             () = tokio::time::sleep(retry) => {},
         }
         retry = (retry * 2).min(Duration::from_secs(60));

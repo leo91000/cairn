@@ -1,7 +1,12 @@
-use super::{Connection, delivery::accept};
+use super::{Connection, label, snowflake};
 use crate::{
     error::{Error, Result},
+    plugins::{
+        connections::{Label, status},
+        work::{Inbound, accept},
+    },
     service::Service,
+    validation::text,
 };
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{Value, json};
@@ -165,11 +170,13 @@ async fn run_at(
                                 session.id = value["d"]["session_id"].as_str().map(str::to_owned);
                                 session.bot_id = value["d"]["user"]["id"].as_str().unwrap_or("").to_owned();
                                 session.resume_url = value["d"]["resume_gateway_url"].as_str().filter(|url| safe_resume_url(url)).map(str::to_owned);
-                                super::status(s, connection, "connected").await;
+                                status(s, connection, "connected").await;
                             }
-                            Some("RESUMED") => super::status(s, connection, "connected").await,
+                            Some("RESUMED") => status(s, connection, "connected").await,
                             Some("MESSAGE_CREATE") if !session.bot_id.is_empty() => {
-                                accept(s, connection, &session.bot_id, &value["d"]).await?;
+                                if let Some(inbound) = inbound(connection, &session.bot_id, &value["d"]) {
+                                    accept(s, connection, inbound).await?;
+                                }
                             }
                             _ => {},
                         }
@@ -194,6 +201,42 @@ async fn run_at(
             },
         }
     }
+}
+
+/// The transport's scope: a person mentioning this bot in the configured channel.
+/// Without the Message Content intent, other messages carry no text anyway.
+pub fn inbound(connection: &Connection, bot: &str, message: &Value) -> Option<Inbound> {
+    let author = &message["author"];
+    let addressed = message["guild_id"] == connection.settings["guildId"]
+        && message["channel_id"] == connection.settings["channelId"]
+        && author["id"].as_str().is_some_and(snowflake)
+        && author["bot"] != true
+        && message["webhook_id"].is_null()
+        && text(message, "content").len() <= 50_000
+        && snowflake(text(message, "id"))
+        && message["mentions"]
+            .as_array()
+            .is_some_and(|mentions| mentions.iter().any(|mention| mention["id"] == bot));
+    if !addressed {
+        return None;
+    }
+    let name = author["global_name"]
+        .as_str()
+        .filter(|name| !name.is_empty())
+        .unwrap_or_else(|| text(author, "username"));
+    Some(Inbound {
+        id: text(message, "id").to_owned(),
+        author: Label {
+            id: text(author, "id").to_owned(),
+            name: label(name),
+        },
+        context: json!({
+            "botId": bot,
+            "guildId": message["guild_id"],
+            "channelId": message["channel_id"],
+        }),
+        body: json!({ "content": message["content"] }),
+    })
 }
 
 fn safe_resume_url(value: &str) -> bool {
@@ -332,7 +375,7 @@ mod tests {
         upstream.await.unwrap();
         assert_eq!(session.sequence, Some(3));
         assert_eq!(session.id.as_deref(), Some("synthetic_session"));
-        assert_eq!(s.store.list("plugin-inbox").await.unwrap().len(), 1);
+        assert_eq!(s.store.list("plugin-events").await.unwrap().len(), 1);
         assert!(!safe_resume_url("wss://localhost"));
         assert!(!safe_resume_url(
             "wss://gateway.discord.gg.attacker.example"

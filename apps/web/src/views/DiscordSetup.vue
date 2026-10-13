@@ -144,20 +144,23 @@ async function save() {
     const body = {
       name: name.value.trim(),
       ...(token.value ? { token: token.value } : {}),
-      guildId: guildId.value,
-      guildName: guild.value?.name ?? '',
-      channelId: channelId.value,
-      channelName: channel.value?.name ?? '',
+      settings: {
+        guildId: guildId.value,
+        guildName: guild.value?.name ?? '',
+        channelId: channelId.value,
+        channelName: channel.value?.name ?? '',
+        botId: discovery.value?.bot.id ?? '',
+        botName: discovery.value?.bot.name ?? '',
+      },
       accessMode: accessMode.value,
       userIds: people.value.map(person => person.id),
       people: people.value,
-      bot: discovery.value?.bot,
       agentId: agentId.value,
       projectId: agent.value?.access.projects?.[0] ?? null,
       maxMessagesPerHour: limit.value,
       enabled: enabled.value,
     }
-    await api(`/plugins/discord${editing.value ? `/${editing.value}` : ''}`, {
+    await api(`/plugins/discord/connections${editing.value ? `/${editing.value}` : ''}`, {
       method: editing.value ? 'PUT' : 'POST',
       body: JSON.stringify(body),
     })
@@ -184,8 +187,8 @@ onMounted(async () => {
       return
     }
 
-    guildId.value = existing.guildId
-    channelId.value = existing.channelId
+    guildId.value = existing.settings.guildId
+    channelId.value = existing.settings.channelId
     accessMode.value = existing.accessMode
     people.value = existing.userIds.map(id => existing.people.find(person => person.id === id) ?? { id, name: '' })
     agentId.value = existing.agentId

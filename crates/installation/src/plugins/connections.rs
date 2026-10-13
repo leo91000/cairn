@@ -1,0 +1,545 @@
+//! Configured plugin connections: an owner delegation (agent, project, people, quota)
+//! plus plugin settings declared by the manifest. Identical for every plugin.
+use super::{discord, registry};
+use crate::{
+    config::{id, now},
+    error::{Error, Result},
+    service::{Service, policy},
+    store::Db,
+    validation::{text, uuid},
+};
+use cairn_plugin_api::Manifest;
+use serde::{Deserialize, Serialize};
+use serde_json::{Map, Value, json};
+
+pub const KIND: &str = "plugin-connections";
+
+/// Records owned by a connection, removed with it.
+pub const OWNED: &[&str] = &[
+    "plugin-events",
+    "plugin-deliveries",
+    "plugin-requests",
+    "plugin-activity",
+    "plugin-storage",
+    "plugin-timers",
+];
+
+#[derive(Clone, Copy, Default, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum AccessMode {
+    /// Only listed people; other people's messages are discarded without a trace.
+    #[default]
+    Allowlist,
+    /// Unknown people who reach the plugin create a request the owner can approve.
+    Requests,
+}
+
+/// Display labels chosen by the owner. Never used for authorization.
+#[derive(Clone, Default, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Label {
+    pub id: String,
+    pub name: String,
+}
+
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Connection {
+    pub id: String,
+    pub plugin_id: String,
+    pub name: String,
+    pub enabled: bool,
+    pub revision: String,
+    /// Plugin-specific values validated against the manifest's settings schema.
+    pub settings: Value,
+    /// Empty when the plugin cannot start conversations.
+    pub agent_id: String,
+    pub project_id: Option<String>,
+    pub granted_access: Value,
+    pub owner_access_id: Option<String>,
+    pub access_mode: AccessMode,
+    pub user_ids: Vec<String>,
+    pub people: Vec<Label>,
+    pub max_messages_per_hour: u32,
+    pub updated_at: i64,
+}
+
+pub fn label(value: &str) -> String {
+    value
+        .chars()
+        .filter(|c| !c.is_control())
+        .take(100)
+        .collect::<String>()
+        .trim()
+        .to_owned()
+}
+
+/// External identities (Discord snowflakes, Slack IDs, …) are short opaque tokens.
+pub fn external_id(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 64
+        && value
+            .bytes()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, b'_' | b'-' | b'.' | b':'))
+}
+
+pub fn credential_key(id: &str) -> String {
+    format!("plugin-credential:{id}")
+}
+
+pub(crate) async fn ensure_owner(s: &Service, connection: &Connection) -> Result<()> {
+    let current = crate::relay::task_author_policy(s).await?;
+    let access_id = current
+        .as_ref()
+        .map(|policy| policy.owner.access_id.as_str());
+    if access_id != connection.owner_access_id.as_deref() {
+        return Err(Error::forbidden(
+            "Plugin delegation no longer belongs to this installation owner.",
+        ));
+    }
+    Ok(())
+}
+
+/// Rechecked before every effect: still enabled, same revision, same agent grants.
+pub(crate) fn authorize(db: &Db<'_>, expected: &Connection) -> Result<Connection> {
+    let denied =
+        || Error::forbidden("Plugin connection or agent grant was revoked. Review the connection.");
+    let value = db.get(KIND, &expected.id)?.ok_or_else(denied)?;
+    let current: Connection = serde_json::from_value(value)?;
+    if !current.enabled || current.revision != expected.revision {
+        return Err(denied());
+    }
+    if !current.agent_id.is_empty() {
+        let agent = db.get("agents", &current.agent_id)?.ok_or_else(denied)?;
+        if policy(&agent) != current.granted_access {
+            return Err(denied());
+        }
+    }
+    Ok(current)
+}
+
+/// The connection's secret, for host-side injection only. Never sent to plugin code.
+pub(crate) async fn credential(s: &Service, connection: &Connection) -> Result<Option<String>> {
+    ensure_owner(s, connection).await?;
+    let expected = connection.clone();
+    s.store.read(move |db| authorize(db, &expected)).await?;
+    Ok(s.vault
+        .get(&credential_key(&connection.id))
+        .await?
+        .map(|value| text(&value, "token").to_owned()))
+}
+
+pub(crate) async fn status(s: &Service, connection: &Connection, state: &str) {
+    let _ = s
+        .store
+        .set(
+            &format!("plugin-status:{}", connection.id),
+            json!({ "state": state, "updatedAt": now() }),
+            None,
+        )
+        .await;
+}
+
+/// Validates settings against the manifest schema. Unknown keys are rejected.
+pub fn settings(manifest: &Manifest, input: &Value) -> Result<Value> {
+    let empty = Map::new();
+    let input = match input {
+        Value::Object(map) => map,
+        Value::Null => &empty,
+        _ => return Err(Error::bad("Plugin settings must be an object.")),
+    };
+    if let Some(key) = input
+        .keys()
+        .find(|key| !manifest.settings.iter().any(|field| field["key"] == **key))
+    {
+        return Err(Error::bad(format!("Unknown plugin setting: {key}.")));
+    }
+    let mut output = Map::new();
+    for field in &manifest.settings {
+        let key = text(field, "key").to_owned();
+        let title = text(field, "title");
+        let value = input.get(&key).filter(|value| !value.is_null());
+        let Some(value) = value else {
+            if field["required"] == true {
+                return Err(Error::bad(format!("Enter {title}.")));
+            }
+            continue;
+        };
+        let value = match field["type"].as_str() {
+            Some("string") => {
+                let max = field["maxLength"].as_u64().unwrap_or(200).min(2000) as usize;
+                let value = value
+                    .as_str()
+                    .ok_or_else(|| Error::bad(format!("{title} must be text.")))?;
+                if value.chars().count() > max || value.chars().any(char::is_control) {
+                    return Err(Error::bad(format!("{title} is too long or invalid.")));
+                }
+                if field["required"] == true && value.trim().is_empty() {
+                    return Err(Error::bad(format!("Enter {title}.")));
+                }
+                json!(value.trim())
+            }
+            Some("number") => {
+                let number = value
+                    .as_f64()
+                    .filter(|number| number.is_finite())
+                    .ok_or_else(|| Error::bad(format!("{title} must be a number.")))?;
+                let low = field["minimum"].as_f64().unwrap_or(f64::MIN);
+                let high = field["maximum"].as_f64().unwrap_or(f64::MAX);
+                if number < low || number > high {
+                    return Err(Error::bad(format!("{title} is out of range.")));
+                }
+                value.clone()
+            }
+            _ => json!(
+                value
+                    .as_bool()
+                    .ok_or_else(|| Error::bad(format!("{title} must be on or off.")))?
+            ),
+        };
+        output.insert(key, value);
+    }
+    Ok(Value::Object(output))
+}
+
+fn labels(value: &Value) -> Vec<Label> {
+    value
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|item| item["id"].as_str().is_some_and(external_id))
+        .take(100)
+        .map(|item| Label {
+            id: text(item, "id").to_owned(),
+            name: label(text(item, "name")),
+        })
+        .collect()
+}
+
+pub async fn save(
+    s: &Service,
+    plugin_id: &str,
+    input: &Value,
+    existing: Option<&str>,
+) -> Result<Value> {
+    let package = registry::active(s, plugin_id).await?;
+    let manifest = package.manifest;
+    let owner = crate::relay::task_author_policy(s).await?;
+    let name = text(input, "name").trim();
+    if name.is_empty() || name.chars().count() > 100 {
+        return Err(Error::bad("Enter a connection name."));
+    }
+    let settings = settings(&manifest, &input["settings"])?;
+    if manifest.permits_capability("transport.discord") {
+        discord::validate_scope(&settings)?;
+    }
+    let delegates = manifest.permits_capability("conversations.submit");
+    let agent_id = if delegates {
+        text(input, "agentId")
+    } else {
+        ""
+    };
+    let project = input["projectId"]
+        .as_str()
+        .filter(|_| delegates)
+        .map(str::to_owned);
+    if delegates {
+        uuid(agent_id)?;
+    }
+    if let Some(project) = &project {
+        uuid(project)?;
+    }
+    let users = input["userIds"].as_array().cloned().unwrap_or_default();
+    let access_mode = match input["accessMode"].as_str() {
+        None | Some("allowlist") => AccessMode::Allowlist,
+        Some("requests") => AccessMode::Requests,
+        Some(_) => return Err(Error::bad("Choose who can use this connection.")),
+    };
+    if users.len() > 100
+        || users
+            .iter()
+            .any(|user| !user.as_str().is_some_and(external_id))
+    {
+        return Err(Error::bad("Enter valid user IDs, at most 100."));
+    }
+    // Approval mode may start empty: the owner approves the first request themselves.
+    if delegates && users.is_empty() && access_mode == AccessMode::Allowlist {
+        return Err(Error::bad(
+            "Add at least one person who can use this connection.",
+        ));
+    }
+    let user_ids = users
+        .iter()
+        .filter_map(Value::as_str)
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    let given = labels(&input["people"]);
+    let people = user_ids
+        .iter()
+        .map(|id| {
+            given
+                .iter()
+                .find(|label| label.id == *id)
+                .cloned()
+                .unwrap_or_else(|| Label {
+                    id: id.clone(),
+                    name: String::new(),
+                })
+        })
+        .collect();
+    let enabled = input["enabled"]
+        .as_bool()
+        .ok_or_else(|| Error::bad("Choose whether the connection is enabled."))?;
+    let limit = input["maxMessagesPerHour"]
+        .as_u64()
+        .filter(|value| (1..=100).contains(value))
+        .unwrap_or(20) as u32;
+    let token = text(input, "token").trim();
+    if input.get("token").is_some_and(|value| !value.is_string())
+        || token.len() > 4096
+        || token.chars().any(|c| c.is_whitespace() || c.is_control())
+        || (existing.is_none() && token.is_empty() && manifest.credential.is_some())
+    {
+        let label = manifest
+            .credential
+            .as_ref()
+            .map_or("credential", |c| c.label.as_str());
+        return Err(Error::bad(format!("Enter the {label}.")));
+    }
+    let connection_id = existing.map_or_else(id, str::to_owned);
+    uuid(&connection_id)?;
+    let encrypted = if token.is_empty() {
+        None
+    } else {
+        Some(
+            s.vault
+                .encrypt(&credential_key(&connection_id), &json!({ "token": token }))?,
+        )
+    };
+    let mut connection = Connection {
+        id: connection_id,
+        plugin_id: plugin_id.to_owned(),
+        name: name.to_owned(),
+        enabled,
+        revision: id(),
+        settings,
+        agent_id: agent_id.to_owned(),
+        project_id: project,
+        granted_access: Value::Null,
+        owner_access_id: owner.map(|policy| policy.owner.access_id),
+        access_mode,
+        user_ids,
+        people,
+        max_messages_per_hour: limit,
+        updated_at: now(),
+    };
+    let updating = existing.is_some();
+    let result = s.store.transaction(move |db| {
+        if let Some(current) = db.get(KIND, &connection.id)? {
+            if current["pluginId"] != connection.plugin_id { return Err(Error::not_found("Plugin connection not found.")); }
+        } else if updating {
+            return Err(Error::not_found("Plugin connection not found."));
+        }
+        if !updating && db.list(KIND)?.len() >= 16 {
+            return Err(Error::bad("At most sixteen plugin connections can run on this installation."));
+        }
+        if !connection.agent_id.is_empty() {
+            let agent = db.get("agents", &connection.agent_id)?.ok_or_else(|| Error::bad("Agent not found."))?;
+            let access = policy(&agent);
+            let projects = connection.project_id.as_ref().map_or_else(|| json!([]), |id| json!([id]));
+            // External people never receive an installation-wide agent or project scope.
+            if access["projects"] != projects || access["installation"] == true {
+                return Err(Error::bad("Choose a dedicated agent restricted to the selected project (or no projects), with installation access disabled."));
+            }
+            if let Some(project) = &connection.project_id
+                && db.get("projects", project)?.is_none()
+            { return Err(Error::bad("Project not found.")); }
+            connection.granted_access = access;
+        }
+        if connection.access_mode == AccessMode::Allowlist {
+            for request in db.list("plugin-requests")? {
+                if request["connectionId"] == connection.id && request["status"] == "pending" {
+                    db.remove("plugin-requests", text(&request, "id"))?;
+                }
+            }
+        }
+        if let Some(encrypted) = encrypted { db.set(&format!("mcp-secret:{}", credential_key(&connection.id)), &encrypted, None)?; }
+        let value = serde_json::to_value(&connection)?;
+        db.put(KIND, &value)?;
+        db.audit("plugin.connection.saved", &json!({ "id": connection.id, "plugin": connection.plugin_id }))?;
+        Ok(value)
+    }).await?;
+    s.plugins.changed.notify_one();
+    Ok(result)
+}
+
+/// Loads a connection and checks it belongs to the plugin named in the route.
+pub async fn get(s: &Service, plugin_id: &str, connection_id: &str) -> Result<Connection> {
+    uuid(connection_id)?;
+    let value = s.get(KIND, connection_id).await?;
+    if value["pluginId"] != plugin_id {
+        return Err(Error::not_found("Plugin connection not found."));
+    }
+    Ok(serde_json::from_value(value)?)
+}
+
+pub async fn remove(s: &Service, plugin_id: &str, connection_id: &str) -> Result<Value> {
+    get(s, plugin_id, connection_id).await?;
+    let connection_id = connection_id.to_owned();
+    s.store
+        .transaction(move |db| {
+            db.remove(KIND, &connection_id)?;
+            db.delete(&format!("mcp-secret:{}", credential_key(&connection_id)))?;
+            db.delete(&format!("plugin-status:{connection_id}"))?;
+            for kind in OWNED {
+                for value in db.list(kind)? {
+                    if value["connectionId"] == connection_id {
+                        db.remove(kind, text(&value, "id"))?;
+                    }
+                }
+            }
+            db.audit("plugin.connection.deleted", &json!({ "id": connection_id }))
+        })
+        .await?;
+    s.plugins.changed.notify_one();
+    Ok(json!({ "deleted": true }))
+}
+
+/// Owner view: configuration, live state, usage and recent exchanges. Never secrets.
+pub async fn overview(s: &Service) -> Result<Vec<Value>> {
+    let hour = now() / 3_600_000;
+    s.store
+        .read(move |db| {
+            let requests = db.list("plugin-requests")?;
+            let activity = db.list("plugin-activity")?;
+            let mut connections = db.list(KIND)?;
+            for connection in &mut connections {
+                let id = text(connection, "id").to_owned();
+                connection["status"] = db
+                    .kv(&format!("plugin-status:{id}"))?
+                    .unwrap_or(json!({ "state": "disconnected" }));
+                connection["usage"] = json!({
+                    "hour": db
+                        .kv(&format!("plugin-rate:{id}:{hour}"))?
+                        .and_then(|value| value.as_u64())
+                        .unwrap_or(0)
+                });
+                let mut pending = requests
+                    .iter()
+                    .filter(|value| value["connectionId"] == id && value["status"] == "pending")
+                    .cloned()
+                    .collect::<Vec<_>>();
+                pending.sort_by_key(|value| -value["updatedAt"].as_i64().unwrap_or(0));
+                connection["requests"] = json!(pending);
+                let mut recent = activity
+                    .iter()
+                    .filter(|value| value["connectionId"] == id)
+                    .cloned()
+                    .collect::<Vec<_>>();
+                recent.sort_by_key(|value| -value["createdAt"].as_i64().unwrap_or(0));
+                recent.truncate(8);
+                connection["activity"] = json!(recent);
+            }
+            Ok(connections)
+        })
+        .await
+}
+
+/// Pausing keeps the configuration and credential; the worker stops within seconds.
+pub async fn set_enabled(s: &Service, plugin_id: &str, id: &str, input: &Value) -> Result<Value> {
+    get(s, plugin_id, id).await?;
+    let enabled = input["enabled"]
+        .as_bool()
+        .ok_or_else(|| Error::bad("Choose whether the connection accepts work."))?;
+    let id = id.to_owned();
+    let value = s
+        .store
+        .transaction(move |db| {
+            let mut value = db
+                .get(KIND, &id)?
+                .ok_or_else(|| Error::not_found("Plugin connection not found."))?;
+            value["enabled"] = json!(enabled);
+            value["updatedAt"] = json!(now());
+            db.put(KIND, &value)?;
+            db.audit(
+                "plugin.connection.enabled",
+                &json!({ "id": id, "enabled": enabled }),
+            )?;
+            Ok(value)
+        })
+        .await?;
+    s.plugins.changed.notify_one();
+    Ok(value)
+}
+
+/// Approve, deny or remove one person. Admission rereads this list for every
+/// message, so changes apply immediately without restarting the worker.
+pub async fn people(
+    s: &Service,
+    plugin_id: &str,
+    connection_id: &str,
+    user_id: &str,
+    action: &str,
+) -> Result<Value> {
+    get(s, plugin_id, connection_id).await?;
+    if !external_id(user_id) || !matches!(action, "approve" | "deny" | "remove") {
+        return Err(Error::bad("Invalid person."));
+    }
+    let (connection_id, user_id, action) = (
+        connection_id.to_owned(),
+        user_id.to_owned(),
+        action.to_owned(),
+    );
+    s.store
+        .transaction(move |db| {
+            let mut connection: Connection = serde_json::from_value(
+                db.get(KIND, &connection_id)?
+                    .ok_or_else(|| Error::not_found("Plugin connection not found."))?,
+            )?;
+            let request = db
+                .list("plugin-requests")?
+                .into_iter()
+                .find(|value| value["connectionId"] == connection_id && value["userId"] == user_id);
+            match action.as_str() {
+                "approve" => {
+                    let request =
+                        request.ok_or_else(|| Error::not_found("Access request not found."))?;
+                    if !connection.user_ids.contains(&user_id) {
+                        if connection.user_ids.len() >= 100 {
+                            return Err(Error::bad("At most 100 people can use one connection."));
+                        }
+                        connection.user_ids.push(user_id.clone());
+                        connection.people.push(Label {
+                            id: user_id.clone(),
+                            name: label(text(&request, "name")),
+                        });
+                    }
+                    db.remove("plugin-requests", text(&request, "id"))?;
+                }
+                "deny" => {
+                    // A denied request stays recorded so repeated attempts stay silent.
+                    let mut request =
+                        request.ok_or_else(|| Error::not_found("Access request not found."))?;
+                    request["status"] = json!("denied");
+                    request["updatedAt"] = json!(now());
+                    db.put("plugin-requests", &request)?;
+                }
+                _ => {
+                    connection.user_ids.retain(|id| *id != user_id);
+                    connection.people.retain(|person| person.id != user_id);
+                    if let Some(request) = request {
+                        db.remove("plugin-requests", text(&request, "id"))?;
+                    }
+                }
+            }
+            connection.updated_at = now();
+            let value = serde_json::to_value(&connection)?;
+            db.put(KIND, &value)?;
+            db.audit(
+                "plugin.connection.people",
+                &json!({ "id": connection_id, "action": action }),
+            )?;
+            Ok(value)
+        })
+        .await
+}

@@ -111,3 +111,4 @@ export const BrandDiscord = 'i-simple-icons-discord' as const
 export const BrandSlack = 'i-simple-icons-slack' as const
 export const BrandTelegram = 'i-simple-icons-telegram' as const
 export const BrandLinear = 'i-simple-icons-linear' as const
+export const Upload = 'i-lucide-upload' as const
