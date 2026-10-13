@@ -117,8 +117,9 @@ and inbox behavior retain their tests.
 The image CI runs `tests/runner-exclusive-smoke.mjs` against the exact candidate
 image. With private zram on a disposable host it requires actual memory reclamation.
 If the host kernel cannot load zram (observed on hosted Azure 6.17.0-1022),
-the positive reclamation check is skipped and the probe still verifies that
-unqualified memory acquisition fails with rollback. CPU and nested-vCPU continuity
+positive reclamation becomes optional: any successful memory acquisition still
+checks residency and headroom, and any refusal must complete rollback.
+CPU and nested-vCPU continuity
 remain required. A skipped check does not qualify RAM reclamation on that host.
 It checks the same command/VMM PIDs and buffer contents, nested-vCPU progress,
 admission fencing, checkpoint arbitration, reservation expiry and automatic resumption.
