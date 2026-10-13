@@ -7,6 +7,19 @@ export interface SendingMessage {
   label: string
 }
 
+export function chatSleepNotice(chat: ChatDetail | null | undefined) {
+  if (chat?.paused || (chat?.lifecycle && chat.lifecycle !== 'active') || chat?.run?.status !== 'succeeded' || !chat.wakeup)
+    return null
+  const when = new Date(chat.wakeup.wakeAt).toLocaleString([], {
+    month: 'short',
+    day: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+  })
+  return { account: null, message: `${chat.wakeup.reason} · Automatic resume from ${when}, when capacity is available.` }
+}
+
 export function chatWaitNotice(run: Run | null | undefined) {
   const reason = run?.status === 'queued' ? run.accountWaitReason?.trim() : ''
   if (!reason)

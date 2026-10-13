@@ -294,7 +294,7 @@ export function chatFixture() {
       if (text.includes('finish now'))
         finish()
       else if (!hold)
-        setTimeout(finish, 250)
+        setTimeout(finish, text.includes('fixture:slow-finish') ? 3000 : 250)
     }
 
     return true

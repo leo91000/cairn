@@ -74,7 +74,19 @@ abstract class BackgroundWaitCases {
             compose.onNodeWithText(message).assertDoesNotExist()
         }
 
-    private fun conversation(status: String, check: () -> Unit) {
+    @Test
+    fun scheduledSleepDisplaysAutomaticResumeWithoutWorkingIndicator() =
+        conversation("succeeded", sleeping = true) {
+            compose.onNodeWithText("Attente planifiée", useUnmergedTree = true).assertExists()
+            compose
+                .onNodeWithText("Attendre la CI · Reprise automatique", substring = true)
+                .assertIsDisplayed()
+            compose.onAllNodesWithTag("agent-working").assertCountEquals(0)
+            compose.onAllNodesWithTag("agent-waiting").assertCountEquals(0)
+            compose.onNodeWithContentDescription("Arrêter").assertExists()
+        }
+
+    private fun conversation(status: String, sleeping: Boolean = false, check: () -> Unit) {
         MockWebServer().use { server ->
             val now = System.currentTimeMillis()
             val chat =
@@ -85,6 +97,10 @@ abstract class BackgroundWaitCases {
                     agentName = "Agent principal",
                     runId = "run",
                     run = Run("run", status = status, startedAt = now - 60_000),
+                    wakeup =
+                        if (sleeping)
+                            ChatWakeup("wake", "message", "Attendre la CI", 420, now, now + 420000)
+                        else null,
                 )
             val event =
                 RunEvent(

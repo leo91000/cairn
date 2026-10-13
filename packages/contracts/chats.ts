@@ -27,7 +27,16 @@ export interface ChatAttachment {
   kind: 'image' | 'file'
 }
 export type ConversationLifecycle = 'active' | 'trash' | 'purging'
+export interface ChatWakeup {
+  id: string
+  messageId: string
+  reason: string
+  seconds: number
+  createdAt: number
+  wakeAt: number
+}
 export interface Chat {
+  wakeup?: ChatWakeup | null
   slug?: string
   lifecycle?: ConversationLifecycle
   trashedAt?: number | null

@@ -50,6 +50,16 @@ data class ChatQuestion(
 )
 
 @Serializable
+data class ChatWakeup(
+    val id: String,
+    val messageId: String,
+    val reason: String,
+    val seconds: Long,
+    val createdAt: Long,
+    val wakeAt: Long,
+)
+
+@Serializable
 data class Chat(
     val id: String,
     val title: String = "Nouvelle conversation",
@@ -72,6 +82,7 @@ data class Chat(
     val restoredAt: Long? = null,
     val sessionRestartRequested: Boolean = false,
     val lifecycleError: String? = null,
+    val wakeup: ChatWakeup? = null,
 )
 
 @Serializable
