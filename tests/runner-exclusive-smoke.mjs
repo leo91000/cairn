@@ -79,6 +79,12 @@ for(const pid of fs.readdirSync('/proc').filter(v=>/^\\d+$/.test(v))){
     return JSON.parse(docker('exec', name, 'node', '-e', script))
   }
 
+  function hostAvailableMemoryMiB() {
+    const memory = docker('exec', name, 'cat', '/proc/meminfo').match(/^MemAvailable:\s+(\d+)\s+kB$/m)
+    assert.ok(memory, 'Host available memory can be measured')
+    return Math.floor(Number(memory[1]) / 1024)
+  }
+
   async function makeEntry(storage, mode) {
     const runId = randomUUID()
     const id = randomUUID()
@@ -223,13 +229,15 @@ console.log('exclusive-live-ok '+mode+' pid='+process.pid);
     assert.ok(logs(victim).includes(`tick victim pid=${guestPid}`))
 
     const health = await (await api('/health')).json()
-    const headroom = health.budget.limits.memoryMiB - health.usage.memoryMiB
+    const hostMemoryBefore = hostAvailableMemoryMiB()
+    const headroom = Math.min(health.budget.limits.memoryMiB - health.usage.memoryMiB, hostMemoryBefore)
     const memoryRequest = { ...reservation(), minimumAvailableMemoryMiB: headroom + 64 }
     const memoryStart = snapshot(victim)
     const memoryResponse = await request('/exclusive/acquire', 'POST', memoryRequest)
     await setTimeout(300)
     const memoryNestedCounter = nestedProgress()
     let memoryAfter
+    let hostMemoryAfter
     if (memoryResponse.ok) {
       const value = await memoryResponse.json()
       assert.equal(value.reservation.state, 'acquired')
@@ -238,6 +246,8 @@ console.log('exclusive-live-ok '+mode+' pid='+process.pid);
       assert.ok(memoryAfter.resident + 32 * 1024 ** 2 < memoryStart.resident, 'Actual paused VMM residency decreases')
       const qualified = await (await api('/health')).json()
       assert.ok(qualified.budget.limits.memoryMiB - qualified.usage.memoryMiB >= memoryRequest.minimumAvailableMemoryMiB, 'Confirmed cgroup headroom meets the requested target')
+      hostMemoryAfter = hostAvailableMemoryMiB()
+      assert.ok(hostMemoryAfter >= memoryRequest.minimumAvailableMemoryMiB, 'Confirmed host headroom meets the requested target')
       await api('/exclusive/release', 'POST', { id: memoryRequest.id, epoch: memoryRequest.epoch })
     }
     else {
@@ -269,6 +279,8 @@ console.log('exclusive-live-ok '+mode+' pid='+process.pid);
       before,
       memoryStart,
       memoryAfter,
+      hostMemoryBeforeMiB: hostMemoryBefore,
+      hostMemoryAfterMiB: hostMemoryAfter,
       nestedProgress: {
         pid: nestedPid,
         afterCpuPause: pausedNestedCounter.toString(),

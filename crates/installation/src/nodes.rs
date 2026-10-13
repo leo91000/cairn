@@ -1006,6 +1006,7 @@ fn execution_ready(node: &Value, body: &Value, expected: &Expectations) -> bool 
         .as_ref()
         .is_none_or(|image| node["imageDigest"] == *image || node["updateError"].is_string());
     body["executionReady"] == true
+        && body["pool"]["quarantined"] != true
         && body["sharedResources"] == true
         && body["budget"] == json!({ "slots": slots(node), "limits": node["limits"] })
         && node["capabilities"]["fuse"] == true

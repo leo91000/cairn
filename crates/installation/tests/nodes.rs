@@ -392,6 +392,16 @@ async fn shared_budget_must_be_applied_before_admission_and_reconfiguration_paus
             ready
         );
     }
+    heartbeat["pool"] = json!({ "quarantined": true });
+    owner
+        .call("POST", HEARTBEAT, heartbeat.clone(), Some(token))
+        .await;
+    assert_eq!(
+        owner.stored("nodes", &node).await.unwrap()["executionReady"],
+        false,
+        "A quarantined pool cannot admit work even if executionReady was stale"
+    );
+    heartbeat["pool"]["quarantined"] = false.into();
     let (status, configured) = owner
         .send(
             "PUT",
