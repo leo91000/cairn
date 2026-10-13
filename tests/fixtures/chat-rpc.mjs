@@ -330,7 +330,7 @@ export function chatFixture() {
             durationMs: 9,
           },
         })
-        // `fixture:subagents-working` leaves the subagent at work until the user says "finish now".
+        // `fixture:subagents-working` leaves the subagent at work while the turn stays open.
         if (text.includes('fixture:subagents-working')) {
           hold = true
         }

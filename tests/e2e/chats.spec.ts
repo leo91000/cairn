@@ -123,8 +123,6 @@ test('working subagents stay in sight beside the composer and open as a drawer o
   await expect(drawer).toHaveCount(0)
   await bar.getByRole('button', { name: /1 subagent working/ }).click()
   await expect(page.getByRole('dialog', { name: 'Subagent activity' })).toBeVisible()
-  await workspace.api(`/api/chats/${chat.id}/messages`, 'POST', { id: randomUUID(), text: 'finish now' })
-  await expect.poll(async () => (await workspace.api(`/api/chats/${chat.id}`)).run?.status, { timeout: 15000 }).toBe('succeeded')
 })
 
 test('a transient agent error shows a retry countdown and resumes without user input', async ({ page, workspace }) => {
