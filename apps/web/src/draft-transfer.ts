@@ -1,9 +1,90 @@
 import {
   beaconOrigin,
   centralAccount,
+  installationHost,
   installationSubdomains,
   installationUrl,
 } from './beacon-location'
+
+const transferPrefix = 'cairn-draft-transfer:'
+const transferParameter = 'cairn_draft_transfer'
+const transferLifetime = 5 * 60 * 1000
+let pendingTransfer = ''
+
+function validTransferId(value: unknown): value is string {
+  return typeof value === 'string' && /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/.test(value)
+}
+
+function draftEntries(drafts: unknown, installationId: string) {
+  if (!drafts || typeof drafts !== 'object' || Array.isArray(drafts))
+    throw new Error('Invalid draft transfer')
+  const entries = Object.entries(drafts)
+  const prefix = `cairn-chat-draft:${installationId}:`
+  if (entries.length > 1000 || entries.some(([key, value]) => !key.startsWith(prefix) || typeof value !== 'string' || value.length > 1000000))
+    throw new Error('Invalid draft transfer')
+  return entries as [string, string][]
+}
+
+function removeExpiredTransfers() {
+  for (let index = localStorage.length - 1; index >= 0; index--) {
+    const key = localStorage.key(index)
+    if (!key?.startsWith(transferPrefix))
+      continue
+    try {
+      const batch = JSON.parse(localStorage.getItem(key) || 'null')
+      if (!batch || typeof batch.expiresAt !== 'number' || batch.expiresAt <= Date.now())
+        localStorage.removeItem(key)
+    }
+    catch { localStorage.removeItem(key) }
+  }
+}
+
+// Remove the opaque handoff marker before the router sees it. It contains no draft or credential.
+export function prepareDraftTransfer() {
+  if (!installationHost || window.parent !== window)
+    return
+  const url = new URL(window.location.href)
+  const id = url.searchParams.get(transferParameter)
+  if (id !== null) {
+    pendingTransfer = validTransferId(id) ? id : ''
+    url.searchParams.delete(transferParameter)
+    window.history.replaceState(window.history.state, '', url.href)
+  }
+}
+
+// WebKit partitions iframe sessionStorage; a short-lived target-origin mailbox survives navigation.
+// Consume only this tab's account/installation-bound batch before the composer is mounted.
+export function restoreInstallationDrafts(installationId: string, accountId: string) {
+  if (!pendingTransfer) {
+    try {
+      removeExpiredTransfers()
+    }
+    catch {}
+
+    return
+  }
+
+  removeExpiredTransfers()
+  const key = `${transferPrefix}${pendingTransfer}`
+  const raw = localStorage.getItem(key)
+  if (!raw)
+    return
+  const batch = JSON.parse(raw)
+  if (batch.id !== installationId || batch.accountId !== accountId || batch.origin !== beaconOrigin || batch.expiresAt <= Date.now()) {
+    localStorage.removeItem(key)
+    pendingTransfer = ''
+    return
+  }
+
+  for (const [key, value] of draftEntries(batch.drafts, installationId)) {
+    // Empty is a newer deliberately cleared draft, not an absent key.
+    if (sessionStorage.getItem(key) === null)
+      sessionStorage.setItem(key, value)
+  }
+
+  localStorage.removeItem(key)
+  pendingTransfer = ''
+}
 
 // Transfer only this installation's drafts, directly between browser frames.
 // The central server never stores or receives their contents.
@@ -21,7 +102,9 @@ export async function transferInstallationDrafts(id: string, slug: string, accou
   if (!Object.values(drafts).some(Boolean))
     return
 
+  const transferId = crypto.randomUUID()
   const target = new URL('/browser/drafts', installationUrl(slug))
+  target.searchParams.set(transferParameter, transferId)
   const frame = document.createElement('iframe')
   frame.hidden = true
   frame.title = 'Restore conversation drafts'
@@ -41,13 +124,14 @@ export async function transferInstallationDrafts(id: string, slug: string, accou
       if (event.data?.kind === 'cairn-drafts-ready') {
         frame.contentWindow?.postMessage({
           kind: 'cairn-drafts',
+          transferId,
           id,
           accountId,
           drafts,
         }, target.origin)
       }
 
-      if (event.data?.kind === 'cairn-drafts-saved')
+      if (event.data?.kind === 'cairn-drafts-saved' && event.data.transferId === transferId)
         finish(event.data.ok ? undefined : new Error('Unable to restore your drafts. They remain saved here; please try again.'))
     }
 
@@ -55,9 +139,13 @@ export async function transferInstallationDrafts(id: string, slug: string, accou
     window.addEventListener('message', receive)
     document.body.append(frame)
   })
+  return transferId
 }
 
 export async function receiveInstallationDrafts(slug: string) {
+  const transferId = new URL(window.location.href).searchParams.get(transferParameter)
+  if (!validTransferId(transferId))
+    return
   const response = await fetch('/api/account/session', { credentials: 'same-origin' })
   if (!response.ok)
     return
@@ -70,26 +158,24 @@ export async function receiveInstallationDrafts(slug: string) {
     if (event.origin !== beaconOrigin || event.source !== window.parent || event.data?.kind !== 'cairn-drafts')
       return
     const data = event.data
-    if (data.id !== installation.id || data.accountId !== session.account.id)
+    if (data.transferId !== transferId || data.id !== installation.id || data.accountId !== session.account.id)
       return
     let ok = false
     try {
-      const entries = Object.entries(data.drafts as Record<string, unknown>)
-      const prefix = `cairn-chat-draft:${installation.id}:`
-      const valid = entries.length <= 1000 && entries.every(([key, value]) => key.startsWith(prefix) && typeof value === 'string' && value.length <= 1000000)
-      if (valid) {
-        for (const [key, value] of entries) {
-          // Returning to a legacy bookmark must not overwrite newer drafts on the subdomain.
-          if (!sessionStorage.getItem(key))
-            sessionStorage.setItem(key, value as string)
-        }
-
-        ok = true
-      }
+      draftEntries(data.drafts, installation.id)
+      removeExpiredTransfers()
+      localStorage.setItem(`${transferPrefix}${transferId}`, JSON.stringify({
+        id: installation.id,
+        accountId: session.account.id,
+        origin: beaconOrigin,
+        expiresAt: Date.now() + transferLifetime,
+        drafts: data.drafts,
+      }))
+      ok = true
     }
     catch {}
 
-    window.parent.postMessage({ kind: 'cairn-drafts-saved', ok }, beaconOrigin)
+    window.parent.postMessage({ kind: 'cairn-drafts-saved', transferId, ok }, beaconOrigin)
   })
   window.parent.postMessage({ kind: 'cairn-drafts-ready' }, beaconOrigin)
 }

@@ -8,7 +8,9 @@ import process from 'node:process'
 import { expect, test } from '@playwright/test'
 import { beaconRelayFixture, executeBeaconSql } from './beacon-relay-fixture'
 
-test('installation subdomains keep central login, drafts, account confirmation and revocation', async ({ page }) => {
+test('installation subdomains preserve browser drafts and canonical account access', async ({ page: initialPage, browser, browserName }) => {
+  let page = initialPage
+  let proxyContext: Awaited<ReturnType<typeof browser.newContext>> | undefined
   test.setTimeout(120000)
   page.setDefaultTimeout(10000)
   const fixture = await beaconRelayFixture(4489)
@@ -21,6 +23,25 @@ test('installation subdomains keep central login, drafts, account confirmation a
   const forwardHost = (host: string) => host.startsWith('localhost:') ? `cairn.localhost:${frontPort}` : host
   const upgraded = new Set<Duplex>()
   const proxy = createServer((request, response) => {
+    const provider = new URL(request.url || '/', `http://127.0.0.1:${frontPort}`)
+    if (provider.pathname === '/test/provider/authorize') {
+      const callback = new URL(provider.searchParams.get('redirect_uri')!)
+      callback.searchParams.set('state', provider.searchParams.get('state')!)
+      callback.searchParams.set('code', 'fixture-verified')
+      response.writeHead(302, { location: callback.href }).end()
+      return
+    }
+
+    if (provider.pathname === '/test/provider/token') {
+      response.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify({ access_token: 'fixture-token', token_type: 'Bearer' }))
+      return
+    }
+
+    if (provider.pathname === '/test/provider/userinfo') {
+      response.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify({ sub: 'fixture-owner', email: 'subdomain-owner@example.test', email_verified: true }))
+      return
+    }
+
     const upstream = httpRequest({
       hostname: '127.0.0.1',
       port: 4489,
@@ -54,9 +75,20 @@ test('installation subdomains keep central login, drafts, account confirmation a
   frontPort = (proxy.address() as AddressInfo).port
   const origin = `http://cairn.localhost:${frontPort}`
   try {
+    if (browserName === 'webkit') {
+      proxyContext = await browser.newContext({ proxy: { server: `http://127.0.0.1:${frontPort}` } })
+      page = await proxyContext.newPage()
+      page.setDefaultTimeout(10000)
+    }
+
     fixture.beacon(isolated.toString(), {
       CAIRN_BEACON_ORIGIN: origin,
       CAIRN_BEACON_INSTALLATION_SUBDOMAINS: 'true',
+      CAIRN_BEACON_GOOGLE_CLIENT_ID: 'fixture-google',
+      CAIRN_BEACON_GOOGLE_CLIENT_SECRET: 'fixture-only',
+      CAIRN_BEACON_GOOGLE_AUTHORIZATION_URL: `http://127.0.0.1:${frontPort}/test/provider/authorize`,
+      CAIRN_BEACON_GOOGLE_TOKEN_URL: `http://127.0.0.1:${frontPort}/test/provider/token`,
+      CAIRN_BEACON_GOOGLE_USERINFO_URL: `http://127.0.0.1:${frontPort}/test/provider/userinfo`,
     })
     await expect.poll(() => fetch(`${fixture.url}/health`).then(response => response.ok).catch(() => false)).toBe(true)
     await page.goto(origin)
@@ -101,6 +133,10 @@ test('installation subdomains keep central login, drafts, account confirmation a
     await expect(page.getByLabel('Message', { exact: true })).toHaveValue('Keep this draft across origins')
     await page.getByRole('button', { name: /^(Send|Queue)$/, exact: true }).click()
     await expect(page.getByRole('heading', { name: 'Keep this draft across origins', exact: true })).toBeVisible()
+    await page.goto(legacy)
+    await expect(page).toHaveURL(`${hostedOrigin}/chats/${chat.id}?bookmark=yes#reply`)
+    await expect(page.getByLabel('Message', { exact: true })).toHaveValue('')
+
     const cookie = (await page.context().cookies(origin)).find(cookie => cookie.name === 'cairn_session')!
     expect(cookie.domain).toBe('.cairn.localhost')
     expect(cookie.httpOnly).toBe(true)
@@ -118,9 +154,15 @@ test('installation subdomains keep central login, drafts, account confirmation a
     }, { path: attachmentPath, headers: csrf })
     expect(attachment.uploaded).toBe(true)
     expect(attachment.downloaded).toBe('A private attachment')
+    const pendingMailboxes = await page.evaluate(() => Object.keys(localStorage).filter(key => key.startsWith('cairn-draft-transfer:')))
+    expect(pendingMailboxes).toEqual([])
+    if (browserName === 'webkit')
+      return
 
-    await page.getByRole('button', { name: 'Account', exact: true }).click()
-    await page.getByRole('menuitem', { name: 'Account settings', exact: true }).click()
+    await page.goto(`${hostedOrigin}/settings`)
+    await expect(page.getByRole('button', { name: 'Add passkey', exact: true })).toHaveCount(0)
+    await expect(page.getByRole('button', { name: 'Send confirmation code', exact: true })).toHaveCount(0)
+    await page.getByRole('button', { name: 'Open account settings', exact: true }).click()
     await expect(page).toHaveURL(new RegExp(`^${origin}/installations/${installation.slug}/settings/account\\?return_to=`))
     const cdp = await page.context().newCDPSession(page)
     await cdp.send('WebAuthn.enable')
@@ -136,6 +178,8 @@ test('installation subdomains keep central login, drafts, account confirmation a
     })
     await page.getByRole('button', { name: 'Add passkey', exact: true }).click()
     await expect(page.getByText('My passkey', { exact: true })).toBeVisible()
+    await page.getByRole('button', { name: 'Add Google', exact: true }).click()
+    await expect(page.getByRole('button', { name: 'Remove Google subdomain-owner@example.test', exact: true })).toBeVisible()
     await page.getByRole('button', { name: 'Back to installation', exact: true }).click()
     await expect(page).toHaveURL(`${hostedOrigin}/`)
     await page.goto(`${hostedOrigin}/chats/${chat.slug}`)
@@ -161,8 +205,58 @@ test('installation subdomains keep central login, drafts, account confirmation a
     await page.getByRole('button', { name: 'Sign in with a passkey', exact: true }).click()
     await expect(page).toHaveURL(`${hostedOrigin}/chats/${chat.slug}`)
     await expect(page.getByRole('heading', { name: 'Keep this draft across origins', exact: true })).toBeVisible()
+    await page.getByRole('navigation', { name: 'Workspace navigation', exact: true }).getByRole('button', { name: 'Sign out', exact: true }).click()
+    const oauthDeepLink = `${hostedOrigin}/chats/${chat.slug}?source=oauth#reply`
+    await page.goto(oauthDeepLink)
+    await expect(page.getByLabel('Email address')).toBeVisible()
+    await page.getByRole('button', { name: 'Continue with Google', exact: true }).click()
+    await expect(page).toHaveURL(oauthDeepLink)
+    await expect(page.getByLabel('Message', { exact: true })).toHaveValue('')
+
+    // Establish a fresh proof on the canonical origin before changing access.
+    await page.goto(`${hostedOrigin}/settings/sensitive`)
+    await page.getByRole('button', { name: 'Revoke and forget installation', exact: true }).click()
+    await page.getByRole('button', { name: 'Confirm identity', exact: true }).click()
+    await page.getByRole('button', { name: 'Confirm with a passkey', exact: true }).click()
+    await expect(page).toHaveURL(`${hostedOrigin}/settings/sensitive`)
+    await page.goto(`${origin}/installations/${installation.slug}/settings/account`)
+    const extra = await page.evaluate(async () => {
+      const session = await (await fetch('/api/account/session')).json()
+      const headers = { 'X-CSRF-Token': session.csrf, 'Content-Type': 'application/json' }
+      const claimed: string[] = []
+      for (const name of ['Detached installation', 'Shared installation']) {
+        const code = await (await fetch('/api/installations/claim-code', { method: 'POST', headers, body: '{}' })).json()
+        const identity = await (await fetch('/api/relay/claim', { method: 'POST', headers, body: JSON.stringify({ code: code.code, name, protocol: 4 }) })).json()
+        claimed.push(identity.installationId)
+      }
+
+      const listed = await (await fetch('/api/account/session')).json()
+      return listed.installations.filter((item: { id: string }) => claimed.includes(item.id))
+    })
+    const detached = extra.find((item: { name: string }) => item.name === 'Detached installation')
+    const shared = extra.find((item: { name: string }) => item.name === 'Shared installation')
+    const secondOwner = crypto.randomUUID()
+    executeBeaconSql(isolated, `INSERT INTO cairn_accounts (id,email) VALUES ('${secondOwner}','second-owner@example.test'); UPDATE installations SET owner_id='${secondOwner}' WHERE id='${shared.id}'; INSERT INTO installation_members (installation_id,account_id) VALUES ('${shared.id}','${session.account.id}')`)
+    const detachedOrigin = origin.replace('cairn.localhost', `${detached.slug}.cairn.localhost`)
+    const sharedOrigin = origin.replace('cairn.localhost', `${shared.slug}.cairn.localhost`)
+    await page.goto(`${sharedOrigin}/settings/sensitive`)
+    await page.getByRole('button', { name: 'Leave installation', exact: true }).click()
+    await page.getByRole('button', { name: 'Confirm leaving', exact: true }).click()
+    await expect(page).toHaveURL(`${hostedOrigin}/`)
+    await page.goto(`${detachedOrigin}/settings/sensitive`)
+    await page.getByRole('button', { name: 'Detach installation', exact: true }).click()
+    await page.getByRole('button', { name: 'Confirm detachment', exact: true }).click()
+    await expect(page).toHaveURL(`${hostedOrigin}/`)
+    await page.goto(`${hostedOrigin}/settings/sensitive`)
+    await page.getByRole('button', { name: 'Revoke and forget installation', exact: true }).click()
+    await page.getByRole('button', { name: 'Confirm revocation', exact: true }).click()
+    await expect(page).toHaveURL(`${origin}/`)
+    await expect(page.getByRole('heading', { name: 'No installations yet', exact: true })).toBeVisible()
+    const afterAccessChanges = await page.evaluate(async () => (await fetch('/api/account/session')).json())
+    expect(afterAccessChanges.installations).toEqual([])
   }
   finally {
+    await proxyContext?.close()
     await fixture.close()
     for (const socket of upgraded)
       socket.destroy()

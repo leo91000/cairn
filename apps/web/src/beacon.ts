@@ -2,11 +2,14 @@ import { createApp } from 'vue'
 import { installationRoute } from './api'
 import { installationHost } from './beacon-location'
 import BeaconApp from './BeaconApp.vue'
+import { prepareDraftTransfer } from './draft-transfer'
 import { workspaceRouter } from './router'
 import DraftTransfer from './views/DraftTransfer.vue'
 import '@fontsource-variable/dm-sans/wght.css'
 import '@fontsource-variable/manrope/wght.css'
 import './styles/index.css'
+
+prepareDraftTransfer()
 
 const base = installationRoute && !installationHost ? `/installations/${installationRoute}/` : '/'
 const router = workspaceRouter(base)

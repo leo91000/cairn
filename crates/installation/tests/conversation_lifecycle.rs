@@ -397,3 +397,23 @@ async fn legacy_conversations_get_stable_slugs_without_changing_activity_or_uuid
         migrated["slug"]
     );
 }
+
+#[tokio::test]
+async fn chat_aliases_keep_json_body_limits_before_lookup_and_live_subscription() {
+    let app = App::new().await;
+    let chat = app.create_chat().await;
+    let known = chat["slug"].as_str().unwrap();
+    let body = json!({ "id": id(), "text": "x".repeat(1_000_000) });
+    for key in [known, "missing", "quiet-cedar-00000000"] {
+        for suffix in ["messages", "stream"] {
+            let (status, _) = app
+                .request("POST", &format!("{CHATS}/{key}/{suffix}"), body.clone())
+                .await;
+            assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE, "{key}/{suffix}");
+        }
+    }
+    assert_eq!(
+        app.get(&format!("{CHATS}/quiet-cedar-00000000")).await.0,
+        StatusCode::NOT_FOUND
+    );
+}

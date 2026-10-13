@@ -41,7 +41,7 @@ import ThemeControl from './components/ThemeControl.vue'
 import UiAlert from './components/UiAlert.vue'
 import UiButton from './components/UiButton.vue'
 import VirtualSelect from './components/VirtualSelect.vue'
-import { transferInstallationDrafts } from './draft-transfer'
+import { restoreInstallationDrafts, transferInstallationDrafts } from './draft-transfer'
 import { Settings } from './icons'
 import { installationKey } from './installation-context'
 import Authorize from './views/Authorize.vue'
@@ -236,6 +236,16 @@ async function loadSession() {
   error.value = ''
   try {
     const [account, available] = await Promise.all([accountRequest('session'), accountRequest('options')])
+    if (installationHost && account.authenticated) {
+      const installation = account.installations.find((item: { id: string, slug: string }) => item.slug === installationHost)
+      if (installation) {
+        try {
+          restoreInstallationDrafts(installation.id, account.account.id)
+        }
+        catch { error.value = 'Unable to restore your drafts. Reopen the original link to try again.' }
+      }
+    }
+
     session.value = account
     options.value = available
     ready.value = true
@@ -382,7 +392,7 @@ async function leaveInstallation() {
       throw new Error(value.error || 'Unable to leave this installation.')
     }
 
-    redirect('/')
+    redirect(`${beaconOrigin}/`)
   }
   catch (cause) {
     error.value = cause instanceof Error ? cause.message : 'Unable to leave this installation.'
@@ -436,7 +446,7 @@ async function detachInstallation() {
   error.value = ''
   try {
     await installationRequest(`${installation.value.id}/detach`)
-    redirect('/')
+    redirect(`${beaconOrigin}/`)
   }
   catch (cause) {
     error.value = cause instanceof Error ? cause.message : 'Unable to detach the installation.'
@@ -453,7 +463,7 @@ async function forgetInstallation() {
   error.value = ''
   try {
     await installationRequest(encodeURIComponent(installation.value.id), undefined, 'DELETE')
-    redirect('/')
+    redirect(`${beaconOrigin}/`)
   }
   catch (cause) {
     error.value = cause instanceof Error ? cause.message : 'Unable to revoke the installation.'
@@ -486,7 +496,7 @@ async function oauth(provider: 'google' | 'github') {
     const start = await accountRequest(`oauth/${provider}/start`, {})
     try {
       sessionStorage.removeItem(beaconReturnKey)
-      if (installationRoute || claimPage || authorizePage) {
+      if (installationRoute || claimPage || authorizePage || (centralAccount && accountReturn)) {
         const destination = claimPage ? '/claim' : `${window.location.pathname}${window.location.search}${window.location.hash}`
         sessionStorage.setItem(beaconReturnKey, destination)
       }
@@ -506,9 +516,14 @@ async function navigateInstallation(value: { id: string, slug?: string }, destin
     return
   navigationPending.value = true
   try {
-    if (value.slug)
-      await transferInstallationDrafts(value.id, value.slug, session.value?.account?.id || '')
-    redirect(destination)
+    const target = new URL(destination, beaconOrigin)
+    if (value.slug) {
+      const transferId = await transferInstallationDrafts(value.id, value.slug, session.value?.account?.id || '')
+      if (transferId)
+        target.searchParams.set('cairn_draft_transfer', transferId)
+    }
+
+    redirect(target.href)
   }
   catch (cause) {
     navigationPending.value = false
@@ -696,8 +711,11 @@ onMounted(async () => {
     const destination = sessionStorage.getItem(beaconReturnKey)
     if (url.pathname === '/' && destination) {
       sessionStorage.removeItem(beaconReturnKey)
-      if (destination === '/claim' || /^\/authorize(?:\?|$)/.test(destination) || /^\/installations\/[\w-]+\//.test(destination)) {
-        const target = new URL(destination, url.origin)
+      const target = new URL(destination, beaconOrigin)
+      const returningToLogin = installationSubdomains && centralAccount && target.pathname === '/' && target.searchParams.has('return_to')
+      const allowedPath = destination === '/claim' || /^\/authorize(?:\?|$)/.test(destination) || /^\/installations\/[\w-]+\//.test(destination) || returningToLogin
+      if (target.origin === beaconOrigin && !target.username && !target.password && allowedPath) {
+        target.searchParams.delete('sign_in_error')
         const signInError = url.searchParams.get('sign_in_error')
         if (signInError)
           target.searchParams.set('sign_in_error', signInError)

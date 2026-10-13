@@ -52,9 +52,18 @@ installation vérifie son appartenance au compte et l’origine complète. Les
 commandes d’installation et URLs MCP continuent d’utiliser cette origine.
 
 Lors de l’ouverture d’un ancien lien, une iframe limitée à l’origine canonique
-transfère les brouillons de cette installation entre les sessionStorage du
-navigateur. Elle vérifie la source, l’origine, le compte et l’installation ; elle
-conserve les brouillons d’origine et n’écrase pas les nouveaux. Leur contenu ne
+transfère les brouillons de cette installation dans une boîte temporaire du
+localStorage de l’origine cible : WebKit ne conserve pas le sessionStorage d’une
+iframe après sa navigation au premier plan. Un identifiant aléatoire isole chaque
+transfert et les onglets ; il apparaît brièvement dans la requête de navigation,
+puis est retiré avant le routage. Il ne contient ni brouillon ni identifiant de
+session. Après vérification du compte et de l’installation, l’application restaure
+les brouillons dans le sessionStorage et supprime la boîte. La boîte expire après
+cinq minutes ; les boîtes expirées sont purgées lors de la prochaine visite.
+
+L’échange vérifie la source, l’origine, le compte et l’installation ; il
+conserve les brouillons d’origine et n’écrase pas les nouveaux, y compris les
+brouillons explicitement vidés. Leur contenu ne
 transite pas par le backend. Le thème et l’installation récemment sélectionnée
 utilisent des cookies de préférence non sensibles pour traverser les origines.
 

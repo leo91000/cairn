@@ -13,9 +13,10 @@ import {
   beaconEntry,
   date,
   notify,
+  redirect,
   state,
 } from '../api'
-import { beaconOrigin } from '../beacon-location'
+import { accountSettingsUrl, beaconOrigin, installationHost } from '../beacon-location'
 import AccountConfirmation from '../components/AccountConfirmation.vue'
 import Icon from '../components/Icon.vue'
 import Modal from '../components/Modal.vue'
@@ -161,7 +162,10 @@ async function copy(value: string) {
         <h2 class="text-xl font-heading">
           Account
         </h2>
-        <slot name="account" />
+        <UiButton v-if="installationHost" @click="redirect(accountSettingsUrl(installationHost))">
+          Open account settings
+        </UiButton>
+        <slot v-else name="account" />
         <section class="panel border-b border-line overflow-hidden settings-section mb-5.5 appearance-section px-0 py-7 phone:py-5">
           <div class="section-intro flex gap-[17px] items-center mb-6 phone:items-start phone:gap-[13px]">
             <div><h2>Appearance</h2></div>
