@@ -1,10 +1,12 @@
 //! Read-only, bounded GitHub observation through the agent's existing credentials.
+mod pr_checks;
+
 use super::access;
 use crate::{
     config::now,
     conversation_lifecycle::is_active,
     error::{Error, Result},
-    process::{bounded_output, codex_environment, command},
+    process::{Environment, bounded_output, codex_environment, command},
     run_status::RunStatus,
     service::{Service, policy},
     store::Db,
@@ -16,6 +18,13 @@ use std::{collections::BTreeMap, sync::Arc, time::Duration};
 
 const POLL_MS: i64 = 30_000;
 const BATCH_SIZE: usize = 16;
+
+pub(super) fn is_condition(condition: &Value) -> bool {
+    matches!(
+        text(condition, "type"),
+        "github_workflow" | "github_pr_checks"
+    )
+}
 
 pub(super) fn project(db: &Db<'_>, run: &Value, condition: &Value) -> Result<String> {
     let id = text(condition, "projectId");
@@ -73,6 +82,14 @@ pub(super) async fn observe(s: &Service, run: &Value, condition: &Value) -> Resu
         environment.remove("GITHUB_TOKEN");
         environment.insert("GH_TOKEN".into(), token.into());
     }
+    if condition["type"] == "github_pr_checks" {
+        return tokio::time::timeout(
+            Duration::from_secs(20),
+            pr_checks::observe(s, &repository, &environment, condition),
+        )
+        .await
+        .map_err(|_| Error::bad_gateway("GitHub PR checks could not be checked in time."))?;
+    }
     let endpoint = format!("repos/{repository}/actions/runs/{}", condition["runId"]);
     let args = [
         "api",
@@ -83,22 +100,7 @@ pub(super) async fn observe(s: &Service, run: &Value, condition: &Value) -> Resu
         "{id,head_sha,status,conclusion,run_attempt,html_url}",
     ]
     .map(str::to_owned);
-    let output = bounded_output(
-        command(&s.config.gh_bin, &args, &environment, None),
-        Duration::from_secs(20),
-        1_000_000,
-    )
-    .await
-    .map_err(|_| {
-        Error::bad_gateway("GitHub could not be checked. Verify the connection and retry.")
-    })?;
-    if !output.success {
-        return Err(Error::bad_gateway(
-            "GitHub could not be checked. Verify repository access and retry.",
-        ));
-    }
-    let value: Value = serde_json::from_str(&output.stdout)
-        .map_err(|_| Error::bad_gateway("Invalid GitHub workflow response."))?;
+    let value = request(s, &environment, &args).await?;
     if value["id"] != condition["runId"]
         || text(&value, "head_sha").to_ascii_lowercase() != condition["headSha"]
     {
@@ -141,6 +143,34 @@ pub(super) async fn observe(s: &Service, run: &Value, condition: &Value) -> Resu
     })))
 }
 
+async fn request(s: &Service, environment: &Environment, args: &[String]) -> Result<Value> {
+    let output = bounded_output(
+        command(&s.config.gh_bin, args, environment, None),
+        Duration::from_secs(20),
+        1_000_000,
+    )
+    .await
+    .map_err(|_| {
+        Error::bad_gateway("GitHub could not be checked. Verify the connection and retry.")
+    })?;
+    if !output.success {
+        return Err(Error::bad_gateway(
+            "GitHub could not be checked. Verify repository access and retry.",
+        ));
+    }
+    let value: Value = serde_json::from_str(&output.stdout)
+        .map_err(|_| Error::bad_gateway("Invalid GitHub response."))?;
+    if value["errors"]
+        .as_array()
+        .is_some_and(|errors| !errors.is_empty())
+    {
+        return Err(Error::bad_gateway(
+            "GitHub returned an incomplete response.",
+        ));
+    }
+    Ok(value)
+}
+
 fn watchable(chat: &Value, run: &Value, time: i64) -> bool {
     let wakeup = &chat["wakeup"];
     is_active(chat)
@@ -150,7 +180,7 @@ fn watchable(chat: &Value, run: &Value, time: i64) -> bool {
         && run["cancelRequestedAt"].is_null()
         && run["workspaceCleanedAt"].is_null()
         && wakeup["messageId"] == run["chatExecution"]["messageId"]
-        && wakeup["condition"]["type"] == "github_workflow"
+        && is_condition(&wakeup["condition"])
         && !wakeup["observation"].is_object()
         && wakeup["wakeAt"]
             .as_i64()

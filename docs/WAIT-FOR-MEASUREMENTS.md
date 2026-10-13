@@ -1,10 +1,8 @@
 # Wait metadata measurements
 
-Measured on 2026-10-13 against `cairn_workspace.sleep` as the reference operation.
-Remeasured after making initial registration checks and the input revision atomic.
-Both cases use the same SQLite schema and JSON encoding. `wait_for` adds a named
-condition and extra authorization/state checks; it changes no object compression,
-disk codec or journal policy.
+Measured on 2026-10-13 against `cairn_workspace.sleep`, including the new
+`github_pr_checks` condition. All cases use the same SQLite schema and JSON
+encoding. No codec, compression or journal policy changes.
 
 ## Reproduction
 
@@ -14,68 +12,71 @@ CARGO_BUILD_JOBS=1 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_DEV_INCREMENTAL=false
   measure_wait_metadata_against_sleep -- --ignored --exact --nocapture
 ```
 
-The backend launcher isolates live agent credentials. The ignored test creates a
-temporary installation, one interactive caller, one pending run dependency and a
-registered project. It performs 100 distinct registrations/replacements, 500
-pooled reads, then 20 fresh-pool opens and their first reads for each operation.
-Every registration records a new wakeup/event; identical-request shortcuts are
-excluded. No GitHub CLI/network request is used by this workload.
+The backend launcher isolates live agent credentials. Each temporary installation
+has one caller, a pending run dependency and a registered project. For each mode,
+100 distinct registrations/replacements record a wakeup and event, followed by
+500 pooled reads and 20 new SQLite pools and their first reads. Identical-request
+shortcuts are excluded. The PR case has one required check in progress, one page
+of check results and no additional rulesets. Its four read-only CLI requests per
+registration use a synthetic Node fixture, without GitHub or network access.
 
-Host: Linux 6.12.109, Intel Xeon virtual CPU, 12 CPU threads available to the
-process, 32,363,544 KiB memory reported, about 30 GiB available during inspection.
-SQLite files reside on `/tmp`, a tmpfs. This is a shared execution VM; other host
-workloads and memory pressure are not controlled. Rust 1.97.1, development profile,
-debug information and incremental compilation disabled, one build job. Compilation
-finishes before timing starts; no other agent-started build/test ran during the
-measured workload.
+Host: Linux 6.12.109, virtual Intel Xeon CPU, 12 CPU threads available,
+32,363,544 KiB reported memory and about 30 GiB available. SQLite files are on
+`/tmp`, a tmpfs. Shared VM host workloads are not controlled. Rust 1.97.1, dev
+profile, debug info and incremental compilation disabled, one build job.
+Compilation finishes before timing; no other agent build/test runs during timing.
 
-Fresh-pool reads use newly opened SQLite connections and statement/page caches.
-The OS cache is warm and was not flushed. Pool creation is reported separately.
-Process CPU covers all threads of the measured process during the write phase.
-The first registration's validation setup is included, so median and p95 are
-useful alongside the mean.
+Fresh-pool reads start with new SQLite connections and statement/page caches.
+OS caches stay warm; they are not flushed. Pool creation is timed separately.
+Parent CPU covers all threads via CLOCK_PROCESS_CPUTIME_ID; child CPU is measured
+separately via RUSAGE_CHILDREN and captures synthetic CLI processes, not just the
+manager. Registration/write latency includes validation, state checks and writes.
+For the PR case it also includes four synthetic CLI startups and JSON parsing.
 
 ## Results
 
-| Metric | Reference `sleep` | `wait_for: run_finished` |
-| --- | ---: | ---: |
-| Encoded wakeup JSON bytes | 185 | 268 |
-| Encoded conversation JSON bytes | 576 | 659 |
-| Write median, ms | 0.340 | 1.489 |
-| Write p95, ms | 0.455 | 2.011 |
-| Write mean, ms | 0.887 | 1.582 |
-| Process CPU for 100 writes, ms | 88.911 | 159.169 |
-| Warm read median, ms | 0.031 | 0.033 |
-| Warm read p95, ms | 0.043 | 0.047 |
-| First read with fresh pool median, ms | 0.279 | 0.275 |
-| First read with fresh pool p95, ms | 0.372 | 0.376 |
-| Fresh pool open median, ms | 0.541 | 0.543 |
-| `events_user_input` index allocated bytes in the fixture | 4,096 | 4,096 |
+| Metric | Reference `sleep` | `run_finished` | `github_pr_checks` |
+| --- | ---: | ---: | ---: |
+| Encoded wakeup JSON bytes | 185 | 268 | 370 |
+| Encoded conversation JSON bytes | 576 | 655 | 757 |
+| Registration/write median, ms | 0.415 | 2.761 | 101.209 |
+| Registration/write p95, ms | 0.758 | 4.279 | 123.610 |
+| Registration/write mean, ms | 1.209 | 2.890 | 103.704 |
+| Parent process CPU for 100 registrations, ms | 114.203 | 265.063 | 596.178 |
+| Child CLI CPU for 100 registrations, ms | 0.000 | 0.000 | 9751.263 |
+| Synthetic CLI requests | 0 | 0 | 400 |
+| Warm read median, ms | 0.034 | 0.039 | 0.045 |
+| Warm read p95, ms | 0.064 | 0.061 | 0.083 |
+| First read with fresh pool median, ms | 0.373 | 0.412 | 0.385 |
+| First read with fresh pool p95, ms | 0.434 | 1.278 | 0.478 |
+| Fresh pool open median, ms | 0.797 | 0.840 | 0.775 |
+| User-input index bytes | 4,096 | 4,096 | 4,096 |
 
-The conditional wakeup adds 83 encoded bytes in this fixture. Its registration
-costs about 1.1 ms more at the median while pooled read latency remains in the
-same range. The index is a shared schema cost: one initial `chat.user` event is
-indexed in each case, and wait bookkeeping does not add index entries. Real
-histories can require more index pages. Whole-conversation bytes include a
-generated readable slug; that part can vary slightly between repetitions.
+The pending PR wakeup adds 185 JSON bytes over sleep; the internal run wakeup
+adds 83. Conversation bytes include variable-length generated slugs. Warm and
+fresh-pool read latencies remain local metadata measurements. The shared partial
+index has one initial chat.user event per fixture; wait bookkeeping adds no
+indexed user message, and real histories can allocate more pages.
 
-These results characterize local metadata operations on tmpfs. They do not
-measure production disks, S3, GitHub request latency, model tokens or a physical
-VM resume. The native worker journey separately verifies a single execution slot
-being yielded to a dependency and the same session resuming before its 60-second
-fallback, in a 4.84-second fixture test run.
+PR registration is about 101 ms at the median in this synthetic fixture, dominated
+by four Node CLI startups. This does not estimate GitHub network latency or the
+production gh executable's CPU. It is not a disk-only write benchmark. It also
+does not measure model tokens, S3, physical VM resume or production disks.
+The native worker journey separately verifies yielding a single execution slot
+and resuming the same conversation/session before its fallback deadline.
 
 ## Monitoring budget
 
-Internal run conditions are checked by the existing scheduler without network
-calls. Successful non-interactive runs avoid a conversation lookup. GitHub
-observation is in a separate task: at most 16 distinct targets per 30-second
-batch, four concurrent CLI calls, with identical watchers deduplicated by agent,
-granted policy, registered project origin and condition. Initial registration probes are separate from this
-periodic budget. Temporary failures retain the persisted deadline and next check.
+The separate observer admits at most 16 unique targets per 30-second batch,
+with four targets observed concurrently. A workflow takes one request; a PR
+typically takes four, with ten maximum after bounded pagination and revalidation.
+An entire PR observation has a 20-second timeout. Thus there are at most 1,920
+periodic observations/hour, or 19,200 requests/hour in the maximal PR pagination
+case, before initial registrations and other GitHub uses. API rate limits can
+produce retries until the persisted fallback deadline; this is a workload bound,
+not a claim that every installation can sustain that rate.
 
-An illustrative 20-minute GitHub wait uses approximately 40 background status
-checks at this cadence and one LLM continuation when resolved. This moves the
-observation work out of model inference and the conversation's execution lease;
-it does not eliminate the external requests. A webhook adapter could reduce
-periodic requests after providing authenticated delivery and reconciliation.
+Checks are capped at 500, distinct requirements at 500 and active rules at fewer
+than 200. Returned details share a 100-entry budget across present and missing
+checks. Identical watchers share results only for the same agent, granted policy,
+registered project origin and condition. No request holds the scheduler tick.

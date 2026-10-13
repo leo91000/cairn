@@ -228,7 +228,14 @@ async fn call_tool(s: &Service, bearer: &str, name: &str, args: &Value) -> Resul
             ToolResult::from_result(result, summary)
         }
         "onepassword" => {
-            ToolResult::from_result(crate::onepassword::call(s, bearer, args).await, summary)
+            let result = if args["operation"] == "read" {
+                Err(Error::bad(
+                    "Read secrets through the Cairn plugin CLI and pipe them directly to the consuming command.",
+                ))
+            } else {
+                crate::onepassword::call(s, bearer, args).await
+            };
+            ToolResult::from_result(result, summary)
         }
         "report_outcome" => {
             ToolResult::from_result(crate::outcome::report(s, bearer, args).await, |_| {

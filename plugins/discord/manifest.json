@@ -1,0 +1,20 @@
+{
+  "id": "discord",
+  "name": "Discord",
+  "version": "0.3.0",
+  "description": "Mention a bot in your server to start a conversation with one of your agents.",
+  "apiVersion": 1,
+  "capabilities": ["transport.discord", "conversations.submit", "conversations.control", "http", "storage"],
+  "hosts": ["discord.com", "cdn.discordapp.com", "media.discordapp.net"],
+  "credential": { "label": "Bot token", "header": "authorization", "prefix": "Bot " },
+  "settings": [
+    { "key": "guildId", "title": "Server ID", "type": "string", "required": true, "maxLength": 20 },
+    { "key": "guildName", "title": "Server name", "type": "string", "hidden": true },
+    { "key": "channelId", "title": "Channel ID", "type": "string", "required": true, "maxLength": 20 },
+    { "key": "channelName", "title": "Channel name", "type": "string", "hidden": true },
+    { "key": "botId", "title": "Bot ID", "type": "string", "hidden": true, "maxLength": 20 },
+    { "key": "botName", "title": "Bot name", "type": "string", "hidden": true },
+    { "key": "messageContent", "title": "Read replies without a mention", "type": "boolean", "hidden": true },
+    { "key": "everyMessage", "title": "Answer every message in the channel", "type": "boolean", "hidden": true }
+  ]
+}

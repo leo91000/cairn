@@ -100,3 +100,15 @@ export const MessageCircleQuestion = 'i-lucide-message-circle-question-mark' as 
 
 export const BrandOnePassword = 'i-simple-icons-1password' as const
 export const Minus = 'i-lucide-minus' as const
+
+export const Hash = 'i-lucide-hash' as const
+export const Users = 'i-lucide-users' as const
+export const UserPlus = 'i-lucide-user-plus' as const
+export const Puzzle = 'i-lucide-puzzle' as const
+export const MessageSquare = 'i-lucide-message-square' as const
+export const Power = 'i-lucide-power' as const
+export const BrandDiscord = 'i-simple-icons-discord' as const
+export const BrandSlack = 'i-simple-icons-slack' as const
+export const BrandTelegram = 'i-simple-icons-telegram' as const
+export const BrandLinear = 'i-simple-icons-linear' as const
+export const Upload = 'i-lucide-upload' as const

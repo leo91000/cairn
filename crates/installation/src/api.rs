@@ -31,6 +31,9 @@ pub async fn dispatch(s: &Arc<Service>, input: &Input) -> Result<Value> {
     if under(&input.path, "/api/onepassword") {
         return crate::onepassword::routes(s, input).await;
     }
+    if under(&input.path, "/api/plugins") {
+        return crate::plugins::routes(s, input).await;
+    }
     if under(&input.path, "/api/mcps") {
         return crate::mcp_server::routes(s, input).await;
     }
