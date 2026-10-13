@@ -178,10 +178,13 @@ class FilUnreadJourneyTest {
                 CairnTheme(theme) { CairnApp(vm = vm) }
             }
             try {
+                // Conversations stream in before the missions' activity: wait for both.
                 compose.waitUntil(20000) {
-                    compose.onAllNodesWithTag("unread").fetchSemanticsNodes().isNotEmpty()
+                    compose
+                        .onAllNodesWithText("2 résultats à lire", substring = true)
+                        .fetchSemanticsNodes()
+                        .isNotEmpty()
                 }
-                compose.onNodeWithText("2 résultats à lire", substring = true).assertExists()
                 compose.onNodeWithText("Le changelog est prêt", substring = true).assertExists()
                 capture("fil-unread-dark")
                 theme = "light"
