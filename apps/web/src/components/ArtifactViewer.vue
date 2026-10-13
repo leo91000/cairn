@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import type { Deliverable } from '../../../../packages/contracts/artifacts'
+import DOMPurify from 'dompurify'
 import {
   computed,
   defineAsyncComponent,
@@ -9,6 +10,7 @@ import {
   watch,
 } from 'vue'
 import { fileSize, latestArtifacts } from '../../../../packages/contracts/artifacts'
+import { formatJson, inertDocument, parseDelimited } from '../artifact-preview'
 import { artifactUrl } from '../deliverables'
 import { highlight } from '../highlight'
 import {
@@ -47,16 +49,40 @@ const content = ref('')
 const error = ref('')
 const loading = ref(false)
 const previousFocus = document.activeElement as HTMLElement | null
+const source = ref(false)
+const extension = computed(() => current.value?.name.split('.').at(-1)?.toLowerCase() ?? '')
+// highlight.js resolves most extensions through its own language aliases.
 const language = computed(() => ({
-  rs: 'rust',
-  js: 'javascript',
-  ts: 'typescript',
-  tsx: 'typescript',
-  py: 'python',
-  sh: 'bash',
-  yml: 'yaml',
-})[current.value?.name.split('.').at(-1) ?? ''] ?? current.value?.name.split('.').at(-1))
-const html = computed(() => highlight(content.value, language.value))
+  htm: 'xml',
+  vue: 'xml',
+  svelte: 'xml',
+  cfg: 'ini',
+  conf: 'ini',
+  jsonl: 'json',
+  ndjson: 'json',
+  fish: 'bash',
+})[extension.value] ?? extension.value)
+const rendering = computed(() => {
+  if (current.value?.kind !== 'code')
+    return undefined
+  if (['csv', 'tsv'].includes(extension.value))
+    return 'table'
+  if (['html', 'htm'].includes(extension.value))
+    return 'page'
+  return undefined
+})
+const table = computed(() => rendering.value === 'table' ? parseDelimited(content.value, extension.value === 'tsv' ? '\t' : ',') : undefined)
+const pageDocument = computed(() => {
+  const sanitized = DOMPurify.sanitize(content.value, {
+    WHOLE_DOCUMENT: true,
+    FORBID_TAGS: ['script', 'iframe', 'object', 'embed', 'base', 'meta', 'form'],
+    FORBID_ATTR: ['href', 'xlink:href', 'action', 'formaction', 'target', 'ping'],
+  })
+  // DOMPurify removes doctypes. Keep CSS layout in standards mode after sanitizing.
+  return inertDocument(`<!doctype html>${sanitized}`)
+})
+const formatted = computed(() => extension.value === 'json' ? formatJson(content.value) : content.value)
+const html = computed(() => highlight(formatted.value, language.value))
 watch(() => current.value?.id, async (_, __, cleanup) => {
   const item = current.value
   const controller = new AbortController()
@@ -65,6 +91,7 @@ watch(() => current.value?.id, async (_, __, cleanup) => {
   error.value = ''
   zoom.value = false
   compare.value = false
+  source.value = false
   loading.value = false
   if (!item || !['markdown', 'code'].includes(item.kind))
     return
@@ -209,6 +236,15 @@ onBeforeUnmount(() => {
           >
             Compare
           </button>
+          <button
+            v-if="rendering && !loading && !error"
+            class="rounded-md px-3 py-2 text-xs hover:bg-hover"
+            :class="{ 'bg-hover text-accent': source }"
+            :aria-pressed="source"
+            @click="source = !source"
+          >
+            Source
+          </button>
           <div v-if="latest.length > 1" class="ml-auto flex items-center gap-1">
             <button :class="iconButton" aria-label="Previous file" @click="navigate(-1)">
               <Icon :name="ArrowLeft" :size="16" />
@@ -280,6 +316,41 @@ onBeforeUnmount(() => {
               :title="current.title"
             />
             <Markdown v-else-if="current.kind === 'markdown'" :content="content" />
+            <div v-else-if="table && !source" class="overflow-auto rounded-lg border border-line">
+              <table class="min-w-full border-collapse text-xs" :aria-label="current.title">
+                <thead v-if="table.rows.length" class="sticky top-0 bg-surface">
+                  <tr>
+                    <th
+                      v-for="column in table.columns"
+                      :key="column"
+                      scope="col"
+                      class="border-b border-line px-3 py-2 text-left font-semibold whitespace-nowrap"
+                    >
+                      {{ table.rows[0]![column - 1] }}
+                    </th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr v-for="(row, index) in table.rows.slice(1)" :key="index" class="even:bg-surface/50">
+                    <td v-for="column in table.columns" :key="column" class="border-b border-line/60 px-3 py-1.5 align-top whitespace-pre-wrap">
+                      {{ row[column - 1] }}
+                    </td>
+                  </tr>
+                </tbody>
+              </table>
+              <p v-if="table.truncated" class="m-0! px-3 py-2 text-xs text-muted">
+                Preview limited to {{ table.rows.length }} rows and {{ table.columns }} columns. Download the original to see everything.
+              </p>
+            </div>
+            <iframe
+              v-else-if="rendering === 'page' && !source"
+              :key="current.id"
+              :srcdoc="pageDocument"
+              sandbox=""
+              referrerpolicy="no-referrer"
+              :title="current.title"
+              class="block h-[calc(100dvh-190px)] w-full rounded-lg border border-line bg-white"
+            />
             <pre v-else-if="current.kind === 'code'" class="m-0 overflow-visible whitespace-pre-wrap break-words text-xs leading-relaxed"><code v-html="html" /></pre>
             <div v-else class="flex min-h-full flex-col items-center justify-center gap-4 text-center">
               <Icon :name="FileText" :size="44" class="text-accent" /><p class="text-sm text-muted">
