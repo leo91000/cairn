@@ -166,6 +166,24 @@ async fn work_finished_before_an_account_first_reads_is_not_unread() {
 }
 
 #[tokio::test]
+async fn plugin_conversations_answer_in_their_channel_and_are_never_unread() {
+    let app = App::new().await;
+    app.get(&app.owner, "/api/chats").await;
+    let chat = app.finished_chat().await;
+    app.service
+        .store
+        .set(
+            &format!("plugin-conversation:{}", text(&chat, "id")),
+            json!({ "connectionId": "discord", "thread": "support" }),
+            None,
+        )
+        .await
+        .unwrap();
+    let listed = app.get(&app.owner, "/api/chats").await;
+    assert_eq!(find(&listed, "id", text(&chat, "id"))["unread"], false);
+}
+
+#[tokio::test]
 async fn failed_and_stopped_work_is_never_unread() {
     let app = App::new().await;
     app.get(&app.owner, "/api/chats").await;

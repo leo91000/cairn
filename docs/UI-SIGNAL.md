@@ -50,8 +50,9 @@ Read marks live on the installation, per account (`crates/installation/src/reads
 on the phone clears it on the web, and each member reads on their own. `POST /api/reads` records
 `chat:<id>` or `task:<id>` items; the conversation list, its live stream and `/api/tasks/activity`
 carry `unread` and `preview` for the caller. An account's first read starts its history, so earlier
-work is not unread. Failed, stopped and paused work is never unread, and a turn that finishes while
-its conversation is open and visible is read as it happens. Finished work opened from For you stays
+work is not unread. Failed, stopped and paused work is never unread, nor are plugin
+conversations, which answer in their own channel; a turn that finishes while its conversation is
+open and visible is read as it happens. Finished work opened from For you stays
 there, read, until the user moves on, then joins Recent. Android shows the same rows in « Pour
 vous », with « Tout lire », and reads the page settled in the Fil pager while the app is in the
 foreground.

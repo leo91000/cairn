@@ -76,11 +76,15 @@ impl Reads {
     }
 
     /// Marks finished conversation turns the account has not opened since, with the agent's
-    /// last words as a preview.
+    /// last words as a preview. A plugin's conversations answer in their own channel, so their
+    /// replies wait on nobody here.
     pub(crate) fn chats(&self, db: &Db<'_>, chats: &mut [Value]) -> Result<()> {
         for chat in chats {
-            let finished = chat["status"] == RunStatus::Succeeded && chat["paused"] != true;
-            let item = format!("chat:{}", text(chat, "id"));
+            let id = text(chat, "id");
+            let finished = chat["status"] == RunStatus::Succeeded
+                && chat["paused"] != true
+                && db.kv(&format!("plugin-conversation:{id}"))?.is_none();
+            let item = format!("chat:{id}");
             let unread = finished && self.unread(&item, chat["finishedAt"].as_i64());
             chat["unread"] = unread.into();
             if unread {
