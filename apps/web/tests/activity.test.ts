@@ -13,6 +13,33 @@ const events: RunEvent[] = sample.map((payload, index) => ({
   payload,
 }))
 describe('conversation activity', () => {
+  it('labels each reply with the provider its attempt used, until another attempt begins', () => {
+    let id = 0
+    const event = (type: string, text: string, payload?: Record<string, unknown>): RunEvent => ({
+      id: ++id,
+      runId: 'chat',
+      createdAt: id,
+      type,
+      text,
+      ...(payload ? { payload } : {}),
+    })
+    const reply = (text: string) => event('item.completed', '', { item: { id: `m${id}`, type: 'agent_message', text } })
+    const entries = activityEntries([
+      event('status', 'Preparing workspace', { attempt: true }),
+      event('status', 'Kimi K2 via OpenCode Go', { route: { model: 'opencode-go/kimi-k2', providerName: 'OpenCode Go' } }),
+      event('status', 'Opening project'),
+      reply('First'),
+      event('status', 'Preparing workspace', { attempt: true }),
+      event('status', 'Kimi K2 via OpenCode Zen', { route: { model: 'opencode/kimi-k2', providerName: 'OpenCode Zen' } }),
+      reply('Second'),
+      event('status', 'Preparing workspace', { attempt: true }),
+      reply('Third'),
+    ], true)
+    const replies = entries.filter(entry => entry.kind === 'message').map(entry => [entry.text, entry.via])
+    expect(replies).toEqual([['First', 'OpenCode Go'], ['Second', 'OpenCode Zen'], ['Third', undefined]])
+    expect(entries.some(entry => entry.kind !== 'message' && JSON.stringify(entry).includes('via OpenCode'))).toBe(false)
+  })
+
   it('hides routine session updates in chat while preserving the raw activity and tool steps', () => {
     const input: RunEvent[] = [
       {

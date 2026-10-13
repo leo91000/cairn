@@ -178,15 +178,66 @@ impl ExecutionAdapter for Opencode {
 
     async fn configure_plan(
         &self,
-        _s: &Service,
+        s: &Service,
         plan: &mut Value,
         account: Option<&Lease>,
     ) -> Result<()> {
-        if account.is_none() {
+        let Some(account) = account else {
             return Err(Error::bad(
                 "Connect an OpenCode model-provider API key before starting this agent.",
             ));
-        }
+        };
+        let selected = text(plan, "model").to_owned();
+        let record = s.accounts.account(s, &account.account_id).await?;
+        let field = |name: &str| {
+            record
+                .extra
+                .get(name)
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_owned()
+        };
+        let (name, via) = if selected.starts_with(crate::opencode::AUTO) {
+            let route = s
+                .opencode
+                .route(s, &selected, &field("modelProvider"))
+                .await?
+                .ok_or_else(|| {
+                    Error::conflict(
+                        "This OpenCode connection no longer offers the selected model. Choose another model or connection.",
+                    )
+                })?;
+            plan["model"] = route["model"].clone();
+            // A fallback route may not offer the saved level; it then uses its default.
+            let reasoning = text(plan, "reasoning");
+            if !reasoning.is_empty()
+                && !route["supportedReasoningEfforts"]
+                    .as_array()
+                    .is_some_and(|e| e.iter().any(|e| e["reasoningEffort"] == reasoning))
+            {
+                plan["reasoning"] = "".into();
+            }
+            (
+                text(&route, "displayName").to_owned(),
+                text(&route, "providerName").to_owned(),
+            )
+        } else {
+            let name = s
+                .opencode
+                .display_name(&selected)
+                .unwrap_or(selected.clone());
+            (name, field("modelProviderName"))
+        };
+        // Conversations label the replies that follow with the provider that wrote them.
+        let payload = json!({ "route": { "model": plan["model"], "providerName": via } });
+        s.store
+            .event(
+                text(plan, "runId"),
+                "status",
+                &format!("{name} via {via}"),
+                Some(payload),
+            )
+            .await?;
         plan["opencodeManagedAuth"] = true.into();
         Ok(())
     }

@@ -33,6 +33,8 @@ export interface Account {
   plan: string | null
   modelProvider?: string
   modelProviderName?: string
+  /** The user's order among accounts of a coding agent that orders them. */
+  priority?: number
   state: 'pending' | 'ready' | 'error'
   status: AccountStatus
   error: string
@@ -74,6 +76,8 @@ export const providers: Record<Provider, {
   subscription: string
   connection: 'oauth' | 'apiKey'
   requiresModel: boolean
+  /** Runs try accounts in the user's order instead of by remaining capacity. */
+  ordered: boolean
 }> = {
   codex: {
     label: 'Codex',
@@ -81,6 +85,7 @@ export const providers: Record<Provider, {
     subscription: 'ChatGPT account',
     connection: 'oauth',
     requiresModel: false,
+    ordered: false,
   },
   claude: {
     label: 'Claude Code',
@@ -88,6 +93,7 @@ export const providers: Record<Provider, {
     subscription: 'Claude account',
     connection: 'oauth',
     requiresModel: false,
+    ordered: false,
   },
   opencode: {
     label: 'OpenCode',
@@ -95,6 +101,7 @@ export const providers: Record<Provider, {
     subscription: 'Provider API key',
     connection: 'apiKey',
     requiresModel: true,
+    ordered: true,
   },
 }
 

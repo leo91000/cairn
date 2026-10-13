@@ -49,6 +49,9 @@ data class Account(
     val plan: String? = null,
     val modelProvider: String? = null,
     val modelProviderName: String? = null,
+    /** The user's order among accounts of a coding agent that orders them. */
+    val priority: Int? = null,
+    val createdAt: Long? = null,
     val state: String = "pending",
     /** signIn, reconnect, paused, unavailable, waiting, full, next, low or ready. */
     val status: String = "ready",

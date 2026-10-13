@@ -15,6 +15,10 @@ import androidx.compose.ui.unit.dp
 import build.cairn.app.data.*
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import kotlinx.serialization.json.add
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.put
+import kotlinx.serialization.json.putJsonArray
 
 /** The accounts coding agents run on, grouped by coding agent, then the tools agents reach. */
 @Composable
@@ -110,6 +114,20 @@ fun ConnectionsScreen(vm: CairnViewModel, state: Workspace, openRun: (String) ->
                     add = {
                         vm.clearMessage()
                         adding = provider
+                    },
+                    reorder = { ids ->
+                        vm.perform {
+                            val next =
+                                api.send<AccountsView>(
+                                    "POST",
+                                    "/accounts/order",
+                                    buildJsonObject {
+                                        put("provider", provider)
+                                        putJsonArray("ids") { ids.forEach { add(it) } }
+                                    },
+                                )
+                            withContext(Dispatchers.Main) { show(next) }
+                        }
                     },
                 ) {
                     opened = it.id

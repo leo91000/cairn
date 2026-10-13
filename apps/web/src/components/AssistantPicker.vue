@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import type { CSSProperties } from 'vue'
 import type { Provider } from '../../../../packages/contracts/accounts'
+import type { CodingAgentModel } from '../../../../packages/contracts/models'
 import {
   computed,
   nextTick,
@@ -10,7 +11,7 @@ import {
   watch,
 } from 'vue'
 import { providers as codingAgents } from '../../../../packages/contracts/accounts'
-import { effortLabel } from '../../../../packages/contracts/models'
+import { billingLabels, effortLabel } from '../../../../packages/contracts/models'
 import { brands } from '../accounts'
 import {
   Check,
@@ -51,24 +52,30 @@ const catalog = computed(() => modelCatalogs[provider.value].catalog)
 const reload = () => modelCatalogs[provider.value].load()
 const current = computed(() => providers.find(item => item.value === provider.value) ?? providers[0])
 const effectiveModel = computed(() => model.value || props.defaultModel || catalog.value.models.find(item => item.isDefault)?.model || '')
-const selected = computed(() => catalog.value.models.find(item => item.model === effectiveModel.value))
+// A model offered by several providers is one entry. Its own id runs on the first available
+// route; a route's id pins that provider.
+const routeOf = (item: CodingAgentModel, value: string) => item.routes?.find(route => route.model === value)
+const matches = (item: CodingAgentModel, value: string) => item.model === value || !!routeOf(item, value)
+const selected = computed(() => catalog.value.models.find(item => matches(item, effectiveModel.value)))
+const route = computed(() => selected.value && routeOf(selected.value, effectiveModel.value))
 const fallback = computed(() => {
-  const item = catalog.value.models.find(item => item.model === (props.defaultModel || catalog.value.models.find(model => model.isDefault)?.model))
+  const value = props.defaultModel || catalog.value.models.find(model => model.isDefault)?.model || ''
+  const item = catalog.value.models.find(item => matches(item, value))
   return item?.displayName || item?.model || props.defaultModel
 })
-const modelLabel = computed(() => selected.value?.displayName || selected.value?.model || effectiveModel.value || 'Default model')
+const modelLabel = computed(() => [selected.value?.displayName || selected.value?.model || effectiveModel.value || 'Default model', route.value?.providerName].filter(Boolean).join(' · '))
 const defaultEffort = computed(() => (props.inherit && !model.value ? props.defaultReasoning || selected.value?.defaultReasoningEffort : selected.value?.defaultReasoningEffort) || '')
 const effectiveEffort = computed(() => reasoning.value || defaultEffort.value)
 const summary = computed(() => [current.value.label, modelLabel.value, effectiveEffort.value && `${effortLabel(effectiveEffort.value)} reasoning`].filter(Boolean).join(' · '))
 // Claude lists its own "default" alias. When the default row already resolves to it,
 // show one row instead of two equivalent choices.
 const alias = computed(() => !props.inherit || !props.defaultModel ? catalog.value.models.find(item => item.model === 'default') : undefined)
-const visible = computed(() => catalog.value.models.filter(item => (!item.hidden || item.model === model.value) && (item !== alias.value || model.value === item.model)))
+const visible = computed(() => catalog.value.models.filter(item => (!item.hidden || matches(item, model.value)) && (item !== alias.value || model.value === item.model)))
 const models = computed(() => {
   const words = query.value.trim().toLowerCase()
   return words ? visible.value.filter(item => `${item.displayName} ${item.model}`.toLowerCase().includes(words)) : visible.value
 })
-const missing = computed(() => !!model.value && !catalog.value.models.some(item => item.model === model.value))
+const missing = computed(() => !!model.value && !catalog.value.models.some(item => matches(item, model.value)))
 const choices = computed(() => [
   ...(!current.value.requiresModel || (props.inherit && props.defaultModel)
     ? [
@@ -79,6 +86,8 @@ const choices = computed(() => [
             ? `${fallback.value} · ${props.inherit ? 'the agent’s setting' : `chosen by ${current.value.label}`}`
             : props.inherit ? 'Follow the agent’s model' : 'Follow provider settings'),
           recommended: !props.inherit && !!alias.value,
+          chosen: !model.value,
+          routes: [],
         },
       ]
     : []),
@@ -87,6 +96,8 @@ const choices = computed(() => [
     label: item.displayName || item.model,
     description: item.description,
     recommended: item.isDefault,
+    chosen: !!model.value && matches(item, model.value),
+    routes: item.routes?.filter(route => !route.hidden || route.model === model.value) ?? [],
   })),
   ...(missing.value
     ? [{
@@ -94,6 +105,8 @@ const choices = computed(() => [
         label: model.value,
         description: 'Saved model · not in the current catalog',
         recommended: false,
+        chosen: true,
+        routes: [],
       }]
     : []),
 ])
@@ -104,7 +117,7 @@ watch([provider, () => catalog.value.models, () => props.defaultModel], () => {
       || catalog.value.models.find(item => !item.hidden)?.model || ''
   }
 }, { immediate: true })
-const efforts = computed(() => [...new Map((selected.value?.supportedReasoningEfforts ?? []).map(effort => [effort.reasoningEffort, effort])).values()]
+const efforts = computed(() => [...new Map(((route.value ?? selected.value)?.supportedReasoningEfforts ?? []).map(effort => [effort.reasoningEffort, effort])).values()]
   .sort((a, b) => (order.indexOf(a.reasoningEffort) + 1 || 99) - (order.indexOf(b.reasoningEffort) + 1 || 99)))
 const effortDescription = computed(() => efforts.value.find(effort => effort.reasoningEffort === effectiveEffort.value)?.description)
 const unsupported = computed(() => !!reasoning.value && !!selected.value && !efforts.value.some(effort => effort.reasoningEffort === reasoning.value))
@@ -118,11 +131,18 @@ function chooseProvider(value: Provider) {
   query.value = ''
 }
 
-function chooseModel(value: string) {
-  if (value === model.value)
+function chooseModel(option: { value: string, chosen: boolean }) {
+  if (option.chosen)
     return
-  model.value = value
+  model.value = option.value
   reasoning.value = ''
+}
+
+// Switching between routes of one model keeps a reasoning level they share.
+function chooseRoute(value: string) {
+  model.value = value
+  if (reasoning.value && !efforts.value.some(effort => effort.reasoningEffort === reasoning.value))
+    reasoning.value = ''
 }
 
 function place() {
@@ -311,17 +331,17 @@ onBeforeUnmount(() => removeEventListener('resize', place))
           </p>
           <div class="flex flex-col gap-1.5" role="radiogroup" aria-label="Model">
             <template v-for="option in choices" :key="option.value">
-              <div class="model-card rounded-xl border transition-[border-color,background]" :class="model === option.value ? 'selected border-accent bg-soft' : 'border-transparent bg-hover/35 hover:bg-hover/60'">
+              <div class="model-card rounded-xl border transition-[border-color,background]" :class="option.chosen ? 'selected border-accent bg-soft' : 'border-transparent bg-hover/35 hover:bg-hover/60'">
                 <button
                   type="button"
                   role="radio"
                   data-model
-                  :aria-checked="model === option.value"
+                  :aria-checked="option.chosen"
                   :aria-label="option.label"
                   :aria-describedby="option.description ? `${id}-${option.value || 'default'}-description` : undefined"
                   class="flex w-full items-center gap-3 rounded-xl px-3.5 py-3 text-left focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
                   :disabled="disabled"
-                  @click="chooseModel(option.value)"
+                  @click="chooseModel(option)"
                 >
                   <span class="flex min-w-0 flex-1 flex-col gap-0.5">
                     <span class="flex flex-wrap items-center gap-2">
@@ -332,14 +352,51 @@ onBeforeUnmount(() => removeEventListener('resize', place))
                       v-if="option.description"
                       :id="`${id}-${option.value || 'default'}-description`"
                       class="text-2xs text-muted"
-                      :class="model === option.value ? 'line-clamp-4' : 'line-clamp-2'"
+                      :class="option.chosen ? 'line-clamp-4' : 'line-clamp-2'"
                     >{{ option.description }}</span>
                   </span>
-                  <span class="grid size-5 shrink-0 place-items-center rounded-full" :class="model === option.value ? 'bg-accent text-raised' : 'border-[1.5px] border-control'">
-                    <Icon v-if="model === option.value" :name="Check" :size="12" />
+                  <span class="grid size-5 shrink-0 place-items-center rounded-full" :class="option.chosen ? 'bg-accent text-raised' : 'border-[1.5px] border-control'">
+                    <Icon v-if="option.chosen" :name="Check" :size="12" />
                   </span>
                 </button>
-                <div v-if="model === option.value" class="mx-2.5 mb-2.5 flex flex-col gap-2 rounded-lg bg-raised px-3 py-2.5">
+                <div v-if="option.chosen" class="mx-2.5 mb-2.5 flex flex-col gap-2 rounded-lg bg-raised px-3 py-2.5">
+                  <template v-if="option.routes.length > 1">
+                    <div class="flex items-baseline justify-between gap-2">
+                      <span class="text-2xs font-medium text-muted">Connection</span>
+                      <strong class="text-sm text-accent">{{ route?.providerName ?? 'Auto' }}</strong>
+                    </div>
+                    <div class="flex flex-wrap gap-1.5" role="radiogroup" aria-label="Connection">
+                      <button
+                        type="button"
+                        role="radio"
+                        :aria-checked="!route"
+                        class="effort-chip"
+                        :disabled="disabled"
+                        @click="chooseRoute(option.value)"
+                      >
+                        <Icon v-if="!route" :name="Check" :size="12" />Auto
+                      </button>
+                      <button
+                        v-for="item in option.routes"
+                        :key="item.model"
+                        type="button"
+                        role="radio"
+                        :aria-checked="route?.model === item.model"
+                        class="effort-chip"
+                        :disabled="disabled"
+                        @click="chooseRoute(item.model)"
+                      >
+                        {{ item.providerName }}<span class="opacity-70">· {{ billingLabels[item.billing] }}</span>
+                      </button>
+                    </div>
+                    <p class="text-2xs text-muted">
+                      {{ route ? `Runs only on ${route.providerName}. When its limit is reached, the run waits.` : `Tries ${option.routes.map(item => item.providerName).join(', then ')}, in your Connections order.` }}
+                    </p>
+                    <hr class="my-0.5 border-line">
+                  </template>
+                  <p v-else-if="option.routes.length" class="text-2xs text-muted">
+                    Via {{ option.routes[0].providerName }} · {{ billingLabels[option.routes[0].billing] }}
+                  </p>
                   <div class="flex items-baseline justify-between gap-2">
                     <span :id="`${id}-reasoning`" class="text-2xs font-medium text-muted">Reasoning</span>
                     <strong class="text-sm text-accent">{{ effortLabel(effectiveEffort) }}</strong>
@@ -405,7 +462,7 @@ onBeforeUnmount(() => removeEventListener('resize', place))
             maxlength="100"
             placeholder="Use the provider default"
             class="mt-1"
-            @change="chooseModel(($event.target as HTMLInputElement).value.trim())"
+            @change="(event) => { const value = (event.target as HTMLInputElement).value.trim(); chooseModel({ value, chosen: value === model }) }"
           ></label>
         </section>
       </div>

@@ -135,11 +135,33 @@ impl Driver for Opencode {
     }
 
     async fn supports(&self, s: &Service, id: &str, model: &str) -> Result<bool> {
+        if model.is_empty() {
+            return Ok(true);
+        }
         let account = s.accounts.account(s, id).await?;
-        Ok(model.is_empty()
-            || model.split_once('/').is_some_and(|(provider, _)| {
-                account.extra.get("modelProvider").and_then(Value::as_str) == Some(provider)
-            }))
+        let Some(provider) = account.extra.get("modelProvider").and_then(Value::as_str) else {
+            return Ok(false);
+        };
+        Ok(s.opencode.cached_route(model, provider)?.is_some())
+    }
+
+    async fn warm(&self, s: &Service, model: &str) -> Result<()> {
+        // Without a catalog no account supports Auto yet, so the run waits and retries.
+        // A failed discovery is retried after a pause, not on every admission attempt.
+        static FAILED_AT: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(0);
+        let failed_at = FAILED_AT.load(std::sync::atomic::Ordering::Relaxed);
+        if model.starts_with(crate::opencode::AUTO)
+            && now() - failed_at >= 30_000
+            && let Err(error) = s.opencode.models(s).await
+        {
+            FAILED_AT.store(now(), std::sync::atomic::Ordering::Relaxed);
+            tracing::warn!(error = %error.message, "OpenCode model catalog unavailable");
+        }
+        Ok(())
+    }
+
+    fn ordered(&self) -> bool {
+        true
     }
 
     fn home(&self, s: &Service, run_id: &str) -> PathBuf {

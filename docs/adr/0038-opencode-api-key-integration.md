@@ -42,6 +42,23 @@ native continuation user IDs fail visibly, including during recovery, rather tha
 being mistaken for assistant activity or leaving an unowned response running.
 Expired question answers fail visibly and delivered answers are not replayed.
 
+## One model through several connections
+
+Go, Zen and direct provider keys can offer the same model under different names,
+such as `opencode-go/claude-sonnet-4.5` and `openrouter/anthropic/claude-sonnet-4.5`.
+The catalog groups them by their last path segment, case-folded with `.` and `_`
+read as `-`. Each group is one picker entry, and each connected provider offering it
+is a route. Names that do not match stay separate entries, so a missed match costs a
+duplicate row, never a wrong provider.
+
+An entry's own identifier, `auto/<model>`, runs on the first route available in the
+user's connection order. OpenCode accounts rank by that order before the pool's
+usual capacity and recent-use rules; the launch then resolves the leased account's
+provider to its concrete `provider/model` and records it as a conversation status.
+A rate limit uses the existing exhaustion flow, so the resumed session continues on
+the next route. A route's `provider/model` pins that provider. Auto offers only the
+variants every route shares, because a fallback must accept the chosen reasoning.
+
 ## Initial scope
 
 This integration supports model-provider API keys, including OpenCode Zen. It does

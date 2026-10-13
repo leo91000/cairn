@@ -75,9 +75,16 @@ internal fun selectedModel(
     defaultModel: String,
 ): CodingAgentModel? {
     val name = model.ifBlank { defaultModel }
-    return if (name.isNotBlank()) catalog.models.find { it.model == name }
+    return if (name.isNotBlank()) catalog.models.find { it.matches(name) }
     else catalog.models.find { it.isDefault }
 }
+
+internal fun billingLabel(value: String) =
+    when (value) {
+        "subscription" -> "Inclus"
+        "credits" -> "Crédits"
+        else -> "Votre clé"
+    }
 
 internal val ClaudeTint = Color(0xFFD97757)
 private val ModelCardShape = RoundedCornerShape(18.dp)
@@ -159,7 +166,12 @@ fun ModelPicker(
             refreshing = false
         }
     }
-    val selected = selectedModel(catalog, model, defaultModel)
+    val chosen = selectedModel(catalog, model, defaultModel)
+    // A pinned route offers its own reasoning levels; Auto offers those all routes share.
+    val route = chosen?.route(model.ifBlank { defaultModel })
+    val selected =
+        route?.let { chosen.copy(supportedReasoningEfforts = it.supportedReasoningEfforts) }
+            ?: chosen
     LaunchedEffect(provider, catalog.models, model, defaultModel, inherit) {
         if (
             codingAgent(provider).requiresModel &&
@@ -178,8 +190,12 @@ fun ModelPicker(
         else selected?.defaultReasoningEffort.orEmpty()
     val effectiveEffort = reasoning.ifBlank { inheritedEffort }
     val modelLabel =
-        selected?.displayName?.ifBlank { selected.model }
-            ?: model.ifBlank { defaultModel }.ifBlank { "Modèle par défaut" }
+        listOfNotNull(
+                selected?.displayName?.ifBlank { selected.model }
+                    ?: model.ifBlank { defaultModel }.ifBlank { "Modèle par défaut" },
+                route?.providerName?.ifBlank { null },
+            )
+            .joinToString(" · ")
     val summary =
         listOfNotNull(
                 if (changeProvider != null || field) providerLabel(provider) else null,
@@ -210,7 +226,7 @@ fun ModelPicker(
                     ?.takeIf { !inherit || defaultModel.isBlank() }
             val visible =
                 catalog.models.filter {
-                    (!it.hidden || it.model == model) && (it != alias || model == it.model)
+                    (!it.hidden || it.matches(model)) && (it != alias || model == it.model)
                 }
             val models = visible.filter {
                 it.displayName.contains(query, true) || it.model.contains(query, true)
@@ -336,15 +352,28 @@ fun ModelPicker(
                         change("", "")
                     }
                 models.forEach { item ->
+                    val routes = item.routes.filter { !it.hidden || it.model == model }
                     ModelCard(
                         item.displayName.ifBlank { item.model },
-                        item.description,
-                        item.model == model,
+                        routes
+                            .takeIf { it.isNotEmpty() }
+                            ?.joinToString(", puis ", "Via ") { it.providerName }
+                            ?: item.description,
+                        item.matches(model),
                         enabled,
                         badge = if (item.isDefault) "Recommandé" else "",
-                        reasoning = reasoningFor,
+                        reasoning = {
+                            RouteControl(item, routes, route, enabled) { value ->
+                                val efforts =
+                                    (item.route(value)?.supportedReasoningEfforts
+                                            ?: item.supportedReasoningEfforts)
+                                        .map { it.reasoningEffort }
+                                change(value, reasoning.takeIf { it in efforts }.orEmpty())
+                            }
+                            reasoningFor()
+                        },
                     ) {
-                        if (item.model != model) change(item.model, "")
+                        if (!item.matches(model)) change(item.model, "")
                     }
                 }
                 if (models.isEmpty() && query.isNotBlank())
@@ -356,7 +385,7 @@ fun ModelPicker(
                         style = MaterialTheme.typography.bodyMedium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
-                if (model.isNotBlank() && catalog.models.none { it.model == model })
+                if (model.isNotBlank() && catalog.models.none { it.matches(model) })
                     ModelCard(
                         model,
                         "Modèle enregistré · absent du catalogue",
@@ -649,6 +678,64 @@ private fun ModelCard(
                 }
         }
     }
+}
+
+/** Auto, or one provider for a model several connected providers offer. */
+@Composable
+private fun RouteControl(
+    item: CodingAgentModel,
+    routes: List<ModelRoute>,
+    pinned: ModelRoute?,
+    enabled: Boolean,
+    change: (String) -> Unit,
+) {
+    val colors = MaterialTheme.colorScheme
+    if (routes.size == 1) {
+        Text(
+            "Via ${routes.single().providerName} · ${billingLabel(routes.single().billing)}",
+            style = MaterialTheme.typography.bodySmall,
+            color = colors.onSurfaceVariant,
+        )
+        return
+    }
+    if (routes.isEmpty()) return
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Text(
+            "Connexion",
+            Modifier.weight(1f),
+            style = MaterialTheme.typography.labelMedium,
+            color = colors.onSurfaceVariant,
+        )
+        Text(
+            pinned?.providerName ?: "Auto",
+            style = MaterialTheme.typography.titleSmall,
+            color = colors.primary,
+        )
+    }
+    FlowRow(
+        Modifier.testTag("model-routes"),
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        EffortChip("Auto", pinned == null, enabled) { change(item.model) }
+        routes.forEach { route ->
+            EffortChip(
+                "${route.providerName} · ${billingLabel(route.billing)}",
+                pinned?.model == route.model,
+                enabled,
+            ) {
+                change(route.model)
+            }
+        }
+    }
+    Text(
+        if (pinned != null)
+            "Uniquement sur ${pinned.providerName}. Si sa limite est atteinte, l’exécution attend."
+        else
+            "Essaie ${routes.joinToString(", puis ") { it.providerName }}, dans l’ordre de vos connexions.",
+        style = MaterialTheme.typography.bodySmall,
+        color = colors.onSurfaceVariant,
+    )
+    HorizontalDivider(Modifier.padding(vertical = 2.dp))
 }
 
 @Composable

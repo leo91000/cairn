@@ -12,7 +12,12 @@ import OnePasswordAccounts from '../components/OnePasswordAccounts.vue'
 import ProviderMark from '../components/ProviderMark.vue'
 import UiAlert from '../components/UiAlert.vue'
 import UiButton from '../components/UiButton.vue'
-import { Plus, RefreshCw } from '../icons'
+import {
+  ArrowDown,
+  ArrowUp,
+  Plus,
+  RefreshCw,
+} from '../icons'
 
 // The accounts coding agents run on, grouped by coding agent, then the tools agents reach.
 const accounts = useAccounts()
@@ -22,6 +27,8 @@ const replacing = ref<Account>()
 const detail = computed<Account | undefined>(() => accounts.accounts.value.find(a => a.id === opened.value))
 const groups = computed(() => (Object.keys(providers) as Provider[]).map((provider) => {
   const items = accounts.accounts.value.filter(a => a.provider === provider)
+  if (providers[provider].ordered)
+    items.sort((a, b) => (a.priority ?? Number.MAX_SAFE_INTEGER) - (b.priority ?? Number.MAX_SAFE_INTEGER) || a.createdAt - b.createdAt)
   return {
     provider,
     items,
@@ -41,6 +48,14 @@ async function reconnect(account: Account) {
   else {
     await accounts.reconnect(account.id)
   }
+}
+
+// Auto tries ordered connections top to bottom.
+function move(items: Account[], index: number, offset: number) {
+  const ids = items.map(a => a.id)
+  const [id] = ids.splice(index, 1)
+  ids.splice(index + offset, 0, id)
+  void accounts.reorder(items[0].provider, ids)
 }
 
 function closeSignIn() {
@@ -120,13 +135,41 @@ function closeSignIn() {
             <Icon :name="Plus" :size="14" /><span class="phone:hidden">Add</span>
           </UiButton>
         </header>
-        <AccountRow
-          v-for="account in group.items"
+        <p v-if="providers[group.provider].ordered && group.items.length > 1" class="border-t border-line px-4.5 py-2.5 text-xs text-muted phone:px-4">
+          Models offered by several connections run on the first available one, top to bottom.
+        </p>
+        <div
+          v-for="(account, index) in group.items"
           :key="account.id"
-          :account="account"
-          :selected="account.id === opened"
-          @open="opened = account.id"
-        />
+          class="flex items-stretch"
+        >
+          <AccountRow
+            class="min-w-0 flex-1"
+            :account="account"
+            :selected="account.id === opened"
+            @open="opened = account.id"
+          />
+          <div v-if="providers[group.provider].ordered && group.items.length > 1" class="flex shrink-0 flex-col justify-center gap-0.5 border-t border-line pr-3">
+            <button
+              type="button"
+              class="grid size-7 place-items-center rounded-full text-subtle hover:bg-hover hover:text-ink disabled:opacity-30"
+              :aria-label="`Move ${account.name} up`"
+              :disabled="accounts.busy.value || index === 0"
+              @click="move(group.items, index, -1)"
+            >
+              <Icon :name="ArrowUp" :size="14" />
+            </button>
+            <button
+              type="button"
+              class="grid size-7 place-items-center rounded-full text-subtle hover:bg-hover hover:text-ink disabled:opacity-30"
+              :aria-label="`Move ${account.name} down`"
+              :disabled="accounts.busy.value || index === group.items.length - 1"
+              @click="move(group.items, index, 1)"
+            >
+              <Icon :name="ArrowDown" :size="14" />
+            </button>
+          </div>
+        </div>
         <p v-if="!group.items.length" class="border-t border-line px-4.5 py-4 text-sm text-muted phone:px-4">
           No {{ providers[group.provider].label }} account yet.<template v-if="accounts.required.value.includes(group.provider)">
             {{ providers[group.provider].label }} runs wait until you add one.

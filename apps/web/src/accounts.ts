@@ -176,6 +176,7 @@ export function useAccounts() {
     submitCode: (code: string) => action(() => api('/accounts/sign-in/code', json('POST', { code }))),
     cancel: () => action(() => api('/accounts/sign-in', json('DELETE'))),
     update: (id: string, patch: Partial<Pick<Account, 'name' | 'enabled' | 'maxConcurrentRuns'>>) => action(() => api<Account>(`/accounts/${id}`, json('PATCH', patch))),
+    reorder: (provider: Provider, ids: string[]) => action(async () => apply(await api<Accounts>('/accounts/order', json('POST', { provider, ids })))),
     remove: (id: string) => action(() => api(`/accounts/${id}`, json('DELETE'))),
   }
 }

@@ -58,9 +58,23 @@ bound to its model provider; add a separate account to use a different provider.
 **Replace API key** is available once the account's active/recoverable runs finish.
 No key is returned by the account API or written to the native authentication file.
 
-The model picker discovers the connected providers' native inventory and variants.
-A model is stored as `provider/model`, preserving nested IDs such as
-`openrouter/anthropic/claude-sonnet-4.6`. Usage is not polled: the account row says
+The model picker discovers the connected providers' native inventory and variants,
+and lists each model once, even when several connections offer it: for example,
+Claude Sonnet through OpenCode Go, Zen and an Anthropic key. Only active connections
+contribute models. A chosen model offers a **Connection** choice:
+
+- **Auto**, the default, stores `auto/<model>`. A run uses the first connection in
+  your **Connections** order that offers the model and has capacity, then continues
+  on the next one when a connection reaches its limit. Auto offers only the reasoning
+  levels all its connections share.
+- A specific connection stores `provider/model`, preserving nested IDs such as
+  `openrouter/anthropic/claude-sonnet-4.6`. The run uses only that provider and waits
+  when it reaches its limit.
+
+Each connection is labelled by who pays: **Included** (OpenCode Go subscription),
+**Credits** (Zen balance) or **Your key**. Reorder OpenCode connections with the
+arrows on **Connections**. The conversation records which connection ran, such as
+*Claude Sonnet 4.5 via OpenCode Zen*. Usage is not polled: the account row says
 **Usage not reported**. Saving a key validates its format; the first model request
 checks authentication. A provider rejection asks you to replace the key. A rate
 limit enters the shared exhaustion flow and retries the account after five minutes
@@ -86,6 +100,7 @@ Screenshots use synthetic accounts: [desktop](screenshots/agent-accounts/desktop
 | `GET /api/accounts` | `{accounts, signIn, required}`: every account, the sign-in in progress, and the coding agents whose runs wait for you |
 | `POST /api/accounts` | `{provider, name}` starts sign-in; OpenCode additionally requires `{modelProvider, apiKey}` |
 | `GET /api/accounts/providers/opencode` | Supported API-key model providers from the pinned native catalog |
+| `POST /api/accounts/order` | `{provider, ids}` saves the order Auto tries OpenCode connections in; `ids` lists every account once |
 | `POST /api/accounts/{id}/api-key` | `{modelProvider, apiKey}` replaces an OpenCode key when the account is idle |
 | `POST /api/accounts/{id}/sign-in` | Signs an existing account in again |
 | `POST /api/accounts/sign-in/code` | `{code}` for coding agents whose page shows a code to paste back (Claude Code) |

@@ -34,6 +34,8 @@ export type ActivityEntry
     time: number
     text: string
     delivery?: string
+    /** The model provider that wrote this reply, when the engine chose among several. */
+    via?: string
     attachments?: import('../../../packages/contracts/chats').ChatAttachment[]
   }
   | { kind: 'group', id: string, artifacts: ActivityArtifact[] }
@@ -86,6 +88,7 @@ export function activityEntries(events: RunEvent[], chat = false): ActivityEntry
   }
 
   let turn = 0
+  let via: string | undefined
   let legacyTool: ActivityArtifact | undefined
   for (const event of events) {
     if (event.type === 'artifact')
@@ -103,6 +106,16 @@ export function activityEntries(events: RunEvent[], chat = false): ActivityEntry
     }
 
     const data = payload(event)
+    const route = record(data.route)
+    // An attempt may name the provider of its replies; the next attempt ends that label.
+    if (event.type === 'status' && data.attempt === true)
+      via = undefined
+    if (event.type === 'status' && text(route.providerName)) {
+      via = text(route.providerName)
+      if (chat)
+        continue
+    }
+
     const item = record(data.item)
     const type = text(item.type)
     if (event.type === 'turn.started') {
@@ -131,6 +144,7 @@ export function activityEntries(events: RunEvent[], chat = false): ActivityEntry
           id,
           time: event.createdAt,
           text: content,
+          ...(via ? { via } : {}),
         }
         entries.push(message)
         messages.set(id, message)
@@ -242,7 +256,7 @@ export function activityEntries(events: RunEvent[], chat = false): ActivityEntry
         'turn.failed': 'Turn failed',
         'turn.waiting': 'Waiting for background tasks',
       }
-      artifact.title = event.type === 'status' ? readable(event.text) : type ? readable(type) : labels[event.type] || readable(event.type)
+      artifact.title = event.type === 'status' ? (event.text.includes(' ') ? event.text : readable(event.text)) : type ? readable(type) : labels[event.type] || readable(event.type)
       const message = text(item.message) || text(data.message) || text(record(data.error).message)
       if (message)
         block('Details', message)

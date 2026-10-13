@@ -105,6 +105,17 @@ pub trait Driver: Send + Sync {
 
     async fn supports(&self, s: &Service, id: &str, model: &str) -> Result<bool>;
 
+    /// Loads what [`Driver::supports`] needs for `model` before selection takes its locks.
+    async fn warm(&self, _s: &Service, _model: &str) -> Result<()> {
+        Ok(())
+    }
+
+    /// Whether the user orders these accounts. Ordered accounts are tried first to last,
+    /// before remaining capacity and recent use.
+    fn ordered(&self) -> bool {
+        false
+    }
+
     /// The private home a run's CLI reads its credentials from.
     fn home(&self, s: &Service, run_id: &str) -> PathBuf;
 
@@ -469,9 +480,12 @@ impl Accounts {
             }
         }
         let rank = |a: &Account| capacity(a, driver, model).unwrap_or(-1.);
+        let ordered = driver.ordered();
         candidates.sort_by(|a, b| {
-            rank(b)
-                .total_cmp(&rank(a))
+            let position = |a: &Account| ordered.then(|| a.priority());
+            position(a)
+                .cmp(&position(b))
+                .then(rank(b).total_cmp(&rank(a)))
                 .then(
                     a.last_used_at
                         .unwrap_or(0)
@@ -498,6 +512,7 @@ impl Accounts {
             return Ok(None);
         }
         timing.next("availability");
+        driver.warm(s, model).await?;
         let available = {
             let leases = self.leases.lock().await;
             if leases.contains_key(run_id) {
@@ -963,6 +978,37 @@ impl Accounts {
             .unwrap_or(Value::Null))
     }
 
+    /// Saves the user's order for `provider`'s accounts; `ids` lists every account once.
+    pub async fn reorder(&self, s: &Service, provider: Provider, ids: &[String]) -> Result<Value> {
+        if !provider.driver().ordered() {
+            return Err(Error::bad("This coding agent does not order its accounts."));
+        }
+        let _selection = self.selection.lock().await;
+        let ids = ids.to_vec();
+        s.store
+            .transaction(move |db| {
+                let mut accounts = stored(db)?;
+                accounts.retain(|a| a.provider == provider);
+                let mut expected = accounts.iter().map(|a| a.id.as_str()).collect::<Vec<_>>();
+                let mut given = ids.iter().map(String::as_str).collect::<Vec<_>>();
+                expected.sort_unstable();
+                given.sort_unstable();
+                if expected != given {
+                    return Err(Error::conflict(
+                        "Connections changed. Reload them and order them again.",
+                    ));
+                }
+                for mut account in accounts {
+                    let position = ids.iter().position(|id| *id == account.id).unwrap_or(0);
+                    account.extra.insert("priority".into(), position.into());
+                    db.put(KIND, &account.to_value())?;
+                }
+                db.audit("account.reordered", &json!({ "provider": provider }))
+            })
+            .await?;
+        self.overview(s).await
+    }
+
     pub async fn remove(&self, s: &Service, id: &str) -> Result<()> {
         let _selection = self.selection.lock().await;
         let _guard = self.lock(id).await;
@@ -1085,6 +1131,19 @@ pub async fn routes(s: &Arc<Service>, input: &Input) -> Result<Value> {
             } else {
                 accounts.add(s, provider, input.string("name", 200)?).await
             }
+        }
+        ("POST", ["order"]) => {
+            let provider = Provider::parse(input.string("provider", 20)?)?;
+            let ids = input.body["ids"]
+                .as_array()
+                .filter(|ids| ids.len() <= MAX_ACCOUNTS)
+                .and_then(|ids| {
+                    ids.iter()
+                        .map(|id| id.as_str().filter(|id| uuid(id).is_ok()).map(str::to_owned))
+                        .collect::<Option<Vec<_>>>()
+                })
+                .ok_or_else(|| Error::bad("List the accounts in their new order."))?;
+            accounts.reorder(s, provider, &ids).await
         }
         ("POST", ["refresh"]) => {
             accounts.poll(s, false).await?;

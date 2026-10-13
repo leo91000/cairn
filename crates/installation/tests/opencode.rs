@@ -476,3 +476,71 @@ async fn native_questions_use_cairn_ids_and_answers_reach_the_original_native_re
             .contains("compact status panel")
     );
 }
+
+#[tokio::test]
+async fn auto_models_follow_the_connection_order_and_fall_back_when_one_is_exhausted() {
+    let root = TempDir::new().unwrap();
+    let s = service(&root).await;
+    let zen = text(&connect(&s).await, "id").to_owned();
+    let go = s
+        .accounts
+        .connect_api_key(&s, Provider::Opencode, "Go", "opencode-go", "go-key", None)
+        .await
+        .unwrap();
+    let go = text(&go, "id").to_owned();
+    assert!(
+        s.accounts
+            .reorder(&s, Provider::Opencode, std::slice::from_ref(&go))
+            .await
+            .is_err(),
+        "an order must list every account"
+    );
+    s.accounts
+        .reorder(&s, Provider::Opencode, &[go.clone(), zen.clone()])
+        .await
+        .unwrap();
+
+    let auto = "auto/ling-3-1-flash-free";
+    let models = s.opencode.models(&s).await.unwrap();
+    let entry = models["models"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|m| m["model"] == auto)
+        .unwrap();
+    assert_eq!(
+        entry["routes"][0]["model"],
+        "opencode-go/ling-3.1-flash-free"
+    );
+    assert_eq!(entry["routes"][1]["model"], MODEL);
+
+    let first = s
+        .accounts
+        .acquire(&s, "auto-first", Provider::Opencode, auto)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(first.account_id, go);
+    s.accounts.release(&first).await.unwrap();
+    s.accounts.exhausted(&s, &go, auto).await.unwrap();
+    let next = s
+        .accounts
+        .acquire(&s, "auto-next", Provider::Opencode, auto)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(next.account_id, zen);
+    s.accounts.release(&next).await.unwrap();
+
+    // A pinned route never moves to another provider.
+    let pinned = s
+        .accounts
+        .acquire(
+            &s,
+            "pinned",
+            Provider::Opencode,
+            "opencode-go/ling-3.1-flash-free",
+        )
+        .await;
+    assert!(pinned.unwrap_err().is_conflict());
+}

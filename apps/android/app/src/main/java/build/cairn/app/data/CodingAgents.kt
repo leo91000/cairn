@@ -8,6 +8,8 @@ data class CodingAgent(
     val label: String,
     val apiKeys: Boolean = false,
     val requiresModel: Boolean = false,
+    /** Runs try accounts in the user's order instead of by remaining capacity. */
+    val ordered: Boolean = false,
 )
 
 val codingAgents =
@@ -21,6 +23,7 @@ val codingAgents =
             "OpenCode",
             apiKeys = true,
             requiresModel = true,
+            ordered = true,
         ),
     )
 

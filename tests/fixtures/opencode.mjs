@@ -50,6 +50,13 @@ async function main() {
         },
       },
       {
+        id: 'opencode-go',
+        name: 'OpenCode Go',
+        models: {
+          'ling-3.1-flash-free': nativeModel('ling-3.1-flash-free', 'Ling 3.1 Flash Free', ['medium', 'high']),
+        },
+      },
+      {
         id: 'openrouter',
         name: 'OpenRouter',
         models: {
@@ -129,6 +136,12 @@ async function main() {
     for (const part of user.parts)
       emit('message.part.updated', { part })
     emit('session.status', { sessionID: session.id, status: { type: 'busy' } })
+    // A subscription past its limit; Auto continues on the next connection.
+    if (body.includes('fixture:opencode-limit') && provider === 'opencode-go') {
+      emit('session.error', { sessionID: session.id, error: { name: 'APIError', data: { statusCode: 429, message: 'Go limit reached' } } })
+      return
+    }
+
     if (body.includes('fixture:opencode-error')) {
       emit('session.error', { sessionID: session.id, error: { name: 'APIError', data: { statusCode: 401, message: 'Sensitive provider detail' } } })
       return

@@ -275,9 +275,16 @@ internal fun CodingAgentCard(
     accounts: List<Account>,
     required: Boolean,
     add: () -> Unit,
+    reorder: ((List<String>) -> Unit)? = null,
     open: (Account) -> Unit,
 ) {
     val provider = agent.provider
+    // Auto tries ordered connections top to bottom.
+    val accounts =
+        if (agent.ordered)
+            accounts.sortedWith(compareBy({ it.priority ?: Int.MAX_VALUE }, { it.createdAt ?: 0L }))
+        else accounts
+    val movable = agent.ordered && reorder != null && accounts.size > 1
     val running = accounts.sumOf { it.activeRunIds.size }
     SignalCard(
         Modifier.fillMaxWidth().testTag("accounts-$provider").semantics {
@@ -307,9 +314,47 @@ internal fun CodingAgentCard(
                 onClick = add,
             )
         }
-        accounts.forEach { account ->
+        if (movable) {
             HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
-            AccountRow(account) { open(account) }
+            Text(
+                "Un modèle proposé par plusieurs connexions passe par la première disponible, de haut en bas.",
+                Modifier.padding(horizontal = 16.dp, vertical = 10.dp),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+        accounts.forEachIndexed { index, account ->
+            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+            if (!movable) AccountRow(account) { open(account) }
+            else
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Box(Modifier.weight(1f)) { AccountRow(account) { open(account) } }
+                    Column(Modifier.padding(end = 4.dp)) {
+                        fun move(offset: Int) {
+                            val ids = accounts.map { it.id }.toMutableList()
+                            ids.add(index + offset, ids.removeAt(index))
+                            reorder?.invoke(ids)
+                        }
+                        IconButton(
+                            onClick = { move(-1) },
+                            enabled = index > 0,
+                            modifier = Modifier.size(36.dp),
+                        ) {
+                            Icon(CairnIcons.Up, "Monter ${account.name}", Modifier.size(16.dp))
+                        }
+                        IconButton(
+                            onClick = { move(1) },
+                            enabled = index < accounts.lastIndex,
+                            modifier = Modifier.size(36.dp),
+                        ) {
+                            Icon(
+                                CairnIcons.Bottom,
+                                "Descendre ${account.name}",
+                                Modifier.size(16.dp),
+                            )
+                        }
+                    }
+                }
         }
         if (accounts.isEmpty()) {
             HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)

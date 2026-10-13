@@ -7,6 +7,40 @@ import org.junit.Test
 
 class TimelineTest {
     @Test
+    fun `chat labels each reply with its attempt's provider until another attempt begins`() {
+        fun route(id: Long, provider: String) =
+            event(id, "status")
+                .copy(
+                    text = "Kimi K2 via $provider",
+                    payload = mapOf("route" to buildJsonObject { put("providerName", provider) }),
+                )
+        fun attempt(id: Long) =
+            event(id, "status")
+                .copy(
+                    text = "Preparing workspace",
+                    payload = mapOf("attempt" to JsonPrimitive(true)),
+                )
+        val events =
+            listOf(
+                route(1, "OpenCode Go"),
+                event(2, "status").copy(text = "Opening project"),
+                event(3, "item.completed", "a", "agent_message"),
+                attempt(4),
+                route(5, "OpenCode Zen"),
+                event(6, "item.completed", "b", "agent_message"),
+                attempt(7),
+                event(8, "item.completed", "c", "agent_message"),
+            )
+        val rows = timelineEntries(events, chat = true).filter { it.message }
+        assertEquals(listOf("OpenCode Go", "OpenCode Zen", ""), rows.map { it.via })
+        // Run history keeps the statuses, titled by their text.
+        assertEquals(events.size, timelineEntries(events).sumOf { it.events.size })
+        assertEquals("Kimi K2 via OpenCode Go", presentActivity(events[0]).title)
+        assertEquals("Preparing workspace", presentActivity(events[3]).title)
+        assertEquals("", presentActivity(events[3]).output)
+    }
+
+    @Test
     fun `chat removes routine notices and empty groups while run history keeps them`() {
         val events =
             listOf(

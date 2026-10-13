@@ -393,6 +393,8 @@ async fn read_bounded_line(
 pub struct Catalog {
     cached: Mutex<Option<(i64, Value)>>,
     models: Mutex<Option<ModelCache>>,
+    /// The last model catalog, readable without waiting for a refresh in progress.
+    latest: std::sync::RwLock<Option<Value>>,
 }
 
 struct ModelCache {
@@ -439,23 +441,26 @@ impl Catalog {
             .into())
     }
 
+    /// One entry per model, with every connected provider offering it as a route in the
+    /// user's connection order. An entry's own `auto/…` id runs on the first available route.
     pub async fn models(&self, s: &Service) -> Result<Value> {
-        let accounts = s
+        let mut accounts = s
             .accounts
             .of(s, Provider::Opencode)
             .await?
             .into_iter()
-            .filter(crate::accounts::Account::is_ready)
+            .filter(crate::accounts::Account::is_active)
             .collect::<Vec<_>>();
-        let connected = accounts
+        accounts.sort_by(|a, b| a.priority().cmp(&b.priority()).then(a.id.cmp(&b.id)));
+        let mut connected = Vec::<String>::new();
+        for provider in accounts
             .iter()
-            .filter_map(|a| {
-                a.extra
-                    .get("modelProvider")
-                    .and_then(Value::as_str)
-                    .map(str::to_owned)
-            })
-            .collect::<Vec<_>>();
+            .filter_map(|a| a.extra.get("modelProvider").and_then(Value::as_str))
+        {
+            if !connected.iter().any(|p| p == provider) {
+                connected.push(provider.to_owned());
+            }
+        }
         if connected.is_empty() {
             return Ok(json!({
                 "models": [],
@@ -504,58 +509,8 @@ impl Catalog {
         )
         .await?;
         let raw = server.get("/provider").await?;
-        let preferred = &connected[0];
-        let mut models = Vec::new();
-        for provider in raw["all"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .filter(|p| connected.iter().any(|id| p["id"] == id.as_str()))
-        {
-            let provider_id = text(provider, "id");
-            for (id, model) in provider["models"].as_object().into_iter().flatten() {
-                if format!("{provider_id}/{id}").len() > 100 {
-                    continue;
-                }
-                let variants = model["variants"]
-                    .as_object()
-                    .into_iter()
-                    .flatten()
-                    .filter(|(name, value)| {
-                        let mut chars = name.chars();
-                        name.len() <= 40
-                            && chars.next().is_some_and(|c| c.is_ascii_lowercase())
-                            && chars.all(|c| {
-                                c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '-'
-                            })
-                            && value["disabled"] != true
-                    })
-                    .map(|(variant, _)| {
-                        json!({
-                            "reasoningEffort": variant,
-                            "description": "Model variant",
-                        })
-                    })
-                    .collect::<Vec<_>>();
-                models.push(json!({
-                    "model": format!("{provider_id}/{id}"),
-                    "displayName": format!("{} · {}", text(model, "name"), provider_name(provider)),
-                    "description": format!("{} model via OpenCode", provider_name(provider)),
-                    "hidden": model["status"] == "deprecated",
-                    "isDefault": provider_id == preferred && raw["default"][provider_id] == id.as_str(),
-                    "defaultReasoningEffort": "",
-                    "supportedReasoningEfforts": variants,
-                }));
-            }
-        }
-        models.sort_by_key(|model| {
-            (
-                !model["isDefault"].as_bool().unwrap_or(false),
-                text(model, "displayName").to_owned(),
-            )
-        });
         let value = json!({
-            "models": models,
+            "models": group(&raw, &connected),
             "checkedAt": now(),
             "stale": false,
             "error": "",
@@ -565,8 +520,235 @@ impl Catalog {
             at: now(),
             value: value.clone(),
         });
+        *self
+            .latest
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(value.clone());
         Ok(value)
     }
+
+    /// The `provider/model` that runs `model` on `provider`, if that provider offers it.
+    pub async fn route(&self, s: &Service, model: &str, provider: &str) -> Result<Option<Value>> {
+        if !model.starts_with(AUTO) {
+            return pinned(model, provider);
+        }
+        Ok(lookup(&self.models(s).await?, model, provider))
+    }
+
+    /// [`Catalog::route`] from the last catalog, without discovery: account selection
+    /// asks while holding its locks, after [`Catalog::models`] warmed the catalog.
+    pub fn cached_route(&self, model: &str, provider: &str) -> Result<Option<Value>> {
+        if !model.starts_with(AUTO) {
+            return pinned(model, provider);
+        }
+        let latest = self
+            .latest
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        Ok(latest
+            .as_ref()
+            .and_then(|catalog| lookup(catalog, model, provider)))
+    }
+}
+
+impl Catalog {
+    /// The last catalog's name for `provider/model`.
+    pub fn display_name(&self, model: &str) -> Option<String> {
+        let latest = self
+            .latest
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        latest.as_ref()?["models"]
+            .as_array()?
+            .iter()
+            .find(|entry| {
+                entry["routes"]
+                    .as_array()
+                    .is_some_and(|routes| routes.iter().any(|r| r["model"] == model))
+            })
+            .map(|entry| text(entry, "displayName").to_owned())
+    }
+}
+
+fn pinned(model: &str, provider: &str) -> Result<Option<Value>> {
+    let (owner, _) = model_id(model)?;
+    Ok((owner == provider).then(|| json!({ "model": model, "provider": provider })))
+}
+
+/// The route of `auto/…` `model` on `provider`. Auto never selects a deprecated route.
+fn lookup(catalog: &Value, model: &str, provider: &str) -> Option<Value> {
+    let entry = catalog["models"]
+        .as_array()?
+        .iter()
+        .find(|entry| entry["model"] == model)?;
+    let route = entry["routes"]
+        .as_array()?
+        .iter()
+        .find(|route| route["provider"] == provider && route["hidden"] != true)?;
+    let mut route = route.clone();
+    route["displayName"] = entry["displayName"].clone();
+    Some(route)
+}
+
+/// Selects a model on whichever connected provider is available first.
+pub const AUTO: &str = "auto/";
+
+/// The same model under different providers' names: `opencode/claude-sonnet-4-5`,
+/// `anthropic/claude-sonnet-4.5` and `openrouter/anthropic/claude-sonnet-4.5`.
+pub fn canonical(model: &str) -> String {
+    model
+        .rsplit('/')
+        .next()
+        .unwrap_or(model)
+        .to_ascii_lowercase()
+        .replace(['.', '_'], "-")
+}
+
+/// Who pays for a provider's usage, shown beside each route.
+fn billing(provider: &str) -> &'static str {
+    match provider {
+        "opencode-go" => "subscription",
+        "opencode" => "credits",
+        _ => "key",
+    }
+}
+
+/// Reasoning levels from least to most; other variant names follow alphabetically.
+const EFFORTS: &[&str] = &[
+    "none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra",
+];
+
+fn efforts(model: &Value) -> Vec<Value> {
+    let mut variants = model["variants"]
+        .as_object()
+        .into_iter()
+        .flatten()
+        .filter(|(name, value)| {
+            let mut chars = name.chars();
+            name.len() <= 40
+                && chars.next().is_some_and(|c| c.is_ascii_lowercase())
+                && chars
+                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '-')
+                && value["disabled"] != true
+        })
+        .map(|(variant, _)| variant.as_str())
+        .collect::<Vec<_>>();
+    variants.sort_by_key(|v| {
+        (
+            EFFORTS.iter().position(|e| e == v).unwrap_or(EFFORTS.len()),
+            *v,
+        )
+    });
+    variants
+        .into_iter()
+        .map(|variant| {
+            json!({
+                "reasoningEffort": variant,
+                "description": "Model variant",
+            })
+        })
+        .collect()
+}
+
+/// Groups `/provider`'s models across `connected` providers, in that order.
+fn group(raw: &Value, connected: &[String]) -> Vec<Value> {
+    let providers = raw["all"].as_array().map_or(&[][..], Vec::as_slice);
+    // The first connection whose provider names a default model.
+    let preferred = connected
+        .iter()
+        .find(|id| raw["default"][id.as_str()].is_string())
+        .unwrap_or(&connected[0]);
+    let mut entries = Vec::<Value>::new();
+    for provider in connected
+        .iter()
+        .filter_map(|id| providers.iter().find(|p| p["id"] == id.as_str()))
+    {
+        let provider_id = text(provider, "id");
+        let mut models = provider["models"]
+            .as_object()
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>();
+        models.sort_by_key(|(id, _)| id.as_str());
+        for (id, model) in models {
+            let qualified = format!("{provider_id}/{id}");
+            let key = canonical(id);
+            if qualified.len() > 100 || AUTO.len() + key.len() > 100 {
+                continue;
+            }
+            let route = json!({
+                "model": qualified,
+                "provider": provider_id,
+                "providerName": provider_name(provider),
+                "billing": billing(provider_id),
+                "hidden": model["status"] == "deprecated",
+                "supportedReasoningEfforts": efforts(model),
+            });
+            let is_default = provider_id == preferred && raw["default"][provider_id] == id.as_str();
+            if let Some(entry) = entries.iter_mut().find(|e| e["key"] == key.as_str()) {
+                // A provider can list one model under two names; keep its first.
+                if entry["routes"]
+                    .as_array()
+                    .is_some_and(|r| r.iter().any(|r| r["provider"] == provider_id))
+                {
+                    continue;
+                }
+                entry["routes"].as_array_mut().unwrap().push(route);
+                entry["isDefault"] = (entry["isDefault"] == true || is_default).into();
+                continue;
+            }
+            entries.push(json!({
+                "key": key,
+                "model": format!("{AUTO}{key}"),
+                "displayName": text(model, "name"),
+                "isDefault": is_default,
+                "defaultReasoningEffort": "",
+                "routes": [route],
+            }));
+        }
+    }
+    for entry in &mut entries {
+        let routes = entry["routes"].as_array().cloned().unwrap_or_default();
+        let available = routes
+            .iter()
+            .filter(|r| r["hidden"] != true)
+            .collect::<Vec<_>>();
+        let names = available
+            .iter()
+            .map(|r| text(r, "providerName"))
+            .collect::<Vec<_>>();
+        // Auto may run on any route, so it offers only the variants all of them share.
+        let shared = available.first().map_or_else(Vec::new, |first| {
+            first["supportedReasoningEfforts"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter(|effort| {
+                    available.iter().all(|r| {
+                        r["supportedReasoningEfforts"]
+                            .as_array()
+                            .is_some_and(|e| e.contains(effort))
+                    })
+                })
+                .cloned()
+                .collect()
+        });
+        entry["hidden"] = available.is_empty().into();
+        entry["supportedReasoningEfforts"] = shared.into();
+        entry["description"] = match names.as_slice() {
+            [] => "Deprecated model".into(),
+            [only] => format!("Via {only}"),
+            [first, rest @ ..] => format!("Via {first}, then {}", rest.join(", then ")),
+        }
+        .into();
+    }
+    entries.sort_by_key(|entry| {
+        (
+            entry["isDefault"] != true,
+            text(entry, "displayName").to_lowercase(),
+        )
+    });
+    entries
 }
 
 fn provider_name(provider: &Value) -> &str {
@@ -574,5 +756,87 @@ fn provider_name(provider: &Value) -> &str {
         "OpenCode Zen"
     } else {
         text(provider, "name")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn model(name: &str, variants: &[&str]) -> Value {
+        json!({
+            "name": name,
+            "status": "active",
+            "variants": variants.iter().map(|v| (v.to_string(), json!({}))).collect::<serde_json::Map<_, _>>(),
+        })
+    }
+
+    #[test]
+    fn one_model_under_several_providers_is_one_entry_in_connection_order() {
+        let raw = json!({
+            "all": [
+                { "id": "opencode", "name": "OpenCode", "models": {
+                    "claude-sonnet-4-5": model("Claude Sonnet 4.5", &["low", "high"]),
+                    "kimi-k2": model("Kimi K2", &[]),
+                } },
+                { "id": "opencode-go", "name": "OpenCode Go", "models": {
+                    "claude-sonnet-4.5": model("Claude Sonnet 4.5", &["high", "max"]),
+                } },
+                { "id": "openrouter", "name": "OpenRouter", "models": {
+                    "anthropic/claude-sonnet-4.5": model("Anthropic: Claude Sonnet 4.5", &["high"]),
+                } },
+                { "id": "anthropic", "name": "Anthropic", "models": {
+                    "claude-sonnet-4-5": model("Claude Sonnet 4.5", &["high"]),
+                } },
+            ],
+            "default": { "opencode": "kimi-k2" },
+        });
+        let connected = ["opencode-go", "opencode", "openrouter"].map(String::from);
+        let entries = group(&raw, &connected);
+        assert_eq!(entries.len(), 2);
+        // Go names no default, so the first connection that does chooses it.
+        assert_eq!(entries[0]["model"], "auto/kimi-k2");
+        assert_eq!(entries[0]["isDefault"], true);
+        assert_eq!(entries[0]["description"], "Via OpenCode Zen");
+        let sonnet = &entries[1];
+        assert_eq!(sonnet["model"], "auto/claude-sonnet-4-5");
+        assert_eq!(sonnet["displayName"], "Claude Sonnet 4.5");
+        let routes = sonnet["routes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| (text(r, "model"), text(r, "billing")))
+            .collect::<Vec<_>>();
+        // Anthropic is not connected, so it offers no route.
+        assert_eq!(
+            routes,
+            [
+                ("opencode-go/claude-sonnet-4.5", "subscription"),
+                ("opencode/claude-sonnet-4-5", "credits"),
+                ("openrouter/anthropic/claude-sonnet-4.5", "key"),
+            ]
+        );
+        assert_eq!(
+            sonnet["description"],
+            "Via OpenCode Go, then OpenCode Zen, then OpenRouter"
+        );
+        // Auto can run on any route, so it offers only the level they all share.
+        assert_eq!(
+            sonnet["supportedReasoningEfforts"],
+            json!([{ "reasoningEffort": "high", "description": "Model variant" }])
+        );
+    }
+
+    #[test]
+    fn canonical_names_ignore_provider_prefixes_and_separators() {
+        assert_eq!(
+            canonical("anthropic/claude-sonnet-4.5"),
+            "claude-sonnet-4-5"
+        );
+        assert_eq!(canonical("Claude_Sonnet_4-5"), "claude-sonnet-4-5");
+        assert_ne!(
+            canonical("ling-3.1-flash-free"),
+            canonical("ling-3.1-flash")
+        );
     }
 }
