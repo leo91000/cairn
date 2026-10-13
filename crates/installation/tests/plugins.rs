@@ -124,6 +124,7 @@ struct Mock {
     requests: Mutex<Vec<Call>>,
     /// Statuses for the next message posts, consumed first to last.
     statuses: Mutex<Vec<u16>>,
+    thread_status: AtomicUsize,
 }
 
 struct Call {
@@ -186,6 +187,10 @@ async fn record(
         return Json(json!({ "id": format!("{}", 9000 + count) })).into_response();
     }
     if let Some(source) = path.strip_suffix("/threads") {
+        let status = mock.thread_status.load(Ordering::SeqCst);
+        if status != 0 {
+            return StatusCode::from_u16(status as u16).unwrap().into_response();
+        }
         // Like Discord, a thread started from a message reuses the message's ID.
         let id = source.rsplit('/').next().unwrap_or("700");
         return Json(json!({ "id": id })).into_response();
@@ -341,6 +346,7 @@ async fn due(s: &Service) {
     for mut delivery in s.store.list(work::DELIVERIES).await.unwrap() {
         delivery["nextAttemptAt"] = json!(now());
         delivery["progressAt"] = json!(0);
+        delivery["questionRetryAt"] = json!({});
         s.store.put(work::DELIVERIES, delivery).await.unwrap();
     }
 }
@@ -440,10 +446,10 @@ async fn discord_script_runs_a_conversation_in_a_thread_end_to_end() {
         .iter()
         .find(|post| text(post, "content").starts_with('⏳'))
         .unwrap();
-    assert_eq!(status["content"], "⏳ Running `pnpm test --filter deploy`");
+    assert_eq!(status["content"], "⏳ Running a command");
     assert_eq!(
         status["components"][0]["components"][0]["custom_id"],
-        "stop"
+        format!("stop:{chat}")
     );
     let asked = posts
         .iter()
@@ -1168,6 +1174,487 @@ async fn replies_export_only_the_correlated_completed_turn_and_revoke_immediatel
     assert!(s.get("chats", text(&receipt, "chatId")).await.is_ok());
 }
 
+#[tokio::test]
+async fn revoked_and_deleted_deliveries_do_not_stop_other_people() {
+    let (_root, s, connection) = fixture().await;
+    let (mock, server) = mock(&s).await;
+    let mut saved = serde_json::to_value(&connection).unwrap();
+    saved["userIds"] = json!(["300", "301"]);
+    saved["maxMessagesPerHour"] = json!(10);
+    let connection: Connection = serde_json::from_value(
+        connections::save(&s, "discord", &saved, Some(&connection.id))
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    let mut session = session(&s, "discord").await;
+    for (id, author) in [("510", "300"), ("511", "301"), ("512", "301")] {
+        accept(&s, &connection, message(id, author, "<@400> hello"))
+            .await
+            .unwrap();
+    }
+    runtime::pump(&s, &connection, &mut session).await.unwrap();
+    let deliveries = s.store.list(work::DELIVERIES).await.unwrap();
+    let removed = deliveries.iter().find(|d| d["thread"] == "511").unwrap();
+    let chat_id = text(removed, "chatId").to_owned();
+    s.store
+        .transaction(move |db| db.remove("chats", &chat_id))
+        .await
+        .unwrap();
+    connections::people(&s, "discord", &connection.id, "300", "remove")
+        .await
+        .unwrap();
+    let remaining = deliveries.iter().find(|d| d["thread"] == "512").unwrap();
+    finish_turn(&s, remaining, "Still here").await;
+    due(&s).await;
+    runtime::pump(&s, &connection, &mut session).await.unwrap();
+    assert!(session.alive());
+    assert!(s.store.list(work::DELIVERIES).await.unwrap().is_empty());
+    assert_eq!(
+        mock.posts("/api/v10/channels/512/messages")
+            .await
+            .last()
+            .unwrap()["content"],
+        "Still here"
+    );
+    assert!(
+        mock.posts("/api/v10/channels/510/messages")
+            .await
+            .is_empty()
+    );
+    session.stop().await;
+    server.abort();
+}
+
+#[tokio::test]
+async fn public_question_partial_answers_require_the_starters_authority() {
+    let (_root, s, connection) = fixture().await;
+    let agent = s.agent(json!({
+        "name": "Support",
+        "access": { "projects": [], "skills": [], "mcps": [], "github": false, "installation": false, "sandbox": "read-only" },
+    }), None).await.unwrap();
+    let mut saved = serde_json::to_value(&connection).unwrap();
+    saved["agentId"] = agent["id"].clone();
+    saved["accessMode"] = json!("everyone");
+    let connection: Connection = serde_json::from_value(
+        connections::save(&s, "discord", &saved, Some(&connection.id))
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    let (_mock, server) = mock(&s).await;
+    let mut session = session(&s, "discord").await;
+    accept(&s, &connection, message("520", "301", "<@400> help"))
+        .await
+        .unwrap();
+    runtime::pump(&s, &connection, &mut session).await.unwrap();
+    let delivery = s.store.list(work::DELIVERIES).await.unwrap().remove(0);
+    s.chat_tick(&std::collections::HashSet::new())
+        .await
+        .unwrap();
+    let chat = s.get("chats", text(&delivery, "chatId")).await.unwrap();
+    let run = text(&chat, "runId");
+    s.store
+        .event(
+            run,
+            "chat.user",
+            "",
+            Some(json!({ "messageId": delivery["id"] })),
+        )
+        .await
+        .unwrap();
+    let question = "b".repeat(64);
+    s.question_receive(run, json!({
+        "id": question,
+        "blocking": true,
+        "fields": [
+            { "id": "first", "title": "First?", "secret": false, "options": [{ "label": "Safe", "description": "" }, { "label": "Attacker", "description": "" }] },
+            { "id": "second", "title": "Second?", "secret": false, "options": [] },
+        ],
+    })).await.unwrap();
+    due(&s).await;
+    runtime::pump(&s, &connection, &mut session).await.unwrap();
+    let key = format!(
+        "storage:{}:{}",
+        connection.id,
+        cairn_installation::auth::hex_digest(&format!("question:520:{question}"))
+    );
+    let mut threads = std::collections::HashSet::new();
+    threads.insert("520".into());
+    // A stranger's button cannot poison the first field.
+    let click = json!({
+        "id": "801", "token": "synthetic_interaction", "type": 3, "guild_id": "100", "channel_id": "520",
+        "member": { "user": { "id": "302", "username": "outsider" } },
+        "message": { "id": "9002", "author": { "id": "400" } },
+        "data": { "custom_id": format!("a:{question}:0:1") },
+    });
+    discord::interact(&s, &connection, "400", &threads, &click)
+        .await
+        .unwrap();
+    runtime::pump(&s, &connection, &mut session).await.unwrap();
+    assert_eq!(
+        s.store.get("plugin-storage", &key).await.unwrap().unwrap()["value"]["answers"],
+        json!({})
+    );
+    // A stranger's free text cannot poison it either; the starter can answer both.
+    for (id, author, answer) in [
+        ("521", "302", "Attacker"),
+        ("522", "301", "Safe"),
+        ("523", "301", "Continue"),
+    ] {
+        let mut value = message(id, author, answer);
+        value["channel_id"] = json!("520");
+        work::accept(
+            &s,
+            &connection,
+            discord::inbound(&connection, "400", &threads, &value).unwrap(),
+        )
+        .await
+        .unwrap();
+        runtime::pump(&s, &connection, &mut session).await.unwrap();
+    }
+    let queued = s
+        .store
+        .read({
+            let chat_id = text(&chat, "id").to_owned();
+            move |db| db.messages(&chat_id)
+        })
+        .await
+        .unwrap();
+    assert!(
+        queued
+            .iter()
+            .any(|message| message["answers"]
+                == json!({ "first": ["Safe"], "second": ["Continue"] }))
+    );
+    session.stop().await;
+    server.abort();
+}
+
+#[tokio::test]
+async fn failures_before_acknowledgement_finish_and_followups_resume_stopped_runs() {
+    for status in ["cancelled", "failed", "interrupted"] {
+        let (_root, s, connection) = fixture().await;
+        let event = json!({ "name": "message", "revision": connection.revision, "authorId": "300", "payload": { "id": "530" } });
+        let args = json!({ "text": "hello", "thread": "530", "shared": true });
+        let receipt = work::submit(&s, &context(&connection, &event), &args)
+            .await
+            .unwrap();
+        s.chat_tick(&std::collections::HashSet::new())
+            .await
+            .unwrap();
+        let chat = s.get("chats", text(&receipt, "chatId")).await.unwrap();
+        let run = text(&chat, "runId");
+        s.store
+            .patch_run(run, json!({ "status": status, "recoveryPending": false }))
+            .await
+            .unwrap();
+        let delivery = s.store.list(work::DELIVERIES).await.unwrap().remove(0);
+        let reply = work::reply(&s, &connection, &delivery)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            reply.status,
+            if status == "cancelled" {
+                "cancelled"
+            } else {
+                "failed"
+            }
+        );
+        if status != "interrupted" {
+            s.chat_tick(&std::collections::HashSet::new())
+                .await
+                .unwrap();
+            assert_eq!(
+                s.get("chats", text(&chat, "id")).await.unwrap()["paused"],
+                true
+            );
+            let mut follow = event.clone();
+            follow["payload"]["id"] = json!("531");
+            work::submit(&s, &context(&connection, &follow), &args)
+                .await
+                .unwrap();
+            s.chat_tick(&std::collections::HashSet::new())
+                .await
+                .unwrap();
+            assert_eq!(s.store.run(run).await.unwrap()["status"], "queued");
+            assert_eq!(
+                s.get("chats", text(&chat, "id")).await.unwrap()["paused"],
+                false
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn channel_fallback_questions_retry_and_controls_route_to_the_right_conversation() {
+    let (_root, s, connection) = fixture().await;
+    let (mock, server) = mock(&s).await;
+    mock.thread_status.store(403, Ordering::SeqCst);
+    let mut session = session(&s, "discord").await;
+    accept(&s, &connection, message("540", "300", "<@400> help"))
+        .await
+        .unwrap();
+    runtime::pump(&s, &connection, &mut session).await.unwrap();
+    let delivery = s.store.list(work::DELIVERIES).await.unwrap().remove(0);
+    assert_eq!(delivery["reply"]["threaded"], false);
+    s.chat_tick(&std::collections::HashSet::new())
+        .await
+        .unwrap();
+    let chat = s.get("chats", text(&delivery, "chatId")).await.unwrap();
+    let run = text(&chat, "runId");
+    s.store
+        .event(
+            run,
+            "chat.user",
+            "",
+            Some(json!({ "messageId": delivery["id"] })),
+        )
+        .await
+        .unwrap();
+    let question = "c".repeat(64);
+    s.question_receive(run, json!({
+        "id": question, "blocking": true,
+        "fields": [{ "id": "x".repeat(101), "title": "Choose?", "secret": false, "options": [{ "label": format!("a{}", "é".repeat(40)), "description": "" }] }],
+    })).await.unwrap();
+    // Another queued message in this conversation must not republish its question.
+    let mut second = message("541", "300", "<@400> also this");
+    second["attachments"] = json!([]);
+    accept(&s, &connection, second).await.unwrap();
+    mock.statuses.lock().await.push(429);
+    due(&s).await;
+    for mut delivery in s.store.list(work::DELIVERIES).await.unwrap() {
+        delivery["progressAt"] = json!(now());
+        s.store.put(work::DELIVERIES, delivery).await.unwrap();
+    }
+    runtime::pump(&s, &connection, &mut session).await.unwrap();
+    let first = s
+        .store
+        .get(work::DELIVERIES, text(&delivery, "id"))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(first["asked"], json!([]));
+    due(&s).await;
+    runtime::pump(&s, &connection, &mut session).await.unwrap();
+    let asked = mock
+        .posts("/api/v10/channels/200/messages")
+        .await
+        .into_iter()
+        .filter(|post| text(post, "content").contains("Choose?"))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        asked.len(),
+        2,
+        "one failed post and one successful retry; queued delivery posts none"
+    );
+    assert_eq!(
+        asked[1]["components"][0]["components"][0]["label"],
+        format!("a{}", "é".repeat(40))
+    );
+    accept(
+        &s,
+        &connection,
+        message("542", "300", &format!("<@400> {}", "界".repeat(1800))),
+    )
+    .await
+    .unwrap();
+    runtime::pump(&s, &connection, &mut session).await.unwrap();
+    let pending = s
+        .store
+        .kv(&format!("chat-question:{}:{question}", text(&chat, "id")))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(pending["status"], "answering");
+    // Stop buttons include the explicit conversation even without a shared thread.
+    discord::interact(&s, &connection, "400", &std::collections::HashSet::new(), &json!({
+        "id": "802", "token": "synthetic_interaction", "type": 3, "guild_id": "100", "channel_id": "200",
+        "member": { "user": { "id": "300", "username": "sarah" } },
+        "message": { "id": "9002", "author": { "id": "400" } },
+        "data": { "custom_id": format!("stop:{}", text(&chat, "id")) },
+    })).await.unwrap();
+    runtime::pump(&s, &connection, &mut session).await.unwrap();
+    assert_eq!(
+        s.get("chats", text(&chat, "id")).await.unwrap()["paused"],
+        true
+    );
+    session.stop().await;
+    server.abort();
+}
+
+#[tokio::test]
+async fn every_host_capability_rejects_a_changed_owner() {
+    let (_root, s, mut connection) = fixture().await;
+    // The persisted connection keeps valid agent grants but belongs to another owner.
+    connection.owner_access_id = Some("previous-owner".into());
+    s.store
+        .put(
+            connections::KIND,
+            serde_json::to_value(&connection).unwrap(),
+        )
+        .await
+        .unwrap();
+    let ctx = context(
+        &connection,
+        &json!({ "name": "timer", "revision": connection.revision }),
+    );
+    for (method, args) in [
+        ("storage.set", json!({ "key": "x", "value": true })),
+        ("timers.after", json!({ "seconds": 1, "name": "x" })),
+        (
+            "http.request",
+            json!({ "url": "https://discord.com/api/v10/users/@me", "auth": false }),
+        ),
+    ] {
+        let denied = capabilities::call(&s, &ctx, method, args)
+            .await
+            .err()
+            .unwrap();
+        assert_eq!(denied.0, "forbidden");
+    }
+    assert!(s.store.list("plugin-storage").await.unwrap().is_empty());
+    assert!(s.store.list("plugin-timers").await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn optional_questions_are_not_republished_on_later_turns() {
+    let (_root, s, connection) = fixture().await;
+    let (mock, server) = mock(&s).await;
+    let mut session = session(&s, "discord").await;
+    accept(&s, &connection, message("550", "300", "<@400> help"))
+        .await
+        .unwrap();
+    runtime::pump(&s, &connection, &mut session).await.unwrap();
+    let first = s.store.list(work::DELIVERIES).await.unwrap().remove(0);
+    s.chat_tick(&std::collections::HashSet::new())
+        .await
+        .unwrap();
+    let chat = s.get("chats", text(&first, "chatId")).await.unwrap();
+    let run = text(&chat, "runId");
+    s.store
+        .event(
+            run,
+            "chat.user",
+            "",
+            Some(json!({ "messageId": first["id"] })),
+        )
+        .await
+        .unwrap();
+    let question = "d".repeat(64);
+    s.question_receive(run, json!({ "id": question, "blocking": false, "fields": [{ "id": "0", "title": "Optional?", "secret": false, "options": [] }] })).await.unwrap();
+    runtime::pump(&s, &connection, &mut session).await.unwrap();
+    s.question_release(run, Some(&question)).await.unwrap();
+    s.store
+        .event(
+            run,
+            "item.completed",
+            "Done",
+            Some(json!({ "item": { "type": "agent_message", "text": "Done" } })),
+        )
+        .await
+        .unwrap();
+    s.store
+        .event(run, "turn.completed", "", None)
+        .await
+        .unwrap();
+    runtime::pump(&s, &connection, &mut session).await.unwrap();
+    let event = json!({ "name": "message", "revision": connection.revision, "authorId": "300", "payload": { "id": "551" } });
+    let receipt = work::submit(&s, &context(&connection, &event), &json!({ "text": "Another thing", "thread": "550", "shared": true, "reply": first["reply"] })).await.unwrap();
+    s.store
+        .patch_run(
+            run,
+            json!({ "chatExecution": { "messageId": receipt["messageId"] } }),
+        )
+        .await
+        .unwrap();
+    s.store
+        .event(
+            run,
+            "chat.user",
+            "",
+            Some(json!({ "messageId": receipt["messageId"] })),
+        )
+        .await
+        .unwrap();
+    runtime::pump(&s, &connection, &mut session).await.unwrap();
+    let posts = mock.posts("/api/v10/channels/550/messages").await;
+    assert_eq!(
+        posts
+            .iter()
+            .filter(|post| text(post, "content").contains("Optional?"))
+            .count(),
+        1
+    );
+    session.stop().await;
+    server.abort();
+}
+
+#[tokio::test]
+async fn reviewed_reduced_agent_grants_start_a_fresh_conversation() {
+    let (_root, s, connection) = fixture().await;
+    let event = |id| json!({ "name": "message", "revision": connection.revision, "authorId": "300", "payload": { "id": id } });
+    let args = json!({ "text": "hello", "thread": "560", "shared": true });
+    let first = work::submit(&s, &context(&connection, &event("560")), &args)
+        .await
+        .unwrap();
+    s.chat_tick(&std::collections::HashSet::new())
+        .await
+        .unwrap();
+    let mut agent = s.get("agents", &connection.agent_id).await.unwrap();
+    agent["access"]["sandbox"] = json!("read-only");
+    s.agent(agent, Some(&connection.agent_id)).await.unwrap();
+    let saved = connections::save(
+        &s,
+        "discord",
+        &serde_json::to_value(&connection).unwrap(),
+        Some(&connection.id),
+    )
+    .await
+    .unwrap();
+    let new_connection: Connection = serde_json::from_value(saved).unwrap();
+    let mut next = event("561");
+    next["revision"] = json!(new_connection.revision);
+    let second = work::submit(&s, &context(&new_connection, &next), &args)
+        .await
+        .unwrap();
+    assert_ne!(first["chatId"], second["chatId"]);
+    s.chat_tick(&std::collections::HashSet::new())
+        .await
+        .unwrap();
+    let chat = s.get("chats", text(&second, "chatId")).await.unwrap();
+    let run = s.store.run(text(&chat, "runId")).await.unwrap();
+    assert_eq!(run["snapshot"]["agent"]["access"]["sandbox"], "read-only");
+}
+
+#[tokio::test]
+async fn concurrent_plugin_uploads_share_the_chat_attachment_quota() {
+    let (_root, s, connection) = fixture().await;
+    let chat = s
+        .chat_create(json!({ "agentId": connection.agent_id, "projectId": null }))
+        .await
+        .unwrap();
+    let chat_id = text(&chat, "id");
+    let seed = cairn_installation::config::id();
+    s.store
+        .set(
+            &format!("chat-attachment:{chat_id}:{seed}"),
+            json!({ "id": seed, "size": 200 * 1024 * 1024 - 3 }),
+            None,
+        )
+        .await
+        .unwrap();
+    let first = cairn_installation::config::id();
+    let second = cairn_installation::config::id();
+    let (left, right) = tokio::join!(
+        s.store_attachment(chat_id, &first, "one.txt", b"12"),
+        s.store_attachment(chat_id, &second, "two.txt", b"34"),
+    );
+    assert_eq!(usize::from(left.is_ok()) + usize::from(right.is_ok()), 1);
+    assert_eq!(left.err().or_else(|| right.err()).unwrap().status, 413);
+}
+
 fn pinger(version: &str, capabilities: &[&str]) -> Value {
     json!({
         "manifest": {
@@ -1183,7 +1670,7 @@ fn pinger(version: &str, capabilities: &[&str]) -> Value {
         },
         "source": r#"return {
             start = function(event)
-                cairn.timers.after(60, "ping", { team = "core" })
+                cairn.timers.after(60, "ping", { team = event.settings.team })
             end,
             timer = function(event)
                 local response = cairn.http.request({ method = "POST", url = "https://api.example.com/v1/ping", json = event.payload, auth = true })
@@ -1218,7 +1705,7 @@ async fn installed_packages_need_approval_and_reach_only_declared_hosts() {
         .unwrap()
         .clone();
     assert_eq!(entry["status"], "needs_approval");
-    let input = json!({ "name": "Core status", "settings": { "team": "core" }, "token": "secret-key", "enabled": true });
+    let input = json!({ "name": "Core status", "settings": { "team": "configured-team" }, "token": "secret-key", "enabled": true });
     assert_eq!(
         connections::save(&s, "pinger", &input, None)
             .await
@@ -1227,7 +1714,25 @@ async fn installed_packages_need_approval_and_reach_only_declared_hosts() {
         403
     );
 
-    registry::approve(&s, "pinger", "1.0.0").await.unwrap();
+    let source_path = root.path().join("data/plugins/pinger/1.0.0/main.luau");
+    let original_source = text(&package, "source");
+    std::fs::write(
+        &source_path,
+        format!("{original_source}\n-- changed after review"),
+    )
+    .unwrap();
+    assert_eq!(
+        registry::approve(&s, "pinger", "1.0.0", text(&entry["versions"][0], "digest"))
+            .await
+            .unwrap_err()
+            .status,
+        409
+    );
+    assert!(registry::active(&s, "pinger").await.is_err());
+    std::fs::write(&source_path, original_source).unwrap();
+    registry::approve(&s, "pinger", "1.0.0", text(&entry["versions"][0], "digest"))
+        .await
+        .unwrap();
     for bad in [json!({ "team": "core", "other": 1 }), json!({})] {
         let mut input = input.clone();
         input["settings"] = bad;
@@ -1252,7 +1757,7 @@ async fn installed_packages_need_approval_and_reach_only_declared_hosts() {
     assert_eq!(requests.len(), 2, "the undeclared host was never contacted");
     assert_eq!(requests[0].path, "/v1/ping");
     assert_eq!(requests[0].headers["x-api-key"], "secret-key");
-    assert_eq!(requests[0].body, json!({ "team": "core" }));
+    assert_eq!(requests[0].body, json!({ "team": "configured-team" }));
     assert!(requests[1].headers.get("x-api-key").is_none());
     drop(requests);
     let stored = s.store.list("plugin-storage").await.unwrap();
@@ -1298,7 +1803,22 @@ async fn installed_packages_need_approval_and_reach_only_declared_hosts() {
     assert_eq!(entry["status"], "update");
     assert_eq!(entry["active"], "1.0.0");
     assert!(registry::activate(&s, "pinger", "1.1.0").await.is_err());
-    registry::approve(&s, "pinger", "1.1.0").await.unwrap();
+    registry::approve(
+        &s,
+        "pinger",
+        "1.1.0",
+        text(
+            entry["versions"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|v| v["version"] == "1.1.0")
+                .unwrap(),
+            "digest",
+        ),
+    )
+    .await
+    .unwrap();
     assert_eq!(
         registry::active(&s, "pinger")
             .await

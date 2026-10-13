@@ -9,7 +9,7 @@
 --                                                              files, reply, state }
 --                     return { retryAfter = seconds, state = … } to be called again later
 --   timer             a timer scheduled with cairn.timers    { id, name, payload }
---   start             when Cairn starts the worker           { connectionId }
+--   start             when Cairn starts the worker           { connectionId, settings }
 --   command           a run-scoped CLI command (built-in plugins only)
 -- Each handler runs to completion under a deadline and a 16 MB memory limit.
 -- Refused host calls raise an error whose message is a short code such as
@@ -75,13 +75,15 @@ export type Cairn = {
         }) -> { chatId: string, messageId: string },
         -- capability "conversations.control": while handling `message` or `interaction`.
         -- Name the conversation by ID or by its shared thread.
+        -- Check before collecting a partial answer; the final effect also rechecks.
+        check: (target: { conversation: string?, thread: string? }) -> { conversation: string },
         answer: (answer: {
             conversation: string?,
             thread: string?,
             question: string,
             answers: { [string]: string },
         }) -> { status: string },
-        cancel: (target: { conversation: string?, thread: string? }) -> { stopped: boolean },
+        cancel: (target: { conversation: string?, thread: string?, shared: boolean? }) -> { stopped: boolean },
     },
 }
 

@@ -175,7 +175,7 @@ pub async fn begin(s: &Service, connection: &Connection, session: &mut Session) 
         session,
         &event,
         "start",
-        json!({ "connectionId": connection.id }),
+        json!({ "connectionId": connection.id, "settings": connection.settings }),
     )
     .await
     .map(|_| ())
@@ -222,7 +222,21 @@ pub async fn pump(s: &Service, connection: &Connection, session: &mut Session) -
             work::finish(s, &delivery, "failed").await?;
             continue;
         }
-        let Some(reply) = work::reply(s, connection, &delivery).await? else {
+        // Connection-wide revocation still ends the session. A person revoked or a
+        // conversation deleted affects only that delivery, not every other user.
+        let expected = connection.clone();
+        s.store
+            .read(move |db| connections::authorize(db, &expected))
+            .await?;
+        let reply = match work::reply(s, connection, &delivery).await {
+            Ok(reply) => reply,
+            Err(error) if matches!(error.status, 403 | 404) => {
+                work::finish(s, &delivery, "failed").await?;
+                continue;
+            }
+            Err(error) => return Err(error),
+        };
+        let Some(reply) = reply else {
             follow(s, connection, session, &mut delivery).await?;
             if !session.alive() {
                 return Err(Error::bad_gateway("Plugin worker stopped."));
@@ -232,6 +246,7 @@ pub async fn pump(s: &Service, connection: &Connection, session: &mut Session) -
         let payload = json!({
             "deliveryId": delivery["id"],
             "conversation": delivery["chatId"],
+            "userId": delivery["userId"],
             "thread": delivery["thread"],
             "text": reply.text,
             "status": reply.status,
@@ -282,31 +297,59 @@ async fn follow(
     delivery: &mut Value,
 ) -> Result<()> {
     let mut changed = false;
-    for question in work::questions(s, delivery).await? {
+    for question in work::questions(s, connection, delivery).await? {
         let asked = delivery["asked"]
             .as_array()
             .is_some_and(|asked| asked.contains(&question["id"]));
-        if asked {
+        if asked
+            || delivery["questionRetryAt"][text(&question, "id")]
+                .as_i64()
+                .unwrap_or(0)
+                > now()
+        {
             continue;
         }
         let payload = json!({
             "deliveryId": delivery["id"],
             "conversation": delivery["chatId"],
+            "userId": delivery["userId"],
             "thread": delivery["thread"],
             "question": question,
             "reply": delivery["reply"],
         });
         let event = json!({ "name": "question", "revision": connection.revision });
-        if dispatch(s, connection, session, &event, "question", payload)
-            .await
-            .is_ok()
-        {
-            match delivery["asked"].as_array_mut() {
-                Some(asked) => asked.push(question["id"].clone()),
-                None => delivery["asked"] = json!([question["id"]]),
+        match dispatch(s, connection, session, &event, "question", payload).await {
+            Ok(value) if !value["retryAfter"].is_number() => {
+                s.store
+                    .set(
+                        &format!(
+                            "plugin-question-seen:{}:{}",
+                            connection.id,
+                            text(&question, "id")
+                        ),
+                        json!(true),
+                        Some(now() + 30 * 86_400_000),
+                    )
+                    .await?;
+                match delivery["asked"].as_array_mut() {
+                    Some(asked) => asked.push(question["id"].clone()),
+                    None => delivery["asked"] = json!([question["id"]]),
+                }
             }
-            changed = true;
+            result => {
+                let seconds = result
+                    .ok()
+                    .and_then(|value| value["retryAfter"].as_f64())
+                    .unwrap_or(5.0)
+                    .clamp(1.0, 300.0);
+                if !delivery["questionRetryAt"].is_object() {
+                    delivery["questionRetryAt"] = json!({});
+                }
+                delivery["questionRetryAt"][text(&question, "id")] =
+                    json!(now() + (seconds * 1000.0) as i64);
+            }
         }
+        changed = true;
     }
     if now() - delivery["progressAt"].as_i64().unwrap_or(0) >= 8000
         && let Some(progress) = work::progress(s, connection, delivery).await?
@@ -314,6 +357,7 @@ async fn follow(
         let payload = json!({
             "deliveryId": delivery["id"],
             "conversation": delivery["chatId"],
+            "userId": delivery["userId"],
             "thread": delivery["thread"],
             "state": progress["state"],
             "step": progress["step"],

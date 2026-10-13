@@ -39,6 +39,20 @@ local function text(content: string, botId: string): string
     return string.match(value, "^%s*(.-)%s*$") or ""
 end
 
+-- Never split UTF-8 bytes; Discord validates lengths in UTF-16 code units.
+local function truncate(value: string, limit: number): string
+    local output, units = {}, 0
+    for _, code in utf8.codes(value) do
+        local size = if code > 0xFFFF then 2 else 1
+        if units + size > limit then
+            break
+        end
+        table.insert(output, utf8.char(code))
+        units += size
+    end
+    return table.concat(output)
+end
+
 -- Discord counts message length in UTF-16 code units.
 local function chunks(value: string): { string }
     local parts, current, units, count = {}, {}, 0, 0
@@ -67,22 +81,13 @@ local function title(value: string): string
     if line == "" then
         return "Conversation"
     end
-    local result, count = {}, 0
-    for _, code in utf8.codes(line) do
-        count += 1
-        if count > 90 then
-            table.insert(result, "…")
-            break
-        end
-        table.insert(result, utf8.char(code))
-    end
-    return table.concat(result)
+    return truncate(line, 90)
 end
 
-local function stopButton(): any
+local function stopButton(conversation: string): any
     return { {
         type = 1,
-        components = { { type = 2, style = 4, label = "Stop", custom_id = "stop" } },
+        components = { { type = 2, style = 4, label = "Stop", custom_id = "stop:" .. conversation } },
     } }
 end
 
@@ -107,8 +112,8 @@ local function destination(reply: any): string?
 end
 
 -- A question waits for answers to all its fields before it goes back to the agent.
-local function questionKey(channel: string): string
-    return "question:" .. channel
+local function questionKey(channel: string, id: string): string
+    return "question:" .. channel .. ":" .. id
 end
 
 local function complete(pending: any): boolean
@@ -126,7 +131,12 @@ local function submitAnswers(channel: string, pending: any, who: string)
         question = pending.id,
         answers = pending.answers,
     })
-    cairn.storage.delete(questionKey(channel))
+    local closed = ok or (code and string.find(tostring(code), "conflict"))
+    if closed then
+        cairn.storage.delete(pending.key)
+    else
+        cairn.storage.set(pending.key, pending)
+    end
     local note = if ok
         then "\n\n✅ Answered by " .. who
         elseif code and string.find(tostring(code), "conflict") then "\n\nThis question was already answered."
@@ -140,12 +150,19 @@ local function submitAnswers(channel: string, pending: any, who: string)
 end
 
 local function record(channel: string, pending: any, field: any, value: string, who: string)
+    -- Check each contributor before saving any partial answer. In public mode a
+    -- stranger must not influence answers eventually submitted by the starter.
+    local allowed = pcall(cairn.conversations.check, { conversation = pending.conversation })
+    if not allowed then
+        return false
+    end
     pending.answers[field.id] = value
     if complete(pending) then
         submitAnswers(channel, pending, who)
     else
-        cairn.storage.set(questionKey(channel), pending)
+        cairn.storage.set(pending.key, pending)
     end
+    return true
 end
 
 return {
@@ -154,22 +171,49 @@ return {
         local value = text(event.content, event.botId)
         local attachments = event.attachments or {}
 
-        if event.threadId then
-            local lowered = string.lower(value)
-            if lowered == "stop" or lowered == "cancel" then
-                local ok = pcall(cairn.conversations.cancel, { thread = event.threadId })
-                react(origin, event.id, if ok then EMOJI.stopped else EMOJI.failed, true)
+        local lowered = string.lower(value)
+        if lowered == "stop" or lowered == "cancel" then
+            local ok = pcall(cairn.conversations.cancel, { thread = origin, shared = event.threadId ~= nil })
+            react(origin, event.id, if ok then EMOJI.stopped else EMOJI.failed, true)
+            return nil
+        end
+        -- Questions are independent, even when several requests share a channel.
+        -- Replying to a question message selects it; otherwise use the sole open
+        -- question for this thread/person and ask for a reference if ambiguous.
+        local pending, candidates = nil, {}
+        for _, key in cairn.storage.list("question:" .. origin .. ":") do
+            local candidate = cairn.storage.get(key)
+            if candidate and event.replyToId and candidate.message == event.replyToId then
+                pending = candidate
+                break
+            end
+            if candidate and (event.threadId or candidate.userId == event.author.id) then
+                table.insert(candidates, candidate)
+            end
+        end
+        if not pending and #candidates == 1 then
+            pending = candidates[1]
+        end
+        if not pending and #candidates > 1 and value ~= "" then
+            quietly(post, origin, {
+                content = "Please reply to the specific question message you want to answer.",
+                allowed_mentions = { parse = cairn.array() },
+            })
+            return nil
+        end
+        if pending and value ~= "" then
+            if complete(pending) then
+                local allowed = pcall(cairn.conversations.check, { conversation = pending.conversation })
+                if allowed then
+                    submitAnswers(origin, pending, event.author.name)
+                end
                 return nil
             end
-            -- A reply while the agent waits on a question answers its first open field.
-            local pending = cairn.storage.get(questionKey(event.threadId))
-            if pending and value ~= "" then
-                for _, field in pending.fields do
-                    if not field.secret and not pending.answers[field.id] then
-                        record(event.threadId, pending, field, value, event.author.name)
-                        react(origin, event.id, EMOJI.done, true)
-                        return nil
-                    end
+            for _, field in pending.fields do
+                if not field.secret and not pending.answers[field.id] then
+                    local recorded = record(origin, pending, field, value, event.author.name)
+                    react(origin, event.id, if recorded then EMOJI.done else EMOJI.failed, true)
+                    return nil
                 end
             end
         end
@@ -235,12 +279,13 @@ return {
 
     interaction = function(event)
         local channel = event.threadId or event.channelId
-        if event.customId == "stop" then
-            pcall(cairn.conversations.cancel, { thread = channel })
+        local stopped = string.match(event.customId, "^stop:([%x%-]+)$")
+        if stopped then
+            pcall(cairn.conversations.cancel, { conversation = stopped })
             return nil
         end
         local id, fieldIndex, optionIndex = string.match(event.customId, "^a:(%x+):(%d+):(%d+)$")
-        local pending = cairn.storage.get(questionKey(channel))
+        local pending = if id then cairn.storage.get(questionKey(channel, id)) else nil
         if not id or not pending or pending.id ~= id then
             return nil
         end
@@ -289,7 +334,7 @@ return {
         else
             local ok, response = pcall(post, channel, {
                 content = content,
-                components = stopButton(),
+                components = stopButton(event.conversation),
                 allowed_mentions = { parse = cairn.array() },
             })
             if not ok or not response.json then
@@ -319,7 +364,7 @@ return {
                     table.insert(buttons, {
                         type = 2,
                         style = if #rows == 0 then 1 else 2,
-                        label = string.sub(choice.label, 1, 80),
+                        label = truncate(choice.label, 80),
                         custom_id = "a:" .. question.id .. ":" .. (index - 1) .. ":" .. (option - 1),
                     })
                     if choice.description and choice.description ~= "" then
@@ -338,18 +383,30 @@ return {
         end
         local content = table.concat(lines, "\n")
         local ok, response = pcall(post, channel, {
-            content = string.sub(content, 1, 1900),
+            content = truncate(content, 1900),
+            nonce = string.sub(question.id, 1, 24),
+            enforce_nonce = true,
             components = if #rows > 0 then rows else cairn.array(),
             allowed_mentions = { parse = cairn.array() },
         })
+        if ok and response.status == 429 then
+            return { retryAfter = if response.json then response.json.retry_after or 5 else 5 }
+        end
+        if not ok or response.status >= 300 or not response.json or not response.json.id then
+            error("question_unavailable")
+        end
         if not secret then
-            cairn.storage.set(questionKey(channel), {
+            local key = questionKey(channel, question.id)
+            cairn.storage.set(key, {
+                key = key,
                 id = question.id,
+                userId = event.userId,
+                deliveryId = event.deliveryId,
                 conversation = event.conversation,
                 fields = question.fields,
                 answers = {},
                 message = if ok and response.json then response.json.id else nil,
-                content = string.sub(content, 1, 1800),
+                content = truncate(content, 1800),
             })
         end
         return nil
@@ -365,6 +422,7 @@ return {
                 cairn.storage.delete(key)
             end
             react(event.reply.source or event.reply.channel, event.reply.message, EMOJI.seen, false)
+            cairn.storage.delete("thread:" .. event.reply.message)
             return { done = true }
         end
         local channel = destination(event.reply)
@@ -373,12 +431,18 @@ return {
             quietly(request, "DELETE", "/channels/" .. channel .. "/messages/" .. status.id)
             cairn.storage.delete(key)
         end
-        cairn.storage.delete(questionKey(channel))
+        for _, key in cairn.storage.list("question:" .. channel .. ":") do
+            local pending = cairn.storage.get(key)
+            if pending and pending.deliveryId == event.deliveryId then
+                cairn.storage.delete(key)
+            end
+        end
 
         local parts = chunks(event.text)
-        local uploads, skipped = {}, 0
+        local uploads, skipped, total = {}, 0, 0
         for _, file in event.files or {} do
-            if #uploads < 10 and (file.size or 0) <= UPLOAD_LIMIT then
+            if #uploads < 10 and (file.size or 0) <= UPLOAD_LIMIT and total + (file.size or 0) <= 50 * 1024 * 1024 then
+                total += file.size or 0
                 table.insert(uploads, { artifact = file.id })
             else
                 skipped += 1
@@ -431,6 +495,7 @@ return {
         react(source, message, if event.status == "completed" then EMOJI.done
             elseif event.status == "cancelled" then EMOJI.stopped
             else EMOJI.failed, true)
+        cairn.storage.delete("thread:" .. event.reply.message)
         return { done = true }
     end,
 }

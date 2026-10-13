@@ -343,18 +343,25 @@ pub async fn submit(s: &Service, context: &Context, args: &Value) -> Result<Valu
                             && chat["projectId"]
                                 == serde_json::to_value(&connection.project_id).unwrap_or(Value::Null)
                     });
-                let mut chat = match usable {
+                let usable = match usable {
+                    Some(chat) => {
+                        let previous = db.run(text(&chat, "runId"))?;
+                        let agent = db.get("agents", &connection.agent_id)?
+                            .ok_or_else(|| Error::forbidden("Agent no longer exists."))?;
+                        let compatible = previous.as_ref().is_none_or(|run| {
+                            crate::service::covers(&agent, &run["snapshot"]["agent"])
+                        });
+                        compatible.then_some(chat)
+                    }
+                    None => None,
+                };
+                let chat = match usable {
                     Some(chat) => chat,
                     None => crate::chats::create_in(
                         db,
                         json!({ "agentId": connection.agent_id, "projectId": connection.project_id }),
                     )?,
                 };
-                // Someone writing again resumes a conversation they stopped.
-                if chat["paused"] == true {
-                    chat["paused"] = json!(false);
-                    db.put("chats", &chat)?;
-                }
                 let chat_id = text(&chat, "id").to_owned();
                 db.set(&binding_key, &json!(chat_id), None)?;
                 let owner_key = format!("plugin-conversation:{chat_id}");
@@ -375,6 +382,25 @@ pub async fn submit(s: &Service, context: &Context, args: &Value) -> Result<Valu
         Ok(chat_id) => chat_id,
         Err(receipt) => return Ok(receipt),
     };
+    // Follow Cairn's resume path for a stopped run; merely clearing `paused` would
+    // make chat_tick pause it again. Resume also restores the checkpoint budget.
+    let chat = s.get("chats", &chat_id).await?;
+    if let Some(run_id) = chat["runId"].as_str() {
+        let run = s.store.run(run_id).await?;
+        if crate::run_status::RunStatus::of(&run)
+            .is_some_and(crate::run_status::RunStatus::is_resumable)
+            && chat["cancelledByDeletion"] != true
+            && chat["sessionRestartRequested"] != true
+        {
+            let expected = expected.clone();
+            let event = event.clone();
+            s.worker
+                .resume_authorized(s, run_id, move |db| {
+                    admit(db, &expected, &event).map(|_| ())
+                })
+                .await?;
+        }
+    }
     let mut attachment_ids = Vec::new();
     for (name, bytes) in files {
         let attachment = id();
@@ -391,6 +417,11 @@ pub async fn submit(s: &Service, context: &Context, args: &Value) -> Result<Valu
             if let Some(receipt) = db.kv(&dedupe)? {
                 return Ok(receipt);
             }
+            let mut chat = db.get("chats", &chat_id)?
+                .ok_or_else(|| Error::not_found("Conversation no longer exists."))?;
+            crate::conversation_lifecycle::require_active(&chat)?;
+            chat["paused"] = json!(false);
+            db.put("chats", &chat)?;
             let counters = limits(db, &connection, &author)?;
             let message_id = id();
             let queued = crate::chats::send_in(
@@ -464,7 +495,12 @@ fn conversation(
     let chat = match args["conversation"].as_str() {
         Some(chat) => chat.to_owned(),
         None => db
-            .kv(&binding(connection, "", text(args, "thread"), true))?
+            .kv(&binding(
+                connection,
+                author,
+                text(args, "thread"),
+                args["shared"] != false,
+            ))?
             .and_then(|value| value.as_str().map(str::to_owned))
             .ok_or_else(|| Error::not_found("Conversation not found."))?,
     };
@@ -483,6 +519,27 @@ fn conversation(
         ));
     }
     Ok(chat)
+}
+
+/// Checks whether the event's author may control this conversation before a plugin
+/// accumulates partial answers. Final answer/cancel effects recheck independently.
+pub async fn check(s: &Service, context: &Context, args: &Value) -> Result<Value> {
+    if !personal(&context.event) {
+        return Err(Error::forbidden("Only a person can control the agent."));
+    }
+    ensure_owner(s, &context.connection).await?;
+    let (expected, event, input) = (
+        context.connection.clone(),
+        context.event.clone(),
+        args.clone(),
+    );
+    s.store
+        .read(move |db| {
+            let (connection, author) = admit(db, &expected, &event)?;
+            let chat = conversation(db, &connection, &author, &input)?;
+            Ok(json!({ "conversation": chat }))
+        })
+        .await
 }
 
 /// `conversations.answer`: answers a pending agent question for a person who is allowed
@@ -508,7 +565,8 @@ pub async fn answer(s: &Service, context: &Context, args: &Value) -> Result<Valu
     let mut answers = serde_json::Map::new();
     for (field, value) in args["answers"].as_object().into_iter().flatten() {
         let value = value.as_str().unwrap_or("");
-        if field.len() > 100 || value.trim().is_empty() || value.len() > 4000 {
+        if field.chars().count() > 200 || value.trim().is_empty() || value.chars().count() > 10_000
+        {
             return Err(Error::bad("Invalid answer."));
         }
         answers.insert(field.clone(), json!([value]));
@@ -589,7 +647,13 @@ fn turn(db: &Db<'_>, connection: &Connection, delivery: &Value) -> Result<Turn> 
         rusqlite::params![run_id, delivery["id"].as_str()], |row| row.get(0),
     ).optional()?;
     let Some(delivered) = delivered else {
-        return Ok(Turn::Waiting);
+        let run = db.run(&run_id)?;
+        // Queued requests can fail before their message reaches the agent.
+        return Ok(match run.as_ref().and_then(|run| run["status"].as_str()) {
+            Some("failed" | "interrupted") => Turn::Stopped { failed: true },
+            Some("cancelled") => Turn::Stopped { failed: false },
+            _ => Turn::Waiting,
+        });
     };
     let end: Option<(i64, String)> = db.0.query_row(
         "SELECT id, type FROM events WHERE run_id=?1 AND type IN ('turn.completed','turn.failed') AND id>?2 ORDER BY id LIMIT 1",
@@ -605,7 +669,7 @@ fn turn(db: &Db<'_>, connection: &Connection, delivery: &Value) -> Result<Turn> 
     }
     let run = db.run(&run_id)?;
     match run.as_ref().and_then(|run| run["status"].as_str()) {
-        Some("failed") => Ok(Turn::Stopped { failed: true }),
+        Some("failed" | "interrupted") => Ok(Turn::Stopped { failed: true }),
         Some("cancelled") => Ok(Turn::Stopped { failed: false }),
         _ => Ok(Turn::Working {
             delivered,
@@ -689,20 +753,9 @@ pub async fn progress(
 
 /// A short, non-sensitive description of the current step. Never includes output.
 fn step(item: &Value) -> String {
-    let short = |value: &str| {
-        let value = value.split_whitespace().collect::<Vec<_>>().join(" ");
-        if value.chars().count() > 80 {
-            format!("{}…", value.chars().take(79).collect::<String>())
-        } else {
-            value
-        }
-    };
     match item["type"].as_str() {
-        Some("command_execution") => format!("Running `{}`", short(text(item, "command"))),
-        Some("file_change") => match item["changes"][0]["path"].as_str() {
-            Some(path) => format!("Editing {}", short(path.rsplit('/').next().unwrap_or(path))),
-            None => "Editing files".into(),
-        },
+        Some("command_execution") => "Running a command".into(),
+        Some("file_change") => "Editing files".into(),
         Some("web_search") => "Searching the web".into(),
         Some("mcp_tool_call" | "collab_tool_call") => "Using a tool".into(),
         Some("todo_list") => "Planning".into(),
@@ -712,15 +765,38 @@ fn step(item: &Value) -> String {
 }
 
 /// Questions the agent is waiting on in this conversation.
-pub async fn questions(s: &Service, delivery: &Value) -> Result<Vec<Value>> {
-    let prefix = crate::chats::questions::question_prefix(text(delivery, "chatId"));
+pub async fn questions(s: &Service, expected: &Connection, delivery: &Value) -> Result<Vec<Value>> {
+    let expected = expected.clone();
+    let delivery = delivery.clone();
+    let prefix = crate::chats::questions::question_prefix(text(&delivery, "chatId"));
     s.store
         .read(move |db| {
+            let connection = authorize(db, &expected)?;
+            let Turn::Working { run, .. } = turn(db, &connection, &delivery)? else {
+                return Ok(Vec::new());
+            };
+            let execution = db.run(&run)?.unwrap_or(Value::Null);
+            if execution["chatExecution"]["messageId"] != delivery["id"] {
+                return Ok(Vec::new());
+            }
             Ok(db
                 .keys(&prefix)?
                 .into_iter()
                 .map(|(_, question)| question)
-                .filter(|question| question["status"] == "pending")
+                .filter(|question| question["status"] == "pending" && question["runId"] == run)
+                .filter_map(|question| {
+                    match db.kv(&format!(
+                        "plugin-question-seen:{}:{}",
+                        connection.id,
+                        text(&question, "id")
+                    )) {
+                        Ok(None) => Some(Ok(question)),
+                        Ok(Some(_)) => None,
+                        Err(error) => Some(Err(error)),
+                    }
+                })
+                .collect::<Result<Vec<_>>>()?
+                .into_iter()
                 .map(|question| {
                     json!({
                         "id": question["id"],

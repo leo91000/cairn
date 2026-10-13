@@ -173,7 +173,6 @@ impl Service {
     }
 
     async fn upload_attachment(&self, chat: &str, id: &str, request: Request) -> Result<Response> {
-        let _guard = self.attachment_upload.lock().await;
         let query: HashMap<String, String> =
             serde_urlencoded::from_str(request.uri().query().unwrap_or(""))
                 .map_err(|_| Error::bad("Invalid file name."))?;
@@ -193,8 +192,8 @@ impl Service {
     }
 
     /// Stores one file for a chat and returns its record, for HTTP uploads and for
-    /// files plugins receive (Discord attachments). Callers hold `attachment_upload`
-    /// when they need uploads serialized; the name is cleaned here.
+    /// files plugins receive (Discord attachments). Serializes the quota check and
+    /// write for every caller; the name is cleaned here.
     pub async fn store_attachment(
         &self,
         chat: &str,
@@ -204,6 +203,7 @@ impl Service {
     ) -> Result<Value> {
         uuid(chat)?;
         uuid(id)?;
+        let _guard = self.attachment_upload.lock().await;
         if bytes.len() > MAX_FILE {
             return Err(Error::too_large("Files must be 10 MB or smaller."));
         }

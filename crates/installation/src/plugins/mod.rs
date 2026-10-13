@@ -159,7 +159,7 @@ pub async fn routes(s: &Arc<Service>, input: &Input) -> Result<Value> {
         }
         ("POST", ["plugins", "packages"]) => registry::install(s, body).await,
         ("POST", ["plugins", "packages", id, "approve"]) => {
-            registry::approve(s, id, &version()).await
+            registry::approve(s, id, &version(), crate::validation::text(body, "digest")).await
         }
         ("POST", ["plugins", "packages", id, "activate"]) => {
             registry::activate(s, id, &version()).await

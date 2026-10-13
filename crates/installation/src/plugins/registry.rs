@@ -289,13 +289,23 @@ pub async fn install(s: &Service, input: &Value) -> Result<Value> {
     Ok(summary(&package))
 }
 
-async fn set_active(s: &Service, id: &str, version: &str, approve: bool) -> Result<Value> {
+async fn set_active(
+    s: &Service,
+    id: &str,
+    version: &str,
+    reviewed_digest: Option<&str>,
+) -> Result<Value> {
     if builtin(id).is_some() {
         return Err(Error::bad("Built-in plugins are updated with Cairn."));
     }
     let package = read_version(s, id, version)?;
     let mut record = record(s, id).await?;
-    if approve {
+    if let Some(reviewed_digest) = reviewed_digest {
+        if package.digest != reviewed_digest {
+            return Err(Error::conflict(
+                "This version changed while you reviewed it. Reload Plugins and review it again.",
+            ));
+        }
         record["approvals"][version] = json!(package.digest);
     } else if record["approvals"][version] != package.digest {
         return Err(Error::forbidden(
@@ -306,7 +316,11 @@ async fn set_active(s: &Service, id: &str, version: &str, approve: bool) -> Resu
     record["updatedAt"] = json!(now());
     let (plugin, action) = (
         id.to_owned(),
-        if approve { "approved" } else { "activated" },
+        if reviewed_digest.is_some() {
+            "approved"
+        } else {
+            "activated"
+        },
     );
     let version = version.to_owned();
     s.store
@@ -323,13 +337,13 @@ async fn set_active(s: &Service, id: &str, version: &str, approve: bool) -> Resu
 }
 
 /// Records the owner's approval of this exact version and runs it.
-pub async fn approve(s: &Service, id: &str, version: &str) -> Result<Value> {
-    set_active(s, id, version, true).await
+pub async fn approve(s: &Service, id: &str, version: &str, digest: &str) -> Result<Value> {
+    set_active(s, id, version, Some(digest)).await
 }
 
 /// Switches to another previously approved version, e.g. to roll back an update.
 pub async fn activate(s: &Service, id: &str, version: &str) -> Result<Value> {
-    set_active(s, id, version, false).await
+    set_active(s, id, version, None).await
 }
 
 pub async fn uninstall(s: &Service, id: &str) -> Result<Value> {

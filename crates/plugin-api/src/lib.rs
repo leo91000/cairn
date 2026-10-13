@@ -42,7 +42,9 @@ pub fn capability(method: &str) -> Option<&'static str> {
         "http.request" => "http",
         "timers.after" | "timers.cancel" => "timers",
         "conversations.submit" => "conversations.submit",
-        "conversations.answer" | "conversations.cancel" => "conversations.control",
+        "conversations.check" | "conversations.answer" | "conversations.cancel" => {
+            "conversations.control"
+        }
         "onepassword.read" => "onepassword.read",
         _ => return None,
     };

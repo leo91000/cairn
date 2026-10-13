@@ -40,7 +40,7 @@ async function act(operation: 'approve' | 'activate') {
   busy.value = true
   error.value = ''
   try {
-    await api(`/plugins/packages/${props.entry.id}/${operation}`, { method: 'POST', body: JSON.stringify({ version: selected.value }) })
+    await api(`/plugins/packages/${props.entry.id}/${operation}`, { method: 'POST', body: JSON.stringify({ version: selected.value, digest: version.value?.digest }) })
     notify(`${manifest.value?.name} ${selected.value} is active`)
     emit('changed')
     emit('close')

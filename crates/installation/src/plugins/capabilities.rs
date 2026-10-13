@@ -1,6 +1,6 @@
 //! Host capabilities exposed to plugin scripts. Each call is checked against the
 //! manifest (by the host crate), then against the live connection here.
-use super::connections::{Connection, authorize, credential};
+use super::connections::{Connection, authorize, credential, ensure_owner};
 use crate::{
     config::{id, now},
     error::{Error, Result},
@@ -39,6 +39,7 @@ pub async fn call(
     args: Value,
 ) -> std::result::Result<Value, Denied> {
     let result = async {
+        ensure_owner(s, &context.connection).await?;
         let expected = context.connection.clone();
         s.store.read(move |db| authorize(db, &expected)).await?;
         match method {
@@ -48,6 +49,7 @@ pub async fn call(
             "http.request" => http(s, context, &args).await,
             "timers.after" | "timers.cancel" => timers(s, &context.connection, method, &args).await,
             "conversations.submit" => super::work::submit(s, context, &args).await,
+            "conversations.check" => super::work::check(s, context, &args).await,
             "conversations.answer" => super::work::answer(s, context, &args).await,
             "conversations.cancel" => super::work::cancel(s, context, &args).await,
             _ => Err(Error::forbidden("Unknown plugin capability.")),

@@ -309,6 +309,7 @@ pub fn inbound(
             "threadId": if in_thread { json!(channel) } else { Value::Null },
             "mentioned": mentioned,
             "everyMessage": every,
+            "replyToId": message["message_reference"]["message_id"],
         }),
         body: json!({ "content": message["content"], "attachments": attachments }),
     })

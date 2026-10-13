@@ -54,6 +54,8 @@ A manifest declares:
 
 ## Connections and delegation
 
+Scripts receive validated settings in their `start` event; credentials stay in the host.
+
 Every plugin uses the same connection model: name, settings, optional credential
 (encrypted in the vault), and, when the package can start conversations, an owner
 delegation: one dedicated agent (one project at most, no installation access), the
@@ -66,7 +68,8 @@ answer for it or stop it. The
 connection is bound to the owner's current access and the agent's recorded policy.
 Routes are generic: `/api/plugins/{id}/connections[/{connection}]` with `enabled`,
 `test` and `people/{user}/{approve|deny|remove}` actions, and
-`/api/plugins/packages[/{id}/approve|activate]` for the registry.
+`/api/plugins/packages[/{id}/approve|activate]` for the registry. Approval includes
+the digest displayed during review; changes require reviewing again.
 
 ## Runtime
 
@@ -81,7 +84,7 @@ Events, all durable until handled (retried up to five times):
 
 | Event | When | Payload |
 |---|---|---|
-| `start` | each time the worker starts | `{ connectionId }` |
+| `start` | each time the worker starts | `{ connectionId, settings }` |
 | `message` | an allowed person wrote through the transport | `{ id, author, content, attachments, … }` |
 | `interaction` | an allowed person pressed a button | `{ id, author, customId, … }` |
 | `access_requested` | someone new asked (approval mode) | `{ id, author, … }`, never content |
@@ -100,13 +103,15 @@ later, for example after a platform rate limit. Capabilities exposed to scripts:
   `shared = true`, one conversation per thread for everyone allowed. `files` are
   fetched from declared hosts (four, 10 MB each) and attached to the message. Writing
   again resumes a stopped conversation.
+- `cairn.conversations.check({ conversation|thread })` checks the current person's
+  control rights before collecting partial answers.
 - `cairn.conversations.answer({ conversation|thread, question, answers })` and
   `cairn.conversations.cancel({ conversation|thread })` (capability
   `conversations.control`): while handling `message` or `interaction`, for an allowed
   person, only in conversations the connection started. Cancel works like Stop in
   Cairn. Private (secret) question fields can only be answered in Cairn.
-- `progress.step` is a short description such as “Running `pnpm test`” or “Editing
-  deploy.ts”; it never contains command output. `reply.status` is `completed`,
+- `progress.step` is a short description such as “Running a command” or “Editing
+  files”; it never contains command lines, paths or output. `reply.status` is `completed`,
   `failed` or `cancelled`, and `reply.files` lists deliverables published during that
   turn (up to ten).
 - `cairn.storage.get/set/delete/list`: up to 1000 values of 64 KB per connection.

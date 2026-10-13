@@ -45,6 +45,19 @@ impl Worker {
     }
 
     pub async fn resume(&self, s: &Service, id: &str) -> Result<Value> {
+        self.resume_authorized(s, id, |_| Ok(())).await
+    }
+
+    /// Rechecks delegated authority in the same transaction as the resume effect.
+    pub(crate) async fn resume_authorized<F>(
+        &self,
+        s: &Service,
+        id: &str,
+        authorize: F,
+    ) -> Result<Value>
+    where
+        F: FnOnce(&Db<'_>) -> Result<()> + Send + 'static,
+    {
         let active = self.active.lock().await;
         if active.contains_key(id) {
             return Err(Error::conflict(
@@ -52,7 +65,13 @@ impl Worker {
             ));
         }
         let id = id.to_owned();
-        let result = s.store.transaction(move |db| requeue(db, &id)).await?;
+        let result = s
+            .store
+            .transaction(move |db| {
+                authorize(db)?;
+                requeue(db, &id)
+            })
+            .await?;
         self.notify();
         Ok(result)
     }

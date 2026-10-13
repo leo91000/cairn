@@ -34,6 +34,7 @@ cairn.timers = {
 }
 cairn.conversations = {
     submit = function(message) return call("conversations.submit", message) end,
+    check = function(target) return call("conversations.check", target) end,
     answer = function(answer) return call("conversations.answer", answer) end,
     cancel = function(target) return call("conversations.cancel", target) end,
 }
@@ -335,5 +336,144 @@ mod tests {
     fn bytecode_and_non_table_packages_are_rejected() {
         assert!(Runtime::load("\u{1}invalid bytecode", Duration::from_secs(1)).is_err());
         assert!(Runtime::load("return function() end", Duration::from_secs(1)).is_err());
+    }
+
+    #[test]
+    fn discord_unicode_titles_and_upload_budgets_are_bounded() {
+        let runtime = load(include_str!("../../../plugins/discord/main.luau"));
+        let title = format!("{} support", "😀".repeat(60));
+        runtime
+            .dispatch(
+                "message",
+                json!({
+                    "id": "500", "author": { "id": "300", "name": "Sarah" },
+                    "channelId": "200", "botId": "400", "content": title,
+                }),
+                |method, args| match method {
+                    "http.request" if args["url"].as_str().unwrap().ends_with("/threads") => {
+                        let title = args["json"]["name"].as_str().unwrap();
+                        assert!(title.encode_utf16().count() <= 100);
+                        assert_eq!(title.chars().count(), 45);
+                        Ok(json!({ "status": 200, "json": { "id": "500" } }))
+                    }
+                    "http.request" => Ok(json!({ "status": 204 })),
+                    "storage.get" => Ok(Value::Null),
+                    "storage.list" => Ok(json!([])),
+                    "conversations.submit" => Ok(json!({ "chatId": "chat" })),
+                    _ => unreachable!("{method}"),
+                },
+            )
+            .unwrap();
+        let files = (0..6)
+            .map(|n| json!({ "id": n.to_string(), "size": 10 * 1024 * 1024 }))
+            .collect::<Vec<_>>();
+        let deleted = Rc::new(Cell::new(false));
+        let cleaned = deleted.clone();
+        runtime.dispatch("reply", json!({
+            "deliveryId": "12345678-0000-4000-8000-000000000001", "text": "Done", "status": "completed", "files": files,
+            "reply": { "channel": "200", "source": "200", "message": "500", "deferred": true },
+        }), move |method, args| {
+            match method {
+                "storage.get" => Ok(if args["key"] == "thread:500" { json!("500") } else { Value::Null }),
+                "storage.list" => Ok(json!([])),
+                "storage.delete" => {
+                    if args["key"] == "thread:500" { cleaned.set(true); }
+                    Ok(Value::Null)
+                }
+                "http.request" => {
+                    if let Some(multipart) = args.get("multipart") {
+                        assert_eq!(multipart["files"].as_array().unwrap().len(), 5);
+                        assert!(multipart["json"]["content"].as_str().unwrap().contains("1 more deliverable"));
+                    }
+                    Ok(json!({ "status": 200, "json": { "id": "900" } }))
+                }
+                _ => unreachable!("{method}"),
+            }
+        }).unwrap();
+        assert!(deleted.get(), "completed deferred routing is cleaned up");
+    }
+
+    #[test]
+    fn concurrent_questions_in_a_channel_keep_independent_answers() {
+        let runtime = load(include_str!("../../../plugins/discord/main.luau"));
+        let state = Rc::new(RefCell::new(
+            std::collections::BTreeMap::<String, Value>::new(),
+        ));
+        let calls = Rc::new(RefCell::new(Vec::<(String, Value)>::new()));
+        let posted = Rc::new(Cell::new(0));
+        let bridge = || {
+            let (state, calls, posted) = (state.clone(), calls.clone(), posted.clone());
+            move |method: &str, args: Value| {
+                calls.borrow_mut().push((method.to_owned(), args.clone()));
+                match method {
+                    "storage.get" => Ok(state
+                        .borrow()
+                        .get(args["key"].as_str().unwrap())
+                        .cloned()
+                        .unwrap_or(Value::Null)),
+                    "storage.set" => {
+                        state.borrow_mut().insert(
+                            args["key"].as_str().unwrap().to_owned(),
+                            args["value"].clone(),
+                        );
+                        Ok(Value::Null)
+                    }
+                    "storage.delete" => {
+                        state.borrow_mut().remove(args["key"].as_str().unwrap());
+                        Ok(Value::Null)
+                    }
+                    "storage.list" => Ok(json!(
+                        state
+                            .borrow()
+                            .keys()
+                            .filter(|key| key.starts_with(args["prefix"].as_str().unwrap()))
+                            .collect::<Vec<_>>()
+                    )),
+                    "http.request" => {
+                        if args["method"] == "POST" {
+                            posted.set(posted.get() + 1);
+                        }
+                        Ok(
+                            json!({ "status": 200, "json": { "id": format!("900{}", posted.get()) } }),
+                        )
+                    }
+                    "conversations.check" | "conversations.answer" => {
+                        Ok(json!({ "status": "answering" }))
+                    }
+                    _ => unreachable!("{method}"),
+                }
+            }
+        };
+        let ids = ["a".repeat(64), "b".repeat(64)];
+        for (index, id) in ids.iter().enumerate() {
+            runtime.dispatch("question", json!({
+                "question": { "id": id, "fields": [{ "id": "0", "title": "Choose?", "options": [{ "label": "Yes" }] }] },
+                "conversation": format!("chat{index}"), "userId": "300", "deliveryId": format!("delivery{index}"),
+                "reply": { "channel": "200", "message": "500", "threaded": false },
+            }), bridge()).unwrap();
+        }
+        assert_eq!(
+            state.borrow().len(),
+            2,
+            "neither question overwrites the other"
+        );
+        runtime.dispatch("interaction", json!({
+            "channelId": "200", "author": { "id": "300", "name": "Sarah" }, "customId": format!("a:{}:0:0", ids[0]),
+        }), bridge()).unwrap();
+        runtime.dispatch("message", json!({
+            "channelId": "200", "botId": "400", "id": "501", "author": { "id": "300", "name": "Sarah" },
+            "content": "No", "replyToId": "9002",
+        }), bridge()).unwrap();
+        let calls = calls.borrow();
+        let answers = calls
+            .iter()
+            .filter(|(method, _)| method == "conversations.answer")
+            .map(|(_, args)| args)
+            .collect::<Vec<_>>();
+        assert_eq!(answers.len(), 2);
+        assert_eq!(answers[0]["conversation"], "chat0");
+        assert_eq!(answers[1]["conversation"], "chat1");
+        assert_eq!(answers[1]["answers"], json!({ "0": "No" }));
+        assert!(state.borrow().is_empty());
     }
 }
