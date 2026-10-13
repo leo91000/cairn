@@ -367,6 +367,7 @@ async fn run() -> Result<(), String> {
     .route("/api/{*path}", any(|| async { StatusCode::NOT_FOUND }))
     .route("/", shell_page.clone())
     .route("/index.html", shell_page.clone())
+    .route("/beacon.html", shell_page.clone())
     .fallback_service(ServeDir::new(&web).fallback(shell_page))
     .layer(SetResponseHeaderLayer::if_not_present(
         header::CONTENT_SECURITY_POLICY,

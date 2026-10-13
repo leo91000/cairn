@@ -116,6 +116,8 @@ test('installation subdomains preserve browser drafts and canonical account acce
     }).toPass({ timeout: 20000 })
     const hostedOrigin = new URL(page.url()).origin
     expect(hostedOrigin).toMatch(/http:\/\/[a-z]+-[a-z]+-[a-f0-9]{8}\.cairn\.localhost:/)
+    await page.goto(`${hostedOrigin}/beacon.html`)
+    await expect(page).toHaveURL(`${hostedOrigin}/`)
     const session = await page.evaluate(async () => (await fetch('/api/account/session')).json())
     const installation = session.installations[0]
     const csrf = { 'origin': hostedOrigin, 'x-csrf-token': session.csrf }
@@ -156,8 +158,13 @@ test('installation subdomains preserve browser drafts and canonical account acce
     expect(attachment.downloaded).toBe('A private attachment')
     const pendingMailboxes = await page.evaluate(() => Object.keys(localStorage).filter(key => key.startsWith('cairn-draft-transfer:')))
     expect(pendingMailboxes).toEqual([])
-    if (browserName === 'webkit')
+    if (browserName === 'webkit') {
+      await page.getByRole('navigation', { name: 'Workspace navigation', exact: true }).getByRole('button', { name: 'Sign out', exact: true }).click()
+      await page.goto(`${hostedOrigin}/beacon.html`)
+      await expect(page.getByLabel('Email address')).toBeVisible()
+      expect(new URL(page.url()).origin).toBe(origin)
       return
+    }
 
     await page.goto(`${hostedOrigin}/settings`)
     await expect(page.getByRole('button', { name: 'Add passkey', exact: true })).toHaveCount(0)
@@ -199,6 +206,9 @@ test('installation subdomains preserve browser drafts and canonical account acce
     await page.goto(`${hostedOrigin}/chats/${chat.slug}`)
     await page.getByRole('navigation', { name: 'Workspace navigation', exact: true }).getByRole('button', { name: 'Sign out', exact: true }).click()
     await expect(page).toHaveURL(`${origin}/`)
+    await page.goto(`${hostedOrigin}/beacon.html`)
+    await expect(page.getByLabel('Email address')).toBeVisible()
+    expect(new URL(page.url()).origin).toBe(origin)
     await page.goto(`${hostedOrigin}/chats/${chat.slug}`)
     await expect(page.getByLabel('Email address')).toBeVisible()
     expect(new URL(page.url()).origin).toBe(origin)
