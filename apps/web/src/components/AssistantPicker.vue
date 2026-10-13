@@ -21,12 +21,7 @@ import {
   Search,
   X,
 } from '../icons'
-import {
-  claudeCatalog,
-  modelCatalog as codexCatalog,
-  loadClaudeModels,
-  loadModels,
-} from '../models'
+import { modelCatalogs } from '../models'
 import { iconButton } from '../ui'
 import Icon from './Icon.vue'
 
@@ -52,8 +47,8 @@ const dialog = ref<HTMLDialogElement>()
 const open = ref(false)
 const query = ref('')
 const position = ref<CSSProperties>({})
-const catalog = computed(() => provider.value === 'claude' ? claudeCatalog : codexCatalog)
-const reload = () => provider.value === 'claude' ? loadClaudeModels() : loadModels()
+const catalog = computed(() => modelCatalogs[provider.value].catalog)
+const reload = () => modelCatalogs[provider.value].load()
 const current = computed(() => providers.find(item => item.value === provider.value) ?? providers[0])
 const effectiveModel = computed(() => model.value || props.defaultModel || catalog.value.models.find(item => item.isDefault)?.model || '')
 const selected = computed(() => catalog.value.models.find(item => item.model === effectiveModel.value))

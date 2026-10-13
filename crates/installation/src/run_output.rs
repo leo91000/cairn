@@ -182,7 +182,7 @@ fn activity_preview(value: &Value, limit: usize, secrets: &[String]) -> Value {
 }
 
 pub fn exhausted(event: &Value) -> bool {
-    if !["turn.failed", "error"].contains(&text(event, "type")) {
+    if event["willRetry"] == true || !["turn.failed", "error"].contains(&text(event, "type")) {
         return false;
     }
     let error = if event["type"] == "turn.failed" {
@@ -195,76 +195,9 @@ pub fn exhausted(event: &Value) -> bool {
         || EXHAUSTED.is_match(text(error, "message"))
 }
 
+/// Compatibility entrypoint for the legacy Codex exec protocol.
 pub fn args(run: &Value, output: &str, session: Option<&str>) -> Vec<String> {
-    let agent = &run["snapshot"]["agent"];
-    let access = policy(agent);
-    let mut args = if access["sandbox"] == "yolo" {
-        vec!["--dangerously-bypass-approvals-and-sandbox".into()]
-    } else {
-        vec![
-            "--sandbox".into(),
-            text(&access, "sandbox").into(),
-            "-a".into(),
-            "never".into(),
-        ]
-    };
-    args.extend(
-        [
-            "-c",
-            "forced_login_method=\"chatgpt\"",
-            "-c",
-            "cli_auth_credentials_store=\"file\"",
-        ]
-        .map(str::to_owned),
-    );
-    let roots = || {
-        let mut roots = vec![
-            Path::new(output)
-                .parent()
-                .unwrap_or(Path::new("."))
-                .to_string_lossy()
-                .into_owned(),
-        ];
-        roots.extend(
-            run["workspaces"]
-                .as_array()
-                .into_iter()
-                .flatten()
-                .map(|w| text(w, "path").to_owned()),
-        );
-        roots
-            .into_iter()
-            .flat_map(|r| vec!["--add-dir".into(), r])
-            .collect::<Vec<_>>()
-    };
-    if session.is_some() && access["sandbox"] == "workspace-write" {
-        args.extend(roots());
-    }
-    args.push("exec".into());
-    if let Some(session) = session {
-        args.extend(["resume".into(), session.into()]);
-    }
-    args.extend(["--json", "--skip-git-repo-check"].map(str::to_owned));
-    if session.is_none() {
-        args.extend(["--color", "never"].map(str::to_owned));
-    }
-    if !text(agent, "reasoning").is_empty() {
-        args.extend([
-            "-c".into(),
-            format!("model_reasoning_effort={}", agent["reasoning"]),
-        ]);
-    }
-    if !text(agent, "model").is_empty() {
-        args.extend(["--model".into(), text(agent, "model").into()]);
-    }
-    if access["sandbox"] == "workspace-write" {
-        args.extend(["-c", "sandbox_workspace_write.network_access=true"].map(str::to_owned));
-        if session.is_none() {
-            args.extend(roots());
-        }
-    }
-    args.extend(["--output-last-message".into(), output.into(), "-".into()]);
-    args
+    crate::coding_agent::codex_args(run, output, session)
 }
 
 pub fn prompt(run: &Value, chat: bool) -> String {
@@ -282,7 +215,8 @@ pub fn prompt(run: &Value, chat: bool) -> String {
             artifact, and share its returned publicUrl. Never make an artifact public \
             merely because it is a deliverable. Store export files in the current run \
             workspace or /tmp. Wait for successful publication and include the returned \
-            durable URL in your reply. Before your final response call \
+            durable URL in your reply. Before your final response, unless ending a \
+            confirmed deferred wait with cairn_workspace.sleep or cairn_workspace.wait_for, call \
             cairn_workspace.report_outcome with completed, blocked, or needs_input, a \
             concrete reason, and validation/delivery evidence. A successful process or \
             local commit is not a completed request when an authorized push, CI check, \
@@ -337,7 +271,7 @@ pub fn prompt(run: &Value, chat: bool) -> String {
             it.\n\nSelected skills (use their supporting resources from the supplied \
             paths):\n{skills}\n\n{onepassword}\n\nRun this task to completion within \
             its stated scope. Preserve unrelated files. Do not expose credentials. \
-            {interaction}\n{deliverables} All task-authorized effects such as creating \
+            {interaction}\n{deliverables}\n{waiting} All task-authorized effects such as creating \
             PRs or releasing must follow their checks. Use .agents/skills for skills. \
             Summarize actual changes, validation, external links and remaining blockers \
             at the end.",
@@ -347,7 +281,12 @@ pub fn prompt(run: &Value, chat: bool) -> String {
             "No projects assigned; use the task workspace."
         } else {
             &projects
-        }
+        },
+        waiting = if chat && run["isolated"] == true {
+            crate::chats::sleep::INSTRUCTIONS
+        } else {
+            ""
+        },
     )
 }
 
@@ -377,7 +316,7 @@ pub fn chat_plan(
     directory: &Path,
     mcp: &Value,
     session: Option<&str>,
-) -> Value {
+) -> crate::error::Result<Value> {
     let mut context = run.clone();
     context["snapshot"]["task"]["prompt"] = "".into();
     if prepared["isolated"] == true {
@@ -407,18 +346,9 @@ pub fn chat_plan(
         directory.join("chat-input")
     };
     let agent = &run["snapshot"]["agent"];
-    let provider = crate::provider::Provider::of_run(run);
-    // MCP access belongs to the current thread lease. Duplicating it in CLI
-    // options prevents an already initialized Codex process from being reused.
-    let args = if provider == crate::provider::Provider::Codex {
-        json!([])
-    } else {
-        mcp["args"].clone()
-    };
+    let provider = crate::provider::Provider::of_run(run)?;
     let mut plan = json!({
         "provider": provider,
-        "claudeMcps": mcp["claudeMcps"],
-        "claudeDeniedTools": mcp["claudeDeniedTools"],
         "execution": run["chatExecution"],
         "instructions": prompt(&context, true),
         "inputDirectory": input_directory,
@@ -428,13 +358,12 @@ pub fn chat_plan(
         "reasoning": agent["reasoning"],
         "sandbox": policy(agent)["sandbox"],
         "writableRoots": roots,
-        "args": args,
-        "codexConfig": { "mcp_servers": mcp["codexConfig"] },
     });
+    crate::store::merge(&mut plan, &provider.adapter().chat_mcp(mcp));
     if let Some(session) = session {
         plan["sessionId"] = session.into();
     }
-    plan
+    Ok(plan)
 }
 
 #[cfg(test)]
@@ -458,6 +387,12 @@ mod tests {
         assert!(exhausted(
             &json!({"type":"error","code":"usage_limit_reached"})
         ));
+        assert!(!exhausted(&json!({
+            "type": "error",
+            "code": "usage_limit_reached",
+            "message": "Usage limit reached",
+            "willRetry": true,
+        })));
         for message in ["Rate limit exceeded, retrying", "The usage limit docs say"] {
             assert!(
                 !exhausted(&json!({"type":"turn.failed","error":{"message":message}})),

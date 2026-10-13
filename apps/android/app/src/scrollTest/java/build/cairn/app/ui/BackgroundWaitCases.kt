@@ -74,7 +74,36 @@ abstract class BackgroundWaitCases {
             compose.onNodeWithText(message).assertDoesNotExist()
         }
 
-    private fun conversation(status: String, check: () -> Unit) {
+    @Test
+    fun scheduledSleepDisplaysAutomaticResumeWithoutWorkingIndicator() =
+        conversation("succeeded", sleeping = true) {
+            compose.onNodeWithText("Attente planifiée", useUnmergedTree = true).assertExists()
+            compose
+                .onNodeWithText("Attendre la CI · Reprise automatique", substring = true)
+                .assertIsDisplayed()
+            compose.onAllNodesWithTag("agent-working").assertCountEquals(0)
+            compose.onAllNodesWithTag("agent-waiting").assertCountEquals(0)
+            compose.onNodeWithContentDescription("Arrêter").assertExists()
+        }
+
+    @Test
+    fun conditionWaitShowsResultAndDeadlineWithoutWorkingIndicator() =
+        conversation("succeeded", conditional = true) {
+            compose.onNodeWithText("Attente d’un résultat", useUnmergedTree = true).assertExists()
+            compose
+                .onNodeWithText("au résultat ou à l’échéance", substring = true)
+                .assertIsDisplayed()
+            compose.onAllNodesWithTag("agent-working").assertCountEquals(0)
+            compose.onAllNodesWithTag("agent-waiting").assertCountEquals(0)
+            compose.onNodeWithContentDescription("Arrêter").assertExists()
+        }
+
+    private fun conversation(
+        status: String,
+        sleeping: Boolean = false,
+        conditional: Boolean = false,
+        check: () -> Unit,
+    ) {
         MockWebServer().use { server ->
             val now = System.currentTimeMillis()
             val chat =
@@ -85,6 +114,24 @@ abstract class BackgroundWaitCases {
                     agentName = "Agent principal",
                     runId = "run",
                     run = Run("run", status = status, startedAt = now - 60_000),
+                    wakeup =
+                        if (sleeping || conditional)
+                            ChatWakeup(
+                                "wake",
+                                "message",
+                                "Attendre la CI",
+                                420,
+                                now,
+                                now + 420000,
+                                condition =
+                                    if (conditional)
+                                        buildJsonObject {
+                                            put("type", "run_finished")
+                                            put("runId", "other-run")
+                                        }
+                                    else null,
+                            )
+                        else null,
                 )
             val event =
                 RunEvent(

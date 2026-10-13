@@ -7,7 +7,8 @@
   const normalize = value => ['light', 'dark', 'system'].includes(value) ? value : 'system'
   let preference = 'system'
   try {
-    preference = normalize(localStorage.getItem(key))
+    const shared = (document.cookie || '').split(';').map(part => part.trim()).find(part => part.startsWith('cairn_theme='))?.slice('cairn_theme='.length)
+    preference = normalize(shared || localStorage.getItem(key))
   }
   catch { /* Privacy settings may disable storage; system mode still works. */ }
 

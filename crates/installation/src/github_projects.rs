@@ -37,7 +37,7 @@ async fn github(s: &Service, endpoint: &str) -> Result<Value> {
     serde_json::from_str(&output.stdout).map_err(|_| Error::bad_gateway("Invalid GitHub response."))
 }
 
-fn repository(raw: &str) -> Result<&str> {
+pub(crate) fn repository(raw: &str) -> Result<&str> {
     let parts = raw.split('/').collect::<Vec<_>>();
     if parts.len() != 2
         || parts.iter().any(|part| {

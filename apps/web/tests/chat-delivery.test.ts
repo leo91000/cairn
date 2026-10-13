@@ -1,7 +1,7 @@
 import type { ChatDetail, ChatMessage } from '../../../packages/contracts/chats'
 import type { Run, RunEvent } from '../../../packages/contracts/contracts'
 import { describe, expect, it } from 'vitest'
-import { chatDelivery, chatWaitNotice } from '../src/chat-delivery'
+import { chatDelivery, chatSleepNotice, chatWaitNotice } from '../src/chat-delivery'
 
 function message(id: string, overrides: Partial<ChatMessage> = {}): ChatMessage {
   return {
@@ -39,6 +39,28 @@ function chat(messages: ChatMessage[], run: Partial<Run> | null = null, paused =
 const running = { id: 'run', status: 'running' as const, chatExecution: { messageId: 'first', text: 'first', recovery: false } }
 
 describe('chat delivery presentation', () => {
+  it('shows the durable wakeup only while the completed conversation waits', () => {
+    const detail = chat([], { status: 'succeeded' })
+    detail.wakeup = {
+      id: 'wake',
+      messageId: 'first',
+      seconds: 420,
+      reason: 'Wait for CI',
+      createdAt: 1,
+      wakeAt: 420001,
+    }
+    expect(chatSleepNotice(detail)?.message).toContain('Wait for CI · Automatic resume from')
+    expect(chatSleepNotice(detail)?.account).toBeNull()
+    detail.wakeup.condition = { type: 'run_finished', runId: 'target' }
+    expect(chatSleepNotice(detail)?.message).toContain('when a result is available or the wait deadline')
+    expect(chatSleepNotice(detail)?.message).not.toContain('Automatic resume from')
+    expect(chatDelivery(detail, []).sending).toEqual([])
+    for (const status of ['running', 'queued', 'failed'] as const)
+      expect(chatSleepNotice({ ...detail, run: { ...detail.run!, status } })).toBeNull()
+    expect(chatSleepNotice({ ...detail, paused: true })).toBeNull()
+    expect(chatSleepNotice({ ...detail, lifecycle: 'trash' })).toBeNull()
+    expect(chatSleepNotice({ ...detail, wakeup: null })).toBeNull()
+  })
   it('explains a required Claude reconnection without claiming the queued agent has started', () => {
     const detail = chat([message('first', { status: 'sending' })], {
       ...running,

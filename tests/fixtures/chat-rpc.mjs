@@ -151,6 +151,23 @@ export function chatFixture() {
       }
 
       const text = params.input[0].text
+      if (text.includes('fixture:codex-reconnect')) {
+        for (const scope of [
+          { threadId: 'another-thread', turnId: active.id, willRetry: true },
+          { threadId: thread.id, turnId: 'previous-turn', willRetry: true },
+          { threadId: thread.id, turnId: active.id, willRetry: false },
+        ]) {
+          notify('error', { ...scope, error: { message: 'Ignored retry notification' } })
+        }
+
+        notify('error', {
+          threadId: thread.id,
+          turnId: active.id,
+          willRetry: true,
+          error: { message: 'Reconnecting... 2/5', codexErrorInfo: 'other' },
+        })
+      }
+
       const failures = text.match(/fixture:agent-failures:(.+)$/m)
       if (failures && !thread.fixtureFailures)
         thread.fixtureFailures = JSON.parse(failures[1])
@@ -355,7 +372,7 @@ export function chatFixture() {
       if (text.includes('finish now'))
         finish()
       else if (!hold)
-        setTimeout(finish, 250)
+        setTimeout(finish, text.includes('fixture:slow-finish') ? 3000 : 250)
     }
 
     return true

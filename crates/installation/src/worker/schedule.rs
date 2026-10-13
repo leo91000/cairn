@@ -152,7 +152,7 @@ impl Worker {
                 return report_capacity_wait(s, &current, &error.message).await;
             }
         }
-        let provider = Provider::of_run(&run);
+        let provider = Provider::of_run(&run)?;
         timing.next("account_acquire");
         let model = text(&run["snapshot"]["agent"], "model");
         let account = match s.accounts.acquire(s, &run_id, provider, model).await {

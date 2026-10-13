@@ -46,7 +46,7 @@ impl Prepared {
 pub(super) async fn eligible(plan: &Plan) -> Result<bool> {
     if plan.command().is_some()
         || !plan.as_value()["chat"].is_object()
-        || plan.chat_provider() != Provider::Codex
+        || plan.chat_provider()? != Provider::Codex
         || plan.as_value()["chat"]["sessionId"]
             .as_str()
             .is_some_and(|id| !id.is_empty())

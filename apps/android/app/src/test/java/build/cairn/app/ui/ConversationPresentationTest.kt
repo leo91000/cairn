@@ -10,6 +10,52 @@ class ConversationPresentationTest {
     private val second = ChatMessage("two", text = "Ensuite")
 
     @Test
+    fun `condition wait distinguishes a result from its fallback deadline`() {
+        val condition = buildJsonObject {
+            put("type", "run_finished")
+            put("runId", "other-run")
+        }
+        val chat =
+            Chat(
+                "chat",
+                run = Run("run", status = "succeeded"),
+                wakeup =
+                    ChatWakeup(
+                        "wake",
+                        "one",
+                        "Attendre la CI",
+                        420,
+                        1,
+                        420001,
+                        condition = condition,
+                    ),
+            )
+        assertTrue(chatSleepNotice(chat)!!.message.contains("au résultat ou à l’échéance"))
+        assertEquals("Attente d’un résultat", conversationState(chat, "Agent", null).status)
+        assertTrue(chatDelivery(chat, emptyList()).sending.isEmpty())
+        assertNull(chatSleepNotice(chat.copy(paused = true)))
+    }
+
+    @Test
+    fun `scheduled wait names the wakeup without inventing a user message`() {
+        val chat =
+            Chat(
+                "chat",
+                run = Run("run", status = "succeeded"),
+                wakeup = ChatWakeup("wake", "one", "Attendre la CI", 420, 1, 420001),
+            )
+        assertTrue(
+            chatSleepNotice(chat)!!.message.startsWith("Attendre la CI · Reprise automatique")
+        )
+        assertEquals("Attente planifiée", conversationState(chat, "Agent", null).status)
+        assertTrue(chatDelivery(chat, emptyList()).sending.isEmpty())
+        assertNull(chatSleepNotice(chat.copy(paused = true)))
+        assertNull(chatSleepNotice(chat.copy(lifecycle = "trash")))
+        assertNull(chatSleepNotice(chat.copy(run = Run("run", status = "running"))))
+        assertNull(chatSleepNotice(chat.copy(wakeup = null)))
+    }
+
+    @Test
     fun `queued Claude message explains the missing account and clears notice when running`() {
         val run =
             Run(

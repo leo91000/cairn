@@ -39,7 +39,7 @@ test('uploads images and files, previews them and preserves attachments while ed
   await expectSingleScroll(page)
   await page.screenshot({ path: test.info().outputPath('attachments-desktop-light.png'), animations: 'disabled' })
   await page.getByRole('button', { name: 'Send', exact: true }).click()
-  await expect(page).toHaveURL(/\/chats\/[a-f0-9-]+$/)
+  await expect(page).toHaveURL(/\/chats\/[a-z]+-[a-z]+-[a-f0-9]{8}$/)
   const chatId = page.url().split('/').at(-1)!
   const user = page.locator('.activity-message').filter({ hasText: 'Compare this design' })
   await expect(user.getByRole('button', { name: 'Preview design.png', exact: true })).toBeVisible()

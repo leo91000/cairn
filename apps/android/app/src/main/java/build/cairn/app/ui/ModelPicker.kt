@@ -66,13 +66,13 @@ internal fun effortLabel(value: String): String =
         else -> value
     }
 
-internal fun providerLabel(value: String) = if (value == "claude") "Claude Code" else "Codex"
+internal fun providerLabel(value: String) = codingAgent(value).label
 
 internal fun selectedModel(
     catalog: ModelCatalog,
     model: String,
     defaultModel: String,
-): CodexModel? {
+): CodingAgentModel? {
     val name = model.ifBlank { defaultModel }
     return if (name.isNotBlank()) catalog.models.find { it.model == name }
     else catalog.models.find { it.isDefault }
@@ -624,7 +624,7 @@ private fun ModelCard(
 
 @Composable
 internal fun ReasoningControl(
-    model: CodexModel?,
+    model: CodingAgentModel?,
     value: String,
     default: String,
     enabled: Boolean,

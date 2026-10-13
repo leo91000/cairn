@@ -5,6 +5,7 @@ extern crate sqlx_core as sqlx;
 mod account;
 mod audit;
 mod fcm;
+mod hosts;
 pub mod html;
 mod installations;
 pub mod installer;
@@ -19,6 +20,7 @@ mod sharing;
 pub mod stun;
 
 pub use fcm::{AccountPushSender, FcmPushSender};
+pub use hosts::InstallationHosts;
 pub use network::TrustedProxies;
 pub use notifications::{PushError, PushSender, PushSubscription, WebPushSender};
 pub use oauth::{OAuthProvider, OAuthProviders};
@@ -61,6 +63,7 @@ struct Service {
     pool: PgPool,
     sender: Arc<dyn EmailSender>,
     origin: String,
+    hosts: InstallationHosts,
     oauth: OAuthProviders,
     relay: relay::Relay,
     push: Option<Arc<dyn PushSender>>,
@@ -181,6 +184,20 @@ pub async fn router_with_network_and_push(
     trusted_proxies: TrustedProxies,
     push: Option<Arc<dyn PushSender>>,
 ) -> Result<Router, sqlx_core::migrate::MigrateError> {
+    let hosts = InstallationHosts::disabled(&origin);
+    router_with_installation_hosts(pool, sender, hosts, oauth, relay, trusted_proxies, push).await
+}
+
+pub async fn router_with_installation_hosts(
+    pool: PgPool,
+    sender: Arc<dyn EmailSender>,
+    hosts: InstallationHosts,
+    oauth: OAuthProviders,
+    relay: Relay,
+    trusted_proxies: TrustedProxies,
+    push: Option<Arc<dyn PushSender>>,
+) -> Result<Router, sqlx_core::migrate::MigrateError> {
+    let origin = hosts.origin().to_owned();
     sqlx_macros::migrate!("./migrations").run(&pool).await?;
 
     // Provider waits retain sharing locks but never borrow the account/API pool.
@@ -190,16 +207,17 @@ pub async fn router_with_network_and_push(
         .connect_lazy_with((*pool.connect_options()).clone());
     let installer = installer::router(origin.clone());
     let service = Service {
-        pool,
+        pool: pool.clone(),
         sender,
         origin,
+        hosts: hosts.clone(),
         oauth,
         relay,
         push,
         push_receipts: Arc::default(),
         push_pool,
     };
-    Ok(Router::new()
+    let router = Router::new()
         .route("/.well-known/assetlinks.json", get(passkeys::assetlinks))
         .route("/api/account/email-code", post(request_code))
         .route("/api/account/verify", post(verify_code))
@@ -408,7 +426,8 @@ pub async fn router_with_network_and_push(
         .layer(middleware::from_fn_with_state(
             trusted_proxies,
             network::client_peer,
-        )))
+        ));
+    Ok(hosts.layer(router, pool))
 }
 
 const EMAIL_CHALLENGE_ATTEMPT_LIMIT: i32 = 5;
@@ -746,15 +765,8 @@ async fn create_session(
     query("INSERT INTO web_sessions (digest, account_id, csrf, expires_at, device, last_proof_at) VALUES ($1, $2, $3, now() + interval '7 days', $4, CASE WHEN $5 THEN clock_timestamp() END)")
         .bind(digest(&token)).bind(account_id).bind(&csrf).bind(device).bind(recent_proof).execute(&mut *connection).await?;
 
-    let secure = if service.origin.starts_with("https://") {
-        "; Secure"
-    } else {
-        ""
-    };
-    let cookie =
-        format!("cairn_session={token}; Path=/; HttpOnly; SameSite=Lax; Max-Age=604800{secure}");
     Ok((
-        [(header::SET_COOKIE, HeaderValue::from_str(&cookie).unwrap())],
+        service.hosts.session_cookies(&token, 604800),
         Json(json!({
             "authenticated": true,
             "account": { "id": account_id, "email": email },
@@ -765,15 +777,13 @@ async fn create_session(
         .into_response())
 }
 
-async fn session(
-    State(service): State<Service>,
-    headers: HeaderMap,
-) -> Result<Json<Value>, ApiError> {
+async fn session(State(service): State<Service>, headers: HeaderMap) -> Result<Response, ApiError> {
     let token = session_token(&headers);
-    let row: Option<(String, String, String)> = query_as("SELECT a.id, a.email, s.csrf FROM web_sessions s JOIN cairn_accounts a ON a.id = s.account_id WHERE s.digest = $1 AND s.expires_at > now()")
+    let row: Option<(String, String, String, i64)> = query_as("SELECT a.id, a.email, s.csrf, GREATEST(0, floor(extract(epoch FROM (s.expires_at - clock_timestamp())))::bigint) FROM web_sessions s JOIN cairn_accounts a ON a.id = s.account_id WHERE s.digest = $1 AND s.expires_at > clock_timestamp()")
         .bind(digest(token)).fetch_optional(&service.pool).await?;
-    Ok(Json(match row {
-        Some((id, email, csrf)) => json!({
+    let remaining = row.as_ref().map(|row| row.3);
+    let body = match row {
+        Some((id, email, csrf, _)) => json!({
             "authenticated": true,
             "account": { "id": id, "email": email },
             "csrf": csrf,
@@ -785,7 +795,23 @@ async fn session(
             "csrf": null,
             "installations": [],
         }),
-    }))
+    };
+    let mut response = Json(body).into_response();
+    if service.hosts.has_cookie_domain()
+        && service.hosts.central(&headers)
+        && let Some(remaining) = remaining
+    {
+        for value in service
+            .hosts
+            .session_cookies(token, remaining)
+            .get_all(header::SET_COOKIE)
+        {
+            response
+                .headers_mut()
+                .append(header::SET_COOKIE, value.clone());
+        }
+    }
+    Ok(response)
 }
 
 async fn browser_security(
@@ -793,12 +819,10 @@ async fn browser_security(
     request: Request,
     next: Next,
 ) -> Response {
-    let allowed_origin = request
-        .headers()
-        .get(header::ORIGIN)
-        .and_then(|value| value.to_str().ok())
-        == Some(service.origin.as_str());
-    let mut response = if request.method() != Method::GET && !allowed_origin {
+    let allowed_origin = service.hosts.allows_origin(request.headers());
+    let checks_origin = request.method() != Method::GET
+        || (service.hosts.enabled() && request.headers().contains_key(header::ORIGIN));
+    let mut response = if checks_origin && !allowed_origin {
         ApiError::Http(StatusCode::FORBIDDEN, "Invalid origin").into_response()
     } else {
         next.run(request).await
@@ -862,19 +886,7 @@ async fn logout(State(service): State<Service>, headers: HeaderMap) -> Result<Re
 }
 
 fn clear_session_cookie(service: &Service) -> Response {
-    let secure = if service.origin.starts_with("https://") {
-        "; Secure"
-    } else {
-        ""
-    };
-    (
-        StatusCode::NO_CONTENT,
-        [(
-            header::SET_COOKIE,
-            format!("cairn_session=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0{secure}"),
-        )],
-    )
-        .into_response()
+    (StatusCode::NO_CONTENT, service.hosts.session_cookies("", 0)).into_response()
 }
 
 async fn consume_limit(pool: &PgPool, key: &str, maximum: i32) -> Result<(), ApiError> {

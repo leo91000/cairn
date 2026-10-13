@@ -2037,13 +2037,24 @@ async fn remote_vm_agents_reach_workspace_tools_only_through_their_node_session(
         .as_str()
         .unwrap();
     let gateway = format!("cairn_{}", connection.replace('-', "_"));
-    // Claude Code and the resident Codex thread receive the VM-local origin.
+    let mut claude_record = record.clone();
+    claude_record["snapshot"]["agent"]["provider"] = "claude".into();
+    let claude_configuration = owner
+        .service
+        .mcps
+        .run_configuration(&owner.service, &claude_record)
+        .await
+        .unwrap();
+    // Both native configurations receive the VM-local origin.
     for (name, path) in [
         ("cairn_workspace", "/mcp-workspace".to_owned()),
         (gateway.as_str(), format!("/mcp-gateway/{connection}")),
     ] {
         let url = format!("http://127.0.0.1:5202{path}");
-        assert_eq!(configuration["claudeMcps"]["mcpServers"][name]["url"], url);
+        assert_eq!(
+            claude_configuration["claudeMcps"]["mcpServers"][name]["url"],
+            url
+        );
         assert_eq!(configuration["codexConfig"][name]["url"], url);
     }
     // Another run in progress on the same installation.

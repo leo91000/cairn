@@ -18,12 +18,14 @@ import {
   X,
 } from '../icons'
 import { iconButton } from '../ui'
+import { chatPath } from '../workspace-links'
 import Icon from './Icon.vue'
 import Modal from './Modal.vue'
 import UiButton from './UiButton.vue'
 import VirtualSelect from './VirtualSelect.vue'
 
-const props = defineProps<{ chats: ChatView[], selected?: string, anchor?: HTMLElement }>()
+// The anchor is resolved when used: a breakpoint change can hide the trigger that opened it.
+const props = defineProps<{ chats: ChatView[], selected?: string, anchor?: () => HTMLElement | undefined }>()
 const emit = defineEmits<{ close: [], create: [] }>()
 const dialog = ref<HTMLDialogElement>()
 const query = ref('')
@@ -103,7 +105,7 @@ const groups = computed(() => {
 })
 
 function position() {
-  const bounds = props.anchor?.getBoundingClientRect()
+  const bounds = props.anchor?.()?.getBoundingClientRect()
   if (!dialog.value || !bounds)
     return
   dialog.value.style.setProperty('--switcher-left', `${Math.max(14, Math.min(bounds.left, window.innerWidth - 394))}px`)
@@ -118,7 +120,7 @@ onMounted(() => {
 onBeforeUnmount(() => {
   window.removeEventListener('resize', position)
   dialog.value?.close()
-  const target = props.anchor ?? previous
+  const target = props.anchor?.() ?? previous
   target?.focus()
 })
 
@@ -192,7 +194,7 @@ function time(timestamp: number) {
             </h3>
             <div v-for="chat in group.chats" :key="chat.id" class="flex items-start gap-1">
               <RouterLink
-                :to="`/chats/${chat.id}`"
+                :to="chatPath(chat)"
                 :aria-current="chat.id === selected ? 'page' : undefined"
                 class="conversation-choice mb-1 min-w-0 flex flex-1 gap-3 rounded-lg border border-transparent px-3 py-3 hover:bg-hover"
                 :class="chat.id === selected ? 'border-accent/25! bg-accent/10' : ''"

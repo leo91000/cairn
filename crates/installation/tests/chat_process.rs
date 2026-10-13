@@ -119,7 +119,8 @@ fn manager_chat_plans_keep_mcp_configuration_out_of_process_arguments() {
         "args": ["-c", "mcp_servers.fixture={url=\"http://fixture\"}"],
         "codexConfig": { "fixture": { "url": "http://fixture" } },
     });
-    let plan = cairn_installation::run_output::chat_plan(&run, &prepared, root.path(), &mcp, None);
+    let plan = cairn_installation::run_output::chat_plan(&run, &prepared, root.path(), &mcp, None)
+        .unwrap();
     assert_eq!(
         plan["args"],
         json!([]),
@@ -129,8 +130,44 @@ fn manager_chat_plans_keep_mcp_configuration_out_of_process_arguments() {
 
     let claude = json!({ "snapshot": { "agent": { "provider": "claude" } } });
     let plan =
-        cairn_installation::run_output::chat_plan(&claude, &prepared, root.path(), &mcp, None);
+        cairn_installation::run_output::chat_plan(&claude, &prepared, root.path(), &mcp, None)
+            .unwrap();
     assert_eq!(plan["args"], mcp["args"]);
+}
+
+#[tokio::test]
+async fn native_reconnect_notices_are_scoped_to_the_active_turn_without_failing_it() {
+    let root = TempDir::new().unwrap();
+    let home = prepare(&root);
+    let config = config(&root);
+    let plan = plan(&root, "fixture:codex-reconnect");
+    let (tx, mut rx) = mpsc::channel(64);
+    let task = tokio::spawn(async move {
+        chat_process::run(&config, &home, plan, tx, CancellationToken::new()).await
+    });
+    let mut notices = Vec::new();
+    let mut completed = false;
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while let Some(event) = rx.recv().await {
+            assert_ne!(event["type"], "turn.failed");
+            completed |= event["type"] == "turn.completed";
+            if event["type"] == "error" {
+                notices.push(event);
+            }
+        }
+    })
+    .await
+    .unwrap();
+    task.await.unwrap().unwrap();
+    assert!(completed);
+    assert_eq!(
+        notices,
+        vec![json!({
+            "type": "error",
+            "error": { "message": "Reconnecting... 2/5", "codexErrorInfo": "other" },
+            "willRetry": true,
+        })]
+    );
 }
 
 #[tokio::test]

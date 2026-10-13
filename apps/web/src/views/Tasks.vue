@@ -167,7 +167,7 @@ const runColor = (status: RunListItem['status']) => status === 'succeeded' ? 'bg
     {{ error }}
   </UiAlert>
   <div class="missions flex min-h-0 flex-1">
-    <section class="flex min-h-0 w-105 shrink-0 flex-col tablet:w-full" aria-label="Mission list">
+    <section class="flex min-h-0 w-111 shrink-0 flex-col pr-6 tablet:w-full tablet:pr-0" aria-label="Mission list">
       <header class="flex items-start gap-2 pr-1">
         <div class="min-w-0 flex-1">
           <h1 class="m-0! font-heading text-[32px] leading-9 font-bold tracking-[-0.8px]">
@@ -203,7 +203,8 @@ const runColor = (status: RunListItem['status']) => status === 'succeeded' ? 'bg
           aria-label="Search missions"
         >
       </label>
-      <div class="-mx-1 mt-2 flex shrink-0 gap-2 overflow-x-auto px-1 py-1.5 [scrollbar-width:none]" role="group" aria-label="Filter missions">
+      <!-- The end padding lies under the fade, so the last filter clears it once scrolled into view. -->
+      <div class="-ml-1 mt-2 flex shrink-0 gap-2 overflow-x-auto py-1.5 pr-8 pl-1 [mask-image:linear-gradient(to_right,#000_calc(100%-32px),transparent)] [scrollbar-width:none]" role="group" aria-label="Filter missions">
         <button
           v-for="option in missionFilters"
           :key="option.value"
@@ -284,6 +285,7 @@ const runColor = (status: RunListItem['status']) => status === 'succeeded' ? 'bg
       <MissionDetail
         v-if="shown"
         :key="shown.id"
+        class="max-w-180"
         :task="shown"
         :latest="latest.get(shown.id)"
         :busy="busy === shown.id"

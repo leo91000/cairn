@@ -1,13 +1,24 @@
 name: Prepare Android emulator packages
 description: Retry SDK downloads before starting device tests.
+inputs:
+  target:
+    description: System image variant, for example google_apis or the lighter google_atd.
+    default: google_apis
+  build-packages:
+    description: SDK packages for jobs that still run Gradle next to the emulator; empty for prebuilt APKs.
+    default: build-tools;37.0.0 platforms;android-36
 runs:
   using: composite
   steps:
     - name: Install emulator packages
       shell: bash
+      env:
+        TARGET: ${{ inputs.target }}
+        BUILD_PACKAGES: ${{ inputs.build-packages }}
       run: |
+        read -ra build_packages <<< "$BUILD_PACKAGES"
         for attempt in 1 2 3; do
-          if sdkmanager --install 'build-tools;37.0.0' 'platforms;android-36' emulator 'system-images;android-36;google_apis;x86_64' --channel=0; then
+          if sdkmanager --install "${build_packages[@]}" emulator "system-images;android-36;$TARGET;x86_64" --channel=0; then
             exit 0
           fi
           if [[ "$attempt" == 3 ]]; then
