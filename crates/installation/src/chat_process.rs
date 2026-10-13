@@ -361,6 +361,15 @@ impl Chat<'_> {
                 self.item(params["item"].clone(), &kind).await?;
             }
             "item/agentMessage/delta" => self.message_delta(&params).await?,
+            "error" if params["willRetry"] == true && params["turnId"] == self.turn.as_str() => {
+                // Codex owns this retry. Report its progress without failing the turn.
+                self.emit(json!({
+                    "type": "error",
+                    "error": params["error"],
+                    "willRetry": true,
+                }))
+                .await?;
+            }
             "turn/completed" => self.completed = Some(params["turn"].clone()),
             _ => {}
         }

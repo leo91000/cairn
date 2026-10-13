@@ -92,6 +92,7 @@ CREATE INDEX IF NOT EXISTS chat_messages_chat ON chat_messages(chat_id,created_a
         // Backwards history excludes superseded text snapshots. These small keys
         // bound both the next-turn lookup and the same-message revision lookup.
         tx.execute_batch("CREATE INDEX IF NOT EXISTS events_turns ON events(run_id,id) WHERE type='turn.started';
+CREATE INDEX IF NOT EXISTS events_user_input ON events(run_id,id) WHERE type='chat.user';
 CREATE INDEX IF NOT EXISTS events_messages ON events(run_id,json_extract(payload,'$.item.id'),id) WHERE json_extract(payload,'$.item.type')='agent_message';")?;
         tx.execute_batch(crate::nodes::shared_blocks::SCHEMA)?;
         tx.execute_batch(crate::storage::migration::SCHEMA)?;

@@ -178,7 +178,7 @@ fn activity_preview(value: &Value, limit: usize, secrets: &[String]) -> Value {
 }
 
 pub fn exhausted(event: &Value) -> bool {
-    if !["turn.failed", "error"].contains(&text(event, "type")) {
+    if event["willRetry"] == true || !["turn.failed", "error"].contains(&text(event, "type")) {
         return false;
     }
     let error = if event["type"] == "turn.failed" {
@@ -212,7 +212,7 @@ pub fn prompt(run: &Value, chat: bool) -> String {
             merely because it is a deliverable. Store export files in the current run \
             workspace or /tmp. Wait for successful publication and include the returned \
             durable URL in your reply. Before your final response, unless ending a \
-            confirmed scheduled wait with cairn_workspace.sleep, call \
+            confirmed deferred wait with cairn_workspace.sleep or cairn_workspace.wait_for, call \
             cairn_workspace.report_outcome with completed, blocked, or needs_input, a \
             concrete reason, and validation/delivery evidence. A successful process or \
             local commit is not a completed request when an authorized push, CI check, \
@@ -383,6 +383,12 @@ mod tests {
         assert!(exhausted(
             &json!({"type":"error","code":"usage_limit_reached"})
         ));
+        assert!(!exhausted(&json!({
+            "type": "error",
+            "code": "usage_limit_reached",
+            "message": "Usage limit reached",
+            "willRetry": true,
+        })));
         for message in ["Rate limit exceeded, retrying", "The usage limit docs say"] {
             assert!(
                 !exhausted(&json!({"type":"turn.failed","error":{"message":message}})),
