@@ -9,6 +9,7 @@ export interface ActivityCode {
 }
 /** A subagent the agent delegated work to, with the steps it took on its own. */
 export interface ActivitySubagent {
+  taskId?: string
   type: string
   prompt: string
   /** Its final report, once it finished. */
@@ -108,6 +109,14 @@ export function activityEntries(events: RunEvent[], chat = false): ActivityEntry
   const messages = new Map<string, Extract<ActivityEntry, { kind: 'message' }>>()
   // By the agent's own item ID: a subagent's steps can arrive after the turn that started it.
   const subagents = new Map<string, ActivityArtifact>()
+  const aliases = new Map<string, string>()
+  for (const event of events) {
+    const item = record(payload(event).item)
+    if (item.type === 'subagent' && text(item.replaces_id))
+      aliases.set(`${event.runId}:${text(item.replaces_id)}`, text(item.id))
+  }
+
+  const agentKey = (event: RunEvent, id: string) => `${event.runId}:${aliases.get(`${event.runId}:${id}`) ?? id}`
   let connectionNotices: ActivityArtifact[] = []
 
   function recovered() {
@@ -141,6 +150,26 @@ export function activityEntries(events: RunEvent[], chat = false): ActivityEntry
     const data = payload(event)
     const item = record(data.item)
     const type = text(item.type)
+    // Keep ended children stopped in the history when a later execution starts.
+    const ended = ['turn.completed', 'turn.failed'].includes(event.type) || (event.type === 'status' && ['succeeded', 'failed', 'cancelled', 'interrupted'].includes(event.text))
+    if (ended) {
+      for (const [key, agent] of subagents) {
+        if (key.startsWith(`${event.runId}:`) && agent.subagent?.state === 'running') {
+          agent.subagent.state = 'stopped'
+          agent.status = 'done'
+          agent.statusLabel = 'Stopped'
+          agent.durationMs = Math.max(0, event.createdAt - agent.time)
+          for (const step of agent.subagent.steps) {
+            if (step.status === 'running' && !step.subagent) {
+              step.status = 'info'
+              step.statusLabel = 'Stopped'
+              step.durationMs = Math.max(0, event.createdAt - step.time)
+            }
+          }
+        }
+      }
+    }
+
     if (event.type === 'turn.started') {
       connectionNotices = []
       turn++
@@ -152,10 +181,12 @@ export function activityEntries(events: RunEvent[], chat = false): ActivityEntry
       recovered()
     const itemId = text(item.id)
     // A subagent keeps its row when its updates arrive after the turn that started it.
-    const id = (type === 'subagent' && subagents.get(itemId)?.id) || (itemId ? `${turn}:${itemId}` : `event:${event.id}`)
+    const parentArtifact = subagents.get(agentKey(event, text(item.parent_id)))
+    const agentId = type === 'subagent' ? subagents.get(agentKey(event, itemId))?.id ?? `${turn}:${agentKey(event, itemId)}` : undefined
+    const id = agentId || (itemId ? `${parentArtifact?.id ?? turn}:${itemId}` : `event:${event.id}`)
     const legacy = !event.payload && !Object.keys(data).length
     const legacyMessage = legacy && event.type === 'item.completed' && !legacyTool && event.text.trim()
-    const parent = subagents.get(text(item.parent_id))?.subagent
+    const parent = parentArtifact?.subagent
     if (type === 'subagent_message' && parent) {
       parent.message = text(item.text)
       continue
@@ -277,19 +308,20 @@ export function activityEntries(events: RunEvent[], chat = false): ActivityEntry
       const state = subagentStates[status] ?? 'running'
       artifact.kind = 'subagent'
       artifact.title = text(item.name) || 'Subagent'
-      artifact.subtitle = text(item.agent_type)
+      artifact.subtitle = text(item.agent_type) || previous?.type || ''
       artifact.status = state === 'failed' ? 'error' : state === 'running' ? 'running' : 'done'
       if (state === 'stopped')
         artifact.statusLabel = 'Stopped'
       if (typeof item.duration_ms === 'number')
         artifact.durationMs = item.duration_ms
       artifact.subagent = {
-        type: text(item.agent_type),
-        prompt: text(item.prompt),
-        result: text(item.result),
-        message: previous?.message ?? '',
+        taskId: text(item.task_id) || previous?.taskId,
+        type: artifact.subtitle,
+        prompt: text(item.prompt) || previous?.prompt || '',
+        result: typeof item.result === 'string' ? item.result : previous?.result || '',
+        message: state === 'running' && previous?.state !== 'running' ? '' : previous?.message ?? '',
         activity: text(item.activity),
-        model: text(item.model),
+        model: text(item.model) || previous?.model || '',
         background: item.background === true,
         state,
         tokens: typeof item.tokens === 'number' ? item.tokens : undefined,
@@ -359,7 +391,7 @@ export function activityEntries(events: RunEvent[], chat = false): ActivityEntry
 
     artifacts.set(id, artifact)
     if (artifact.kind === 'subagent' && itemId)
-      subagents.set(itemId, artifact)
+      subagents.set(agentKey(event, itemId), artifact)
     if (parent) {
       parent.steps.push(artifact)
       continue
@@ -378,7 +410,7 @@ export function activityEntries(events: RunEvent[], chat = false): ActivityEntry
 }
 
 /** Subagents started one after another work as a team, shown apart from the agent's own steps. */
-function teamEntries(entries: ActivityEntry[]): ActivityEntry[] {
+export function teamEntries(entries: ActivityEntry[]): ActivityEntry[] {
   const result: ActivityEntry[] = []
   for (const entry of entries) {
     if (entry.kind !== 'group' || !entry.artifacts.some(artifact => artifact.kind === 'subagent')) {

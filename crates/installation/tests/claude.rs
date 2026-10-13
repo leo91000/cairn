@@ -705,6 +705,7 @@ async fn subagents_report_their_own_steps_without_replacing_the_reply() {
     let (kind, last) = count.last().unwrap();
     assert_eq!(*kind, "item.completed");
     assert_eq!(last["status"], "completed");
+    assert_eq!(last["task_id"], "task-agent-count");
     // The report drops Claude Code's hand-back framing and keeps the final usage.
     assert_eq!(last["result"], "Total: 3 lines.");
     assert_eq!(last["tokens"], 1510);
@@ -760,6 +761,19 @@ async fn subagents_report_their_own_steps_without_replacing_the_reply() {
         std::fs::read_to_string(root.path().join("result.md")).unwrap(),
         "Both subagents reported back"
     );
+}
+
+#[tokio::test]
+async fn a_subagent_tool_result_preserves_its_stopped_notification() {
+    let root = TempDir::new().unwrap();
+    let c = setup(&root);
+    let events = run_events(&c, plan(&root, "fixture:subagents-stopped")).await;
+    let last = events
+        .iter()
+        .rfind(|event| event["item"]["id"] == "agent-count")
+        .unwrap();
+    assert_eq!(last["item"]["status"], "stopped");
+    assert_eq!(last["item"]["result"], "Total: 3 lines.");
 }
 
 #[tokio::test]

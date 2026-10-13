@@ -208,6 +208,28 @@ test('subagents show as a team with their own steps and report', async ({ page, 
   }
 })
 
+test('early and nested subagents keep one row and their own steps', async ({ page, workspace }) => {
+  const chat = await workspace.api('/api/chats', 'POST', {})
+  await workspace.api(`/api/chats/${chat.id}/messages`, 'POST', { id: randomUUID(), text: 'fixture:subagents-lifecycle' })
+  await expect.poll(async () => (await workspace.api(`/api/chats/${chat.id}`)).run?.status, { timeout: 15000 }).toBe('succeeded')
+  await page.goto(workspacePath(`/chats/${chat.id}`))
+  await authenticateWorkspace(page)
+  const team = page.getByTestId('subagent-team').first()
+  await expect(team).toContainText('2 subagents')
+  await team.locator(':scope > button').click()
+  const row = team.locator(':scope > ul > li').filter({ has: page.getByRole('button', { name: /^keyboard, Done,/ }) })
+  await row.locator(':scope > button').click()
+  const nested = row.getByTestId('subagent-team')
+  await expect(nested).toContainText('1 done')
+  await nested.locator(':scope > button').click()
+  await nested.getByTestId('subagent').locator(':scope > button').click()
+  const actions = nested.getByTestId('agent-actions')
+  await expect(actions).toContainText('Ran 1 command')
+  await actions.locator(':scope > button').click()
+  await expect(actions.getByTestId('agent-step')).toContainText('pnpm test')
+  await expect(team.locator(':scope > ul > li').filter({ hasText: 'Stopped' })).toHaveCount(1)
+})
+
 test('a transient agent error shows a retry countdown and resumes without user input', async ({ page, workspace }) => {
   const chat = await workspace.api('/api/chats', 'POST', {})
   await workspace.api(`/api/chats/${chat.id}/messages`, 'POST', {

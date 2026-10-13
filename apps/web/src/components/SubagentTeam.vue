@@ -7,6 +7,7 @@ import {
   useId,
   watchEffect,
 } from 'vue'
+import { teamEntries } from '../activity'
 import { ChevronDown, GitFork } from '../icons'
 import { liveElapsed } from '../signal'
 import ActivityContent from './ActivityContent.vue'
@@ -171,8 +172,11 @@ function toggle(id: string) {
           <p v-if="agent.subagent!.prompt" class="m-0! line-clamp-4 whitespace-pre-wrap text-xs text-muted">
             <span class="font-semibold text-ink">Prompt · </span>{{ agent.subagent!.prompt }}
           </p>
-          <AgentActions v-if="agent.subagent!.steps.length" :artifacts="agent.subagent!.steps" :active="state(agent) === 'running'" />
-          <p v-else-if="state(agent) === 'running'" class="m-0! text-xs text-muted">
+          <template v-for="entry in teamEntries([{ kind: 'group', id: agent.id, artifacts: agent.subagent!.steps }])" :key="entry.id">
+            <AgentActions v-if="entry.kind === 'group'" :artifacts="entry.artifacts" :active="state(agent) === 'running'" />
+            <SubagentTeam v-else-if="entry.kind === 'team'" :agents="entry.agents" :active="active" />
+          </template>
+          <p v-if="!agent.subagent!.steps.length && state(agent) === 'running'" class="m-0! text-xs text-muted">
             No steps yet.
           </p>
           <div v-if="agent.subagent!.result || agent.subagent!.message" class="rounded-xl border border-line bg-surface px-3 py-2">

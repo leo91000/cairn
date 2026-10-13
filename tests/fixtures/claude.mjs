@@ -408,7 +408,7 @@ else {
       })
       childResult('agent-list', 'list-bash', 'one.txt\ntwo.txt')
       child('agent-count', { id: 'count-2', content: [{ type: 'text', text: 'Total: 3 lines.' }] })
-      task('task_notification', 'agent-count', { status: 'completed', summary: 'Total: 3 lines.', usage: { total_tokens: 1500, tool_uses: 1, duration_ms: 1100 } })
+      task('task_notification', 'agent-count', { status: prompt.includes('fixture:subagents-stopped') ? 'stopped' : 'completed', summary: 'Total: 3 lines.', usage: { total_tokens: 1500, tool_uses: 1, duration_ms: 1100 } })
       out({
         type: 'user',
         parent_tool_use_id: null,

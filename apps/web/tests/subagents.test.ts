@@ -32,6 +32,102 @@ function subagent(type: string, id: string, values: Record<string, unknown> = {}
 }
 
 describe('subagents', () => {
+  it('clears the previous report and message when a subagent starts a follow-up', () => {
+    const [team] = activityEntries([
+      subagent('item.started', 'worker'),
+      item('item.completed', {
+        id: 'reply',
+        type: 'subagent_message',
+        text: 'Old report',
+        parent_id: 'worker',
+      }),
+      subagent('item.completed', 'worker', { status: 'completed', result: 'Old report' }),
+      subagent('item.updated', 'worker', { result: '' }),
+    ], true)
+    expect(team?.kind === 'team' && team.agents[0]?.subagent).toMatchObject({ state: 'running', result: '', message: '' })
+  })
+
+  it('folds early lifecycle activity into its spawn without losing metadata or steps', () => {
+    const entries = activityEntries([
+      subagent('item.started', 'spawn'),
+      item('item.started', {
+        id: 'early',
+        type: 'subagent',
+        name: 'worker',
+        status: 'in_progress',
+      }),
+      item('item.completed', {
+        id: 'read',
+        type: 'command_execution',
+        command: 'pwd',
+        parent_id: 'early',
+        status: 'completed',
+      }),
+      subagent('item.completed', 'spawn', { replaces_id: 'early', name: 'worker' }),
+      subagent('item.updated', 'spawn', { replaces_id: 'early', status: 'completed', result: 'Done' }),
+    ], true)
+    expect(entries).toHaveLength(1)
+    const team = entries[0]!
+    expect(team.kind === 'team' && team.agents).toHaveLength(1)
+    const agent = team.kind === 'team' ? team.agents[0]! : undefined
+    expect(agent?.subagent).toMatchObject({ prompt: 'Prompt for spawn', result: 'Done', type: 'Explore' })
+    expect(agent?.subagent?.steps.map(step => step.command)).toEqual(['pwd'])
+  })
+
+  it('keeps child step identities stable across parent turns and separate between siblings', () => {
+    const entries = activityEntries([
+      subagent('item.started', 'First'),
+      subagent('item.started', 'Second'),
+      item('item.started', {
+        id: 'command',
+        type: 'command_execution',
+        command: 'pwd',
+        parent_id: 'First',
+        status: 'in_progress',
+      }),
+      item('item.completed', {
+        id: 'command',
+        type: 'command_execution',
+        command: 'ls',
+        parent_id: 'Second',
+        status: 'completed',
+      }),
+      event('turn.started', { type: 'turn.started' }),
+      item('item.completed', {
+        id: 'command',
+        type: 'command_execution',
+        command: 'pwd',
+        parent_id: 'First',
+        status: 'completed',
+        aggregated_output: '/workspace',
+      }),
+    ], true)
+    const team = entries[0]!
+    expect(team.kind === 'team' && team.agents.map(agent => agent.subagent?.steps.map(step => [step.command, step.status]))).toEqual([
+      [['pwd', 'done']],
+      [['ls', 'done']],
+    ])
+  })
+
+  it('keeps unfinished subagents stopped after another execution starts', () => {
+    const entries = activityEntries([
+      subagent('item.started', 'Previous'),
+      item('item.started', {
+        id: 'unfinished',
+        type: 'command_execution',
+        command: 'pnpm test',
+        parent_id: 'Previous',
+        status: 'in_progress',
+      }),
+      event('turn.failed', { type: 'turn.failed' }),
+      { ...event('turn.started', { type: 'turn.started' }), runId: 'next-run' },
+      { ...subagent('item.started', 'Previous'), runId: 'next-run' },
+    ], true)
+    const agents = entries.flatMap(entry => entry.kind === 'team' ? entry.agents : [])
+    expect(agents.map(agent => agent.subagent?.state)).toEqual(['stopped', 'running'])
+    expect(agents[0]?.subagent?.steps[0]).toMatchObject({ status: 'info', statusLabel: 'Stopped' })
+  })
+
   it('groups subagents started together and keeps their steps and messages out of the reply', () => {
     const entries = activityEntries([
       user('Audit the webhooks'),
