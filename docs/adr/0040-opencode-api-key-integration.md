@@ -4,7 +4,7 @@ Date: 2026-10-13.
 
 ## Context
 
-ADR-0037 separates native execution adapters from shared worker orchestration.
+[ADR-0037](0037-coding-agent-execution-adapters.md) separates native execution adapters from shared worker orchestration.
 OpenCode is the first additional engine using that boundary. Its engine identifier
 is independent from the model provider: Zen, OpenAI and OpenRouter credentials
 cannot be interchanged just because they use the same executable.
