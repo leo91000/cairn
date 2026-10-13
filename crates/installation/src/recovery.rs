@@ -3,13 +3,12 @@ use crate::{
     error::{Error, Result},
     execution::secret,
     provider::Provider,
-    rpc::Session,
     service::Service,
     validation::text,
     worker::checkpoint::RunCheckpoint,
 };
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+use serde_json::Value;
 use std::{path::Path, time::Duration};
 
 /// Identifies one process instance across PID reuse and host reboots.
@@ -154,67 +153,8 @@ async fn node_lease_expired(s: &Service, attempt: &str) -> Result<bool> {
 }
 
 pub async fn session(s: &Service, run: &Value, home: &Path, cwd: &Path) -> Result<String> {
-    let saved = run["sessionId"].as_str().filter(|id| !id.is_empty());
-    if Provider::of_run(run) == Provider::Claude {
-        return saved.map(str::to_owned).ok_or_else(|| {
-            Error::conflict(
-                "The saved Claude session is unavailable. Working files were preserved.",
-            )
-        });
-    }
-    // The authoritative session is on the retained guest disk. The guest's
-    // thread/resume verifies it; asking a host Codex process cannot do so.
-    if (run["isolated"] == true || !s.config.runner_url.is_empty())
-        && let Some(id) = saved
-    {
-        return Ok(id.to_owned());
-    }
-    codex_session(s, run, home, cwd).await.map_err(|_| {
-        Error::conflict(
-            "The saved Codex conversation is unavailable. Working files were preserved; review them before starting a new run.",
-        )
-    })
-}
-
-async fn codex_session(s: &Service, run: &Value, home: &Path, cwd: &Path) -> Result<String> {
-    let mut rpc = Session::codex(&s.config, home, &[], None).await?;
-    let result = find_codex_session(&mut rpc, run, cwd).await;
-    rpc.close().await;
-    result
-}
-
-async fn find_codex_session(rpc: &mut Session, run: &Value, cwd: &Path) -> Result<String> {
-    if let Some(id) = run["sessionId"].as_str() {
-        let params = json!({ "threadId": id, "includeTurns": false });
-        let result = rpc.request("thread/read", params).await?;
-        if result["thread"]["id"] == id {
-            return Ok(id.to_owned());
-        }
-        return Err(Error::bad("Session mismatch"));
-    }
-    let source_kind = if run["chatExecution"].is_object() {
-        "appServer"
-    } else {
-        "exec"
-    };
-    let params = json!({
-        "limit": 2,
-        "cwd": cwd,
-        "sourceKinds": [source_kind],
-        "archived": false,
-    });
-    let result = rpc.request("thread/list", params).await?;
-    let cwd = cwd.to_string_lossy();
-    let matches = result["data"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter(|t| t["cwd"] == cwd.as_ref() && t["parentThreadId"].is_null())
-        .collect::<Vec<_>>();
-    if let [thread] = matches.as_slice()
-        && !text(thread, "id").is_empty()
-    {
-        return Ok(text(thread, "id").to_owned());
-    }
-    Err(Error::bad("No unique session"))
+    Provider::of_run(run)?
+        .adapter()
+        .resume_session(s, run, home, cwd)
+        .await
 }

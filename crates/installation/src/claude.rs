@@ -42,7 +42,7 @@ pub fn configure(env: &mut Environment, directory: &Path) {
 }
 
 /// Subscription runs never use API keys, cloud providers or alternate OAuth overrides.
-fn sanitize(env: &mut Environment) {
+pub(crate) fn sanitize(env: &mut Environment) {
     for key in [
         "ANTHROPIC_API_KEY",
         "ANTHROPIC_BASE_URL",
@@ -64,7 +64,7 @@ fn sanitize(env: &mut Environment) {
 }
 
 pub fn validate_agent(agent: &Value) -> Result<()> {
-    if Provider::of_agent(agent) != Provider::Claude {
+    if Provider::of_agent(agent)? != Provider::Claude {
         return Ok(());
     }
     if !EFFORTS.contains(&text(agent, "reasoning")) {

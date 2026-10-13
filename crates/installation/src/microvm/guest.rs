@@ -494,7 +494,7 @@ async fn receive_frames(
 /// Marks the disk initialized, saves the plan and applies its filesystem policy.
 async fn prepare_run(plan: &Plan) -> Result<()> {
     if plan.as_value()["chat"].is_object()
-        && plan.chat_provider() == crate::provider::Provider::Codex
+        && plan.chat_provider()? == crate::provider::Provider::Codex
     {
         let timing = Operation::new("codex_state_seed", plan.run_id(), "install");
         let count = seed_codex().await?;
@@ -638,7 +638,7 @@ fn spawn_agent(
     let socket = codex.socket()?;
     if let Some(socket) = socket {
         if !plan.as_value()["chat"].is_object()
-            || plan.chat_provider() != crate::provider::Provider::Codex
+            || plan.chat_provider()? != crate::provider::Provider::Codex
             || plan.command() != Some(vec![super::plan::ENTRYPOINT, "runner-entry"])
         {
             return Err(Error::conflict(

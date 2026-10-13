@@ -125,28 +125,6 @@ async fn git_identity(
     ))
 }
 
-async fn install_codex_auth(home: &Path, config: &Config, codex_home: Option<&Path>) -> Result<()> {
-    let auth = codex_home
-        .map_or_else(|| config.home.join(".codex"), Path::to_owned)
-        .join("auth.json");
-    let managed = auth
-        .parent()
-        .is_some_and(|p| p.join("cairn-managed-auth").exists());
-    if managed {
-        atomic_write(&home.join(".codex/cairn-managed-auth"), b"1").await?;
-    } else {
-        let bytes = tokio::fs::read(&auth)
-            .await
-            .map_err(|_| Error::bad("Connect Codex before starting an isolated agent."))?;
-        atomic_write(&home.join(".codex/auth.json"), &bytes).await?;
-    }
-    atomic_write(
-        &home.join(".codex/config.toml"),
-        b"cli_auth_credentials_store = \"file\"\n",
-    )
-    .await
-}
-
 async fn configure_git(
     home: &Path,
     config: &Config,
@@ -198,7 +176,7 @@ async fn install_skills(home: &Path, skills: &Value) -> Result<Vec<Value>> {
 pub(super) struct HomeOptions<'a> {
     pub github: Option<&'a str>,
     pub github_access: bool,
-    pub codex_home: Option<&'a Path>,
+    pub account_home: Option<&'a Path>,
 }
 
 /// Populates `home` with provider credentials, Git configuration and skills.
@@ -208,10 +186,10 @@ pub(super) async fn prepare_home(
     config: &Config,
     options: &HomeOptions<'_>,
 ) -> Result<Vec<Value>> {
-    private_dir(&home.join(".codex")).await?;
-    if Provider::of_run(run) == Provider::Codex {
-        install_codex_auth(home, config, options.codex_home).await?;
-    }
+    Provider::of_run(run)?
+        .adapter()
+        .prepare_isolated_home(config, home, options.account_home)
+        .await?;
     github_home(home, config, options.github_access, options.github).await?;
     configure_git(home, config, options.github, options.github_access).await?;
     install_skills(home, &run["snapshot"]["skills"]).await

@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import type { Provider } from '../../../../packages/contracts/accounts'
 import type {
   Chat,
   ChatAttachment,
@@ -80,7 +81,7 @@ const deliverables = computed(() => live.snapshot.value?.artifacts ?? [])
 const draft = ref('')
 const model = ref('')
 const reasoning = ref('')
-const provider = ref<'' | 'codex' | 'claude'>('')
+const provider = ref<'' | Provider>('')
 const history = ref(false)
 const detailsOpen = ref(false)
 const detailsButton = ref<HTMLButtonElement>()
@@ -240,7 +241,7 @@ const agents = computed(() => state.agents.map(agent => ({
 const currentProvider = computed(() => detail.value?.run?.snapshot.agent.provider || selectedAgent.value?.provider || 'codex')
 const chosenProvider = computed({
   get: () => provider.value || currentProvider.value,
-  set: (value: 'codex' | 'claude') => {
+  set: (value: Provider) => {
     provider.value = value
     model.value = ''
     reasoning.value = ''
@@ -284,7 +285,7 @@ let submission: {
   id: string
   text: string
   mode: 'queue' | 'steer'
-  provider: 'codex' | 'claude'
+  provider: Provider
   model: string
   reasoning: string
   attachmentIds: string[]

@@ -126,7 +126,8 @@ async fn empty_start_does_not_touch_unselected_repositories_and_selected_start_l
         Path::new("/tmp"),
         &json!({ "args": [] }),
         None,
-    );
+    )
+    .unwrap();
     assert!(
         plan["writableRoots"]
             .as_array()

@@ -179,14 +179,14 @@ pub(crate) fn detail(db: &Db<'_>, id: &str) -> Result<Value> {
 }
 
 /// Steering joins the running turn, whose provider, model and reasoning are fixed.
-fn changes_running_agent(message: &Value, run: &Value) -> bool {
+fn changes_running_agent(message: &Value, run: &Value) -> Result<bool> {
     let agent = &run["snapshot"]["agent"];
-    let provider = Value::from(Provider::of_run(run).as_str());
+    let provider = Value::from(Provider::of_run(run)?.as_str());
     let differs =
         |key: &str, current: &Value| !text(message, key).is_empty() && message[key] != *current;
-    differs("provider", &provider)
+    Ok(differs("provider", &provider)
         || differs("model", &agent["model"])
-        || differs("reasoning", &agent["reasoning"])
+        || differs("reasoning", &agent["reasoning"]))
 }
 
 fn validate_steer(db: &Db<'_>, chat: &Value, message: &Value) -> Result<()> {
@@ -196,7 +196,7 @@ fn validate_steer(db: &Db<'_>, chat: &Value, message: &Value) -> Result<()> {
     let Some(run) = db.run(text(chat, "runId"))? else {
         return Ok(());
     };
-    if run_is_active(&run) && changes_running_agent(message, &run) {
+    if run_is_active(&run) && changes_running_agent(message, &run)? {
         return Err(Error::conflict(
             "Queue this message to change provider, model or reasoning on the next turn.",
         ));
@@ -430,18 +430,18 @@ fn needs_attention(chat: &Value, run: Option<&Value>) -> bool {
 }
 
 /// Applies the provider, model and reasoning chosen for this message.
-fn select_agent(snapshot: &mut Value, run: Option<&Value>, message: &Value) {
+fn select_agent(snapshot: &mut Value, run: Option<&Value>, message: &Value) -> Result<()> {
     let provider = if text(message, "provider").is_empty() {
         let previous = run.map_or(
             &snapshot["snapshot"]["agent"],
             |run| &run["snapshot"]["agent"],
         );
-        Provider::of_agent(previous).as_str()
+        Provider::of_agent(previous)?.as_str()
     } else {
         text(message, "provider")
     }
     .to_owned();
-    let switched = provider != Provider::of_run(snapshot).as_str();
+    let switched = provider != Provider::of_run(snapshot)?.as_str();
     let agent = &mut snapshot["snapshot"]["agent"];
     if switched {
         agent["model"] = "".into();
@@ -455,6 +455,7 @@ fn select_agent(snapshot: &mut Value, run: Option<&Value>, message: &Value) {
     if !text(message, "reasoning").is_empty() {
         agent["reasoning"] = message["reasoning"].clone();
     }
+    Ok(())
 }
 
 /// Reuses the chat's run for the next turn, handing the transcript to a fresh
@@ -480,8 +481,8 @@ fn continue_run(
         None if chat["cancelledByDeletion"] == true => json!({}),
         None => return Err(Error::conflict("Run checkpoint not found")),
     };
-    let provider = Provider::of_run(snapshot);
-    if provider != Provider::of_run(run) || checkpoint["freshSession"] == true {
+    let provider = Provider::of_run(snapshot)?;
+    if provider != Provider::of_run(run)? || checkpoint["freshSession"] == true {
         checkpoint["freshSession"] = false.into();
         execution.context = Some(handoff_context(db, run_id)?);
         checkpoint["launched"] = false.into();
@@ -751,8 +752,10 @@ impl Service {
         task["createdAt"] = chat["createdAt"].clone();
         task["nextRun"] = Value::Null;
         let mut snapshot = self.snapshot(task, "chat").await?;
-        select_agent(&mut snapshot, run.as_ref(), &message);
-        crate::claude::validate_agent(&snapshot["snapshot"]["agent"])?;
+        select_agent(&mut snapshot, run.as_ref(), &message)?;
+        Provider::of_run(&snapshot)?
+            .adapter()
+            .validate_agent(&snapshot["snapshot"]["agent"])?;
         let chat_id = text(&chat, "id").to_owned();
         self.store
             .transaction(move |db| launch_turn(db, &chat_id, run, message, snapshot))

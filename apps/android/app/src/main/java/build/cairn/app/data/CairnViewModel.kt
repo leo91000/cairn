@@ -36,8 +36,7 @@ data class Workspace(
     val signingIn: Boolean = false,
     val restoringSession: Boolean = false,
     val mcps: List<Mcp> = emptyList(),
-    val models: ModelCatalog = ModelCatalog(),
-    val claudeModels: ModelCatalog = ModelCatalog(),
+    val modelCatalogs: Map<String, ModelCatalog> = emptyMap(),
     val error: String? = null,
     val notice: String? = null,
     val agents: List<Agent> = emptyList(),
@@ -47,6 +46,8 @@ data class Workspace(
     val overview: Overview = Overview(),
     val transportRoute: String = "relay",
 ) {
+    fun modelCatalog(provider: String): ModelCatalog = modelCatalogs[provider] ?: ModelCatalog()
+
     val isOwner: Boolean
         get() = installation?.role == InstallationRole.Owner
 }
@@ -520,27 +521,22 @@ constructor(
         val tasks = async { target.get<List<Task>>("/tasks") }
         val skills = async { target.get<List<Skill>>("/skills") }
         val mcps = async { if (owner) target.get<List<Mcp>>("/mcps") else emptyList() }
-        val models = async {
-            try {
-                target.get<ModelCatalog>("/codex/models")
-            } catch (e: Exception) {
-                if (e is CancellationException || (e is ApiException && e.status == 401)) throw e
-                state.value.models.copy(
-                    stale = true,
-                    error = "Catalogue temporairement indisponible.",
-                )
-            }
-        }
-        val claudeModels = async {
-            try {
-                target.get<ModelCatalog>("/claude/models")
-            } catch (e: Exception) {
-                if (e is CancellationException || (e is ApiException && e.status == 401)) throw e
-                state.value.claudeModels.copy(
-                    stale = true,
-                    error = "Catalogue Claude temporairement indisponible.",
-                )
-            }
+        val catalogs = codingAgents.associate { agent ->
+            agent.provider to
+                async {
+                    try {
+                        target.get<ModelCatalog>("/${agent.provider}/models")
+                    } catch (e: Exception) {
+                        if (e is CancellationException || (e is ApiException && e.status == 401))
+                            throw e
+                        state.value
+                            .modelCatalog(agent.provider)
+                            .copy(
+                                stale = true,
+                                error = "Catalogue temporairement indisponible.",
+                            )
+                    }
+                }
         }
         val overview = async { target.get<Overview>("/overview") }
         val updated =
@@ -551,8 +547,7 @@ constructor(
                 skills = skills.await(),
                 overview = overview.await(),
                 mcps = mcps.await(),
-                models = models.await(),
-                claudeModels = claudeModels.await(),
+                modelCatalogs = catalogs.mapValues { (_, catalog) -> catalog.await() },
             )
         if (connection === target && state.value.session.authenticated)
             mutable.update {
@@ -563,8 +558,7 @@ constructor(
                     skills = updated.skills,
                     overview = updated.overview,
                     mcps = updated.mcps,
-                    models = updated.models,
-                    claudeModels = updated.claudeModels,
+                    modelCatalogs = updated.modelCatalogs,
                 )
             }
     }
@@ -587,15 +581,14 @@ constructor(
     }
 
     suspend fun refreshModels(provider: String) {
-        require(provider in listOf("codex", "claude"))
+        codingAgent(provider)
         val target = api
         try {
             val catalog = target.get<ModelCatalog>("/$provider/models")
             // A request started before sign-out or a server change must not restore old data.
             if (connection === target && state.value.session.authenticated)
                 mutable.update {
-                    if (provider == "claude") it.copy(claudeModels = catalog)
-                    else it.copy(models = catalog)
+                    it.copy(modelCatalogs = it.modelCatalogs + (provider to catalog))
                 }
         } catch (e: Exception) {
             if (e is CancellationException) throw e
@@ -605,14 +598,13 @@ constructor(
                 return
             }
             mutable.update {
-                val cached = if (provider == "claude") it.claudeModels else it.models
+                val cached = it.modelCatalog(provider)
                 val unavailable =
                     cached.copy(
                         stale = true,
                         error = "Catalogue temporairement indisponible. Réessayez.",
                     )
-                if (provider == "claude") it.copy(claudeModels = unavailable)
-                else it.copy(models = unavailable)
+                it.copy(modelCatalogs = it.modelCatalogs + (provider to unavailable))
             }
         }
     }
