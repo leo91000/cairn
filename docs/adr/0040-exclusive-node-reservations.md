@@ -117,8 +117,18 @@ and inbox behavior retain their tests.
 The image CI runs `tests/runner-exclusive-smoke.mjs` against the exact candidate
 image, with private zram on a disposable host and required memory reclamation.
 It checks the same command/VMM PIDs and buffer contents, nested-vCPU progress,
-admission fencing, checkpoint arbitration, lease expiry and automatic resumption.
-Android mode checks that the same booted emulator survives pause/reclamation.
+admission fencing, checkpoint arbitration, reservation expiry and automatic resumption.
+Optional Android mode checks that the same booted emulator survives pause/reclamation.
+Hosted AMD Android boot is still unqualified (see NESTED-KVM-RESEARCH.md), so this
+mode is skipped in ordinary image CI and can be requested with the
+`exclusive-android` workflow-dispatch input. Run it on a compatible Intel host
+before claiming nested Android continuity:
+
+```sh
+CAIRN_EXCLUSIVE_REQUIRE_RECLAIM=true CAIRN_EXCLUSIVE_ANDROID=true \
+  node tests/runner-exclusive-smoke.mjs '<exact candidate image digest>'
+```
+
 Android UI cases run on JVM and on an actual AOSP emulator.
 
 Local metadata measurements and their limits are recorded in

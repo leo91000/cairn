@@ -290,7 +290,7 @@ console.log('exclusive-live-ok '+mode+' pid='+process.pid);
       },
       android,
       memoryRequired,
-      scope: 'Real Firecracker and vhost-user; same active commands, nested vCPU, guest RAM contents, checkpoint arbitration, admission and lease expiry. Private synthetic local storage origin.',
+      scope: 'Real Firecracker and vhost-user; same active commands, nested vCPU, guest RAM contents, checkpoint arbitration, admission and reservation expiry. Private synthetic local storage origin.',
     })}\n`)
   }
   finally {
