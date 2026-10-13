@@ -8,6 +8,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.test.core.app.ApplicationProvider
 import build.cairn.app.data.*
 import java.util.concurrent.CopyOnWriteArrayList
+import java.util.concurrent.atomic.AtomicBoolean
 import kotlinx.coroutines.flow.first
 import kotlinx.serialization.json.*
 import okhttp3.mockwebserver.*
@@ -19,6 +20,260 @@ abstract class NodePlacementCases {
     protected open fun capture(name: String) {}
 
     @get:Rule val compose = createComposeRule()
+
+    @Test fun suspendedChatTimelineShowsAStaticNoticeInsteadOfWorking() = suspendedTimeline(true)
+
+    @Test fun suspendedRunTimelineAndResultDescribeThePause() = suspendedTimeline(false)
+
+    private fun suspendedTimeline(chatPage: Boolean) {
+        MockWebServer().use { server ->
+            val reservation =
+                ExclusiveReservation(
+                    "reservation",
+                    "node",
+                    "owner",
+                    "Compilation Android",
+                    "acquired",
+                )
+            val run =
+                Run(
+                    "neighbor",
+                    status = "running",
+                    taskName = "Exécution voisine",
+                    suspendedByExclusive = reservation,
+                )
+            val chat =
+                Chat(
+                    "chat",
+                    title = "Conversation suspendue",
+                    agentName = "Agent principal",
+                    status = "running",
+                    run = run,
+                    suspendedByExclusive = reservation,
+                )
+            server.dispatcher =
+                object : Dispatcher() {
+                    override fun dispatch(request: RecordedRequest): MockResponse {
+                        val path = request.path!!.substringBefore('?')
+                        val live =
+                            when (path) {
+                                "/api/installations/fixture/api/chats/stream" ->
+                                    LiveState(chats = listOf(chat))
+                                "/api/installations/fixture/api/chats/chat/stream" ->
+                                    LiveState(chat = chat)
+                                "/api/installations/fixture/api/runs/neighbor/stream" ->
+                                    LiveState(run = run)
+                                else -> null
+                            }
+                        if (live != null) {
+                            val frame =
+                                "event: batch\nid: 0\ndata: ${wireJson.encodeToString(LiveBatch(emptyList(), live, true, false))}\n\n"
+                            return MockResponse()
+                                .setHeader("Content-Type", "text/event-stream")
+                                .setBody(frame)
+                        }
+                        val body =
+                            when {
+                                path == "/api/installations" -> beaconInstallationsFixture()
+                                path == "/api/account/session" -> beaconAccountFixture("fixture")
+                                path == "/api/installations/fixture/api/overview" -> "{}"
+                                path == "/api/installations/fixture/api/agents" ->
+                                    wireJson.encodeToString(
+                                        listOf(Agent(MAIN_AGENT_ID, "Agent principal"))
+                                    )
+                                path.endsWith("/models") -> """{"models":[]}"""
+                                else -> "[]"
+                            }
+                        return MockResponse().setBody(body)
+                    }
+                }
+            server.start()
+            val vm = connectedViewModel()
+            compose.setContent {
+                val state by vm.state.collectAsStateWithLifecycle()
+                LaunchedEffect(Unit) {
+                    vm.state.first { it.ready }
+                    vm.connect(server.url("/").toString())
+                }
+                CairnTheme {
+                    if (state.session.authenticated) {
+                        if (chatPage) ChatScreen(vm, state, "chat", openChat = {}, openRun = {})
+                        else RunScreen(vm, state, "neighbor", openRun = {})
+                    }
+                }
+            }
+            compose.waitUntil(20000) {
+                compose
+                    .onAllNodesWithText("Suspendue (exclusivité) · Compilation Android")
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
+            }
+            compose.onNodeWithTag("agent-working").assertDoesNotExist()
+            compose.onNodeWithTag("chat-working-avatar").assertDoesNotExist()
+            capture(if (chatPage) "exclusive-chat-timeline" else "exclusive-run-timeline")
+            if (!chatPage) {
+                compose.onNodeWithText("Résultat").performClick()
+                compose.onNodeWithText("Exécution suspendue").assertExists()
+                compose.onNodeWithText("Le travail est en cours").assertDoesNotExist()
+            }
+        }
+    }
+
+    @Test
+    fun ownerCanInspectAndReleaseAnExclusiveReservationWithoutClaimingNeighborsResumed() {
+        MockWebServer().use { server ->
+            val releasing = AtomicBoolean(false)
+            val releases = CopyOnWriteArrayList<RecordedRequest>()
+            val opened = CopyOnWriteArrayList<String>()
+            server.dispatcher =
+                object : Dispatcher() {
+                    override fun dispatch(request: RecordedRequest): MockResponse {
+                        val path = request.path!!.substringBefore('?')
+                        val body =
+                            when {
+                                path ==
+                                    "/api/installations/fixture/api/nodes/node/exclusive/reservation/release" -> {
+                                    releases += request
+                                    releasing.set(true)
+                                    "{}"
+                                }
+                                path == "/api/installations/fixture/api/nodes" ->
+                                    """[{"id":"node","name":"Serveur réservé","status":"online","accepting":true,"executionReady":true,"capabilities":{"kvm":true},"exclusiveReservations":true,"exclusiveReservation":{"id":"reservation","nodeId":"node","ownerRunId":"owner-run","reason":"Compilation Android","state":"${if (releasing.get()) "releasing" else "acquired"}","createdAt":100,"expiresAt":4102444800000,"waitUntil":4102444800000,"pausedRunIds":["neighbor-one","neighbor-two"],"minimumAvailableMemoryMiB":4096}}]"""
+                                path == "/api/installations" -> beaconInstallationsFixture()
+                                path == "/api/account/session" -> beaconAccountFixture("fixture")
+                                path == "/api/installations/fixture/api/overview" -> "{}"
+                                else -> "[]"
+                            }
+                        return MockResponse().setBody(body)
+                    }
+                }
+            server.start()
+            val vm = connectedViewModel()
+            compose.setContent {
+                val state by vm.state.collectAsStateWithLifecycle()
+                LaunchedEffect(Unit) {
+                    vm.state.first { it.ready }
+                    vm.connect(server.url("/").toString())
+                }
+                CairnTheme { if (state.session.authenticated) NodesScreen(vm, state, opened::add) }
+            }
+            compose.waitUntil(20000) {
+                compose.onAllNodesWithText("Exclusivité acquise").fetchSemanticsNodes().isNotEmpty()
+            }
+            compose.onNodeWithText("Compilation Android").assertExists()
+            compose.onNodeWithText("2 tâches suspendues").assertExists()
+            compose.onNodeWithText("Expire le", substring = true).assertExists()
+            compose.onNodeWithText("RAM disponible demandée : 4 Gio").assertExists()
+            compose.onNodeWithText("Ouvrir l’exécution").performScrollTo().performClick()
+            assertEquals(listOf("owner-run"), opened.toList())
+            capture("exclusive-reservation")
+            compose.onNodeWithText("Libérer la réservation").performScrollTo().performClick()
+            compose.waitUntil(10000) {
+                releases.size == 1 &&
+                    compose
+                        .onAllNodesWithText("Reprise des autres tâches")
+                        .fetchSemanticsNodes()
+                        .isNotEmpty()
+            }
+            assertEquals("POST", releases.single().method)
+            assertEquals("fixture", releases.single().getHeader("X-CSRF-Token"))
+            compose.onNodeWithText("Libérer la réservation").assertIsNotEnabled()
+            compose.onNodeWithText("2 tâches suspendues").assertExists()
+        }
+    }
+
+    @Test
+    fun suspendedRunKeepsStorageFailuresVisibleAndExplainsAutomaticResume() {
+        MockWebServer().use { server ->
+            server.dispatcher =
+                object : Dispatcher() {
+                    override fun dispatch(request: RecordedRequest): MockResponse {
+                        val body =
+                            when (request.path!!.substringBefore('?')) {
+                                "/api/installations/fixture/api/nodes/placement/neighbor" ->
+                                    """{"nodes":[{"id":"node","name":"Serveur réservé","status":"online"}]}"""
+                                "/api/installations" -> beaconInstallationsFixture()
+                                "/api/account/session" -> beaconAccountFixture("fixture")
+                                "/api/installations/fixture/api/overview" -> "{}"
+                                else -> "[]"
+                            }
+                        return MockResponse().setBody(body)
+                    }
+                }
+            server.start()
+            val vm = connectedViewModel()
+            val run =
+                mutableStateOf(
+                    Run(
+                        id = "neighbor",
+                        status = "running",
+                        nodeId = LOCAL_NODE_ID,
+                        suspendedByExclusive =
+                            ExclusiveReservation(
+                                id = "reservation",
+                                nodeId = "node",
+                                ownerRunId = "owner-run",
+                                reason = "Compilation Android",
+                                state = "acquired",
+                                expiresAt = 4102444800000,
+                            ),
+                    )
+                )
+            compose.setContent {
+                val state by vm.state.collectAsStateWithLifecycle()
+                LaunchedEffect(Unit) {
+                    vm.state.first { it.ready }
+                    vm.connect(server.url("/").toString())
+                }
+                CairnTheme {
+                    if (state.session.authenticated)
+                        Page {
+                            RunCard(run.value) {}
+                            NodePlacement(vm, run.value)
+                        }
+                }
+            }
+            compose.waitUntil(20000) {
+                compose
+                    .onAllNodesWithText("Suspendue pour une réservation exclusive")
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
+            }
+            compose.onNodeWithText("Suspendue (exclusivité)").assertExists()
+            compose.runOnIdle { run.value = run.value.copy(movementError = "Transfert impossible") }
+            compose.onNodeWithText("Déplacement en échec").assertExists()
+            compose.onNodeWithText("Node : Runner du master").performClick()
+            compose.onNodeWithText("Compilation Android").assertExists()
+            compose.onNodeWithText("Réservation jusqu’au", substring = true).assertExists()
+            compose
+                .onNodeWithText(
+                    "La reprise est automatique après la libération, dès que la node est disponible."
+                )
+                .assertExists()
+            compose.onNodeWithText("Transfert impossible").assertExists()
+            capture("exclusive-suspended-run")
+            compose.onNodeWithContentDescription("Fermer Node d’exécution").performClick()
+            compose.runOnIdle { run.value = run.value.copy(status = "failed") }
+            compose.onNodeWithText("Échec").assertExists()
+            compose.onNodeWithText("Suspendue (exclusivité)").assertDoesNotExist()
+            compose.onNodeWithText("Suspendue pour une réservation exclusive").assertDoesNotExist()
+        }
+    }
+
+    private fun connectedViewModel(): CairnViewModel =
+        CairnViewModel(
+            ApplicationProvider.getApplicationContext<Application>(),
+            object : SessionVault {
+                private val values = mutableMapOf<String, String>()
+
+                override fun read(origin: String) = values[origin]
+
+                override fun write(origin: String, cookie: String?) {
+                    if (cookie == null) values.remove(origin) else values[origin] = cookie
+                }
+            },
+            beaconOrigin = "",
+        )
 
     @Test
     fun ownerCanPreferOrPinAnAuthorizedNodeAndSeeSynchronizationAge() {
@@ -356,6 +611,7 @@ abstract class NodePlacementCases {
             compose.onNodeWithText("Configurer", substring = false).performScrollTo().performClick()
             compose.onNodeWithText("Budget CPU partagé").performTextReplacement("3")
             compose.onNodeWithText("Slots d’exécution").performTextReplacement("12")
+            compose.onNodeWithText("Autoriser Agent test").performScrollTo().performClick()
             compose.onNodeWithText("Enregistrer").performClick()
             compose.waitUntil(10000) {
                 writes.any { it.first == "/api/installations/fixture/api/nodes/node" }
@@ -368,6 +624,16 @@ abstract class NodePlacementCases {
                     .jsonObject["cpu"]!!
                     .jsonPrimitive
                     .int,
+            )
+            assertEquals(
+                "agent",
+                writes
+                    .first { it.first == "/api/installations/fixture/api/nodes/node" }
+                    .second["exclusiveAgents"]!!
+                    .jsonArray
+                    .single()
+                    .jsonPrimitive
+                    .content,
             )
             compose.onNodeWithText("Révoquer", substring = false).performScrollTo().performClick()
             compose.waitUntil(10000) {

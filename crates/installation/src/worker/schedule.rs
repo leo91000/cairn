@@ -80,6 +80,7 @@ impl Worker {
             .write(|db| {
                 db.0.execute("DELETE FROM kv WHERE expires IS NOT NULL AND expires<=?", [now()])?;
                 db.0.execute("DELETE FROM audit WHERE created_at<?", [now() - 90 * DAY_MS])?;
+                db.0.execute("DELETE FROM records WHERE kind='node-exclusive-requests' AND json_extract(data,'$.state') IN ('released','failed','expired') AND json_extract(data,'$.createdAt')<?", [now() - 30 * DAY_MS])?;
                 db.0.execute("DELETE FROM events WHERE created_at<? AND run_id IN (SELECT id FROM runs WHERE status NOT IN ('queued','running') AND json_extract(data,'$.trigger')!='chat')", [now() - 30 * DAY_MS])?;
                 Ok(())
             })

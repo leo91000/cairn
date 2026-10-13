@@ -118,6 +118,7 @@ enum ControlScenario {
     DemandCapture,
     PausedCapture,
     EmergencyCapture,
+    ExclusiveCapture,
     MonitorPause,
     MonitorResume,
     MonitorStarting,
@@ -142,14 +143,20 @@ impl ControlScenario {
     }
 
     fn lose_ack(self) -> bool {
-        !matches!(self, Self::MonitorHealthy | Self::PausedCapture)
+        !matches!(
+            self,
+            Self::MonitorHealthy | Self::PausedCapture | Self::ExclusiveCapture
+        )
     }
 
     /// Whether the storage monitor, rather than a capture, drives the VM.
     fn monitor(self) -> bool {
         !matches!(
             self,
-            Self::DemandCapture | Self::PausedCapture | Self::EmergencyCapture
+            Self::DemandCapture
+                | Self::PausedCapture
+                | Self::EmergencyCapture
+                | Self::ExclusiveCapture
         )
     }
 }
@@ -167,6 +174,11 @@ async fn healthy_paused_vm_resumes_before_guest_freeze() {
 #[tokio::test]
 async fn emergency_capture_retries_lost_pause_acknowledgement_and_remains_protected() {
     exercise_vm_control(ControlScenario::EmergencyCapture).await;
+}
+
+#[tokio::test]
+async fn checkpoint_and_storage_recovery_preserve_exclusive_suspension() {
+    exercise_vm_control(ControlScenario::ExclusiveCapture).await;
 }
 
 #[tokio::test]
@@ -396,7 +408,7 @@ async fn check_capture(
     .unwrap();
     let point = result.unwrap();
     assert!(!stop.is_cancelled());
-    if case.emergency() {
+    if case.emergency() || matches!(case, ControlScenario::ExclusiveCapture) {
         assert_eq!(point["manifest"]["consistency"], "crash");
         assert!(paused.load(Ordering::SeqCst));
         assert!(!thawed.load(Ordering::SeqCst));
@@ -463,6 +475,21 @@ async fn exercise_vm_control(case: ControlScenario) {
         if matches!(case, ControlScenario::PausedCapture) {
             held_volume.set_paused(true);
         }
+        let exclusive = cairn_installation::microvm::suspension::Reason::Exclusive {
+            reservation_id: id(),
+            epoch: 1,
+        };
+        if matches!(case, ControlScenario::ExclusiveCapture) {
+            cairn_installation::microvm::suspension::settle_reason(
+                root.path(),
+                &attempt,
+                &exclusive,
+                true,
+                &CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+        }
         check_capture(
             case,
             root.path(),
@@ -473,6 +500,29 @@ async fn exercise_vm_control(case: ControlScenario) {
             &thawed,
         )
         .await;
+        if matches!(case, ControlScenario::ExclusiveCapture) {
+            let stop = CancellationToken::new();
+            held_volume
+                .enforce_limits(root.path(), &attempt, &stop)
+                .await
+                .unwrap();
+            assert!(!held_volume.paused(), "storage released only its own fence");
+            assert!(
+                paused.load(Ordering::SeqCst),
+                "exclusive CPUs remain paused after storage recovery"
+            );
+            cairn_installation::microvm::suspension::settle_reason(
+                root.path(),
+                &attempt,
+                &exclusive,
+                false,
+                &stop,
+            )
+            .await
+            .unwrap();
+            assert!(!paused.load(Ordering::SeqCst));
+            assert!(!stop.is_cancelled());
+        }
     }
     controller_task.abort();
     guest_task.abort();

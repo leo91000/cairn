@@ -349,7 +349,9 @@ fn is_retry(call: &Call, sequence: u64) -> Result<bool> {
 
 /// How long a node may take to start answering, by operation.
 fn head_timeout(path: &str) -> Duration {
-    Duration::from_secs(if path.ends_with("/restore") {
+    Duration::from_secs(if path.starts_with("/exclusive/") {
+        150
+    } else if path.ends_with("/restore") {
         120
     } else if path.starts_with("/prepare/")
         || path.ends_with("snapshot")

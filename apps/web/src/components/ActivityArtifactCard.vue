@@ -27,6 +27,7 @@ import Markdown from './Markdown.vue'
 const props = defineProps<{
   artifact: ActivityArtifact
   active: boolean
+  suspended?: boolean
   expanded: boolean
   bare?: boolean
 }>()
@@ -66,7 +67,8 @@ const labels = {
   notice: 'Session',
 }
 const running = computed(() => props.artifact.status === 'running' && props.active)
-const status = computed(() => props.artifact.statusLabel ?? (running.value ? 'Running' : props.artifact.status === 'running' ? 'Stopped' : props.artifact.status === 'error' ? 'Failed' : props.artifact.historical ? 'Recorded' : props.artifact.status === 'info' ? 'Info' : 'Completed'))
+const suspended = computed(() => running.value && props.suspended)
+const status = computed(() => suspended.value ? 'Suspended' : props.artifact.statusLabel ?? (running.value ? 'Running' : props.artifact.status === 'running' ? 'Stopped' : props.artifact.status === 'error' ? 'Failed' : props.artifact.historical ? 'Recorded' : props.artifact.status === 'info' ? 'Info' : 'Completed'))
 const blocks = computed(() => props.artifact.blocks.filter(block => block.label !== 'Command'))
 const outputLines = computed(() => blocks.value.reduce((total, block) => total + (block.code ? block.code.trimEnd().split('\n').length : 0), 0))
 const diff = computed(() => {
@@ -105,7 +107,7 @@ const elapsed = computed(() => {
       <span class="operation-icon grid place-items-center w-10 h-10 border border-line rounded-xl bg-surface text-muted phone:w-8 phone:h-8 phone:rounded-[10px]"><Icon v-if="artifact.kind === 'search' && !artifact.command" :name="Globe" :size="19" /><Icon v-else :name="icons[artifact.kind]" :size="19" /></span>
       <span class="artifact-heading flex-1 min-w-0"><span class="operation-label">{{ labels[artifact.kind] }}</span><strong>{{ artifact.title }}</strong><span v-if="artifact.subtitle" class="operation-description" :class="{ 'artifact-command': artifact.command || artifact.kind === 'read' }">{{ artifact.subtitle }}</span></span>
       <span class="operation-state inline-flex items-center gap-[5px] mt-0.5 rounded-[5px] text-micro whitespace-nowrap text-muted bg-surface phone:[grid-column:2] phone:[grid-row:2] phone:[justify-self:start] px-[7px] py-1 phone:m-0" :data-state="status"><Icon
-        v-if="running"
+        v-if="running && !suspended"
         :name="LoaderCircle"
         class="activity-spinning [animation:activity-spin_1.5s_linear_infinite] [@media(prefers-reduced-motion:_reduce)]:[animation:none]"
         :size="13"

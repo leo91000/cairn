@@ -291,6 +291,7 @@ pub async fn schedule(s: &Service, bearer: &str, raw: &Value) -> Result<Value> {
                 wakeup["nextCheckAt"] = created.into();
             }
             chat["wakeup"] = wakeup.clone();
+            crate::nodes::exclusive::release_before_wait(db, text(&run, "id"))?;
             chat["updatedAt"] = created.into();
             db.put("chats", &chat)?;
             db.event(

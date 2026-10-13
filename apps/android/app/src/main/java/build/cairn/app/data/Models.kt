@@ -158,6 +158,7 @@ data class Run(
     val movementError: String? = null,
     val backup: NodeBackup? = null,
     val storage: RunStorage? = null,
+    val suspendedByExclusive: ExclusiveReservation? = null,
 ) {
     val active
         get() = status == "running" || status == "queued"

@@ -11,6 +11,10 @@ on:
         type: choice
         options: ['1', '2']
         default: '2'
+      exclusive-android:
+        description: Qualify live nested Android continuity on a compatible host
+        type: boolean
+        default: false
 permissions:
   contents: read
 concurrency:
@@ -533,6 +537,29 @@ jobs:
         run: |
           node tests/container-smoke.mjs "$SMOKE_IMAGE"
           node tests/runner-smoke.mjs "$SMOKE_IMAGE"
+      - name: Qualify exclusive pause, private memory paging and live nested KVM
+        env:
+          CAIRN_EXCLUSIVE_REQUIRE_RECLAIM: 'true'
+          # Hosted AMD nested Android remains unqualified (NESTED-KVM-RESEARCH.md).
+          # Keep the same-emulator mode available for explicit qualification.
+          CAIRN_EXCLUSIVE_ANDROID: ${{ inputs.exclusive-android && 'true' || 'false' }}
+        run: |
+          if [[ "$CAIRN_EXCLUSIVE_ANDROID" != true ]]; then
+            echo 'Nested Android continuity skipped: the hosted AMD platform is unqualified.'
+          fi
+          # This runner is disposable. Never page conversation credentials to
+          # the hosted image's default plaintext swap.
+          if sudo modprobe zram num_devices=1; then
+            sudo swapoff -a
+            echo zstd | sudo tee /sys/block/zram0/comp_algorithm > /dev/null
+            echo 4G | sudo tee /sys/block/zram0/disksize > /dev/null
+            sudo mkswap /dev/zram0
+            sudo swapon --priority 100 /dev/zram0
+          else
+            export CAIRN_EXCLUSIVE_REQUIRE_RECLAIM=false
+            echo 'Positive RAM reclamation skipped: zram is unavailable. Unqualified-memory refusal and rollback, live CPU/KVM continuity and admission fencing are still tested.'
+          fi
+          node tests/runner-exclusive-smoke.mjs "$SMOKE_IMAGE"
       - name: Remove the disposable beacon database
         if: always()
         run: docker rm --force cairn-beacon-smoke-db

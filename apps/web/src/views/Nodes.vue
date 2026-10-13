@@ -28,6 +28,7 @@ import {
 const nodes = ref<ExecutionNode[]>([])
 const editing = ref<ExecutionNode | null>(null)
 const tags = ref('')
+const exclusiveAgents = ref<string[]>([])
 const name = ref('')
 const managerUrl = ref('')
 // Ceilings are edited in GiB and stored in MiB.
@@ -111,6 +112,7 @@ function enroll() {
 function edit(node: ExecutionNode) {
   editing.value = JSON.parse(JSON.stringify(node))
   tags.value = node.tags.join(', ')
+  exclusiveAgents.value = [...node.exclusiveAgents || []]
   memoryGiB.value = +(node.limits.memoryMiB / 1024).toFixed(2)
   diskGiB.value = +(node.limits.diskMiB / 1024).toFixed(2)
 }
@@ -129,6 +131,7 @@ function save() {
         limits,
         slots: node.slots,
         accepting: node.accepting,
+        exclusiveAgents: exclusiveAgents.value,
       }),
     })
     editing.value = null
@@ -139,6 +142,16 @@ function save() {
 function grant(node: ExecutionNode) {
   granting.value = node
   granted.value = (node.agents || []).filter(agent => !agent.allNodes).map(agent => agent.id)
+}
+
+function releaseExclusive(node: ExecutionNode) {
+  const reservation = node.exclusiveReservation
+  if (!reservation)
+    return
+  return action(async () => {
+    await api(`/nodes/${node.id}/exclusive/${reservation.id}/release`, { method: 'POST', body: '{}' })
+    notify('Exclusive release requested; suspended work resumes after confirmation')
+  })
 }
 
 function saveGrants() {
@@ -290,6 +303,23 @@ function statusLabel(node: ExecutionNode) {
           <p v-if="node.agents?.length" class="mt-2 text-sm">
             Used by {{ node.agents.map(agent => agent.allNodes ? `${agent.name} (all nodes)` : agent.name).join(', ') }}
           </p>
+          <div v-if="node.exclusiveReservation" role="status" class="mt-3 rounded-lg border border-line p-3 text-sm">
+            <p><strong>Exclusive reservation · {{ node.exclusiveReservation.state }}</strong></p>
+            <p>{{ node.exclusiveReservation.reason }}</p>
+            <p>{{ node.exclusiveReservation.pausedRunIds.length }} conversations suspended<span v-if="node.exclusiveReservation.expiresAt"> · until {{ new Date(node.exclusiveReservation.expiresAt).toLocaleTimeString() }}</span></p>
+            <RouterLink :to="`/runs/${node.exclusiveReservation.ownerRunId}`">
+              View reservation owner
+            </RouterLink>
+            <UiButton
+              class="ml-2"
+              size="small"
+              variant="default"
+              :disabled="busy || node.exclusiveReservation.state === 'releasing'"
+              @click="releaseExclusive(node)"
+            >
+              Release reservation
+            </UiButton>
+          </div>
           <p v-if="node.staleDisks?.count" class="mt-2 text-sm">
             Old disks: {{ formatMiB(node.staleDisks.diskMiB) }} kept from {{ node.staleDisks.count }} conversation{{ node.staleDisks.count > 1 ? 's' : '' }}
             <UiButton
@@ -506,6 +536,16 @@ function statusLabel(node: ExecutionNode) {
           required
         ></label>
         <label>Tags, separated by commas<input v-model="tags" class="mt-1 block w-full"></label>
+        <fieldset class="form-section">
+          <legend>Exclusive reservations</legend>
+          <p>Selected agents may temporarily suspend other conversations on this node. Their commands are preserved and resume automatically after release or expiration.</p>
+          <p v-if="!editing.exclusiveReservations" class="text-sm text-muted">
+            This runtime needs an update before reservations can be acquired.
+          </p>
+          <label v-for="agent in state.agents" :key="agent.id" class="flex items-center gap-2">
+            <input v-model="exclusiveAgents" type="checkbox" :value="agent.id"> {{ agent.name }}
+          </label>
+        </fieldset>
         <fieldset class="form-section">
           <legend>Slots and shared budgets</legend><p>All slots share these budgets. Resources are used on demand.</p><div class="form-grid">
             <label>Execution slots<input

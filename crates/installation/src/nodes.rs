@@ -4,6 +4,7 @@ pub mod checkpoint;
 pub mod connector;
 pub mod coordination;
 pub mod disk_grants;
+pub mod exclusive;
 pub mod executor;
 pub mod files;
 pub mod maintenance;
@@ -482,6 +483,9 @@ pub async fn admin(s: &Service, input: &Input) -> Result<Value> {
         ("GET", ["nodes", "backups", run]) => backups(s, run).await,
         ("PUT", ["nodes", node, "storage"]) => configure_storage(s, node, &input.body).await,
         ("GET", ["nodes"]) => Ok(inventory(s).await?.into()),
+        ("POST", ["nodes", _, "exclusive", reservation, "release"]) => {
+            exclusive::release_owned(s, reservation, None).await
+        }
         ("PUT", ["nodes", node]) => configure_node(s, node, input.body.clone()).await,
         ("POST", ["nodes", "enrollments"]) => invite(s, input.body.clone()).await,
         ("POST", ["nodes", node, "stale-disks", "delete"]) => delete_stale_disks(s, node).await,
@@ -553,6 +557,8 @@ struct Configuration {
     #[serde(default)]
     slots: Option<u64>,
     accepting: bool,
+    #[serde(default, rename = "exclusiveAgents")]
+    exclusive_agents: Option<Vec<String>>,
 }
 
 async fn configure_node(s: &Service, node: &str, body: Value) -> Result<Value> {
@@ -574,6 +580,14 @@ async fn configure_node(s: &Service, node: &str, body: Value) -> Result<Value> {
         return Err(Error::bad(
             "Use at most 32 tags of 1 to 40 letters, digits or -_:./.",
         ));
+    }
+    if let Some(agents) = &request.exclusive_agents {
+        if agents.len() > 256 {
+            return Err(Error::bad("Use at most 256 exclusive node grants."));
+        }
+        for agent in agents {
+            crate::validation::uuid(agent)?;
+        }
     }
     let node = node.to_owned();
     s.store
@@ -611,6 +625,13 @@ async fn configure_node(s: &Service, node: &str, body: Value) -> Result<Value> {
                 record["slots"] = slots.into();
             }
             record["accepting"] = request.accepting.into();
+            if let Some(agents) = request.exclusive_agents {
+                for agent in &agents {
+                    db.get("agents", agent)?
+                        .ok_or_else(|| Error::bad("Exclusive agent missing."))?;
+                }
+                record["exclusiveAgents"] = agents.into();
+            }
             db.put("nodes", &record)?;
             db.audit("node.configured", &json!({ "nodeId": node }))?;
             Ok(public(record))
@@ -958,6 +979,7 @@ fn record_heartbeat(
     node["usage"] = body["usage"].clone();
     node["pressure"] = body["pressure"].clone();
     node["budgetError"] = body["budgetError"].clone();
+    node["exclusiveReservations"] = body["exclusiveReservations"].clone();
     if let Some(capabilities) = capabilities {
         node["capabilities"] = capabilities;
     }
@@ -984,6 +1006,7 @@ fn execution_ready(node: &Value, body: &Value, expected: &Expectations) -> bool 
         .as_ref()
         .is_none_or(|image| node["imageDigest"] == *image || node["updateError"].is_string());
     body["executionReady"] == true
+        && body["pool"]["quarantined"] != true
         && body["sharedResources"] == true
         && body["budget"] == json!({ "slots": slots(node), "limits": node["limits"] })
         && node["capabilities"]["fuse"] == true
@@ -1099,6 +1122,7 @@ pub async fn refresh_local(s: &Service) -> Result<()> {
                     == json!({ "slots": slots(&record), "limits": record["limits"] }))
             .into();
             record["budgetError"] = budget_error;
+            record["exclusiveReservations"] = health["exclusiveReservations"].clone();
             record["lastSeen"] = now().into();
             record["runtimeSlots"] = health["pool"]["capacity"].clone();
             record["usage"] = health["usage"].clone();
