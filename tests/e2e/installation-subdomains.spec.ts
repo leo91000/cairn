@@ -162,7 +162,7 @@ test('installation subdomains preserve browser drafts and canonical account acce
       await page.getByRole('navigation', { name: 'Workspace navigation', exact: true }).getByRole('button', { name: 'Sign out', exact: true }).click()
       await page.goto(`${hostedOrigin}/beacon.html`)
       await expect(page.getByLabel('Email address')).toBeVisible()
-      expect(new URL(page.url()).origin).toBe(origin)
+      await expect.poll(() => new URL(page.url()).origin).toBe(origin)
       return
     }
 

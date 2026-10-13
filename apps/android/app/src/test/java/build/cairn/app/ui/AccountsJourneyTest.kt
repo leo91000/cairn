@@ -353,6 +353,7 @@ class AccountsJourneyTest {
                 )
                 .performClick()
             waitText("Une clé API par fournisseur de modèles.")
+            waitText("OpenCode Zen")
             compose.onNodeWithText("Nom").performTextInput("Zen")
             capture("opencode-connect-light")
             compose
@@ -373,7 +374,11 @@ class AccountsJourneyTest {
             assertEquals("opencode", saved["provider"]?.jsonPrimitive?.content)
             assertEquals("opencode", saved["modelProvider"]?.jsonPrimitive?.content)
             assertEquals("synthetic-android-zen-key", saved["apiKey"]?.jsonPrimitive?.content)
+            compose.waitUntil(15000) {
+                compose.onAllNodesWithTag("account-sign-in").fetchSemanticsNodes().isEmpty()
+            }
             waitText("Zen")
+            waitText("Usage non consulté")
             compose.onNodeWithText("Usage non consulté", substring = true).assertExists()
             capture("opencode-account-light")
         }
