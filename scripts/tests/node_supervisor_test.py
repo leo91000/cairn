@@ -65,6 +65,10 @@ class Supervisor(unittest.TestCase):
             self.assertIn('CAIRN_DISK_LAYOUT=paired-ext4-v1', launch)
             self.assertIn('CAIRN_VM_SNAPSHOTS=true', launch)
             self.assertIn('CAIRN_READY_VM_POOL_SIZE=4', launch)
+            self.assertIn('--cap-add=SYS_PTRACE', launch)
+            self.assertIn('--cap-add=SYS_NICE', launch)
+            self.assertIn('--cap-drop=ALL', launch)
+            self.assertNotIn('--privileged', launch)
         config.update({'vmSnapshots': False, 'diskLayout': 'paired-ext4-v1'})
         self.assertEqual(host.vm_arguments(config), ['-e', 'CAIRN_READY_VM_POOL_SIZE=4', '-e', 'CAIRN_DISK_LAYOUT=paired-ext4-v1', '-e', 'CAIRN_VM_SNAPSHOTS=false'])
 

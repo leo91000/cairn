@@ -324,6 +324,26 @@ describe('coolify deployment over HTTP', () => {
     expect(firecrackerRunnerCompose(compose)).toBe(compose)
   })
 
+  it('adds live paging capabilities while preserving VM sizing and pool options', async () => {
+    const document = parse(compose)
+    const runner = document.services.runner
+    runner.cap_add = runner.cap_add.filter(value => !['SYS_PTRACE', 'SYS_NICE'].includes(value))
+    runner.mem_limit = '18g'
+    runner.cpus = 6
+    runner.environment.CAIRN_READY_VM_POOL = 'false'
+    compose = stringify(document)
+    await deploy(config, { intervalMs: 0, timeoutMs: 1000 })
+    const result = parse(compose).services.runner
+    expect(result.cap_add).toContain('SYS_PTRACE')
+    expect(result.cap_add).toContain('SYS_NICE')
+    expect(result.cap_drop).toEqual(['ALL'])
+    expect(result.privileged).toBeUndefined()
+    expect(result.mem_limit).toBe('18g')
+    expect(result.cpus).toBe(6)
+    expect(result.environment.CAIRN_READY_VM_POOL).toBe('false')
+    expect(firecrackerRunnerCompose(compose)).toBe(compose)
+  })
+
   it.each(['mapping', 'list'])('preserves snapshot activation through repeated deployment (%s)', async (shape) => {
     const document = parse(compose)
     const runner = document.services.runner

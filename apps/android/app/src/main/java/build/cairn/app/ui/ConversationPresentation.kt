@@ -78,6 +78,7 @@ internal fun conversationState(
     val status =
         when {
             chat.paused -> "En pause"
+            chat.exclusiveSuspended -> "Suspendue (exclusivité)"
             run == "queued" -> "En attente"
             chatSleepNotice(chat) != null ->
                 if (chat.wakeup?.condition != null) "Attente d’un résultat" else "Attente planifiée"
@@ -87,7 +88,7 @@ internal fun conversationState(
     val tasks = wait?.tasks?.size ?: 0
     val live =
         when {
-            run != "running" -> null
+            run != "running" || chat.exclusiveSuspended -> null
             tasks == 1 -> "Tâche en arrière-plan"
             tasks > 1 -> "$tasks tâches en arrière-plan"
             else -> "$agentName travaille"

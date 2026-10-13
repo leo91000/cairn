@@ -17,6 +17,7 @@ import {
   Search,
   X,
 } from '../icons'
+import { exclusiveSuspensionLabel, isExclusivelySuspended } from '../run-status'
 import { iconButton } from '../ui'
 import { chatPath } from '../workspace-links'
 import Icon from './Icon.vue'
@@ -204,7 +205,7 @@ function time(timestamp: number) {
                   <span class="line-clamp-2 text-xs font-semibold leading-relaxed wrap-anywhere">{{ chat.title }}</span>
                   <span class="mt-1.5 block text-[11px] leading-relaxed text-muted wrap-anywhere">{{ chat.agentName }}<template v-if="chat.projectName"> · {{ chat.projectName }}</template></span>
                   <span v-if="chat.pendingQuestions" class="mt-2 inline-block rounded-md bg-warning-surface px-2 py-1 text-[10px] text-warning">{{ chat.pendingQuestions }} awaiting answer</span>
-                  <span v-else-if="chat.status === 'running' || chat.status === 'queued'" class="mt-2 flex items-center gap-1.5 text-[10px] text-accent"><Icon :name="Clock" :size="12" />{{ chat.status === 'queued' ? 'Waiting' : 'Working' }}</span>
+                  <span v-else-if="chat.status === 'running' || chat.status === 'queued'" class="mt-2 flex items-center gap-1.5 text-[10px]" :class="chat.paused || isExclusivelySuspended(chat) ? 'text-muted' : 'text-accent'"><Icon :name="Clock" :size="12" />{{ chat.paused ? 'Paused' : isExclusivelySuspended(chat) ? exclusiveSuspensionLabel : chat.status === 'queued' ? 'Waiting' : 'Working' }}</span>
                   <span v-else-if="chat.status === 'failed' || chat.status === 'interrupted'" class="mt-2 block text-[10px] text-danger">{{ chat.status === 'failed' ? 'Response failed' : 'Interrupted' }}</span>
                 </div>
                 <time :datetime="new Date(chat.updatedAt).toISOString()" class="shrink-0 pt-1 text-[10px] text-muted">{{ time(chat.updatedAt) }}</time>

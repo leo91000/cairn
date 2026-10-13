@@ -202,7 +202,7 @@ def launch(image):
     remove()
     command(['docker', 'run', '-d', '--name', NAME, '--init', '--user', '0:0', '--read-only',
              '--health-cmd', '/usr/local/bin/node -e ' + shlex.quote(HEALTH_CHECK),
-             '--restart=unless-stopped', '--label', 'dev.cairn.node.owner=' + json.loads((ROOT / 'data/node/identity.json').read_text())['nodeId'], '--cap-drop=ALL', *['--cap-add=' + cap for cap in ('SYS_ADMIN', 'NET_ADMIN', 'SYS_CHROOT', 'SETUID', 'SETGID', 'MKNOD', 'CHOWN', 'FOWNER', 'KILL', 'DAC_OVERRIDE')],
+             '--restart=unless-stopped', '--label', 'dev.cairn.node.owner=' + json.loads((ROOT / 'data/node/identity.json').read_text())['nodeId'], '--cap-drop=ALL', *['--cap-add=' + cap for cap in ('SYS_ADMIN', 'SYS_PTRACE', 'SYS_NICE', 'NET_ADMIN', 'SYS_CHROOT', 'SETUID', 'SETGID', 'MKNOD', 'CHOWN', 'FOWNER', 'KILL', 'DAC_OVERRIDE')],
              '--security-opt=apparmor:unconfined', '--security-opt=seccomp:unconfined',
              '--device=/dev/kvm', '--device=/dev/net/tun', *(['--device=/dev/fuse'] if Path('/dev/fuse').exists() else []), *devices, *vm_options, '--sysctl=net.ipv4.ip_forward=1',
              '--sysctl=net.ipv6.conf.all.disable_ipv6=1', '--tmpfs=/run', '--tmpfs=/tmp',

@@ -608,7 +608,12 @@ impl Vm {
         let blocked = self
             .volume
             .as_ref()
-            .is_some_and(|volume| volume.source.waiting() || volume.paused());
+            .is_some_and(|volume| volume.source.waiting() || volume.paused())
+            || super::suspension::inspect_jail(&self.jail)
+                .await
+                .map_or(true, |status| {
+                    status.is_some_and(|status| status.paused || !status.acknowledged)
+                });
         let mut acknowledged = false;
         if !blocked && !self.idle {
             // Healthy guests get a bounded graceful stop.
@@ -645,6 +650,9 @@ impl Vm {
                 let _ = child.kill().await;
                 let _ = child.wait().await;
             }
+        }
+        if let Err(error) = super::suspension::finish_jail(&self.jail).await {
+            tracing::warn!(vm_id = id, message = %error.message, "Could not finalize VM suspension accounting");
         }
         cancel_reads();
         drop(volume);
@@ -706,7 +714,7 @@ impl Vm {
             reclaim_idle_memory(self.jail.parent().unwrap(), self.memory_mib, active_bytes).await?;
 
         self.idle = true;
-        host::set_vm_state(&self.jail.join("api.sock"), "Paused").await?;
+        super::suspension::set_retention(&self.jail, true).await?;
         let retained_bytes = self
             .resident_bytes()
             .ok_or_else(|| Error::unavailable("Retained VM memory is unavailable."))?;
@@ -725,7 +733,7 @@ impl Vm {
             .map_err(Error::internal)?
             .error_for_status()
             .map_err(Error::internal)?;
-        host::set_vm_state(&self.jail.join("api.sock"), "Resumed").await?;
+        super::suspension::set_retention(&self.jail, false).await?;
         self.idle = false;
         Ok(())
     }
@@ -758,6 +766,7 @@ impl Vm {
         stop: CancellationToken,
     ) -> Result<i32> {
         let mut timing = Operation::new("guest_prepare", plan.run_id(), "clock_and_auth");
+        super::suspension::prepare_attempt(state, plan.id(), self.id()).await?;
         self.synchronize_clock().await?;
         let record = AttemptRecord {
             vm_id: self.id().to_owned(),
@@ -932,6 +941,10 @@ async fn run(socket: &Path, plan: &Plan, state: &Path, mut timing: Operation) ->
     };
     timing.next("run_request");
     wire::write(stream.get_mut(), &request).await?;
+    let record: AttemptRecord = serde_json::from_slice(
+        &tokio::fs::read(state.join(format!("{}.vm.json", plan.id()))).await?,
+    )?;
+    super::suspension::bind_attempt(state, plan.id(), &record.vm_id).await?;
     timing.finish();
 
     let mut inbox = Inbox::new(plan);
@@ -942,7 +955,7 @@ async fn run(socket: &Path, plan: &Plan, state: &Path, mut timing: Operation) ->
         .await?;
     let mut total = 0usize;
     loop {
-        let event = next_event(&mut stream, socket, &mut inbox).await?;
+        let event = next_event(&mut stream, socket, &mut inbox, state, plan.id()).await?;
         match event {
             Event::Output { ref data, .. } => {
                 let bytes = STANDARD
@@ -974,6 +987,8 @@ async fn next_event(
     stream: &mut BufReader<UnixStream>,
     socket: &Path,
     inbox: &mut Inbox,
+    state: &Path,
+    attempt: &str,
 ) -> Result<Event> {
     // Keep the read future alive across inbox ticks: dropping it halfway
     // through a fragmented frame would discard already-consumed bytes.
@@ -982,7 +997,16 @@ async fn next_event(
     let event = loop {
         tokio::select! {
             event = &mut next => break event,
-            _ = inbox.timer.tick() => inbox.forward(socket).await?,
+            _ = inbox.timer.tick() => {
+                if let Some(_running) = super::suspension::hold_running(state, attempt).await? {
+                    match tokio::time::timeout(Duration::from_secs(5), inbox.forward(socket)).await {
+                        Ok(result) => result?,
+                        Err(_) => {
+                            tracing::warn!(attempt, "Guest inbox forwarding will retry after its response timed out");
+                        },
+                    }
+                }
+            },
         }
     };
     let event = event?.ok_or_else(|| {
@@ -1028,6 +1052,93 @@ mod tests {
     use super::*;
     use crate::microvm::budget;
     use std::os::unix::process::CommandExt;
+
+    #[tokio::test]
+    async fn suspension_preserves_fragmented_events_and_defers_inbox_rpc() {
+        use crate::microvm::suspension::{self, Reason};
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
+
+        let root = tempfile::tempdir().unwrap();
+        let vm_id = crate::config::id();
+        let directory = root
+            .path()
+            .join("jails/firecracker")
+            .join(&vm_id)
+            .join("root");
+        tokio::fs::create_dir_all(&directory).await.unwrap();
+        atomic_write(
+            &root.path().join("attempt.vm.json"),
+            &serde_json::to_vec(&AttemptRecord {
+                vm_id: vm_id.clone(),
+                run_id: String::new(),
+            })
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+        suspension::bind_attempt(root.path(), "attempt", &vm_id)
+            .await
+            .unwrap();
+        let api = UnixListener::bind(directory.join("api.sock")).unwrap();
+        let controller = tokio::spawn(async move {
+            let (stream, _) = api.accept().await.unwrap();
+            let mut stream = BufReader::new(stream);
+            let mut line = String::new();
+            stream.read_line(&mut line).await.unwrap();
+            assert!(line.starts_with("PATCH /vm "));
+            stream
+                .get_mut()
+                .write_all(b"HTTP/1.1 204 No Content\r\n\r\n")
+                .await
+                .unwrap();
+        });
+        let reason = Reason::Exclusive {
+            reservation_id: "reservation".to_owned(),
+            epoch: 1,
+        };
+        suspension::set_reason(root.path(), "attempt", &reason, true)
+            .await
+            .unwrap();
+        controller.await.unwrap();
+        let source = root.path().join("inbox");
+        tokio::fs::create_dir_all(&source).await.unwrap();
+        tokio::fs::write(source.join("messages.json"), b"changed while paused")
+            .await
+            .unwrap();
+        let guest_path = directory.join("guest.sock");
+        let guest = UnixListener::bind(&guest_path).unwrap();
+        let (reader, mut writer) = UnixStream::pair().unwrap();
+        let output = tokio::spawn(async move {
+            writer
+                .write_all(b"{\"type\":\"output\",\"data\":")
+                .await
+                .unwrap();
+            tokio::time::sleep(Duration::from_millis(40)).await;
+            writer.write_all(b"\"cHJlc2VydmVk\"}\n").await.unwrap();
+        });
+        let mut inbox = Inbox {
+            timer: tokio::time::interval(Duration::from_millis(5)),
+            source: Some(source),
+            last: Vec::new(),
+        };
+        let event = next_event(
+            &mut BufReader::new(reader),
+            &guest_path,
+            &mut inbox,
+            root.path(),
+            "attempt",
+        )
+        .await
+        .unwrap();
+        assert!(matches!(event, Event::Output { data, .. } if data == "cHJlc2VydmVk"));
+        assert!(inbox.last.is_empty());
+        assert!(
+            tokio::time::timeout(Duration::from_millis(10), guest.accept())
+                .await
+                .is_err()
+        );
+        output.await.unwrap();
+    }
 
     #[test]
     fn idle_balloon_does_not_walk_unallocated_large_guest_memory() {

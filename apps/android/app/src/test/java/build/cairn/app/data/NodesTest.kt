@@ -1,6 +1,12 @@
 package build.cairn.app.data
 
+import kotlinx.serialization.json.encodeToJsonElement
+import kotlinx.serialization.json.jsonArray
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -56,5 +62,70 @@ class NodesTest {
                 .first()
                 .startsWith("Aucun contact depuis 10 min")
         )
+    }
+
+    @Test
+    fun exclusivePermissionsRemainExplicitAndLegacyConfigurationPreservesThem() {
+        val oldNode =
+            wireJson.decodeFromString<ExecutionNode>(
+                """{"id":"n","name":"Desktop","status":"online"}"""
+            )
+        assertTrue(oldNode.exclusiveAgents.isEmpty())
+        assertFalse(oldNode.exclusiveReservations)
+        assertNull(oldNode.exclusiveReservation)
+
+        val configuration = NodeConfiguration("Desktop", true, emptyList(), NodeResources())
+        assertFalse("exclusiveAgents" in wireJson.encodeToJsonElement(configuration).jsonObject)
+        val granted =
+            wireJson
+                .encodeToJsonElement(configuration.copy(exclusiveAgents = listOf("agent")))
+                .jsonObject
+        assertEquals("agent", granted["exclusiveAgents"]!!.jsonArray.single().jsonPrimitive.content)
+        val revoked =
+            wireJson
+                .encodeToJsonElement(configuration.copy(exclusiveAgents = emptyList()))
+                .jsonObject
+        assertTrue(revoked["exclusiveAgents"]!!.jsonArray.isEmpty())
+    }
+
+    @Test
+    fun exclusiveReservationSurvivesNodeAndRunSerialization() {
+        val reservation =
+            ExclusiveReservation(
+                id = "reservation",
+                nodeId = "node",
+                ownerRunId = "owner",
+                reason = "Compilation",
+                state = "acquired",
+                createdAt = 100,
+                expiresAt = 1000,
+                renewalPending = true,
+                pausedRunIds = listOf("neighbor"),
+                minimumAvailableMemoryMiB = 4096,
+            )
+        val encodedNode =
+            wireJson.encodeToString(
+                ExecutionNode.serializer(),
+                node.copy(exclusiveReservation = reservation),
+            )
+        assertEquals(
+            reservation,
+            wireJson.decodeFromString<ExecutionNode>(encodedNode).exclusiveReservation,
+        )
+        val run = Run("neighbor", status = "running", suspendedByExclusive = reservation)
+        assertEquals(
+            reservation,
+            wireJson
+                .decodeFromString<Run>(wireJson.encodeToString(Run.serializer(), run))
+                .suspendedByExclusive,
+        )
+        val chat = Chat("chat", status = "running", suspendedByExclusive = reservation)
+        val decodedChat =
+            wireJson.decodeFromString<Chat>(wireJson.encodeToString(Chat.serializer(), chat))
+        assertEquals(reservation, decodedChat.suspendedByExclusive)
+        assertTrue(decodedChat.exclusiveSuspended)
+        assertFalse(decodedChat.copy(status = "failed").exclusiveSuspended)
+        assertEquals("Exclusivité acquise", exclusiveReservationState(reservation.state))
+        assertEquals("future-state", exclusiveReservationState("future-state"))
     }
 }

@@ -533,6 +533,20 @@ jobs:
         run: |
           node tests/container-smoke.mjs "$SMOKE_IMAGE"
           node tests/runner-smoke.mjs "$SMOKE_IMAGE"
+      - name: Qualify exclusive pause, private memory paging and the same live Android emulator
+        env:
+          CAIRN_EXCLUSIVE_REQUIRE_RECLAIM: 'true'
+          CAIRN_EXCLUSIVE_ANDROID: 'true'
+        run: |
+          # This runner is disposable. Never page conversation credentials to
+          # the hosted image's default plaintext swap.
+          sudo swapoff -a
+          sudo modprobe zram num_devices=1
+          echo zstd | sudo tee /sys/block/zram0/comp_algorithm > /dev/null
+          echo 4G | sudo tee /sys/block/zram0/disksize > /dev/null
+          sudo mkswap /dev/zram0
+          sudo swapon --priority 100 /dev/zram0
+          node tests/runner-exclusive-smoke.mjs "$SMOKE_IMAGE"
       - name: Remove the disposable beacon database
         if: always()
         run: docker rm --force cairn-beacon-smoke-db

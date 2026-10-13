@@ -7,6 +7,10 @@ use crate::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
+use std::sync::{
+    Mutex as SyncMutex,
+    atomic::{AtomicU64, Ordering},
+};
 use tokio::sync::Mutex;
 
 /// Absent (`None`), explicitly `null` (`Some(None)`) or set (`Some(Some(_))`).
@@ -216,13 +220,25 @@ pub struct Checkpoint {
     store: Store,
     pub id: String,
     state: Mutex<RunCheckpoint>,
-    pub deadline: Option<i64>,
+    deadline_base: Option<i64>,
+    administrative_pause_ms: AtomicU64,
+    pause_observation: SyncMutex<(String, u64)>,
 }
 
 impl Checkpoint {
     pub fn new(store: Store, id: String, state: RunCheckpoint) -> Self {
+        let previous = state
+            .extra
+            .get("administrativePauseObservation")
+            .cloned()
+            .unwrap_or_default();
         Self {
-            deadline: state.deadline(),
+            deadline_base: state.deadline(),
+            administrative_pause_ms: AtomicU64::new(0),
+            pause_observation: SyncMutex::new((
+                previous["attempt"].as_str().unwrap_or("").into(),
+                previous["totalMs"].as_u64().unwrap_or(0),
+            )),
             state: Mutex::new(state),
             store,
             id,
@@ -230,7 +246,42 @@ impl Checkpoint {
     }
 
     pub fn expired(&self) -> bool {
-        self.deadline.is_some_and(|deadline| now() >= deadline)
+        self.deadline().is_some_and(|deadline| now() >= deadline)
+    }
+
+    pub fn deadline(&self) -> Option<i64> {
+        self.deadline_base.map(|deadline| {
+            deadline.saturating_add(
+                self.administrative_pause_ms
+                    .load(Ordering::SeqCst)
+                    .min(i64::MAX as u64) as i64,
+            )
+        })
+    }
+
+    pub fn account_pause(&self, attempt: &str, total_ms: u64) {
+        let mut previous = self.pause_observation.lock().unwrap();
+        if previous.0 != attempt {
+            *previous = (attempt.into(), 0);
+        }
+        if total_ms > previous.1 {
+            self.administrative_pause_ms
+                .fetch_add(total_ms - previous.1, Ordering::SeqCst);
+            previous.1 = total_ms;
+        }
+    }
+
+    pub async fn refresh_pause(&self, service: &crate::service::Service) -> Result<()> {
+        let state = self.snapshot().await;
+        if state.firecracker()
+            && let Some(attempt) = state.runner_id()
+        {
+            let total =
+                crate::nodes::exclusive::administrative_pause_ms(service, &self.id, attempt)
+                    .await?;
+            self.account_pause(attempt, total);
+        }
+        Ok(())
     }
 
     pub async fn snapshot(&self) -> RunCheckpoint {
@@ -245,7 +296,14 @@ impl Checkpoint {
     pub async fn update(&self, change: impl FnOnce(&mut RunCheckpoint)) -> Result<()> {
         let mut state = self.state.lock().await;
         change(&mut state);
-        state.remaining_ms = Some(self.deadline.map(|deadline| (deadline - now()).max(0)));
+        {
+            let previous = self.pause_observation.lock().unwrap();
+            state.extra.insert(
+                "administrativePauseObservation".into(),
+                serde_json::json!({ "attempt": previous.0, "totalMs": previous.1 }),
+            );
+            state.remaining_ms = Some(self.deadline().map(|deadline| (deadline - now()).max(0)));
+        }
         state.store(&self.store, &self.id).await
     }
 
@@ -340,5 +398,54 @@ mod tests {
             RunCheckpoint::from_value(json!({ "launched": "yes", "remainingMs": 1.5 })).unwrap();
         assert!(!checkpoint.launched());
         assert_eq!(checkpoint.remaining_ms, None);
+    }
+
+    #[tokio::test]
+    async fn pause_credit_is_monotonic_per_attempt_and_survives_checkpoint_recovery() {
+        let root = tempfile::tempdir().unwrap();
+        let store = Store::open(root.path()).unwrap();
+        let checkpoint = Checkpoint::new(
+            store.clone(),
+            "budget-fixture".into(),
+            RunCheckpoint::fresh(Some(60_000)),
+        );
+        let original = checkpoint.deadline().unwrap();
+        checkpoint.account_pause("attempt-a", 30_000);
+        checkpoint.account_pause("attempt-a", 29_000);
+        checkpoint.account_pause("attempt-a", 30_000);
+        assert_eq!(checkpoint.deadline(), Some(original + 30_000));
+        checkpoint.account_pause("attempt-b", 10_000);
+        assert_eq!(checkpoint.deadline(), Some(original + 40_000));
+        checkpoint.persist().await.unwrap();
+        let saved = RunCheckpoint::load(&store, "budget-fixture")
+            .await
+            .unwrap()
+            .unwrap();
+        let recovered = Checkpoint::new(store, "budget-fixture".into(), saved);
+        let before = recovered.deadline();
+        recovered.account_pause("attempt-b", 10_000);
+        assert_eq!(
+            recovered.deadline(),
+            before,
+            "already persisted credit is not counted twice"
+        );
+        recovered.account_pause("attempt-b", 12_000);
+        assert_eq!(
+            recovered.deadline(),
+            before.map(|deadline| deadline + 2_000)
+        );
+    }
+
+    #[test]
+    fn administrative_pause_never_creates_a_deadline_for_an_unlimited_run() {
+        let root = tempfile::tempdir().unwrap();
+        let checkpoint = Checkpoint::new(
+            Store::open(root.path()).unwrap(),
+            "unlimited-fixture".into(),
+            RunCheckpoint::fresh(None),
+        );
+        checkpoint.account_pause("attempt", 30_000);
+        assert_eq!(checkpoint.deadline(), None);
+        assert!(!checkpoint.expired());
     }
 }

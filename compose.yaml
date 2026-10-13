@@ -47,7 +47,7 @@ services:
       CONCURRENCY: ${CONCURRENCY:-4}
     read_only: true
     cap_drop: [ALL]
-    cap_add: [SYS_ADMIN, NET_ADMIN, SYS_CHROOT, SETUID, SETGID, MKNOD, CHOWN, FOWNER, KILL, DAC_OVERRIDE]
+    cap_add: [SYS_ADMIN, SYS_PTRACE, SYS_NICE, NET_ADMIN, SYS_CHROOT, SETUID, SETGID, MKNOD, CHOWN, FOWNER, KILL, DAC_OVERRIDE]
     security_opt: [apparmor:unconfined, seccomp:unconfined]
     devices:
       - /dev/kvm:/dev/kvm

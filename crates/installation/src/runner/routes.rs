@@ -66,6 +66,14 @@ pub(super) async fn handler(State(broker): State<Broker>, request: Request) -> R
     let path = request.uri().path().trim_start_matches('/').to_owned();
     let segments = path.split('/').collect::<Vec<_>>();
     match segments.as_slice() {
+        ["exclusive"] => {
+            if request.method() != "GET" {
+                return Err(Error::method_not_allowed("Method not allowed."));
+            }
+            json_response(broker.inspect_exclusive().await?)
+        }
+        ["exclusive", "acquire"] => exclusive_acquire(&broker, request).await,
+        ["exclusive", "release"] => exclusive_release(&broker, request).await,
         ["node-budget"] => node_budget(&broker, request).await,
         ["storage-policy"] => storage_policy(&broker, request).await,
         ["snapshots", snapshot, hash] => snapshot_file(&broker, request, snapshot, hash).await,
@@ -105,6 +113,7 @@ async fn health(broker: &Broker) -> Result<Response> {
         "runtimeId": runtime_id,
         "nodeProtocol": NODE_PROTOCOL,
         "sharedResources": broker.pool.budget().await.is_some(),
+        "exclusiveReservations": true,
         "runtimes": runtimes,
         "dataRoot": broker.data,
         "activeRuns": active_runs,
@@ -114,6 +123,25 @@ async fn health(broker: &Broker) -> Result<Response> {
         "usage": usage,
         "pressure": pressure,
     }))
+}
+
+async fn exclusive_acquire(broker: &Broker, request: Request) -> Result<Response> {
+    require_post(&request)?;
+    let bytes = body(request, 16384, "Invalid exclusive reservation.").await?;
+    let acquisition = decode(&bytes, "Invalid exclusive reservation.")?;
+    let broker = broker.clone();
+    // Disconnecting an HTTP caller cannot abandon an in-flight CPU suspension.
+    let operation = tokio::spawn(async move { broker.acquire_exclusive(acquisition).await });
+    json_response(operation.await.map_err(Error::internal)??)
+}
+
+async fn exclusive_release(broker: &Broker, request: Request) -> Result<Response> {
+    require_post(&request)?;
+    let bytes = body(request, 1024, "Invalid exclusive release.").await?;
+    let release = decode(&bytes, "Invalid exclusive release.")?;
+    let broker = broker.clone();
+    let operation = tokio::spawn(async move { broker.release_exclusive(release).await });
+    json_response(operation.await.map_err(Error::internal)??)
 }
 
 async fn authorize(broker: &Broker, headers: &axum::http::HeaderMap) -> Result<()> {
@@ -373,6 +401,9 @@ async fn run_route(broker: Broker, request: Request, segments: &[&str]) -> Resul
         .ok_or_else(|| Error::not_found("Not found"))?;
     uuid(id)?;
     match (request.method().as_str(), segments) {
+        ("GET", ["runs", id, "administrative-pause"]) => {
+            json_response(broker.administrative_pause(id).await?)
+        }
         ("POST", ["runs", id, "snapshot"]) => attempt_snapshot(&broker, request, id).await,
         ("POST", ["runs", id, "lease"]) => renew_lease(&broker, request, id).await,
         ("POST", ["runs", id, "artifact"]) => export_artifact(&broker, request, id).await,

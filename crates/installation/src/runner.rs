@@ -1,6 +1,7 @@
 //! Authenticated execution interface shared by chats, scheduled tasks and recovery.
 mod broker;
 mod client;
+mod exclusive;
 mod routes;
 
 pub use client::client;
@@ -71,6 +72,8 @@ pub async fn serve(stop: CancellationToken) -> Result<()> {
         .await?;
     let memory_monitor = tokio::spawn(pool.clone().monitor());
     let broker = Broker::new(data, state, pool, stop.clone());
+    broker.recover_exclusive().await?;
+    let exclusive_monitor = tokio::spawn(broker.clone().monitor_exclusive());
     let draining = broker.clone();
     let address = std::env::var("RUNNER_BIND").unwrap_or_else(|_| "0.0.0.0:4311".into());
     let listener = tokio::net::TcpListener::bind(address).await?;
@@ -89,6 +92,7 @@ pub async fn serve(stop: CancellationToken) -> Result<()> {
     }
     draining.pool.drain().await;
     memory_monitor.await.map_err(Error::internal)?;
+    exclusive_monitor.await.map_err(Error::internal)?;
     drop(controller);
     Ok(())
 }
@@ -133,6 +137,7 @@ mod tests {
         let attempt = Attempt {
             stop: CancellationToken::new(),
             done: receiver,
+            physical_teardown: None,
             socket: Arc::default(),
             plan: Plan::new(json!({
                 "runId": run

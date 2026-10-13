@@ -50,6 +50,7 @@ struct HeartbeatRequest<'a> {
     shared_resources: bool,
     budget: &'a Value,
     budget_error: &'a Value,
+    exclusive_reservations: bool,
 }
 
 pub(crate) fn master(input: &str) -> Result<url::Url> {
@@ -405,6 +406,7 @@ async fn heartbeat(
             shared_resources: health["sharedResources"] == true,
             budget: &health["budget"],
             budget_error: &budget_error_value,
+            exclusive_reservations: health["exclusiveReservations"] == true,
         };
         let request = client
             .post(

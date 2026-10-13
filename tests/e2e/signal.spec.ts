@@ -41,6 +41,46 @@ async function capture(page: Page, testInfo: TestInfo, name: string) {
   await page.screenshot({ path: testInfo.outputPath(`${name}.png`) })
 }
 
+test('exclusive suspension stays live and suppresses working indicators until release', async ({ page, workspace }) => {
+  test.setTimeout(90000)
+  const chat = await workspace.api('/api/chats', 'POST', {})
+  await workspace.api(`/api/chats/${chat.id}/messages`, 'POST', { id: randomUUID(), text: 'Keep watching the build. fixture:chat-hang' })
+  await expect.poll(async () => (await workspace.api(`/api/chats/${chat.id}`)).run?.status, { timeout: 30000 }).toBe('running')
+  const detail = await workspace.api(`/api/chats/${chat.id}`)
+  const runId = detail.run.id
+  workspace.service.store.updateRun(runId, {
+    suspendedByExclusive: {
+      id: randomUUID(),
+      nodeId: randomUUID(),
+      ownerRunId: randomUUID(),
+      reason: 'Compile the emulator image',
+      state: 'acquired',
+      createdAt: Date.now(),
+      expiresAt: Date.now() + 60000,
+      waitUntil: Date.now() + 60000,
+      pausedRunIds: [runId],
+      minimumAvailableMemoryMiB: 0,
+    },
+  })
+  try {
+    await signIn(page)
+    const live = page.getByRole('region', { name: 'Live', exact: true })
+    await expect(live.getByText('Suspended for exclusive work', { exact: true })).toBeVisible()
+    await expect(live.getByText('Working', { exact: true })).toHaveCount(0)
+    await expect(live.locator('.avatar-orbit')).toHaveCount(0)
+    await live.locator(`[data-fil-key="chat:${chat.id}"]`).click()
+    await expect(page.getByRole('region', { name: 'Activity output' }).getByText('Suspended for exclusive work.')).toBeVisible()
+    await expect(page.locator('.agent-working, .working-wave')).toHaveCount(0)
+    workspace.service.store.updateRun(runId, { suspendedByExclusive: null })
+    await expect(live.getByText('Working', { exact: true })).toBeVisible()
+    await expect(page.locator('.agent-working')).toHaveCount(1)
+  }
+  finally {
+    await workspace.api(`/api/chats/${chat.id}/stop`, 'POST')
+    await workspace.api(`/api/chats/${chat.id}`, 'DELETE', { confirm: true })
+  }
+})
+
 test('the Fil, rail and shortcuts lead through the workspace', async ({ page, workspace }, testInfo) => {
   test.setTimeout(120000)
   const { chat, run } = await seed(workspace)

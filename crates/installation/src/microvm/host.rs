@@ -8,7 +8,6 @@ use crate::{
     error::{Error, Result},
     performance::{Operation, StreamMetrics},
     skills::private_dir,
-    validation::text,
 };
 use base64::{Engine, engine::general_purpose::STANDARD};
 use serde::{Serialize, de::DeserializeOwned};
@@ -331,23 +330,15 @@ async fn transfer(
 
 /// Pause all guest CPUs before lease-loss teardown, including non-agent processes.
 pub async fn pause_attempt(state: &Path, attempt: &str) -> Result<()> {
-    vm_state(state, attempt, "Paused").await
+    super::suspension::set_reason(state, attempt, &super::suspension::Reason::Revoked, true)
+        .await
+        .map(|_| ())
 }
 
 pub async fn resume_attempt(state: &Path, attempt: &str) -> Result<()> {
-    vm_state(state, attempt, "Resumed").await
-}
-
-async fn vm_state(state: &Path, attempt: &str, status: &str) -> Result<()> {
-    let value: Value =
-        serde_json::from_slice(&tokio::fs::read(state.join(format!("{attempt}.vm.json"))).await?)?;
-    let vm = text(&value, "vmId");
-    crate::validation::uuid(vm)?;
-    let socket = state
-        .join("jails/firecracker")
-        .join(vm)
-        .join("root/api.sock");
-    set_vm_state(&socket, status).await
+    super::suspension::set_reason(state, attempt, &super::suspension::Reason::Storage, false)
+        .await
+        .map(|_| ())
 }
 
 pub(super) async fn set_vm_state(socket: &Path, status: &str) -> Result<()> {
@@ -391,19 +382,13 @@ pub async fn settle_attempt(
     paused: bool,
     stop: &tokio_util::sync::CancellationToken,
 ) -> Result<()> {
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
-    loop {
-        let result = tokio::select! {
-            () = stop.cancelled() => return Err(Error::conflict("Execution stopped during VM transition.")),
-            result = vm_state(state, attempt, if paused { "Paused" } else { "Resumed" }) => result,
-        };
-        match result {
-            Err(error) if error.status == 408 && tokio::time::Instant::now() < deadline => {}
-            result => return result,
-        }
-        tokio::select! {
-            () = stop.cancelled() => return Err(Error::conflict("Execution stopped during VM transition.")),
-            () = tokio::time::sleep(Duration::from_millis(100)) => {},
-        }
-    }
+    super::suspension::settle_reason(
+        state,
+        attempt,
+        &super::suspension::Reason::Storage,
+        paused,
+        stop,
+    )
+    .await
+    .map(|_| ())
 }

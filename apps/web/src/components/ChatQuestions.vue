@@ -3,12 +3,18 @@ import type { ChatQuestion } from '../../../../packages/contracts/chats'
 import { computed, ref, watch } from 'vue'
 import { api, state } from '../api'
 import { ChevronDown, MessageCircleQuestion, Send } from '../icons'
+import { exclusiveSuspensionLabel } from '../run-status'
 import Icon from './Icon.vue'
 import Modal from './Modal.vue'
 import UiAlert from './UiAlert.vue'
 import UiButton from './UiButton.vue'
 
-const props = defineProps<{ questions: ChatQuestion[], active: boolean, highlighted?: string }>()
+const props = defineProps<{
+  questions: ChatQuestion[]
+  active: boolean
+  suspended?: boolean
+  highlighted?: string
+}>()
 const emit = defineEmits<{ answered: [] }>()
 const pending = computed(() => props.questions.filter(question => question.status === 'pending'))
 const open = ref(false)
@@ -74,7 +80,7 @@ async function send() {
   <Modal v-if="open && question" title="Your input" @close="open = false">
     <form class="space-y-5 p-6 phone:p-4" @submit.prevent="send">
       <div class="flex items-center justify-between gap-3">
-        <span class="inline-flex items-center gap-1.5 rounded-full bg-accent/10 px-2.5 py-1 text-[11px] font-medium text-accent"><span class="size-1.5 rounded-full bg-accent" />{{ question.blocking && active ? 'Agent is waiting' : active ? 'Agent keeps working' : 'Continue the conversation' }}</span>
+        <span class="inline-flex items-center gap-1.5 rounded-full bg-accent/10 px-2.5 py-1 text-[11px] font-medium text-accent"><span class="size-1.5 rounded-full bg-accent" />{{ question.blocking && active ? 'Agent is waiting' : active && suspended ? exclusiveSuspensionLabel : active ? 'Agent keeps working' : 'Continue the conversation' }}</span>
         <div v-if="pending.length > 1" class="flex items-center gap-2 text-xs text-muted">
           <button
             type="button"
