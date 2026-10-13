@@ -1,0 +1,369 @@
+//! Host capabilities exposed to plugin scripts. Each call is checked against the
+//! manifest (by the host crate), then against the live connection here.
+use super::connections::{Connection, authorize, credential, ensure_owner};
+use crate::{
+    config::{id, now},
+    error::{Error, Result},
+    service::Service,
+    validation::text,
+};
+use cairn_plugin_api::Manifest;
+use cairn_plugin_host::Denied;
+use futures_util::StreamExt;
+use serde_json::{Map, Value, json};
+use std::time::Duration;
+
+/// What a handler acts for: its connection and the event being handled.
+pub struct Context {
+    pub connection: Connection,
+    pub manifest: Manifest,
+    pub event: Value,
+}
+
+/// Maps host errors to the short codes scripts may see. Messages stay in the host.
+pub fn code(error: &Error) -> &'static str {
+    match error.status {
+        400 | 413 => "invalid",
+        401 | 403 => "forbidden",
+        404 => "not_found",
+        409 => "conflict",
+        429 => "rate_limited",
+        _ => "unavailable",
+    }
+}
+
+pub async fn call(
+    s: &Service,
+    context: &Context,
+    method: &str,
+    args: Value,
+) -> std::result::Result<Value, Denied> {
+    let result = async {
+        ensure_owner(s, &context.connection).await?;
+        let expected = context.connection.clone();
+        s.store.read(move |db| authorize(db, &expected)).await?;
+        match method {
+            "storage.get" | "storage.set" | "storage.delete" | "storage.list" => {
+                storage(s, &context.connection, method, &args).await
+            }
+            "http.request" => http(s, context, &args).await,
+            "timers.after" | "timers.cancel" => timers(s, &context.connection, method, &args).await,
+            "conversations.submit" => super::work::submit(s, context, &args).await,
+            "conversations.check" => super::work::check(s, context, &args).await,
+            "conversations.answer" => super::work::answer(s, context, &args).await,
+            "conversations.cancel" => super::work::cancel(s, context, &args).await,
+            _ => Err(Error::forbidden("Unknown plugin capability.")),
+        }
+    }
+    .await;
+    result.map_err(|error| Denied(code(&error)))
+}
+
+fn key(args: &Value) -> Result<String> {
+    let key = text(args, "key");
+    if key.is_empty() || key.chars().count() > 200 || key.chars().any(char::is_control) {
+        return Err(Error::bad("Invalid storage key."));
+    }
+    Ok(key.to_owned())
+}
+
+/// Small connection-scoped values. Removed with the connection.
+async fn storage(
+    s: &Service,
+    connection: &Connection,
+    method: &str,
+    args: &Value,
+) -> Result<Value> {
+    const KIND: &str = "plugin-storage";
+    let connection = connection.id.clone();
+    let method = method.to_owned();
+    let args = args.clone();
+    s.store
+        .transaction(move |db| {
+            let owned = || {
+                db.list(KIND).map(|values| {
+                    values
+                        .into_iter()
+                        .filter(|value| value["connectionId"] == connection)
+                        .collect::<Vec<_>>()
+                })
+            };
+            if method == "storage.list" {
+                let prefix = text(&args, "prefix");
+                let mut keys = owned()?
+                    .iter()
+                    .map(|value| text(value, "key").to_owned())
+                    .filter(|key| key.starts_with(prefix))
+                    .collect::<Vec<_>>();
+                keys.sort();
+                return Ok(json!(keys));
+            }
+            let key = key(&args)?;
+            let record_id = format!("storage:{connection}:{}", crate::auth::hex_digest(&key));
+            match method.as_str() {
+                "storage.get" => Ok(db
+                    .get(KIND, &record_id)?
+                    .map_or(Value::Null, |value| value["value"].clone())),
+                "storage.delete" => {
+                    db.remove(KIND, &record_id)?;
+                    Ok(Value::Null)
+                }
+                _ => {
+                    let value = args.get("value").cloned().unwrap_or(Value::Null);
+                    if serde_json::to_string(&value)?.len() > 65_536 {
+                        return Err(Error::too_large("Stored values are limited to 64 KB."));
+                    }
+                    if db.get(KIND, &record_id)?.is_none() && owned()?.len() >= 1000 {
+                        return Err(Error::too_large("A connection can keep at most 1000 values."));
+                    }
+                    db.put(
+                        KIND,
+                        &json!({ "id": record_id, "connectionId": connection, "key": key, "value": value, "updatedAt": now() }),
+                    )?;
+                    Ok(Value::Null)
+                }
+            }
+        })
+        .await
+}
+
+/// Checks a URL against the hosts the plugin declares: HTTPS, default port, no
+/// credentials in the URL. Tests may route it to a local server.
+pub(crate) fn target(s: &Service, manifest: &Manifest, raw: &str) -> Result<String> {
+    let url = url::Url::parse(raw).map_err(|_| Error::bad("Invalid URL."))?;
+    let host = url.host_str().unwrap_or("");
+    if url.scheme() != "https"
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.port().is_some()
+        || !manifest.hosts.iter().any(|allowed| allowed == host)
+    {
+        return Err(Error::forbidden("This host is not declared by the plugin."));
+    }
+    Ok(match s.plugins.test_origin() {
+        Some(origin) => format!(
+            "{origin}{}{}",
+            url.path(),
+            url.query()
+                .map(|query| format!("?{query}"))
+                .unwrap_or_default()
+        ),
+        None => url.to_string(),
+    })
+}
+
+/// Builds a multipart body from a JSON part and deliverables of the reply being
+/// handled. Only files listed in that `reply` event can be attached.
+async fn multipart(s: &Service, context: &Context, spec: &Value) -> Result<(String, Vec<u8>)> {
+    let allowed = context.event["files"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    let boundary = format!("cairn-{}", crate::config::id().replace('-', ""));
+    let mut body = Vec::new();
+    let mut part = |headers: String, bytes: &[u8]| {
+        body.extend_from_slice(format!("--{boundary}\r\n{headers}\r\n\r\n").as_bytes());
+        body.extend_from_slice(bytes);
+        body.extend_from_slice(b"\r\n");
+    };
+    let field = |value: &str, fallback: &str| -> Result<String> {
+        let name = if value.is_empty() { fallback } else { value };
+        if name.len() > 60
+            || !name
+                .bytes()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, b'_' | b'[' | b']' | b'-'))
+        {
+            return Err(Error::bad("Invalid multipart field."));
+        }
+        Ok(name.to_owned())
+    };
+    if let Some(json) = spec.get("json").filter(|value| !value.is_null()) {
+        let name = field(text(spec, "jsonField"), "payload_json")?;
+        part(
+            format!(
+                "Content-Disposition: form-data; name=\"{name}\"\r\nContent-Type: application/json"
+            ),
+            serde_json::to_string(json)?.as_bytes(),
+        );
+    }
+    let files = spec["files"].as_array().cloned().unwrap_or_default();
+    if files.len() > 10 {
+        return Err(Error::bad("Attach up to ten files."));
+    }
+    let mut total = 0;
+    for (index, file) in files.iter().enumerate() {
+        let artifact = text(file, "artifact");
+        crate::validation::uuid(artifact)?;
+        let listed = allowed
+            .iter()
+            .find(|item| item["id"] == artifact)
+            .ok_or_else(|| Error::forbidden("Only deliverables of this reply can be uploaded."))?;
+        let path = s.config.data_dir.join("artifacts").join(artifact);
+        let metadata = std::fs::symlink_metadata(&path)?;
+        total += metadata.len();
+        if !metadata.is_file() || metadata.len() > 25 * 1024 * 1024 || total > 50 * 1024 * 1024 {
+            return Err(Error::too_large("Deliverables are too large to upload."));
+        }
+        let bytes = tokio::fs::read(&path).await?;
+        let name = super::connections::label(text(listed, "name")).replace(['"', '\\'], "_");
+        let media = listed["mediaType"]
+            .as_str()
+            .filter(|media| media.len() < 100 && !media.contains(['\r', '\n']))
+            .unwrap_or("application/octet-stream");
+        part(
+            format!(
+                "Content-Disposition: form-data; name=\"{}\"; filename=\"{name}\"\r\nContent-Type: {media}",
+                field(text(file, "field"), &format!("files[{index}]"))?
+            ),
+            &bytes,
+        );
+    }
+    body.extend_from_slice(format!("--{boundary}--\r\n").as_bytes());
+    Ok((format!("multipart/form-data; boundary={boundary}"), body))
+}
+
+/// HTTPS to hosts the manifest lists. With `auth = true`, the host adds the
+/// connection's credential using the manifest's rule; scripts never see it.
+async fn http(s: &Service, context: &Context, args: &Value) -> Result<Value> {
+    let invalid = |message: &str| Error::bad(message.to_owned());
+    let method = match args["method"].as_str().unwrap_or("GET") {
+        "GET" => reqwest::Method::GET,
+        "POST" => reqwest::Method::POST,
+        "PUT" => reqwest::Method::PUT,
+        "PATCH" => reqwest::Method::PATCH,
+        "DELETE" => reqwest::Method::DELETE,
+        _ => return Err(invalid("Unsupported HTTP method.")),
+    };
+    let target = target(s, &context.manifest, text(args, "url"))?;
+    let mut request = s
+        .plugins
+        .http
+        .request(method, target)
+        .timeout(Duration::from_secs(15));
+    if let Some(headers) = args["headers"].as_object() {
+        if headers.len() > 10 {
+            return Err(invalid("Too many headers."));
+        }
+        for (name, value) in headers {
+            let name = name.to_ascii_lowercase();
+            let value = value.as_str().unwrap_or("");
+            let allowed = matches!(name.as_str(), "content-type" | "accept" | "user-agent")
+                || name.starts_with("x-");
+            if !allowed || value.len() > 500 || value.chars().any(char::is_control) {
+                return Err(invalid("This header is not allowed."));
+            }
+            request = request.header(name, value);
+        }
+    }
+    if let Some(spec) = args.get("multipart").filter(|value| value.is_object()) {
+        let (kind, body) = multipart(s, context, spec).await?;
+        request = request.header("content-type", kind).body(body);
+    } else if let Some(body) = args.get("json").filter(|value| !value.is_null()) {
+        if serde_json::to_string(body)?.len() > 262_144 {
+            return Err(Error::too_large("Request body is too large."));
+        }
+        request = request.json(body);
+    } else if let Some(body) = args["body"].as_str() {
+        if body.len() > 262_144 {
+            return Err(Error::too_large("Request body is too large."));
+        }
+        request = request.body(body.to_owned());
+    }
+    if args["auth"] == true {
+        let rule = context
+            .manifest
+            .credential
+            .as_ref()
+            .ok_or_else(|| Error::forbidden("This plugin declares no credential."))?;
+        let secret = credential(s, &context.connection)
+            .await?
+            .ok_or_else(|| Error::forbidden("This connection has no credential."))?;
+        request = request.header(rule.header.as_str(), format!("{}{secret}", rule.prefix));
+    }
+    let response = request
+        .send()
+        .await
+        .map_err(|_| Error::bad_gateway("The service is unavailable."))?;
+    let status = response.status().as_u16();
+    let mut headers = Map::new();
+    for (name, value) in response.headers() {
+        let name = name.as_str();
+        if (name == "retry-after" || name == "content-type" || name.starts_with("x-ratelimit"))
+            && let Ok(value) = value.to_str()
+        {
+            headers.insert(name.to_owned(), json!(value));
+        }
+    }
+    let mut body = Vec::new();
+    let mut stream = response.bytes_stream();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|_| Error::bad_gateway("The response was interrupted."))?;
+        if body.len() + chunk.len() > 1_048_576 {
+            return Err(Error::too_large("The response is larger than 1 MB."));
+        }
+        body.extend_from_slice(&chunk);
+    }
+    let json = serde_json::from_slice::<Value>(&body).ok();
+    Ok(json!({
+        "status": status,
+        "headers": headers,
+        "json": json,
+        "text": if json.is_none() { json!(String::from_utf8_lossy(&body)) } else { Value::Null },
+    }))
+}
+
+/// Durable timers delivered later as `timer` events.
+async fn timers(s: &Service, connection: &Connection, method: &str, args: &Value) -> Result<Value> {
+    const KIND: &str = "plugin-timers";
+    let connection = connection.clone();
+    let method = method.to_owned();
+    let args = args.clone();
+    s.store
+        .transaction(move |db| {
+            let owned = db
+                .list(KIND)?
+                .into_iter()
+                .filter(|value| value["connectionId"] == connection.id)
+                .collect::<Vec<_>>();
+            if method == "timers.cancel" {
+                if let Some(timer) = owned.iter().find(|value| value["id"] == args["id"]) {
+                    db.remove(KIND, text(timer, "id"))?;
+                }
+                return Ok(Value::Null);
+            }
+            let seconds = args["seconds"]
+                .as_f64()
+                .filter(|value| (1.0..=604_800.0).contains(value))
+                .ok_or_else(|| Error::bad("Timers run between 1 second and 7 days later."))?;
+            let name = text(&args, "name");
+            let payload = args.get("payload").cloned().unwrap_or(Value::Null);
+            if name.is_empty()
+                || name.len() > 64
+                || !name
+                    .bytes()
+                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, b'_' | b'-' | b'.'))
+                || serde_json::to_string(&payload)?.len() > 4096
+            {
+                return Err(Error::bad("Invalid timer."));
+            }
+            if owned.len() >= 100 {
+                return Err(Error::too_large(
+                    "A connection can schedule at most 100 timers.",
+                ));
+            }
+            let timer = id();
+            db.put(
+                KIND,
+                &json!({
+                    "id": timer,
+                    "connectionId": connection.id,
+                    "revision": connection.revision,
+                    "name": name,
+                    "payload": payload,
+                    "at": now() + (seconds * 1000.0) as i64,
+                }),
+            )?;
+            Ok(json!(timer))
+        })
+        .await
+}

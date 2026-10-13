@@ -2,7 +2,10 @@
 members = [
   "crates/installation",
   "crates/beacon",
-  "crates/protocol"
+  "crates/protocol",
+  "crates/plugin-api",
+  "crates/plugin-host",
+  "crates/plugin-runtime"
 ]
 resolver = "3"
 exclude = [ "vendor/rtc-dtls" ]

@@ -21,21 +21,32 @@ COPY vendor ./vendor
 COPY crates/installation/Cargo.toml ./crates/installation/Cargo.toml
 COPY crates/beacon/Cargo.toml ./crates/beacon/Cargo.toml
 COPY crates/protocol/Cargo.toml ./crates/protocol/Cargo.toml
+COPY crates/plugin-api/Cargo.toml ./crates/plugin-api/Cargo.toml
+COPY crates/plugin-host/Cargo.toml ./crates/plugin-host/Cargo.toml
+COPY crates/plugin-runtime/Cargo.toml ./crates/plugin-runtime/Cargo.toml
 # A separate dependency layer survives application edits in remote BuildKit
 # caches. Cargo cache mounts alone do not persist on fresh GitHub runners.
 RUN --mount=type=cache,id=cargo-registry,target=/usr/local/cargo/registry \
-    mkdir -p crates/installation/src crates/installation/examples crates/beacon/src crates/protocol/src \
+    mkdir -p crates/installation/src crates/installation/examples crates/beacon/src crates/protocol/src crates/plugin-api/src crates/plugin-host/src crates/plugin-runtime/src \
+    && printf '' > crates/plugin-api/src/lib.rs \
+    && printf '' > crates/plugin-host/src/lib.rs \
+    && printf '' > crates/plugin-runtime/src/lib.rs \
     && printf 'fn main() {}\n' > crates/installation/src/main.rs \
     && printf 'fn main() {}\n' > crates/installation/examples/ublk_probe.rs \
     && printf '' > crates/installation/src/lib.rs \
     && printf 'fn main() {}\n' > crates/beacon/src/main.rs \
     && printf '' > crates/protocol/src/lib.rs \
     && printf '' > crates/beacon/src/lib.rs && cargo build --locked --release --bin cairn --features ublk
+COPY crates/plugin-api ./crates/plugin-api
+COPY crates/plugin-host ./crates/plugin-host
+COPY crates/plugin-runtime ./crates/plugin-runtime
+COPY plugins ./plugins
 COPY crates/installation ./crates/installation
 COPY crates/protocol ./crates/protocol
 COPY deploy/nodes ./deploy/nodes
 RUN --mount=type=cache,id=cargo-registry,target=/usr/local/cargo/registry \
-    touch crates/installation/src/main.rs crates/installation/src/lib.rs crates/protocol/src/lib.rs && \
+    touch crates/installation/src/main.rs crates/installation/src/lib.rs crates/protocol/src/lib.rs \
+    crates/plugin-api/src/lib.rs crates/plugin-host/src/lib.rs crates/plugin-runtime/src/lib.rs && \
     cargo build --locked --release --bin cairn --features ublk && cp target/release/cairn /usr/local/bin/cairn
 
 # Beacon builds independently: no worker CLI, VM or kernel layers.
@@ -47,8 +58,14 @@ COPY vendor ./vendor
 COPY crates/installation/Cargo.toml ./crates/installation/Cargo.toml
 COPY crates/beacon/Cargo.toml ./crates/beacon/Cargo.toml
 COPY crates/protocol/Cargo.toml ./crates/protocol/Cargo.toml
+COPY crates/plugin-api/Cargo.toml ./crates/plugin-api/Cargo.toml
+COPY crates/plugin-host/Cargo.toml ./crates/plugin-host/Cargo.toml
+COPY crates/plugin-runtime/Cargo.toml ./crates/plugin-runtime/Cargo.toml
 RUN --mount=type=cache,id=cargo-registry,target=/usr/local/cargo/registry \
-    mkdir -p crates/installation/src crates/installation/examples crates/beacon/src crates/protocol/src \
+    mkdir -p crates/installation/src crates/installation/examples crates/beacon/src crates/protocol/src crates/plugin-api/src crates/plugin-host/src crates/plugin-runtime/src \
+    && printf '' > crates/plugin-api/src/lib.rs \
+    && printf '' > crates/plugin-host/src/lib.rs \
+    && printf '' > crates/plugin-runtime/src/lib.rs \
     && printf 'fn main() {}\n' > crates/installation/src/main.rs \
     && printf '' > crates/installation/src/lib.rs \
     && printf 'fn main() {}\n' > crates/installation/examples/ublk_probe.rs \

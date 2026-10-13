@@ -1,0 +1,16 @@
+[package]
+name = "cairn-plugin-host"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+cairn-plugin-api = { path = "../plugin-api" }
+serde_json = "1"
+tokio = { version = "1", features = [
+  "process",
+  "io-util",
+  "time",
+  "sync"
+] }
+tempfile = "3"

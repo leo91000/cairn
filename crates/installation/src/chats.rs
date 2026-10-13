@@ -1,5 +1,5 @@
 mod handoff;
-mod questions;
+pub(crate) mod questions;
 pub mod sleep;
 pub mod wait_for;
 
@@ -596,6 +596,28 @@ fn launch_turn(
     Ok(())
 }
 
+pub(crate) fn create_in(db: &Db<'_>, input: Value) -> Result<Value> {
+    let input = parse_as::<ChatInput>("chat", input)?;
+    let agent = required(db.get("agents", &input.agent_id)?, "Agent not found")?;
+    let created_at = now();
+    let chat = serde_json::to_value(NewChat {
+        id: id(),
+        title: "New chat",
+        agent_id: input.agent_id,
+        project_id: input.project_id,
+        run_id: None,
+        paused: false,
+        created_at,
+        updated_at: created_at,
+    })?;
+    task_projects(&agent, &chat, &db.list("projects")?)?;
+    db.put("chats", &chat)
+}
+
+pub(crate) fn send_in(db: &Db<'_>, chat: &str, input: Value) -> Result<Value> {
+    send(db, chat, parse("message", input)?, None)
+}
+
 impl Service {
     pub async fn chat_list(&self) -> Result<Vec<Value>> {
         self.store.read(|db| list(db)).await
@@ -607,25 +629,7 @@ impl Service {
     }
 
     pub async fn chat_create(&self, input: Value) -> Result<Value> {
-        let input = parse_as::<ChatInput>("chat", input)?;
-        self.store
-            .transaction(move |db| {
-                let agent = required(db.get("agents", &input.agent_id)?, "Agent not found")?;
-                let created_at = now();
-                let chat = serde_json::to_value(NewChat {
-                    id: id(),
-                    title: "New chat",
-                    agent_id: input.agent_id,
-                    project_id: input.project_id,
-                    run_id: None,
-                    paused: false,
-                    created_at,
-                    updated_at: created_at,
-                })?;
-                task_projects(&agent, &chat, &db.list("projects")?)?;
-                db.put("chats", &chat)
-            })
-            .await
+        self.store.transaction(move |db| create_in(db, input)).await
     }
 
     pub async fn chat_send(&self, id: &str, input: Value) -> Result<Value> {
