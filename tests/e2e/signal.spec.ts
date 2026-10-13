@@ -110,7 +110,7 @@ test('the Fil, rail and shortcuts lead through the workspace', async ({ page, wo
   await page.keyboard.press('g')
   await page.keyboard.press('f')
   await live.getByRole('button', { name: /Keep watching the build/ }).click()
-  await expect(page).toHaveURL(workspacePath(`/chats/${chat.id}`))
+  await expect(page).toHaveURL(workspacePath(`/chats/${chat.slug}`))
   await expect(page.getByRole('complementary', { name: 'Fil' }).locator('[aria-current="page"]')).toBeVisible()
   const working = page.locator('.agent-working')
   await expect(working).toBeVisible()
@@ -152,7 +152,7 @@ test('phones use the floating dock and read conversations full screen', async ({
   await dock.getByRole('link', { name: 'Fil' }).click()
 
   await page.getByRole('region', { name: 'Live', exact: true }).getByRole('button').first().click()
-  await expect(page).toHaveURL(workspacePath(`/chats/${chat.id}`))
+  await expect(page).toHaveURL(workspacePath(`/chats/${chat.slug}`))
   await expect(dock).toHaveCount(0)
   await expect(page.locator('.agent-working')).toBeVisible()
   await capture(page, testInfo, 'signal-conversation-mobile')

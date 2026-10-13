@@ -92,9 +92,24 @@ CREATE INDEX IF NOT EXISTS chat_messages_chat ON chat_messages(chat_id,created_a
         // Backwards history excludes superseded text snapshots. These small keys
         // bound both the next-turn lookup and the same-message revision lookup.
         tx.execute_batch("CREATE INDEX IF NOT EXISTS events_turns ON events(run_id,id) WHERE type='turn.started';
+CREATE INDEX IF NOT EXISTS events_user_input ON events(run_id,id) WHERE type='chat.user';
 CREATE INDEX IF NOT EXISTS events_messages ON events(run_id,json_extract(payload,'$.item.id'),id) WHERE json_extract(payload,'$.item.type')='agent_message';")?;
         tx.execute_batch(crate::nodes::shared_blocks::SCHEMA)?;
         tx.execute_batch(crate::storage::migration::SCHEMA)?;
+        tx.execute_batch("CREATE UNIQUE INDEX IF NOT EXISTS records_chat_slug ON records(json_extract(data,'$.slug')) WHERE kind='chats';")?;
+        let db = Db(&tx);
+        let missing = db.json_rows(
+            "SELECT data FROM records WHERE kind='chats' AND json_extract(data,'$.slug') IS NULL",
+            [],
+        )?;
+        for mut chat in missing {
+            chat["slug"] = db.new_chat_slug()?.into();
+            tx.execute(
+                "UPDATE records SET data=? WHERE kind='chats' AND id=?",
+                params![chat.to_string(), chat["id"].as_str()],
+            )?;
+        }
+
         tx.commit()?;
         let mut readers = Vec::new();
         for _ in 0..2 {
@@ -359,7 +374,45 @@ impl Db<'_> {
         )
     }
 
+    pub fn chat_id_for_slug(&self, slug: &str) -> Result<Option<String>> {
+        Ok(self
+            .0
+            .prepare_cached(
+                "SELECT id FROM records WHERE kind='chats' AND json_extract(data,'$.slug')=?",
+            )?
+            .query_row([slug], |row| row.get(0))
+            .optional()?)
+    }
+
+    fn new_chat_slug(&self) -> Result<String> {
+        loop {
+            let slug = cairn_protocol::slugs::readable(uuid::Uuid::new_v4().as_bytes());
+            let used: bool = self.0.query_row(
+                "SELECT EXISTS(SELECT 1 FROM records WHERE kind='chats' AND json_extract(data,'$.slug')=?)",
+                [&slug],
+                |row| row.get(0),
+            )?;
+            if !used {
+                return Ok(slug);
+            }
+        }
+    }
+
     pub fn put(&self, kind: &str, value: &Value) -> Result<Value> {
+        let mut chat;
+        let value = if kind == "chats" {
+            chat = value.clone();
+            let existing = self.get(kind, value["id"].as_str().unwrap_or(""))?;
+            chat["slug"] = match existing.and_then(|chat| chat["slug"].as_str().map(str::to_owned))
+            {
+                Some(slug) => slug.into(),
+                None => self.new_chat_slug()?.into(),
+            };
+            &chat
+        } else {
+            value
+        };
+
         self.0
             .prepare_cached(
                 "INSERT INTO records VALUES(?,?,?,?)

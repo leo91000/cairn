@@ -195,7 +195,7 @@ private fun AgentEditor(vm: CairnViewModel, state: Workspace, initial: Agent, cl
         Field("Nom", form.name, { form = form.copy(name = it) })
         Field("Description", form.description, { form = form.copy(description = it) }, 3)
         ModelPicker(
-            if (form.provider == "claude") state.claudeModels else state.models,
+            state.modelCatalog(form.provider),
             form.model,
             form.reasoning,
             enabled = !state.busy,

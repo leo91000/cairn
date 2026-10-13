@@ -22,7 +22,7 @@ pub struct Cause {
 
 impl Cause {
     /// Structured codes take precedence. Unknown errors remain terminal; the
-    /// exact routing timeout is a fallback for adapters without an error code.
+    /// exact routing timeout also covers Codex's generic `other` classification.
     pub fn classify(error: &Value) -> Option<Self> {
         let code = error["code"].as_str().unwrap_or("");
         let info = &error["codexErrorInfo"];
@@ -96,9 +96,10 @@ impl Cause {
             })
             .or_else(|| {
                 let message = error["message"].as_str().unwrap_or("").trim();
-                // Do not override an unrecognized structured error with message heuristics.
+                // Codex exposes routing discovery I/O failures as `other`. Only
+                // this exact known timeout may recover without a specific code.
                 (code.is_empty()
-                    && info_code.is_empty()
+                    && matches!(info_code, "" | "other")
                     && message.eq_ignore_ascii_case("workspace routing discovery timed out"))
                 .then_some(FailureKind::Timeout)
             })?;
@@ -166,6 +167,19 @@ mod tests {
     }
 
     #[test]
+    fn native_codex_other_routing_timeout_is_retriable() {
+        let error = json!({
+            "additionalDetails": null,
+            "codexErrorInfo": "other",
+            "message": "workspace routing discovery timed out",
+            "misalignment": null,
+        });
+        let cause = Cause::classify(&error).expect("The production Codex timeout must recover");
+        assert_eq!(cause.kind, FailureKind::Timeout);
+        assert_eq!(cause.message, error["message"]);
+    }
+
+    #[test]
     fn terminal_errors_and_tool_messages_never_override_the_safety_guards() {
         for error in [
             json!({ "code": "invalid_request", "message": "workspace routing discovery timed out" }),
@@ -177,6 +191,29 @@ mod tests {
             json!({ "message": "Command failed: workspace routing discovery timed out" }),
             json!({ "message": "Conversation interrupted." }),
             json!({ "message": "Unknown failure" }),
+            json!({ "codexErrorInfo": "other", "message": "Unknown failure" }),
+            json!({
+                "codexErrorInfo": "other",
+                "message": "Command failed: workspace routing discovery timed out",
+            }),
+            json!({
+                "codexErrorInfo": "unauthorized",
+                "message": "workspace routing discovery timed out",
+            }),
+            json!({
+                "codexErrorInfo": "newErrorCode",
+                "message": "workspace routing discovery timed out",
+            }),
+            json!({
+                "code": "invalid_request",
+                "codexErrorInfo": "other",
+                "message": "workspace routing discovery timed out",
+            }),
+            json!({
+                "codexErrorInfo": "other",
+                "httpStatusCode": 403,
+                "message": "workspace routing discovery timed out",
+            }),
         ] {
             assert!(Cause::classify(&error).is_none(), "{error}");
         }

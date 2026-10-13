@@ -1,6 +1,7 @@
 import type { ChatView } from '../../../packages/contracts/chats'
 import type { RunEvent, RunListItem, Task } from '../../../packages/contracts/contracts'
 import type { ActivityEntry } from './activity'
+import { chatPath } from './workspace-links'
 
 // Same identity palette as the Android « Signal » design: readable on white text in both themes.
 const identityColors = ['#14365A', '#D9542F', '#B23F8C', '#12806F', '#8A5A12', '#3F7FBF', '#7A4FD1', '#5E6B2E']
@@ -56,7 +57,7 @@ export function filOf(chats: ChatView[], tasks: Task[], runs: RunListItem[]): Fi
       agentKey: chat.agentId,
       project: chat.projectName,
       at: chat.updatedAt,
-      to: `/chats/${chat.id}`,
+      to: chatPath(chat),
       chatId: chat.id,
     }
     if (chat.pendingQuestions > 0)

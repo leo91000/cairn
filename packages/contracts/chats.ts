@@ -27,7 +27,24 @@ export interface ChatAttachment {
   kind: 'image' | 'file'
 }
 export type ConversationLifecycle = 'active' | 'trash' | 'purging'
+export interface ChatWakeup {
+  condition?: { type: 'run_finished', runId: string } | {
+    type: 'github_workflow'
+    projectId: string
+    runId: number
+    headSha: string
+  }
+  observation?: Record<string, unknown> | null
+  id: string
+  messageId: string
+  reason: string
+  seconds: number
+  createdAt: number
+  wakeAt: number
+}
 export interface Chat {
+  wakeup?: ChatWakeup | null
+  slug?: string
   lifecycle?: ConversationLifecycle
   trashedAt?: number | null
   purgeAt?: number | null

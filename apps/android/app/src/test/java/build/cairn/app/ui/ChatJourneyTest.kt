@@ -211,7 +211,7 @@ class ChatJourneyTest {
                                         ModelCatalog(
                                             models =
                                                 listOf(
-                                                    CodexModel(
+                                                    CodingAgentModel(
                                                         "gpt-fixture",
                                                         displayName = "Modèle du serveur",
                                                         isDefault = true,

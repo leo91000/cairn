@@ -102,6 +102,7 @@ fn guest_exports() -> Router {
                 response
             }
             "/tmp/second.md" => "# Second revision\n".into_response(),
+            "/tmp/diagram.svg" => "<svg onload='alert(1)'></svg>".into_response(),
             "/tmp/preview.png" => include_bytes!("../../../tests/fixtures/artifacts/thumbnail.png")
                 .as_slice()
                 .into_response(),
@@ -447,10 +448,59 @@ fn media_detection_and_byte_ranges_do_not_trust_file_extensions() {
         file::classify("malicious.png", b"<script>alert(1)</script>"),
         ("file", "application/octet-stream")
     );
+    // Markup is previewed as inert text; only viewers decide whether to sandbox-render it.
     assert_eq!(
         file::classify("report.html", b"<html>test</html>"),
+        ("code", "text/plain; charset=utf-8")
+    );
+    assert_eq!(
+        file::classify("report.html", b"<html>\0</html>"),
         ("file", "application/octet-stream")
     );
+    assert_eq!(
+        file::classify("diagram.svg", b"<?xml version=\"1.0\"?><svg></svg>"),
+        ("image", "image/svg+xml")
+    );
+    assert_eq!(
+        file::classify("diagram.svg", b"<script>alert(1)</script>"),
+        ("file", "application/octet-stream")
+    );
+    assert_eq!(
+        file::classify("logo.png", b"<svg onload='alert(1)'/>"),
+        ("file", "application/octet-stream")
+    );
+    for signature in [b"GIF87a", b"GIF89a"] {
+        assert_eq!(
+            file::classify("animation.gif", signature),
+            ("image", "image/gif")
+        );
+    }
+    assert_eq!(
+        file::classify("photo.avif", b"\0\0\0\x1cftypavif"),
+        ("image", "image/avif")
+    );
+    assert_eq!(
+        file::classify("scan.bmp", b"BM\x3a\0\0\0"),
+        ("image", "image/bmp")
+    );
+    assert_eq!(
+        file::classify("notes.txt", b"BM is not a bitmap"),
+        ("code", "text/plain; charset=utf-8")
+    );
+    for name in [
+        "main.go",
+        "App.kt",
+        "Dockerfile",
+        "Makefile",
+        "data.tsv",
+        "fix.patch",
+    ] {
+        assert_eq!(
+            file::classify(name, b"text"),
+            ("code", "text/plain; charset=utf-8"),
+            "{name}"
+        );
+    }
     assert_eq!(
         file::classify("image.png", b"\x89PNG\r\n\x1a\n"),
         ("image", "image/png")
@@ -471,6 +521,32 @@ fn media_detection_and_byte_ranges_do_not_trust_file_extensions() {
     ] {
         assert!(file::range(Some(range), 10).is_err());
     }
+}
+
+#[tokio::test]
+async fn vector_images_are_never_rasterized_or_served_as_inline_documents() {
+    let f = Fixture::new().await;
+    let artifact = f
+        .publish(&json!({ "path": "/tmp/diagram.svg", "title": "Diagram", "key": "diagram" }))
+        .await
+        .unwrap();
+    assert_eq!(artifact["kind"], "image");
+    assert_eq!(artifact["mediaType"], "image/svg+xml");
+    assert_eq!(artifact["previewStatus"], "none");
+
+    let response = download(&f.s, &f.run, &artifact, None).await;
+    assert_eq!(response.headers()["content-type"], "image/svg+xml");
+    assert_eq!(
+        response.headers()["content-security-policy"],
+        "default-src 'none'; sandbox"
+    );
+    assert!(
+        response.headers()["content-disposition"]
+            .to_str()
+            .unwrap()
+            .starts_with("attachment;")
+    );
+    f.server.abort();
 }
 
 #[tokio::test]

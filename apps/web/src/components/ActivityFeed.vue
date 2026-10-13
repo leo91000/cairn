@@ -98,6 +98,23 @@ const fullscreenButton = ref<HTMLButtonElement>()
 const scroller = ref<HTMLElement>()
 const conversation = ref<HTMLElement>()
 const atStart = ref(true)
+const scrolling = ref(false)
+const atEnd = ref(true)
+// The way back stays mounted while paused, so a scroll (including an older page
+// anchoring the reader) only fades it out and never takes its keyboard focus.
+const latestFocused = ref(false)
+const showLatest = computed(() => !follow.value && !atEnd.value)
+// Resuming removes it: a keyboard user's focus moves to the reader first. A tap
+// in Safari never focuses the button, so the composer keeps its keyboard. WebKit
+// also fires no blur for a removed element, which would leave latestFocused set.
+watch(showLatest, (shown) => {
+  if (shown || !latestFocused.value)
+    return
+  latestFocused.value = false
+  scroller.value?.focus({ preventScroll: true })
+})
+let scrollEnd: ReturnType<typeof setTimeout> | undefined
+let restoredTop: number | undefined
 let pagingFrame: number | undefined
 let prependPending = false
 let resizeObserver: ResizeObserver | undefined
@@ -109,10 +126,11 @@ watch([scroller, conversation], ([element, content]) => {
   if (follow.value)
     jump()
   else if (props.position)
-    element.scrollTop = props.position.top
+    restore(element, props.position.top)
   resizeObserver = new ResizeObserver(() => {
     if (follow.value)
       jump()
+    measureEnd()
     schedulePaging()
   })
   resizeObserver.observe(element)
@@ -123,6 +141,7 @@ watch([scroller, conversation], ([element, content]) => {
 onBeforeUnmount(() => {
   savePosition()
   resizeObserver?.disconnect()
+  clearTimeout(scrollEnd)
   if (pagingFrame !== undefined)
     cancelAnimationFrame(pagingFrame)
 })
@@ -131,14 +150,26 @@ function jump() {
   scroller.value?.scrollTo({ top: scroller.value.scrollHeight })
 }
 
+// As Android's canScrollForward: a resize can leave nothing below without a scroll event.
+function measureEnd() {
+  const el = scroller.value
+  if (el)
+    atEnd.value = el.scrollHeight - el.scrollTop - el.clientHeight < 2
+}
+
+function restore(el: HTMLElement, top: number) {
+  el.scrollTop = top
+  restoredTop = el.scrollTop
+}
+
 function savePosition() {
   if (scroller.value)
     emit('position', { top: scroller.value.scrollTop, follow: follow.value }, props.cacheKey)
 }
 
-function followChanged() {
-  if (follow.value)
-    jump()
+function followLatest() {
+  follow.value = true
+  jump()
   savePosition()
 }
 
@@ -161,7 +192,7 @@ watch([() => props.events, () => props.loadingOlder], async () => {
     if (follow.value)
       jump()
     else
-      el.scrollTop = anchor.top + el.scrollHeight - anchor.height
+      restore(el, anchor.top + el.scrollHeight - anchor.height)
   }
 
   prependPending = false
@@ -187,10 +218,20 @@ function schedulePaging() {
 
 watch([entries, () => props.more, () => props.loading, () => props.olderError], schedulePaging, { flush: 'post' })
 
+// As on Android, reading older output pauses following and scrolling back to the end resumes
+// it. Restoring a reading position may land at the end without resuming.
 function scrolled() {
   const el = scroller.value
+  const restored = el?.scrollTop === restoredTop
+  restoredTop = undefined
   if (el && el.scrollHeight - el.scrollTop - el.clientHeight > 60)
     follow.value = false
+  else if (el && !restored)
+    follow.value = true
+  measureEnd()
+  scrolling.value = true
+  clearTimeout(scrollEnd)
+  scrollEnd = setTimeout(() => scrolling.value = false, 150)
   schedulePaging()
   savePosition()
 }
@@ -227,17 +268,9 @@ async function exitFullscreen() {
 
 onBeforeUnmount(() => viewer.value?.close())
 defineExpose({
-  following: follow,
-  toggleFollow: () => {
-    follow.value = !follow.value
-    followChanged()
-  },
   openFiles: () => { artifactViewer.value = '' },
   enterFullscreen,
-  followLatest: () => {
-    follow.value = true
-    followChanged()
-  },
+  followLatest,
 })
 </script>
 
@@ -263,17 +296,6 @@ defineExpose({
             <button v-if="deliverables?.length" class="rounded-md px-2 py-2 text-xs text-muted hover:bg-hover hover:text-ink" @click="artifactViewer = ''">
               Files · {{ latestArtifacts(deliverables).length }}
             </button>
-            <button
-              v-if="chat"
-              :class="iconButton"
-              aria-label="Follow output"
-              :aria-pressed="follow"
-              :title="follow ? 'Pause auto-scroll' : 'Follow latest output'"
-              @click="follow = !follow; followChanged()"
-            >
-              <Icon :name="ArrowDown" :size="17" />
-            </button>
-            <label v-else class="checkbox flex-row items-center gap-2 text-xs font-normal phone:text-xs phone:leading-[1.6] mx-0 my-[9px]"><input v-model="follow" type="checkbox" @change="followChanged">Follow output</label>
             <button
               ref="fullscreenButton"
               :class="twMerge(iconButton, 'icon-button')"
@@ -366,6 +388,26 @@ defineExpose({
               </div>
             </div>
           </div>
+          <!-- An overlay keeps the reading position and the composer still while following is paused. -->
+          <Transition
+            enter-active-class="transition-opacity duration-180 delay-120"
+            leave-active-class="transition-opacity duration-120"
+            enter-from-class="opacity-0"
+            leave-to-class="opacity-0"
+          >
+            <button
+              v-if="showLatest"
+              class="absolute bottom-2 left-1/2 z-10 grid size-9 -translate-x-1/2 place-items-center rounded-full border border-line bg-raised text-ink shadow-sm transition-opacity hover:bg-hover focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent phone:size-11"
+              :class="scrolling && !latestFocused ? 'pointer-events-none opacity-0 duration-120' : 'duration-180 delay-120'"
+              :aria-label="chat ? 'Latest messages' : 'Latest activity'"
+              :title="chat ? 'Latest messages' : 'Latest activity'"
+              @click="followLatest"
+              @focus="latestFocused = true"
+              @blur="latestFocused = false"
+            >
+              <Icon :name="ArrowDown" :size="18" />
+            </button>
+          </Transition>
         </div>
       </section>
     </Teleport>

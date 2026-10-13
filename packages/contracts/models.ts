@@ -1,4 +1,4 @@
-export interface CodexModel {
+export interface CodingAgentModel {
   model: string
   displayName: string
   description: string
@@ -8,7 +8,7 @@ export interface CodexModel {
   supportedReasoningEfforts: { reasoningEffort: string, description: string }[]
 }
 export interface ModelCatalog {
-  models: CodexModel[]
+  models: CodingAgentModel[]
   checkedAt: number | null
   stale: boolean
   error: string

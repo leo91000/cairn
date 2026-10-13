@@ -43,12 +43,16 @@ struct Fixture {
 
 impl Fixture {
     async fn new() -> Self {
+        Self::with_concurrency(2).await
+    }
+
+    async fn with_concurrency(concurrency: usize) -> Self {
         let root = TempDir::new().unwrap();
         std::fs::create_dir(root.path().join("home")).unwrap();
         let config = Config {
             codex_bin: common::fixture("codex.mjs"),
             claude_bin: common::fixture("claude.mjs"),
-            concurrency: 2,
+            concurrency,
             worker_enabled: true,
             ..common::config(root.path())
         };
@@ -228,7 +232,7 @@ fn message(text: &str) -> Value {
 #[tokio::test]
 async fn transient_agent_failure_resumes_same_session_and_workspace_after_restart() {
     let mut fixture = Fixture::new().await;
-    let prompt = "fixture:agent-failures:[{\"message\":\"workspace routing discovery timed out\"}]";
+    let prompt = "fixture:agent-failures:[{\"codexErrorInfo\":\"other\",\"message\":\"workspace routing discovery timed out\"}]";
     let chat_id = fixture.start_chat(message(prompt)).await;
     let run_id = fixture.chat_run(&chat_id).await;
     let waiting = fixture
@@ -237,6 +241,7 @@ async fn transient_agent_failure_resumes_same_session_and_workspace_after_restar
     assert_eq!(waiting["status"], RunStatus::Queued, "{waiting}");
     assert_eq!(waiting["retry"]["attempt"], 1);
     assert_eq!(waiting["retry"]["limit"], 3);
+    assert_eq!(waiting["retry"]["cause"]["kind"], "timeout");
     assert!(waiting["retry"]["nextAttemptAt"].as_i64().unwrap() > now());
     assert_eq!(waiting["sessionId"], "fixture-chat");
     fixture.stop(false).await;
@@ -869,7 +874,211 @@ async fn native_chat_turns_reuse_the_same_run_and_conversation() {
     fixture.stop(false).await;
 }
 
+#[tokio::test]
+async fn sleeping_chat_survives_worker_restart_and_releases_capacity_before_waking() {
+    let mut fixture = Fixture::with_concurrency(1).await;
+    let s = fixture.service.clone();
+    let chat = fixture
+        .start_chat(message(
+            "fixture:slow-finish Wait for CI then finish the original task",
+        ))
+        .await;
+    let run = fixture.chat_run(&chat).await;
+    let current = fixture
+        .until(&run, |r| {
+            r["status"] == "running" && r["sessionId"].is_string()
+        })
+        .await;
+    fixture
+        .until_chat(&chat, async |detail| {
+            detail["messages"][0]["status"] == "delivered"
+        })
+        .await;
+    // Host-only fixtures use a synthetic workspace grant; production VMs receive
+    // this same turn-bound grant through run_configuration.
+    let token = "synthetic-sleep-token";
+    s.store
+        .set(
+            &format!("mcp-grant:{}", cairn_installation::auth::hex_digest(token)),
+            json!({
+                "runId": run,
+                "messageId": current["chatExecution"]["messageId"],
+                "servers": {},
+                "workspace": true,
+            }),
+            None,
+        )
+        .await
+        .unwrap();
+    let wake = cairn_installation::chats::sleep::schedule(
+        &s,
+        token,
+        &json!({ "seconds": 15, "reason": "Wait for CI" }),
+    )
+    .await
+    .unwrap();
+    let first = fixture.until_finished(&run).await;
+    assert_eq!(first["status"], "succeeded");
+    let conversation = fixture
+        .run_directory(&run)
+        .join("codex/fixture-conversation.json");
+    let first_thread: Value =
+        serde_json::from_slice(&std::fs::read(&conversation).unwrap()).unwrap();
+    // Use the actual workspace: preparation may select a generation directory.
+    let preserved = Path::new(text(&first, "workspace")).join("sleep-preserved.txt");
+    std::fs::write(&preserved, "work before the wait").unwrap();
+    fixture.stop(false).await;
+    fixture.start().await;
+    let other = fixture
+        .enqueue("Another conversation uses capacity during the wait")
+        .await;
+    assert_eq!(
+        fixture.until_finished(text(&other, "id")).await["status"],
+        "succeeded"
+    );
+    assert_eq!(s.chat_detail(&chat).await.unwrap()["wakeup"], wake);
+    let resumed = fixture
+        .until(&run, |r| {
+            r["status"] == "succeeded"
+                && text(r, "summary").contains("Cairn resumed this conversation")
+        })
+        .await;
+    assert_eq!(resumed["sessionId"], first["sessionId"]);
+    let run_id = run.clone();
+    let events = s
+        .store
+        .read(move |db| db.events(&run_id, 0, 100))
+        .await
+        .unwrap();
+    let wake_event = events
+        .iter()
+        .find(|event| event["type"] == "chat.wakeup")
+        .unwrap();
+    assert!(wake_event["createdAt"].as_i64().unwrap() >= wake["wakeAt"].as_i64().unwrap());
+    assert_eq!(resumed["workspace"], first["workspace"]);
+    let resumed_thread: Value =
+        serde_json::from_slice(&std::fs::read(conversation).unwrap()).unwrap();
+    assert_eq!(
+        resumed_thread["fixtureGeneration"],
+        first_thread["fixtureGeneration"]
+    );
+    assert_eq!(resumed_thread["turns"].as_array().unwrap().len(), 2);
+    assert_eq!(resumed_thread["turns"][0], first_thread["turns"][0]);
+    assert_eq!(
+        std::fs::read_to_string(preserved).unwrap(),
+        "work before the wait"
+    );
+    let detail = s.chat_detail(&chat).await.unwrap();
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| event["type"] == "chat.user")
+            .count(),
+        1
+    );
+    assert!(detail["wakeup"].is_null());
+    fixture.stop(false).await;
+}
+
 const PNG: &[u8] = b"\x89PNG\r\n\x1a\nfixture";
+
+#[tokio::test]
+async fn condition_wait_yields_the_only_slot_to_its_dependency_and_resumes_the_same_session() {
+    let mut fixture = Fixture::with_concurrency(1).await;
+    let s = fixture.service.clone();
+    s.agent(
+        json!({ "name": "Main agent", "access": { "installation": true } }),
+        Some(MAIN_AGENT_ID),
+    )
+    .await
+    .unwrap();
+    let chat = fixture
+        .start_chat(message("fixture:slow-finish Finish after other work"))
+        .await;
+    let run = fixture.chat_run(&chat).await;
+    let current = fixture
+        .until(&run, |r| {
+            r["status"] == "running" && r["sessionId"].is_string()
+        })
+        .await;
+    fixture
+        .until_chat(&chat, async |detail| {
+            detail["messages"][0]["status"] == "delivered"
+        })
+        .await;
+    let other = fixture
+        .enqueue("Dependency runs while the conversation waits")
+        .await;
+    let token = "synthetic-condition-token";
+    s.store
+        .set(
+            &format!("mcp-grant:{}", cairn_installation::auth::hex_digest(token)),
+            json!({
+                "runId": run,
+                "messageId": current["chatExecution"]["messageId"],
+                "servers": {},
+                "workspace": true,
+                "installation": true,
+            }),
+            None,
+        )
+        .await
+        .unwrap();
+    let wait = cairn_installation::chats::wait_for::schedule(
+        &s,
+        token,
+        &json!({
+            "condition": { "type": "run_finished", "runId": other["id"] },
+            "reason": "Join the dependency",
+            "timeoutSeconds": 60,
+        }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(wait["deferred"], true);
+    assert_eq!(
+        fixture.until_finished(text(&other, "id")).await["status"],
+        "succeeded"
+    );
+    let resumed = fixture
+        .until(&run, |r| {
+            r["status"] == "succeeded"
+                && text(r, "summary").contains("Cairn resumed this conversation")
+        })
+        .await;
+    assert_eq!(resumed["sessionId"], current["sessionId"]);
+    assert!(
+        now() < wait["wakeup"]["wakeAt"].as_i64().unwrap(),
+        "The result resumes the conversation before the fallback timer"
+    );
+    assert!(text(&resumed, "summary").contains(text(&other, "id")));
+    let thread: Value = serde_json::from_slice(
+        &std::fs::read(
+            fixture
+                .run_directory(&run)
+                .join("codex/fixture-conversation.json"),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(thread["turns"].as_array().unwrap().len(), 2);
+    let detail = s.chat_detail(&chat).await.unwrap();
+    assert!(detail["wakeup"].is_null());
+    let run_id = run.clone();
+    let events = s
+        .store
+        .read(move |db| db.events(&run_id, 0, 100))
+        .await
+        .unwrap();
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| event["type"] == "chat.user")
+            .count(),
+        1
+    );
+    fixture.stop(false).await;
+}
 
 #[tokio::test]
 async fn chat_attachments_survive_worker_restart_and_reach_codex() {

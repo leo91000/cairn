@@ -15,8 +15,6 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
-import androidx.compose.foundation.gestures.rememberTransformableState
-import androidx.compose.foundation.gestures.transformable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
@@ -35,7 +33,6 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.focus.focusProperties
 import androidx.compose.ui.graphics.asImageBitmap
-import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.clearAndSetSemantics
@@ -525,7 +522,44 @@ private fun FilePreviewPage(
                 TextButton(onClick = { retry++ }) { Text("Réessayer") }
             }
             currentFile?.let { current ->
+                val extension = name.substringAfterLast('.', "").lowercase()
                 when {
+                    mime == "image/svg+xml" || (mime == "image/gif" && active) -> {
+                        var document by remember(current) { mutableStateOf<String?>(null) }
+                        LaunchedEffect(current) {
+                            document =
+                                withContext(Dispatchers.IO) {
+                                    val limit = if (mime == "image/gif") 20L else 4L
+                                    if (current.length() <= limit * 1024 * 1024)
+                                        imageDocument(current.readBytes(), mime)
+                                    else ""
+                                }
+                        }
+                        document?.let {
+                            if (it.isEmpty() && mime == "image/gif")
+                                Column(Modifier.fillMaxSize()) {
+                                    Box(Modifier.weight(1f)) {
+                                        NativeImage(current, name, active, zoomChanged)
+                                    }
+                                    Text(
+                                        "Aperçu fixe : l’animation est limitée aux GIF de 20 Mo maximum.",
+                                        Modifier.padding(horizontal = 20.dp, vertical = 12.dp),
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    )
+                                }
+                            else if (it.isEmpty())
+                                Page {
+                                    Text(
+                                        "Image trop volumineuse pour un aperçu. Enregistrez-la pour l’ouvrir."
+                                    )
+                                }
+                            else
+                                ZoomableImage(active, zoomChanged) { modifier ->
+                                    InertWebPage(it, name, modifier)
+                                }
+                        }
+                    }
                     kind == "image" || mime.startsWith("image/") ->
                         NativeImage(current, name, active, zoomChanged)
                     kind == "pdf" || mime == "application/pdf" -> NativePdf(current)
@@ -546,20 +580,47 @@ private fun FilePreviewPage(
                                     }
                                 }
                         }
-                        Page {
-                            if (kind == "markdown" || mime.contains("markdown")) Markdown(text)
-                            else if (mime == "application/json" || name.endsWith(".json", true)) {
-                                if (text.length <= 500_000) ResultContent(text)
-                                else
-                                    Text(
-                                        "Fichier volumineux : consultez la source ou enregistrez-le pour lire la suite."
-                                    )
-                                Disclosure("Voir la source JSON") { Code(text) }
-                            } else Code(text)
-                            if (current.length() > 1024 * 1024)
-                                Text(
-                                    "Aperçu limité à 1 Mo. Enregistrez le fichier pour lire la suite."
+                        // Markup and tables have a rendered view; their source stays one tap away.
+                        val page = kind == "code" && extension in listOf("html", "htm")
+                        val table = kind == "code" && extension in listOf("csv", "tsv")
+                        var source by remember(current) { mutableStateOf(false) }
+                        Column(Modifier.fillMaxSize()) {
+                            if (page || table)
+                                FilterChip(
+                                    selected = source,
+                                    onClick = { source = !source },
+                                    label = { Text("Source") },
+                                    modifier = Modifier.padding(horizontal = 20.dp),
                                 )
+                            if (page && !source) InertWebPage(text, name)
+                            else
+                                Page {
+                                    if (table && !source)
+                                        DelimitedTable(
+                                            remember(text) {
+                                                parseDelimited(
+                                                    text,
+                                                    if (extension == "tsv") '\t' else ',',
+                                                )
+                                            }
+                                        )
+                                    else if (kind == "markdown" || mime.contains("markdown"))
+                                        Markdown(text)
+                                    else if (
+                                        mime == "application/json" || name.endsWith(".json", true)
+                                    ) {
+                                        if (text.length <= 500_000) ResultContent(text)
+                                        else
+                                            Text(
+                                                "Fichier volumineux : consultez la source ou enregistrez-le pour lire la suite."
+                                            )
+                                        Disclosure("Voir la source JSON") { Code(text) }
+                                    } else Code(text)
+                                    if (current.length() > 1024 * 1024)
+                                        Text(
+                                            "Aperçu limité à 1 Mo. Enregistrez le fichier pour lire la suite."
+                                        )
+                                }
                         }
                     }
                     else ->
@@ -597,8 +658,6 @@ private fun NativeImage(
 ) {
     var bitmap by remember(file) { mutableStateOf<Bitmap?>(null) }
     var failed by remember(file) { mutableStateOf(false) }
-    var scale by remember { mutableFloatStateOf(1f) }
-    var offset by remember { mutableStateOf(androidx.compose.ui.geometry.Offset.Zero) }
     LaunchedEffect(file) {
         bitmap =
             withContext(Dispatchers.IO) {
@@ -615,29 +674,10 @@ private fun NativeImage(
             }
         failed = bitmap == null
     }
-    val transform = rememberTransformableState { zoom, pan, _ ->
-        scale = (scale * zoom).coerceIn(1f, 6f)
-        offset = if (scale == 1f) androidx.compose.ui.geometry.Offset.Zero else offset + pan
-    }
-    LaunchedEffect(active, scale) { if (active) zoomChanged(scale > 1f) }
-    LaunchedEffect(active) {
-        if (!active) {
-            scale = 1f
-            offset = androidx.compose.ui.geometry.Offset.Zero
-        }
-    }
-    DisposableEffect(Unit) { onDispose { zoomChanged(false) } }
     bitmap?.let {
-        Image(
-            it.asImageBitmap(),
-            description,
-            Modifier.fillMaxSize().transformable(transform, canPan = { scale > 1f }).graphicsLayer {
-                scaleX = scale
-                scaleY = scale
-                translationX = offset.x
-                translationY = offset.y
-            },
-        )
+        ZoomableImage(active, zoomChanged) { modifier ->
+            Image(it.asImageBitmap(), description, modifier)
+        }
     }
     if (failed)
         Text(
