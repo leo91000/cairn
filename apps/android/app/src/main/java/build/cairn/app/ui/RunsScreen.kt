@@ -124,6 +124,10 @@ fun RunsScreen(vm: CairnViewModel, state: Workspace, open: (String) -> Unit) {
     }
 }
 
+/**
+ * One run. In the Fil's pager, only the [selected] page streams and owns full screen, and a mission
+ * run adds a Mission tab with the mission itself.
+ */
 @Composable
 fun RunScreen(
     vm: CairnViewModel,
@@ -131,9 +135,11 @@ fun RunScreen(
     id: String,
     openChat: (String) -> Unit = {},
     back: () -> Unit = {},
+    selected: Boolean = true,
+    mission: Boolean = false,
     openRun: (String) -> Unit,
 ) {
-    val live = rememberLive(vm, state, "/runs/${segment(id)}/stream")
+    val live = rememberLive(vm, state, "/runs/${segment(id)}/stream", streaming = selected)
     val run = live.state?.run
     val events = live.events
     val more = live.catchingUp
@@ -148,11 +154,12 @@ fun RunScreen(
     var menu by remember { mutableStateOf(false) }
     var details by rememberSaveable(id) { mutableStateOf(false) }
     var fullscreen by rememberSaveable(id) { mutableStateOf(false) }
-    BackHandler(fullscreen) { fullscreen = false }
+    BackHandler(fullscreen && selected) { fullscreen = false }
+    LaunchedEffect(selected) { if (!selected) fullscreen = false }
     val focusMode = LocalFocusMode.current
-    DisposableEffect(fullscreen) {
-        focusMode(fullscreen)
-        onDispose { focusMode(false) }
+    DisposableEffect(fullscreen, selected) {
+        if (selected) focusMode(fullscreen)
+        onDispose { if (selected) focusMode(false) }
     }
     var tab by rememberSaveable(id) { mutableIntStateOf(1) }
     var autoTab by rememberSaveable(id) { mutableStateOf(true) }
@@ -188,6 +195,12 @@ fun RunScreen(
         rendering,
         followGesture,
     )
+    val task =
+        state.tasks.find { mission && run != null && run.trigger != "chat" && it.id == run.taskId }
+    val tabs =
+        listOf(1 to "Conversation", 0 to "Résultat", 2 to "Fichiers") +
+            listOfNotNull(task?.let { 3 to "Mission" })
+    LaunchedEffect(tab, task) { if (tab == 3 && task == null && run != null) tab = 1 }
     ArtifactLinkHost(vm, live.state?.artifacts.orEmpty()) {
         Column(Modifier.fillMaxSize()) {
             live.error?.let { ErrorNotice(it) {} }
@@ -259,6 +272,7 @@ fun RunScreen(
                             when (tab) {
                                 0 -> "Résultat"
                                 2 -> "Fichiers"
+                                3 -> "Mission"
                                 else -> "Conversation"
                             },
                             Modifier.weight(1f).padding(start = 16.dp),
@@ -305,11 +319,10 @@ fun RunScreen(
                     )
                 if (!fullscreen)
                     SecondaryTabRow(
-                        selectedTabIndex = listOf(1, 0, 2).indexOf(tab),
+                        selectedTabIndex = tabs.indexOfFirst { it.first == tab }.coerceAtLeast(0),
                         containerColor = MaterialTheme.colorScheme.background,
                     ) {
-                        listOf(1 to "Conversation", 0 to "Résultat", 2 to "Fichiers").forEach {
-                            (index, label) ->
+                        tabs.forEach { (index, label) ->
                             Tab(
                                 selected = tab == index,
                                 onClick = {
@@ -405,6 +418,10 @@ fun RunScreen(
                         }
                     }
                     2 -> Page { ArtifactsPanel(vm, live.state.artifacts) }
+                    3 ->
+                        task?.let {
+                            Page { Column { MissionPanel(vm, state, it, openRun, removed = back) } }
+                        }
                 }
                 if (details)
                     DetailSheet("Mission et détails", { details = false }) {

@@ -81,8 +81,9 @@ test('reads and creates conversations through the previous relay protocol', asyn
     await page.getByRole('button', { name: /^(Send|Queue)$/, exact: true }).click()
     await expect(page.getByRole('heading', { name: 'A conversation from the current version', exact: true })).toBeVisible()
     const conversationUrl = page.url()
-    const sourceInstallation = new URL(conversationUrl).pathname.split('/')[2]!
+    const sourceSlug = new URL(conversationUrl).pathname.split('/')[2]!
     const session = await (await page.request.get(`${url}/api/account/session`)).json()
+    const sourceInstallation = session.installations.find((item: { id: string, slug: string }) => item.slug === sourceSlug || item.id === sourceSlug)!.id
     const claim = await (await page.request.post(`${url}/api/installations/claim-code`, {
       headers: { 'origin': url, 'x-csrf-token': session.csrf },
       data: {},
@@ -129,7 +130,7 @@ test('reads and creates conversations through the previous relay protocol', asyn
     await once(previous, 'open')
     previous.send(JSON.stringify({ type: 'hello', versions: [1] }))
     await welcomed
-    await page.goto(conversationUrl.replace(sourceInstallation, identity.installationId))
+    await page.goto(conversationUrl.replace(sourceSlug, identity.installationId))
     await expect(page.getByRole('status', { name: 'Installation availability' })).toHaveText('Online')
     await expect(page.getByRole('heading', { name: 'A conversation from the current version', exact: true })).toBeVisible()
     await page.getByRole('link', { name: 'New conversation', exact: true }).first().click()

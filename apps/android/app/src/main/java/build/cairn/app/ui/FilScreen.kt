@@ -175,6 +175,23 @@ internal fun buildFeed(chats: List<Chat>, activity: List<Run>, tasks: List<Task>
     return Feed(forYou, running.sortedBy { it.startedAt ?: Long.MAX_VALUE }, recent)
 }
 
+/** The Fil in reading order, one key per item: what a swipe between pages moves through. */
+internal fun Feed.keys() = (forYou + running + recent).map { it.key }
+
+/** The latest run of each mission, polled while the Fil or its pager shows; null until loaded. */
+@Composable
+internal fun rememberFilActivity(vm: CairnViewModel): List<Run>? {
+    var activity by remember { mutableStateOf<List<Run>?>(null) }
+    Poll("fil-activity", 5000) {
+        try {
+            activity = vm.api.get("/tasks/activity")
+        } catch (e: Exception) {
+            vm.report(e)
+        }
+    }
+    return activity
+}
+
 internal fun feedSummary(feed: Feed): String {
     val parts = mutableListOf<String>()
     if (feed.running.isNotEmpty())
@@ -206,14 +223,7 @@ fun FilScreen(
     var connection by rememberSaveable { mutableStateOf(false) }
     if (connection)
         ConnectionSheet(vm, state, close = { connection = false }, openSettings = openSettings)
-    var activity by remember { mutableStateOf<List<Run>>(emptyList()) }
-    Poll("fil-activity", 5000) {
-        try {
-            activity = vm.api.get("/tasks/activity")
-        } catch (e: Exception) {
-            vm.report(e)
-        }
-    }
+    val activity = rememberFilActivity(vm).orEmpty()
     var now by remember { mutableLongStateOf(System.currentTimeMillis()) }
     LaunchedEffect(Unit) {
         while (true) {

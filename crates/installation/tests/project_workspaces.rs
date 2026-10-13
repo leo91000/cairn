@@ -126,7 +126,8 @@ async fn empty_start_does_not_touch_unselected_repositories_and_selected_start_l
         Path::new("/tmp"),
         &json!({ "args": [] }),
         None,
-    );
+    )
+    .unwrap();
     assert!(
         plan["writableRoots"]
             .as_array()
@@ -369,7 +370,7 @@ async fn builtin_mcp_endpoint_exposes_scoped_workspace_tools_and_checks_the_run_
         let value: Value = response.json().await.unwrap();
         assert!(value["error"].is_null(), "{value}");
         if method == "tools/list" {
-            assert_eq!(value["result"]["tools"].as_array().unwrap().len(), 7);
+            assert_eq!(value["result"]["tools"].as_array().unwrap().len(), 8);
             assert_eq!(value["result"]["tools"][2]["name"], "list_nodes");
             assert_eq!(value["result"]["tools"][1]["name"], "publish_artifact");
             assert_eq!(value["result"]["tools"][0]["name"], "open_project");

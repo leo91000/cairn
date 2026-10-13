@@ -50,6 +50,16 @@ data class ChatQuestion(
 )
 
 @Serializable
+data class ChatWakeup(
+    val id: String,
+    val messageId: String,
+    val reason: String,
+    val seconds: Long,
+    val createdAt: Long,
+    val wakeAt: Long,
+)
+
+@Serializable
 data class Chat(
     val id: String,
     val title: String = "Nouvelle conversation",
@@ -72,6 +82,7 @@ data class Chat(
     val restoredAt: Long? = null,
     val sessionRestartRequested: Boolean = false,
     val lifecycleError: String? = null,
+    val wakeup: ChatWakeup? = null,
 )
 
 @Serializable
@@ -136,7 +147,7 @@ data class HistoryPage(
 @Serializable data class ReasoningOption(val reasoningEffort: String, val description: String = "")
 
 @Serializable
-data class CodexModel(
+data class CodingAgentModel(
     val model: String,
     val displayName: String = "",
     val description: String = "",
@@ -148,7 +159,7 @@ data class CodexModel(
 
 @Serializable
 data class ModelCatalog(
-    val models: List<CodexModel> = emptyList(),
+    val models: List<CodingAgentModel> = emptyList(),
     val checkedAt: Long? = null,
     val stale: Boolean = false,
     val error: String = "",

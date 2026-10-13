@@ -36,12 +36,14 @@ import Markdown from './Markdown.vue'
 import ProjectLabel from './ProjectLabel.vue'
 
 // One mission as on Android: who runs it, when, what it asks, how it went, and what to do next.
-const props = defineProps<{
+// `runPath` is where its runs open: the Atelier from Missions, beside the Fil from the Fil.
+const props = withDefaults(defineProps<{
   task: Task
   latest?: RunListItem
   sheet?: boolean
   busy?: boolean
-}>()
+  runPath?: (runId: string) => string
+}>(), { runPath: (runId: string) => `/runs/${runId}` })
 const emit = defineEmits<{
   run: []
   edit: []
@@ -153,7 +155,7 @@ const statusLabels: Record<RunListItem['status'], string> = {
             v-if="latest"
             class="mission-menu-item"
             role="menuitem"
-            :to="`/runs/${latest.id}`"
+            :to="runPath(latest.id)"
           >
             <Icon :name="ArrowUpRight" :size="15" />Open the latest run
           </RouterLink>
@@ -235,7 +237,7 @@ const statusLabels: Record<RunListItem['status'], string> = {
     </p>
     <ul v-else class="m-0! list-none p-0!" aria-label="Run history">
       <li v-for="item in history" :key="item.id">
-        <RouterLink :to="`/runs/${item.id}`" class="flex min-h-14 items-center gap-3 rounded-xl py-1.5 hover:bg-hover/60">
+        <RouterLink :to="runPath(item.id)" class="flex min-h-14 items-center gap-3 rounded-xl py-1.5 hover:bg-hover/60">
           <span class="grid size-7.5 shrink-0 place-items-center rounded-[10px]" :class="tile(item.status).class"><Icon :name="tile(item.status).icon" :size="14" /></span>
           <span class="min-w-0 flex-1">
             <span class="block text-base font-semibold text-ink">{{ date(item.startedAt ?? item.createdAt) }}</span>

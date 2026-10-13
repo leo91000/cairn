@@ -26,7 +26,12 @@ import InstallationHeader from './InstallationHeader.vue'
 
 // The Fil: what needs the user, live work and recent conversations. J/K move the selection,
 // Enter opens it and / filters, as in a mail client.
-const props = withDefaults(defineProps<{ chats: ChatView[], selected?: string | null, compact?: boolean }>(), { selected: null, compact: false })
+const props = withDefaults(defineProps<{
+  chats: ChatView[]
+  selected?: string | null
+  selectedRun?: string | null
+  compact?: boolean
+}>(), { selected: null, selectedRun: null, compact: false })
 const router = useRouter()
 const runs = useMissionRuns()
 const filter = ref('')
@@ -58,9 +63,16 @@ watch(() => props.selected, (id) => {
   if (id)
     cursor.value = `chat:${id}`
 })
+watch(() => props.selectedRun, (id) => {
+  const item = id && flat.value.find(item => item.runId === id)
+  if (item)
+    cursor.value = item.key
+}, { immediate: true })
+
+const opened = (item: FilItem) => (item.chatId && item.chatId === props.selected) || (item.runId && item.runId === props.selectedRun)
 
 function current(item: FilItem) {
-  return (item.chatId && item.chatId === props.selected) || cursor.value === item.key
+  return opened(item) || cursor.value === item.key
 }
 
 function badge(item: FilItem) {
@@ -242,7 +254,7 @@ onBeforeUnmount(() => document.removeEventListener('keydown', key))
                 :data-fil-key="item.key"
                 class="group relative flex w-full items-center gap-3 rounded-xl px-3 py-2.5 text-left transition-colors duration-150"
                 :class="current(item) ? 'bg-hover' : 'hover:bg-hover/70'"
-                :aria-current="item.chatId && item.chatId === selected ? 'page' : undefined"
+                :aria-current="opened(item) ? 'page' : undefined"
                 @click="open(item)"
               >
                 <span class="absolute left-0 top-1/2 h-6 w-[3px] -translate-y-1/2 rounded-full bg-accent transition-transform duration-300" :class="current(item) ? 'scale-y-100' : 'scale-y-0'" />

@@ -6,12 +6,13 @@ import type {
 } from '../../../packages/contracts/contracts'
 import type { McpView } from '../../../packages/contracts/mcp'
 import { reactive, watch } from 'vue'
+import { beaconOrigin, installationHost } from './beacon-location'
 import { clearHistoryCache } from './history-cache'
 import { InstallationTransport } from './installation-transport'
 
 // Resolve the beacon context before any shared view reads its local cache.
 export const beaconEntry = typeof document !== 'undefined' && document.getElementById('app')?.hasAttribute('data-beacon')
-const installationId = beaconEntry ? /^\/installations\/([\w-]+)(?:\/|$)/.exec(window.location.pathname)?.[1] || '' : ''
+export const installationRoute = beaconEntry ? installationHost || /^\/installations\/([\w-]+)(?:\/|$)/.exec(window.location.pathname)?.[1] || '' : ''
 
 export const state = reactive({
   transportRoute: 'relay' as 'direct' | 'relay',
@@ -20,7 +21,7 @@ export const state = reactive({
   signingOut: false,
   redirecting: false,
   csrf: '',
-  installationId,
+  installationId: '',
   installationOnline: undefined as boolean | undefined,
   installationUpdateRequired: false,
   accountId: '',
@@ -128,7 +129,7 @@ export function apiResourceUrl(value: string) {
     return value
   try {
     const url = new URL(value, window.location.origin)
-    if (url.origin === window.location.origin && url.pathname.startsWith('/api/') && !url.pathname.startsWith('/api/installations/') && !url.pathname.startsWith('/api/public/'))
+    if ((url.origin === window.location.origin || url.origin === beaconOrigin) && url.pathname.startsWith('/api/') && !url.pathname.startsWith('/api/installations/') && !url.pathname.startsWith('/api/public/'))
       return apiUrl(`${url.pathname.slice(4)}${url.search}${url.hash}`)
   }
   catch {}
@@ -211,7 +212,7 @@ export async function signOut() {
   state.signingOut = true
   try {
     await logoutAccount()
-    window.location.assign('/')
+    window.location.assign(`${beaconOrigin}/`)
   }
   catch (e) {
     notify((e as Error).message)

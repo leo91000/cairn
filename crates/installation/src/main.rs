@@ -234,12 +234,9 @@ async fn prepare_execution() -> Result<()> {
 async fn chat_command(binary: Option<&String>, stop: CancellationToken) -> Result<i32> {
     let plan = read_stdin_json().await?;
     let mut config = Config::load()?;
+    let provider = cairn_installation::provider::Provider::of_agent(&plan)?;
     if let Some(binary) = binary {
-        if plan["provider"] == "claude" {
-            config.claude_bin = binary.clone();
-        } else {
-            config.codex_bin = binary.clone();
-        }
+        provider.adapter().set_binary(&mut config, binary.clone());
     }
     chat(&config, plan, stop).await
 }
@@ -264,12 +261,18 @@ async fn runner_entry(stop: CancellationToken) -> Result<i32> {
         // Launch a Rust chat process with its complete private environment;
         // changing global process environment after Tokio starts is unsafe.
         let binary = std::env::current_exe()?;
-        let claude = plan["chat"]["provider"] == "claude";
-        if claude {
-            env.insert("CLAUDE_CONFIG_DIR".into(), "/home/node/.claude".into());
+        let provider = cairn_installation::provider::Provider::of_agent(&plan["chat"])?;
+        let adapter = provider.adapter();
+        let state_home = Path::new("/home/node").join(adapter.state_directory());
+        for engine in cairn_installation::provider::Provider::ALL {
+            let adapter = engine.adapter();
+            adapter.isolate_environment(
+                &mut env,
+                &Path::new("/home/node").join(adapter.state_directory()),
+            );
         }
-        let provider = if claude { "claude" } else { "codex" };
-        let args = vec!["chat".to_owned(), provider.to_owned()];
+        adapter.configure_environment(&mut env, &state_home);
+        let args = vec!["chat".to_owned(), provider.as_str().to_owned()];
         let binary = binary
             .to_str()
             .ok_or_else(|| Error::bad("Invalid executable path."))?;
@@ -407,17 +410,12 @@ where
 }
 
 async fn chat(config: &Config, plan: Value, stop: CancellationToken) -> Result<i32> {
-    let home = std::env::var("CODEX_HOME").map_err(|_| Error::bad("Missing Codex home."))?;
     let (tx, mut rx) = tokio::sync::mpsc::channel::<Value>(32);
     let run_id = cairn_installation::performance::identity(text(&plan, "runId"));
     let attempt_id = cairn_installation::performance::identity(text(&plan, "attemptId"));
     let span =
         tracing::info_span!(target: "cairn_performance", "agent_attempt", run_id, attempt_id);
-    let provider = if plan["provider"] == "claude" {
-        cairn_installation::provider::Provider::Claude
-    } else {
-        cairn_installation::provider::Provider::Codex
-    };
+    let provider = cairn_installation::provider::Provider::of_agent(&plan)?;
     let mut activity =
         cairn_installation::performance::Activity::new(run_id, attempt_id, "adapter", provider);
     let output = tokio::spawn(
@@ -450,24 +448,11 @@ async fn chat(config: &Config, plan: Value, stop: CancellationToken) -> Result<i
         }
         .instrument(span.clone()),
     );
-    let result = async {
-        if plan["provider"] == "claude" {
-            return cairn_installation::claude_process::run(config, plan, tx.clone(), stop).await;
-        }
-        if let Ok(socket) = std::env::var("CAIRN_CODEX_SERVICE") {
-            return cairn_installation::chat_process::resident::run(
-                Path::new(&socket),
-                plan,
-                tx.clone(),
-                stop,
-            )
-            .await;
-        }
-        cairn_installation::chat_process::run(config, Path::new(&home), plan, tx.clone(), stop)
-            .await
-    }
-    .instrument(span)
-    .await;
+    let result = provider
+        .adapter()
+        .run(config, plan, tx.clone(), stop)
+        .instrument(span)
+        .await;
     if let Err(error) = &result {
         let failure = json!({
             "type": "turn.failed",

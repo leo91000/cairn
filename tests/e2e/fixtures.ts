@@ -27,18 +27,19 @@ export interface Workspace {
   api: (route: string, method?: string, body?: unknown) => Promise<any>
   signIn: (page: Page) => Promise<void>
   installationId: string
+  installationSlug: string
   setAccountUsage: (id: string, value: unknown) => Promise<void>
 }
 
 // One application per worker; navigation and sign-in share its real beacon context.
-let currentWorkspace: Pick<Workspace, 'url' | 'installationId' | 'signIn'> | undefined
+let currentWorkspace: Pick<Workspace, 'url' | 'installationId' | 'installationSlug' | 'signIn'> | undefined
 
 export function workspacePath(route: string) {
   if (route.startsWith(currentWorkspace!.url))
     route = route.slice(currentWorkspace!.url.length)
   if (!route.startsWith('/') || route.startsWith('/installations/') || route.startsWith('/oauth') || route.startsWith('/authorize'))
     return route
-  return `/installations/${currentWorkspace!.installationId}${route}`
+  return `/installations/${currentWorkspace!.installationSlug}${route}`
 }
 
 export async function signIn(page: Page) {
@@ -135,6 +136,7 @@ export const test = base.extend<object, { workspace: Workspace }>({
 
     let headers: Record<string, string> = { 'content-type': 'application/json', 'origin': url }
     let installationId = ''
+    let installationSlug = ''
     const login = async () => {
       // Request a real email proof; never weaken the service's delivery limits.
       let challenge: { challenge: string } | undefined
@@ -233,9 +235,15 @@ export const test = base.extend<object, { workspace: Workspace }>({
         const response = await fetch(`${url}/api/installations`, { headers })
         const installations = await response.json()
         installationId = installations[0]?.id || ''
+        installationSlug = installations[0]?.slug || installationId
         return installations[0]?.online === true
       }, { timeout: 15000 }).toBe(true)
-      currentWorkspace = { url, installationId, signIn }
+      currentWorkspace = {
+        url,
+        installationId,
+        installationSlug,
+        signIn,
+      }
 
       if (workerInfo.project.name !== 'journeys') {
         const agent = service.agent({ name: 'Release engineer' })
@@ -262,6 +270,7 @@ export const test = base.extend<object, { workspace: Workspace }>({
         url,
         installationUrl: managerUrl,
         installationId,
+        installationSlug,
         signIn,
         projectPath,
         service,
@@ -321,10 +330,19 @@ export function initializeRepository(projectPath: string) {
   execFileSync('git', ['-C', projectPath, '-c', 'user.name=Test', '-c', 'user.email=test@example.test', 'commit', '--allow-empty', '-m', 'Initial'])
 }
 
+// A followed reader stays at the end when its viewport shrinks; a paused one keeps its offset.
+export async function expectFollowing(page: Page) {
+  const scroller = page.getByRole('region', { name: 'Activity output' })
+  const viewport = page.viewportSize()!
+  await page.setViewportSize({ ...viewport, height: viewport.height - 120 })
+  await expect.poll(() => scroller.evaluate(el => el.scrollHeight - el.clientHeight - el.scrollTop)).toBeLessThan(2)
+  await page.setViewportSize(viewport)
+}
+
 // Mobile keeps status in Chat details instead of a permanent metadata row.
 export async function expectChatReady(page: Page) {
   const details = page.getByRole('button', { name: 'Chat details', exact: true })
-  const mobile = await details.isVisible()
+  const mobile = (page.viewportSize()?.width ?? 1280) <= 640
   if (mobile)
     await details.click()
   const context = mobile ? page.getByRole('dialog', { name: 'Chat details', exact: true }) : page

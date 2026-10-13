@@ -577,13 +577,16 @@ async fn raw_route(app: &App, path: &str, request: Request) -> Result<Route> {
             }
         }
         ["", "api", "chats", chat, "attachments", id] => {
-            s.attachment_http(chat, id, request).await?
+            let chat = resolve_chat_id(s, chat).await?;
+            s.attachment_http(&chat, id, request).await?
         }
         ["", "api", "chats", "stream"] => {
             crate::live::http(s.clone(), "chats", "", Input::read(request).await?).await?
         }
         ["", "api", "chats", id, "stream"] => {
-            crate::live::http(s.clone(), "chats", id, Input::read(request).await?).await?
+            let input = Input::read(request).await?;
+            let id = resolve_chat_id(s, id).await?;
+            crate::live::http(s.clone(), "chats", &id, input).await?
         }
         _ => return Ok(Route::Next(request)),
     };
@@ -649,14 +652,38 @@ async fn run_pages(s: &Service, input: &Input) -> Result<Option<Response>> {
     Ok(Some(json_bytes(bytes)))
 }
 
+/// Resolve conversation aliases without changing internal UUID identities.
+async fn resolve_chat_id(service: &Service, key: &str) -> Result<String> {
+    if uuid(key).is_ok() {
+        return Ok(key.to_owned());
+    }
+    let slug = key.to_owned();
+    service
+        .store
+        .read(move |db| crate::error::required(db.chat_id_for_slug(&slug)?, "Chat not found"))
+        .await
+}
+
 async fn api(State(app): State<App>, request: Request) -> Result<Response> {
     let path = request.uri().path().to_owned();
     let request = match raw_route(&app, &path, request).await? {
         Route::Done(response) => return Ok(response),
         Route::Next(request) => request,
     };
-    let input = Input::read(request).await?;
+    let mut input = Input::read(request).await?;
     let s = &app.service;
+    if let Some(rest) = input.path.strip_prefix("/api/chats/") {
+        let (key, tail) = rest.split_once('/').unwrap_or((rest, ""));
+        if key != "stream" && uuid(key).is_err() {
+            let id = resolve_chat_id(s, key).await?;
+            input.path = if tail.is_empty() {
+                format!("/api/chats/{id}")
+            } else {
+                format!("/api/chats/{id}/{tail}")
+            };
+        }
+    }
+
     if let Some(response) = run_pages(s, &input).await? {
         return Ok(response);
     }

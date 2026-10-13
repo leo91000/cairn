@@ -1,6 +1,7 @@
 import type { ChatView } from '../../../packages/contracts/chats'
 import type { RunEvent, RunListItem, Task } from '../../../packages/contracts/contracts'
 import type { ActivityEntry } from './activity'
+import { chatPath } from './workspace-links'
 
 // Same identity palette as the Android « Signal » design: readable on white text in both themes.
 const identityColors = ['#14365A', '#D9542F', '#B23F8C', '#12806F', '#8A5A12', '#3F7FBF', '#7A4FD1', '#5E6B2E']
@@ -28,8 +29,12 @@ export interface FilItem {
   to: string
   chatId?: string
   taskId?: string
+  runId?: string
 }
 export interface Fil { forYou: FilItem[], live: FilItem[], recent: FilItem[] }
+
+/** Missions open beside the Fil, as conversations do, rather than in the Atelier. */
+export const filRunPath = (runId: string) => `/fil/runs/${runId}`
 
 const outcomeLabels = { blocked: 'Blocked', needs_input: 'Needs your input' } as const
 
@@ -52,7 +57,7 @@ export function filOf(chats: ChatView[], tasks: Task[], runs: RunListItem[]): Fi
       agentKey: chat.agentId,
       project: chat.projectName,
       at: chat.updatedAt,
-      to: `/chats/${chat.id}`,
+      to: chatPath(chat),
       chatId: chat.id,
     }
     if (chat.pendingQuestions > 0)
@@ -89,8 +94,9 @@ export function filOf(chats: ChatView[], tasks: Task[], runs: RunListItem[]): Fi
       agentKey: task.agentId,
       project: null,
       at: run.finishedAt ?? run.startedAt ?? run.createdAt,
-      to: `/runs/${run.id}`,
+      to: filRunPath(run.id),
       taskId: task.id,
+      runId: run.id,
     }
     if (run.status === 'running' || run.status === 'queued')
       live.push({ ...base, kind: run.status === 'running' ? 'running' : 'queued', subtitle: run.status === 'running' ? 'Mission running' : 'Mission waiting for a runner' })

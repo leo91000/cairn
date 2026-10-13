@@ -1,5 +1,5 @@
 //! Execution plan written by the manager for one VM attempt.
-use crate::{execution::Sandbox, provider::Provider, validation::text};
+use crate::{error::Result, execution::Sandbox, provider::Provider, validation::text};
 use serde_json::Value;
 use std::path::Path;
 
@@ -87,7 +87,7 @@ impl Plan {
         self.0["chat"]["output"].as_str()
     }
 
-    pub fn chat_provider(&self) -> Provider {
+    pub fn chat_provider(&self) -> Result<Provider> {
         Provider::of_agent(&self.0["chat"])
     }
 

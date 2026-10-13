@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { onMounted, ref } from 'vue'
-import { accountApi, state } from '../api'
+import { accountApi, redirect, state } from '../api'
+import { accountSettingsUrl, installationHost } from '../beacon-location'
 import { BellRing } from '../icons'
 import AccountConfirmation from './AccountConfirmation.vue'
 import Icon from './Icon.vue'
@@ -21,7 +22,7 @@ const installed = window.matchMedia('(display-mode: standalone)').matches || (na
 let registration: ServiceWorkerRegistration | undefined
 onMounted(async () => {
   try {
-    if (!supported || !signedIn)
+    if (installationHost || !supported || !signedIn)
       return
     registration = await navigator.serviceWorker.getRegistration()
     const subscription = await registration?.pushManager.getSubscription()
@@ -112,6 +113,11 @@ async function toggle() {
     <p v-if="!signedIn" class="text-xs text-muted">
       Sign in to your Cairn account to manage push notifications on this device.
     </p>
+    <div v-else-if="installationHost">
+      <UiButton size="small" @click="redirect(accountSettingsUrl(installationHost))">
+        Manage notifications
+      </UiButton>
+    </div>
     <p v-else-if="ios && !installed" class="text-xs text-muted">
       On iPhone or iPad, add Cairn to your Home Screen from Safari’s Share menu, then enable notifications in that app.
     </p>
@@ -139,7 +145,7 @@ async function toggle() {
         {{ busy ? 'Updating…' : enabled ? 'Disable on this device' : 'Enable on this device' }}
       </UiButton><span v-if="enabled" class="text-[11px] text-accent" role="status">Notifications on</span>
     </div>
-    <p v-if="signedIn && supported && !enabled" class="text-xs text-muted">
+    <p v-if="signedIn && supported && !enabled && !installationHost" class="text-xs text-muted">
       Confirm with an email code or passkey before enabling notifications. Google or GitHub sign-in alone doesn’t confirm this action.
     </p>
     <UiAlert v-if="error">

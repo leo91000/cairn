@@ -42,6 +42,7 @@ impl EmailSender for Mailbox {
 
 pub struct Fixture {
     pub url: String,
+    pub browser_origin: String,
     pub client: Client,
     pub mail: Arc<Mailbox>,
     pub pool: PgPool,
@@ -96,7 +97,7 @@ impl Fixture {
         proxies: cairn_beacon::TrustedProxies,
         push: Option<Arc<dyn cairn_beacon::PushSender>>,
     ) -> Self {
-        Self::with_socket_buffer(oauth, connections, proxies, push, None).await
+        Self::with_socket_buffer(oauth, connections, proxies, push, None, false).await
     }
 
     pub async fn with_small_socket_buffer() -> Self {
@@ -106,6 +107,19 @@ impl Fixture {
             cairn_beacon::TrustedProxies::default(),
             None,
             Some(1024),
+            false,
+        )
+        .await
+    }
+
+    pub async fn with_subdomains() -> Self {
+        Self::with_socket_buffer(
+            cairn_beacon::OAuthProviders::default(),
+            5,
+            cairn_beacon::TrustedProxies::default(),
+            None,
+            None,
+            true,
         )
         .await
     }
@@ -116,6 +130,7 @@ impl Fixture {
         proxies: cairn_beacon::TrustedProxies,
         push: Option<Arc<dyn cairn_beacon::PushSender>>,
         send_buffer: Option<u32>,
+        subdomains: bool,
     ) -> Self {
         let database = std::env::var("CAIRN_BEACON_TEST_DATABASE_URL")
             .expect("Set CAIRN_BEACON_TEST_DATABASE_URL to a disposable Postgres database");
@@ -143,12 +158,17 @@ impl Fixture {
             tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap()
         };
         let url = format!("http://localhost:{}", listener.local_addr().unwrap().port());
+        let browser_origin = if subdomains {
+            url.replace("localhost", "cairn.localhost")
+        } else {
+            url.clone()
+        };
         let mail = Arc::new(Mailbox::default());
         let relay = cairn_beacon::Relay::default();
-        let app = cairn_beacon::router_with_network_and_push(
+        let app = cairn_beacon::router_with_installation_hosts(
             pool.clone(),
             mail.clone(),
-            url.clone(),
+            cairn_beacon::InstallationHosts::new(&browser_origin, subdomains).unwrap(),
             oauth,
             relay.clone(),
             proxies,
@@ -166,6 +186,7 @@ impl Fixture {
         });
         Self {
             url,
+            browser_origin,
             client: Client::new(),
             mail,
             pool,
@@ -179,7 +200,13 @@ impl Fixture {
     pub async fn post(&self, route: &str, body: Value) -> reqwest::Response {
         self.client
             .post(format!("{}{route}", self.url))
-            .header("origin", &self.url)
+            .header("origin", &self.browser_origin)
+            .header(
+                "host",
+                reqwest::Url::parse(&self.browser_origin)
+                    .unwrap()
+                    .authority(),
+            )
             .json(&body)
             .send()
             .await
@@ -195,7 +222,13 @@ impl Fixture {
     ) -> reqwest::RequestBuilder {
         self.client
             .request(method, format!("{}{route}", self.url))
-            .header("origin", &self.url)
+            .header("origin", &self.browser_origin)
+            .header(
+                "host",
+                reqwest::Url::parse(&self.browser_origin)
+                    .unwrap()
+                    .authority(),
+            )
             .header("cookie", cookie)
             .header("x-csrf-token", session["csrf"].as_str().unwrap())
     }
@@ -247,7 +280,12 @@ pub async fn login(app: &Fixture, email: &str) -> (String, Value) {
             json!({ "challenge": challenge["challenge"], "code": code }),
         )
         .await;
-    let cookie = response.headers()["set-cookie"]
+    let cookie = response
+        .headers()
+        .get_all("set-cookie")
+        .iter()
+        .next_back()
+        .unwrap()
         .to_str()
         .unwrap()
         .split(';')

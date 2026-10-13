@@ -89,9 +89,11 @@ watch(() => [state.installationRole, route.path], () => {
     void router.replace('/atelier')
 }, { immediate: true })
 
-const place = computed(() => route.path === '/' || route.path.startsWith('/chats') ? 0 : route.path.startsWith('/tasks') ? 1 : atelierPaths.some(path => route.path.startsWith(path)) ? 2 : -1)
+// A mission opened from the Fil stays in the Fil, beside it as a conversation does.
+const filPage = computed(() => route.path === '/' || route.path.startsWith('/fil/'))
+const place = computed(() => filPage.value || route.path.startsWith('/chats') ? 0 : route.path.startsWith('/tasks') ? 1 : atelierPaths.some(path => route.path.startsWith(path)) ? 2 : -1)
 // Reading screens take the whole phone; the dock returns on the three places.
-const reading = computed(() => route.path.startsWith('/chats') || /^\/runs\/./.test(route.path) || route.path === '/authorize' || route.path.startsWith('/settings/'))
+const reading = computed(() => route.path.startsWith('/chats') || /^\/(?:fil\/)?runs\/./.test(route.path) || route.path === '/authorize' || route.path.startsWith('/settings/'))
 const chats = useChatList()
 const runs = useMissionRuns({ eager: false })
 const fil = computed(() => filOf(chats.value, state.tasks, runs.value))
@@ -273,11 +275,11 @@ function openShortcuts() {
     <main
       class="page flex-1 min-h-0 min-w-0 overflow-auto overscroll-contain [scrollbar-width:thin] [&.page-default]:mx-auto [&.page-default]:w-full [&.page-default]:max-w-340 [&.page-default]:px-9 [&.page-default]:pt-8 [&.page-default]:pb-7 tablet:[&.page-default]:px-6 phone:[&.page-default]:px-3 phone:[&.page-default]:pt-[max(14px,env(safe-area-inset-top))] phone:[&.page-default]:pb-32 [&.page-tasks]:flex [&.page-tasks]:flex-col [&.page-tasks]:overflow-hidden phone:[&.page-tasks]:pb-24 [&.page-run]:flex [&.page-run]:flex-col [&.page-run]:overflow-hidden [&.page-fil]:overflow-hidden"
       :class="{
-        'page-fil': route.path === '/',
+        'page-fil': filPage,
         'page-tasks': route.path === '/tasks',
         'page-run': /^\/runs\/./.test(route.path) || route.path.startsWith('/chats'),
         'page-chat': route.path.startsWith('/chats'),
-        'page-default': route.path !== '/' && !route.path.startsWith('/chats'),
+        'page-default': !filPage && !route.path.startsWith('/chats'),
       }"
     >
       <nav v-if="atelierSection" class="atelier-sections -mx-1 mb-6 flex items-center gap-1 overflow-x-auto px-1 pb-1 [scrollbar-width:none] phone:mb-4" aria-label="Atelier sections">
@@ -295,9 +297,9 @@ function openShortcuts() {
           {{ item.label }}
         </RouterLink>
       </nav>
-      <!-- Chats stays mounted between conversations so switching swaps content in place. -->
+      <!-- Chats and the Fil stay mounted between what they open so switching swaps content in place. -->
       <RouterView v-if="state.installationRole === 'owner' || !ownerPage(route.path)" v-slot="{ Component }">
-        <component :is="Component" :key="route.path.startsWith('/chats/') ? '/chats' : route.path">
+        <component :is="Component" :key="route.path.startsWith('/chats/') ? '/chats' : filPage ? '/' : route.path">
           <template #account>
             <slot name="settings-account" />
           </template>

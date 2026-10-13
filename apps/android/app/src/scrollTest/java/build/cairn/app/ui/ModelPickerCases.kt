@@ -22,7 +22,7 @@ abstract class ModelPickerCases {
         ModelCatalog(
             models =
                 listOf(
-                    CodexModel(
+                    CodingAgentModel(
                         "large",
                         "Grand modèle",
                         isDefault = true,
@@ -32,15 +32,15 @@ abstract class ModelPickerCases {
                                 ReasoningOption(it)
                             },
                     ),
-                    CodexModel(
+                    CodingAgentModel(
                         "fast",
                         "Modèle rapide",
                         defaultReasoningEffort = "low",
                         supportedReasoningEfforts =
                             listOf(ReasoningOption("low"), ReasoningOption("high")),
                     ),
-                    CodexModel("hidden", "Modèle masqué", hidden = true),
-                ) + (1..5).map { CodexModel("extra-$it", "Modèle annexe $it") }
+                    CodingAgentModel("hidden", "Modèle masqué", hidden = true),
+                ) + (1..5).map { CodingAgentModel("extra-$it", "Modèle annexe $it") }
         )
 
     protected open fun captureReasoning() = Unit
@@ -133,13 +133,13 @@ abstract class ModelPickerCases {
         val claude =
             ModelCatalog(
                 listOf(
-                    CodexModel(
+                    CodingAgentModel(
                         "default",
                         "Default (recommended)",
                         "Opus avec 1M de contexte",
                         isDefault = true,
                     ),
-                    CodexModel("sonnet", "Sonnet"),
+                    CodingAgentModel("sonnet", "Sonnet"),
                 )
             )
         compose.setContent {

@@ -44,17 +44,6 @@ import kotlinx.serialization.json.buildJsonObject
  * sign-in sheet for every coding agent. Selection rules and statuses come from the server.
  */
 
-internal data class CodingAgent(val provider: String, val vendor: String, val subscription: String)
-
-internal val codingAgents =
-    listOf(
-        CodingAgent("codex", "OpenAI", "Compte ChatGPT"),
-        CodingAgent("claude", "Anthropic", "Compte Claude"),
-    )
-
-internal fun codingAgent(provider: String) =
-    codingAgents.find { it.provider == provider } ?: codingAgents.first()
-
 /** Remaining percentage under which a window is running low. */
 internal const val LowPercent = 10.0
 

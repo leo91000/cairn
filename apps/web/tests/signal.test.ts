@@ -152,7 +152,13 @@ describe('the Fil', () => {
       ['audit', 'failed-mission', 'Tests failed'],
       ['digest', 'review', 'Blocked · Needs a GitHub token'],
     ])
-    expect(fil.live).toMatchObject([{ title: 'triage', kind: 'running', to: '/runs/triage-1' }])
+    // Missions open beside the Fil, like conversations.
+    expect(fil.live).toMatchObject([{
+      title: 'triage',
+      kind: 'running',
+      to: '/fil/runs/triage-1',
+      runId: 'triage-1',
+    }])
   })
 })
 

@@ -10,7 +10,9 @@ accent and motion that only means an agent is working.
   conversations and missions) and recent conversations. `apps/web/src/signal.ts` groups
   them; only the latest run of each mission counts and chat runs stay with their
   conversation. On wide screens the Fil stays beside the open conversation, like a
-  mail client.
+  mail client. A mission opens the same way (`/fil/runs/:id`): its latest run beside the
+  Fil, with a **Mission** tab holding the mission's schedule, history and actions. Runs it
+  starts stay beside the Fil; `/runs/:id` remains the Atelier's run page.
 - **Missions** (`/tasks`): scheduled and one-off tasks with their runs.
 - **Atelier** (`/atelier`): agents, projects, skills, MCP servers, connections,
   the run journal and settings. Its pages share a section bar.
@@ -18,7 +20,8 @@ accent and motion that only means an agent is working.
 Desktop and tablet use a rail with a sliding indicator, badges (coral count of
 what needs you, a live dot while a mission runs), the new-conversation button,
 search, shortcuts, appearance and sign-out. Phones use a floating dock that hides
-while reading a conversation or a run; conversations go back to the Fil.
+while reading a conversation or a run; conversations and missions opened from the Fil go
+back to it.
 
 ## Keyboard
 

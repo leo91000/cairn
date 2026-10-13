@@ -32,6 +32,7 @@ import { refreshMissionRuns, useMissionRuns } from '../mission-runs'
 import { modifier } from '../shortcuts'
 import { filOf } from '../signal'
 import { setThemePreference, themePreference } from '../theme'
+import { chatPath } from '../workspace-links'
 import AgentAvatar from './AgentAvatar.vue'
 import Icon from './Icon.vue'
 
@@ -181,7 +182,7 @@ const commands = computed<Command[]>(() => {
         label: chat.title || 'New conversation',
         hint: [chat.agentName, chat.projectName].filter(Boolean).join(' · '),
         avatar: { name: chat.agentName, key: chat.agentId },
-        run: go(`/chats/${chat.id}`),
+        run: go(chatPath(chat)),
       })
     }
   }

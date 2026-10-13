@@ -67,7 +67,7 @@ async fn execute_inner(
     let mut timing = Operation::new("agent_prepare", &id, "mark_running");
     let mut execution = Execution {
         s,
-        provider: Provider::of_run(run),
+        provider: Provider::of_run(run)?,
         directory: s.config.data_dir.join("runs").join(&id),
         id,
         run,
@@ -115,7 +115,7 @@ struct Execution<'a> {
 /// The prepared execution environment shared by every launch attempt.
 struct Workspace {
     prepared: Value,
-    codex_home: PathBuf,
+    state_home: PathBuf,
     env: Environment,
     mcp: Value,
 }
@@ -180,10 +180,6 @@ struct RunnerStorage<'a> {
 }
 
 impl Execution<'_> {
-    fn claude(&self) -> bool {
-        self.provider == Provider::Claude
-    }
-
     fn stopping(&self) -> bool {
         self.cancel.is_cancelled() || self.s.shutdown.is_cancelled()
     }
@@ -246,7 +242,7 @@ impl Execution<'_> {
         let mut timing = Operation::new("workspace_prepare", &self.id, "execution");
         let prepared = self.prepare_execution(existing).await?;
         timing.next("account_home");
-        let codex_home = self.prepare_codex_home(&prepared).await?;
+        let state_home = self.prepare_state_home(&prepared).await?;
         let patch = json!({
             "workspace": prepared["cwd"],
             "workspaces": prepared["workspaces"],
@@ -256,7 +252,7 @@ impl Execution<'_> {
         s.store.patch_run(&self.id, patch).await?;
         timing.next("environment");
         let mut env = self
-            .environment(prepared["isolated"] == true, &codex_home)
+            .environment(prepared["isolated"] == true, &state_home)
             .await?;
         timing.next("mcp_configuration");
         let mcp = s.mcps.run_configuration(s, self.run).await?;
@@ -278,7 +274,7 @@ impl Execution<'_> {
         timing.finish();
         Ok(Workspace {
             prepared,
-            codex_home,
+            state_home,
             env,
             mcp,
         })
@@ -321,27 +317,17 @@ impl Execution<'_> {
         Ok(prepared)
     }
 
-    async fn prepare_codex_home(&mut self, prepared: &Value) -> Result<PathBuf> {
-        let s = self.s;
+    async fn prepare_state_home(&mut self, prepared: &Value) -> Result<PathBuf> {
         let isolated = prepared["isolated"] == true;
-        let codex_home = self
-            .directory
-            .join(if isolated { "home/.codex" } else { "codex" });
-        private_dir(&codex_home).await?;
-        let claude = self.claude();
-        if !claude && !isolated {
-            execution::codex_home(&s.config, &codex_home).await?;
-        }
-        if let Some(account) = self.account.as_mut()
-            && isolated
-            && !claude
-        {
-            s.accounts.relocate(s, account, &codex_home).await?;
-        }
-        Ok(codex_home)
+        let adapter = self.provider.adapter();
+        let home = adapter.state_home(&self.directory, isolated);
+        adapter
+            .prepare_home(self.s, &home, isolated, self.account.as_mut())
+            .await?;
+        Ok(home)
     }
 
-    async fn environment(&self, isolated: bool, codex_home: &Path) -> Result<Environment> {
+    async fn environment(&self, isolated: bool, state_home: &Path) -> Result<Environment> {
         let config = &self.s.config;
         let mut env = if isolated {
             std::env::vars().collect::<Environment>()
@@ -350,21 +336,12 @@ impl Execution<'_> {
         };
         crate::process::remove_storage_environment(&mut env);
         env.insert("HOME".into(), config.home.to_string_lossy().into_owned());
-        env.insert(
-            "CODEX_HOME".into(),
-            codex_home.to_string_lossy().into_owned(),
-        );
-        for key in ["OPENAI_API_KEY", "CODEX_API_KEY", "CODEX_THREAD_ID"] {
-            env.remove(key);
-        }
-        if self.claude() {
-            // The session belongs to the run, so it can continue on another Claude account.
-            let home = self.account.as_ref().map_or_else(
-                || self.directory.join("home/.claude"),
-                |account| account.home.clone(),
-            );
-            crate::claude::configure(&mut env, &home);
-        }
+        let home = self
+            .account
+            .as_ref()
+            .map_or(state_home, |account| &account.home);
+        self.provider
+            .configure_run_environment(&mut env, &self.directory, isolated, home);
         Ok(env)
     }
 
@@ -375,7 +352,7 @@ impl Execution<'_> {
             return Ok(None);
         }
         let session =
-            recovery::session(s, self.run, &workspace.codex_home, workspace.cwd()).await?;
+            recovery::session(s, self.run, &workspace.state_home, workspace.cwd()).await?;
         let patch = json!({
             "sessionId": session,
             "resumeCount": self.run["resumeCount"].as_u64().unwrap_or(0) + 1,
@@ -413,26 +390,21 @@ impl Execution<'_> {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(error) => return Err(error.into()),
         }
-        if !self.claude() {
-            let home = self
-                .account
-                .as_ref()
-                .map_or(&workspace.codex_home, |account| &account.home);
-            workspace
-                .env
-                .insert("CODEX_HOME".into(), home.to_string_lossy().into_owned());
-        }
-        let mut args = workspace.mcp["args"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .filter_map(Value::as_str)
-            .map(str::to_owned)
-            .collect::<Vec<_>>();
-        args.extend(run_output::args(self.run, &output, resume));
+        let adapter = self.provider.adapter();
+        let isolated = workspace.isolated();
+        let home = self
+            .account
+            .as_ref()
+            .map_or(&workspace.state_home, |account| &account.home);
+        self.provider.configure_run_environment(
+            &mut workspace.env,
+            &self.directory,
+            isolated,
+            home,
+        );
         let mut launch = Launch {
-            binary: s.config.codex_bin.clone(),
-            args,
+            binary: adapter.binary(&s.config).to_owned(),
+            args: adapter.legacy_args(self.run, &workspace.mcp, &output, resume),
             prompt: self.prompt(resume).await?,
         };
         let auth_broker = match self.account.as_ref() {
@@ -555,9 +527,9 @@ impl Execution<'_> {
         launch: &mut Launch,
     ) -> Result<Option<Value>> {
         let s = self.s;
-        let claude = self.claude();
+        let adapter = self.provider.adapter();
         let chat_execution = self.run["chatExecution"].is_object();
-        if !claude && !chat_execution && self.account.is_none() {
+        if !adapter.uses_chat(chat_execution, self.account.is_some()) {
             return Ok(None);
         }
         private_dir(&self.directory.join("chat-input")).await?;
@@ -569,13 +541,10 @@ impl Execution<'_> {
             &self.directory,
             &workspace.mcp,
             resume,
-        );
+        )?;
         // Optional fields: retained older adapters can ignore them.
         chat["runId"] = self.id.clone().into();
         chat["attemptId"] = self.attempt_id.clone().into();
-        if claude {
-            chat["claudeManagedAuth"] = self.account.is_some().into();
-        }
         if !chat_execution {
             // Scheduled work uses the same authenticated protocol as
             // chats, while retaining its own task brief and session.
@@ -586,25 +555,11 @@ impl Execution<'_> {
                 "attachments": [],
             });
         }
-        if !claude && text(&chat, "reasoning").is_empty() {
-            let source = self
-                .account
-                .as_ref()
-                .map_or("", |account| account.account_id.as_str());
-            if let Some((model, effort)) =
-                crate::models::cached_defaults(s, source, text(&chat, "model")).await?
-            {
-                chat["model"] = model.into();
-                chat["reasoning"] = effort.into();
-            }
-        }
-        let agent_binary = if claude {
-            &s.config.claude_bin
-        } else {
-            &s.config.codex_bin
-        };
+        adapter
+            .configure_plan(s, &mut chat, self.account.as_ref())
+            .await?;
         launch.binary = current_exe()?;
-        launch.args = vec!["chat".into(), agent_binary.clone()];
+        launch.args = vec!["chat".into(), adapter.binary(&s.config).to_owned()];
         launch.prompt = chat.to_string();
         Ok(Some(chat))
     }
@@ -922,11 +877,10 @@ impl Execution<'_> {
         let Some(account) = self.account.as_mut() else {
             return Ok(());
         };
-        if workspace.isolated() || self.provider == Provider::Claude {
-            s.accounts.relocate(s, account, &previous.home).await?;
-        } else {
-            execution::codex_home(&s.config, &account.home).await?;
-        }
+        self.provider
+            .adapter()
+            .rotate_account(s, account, &previous.home, workspace.isolated())
+            .await?;
         self.sensitive
             .extend(s.accounts.redactions(s, account).await?);
         let name = s.accounts.get(s, &account.account_id).await?["name"].clone();

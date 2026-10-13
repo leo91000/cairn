@@ -77,10 +77,10 @@ pub async fn prepare(
     run: &Value,
     config: &Config,
     github: Option<&str>,
-    codex_home: Option<&Path>,
+    account_home: Option<&Path>,
     generation: Option<&str>,
 ) -> Result<Value> {
-    let prepared = prepare_execution(run, config, github, codex_home, generation).await?;
+    let prepared = prepare_execution(run, config, github, account_home, generation).await?;
     Ok(serde_json::to_value(prepared)?)
 }
 
@@ -88,7 +88,7 @@ pub async fn prepare_execution(
     run: &Value,
     config: &Config,
     github: Option<&str>,
-    codex_home: Option<&Path>,
+    account_home: Option<&Path>,
     generation: Option<&str>,
 ) -> Result<Prepared> {
     let directory = run_directory(run, config);
@@ -142,7 +142,7 @@ pub async fn prepare_execution(
     let options = HomeOptions {
         github,
         github_access: policy(&run["snapshot"]["agent"])["github"] == true,
-        codex_home,
+        account_home,
     };
     let skills = home::prepare_home(run, &home, config, &options).await?;
     mounts.insert(0, Mount::same(&root, false));

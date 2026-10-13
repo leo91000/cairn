@@ -209,7 +209,9 @@ class SignalJourneyTest {
                                                         "/api/installations/fixture/api/runs/"
                                                     )
                                                     .removeSuffix("/stream"),
+                                                taskId = "daily",
                                                 status = "running",
+                                                trigger = "schedule",
                                                 snapshot = Snapshot(task = daily, agent = main),
                                             )
                                     )
@@ -331,6 +333,38 @@ class SignalJourneyTest {
         waitText("Répondre")
         compose.onNodeWithText("Répondre").performClick()
         waitDescription("Changer de conversation : Choisir la pagination")
+    }
+
+    private fun waitPage(tag: String) =
+        compose.waitUntil(15000) {
+            compose.onAllNodes(hasTestTag(tag) and isSelected()).fetchSemanticsNodes().isNotEmpty()
+        }
+
+    @Test
+    fun `a mission opens beside its conversations and swipes follow the Fil`() = journey {
+        waitText("1 agent au travail · 2 éléments pour vous")
+        compose.onNodeWithText("Revue quotidienne").performClick()
+        waitPage("run-page:failed-run")
+        // The mission itself is one tab away from its run.
+        waitText("Mission")
+        compose.onNodeWithText("Mission").performClick()
+        waitText("Lancer maintenant")
+        compose.onNodeWithContentDescription("Modifier la mission").assertExists()
+        capture("fil-mission-light")
+        // Pour vous: the question, then this mission; then the live conversation.
+        val pager = compose.onNodeWithTag("conversation-pager")
+        pager.performTouchInput { swipeLeft() }
+        waitPage("chat-page:live")
+        waitDescription("Changer de conversation : Refonte de l’application")
+        pager.performTouchInput { swipeRight() }
+        waitPage("run-page:failed-run")
+        pager.performTouchInput { swipeRight() }
+        waitPage("chat-page:question")
+        waitDescription("Changer de conversation : Choisir la pagination")
+        // Swiping replaces nothing in the back stack: Back returns to the Fil.
+        compose.onNodeWithContentDescription("Retour").performClick()
+        waitText("Revue quotidienne")
+        compose.onNodeWithTag("fil").assertExists()
     }
 
     @Test

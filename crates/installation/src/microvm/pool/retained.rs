@@ -60,7 +60,9 @@ pub(super) fn lifetime() -> Result<Duration> {
 pub(super) fn eligible(plan: &Plan) -> bool {
     plan.command().is_none()
         && plan.as_value()["chat"].is_object()
-        && plan.chat_provider() == crate::provider::Provider::Codex
+        && plan
+            .chat_provider()
+            .is_ok_and(|provider| provider == crate::provider::Provider::Codex)
 }
 
 /// Filesystem mounts, privileges and disk geometry cannot change on a live VM.

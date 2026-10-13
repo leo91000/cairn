@@ -174,7 +174,12 @@ async fn run_routes(s: &Arc<Service>, input: &Input, route: Route<'_>) -> Result
             let run = s.store.run(id).await?;
             s.enqueue(text(&run, "taskId"), "retry", None).await?
         }
-        ("GET", ["codex", "models"]) => s.models.list(s).await?,
+        ("GET", [provider, "models"]) => {
+            crate::provider::Provider::parse(provider)?
+                .adapter()
+                .model_catalog(s)
+                .await?
+        }
         _ => return Ok(None),
     };
     Ok(Some(result))
@@ -335,7 +340,6 @@ async fn connection_routes(
             let refresh = input.query.get("refresh").is_some_and(|s| s == "true");
             s.connections.status(s, refresh).await?
         }
-        ("GET", ["claude", "models"]) => crate::claude::model_catalog(s).await?,
         ("GET", ["connections", "login"]) => s.connections.flow().await,
         ("POST", ["connections", "login"]) => {
             if input.string("provider", 20)? != "github" {

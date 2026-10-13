@@ -60,11 +60,21 @@ test('the Fil, rail and shortcuts lead through the workspace', async ({ page, wo
   await expectSingleScroll(page)
   await capture(page, testInfo, 'signal-fil-desktop')
 
-  // J selects the first item and Enter opens it, like a mail client.
+  // J selects the first item and Enter opens it, like a mail client. A mission reads beside the
+  // Fil, which stays the current place, and its Mission tab holds the mission itself.
   await page.keyboard.press('j')
   await page.keyboard.press('Enter')
-  await expect(page).toHaveURL(workspacePath(`/runs/${run.id}`))
-  await expect(rail.getByRole('link', { name: 'Atelier', exact: true })).toHaveAttribute('aria-current', 'page')
+  await expect(page).toHaveURL(workspacePath(`/fil/runs/${run.id}`))
+  await expect(fil).toHaveAttribute('aria-current', 'page')
+  await expect(forYou.locator('[aria-current="page"]')).toHaveCount(0)
+  await expect(forYou.locator('article.border-accent')).toContainText('Nightly security audit')
+  const pane = page.getByRole('region', { name: 'Reading pane' })
+  await expect(pane.getByRole('heading', { name: 'Nightly security audit' })).toBeVisible()
+  await pane.getByRole('button', { name: 'Mission', exact: true }).click()
+  await expect(pane.getByTestId('mission-detail').getByRole('region', { name: 'Schedule' })).toBeVisible()
+  await expect(pane.getByRole('heading', { name: 'This run' })).toBeVisible()
+  await expectSingleScroll(page)
+  await capture(page, testInfo, 'signal-fil-mission-desktop')
 
   // G chords move between the three places.
   await page.keyboard.press('g')
@@ -100,7 +110,7 @@ test('the Fil, rail and shortcuts lead through the workspace', async ({ page, wo
   await page.keyboard.press('g')
   await page.keyboard.press('f')
   await live.getByRole('button', { name: /Keep watching the build/ }).click()
-  await expect(page).toHaveURL(workspacePath(`/chats/${chat.id}`))
+  await expect(page).toHaveURL(workspacePath(`/chats/${chat.slug}`))
   await expect(page.getByRole('complementary', { name: 'Fil' }).locator('[aria-current="page"]')).toBeVisible()
   const working = page.locator('.agent-working')
   await expect(working).toBeVisible()
@@ -122,7 +132,7 @@ test('the Fil, rail and shortcuts lead through the workspace', async ({ page, wo
 
 test('phones use the floating dock and read conversations full screen', async ({ page, workspace }, testInfo) => {
   test.setTimeout(120000)
-  const { chat } = await seed(workspace)
+  const { chat, run } = await seed(workspace)
   await page.setViewportSize({ width: 390, height: 844 })
   await signIn(page)
   const dock = page.getByRole('navigation', { name: 'Quick navigation' })
@@ -142,10 +152,22 @@ test('phones use the floating dock and read conversations full screen', async ({
   await dock.getByRole('link', { name: 'Fil' }).click()
 
   await page.getByRole('region', { name: 'Live', exact: true }).getByRole('button').first().click()
-  await expect(page).toHaveURL(workspacePath(`/chats/${chat.id}`))
+  await expect(page).toHaveURL(workspacePath(`/chats/${chat.slug}`))
   await expect(dock).toHaveCount(0)
   await expect(page.locator('.agent-working')).toBeVisible()
   await capture(page, testInfo, 'signal-conversation-mobile')
+  await page.getByRole('link', { name: 'Back to the Fil' }).click()
+  await expect(page).toHaveURL(workspacePath('/'))
+  await expect(dock).toBeVisible()
+
+  // A mission opens full screen from the Fil and returns to it.
+  // Earlier journeys in this worker seeded the same mission name; open this journey's own card.
+  await page.locator(`[data-fil-key="task:${run.taskId}"]`).getByRole('button', { name: 'Open “Nightly security audit”' }).click()
+  await expect(page).toHaveURL(workspacePath(`/fil/runs/${run.id}`))
+  await expect(dock).toHaveCount(0)
+  await expect(page.getByRole('heading', { name: 'Nightly security audit' })).toBeVisible()
+  await expect(page.getByRole('heading', { name: 'Fil', exact: true })).toBeHidden()
+  await capture(page, testInfo, 'signal-fil-mission-mobile')
   await page.getByRole('link', { name: 'Back to the Fil' }).click()
   await expect(page).toHaveURL(workspacePath('/'))
   await expect(dock).toBeVisible()
