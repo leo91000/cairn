@@ -151,6 +151,7 @@ fn trash(db: &Db<'_>, id: &str, confirmed: bool) -> Result<Value> {
     let messages = db.messages(id)?;
     let questions = db.keys_as::<Question>(&crate::chats::question_prefix(id))?;
     let busy = run_is_active(run.as_ref())
+        || chat["wakeup"].is_object()
         || messages.iter().any(message_is_pending)
         || questions.iter().any(|(_, question)| question.is_open());
     if busy && !confirmed {
@@ -165,6 +166,7 @@ fn trash(db: &Db<'_>, id: &str, confirmed: bool) -> Result<Value> {
         db.patch_run(text(&run, "id"), &json!({ "cancelRequestedAt": now() }))?;
     }
     chat["cancelledByDeletion"] = busy.into();
+    chat["wakeup"] = Value::Null;
     revoke_chat_access(db, &chat, id)?;
     chat["previousLifecycle"] = state(&chat).into();
     chat["lifecycle"] = Lifecycle::Trash.into();
@@ -342,6 +344,7 @@ fn request_new_session(db: &Db<'_>, id: &str) -> Result<Value> {
         }),
     )?;
     chat["sessionRestartRequested"] = true.into();
+    chat["wakeup"] = Value::Null;
     chat["paused"] = true.into();
     db.put("chats", &chat)
 }

@@ -1,5 +1,6 @@
 mod handoff;
 mod questions;
+pub mod sleep;
 
 pub use handoff::{execution_text, with_invoked_skills};
 pub use questions::{Question, QuestionField, QuestionStatus, question_prefix};
@@ -288,6 +289,7 @@ fn send(
         chat["title"] = title(&values).into();
     }
     touch(&mut chat);
+    chat["wakeup"] = Value::Null;
     db.put("chats", &chat)?;
     if let Some((mut question, answers)) = answer {
         question.status = QuestionStatus::Answering;
@@ -554,10 +556,17 @@ fn launch_turn(
     mut snapshot: Value,
 ) -> Result<()> {
     let mut chat = chat(db, chat_id)?;
-    let current = find_message(db, chat_id, text(&message, "id"))?;
-    let unchanged = current.is_some_and(|current| {
-        current["status"] == MessageStatus::Queued && same_content(&current, &message)
-    });
+    let waking = message["wakeup"].is_object();
+    let unchanged = if waking {
+        let current = db.run(text(&chat, "runId"))?;
+        sleep::ready(db, &chat, current.as_ref(), now())?
+            && chat["wakeup"] == message["wakeup"]
+            && current.as_ref().map(|run| &run["id"]) == run.as_ref().map(|run| &run["id"])
+    } else {
+        find_message(db, chat_id, text(&message, "id"))?.is_some_and(|current| {
+            current["status"] == MessageStatus::Queued && same_content(&current, &message)
+        })
+    };
     if !is_active(&chat) || chat["paused"] == true || !unchanged {
         return Ok(());
     }
@@ -577,7 +586,17 @@ fn launch_turn(
     }
     chat["cancelledByDeletion"] = false.into();
     chat["sessionRestartRequested"] = false.into();
+    chat["wakeup"] = Value::Null;
     db.put("chats", &chat)?;
+    if waking {
+        db.event(
+            text(&chat, "runId"),
+            "chat.wakeup",
+            "Resuming after scheduled wait",
+            Some(&message["wakeup"]),
+        )?;
+        return Ok(());
+    }
     message["status"] = MessageStatus::Sending.into();
     db.put_message(&message)?;
     Ok(())
@@ -684,11 +703,15 @@ impl Service {
             let busy = run.as_ref().is_some_and(|run| {
                 active.contains(text(run, "id")) || run["recoveryPending"] == true
             });
-            if chat["paused"] == true || busy {
+            if busy {
                 continue;
             }
             let id = text(&chat, "id").to_owned();
             if needs_attention(&chat, run.as_ref()) {
+                self.chat_cancel_sleep(&id).await?;
+                if chat["paused"] == true {
+                    continue;
+                }
                 let chat_id = id.clone();
                 self.store
                     .transaction(move |db| next_queued(db, &chat_id).map(|_| ()))
@@ -696,13 +719,28 @@ impl Service {
                 self.chat_pause(&id, true).await?;
                 continue;
             }
+            if chat["paused"] == true {
+                continue;
+            }
             let chat_id = id.clone();
-            let Some(message) = self
+            let message = self
                 .store
                 .transaction(move |db| next_queued(db, &chat_id))
-                .await?
-            else {
-                continue;
+                .await?;
+            let message = match message {
+                Some(message) => message,
+                None => {
+                    let chat = chat.clone();
+                    let run = run.clone();
+                    let Some(message) = self
+                        .store
+                        .read(move |db| sleep::message(db, &chat, run.as_ref(), now()))
+                        .await?
+                    else {
+                        continue;
+                    };
+                    message
+                }
             };
             if let Err(error) = self.chat_prepare(chat, run, message).await {
                 self.chat_pause(&id, true).await?;
