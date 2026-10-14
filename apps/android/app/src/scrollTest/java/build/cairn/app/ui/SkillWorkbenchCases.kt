@@ -146,6 +146,7 @@ abstract class SkillWorkbenchCases {
     private class Fixture {
         val batches = CopyOnWriteArrayList<Pair<String, JsonObject>>()
         var saveGate: java.util.concurrent.CountDownLatch? = null
+        @Volatile var saveReturned = false
         val imports = CopyOnWriteArrayList<JsonObject>()
         val updates = CopyOnWriteArrayList<JsonObject>()
         @Volatile var conflict = false
@@ -192,7 +193,8 @@ abstract class SkillWorkbenchCases {
                     path.endsWith("/bundle") && request.method == "POST" -> {
                         val body = wireJson.parseToJsonElement(request.body.readUtf8()).jsonObject
                         fixture.batches += path to body
-                        fixture.saveGate?.await(20, java.util.concurrent.TimeUnit.SECONDS)
+                        fixture.saveGate?.await(60, java.util.concurrent.TimeUnit.SECONDS)
+                        fixture.saveReturned = true
                         if (fixture.conflict)
                             MockResponse()
                                 .setResponseCode(409)
@@ -416,6 +418,59 @@ abstract class SkillWorkbenchCases {
                 gate.countDown()
             }
             shown(hasContentDescription("Nouveau fichier"))
+        }
+    }
+
+    @Test
+    fun delayedSaveDoesNotReopenAnAbandonedSkillOrOverwriteTheNextDraft() {
+        val gate = java.util.concurrent.CountDownLatch(1)
+        val fixture = Fixture().apply { saveGate = gate }
+        launch(fixture).use {
+            try {
+                compose.onNodeWithTag("skill-card-global-review").performClick()
+                openFile("SKILL.md")
+                shown(hasText(skillMarkdown.trimEnd(), substring = true))
+                compose
+                    .onNodeWithTag("skill-code-editor")
+                    .performTextReplacement(skillMarkdown + "A draft\n")
+                compose.onNodeWithTag("skill-save").performClick()
+                compose.waitUntil(15000) { fixture.batches.size == 1 }
+                hideKeyboard()
+                compose.onNodeWithContentDescription("Retour").performClick()
+                shown(hasText("Abandonner les modifications ?"))
+                compose.onNodeWithText("Abandonner", substring = false).performClick()
+                shown(hasTestTag("skill-card-global-pdf-tools"))
+                compose.onNodeWithTag("skill-card-global-pdf-tools").performClick()
+                openFile("SKILL.md")
+                shown(hasText("# PDF", substring = true))
+                val edited = "---\nname: pdf-tools\ndescription: Draft B\n---\nB stays here\n"
+                compose.onNodeWithTag("skill-code-editor").performTextReplacement(edited)
+                gate.countDown()
+                compose.waitUntil(15000) { fixture.saveReturned }
+                // Drain the released HTTP response and subsequent main-thread UI work.
+                compose.waitForIdle()
+                Thread.sleep(500)
+                compose.waitForIdle()
+                compose
+                    .onNodeWithTag("skill-code-editor")
+                    .assertTextContains("B stays here", substring = true)
+                compose.onNodeWithText("pdf-tools", substring = false).assertExists()
+            } finally {
+                gate.countDown()
+            }
+        }
+    }
+
+    @Test
+    fun membersCanReadSourceMetadataWithoutOwnerOnlyActions() {
+        launch(Fixture(), role = "member").use {
+            compose.onNodeWithTag("skill-card-global-pdf-tools").performClick()
+            shown(hasTestTag("skill-source-chip"))
+            compose.onNodeWithTag("skill-source-chip").performClick()
+            shown(hasTestTag("skill-source-sheet"))
+            shown(hasText("anthropics/skills", substring = false))
+            compose.onNodeWithTag("skill-source-check").assertDoesNotExist()
+            compose.onNodeWithTag("skill-source-update").assertDoesNotExist()
         }
     }
 

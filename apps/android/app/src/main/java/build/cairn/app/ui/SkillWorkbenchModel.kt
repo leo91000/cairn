@@ -33,6 +33,8 @@ internal data class SkillTarget(val scope: String, val name: String, val create:
  * one batch based on the revision the editor started from.
  */
 internal class SkillWorkbenchModel : ViewModel() {
+    @Volatile private var editorSession = 0L
+
     var target by mutableStateOf<SkillTarget?>(null)
         private set
 
@@ -75,6 +77,7 @@ internal class SkillWorkbenchModel : ViewModel() {
     }
 
     fun reset() {
+        editorSession += 1
         target = null
         draft = null
         selected = null
@@ -84,6 +87,7 @@ internal class SkillWorkbenchModel : ViewModel() {
         conflict = null
         error = null
         source = null
+        sourceLoading = false
         loading = false
     }
 
@@ -93,18 +97,20 @@ internal class SkillWorkbenchModel : ViewModel() {
         loading = true
         conflict = null
         error = null
+        val session = editorSession
         viewModelScope.launch {
             try {
                 val bundle = vm.api.skillBundle(current.scope, current.name)
-                if (target != current) return@launch
+                if (editorSession != session || target != current) return@launch
                 draft = SkillDraft.of(bundle)
                 if (selected != null && draft?.file(selected!!) == null) selected = null
                 ensureLoaded(vm, SKILL_FILE)
                 selected?.let { ensureLoaded(vm, it) }
             } catch (e: Exception) {
+                if (editorSession != session) return@launch
                 fail(vm, e)
             } finally {
-                loading = false
+                if (editorSession == session) loading = false
             }
         }
     }
@@ -117,15 +123,18 @@ internal class SkillWorkbenchModel : ViewModel() {
         if (file.body != null || draft?.originals?.containsKey(origin) == true) return
         if (origin in fileLoading) return
         fileLoading = fileLoading + origin
+        val session = editorSession
         viewModelScope.launch {
             try {
                 val content = vm.api.skillFile(current.scope, current.name, origin)
                 val body = withContext(Dispatchers.Default) { SkillBody.of(content) }
-                if (target == current) draft = draft?.withOriginal(origin, body)
+                if (editorSession == session && target == current)
+                    draft = draft?.withOriginal(origin, body)
             } catch (e: Exception) {
+                if (editorSession != session) return@launch
                 fail(vm, e)
             } finally {
-                fileLoading = fileLoading - origin
+                if (editorSession == session) fileLoading = fileLoading - origin
             }
         }
     }
@@ -155,6 +164,7 @@ internal class SkillWorkbenchModel : ViewModel() {
         conflict = null
         error = null
         progress = "Enregistrement…"
+        val session = editorSession
         viewModelScope.launch {
             try {
                 val bundle =
@@ -164,8 +174,10 @@ internal class SkillWorkbenchModel : ViewModel() {
                         current.base?.revision,
                         current.changes(),
                     ) {
-                        progress = "Envoi de ${it.substringAfterLast('/')}…"
+                        if (editorSession == session)
+                            progress = "Envoi de ${it.substringAfterLast('/')}…"
                     }
+                if (editorSession != session) return@launch
                 val known =
                     current.files
                         .mapNotNull { file -> current.content(file.path)?.let { file.path to it } }
@@ -178,16 +190,18 @@ internal class SkillWorkbenchModel : ViewModel() {
                 try {
                     vm.refresh()
                 } catch (e: Exception) {
+                    if (editorSession != session) return@launch
                     if (e is CancellationException) throw e
                 }
             } catch (e: Exception) {
+                if (editorSession != session) return@launch
                 if (e is ApiException && e.status == 409)
                     conflict =
                         if (current.base == null) "Un skill porte déjà ce nom dans cette portée."
                         else "Ce skill a été modifié ailleurs depuis son ouverture."
                 else fail(vm, e)
             } finally {
-                progress = null
+                if (editorSession == session) progress = null
             }
         }
     }
@@ -197,6 +211,7 @@ internal class SkillWorkbenchModel : ViewModel() {
         val current = target ?: return
         if (busy) return
         progress = "Préparation de l’archive…"
+        val session = editorSession
         viewModelScope.launch {
             try {
                 val archive =
@@ -210,21 +225,24 @@ internal class SkillWorkbenchModel : ViewModel() {
                                     current.name,
                                     { output.write(it) },
                                 ) { done, total ->
-                                    progress =
-                                        "Téléchargement… ${if (total > 0) done * 100 / total else 0} %"
+                                    if (editorSession == session)
+                                        progress =
+                                            "Téléchargement… ${if (total > 0) done * 100 / total else 0} %"
                                 }
                             }
                     }
+                if (editorSession != session) return@launch
                 vm.notify("Archive ${archive.filename} enregistrée (${formatBytes(archive.size)})")
             } catch (e: Exception) {
                 runCatching {
                     android.provider.DocumentsContract.deleteDocument(resolver, uri)
                 }
+                if (editorSession != session) return@launch
                 if (e is ApiException && e.status == 409)
                     error = "Le skill a changé pendant le téléchargement. Réessayez."
                 else fail(vm, e)
             } finally {
-                progress = null
+                if (editorSession == session) progress = null
             }
         }
     }
@@ -237,6 +255,7 @@ internal class SkillWorkbenchModel : ViewModel() {
         folder: String,
     ) {
         val limit = draft?.limits?.fileBytes ?: return
+        val session = editorSession
         viewModelScope.launch {
             val problems = mutableListOf<String>()
             for (uri in uris) {
@@ -244,9 +263,11 @@ internal class SkillWorkbenchModel : ViewModel() {
                     val (name, bytes) = readDocument(resolver, uri, limit)
                     val path = if (folder.isEmpty()) name else "$folder/$name"
                     val body = withContext(Dispatchers.Default) { SkillBody.of(bytes) }
+                    if (editorSession != session) return@launch
                     update { it.put(path, body) }?.let { problems += "$name : $it" }
                     if (problems.isEmpty() && uris.size == 1) selected = path
                 } catch (e: Exception) {
+                    if (editorSession != session) return@launch
                     if (e is CancellationException) throw e
                     problems += e.message ?: "Lecture impossible."
                 }
@@ -257,12 +278,15 @@ internal class SkillWorkbenchModel : ViewModel() {
 
     fun replaceDocument(vm: CairnViewModel, resolver: ContentResolver, path: String, uri: Uri) {
         val limit = draft?.limits?.fileBytes ?: return
+        val session = editorSession
         viewModelScope.launch {
             try {
                 val (_, bytes) = readDocument(resolver, uri, limit)
                 val body = withContext(Dispatchers.Default) { SkillBody.of(bytes) }
+                if (editorSession != session) return@launch
                 error = update { it.put(path, body) }
             } catch (e: Exception) {
+                if (editorSession != session) return@launch
                 if (e is CancellationException) throw e
                 error = e.message ?: "Lecture impossible."
             }
@@ -272,13 +296,17 @@ internal class SkillWorkbenchModel : ViewModel() {
     fun checkSource(vm: CairnViewModel) {
         val current = target ?: return
         sourceLoading = true
+        val session = editorSession
         viewModelScope.launch {
             try {
-                source = vm.api.skillSource(current.scope, current.name)
+                val result = vm.api.skillSource(current.scope, current.name)
+                if (editorSession != session) return@launch
+                source = result
             } catch (e: Exception) {
+                if (editorSession != session) return@launch
                 fail(vm, e)
             } finally {
-                sourceLoading = false
+                if (editorSession == session) sourceLoading = false
             }
         }
     }
@@ -288,9 +316,11 @@ internal class SkillWorkbenchModel : ViewModel() {
         val base = draft?.base?.revision ?: return
         if (busy) return
         progress = "Mise à jour depuis GitHub…"
+        val session = editorSession
         viewModelScope.launch {
             try {
                 val bundle = vm.api.updateSkillSource(current.scope, current.name, commit, base)
+                if (editorSession != session) return@launch
                 draft = SkillDraft.of(bundle)
                 source = null
                 selected = selected?.takeIf { draft?.file(it) != null }
@@ -300,11 +330,12 @@ internal class SkillWorkbenchModel : ViewModel() {
                 vm.notify("Skill mis à jour depuis GitHub")
                 runCatching { vm.refresh() }
             } catch (e: Exception) {
+                if (editorSession != session) return@launch
                 if (e is ApiException && e.status == 409)
                     conflict = "Ce skill a été modifié ailleurs depuis son ouverture."
                 else fail(vm, e)
             } finally {
-                progress = null
+                if (editorSession == session) progress = null
             }
         }
     }
@@ -313,18 +344,21 @@ internal class SkillWorkbenchModel : ViewModel() {
         val current = target ?: return
         if (busy) return
         progress = "Détachement…"
+        val session = editorSession
         viewModelScope.launch {
             try {
                 vm.api.detachSkillSource(current.scope, current.name)
+                if (editorSession != session) return@launch
                 draft = draft?.let { it.copy(base = it.base?.copy(source = null)) }
                 source = null
                 done()
                 vm.notify("Skill détaché de GitHub")
                 runCatching { vm.refresh() }
             } catch (e: Exception) {
+                if (editorSession != session) return@launch
                 fail(vm, e)
             } finally {
-                progress = null
+                if (editorSession == session) progress = null
             }
         }
     }

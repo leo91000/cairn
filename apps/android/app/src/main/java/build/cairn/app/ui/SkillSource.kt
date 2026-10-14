@@ -94,7 +94,12 @@ internal fun SkillSourceSheet(
                     Modifier.testTag("skill-source-modified"),
                     inset = 0.dp,
                 )
-            if (status == null) {
+            if (!owner) {
+                Text(
+                    "Seul le propriétaire peut rechercher des mises à jour.",
+                    style = MaterialTheme.typography.bodySmall,
+                )
+            } else if (status == null) {
                 SignalButton(
                     if (model.sourceLoading) "Vérification…" else "Rechercher des mises à jour",
                     Modifier.fillMaxWidth().testTag("skill-source-check"),

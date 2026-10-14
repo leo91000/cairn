@@ -207,9 +207,11 @@ function closeMenu(restore = true) {
     focusRow(node.path)
 }
 
-function act(action: () => void) {
+function act(action: (node: SkillTreeNode<DraftFile>) => void) {
+  const node = menuFor.value
   closeMenu(false)
-  action()
+  if (node)
+    action(node)
 }
 
 function menuKeydown(event: KeyboardEvent) {
@@ -447,7 +449,7 @@ defineExpose({ reveal })
             role="menuitem"
             tabindex="-1"
             class="tree-menu-item"
-            @click="act(() => emit('create', menuFor!.path))"
+            @click="act(node => emit('create', node.path))"
           >
             <Icon :name="FilePlus" :size="15" />New file here
           </button>
@@ -457,7 +459,7 @@ defineExpose({ reveal })
             role="menuitem"
             tabindex="-1"
             class="tree-menu-item"
-            @click="act(() => emit('upload', menuFor!.path))"
+            @click="act(node => emit('upload', node.path))"
           >
             <Icon :name="Upload" :size="15" />Upload files here
           </button>
@@ -467,7 +469,7 @@ defineExpose({ reveal })
             role="menuitem"
             tabindex="-1"
             class="tree-menu-item"
-            @click="act(() => emit('rename', menuFor!.path, true))"
+            @click="act(node => emit('rename', node.path, true))"
           >
             <Icon :name="Pencil" :size="15" />Rename folder<kbd>F2</kbd>
           </button>
@@ -478,7 +480,7 @@ defineExpose({ reveal })
             role="menuitem"
             tabindex="-1"
             class="tree-menu-item text-danger"
-            @click="act(() => emit('remove', menuFor!.path, true))"
+            @click="act(node => emit('remove', node.path, true))"
           >
             <Icon :name="Trash2" :size="15" />Delete folder
           </button>
@@ -494,7 +496,7 @@ defineExpose({ reveal })
             tabindex="-1"
             class="tree-menu-item"
             :disabled="menuFor.path === skillManifest"
-            @click="act(() => emit('rename', menuFor!.path, false))"
+            @click="act(node => emit('rename', node.path, false))"
           >
             <Icon :name="Pencil" :size="15" />Rename or move<kbd>F2</kbd>
           </button>
@@ -506,7 +508,7 @@ defineExpose({ reveal })
             tabindex="-1"
             class="tree-menu-item"
             :disabled="menuFor.path === skillManifest"
-            @click="act(() => emit('executable', menuFor!.path))"
+            @click="act(node => emit('executable', node.path))"
           >
             <Icon :name="Terminal" :size="15" />{{ menuFor.file.executable ? 'Remove executable' : 'Make executable' }}
           </button>
@@ -515,7 +517,7 @@ defineExpose({ reveal })
             role="menuitem"
             tabindex="-1"
             class="tree-menu-item"
-            @click="act(() => emit('download', menuFor!.path))"
+            @click="act(node => emit('download', node.path))"
           >
             <Icon :name="Download" :size="15" />Download file
           </button>
@@ -527,7 +529,7 @@ defineExpose({ reveal })
             tabindex="-1"
             class="tree-menu-item text-danger"
             :disabled="menuFor.path === skillManifest"
-            @click="act(() => emit('remove', menuFor!.path, false))"
+            @click="act(node => emit('remove', node.path, false))"
           >
             <Icon :name="Trash2" :size="15" />Delete file<kbd>Del</kbd>
           </button>

@@ -209,24 +209,9 @@ fun SkillChange.toJson(): JsonObject = buildJsonObject {
  */
 const val SKILL_REQUEST_BUDGET = 120_000L
 
-/** Approximate JSON size of a change sent inline, including its keys and path. */
-fun inlineCost(change: SkillChange): Long {
-    val overhead = 48L
-    return when (change) {
-        is SkillChange.Write ->
-            overhead +
-                change.path.length +
-                when (val body = change.body) {
-                    is SkillBody.Text ->
-                        body.size +
-                            body.value.count { it == '"' || it == '\\' || it == '\n' || it < ' ' }
-                    is SkillBody.Binary -> (body.size + 2) / 3 * 4
-                }
-        is SkillChange.Delete -> overhead + change.path.length
-        is SkillChange.Mode -> overhead + change.path.length
-        is SkillChange.Move -> overhead + change.from.length + change.to.length
-    }
-}
+/** Encoded JSON size, including UTF-8 paths and every escaped control character. */
+fun inlineCost(change: SkillChange): Long =
+    change.toJson().toString().toByteArray(Charsets.UTF_8).size.toLong()
 
 /**
  * Paths whose content is staged before the batch: every binary file, then the largest text files

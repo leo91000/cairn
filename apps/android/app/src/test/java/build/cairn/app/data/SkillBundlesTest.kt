@@ -368,6 +368,16 @@ class SkillBundlesTest {
     }
 
     @Test
+    fun textWithLongJsonEscapesIsStagedBeforeItExceedsTheRequestLimit() {
+        val controls = SkillChange.Write("controls.txt", SkillBody.Text("\u0001".repeat(30_000)))
+        assertEquals(setOf("controls.txt"), stagedWrites(listOf(controls)))
+        assertEquals(
+            controls.toJson().toString().toByteArray(Charsets.UTF_8).size.toLong(),
+            inlineCost(controls),
+        )
+    }
+
+    @Test
     fun bodiesDetectTextLikeTheServer() {
         assertTrue(SkillBody.of("héllo".toByteArray()) is SkillBody.Text)
         assertTrue(SkillBody.of(byteArrayOf(0x68, 0)) is SkillBody.Binary)

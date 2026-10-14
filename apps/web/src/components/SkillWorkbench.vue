@@ -607,6 +607,8 @@ async function save() {
   if (!batch.length)
     return
 
+  const destination = base.value
+  const revision = bundle.value?.revision ?? null
   saving.value = 'Saving…'
   const carry = draft.value.map(file => ({ ...file }))
   try {
@@ -618,9 +620,9 @@ async function save() {
         saving.value = done < total ? `Uploading ${done + 1} of ${total}…` : 'Saving…'
       },
     })
-    const result = await api<SkillBundle>(`${base.value}/bundle`, {
+    const result = await api<SkillBundle>(`${destination}/bundle`, {
       method: 'POST',
-      body: JSON.stringify({ base: bundle.value?.revision ?? null, changes: staged }),
+      body: JSON.stringify({ base: revision, changes: staged }),
     })
     const created = creating.value
     applyBundle(result, carry)
@@ -795,7 +797,12 @@ onMounted(async () => {
           autocomplete="off"
           spellcheck="false"
         ></label>
-        <VirtualSelect v-model="scope" label="Scope" :options="scopes" />
+        <VirtualSelect
+          v-model="scope"
+          label="Scope"
+          :options="scopes"
+          :disabled="editingLocked"
+        />
       </div>
 
       <div v-if="loading && !bundle" class="grid flex-1 place-items-center text-sm text-muted">

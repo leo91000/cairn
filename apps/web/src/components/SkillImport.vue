@@ -67,6 +67,8 @@ watch([source, scope], () => {
 })
 
 function choose(file: File | undefined) {
+  if (busy.value)
+    return
   error.value = ''
   candidates.value = []
   candidate.value = ''
@@ -111,31 +113,38 @@ async function submit() {
   if (!ready.value || busy.value)
     return
   error.value = ''
+  pasteRepository()
+  const kind = source.value
+  const destination = scope.value
+  const submittedArchive = archive.value
+  const folder = candidate.value || (kind === 'github' ? path.value.trim().replace(/^\/+|\/+$/g, '') : '')
+  const requestedRef = ref_.value.trim()
+  const requestedRepository = repository.value
+  busy.value = kind === 'archive' ? 'Uploading archive…' : 'Fetching from GitHub…'
   try {
     let body: Record<string, string>
-    if (source.value === 'archive') {
+    if (kind === 'archive') {
       // Uploads are consumed only by a successful import, so a candidate pick reuses this one.
-      if (!upload.value || upload.value.file !== archive.value) {
+      if (!upload.value || upload.value.file !== submittedArchive) {
         busy.value = 'Uploading archive…'
-        const staged = await api<{ id: string }>('/skills/uploads', { method: 'POST', headers: { 'Content-Type': 'application/octet-stream' }, body: archive.value })
-        upload.value = { id: staged.id, file: archive.value! }
+        const staged = await api<{ id: string }>('/skills/uploads', { method: 'POST', headers: { 'Content-Type': 'application/octet-stream' }, body: submittedArchive })
+        upload.value = { id: staged.id, file: submittedArchive! }
       }
 
       body = { source: 'archive', upload: upload.value.id }
     }
     else {
       pasteRepository()
-      body = { source: 'github', repository: parseGithubSource(repository.value)!.repository }
-      if (ref_.value.trim())
-        body.ref = ref_.value.trim()
+      body = { source: 'github', repository: parseGithubSource(requestedRepository)!.repository }
+      if (requestedRef)
+        body.ref = requestedRef
     }
 
-    const folder = candidate.value || (source.value === 'github' ? path.value.trim().replace(/^\/+|\/+$/g, '') : '')
     if (folder)
       body.path = folder
 
-    busy.value = source.value === 'github' ? 'Fetching from GitHub…' : 'Importing…'
-    const result = await api<SkillImport>(`/skills/${encodeURIComponent(scope.value)}/import`, { method: 'POST', body: JSON.stringify(body) })
+    busy.value = kind === 'github' ? 'Fetching from GitHub…' : 'Importing…'
+    const result = await api<SkillImport>(`/skills/${encodeURIComponent(destination)}/import`, { method: 'POST', body: JSON.stringify(body) })
     if (result.imported) {
       emit('imported', result.imported)
       return
@@ -158,130 +167,137 @@ async function submit() {
 </script>
 
 <template>
-  <Modal title="Import a skill" wide @close="emit('close')">
+  <Modal title="Import a skill" wide @close="!busy && emit('close')">
     <form @submit.prevent="submit">
-      <div class="modal-body grid gap-5 px-6.5 py-6 phone:p-5">
-        <UiSegments
-          v-model="source"
-          label="Import from"
-          :options="[{ value: 'archive', label: 'Archive', icon: FileArchive }, { value: 'github', label: 'GitHub', icon: Github }]"
-        />
+      <fieldset :disabled="!!busy" class="contents">
+        <div class="modal-body grid gap-5 px-6.5 py-6 phone:p-5">
+          <UiSegments
+            v-model="source"
+            label="Import from"
+            :options="[{ value: 'archive', label: 'Archive', icon: FileArchive }, { value: 'github', label: 'GitHub', icon: Github }]"
+          />
 
-        <template v-if="source === 'archive'">
-          <div
-            class="relative flex flex-col items-center justify-center rounded-2xl border-[1.5px] border-dashed px-6 py-8 text-center transition-colors phone:py-6"
-            :class="dragging ? 'border-accent bg-soft' : archive ? 'border-line bg-surface' : 'border-control bg-inset'"
-            @dragover.prevent="dragging = true"
-            @dragleave="dragging = false"
-            @drop.prevent="dropped"
-          >
-            <template v-if="archive">
-              <span class="mb-3 grid size-12 place-items-center rounded-2xl bg-soft text-accent"><Icon :name="FileArchive" :size="24" /></span>
-              <p class="m-0! max-w-full truncate text-sm font-semibold">
-                {{ archive.name }}
-              </p>
-              <p class="m-0! mt-0.5 text-xs text-muted">
-                {{ formatBytes(archive.size) }}{{ upload ? ' · uploaded' : '' }}
-              </p>
-              <button type="button" class="mt-3 text-xs font-medium text-accent hover:underline" @click="picker!.click()">
-                Choose another archive
-              </button>
-            </template>
-            <template v-else>
-              <span class="mb-3 grid size-12 place-items-center rounded-2xl border border-line bg-surface text-muted"><Icon :name="Upload" :size="22" /></span>
-              <p class="m-0! text-sm font-semibold">
-                Drop a .zip or .skill archive
-              </p>
-              <p class="m-0! mt-1 text-xs text-muted">
-                Up to {{ formatBytes(limit) }} · or
-                <button type="button" class="font-medium text-accent hover:underline" @click="picker!.click()">
-                  browse your files
+          <template v-if="source === 'archive'">
+            <div
+              class="relative flex flex-col items-center justify-center rounded-2xl border-[1.5px] border-dashed px-6 py-8 text-center transition-colors phone:py-6"
+              :class="dragging ? 'border-accent bg-soft' : archive ? 'border-line bg-surface' : 'border-control bg-inset'"
+              @dragover.prevent="dragging = true"
+              @dragleave="dragging = false"
+              @drop.prevent="dropped"
+            >
+              <template v-if="archive">
+                <span class="mb-3 grid size-12 place-items-center rounded-2xl bg-soft text-accent"><Icon :name="FileArchive" :size="24" /></span>
+                <p class="m-0! max-w-full truncate text-sm font-semibold">
+                  {{ archive.name }}
+                </p>
+                <p class="m-0! mt-0.5 text-xs text-muted">
+                  {{ formatBytes(archive.size) }}{{ upload ? ' · uploaded' : '' }}
+                </p>
+                <button type="button" class="mt-3 text-xs font-medium text-accent hover:underline" @click="picker!.click()">
+                  Choose another archive
                 </button>
-              </p>
-            </template>
-            <input
-              ref="picker"
-              type="file"
-              accept=".zip,.skill,application/zip"
-              class="sr-only"
-              tabindex="-1"
-              aria-label="Skill archive"
-              @change="choose(($event.target as HTMLInputElement).files?.[0])"
-            >
-          </div>
-        </template>
-
-        <template v-else>
-          <label>Repository<input
-            v-model="repository"
-            aria-label="Repository"
-            placeholder="owner/repo or a GitHub URL"
-            autocomplete="off"
-            spellcheck="false"
-            @blur="pasteRepository"
-            @paste="pasted"
-          ><small>Uses this installation’s GitHub connection, so private repositories work too.</small></label>
-          <div class="grid grid-cols-[minmax(0,2fr)_minmax(0,1fr)] gap-4 phone:grid-cols-1">
-            <label>Folder <span class="font-normal text-subtle">(optional)</span><input
-              v-model="path"
-              aria-label="Folder in repository"
-              placeholder="skills/review"
-              autocomplete="off"
-              spellcheck="false"
-            ></label>
-            <label>Branch, tag or commit <span class="font-normal text-subtle">(optional)</span><input
-              v-model="ref_"
-              aria-label="Ref"
-              placeholder="default branch"
-              autocomplete="off"
-              spellcheck="false"
-            ></label>
-          </div>
-        </template>
-
-        <VirtualSelect v-model="scope" label="Add to" :options="scopes" />
-
-        <section v-if="candidates.length" class="grid gap-2.5" aria-label="Skills found">
-          <div>
-            <p class="m-0! text-sm font-semibold">
-              {{ candidates.length }} skills found
-            </p>
-            <p class="m-0! text-xs text-muted">
-              Choose the one to import.
-            </p>
-          </div>
-          <div class="grid max-h-64 gap-1.5 overflow-auto overscroll-contain" role="radiogroup" aria-label="Skill folder">
-            <label
-              v-for="item in candidates"
-              :key="item"
-              class="flex cursor-pointer flex-row! items-center gap-3 rounded-xl border px-3.5 py-3 transition-colors"
-              :class="candidate === item ? 'border-accent bg-soft' : 'border-line bg-surface hover:bg-hover/60'"
-            >
+              </template>
+              <template v-else>
+                <span class="mb-3 grid size-12 place-items-center rounded-2xl border border-line bg-surface text-muted"><Icon :name="Upload" :size="22" /></span>
+                <p class="m-0! text-sm font-semibold">
+                  Drop a .zip or .skill archive
+                </p>
+                <p class="m-0! mt-1 text-xs text-muted">
+                  Up to {{ formatBytes(limit) }} · or
+                  <button type="button" class="font-medium text-accent hover:underline" @click="picker!.click()">
+                    browse your files
+                  </button>
+                </p>
+              </template>
               <input
-                v-model="candidate"
-                type="radio"
-                name="candidate"
-                :value="item"
+                ref="picker"
+                type="file"
+                accept=".zip,.skill,application/zip"
                 class="sr-only"
+                tabindex="-1"
+                aria-label="Skill archive"
+                @change="choose(($event.target as HTMLInputElement).files?.[0])"
               >
-              <span class="grid size-8 shrink-0 place-items-center rounded-lg" :class="candidate === item ? 'bg-accent text-surface' : 'bg-variant text-muted'"><Icon :name="candidate === item ? Check : BookOpen" :size="15" /></span>
-              <span class="min-w-0 flex-1">
-                <span class="block truncate text-sm font-semibold text-ink">{{ item.split('/').pop() || item }}</span>
-                <span class="flex items-center gap-1 truncate font-mono text-2xs font-normal text-muted"><Icon :name="Folder" :size="12" />{{ item }}</span>
-              </span>
-            </label>
-          </div>
-        </section>
+            </div>
+          </template>
 
-        <UiAlert v-if="error">
-          {{ error }}
-        </UiAlert>
-      </div>
+          <template v-else>
+            <label>Repository<input
+              v-model="repository"
+              aria-label="Repository"
+              placeholder="owner/repo or a GitHub URL"
+              autocomplete="off"
+              spellcheck="false"
+              @blur="pasteRepository"
+              @paste="pasted"
+            ><small>Uses this installation’s GitHub connection, so private repositories work too.</small></label>
+            <div class="grid grid-cols-[minmax(0,2fr)_minmax(0,1fr)] gap-4 phone:grid-cols-1">
+              <label>Folder <span class="font-normal text-subtle">(optional)</span><input
+                v-model="path"
+                aria-label="Folder in repository"
+                placeholder="skills/review"
+                autocomplete="off"
+                spellcheck="false"
+              ></label>
+              <label>Branch, tag or commit <span class="font-normal text-subtle">(optional)</span><input
+                v-model="ref_"
+                aria-label="Ref"
+                placeholder="default branch"
+                autocomplete="off"
+                spellcheck="false"
+              ></label>
+            </div>
+          </template>
+
+          <VirtualSelect
+            v-model="scope"
+            label="Add to"
+            :options="scopes"
+            :disabled="!!busy"
+          />
+
+          <section v-if="candidates.length" class="grid gap-2.5" aria-label="Skills found">
+            <div>
+              <p class="m-0! text-sm font-semibold">
+                {{ candidates.length }} skills found
+              </p>
+              <p class="m-0! text-xs text-muted">
+                Choose the one to import.
+              </p>
+            </div>
+            <div class="grid max-h-64 gap-1.5 overflow-auto overscroll-contain" role="radiogroup" aria-label="Skill folder">
+              <label
+                v-for="item in candidates"
+                :key="item"
+                class="flex cursor-pointer flex-row! items-center gap-3 rounded-xl border px-3.5 py-3 transition-colors"
+                :class="candidate === item ? 'border-accent bg-soft' : 'border-line bg-surface hover:bg-hover/60'"
+              >
+                <input
+                  v-model="candidate"
+                  type="radio"
+                  name="candidate"
+                  :value="item"
+                  class="sr-only"
+                >
+                <span class="grid size-8 shrink-0 place-items-center rounded-lg" :class="candidate === item ? 'bg-accent text-surface' : 'bg-variant text-muted'"><Icon :name="candidate === item ? Check : BookOpen" :size="15" /></span>
+                <span class="min-w-0 flex-1">
+                  <span class="block truncate text-sm font-semibold text-ink">{{ item.split('/').pop() || item }}</span>
+                  <span class="flex items-center gap-1 truncate font-mono text-2xs font-normal text-muted"><Icon :name="Folder" :size="12" />{{ item }}</span>
+                </span>
+              </label>
+            </div>
+          </section>
+
+          <UiAlert v-if="error">
+            {{ error }}
+          </UiAlert>
+        </div>
+      </fieldset>
       <footer class="modal-actions sticky bottom-0 flex items-center justify-end gap-2.5 border-t border-line bg-surface px-6.5 py-4.5 phone:flex-wrap phone:px-5 phone:py-4">
         <p v-if="busy" class="m-0! mr-auto flex items-center gap-2 text-xs text-muted" role="status">
           <Icon :name="LoaderCircle" :size="14" class="animate-spin" />{{ busy }}
         </p>
-        <UiButton @click="emit('close')">
+        <UiButton :disabled="!!busy" @click="emit('close')">
           Cancel
         </UiButton>
         <UiButton variant="primary" type="submit" :disabled="!ready || !!busy || (candidates.length > 0 && !candidate)">

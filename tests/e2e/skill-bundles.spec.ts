@@ -369,6 +369,95 @@ test('saving locks draft mutations until the batch completes', async ({ page, wo
   expect((await workspace.api('/api/skills/global/save-lock/file?path=SKILL.md')).content).toBe(submitted)
 })
 
+test('file context menus rename, change modes, download and delete the selected file', async ({ page, workspace }) => {
+  await useRelayForHttpMocks(page)
+  await workspace.api('/api/skills/global/menu-demo/bundle', 'POST', {
+    base: null,
+    changes: [
+      { op: 'write', path: 'SKILL.md', content: manifest('menu-demo', 'Menus') },
+      { op: 'write', path: 'notes.txt', content: 'Keep these bytes\n' },
+    ],
+  })
+  await page.goto(workspacePath('/skills'))
+  await authenticateWorkspace(page)
+  await page.getByRole('button', { name: 'Edit menu-demo', exact: true }).click()
+  const menu = async (filePath: string) => {
+    await showTree(page)
+    await row(page, filePath).hover()
+    await page.getByRole('button', { name: `Actions for ${filePath}`, exact: true }).click()
+    return page.getByRole('menu', { name: `Actions for ${filePath}`, exact: true })
+  }
+
+  await (await menu('notes.txt')).getByRole('menuitem', { name: /Rename or move/ }).click()
+  await page.getByLabel('New path').fill('renamed.txt')
+  await page.getByRole('button', { name: 'Rename', exact: true }).click()
+  await (await menu('renamed.txt')).getByRole('menuitemcheckbox', { name: 'Make executable' }).click()
+  await expect(row(page, 'renamed.txt').locator('..')).toContainText('+x')
+  const download = page.waitForEvent('download')
+  await (await menu('renamed.txt')).getByRole('menuitem', { name: 'Download file' }).click()
+  expect((await download).suggestedFilename()).toBe('renamed.txt')
+  await (await menu('renamed.txt')).getByRole('menuitem', { name: /Delete file/ }).click()
+  await expect(row(page, 'renamed.txt')).toHaveCount(0)
+  await expect(page.getByRole('button', { name: 'Restore notes.txt', exact: true })).toBeVisible()
+})
+
+test('new-skill scope stays fixed while supporting files are staged', async ({ page, workspace }) => {
+  await useRelayForHttpMocks(page)
+  let release!: () => void
+  const pending = new Promise<void>((resolve) => {
+    release = resolve
+  })
+  await page.route(/\/skills\/uploads$/, async (route) => {
+    await pending
+    await route.continue()
+  })
+  await page.goto(workspacePath('/skills'))
+  await authenticateWorkspace(page)
+  await page.getByRole('button', { name: 'New skill', exact: true }).click()
+  await page.getByLabel('Skill name').fill('scope-lock')
+  await page.getByLabel('Skill content').fill(manifest('scope-lock', 'Fixed destination'))
+  await page.getByLabel('Upload skill files').setInputFiles({ name: 'asset.bin', mimeType: 'application/octet-stream', buffer: Buffer.from([0, 1, 2]) })
+  await page.getByRole('button', { name: 'Save skill', exact: true }).click()
+  try {
+    await expect(page.getByRole('dialog', { name: 'New skill' }).getByRole('combobox', { name: 'Scope', exact: true })).toBeDisabled()
+    await expect(page.getByLabel('Skill name')).toBeDisabled()
+  }
+  finally {
+    release()
+  }
+
+  await expect(page.getByRole('dialog', { name: 'Edit skill' }).getByText('All changes saved')).toBeVisible()
+  expect((await workspace.api('/api/skills/global/scope-lock/bundle')).scope).toBe('global')
+})
+
+test('an archive cannot be replaced while its upload is pending', async ({ page }) => {
+  await useRelayForHttpMocks(page)
+  let release!: () => void
+  const pending = new Promise<void>((resolve) => {
+    release = resolve
+  })
+  await page.route(/\/skills\/uploads$/, async (route) => {
+    await pending
+    await route.continue()
+  })
+  await page.goto(workspacePath('/skills'))
+  await authenticateWorkspace(page)
+  await page.getByRole('button', { name: 'Import', exact: true }).click()
+  await page.getByLabel('Skill archive').setInputFiles({ name: 'archive-a.zip', mimeType: 'application/zip', buffer: storedZip({ 'archive-a/SKILL.md': manifest('archive-a', 'A') }) })
+  await page.getByRole('button', { name: 'Import skill', exact: true }).click()
+  try {
+    await expect(page.getByLabel('Skill archive')).toBeDisabled()
+    await expect(page.getByRole('button', { name: 'Choose another archive', exact: true })).toBeDisabled()
+    await page.getByLabel('Skill archive').setInputFiles({ name: 'archive-b.zip', mimeType: 'application/zip', buffer: storedZip({ 'archive-b/SKILL.md': manifest('archive-b', 'B') }) })
+    await expect(page.getByRole('dialog', { name: 'Import a skill' }).getByText('archive-a.zip', { exact: true })).toBeVisible()
+  }
+  finally {
+    release()
+  }
+
+  await expect(page.getByRole('dialog', { name: 'Edit skill' }).getByRole('heading', { name: 'archive-a', exact: true })).toBeVisible()
+})
+
 test('detaching a GitHub source preserves unsaved files', async ({ page, workspace }) => {
   await useRelayForHttpMocks(page)
   await workspace.api('/api/skills/global/detach-draft/bundle', 'POST', { base: null, changes: [{ op: 'write', path: 'SKILL.md', content: manifest('detach-draft', 'Initial') }] })
