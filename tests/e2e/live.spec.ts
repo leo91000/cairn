@@ -457,6 +457,24 @@ test('recent history loads older pages without moving the reader and survives a 
   await expect(page.locator('.activity-message').filter({ hasText: 'Paged line 050' })).toBeAttached()
   await scroller.evaluate(el => el.scrollTop = 0)
   await expect(page.locator('.activity-message').filter({ hasText: 'Paged line 000' })).toBeAttached()
+  // The run also has fixture events before line 000: load that unread prefix before
+  // asserting that reopening needs no history requests at all.
+  await expect.poll(async () => {
+    await scroller.evaluate(el => el.scrollTop = 0)
+    return page.evaluate(runId => new Promise<boolean>((resolve) => {
+      const open = indexedDB.open('cairn-history-v1', 1)
+      open.onsuccess = () => {
+        const db = open.result
+        const tx = db.transaction('entries')
+        const request = tx.objectStore('entries').getAll()
+        request.onsuccess = () => resolve(request.result.some((entry) => {
+          const saved = JSON.parse(entry.text)
+          return saved.state.run?.id === runId && saved.events.length >= 350 && saved.hasOlder === false
+        }))
+        tx.oncomplete = () => db.close()
+      }
+    }), run.id)
+  }).toBe(true)
   // Move back to the latest content and let its bounded disk snapshot commit.
   await page.getByRole('button', { name: 'Latest activity', exact: true }).click()
   await expect(page.locator('.activity-message').filter({ hasText: 'Paged line 349' })).toBeVisible()

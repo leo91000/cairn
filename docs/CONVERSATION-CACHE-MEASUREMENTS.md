@@ -61,3 +61,14 @@ bytes, latency medians and process CPU. This is a local Robolectric/JVM measurem
 with identity sealing, excluding Android Keystore encryption and device/network
 latency. The encrypted production adapter and device reopening behavior are
 validated separately by the Android tests.
+
+Measured on the same shared Linux/Xeon/12-CPU/31-GiB host, with JDK
+21.0.12+101 LTS, Robolectric 4.17, SDK 35 and concurrent compilation. The process
+CPU includes all test-worker threads during the three measured phases. JVM/JIT
+warmup and OS caching affect these small timings; the larger record is not a
+claim of faster local decoding.
+
+| Version | Retained events | Encoded bytes | Write median | Warm read median | Cold read median | Process CPU |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Reference (200-event suffix) | 200 | 111,346 | 0.687 ms | 0.120 ms | 1.984 ms | 220 ms |
+| Loaded pages within byte budget | 1,250 | 691,823 | 2.695 ms | 0.069 ms | 1.596 ms | 500 ms |
