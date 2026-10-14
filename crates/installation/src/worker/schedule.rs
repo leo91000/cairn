@@ -102,6 +102,13 @@ impl Worker {
         {
             return Ok(());
         }
+
+        // Preparation can leave the durable status queued until the launch completes.
+        // Its existing reservation must keep owning the execution and its stop token.
+        if self.active.lock().await.contains_key(&run_id) {
+            return Ok(());
+        }
+
         let recovering = run["recoveryPending"] == true;
         let launched = RunCheckpoint::load(&s.store, &run_id)
             .await?
