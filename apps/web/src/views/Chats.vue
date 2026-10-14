@@ -64,6 +64,7 @@ import {
 } from '../icons'
 import { connectionTone, installationKey, routeLabel } from '../installation-context'
 import { useRetryNotice } from '../run-retry'
+import { exclusiveSuspensionLabel, isExclusivelySuspended } from '../run-status'
 import { backgroundWait } from '../signal'
 import { chatSkills } from '../skill-mentions'
 import { openSubagentKey, subagentState } from '../subagents'
@@ -246,6 +247,7 @@ function pasteFiles(event: ClipboardEvent) {
 }
 
 const active = computed(() => !!detail.value?.run && ['queued', 'running'].includes(detail.value.run.status))
+const suspended = computed(() => isExclusivelySuspended(detail.value?.run))
 const retryNotice = useRetryNotice(() => detail.value?.run)
 const sleepNotice = computed(() => chatSleepNotice(detail.value))
 const waitNotice = computed(() => retryNotice.value
@@ -253,10 +255,16 @@ const waitNotice = computed(() => retryNotice.value
   : chatWaitNotice(detail.value?.run) ?? sleepNotice.value)
 const backgroundTasks = computed(() => detail.value?.run?.status === 'running' ? backgroundWait(events.value)?.tasks.length ?? 0 : 0)
 const chatStatus = computed(() => {
+  const status = detail.value?.run?.status
+  if (status === 'failed')
+    return 'Failed'
+  if (status === 'interrupted')
+    return 'Interrupted'
   if (detail.value?.paused)
     return 'Paused'
 
-  const status = detail.value?.run?.status
+  if (suspended.value)
+    return exclusiveSuspensionLabel
   if (status === 'queued')
     return 'Waiting'
   if (status === 'running') {
@@ -265,10 +273,6 @@ const chatStatus = computed(() => {
     return 'Working'
   }
 
-  if (status === 'failed')
-    return 'Failed'
-  if (status === 'interrupted')
-    return 'Interrupted'
   if (sleepNotice.value)
     return detail.value?.wakeup?.condition ? 'Waiting for a result' : 'Scheduled wait'
   return 'Ready'
@@ -657,7 +661,7 @@ function key(event: KeyboardEvent) {
             :name="detail.agentName"
             :identity="detail.agentId"
             :size="36"
-            :working="detail.run?.status === 'running' && !detail.paused"
+            :working="detail.run?.status === 'running' && !detail.paused && !suspended"
           />
           <div class="min-w-0 flex-1">
             <div class="flex min-w-0 items-center gap-1">
@@ -797,6 +801,7 @@ function key(event: KeyboardEvent) {
             :sending="delivery.sending"
             :events="events"
             :active="detail?.run?.status === 'running'"
+            :suspended="suspended"
             :agent-id="detail?.agentId || selectedAgent?.id"
             :agent="detail?.agentName || selectedAgent?.name || 'Main agent'"
             :task="detail?.title || 'New conversation'"
@@ -817,6 +822,7 @@ function key(event: KeyboardEvent) {
               v-if="detail"
               :questions="detail.questions || []"
               :active="active"
+              :suspended="suspended"
               :highlighted="typeof route.query.question === 'string' ? route.query.question : undefined"
             />
             <UiAlert v-if="visibleError && !dismissedError" class="mb-3 flex items-start gap-2">

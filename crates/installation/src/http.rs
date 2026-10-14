@@ -94,6 +94,7 @@ pub async fn router(service: Arc<Service>) -> Result<Router> {
         .route("/health", any(health))
         .route("/api/mcp", any(crate::mcp_server::handle))
         .route("/mcp-workspace", any(crate::mcp_server::handle))
+        .route("/plugin-command", any(crate::plugins::handle))
         .route("/mcp-installation", any(crate::mcp_server::handle))
         .route("/mcp-gateway/{id}", any(crate::mcp_server::handle))
         .route("/api/{*path}", any(api))
@@ -169,6 +170,7 @@ async fn security(State(app): State<App>, mut request: Request, next: Next) -> R
 fn is_dynamic(path: &str) -> bool {
     path.starts_with("/api/")
         || path == "/mcp-workspace"
+        || path == "/plugin-command"
         || path == "/mcp-installation"
         || path.starts_with("/mcp-gateway/")
         || path.starts_with("/internal/")
@@ -291,6 +293,7 @@ fn authenticate_installation(request: &Request) -> Result<()> {
         || path.starts_with("/internal/node-workspace/")
         || path.starts_with("/internal/execution/")
         || path == "/mcp-workspace"
+        || path == "/plugin-command"
         || path == "/mcp-installation"
         || path.starts_with("/mcp-gateway/");
     if machine {
@@ -330,8 +333,8 @@ fn owner_operation(method: &str, path: &str) -> bool {
         // Storage configuration lives under nodes; credentials also include
         // MCP connection flows and per-agent GitHub tokens below.
         [
-            "nodes" | "accounts" | "onepassword" | "mcps" | "connections" | "settings" | "audit"
-            | "github" | "agent-avatars",
+            "nodes" | "accounts" | "onepassword" | "plugins" | "mcps" | "connections" | "settings"
+            | "audit" | "github" | "agent-avatars",
             ..,
         ] => true,
         ["agents"] | ["agents", _, "avatar"] => !read,

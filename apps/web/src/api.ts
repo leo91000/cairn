@@ -138,7 +138,7 @@ export function apiResourceUrl(value: string) {
 }
 
 export function ownerPage(path: string) {
-  return ['/mcps', '/connections', '/nodes', '/authorize'].includes(path)
+  return ['/plugins', '/mcps', '/connections', '/nodes', '/authorize'].includes(path) || path.startsWith('/plugins/')
 }
 
 export async function refresh() {

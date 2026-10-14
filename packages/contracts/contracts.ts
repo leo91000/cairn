@@ -98,6 +98,7 @@ export interface TaskOutcome {
   messageId?: string | null
 }
 export interface Run {
+  suspendedByExclusive?: import('./nodes').ExclusiveReservation | null
   retry?: {
     attempt: number
     limit: number

@@ -16,6 +16,7 @@ import {
   Sparkles,
   Terminal,
 } from '../icons'
+import { exclusiveSuspensionLabel } from '../run-status'
 import ActivityArtifactCard from './ActivityArtifactCard.vue'
 import Icon from './Icon.vue'
 import Modal from './Modal.vue'
@@ -23,14 +24,14 @@ import Modal from './Modal.vue'
 // The agent's actions between two messages, as on Android: a one-sentence summary that expands
 // into a timeline; each step opens its full detail. While the agent works, the step in progress
 // is left to the working indicator below.
-const props = defineProps<{ artifacts: ActivityArtifact[], active: boolean }>()
+const props = defineProps<{ artifacts: ActivityArtifact[], active: boolean, suspended?: boolean }>()
 const expanded = ref(false)
 const opened = ref<number | null>(null)
 const timelineId = useId()
-const running = (artifact: ActivityArtifact) => artifact.status === 'running' && props.active
+const running = (artifact: ActivityArtifact) => artifact.status === 'running' && props.active && !props.suspended
 const shown = computed(() => props.artifacts.filter(artifact => !running(artifact)))
 const steps = computed(() => agentSteps(shown.value))
-const sentence = computed(() => actionSentence(shown.value))
+const sentence = computed(() => props.active && props.suspended && shown.value.some(artifact => artifact.status === 'running') ? exclusiveSuspensionLabel : actionSentence(shown.value))
 const failures = computed(() => steps.value.filter(step => step.failed).length)
 const kinds = computed(() => [...new Set(shown.value.map(artifact => artifact.kind))].filter(kind => kind !== 'notice').slice(0, 4))
 const glyphs = {
@@ -54,7 +55,7 @@ function status(step: (typeof steps.value)[number]) {
     return code === undefined ? 'Failed' : `Exit ${code}`
   }
 
-  return step.running ? 'running' : ''
+  return step.running ? props.active && props.suspended ? 'suspended' : 'running' : ''
 }
 
 // The sheet names the step's state, including an expected outcome such as "No matches".
@@ -62,7 +63,7 @@ function stepState(step: (typeof steps.value)[number]) {
   if (step.failed)
     return 'Failed'
   if (step.running)
-    return 'Running'
+    return props.active && props.suspended ? 'Suspended' : 'Running'
   const [only] = step.items
   return step.items.length === 1 ? only!.statusLabel ?? (only!.historical ? 'Recorded' : 'Completed') : 'Completed'
 }
@@ -159,6 +160,7 @@ function stepState(step: (typeof steps.value)[number]) {
         <ActivityArtifactCard
           :artifact="artifact"
           :active="active"
+          :suspended="active && suspended"
           expanded
           bare
         />

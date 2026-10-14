@@ -84,6 +84,7 @@ const relevant = computed(() => (!!props.run.nodeId && props.run.nodeId !== LOCA
   || props.run.storage?.mode === 'on-demand'
   || nodes.value.some(candidate => !candidate.local)
   || !!error.value
+  || (props.run.status === 'running' && !!props.run.suspendedByExclusive)
   || !!(props.run.nodeState || props.run.movementError || props.run.restoredAt || props.run.capacityWaitUntil || props.run.backup?.error))
 watch(relevant, value => emit('relevance', value), { immediate: true })
 const destinations = computed(() => nodes.value.filter(candidate => candidate.id !== props.run.nodeId))
@@ -102,6 +103,8 @@ const status = computed((): { tone: 'bad' | 'warn' | 'busy' | 'ok' | 'idle', lab
     return { tone: 'bad', label: 'Sync failed' }
   if (waiting)
     return { tone: waiting === 'integrity' ? 'bad' : 'warn', label: storageShort[waiting] || waiting }
+  if (run.status === 'running' && run.suspendedByExclusive)
+    return { tone: 'busy', label: 'Suspended for exclusive work' }
   if (run.nodeState)
     return { tone: 'busy', label: labels[run.nodeState] || run.nodeState }
   if (run.capacityWaitUntil)
@@ -363,6 +366,15 @@ onUnmounted(() => {
           <p v-if="run.nodeState" class="m-0! mt-1.5!">
             {{ labels[run.nodeState] || run.nodeState }}
           </p>
+          <div v-if="run.status === 'running' && run.suspendedByExclusive" role="status" class="mt-2 rounded-lg border border-line p-2">
+            <p>Suspended for exclusive work: {{ run.suspendedByExclusive.reason }}</p>
+            <p v-if="run.suspendedByExclusive.expiresAt">
+              Reservation ends at {{ new Date(run.suspendedByExclusive.expiresAt).toLocaleTimeString() }}. Work resumes automatically after release when its other pauses are cleared.
+            </p>
+            <RouterLink :to="`/runs/${run.suspendedByExclusive.ownerRunId}`">
+              View reservation owner
+            </RouterLink>
+          </div>
           <p v-if="run.capacityWaitUntil" class="m-0! mt-1.5!">
             Waiting for capacity until {{ new Date(run.capacityWaitUntil).toLocaleString() }}.
           </p>

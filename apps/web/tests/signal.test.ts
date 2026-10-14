@@ -2,6 +2,7 @@ import type { ChatView } from '../../../packages/contracts/chats'
 import type { RunEvent, RunListItem, Task } from '../../../packages/contracts/contracts'
 import { describe, expect, it } from 'vitest'
 import { activityEntries } from '../src/activity'
+import { exclusiveSuspensionLabel } from '../src/run-status'
 import {
   backgroundWait,
   filOf,
@@ -110,6 +111,49 @@ function waiting(id: number, at: number, descriptions: string[]): RunEvent {
 }
 
 describe('the Fil', () => {
+  const reservation: NonNullable<RunListItem['suspendedByExclusive']> = {
+    id: 'reservation',
+    nodeId: 'node',
+    ownerRunId: 'owner',
+    reason: 'Compile',
+    state: 'acquired',
+    createdAt: 1,
+    expiresAt: 1000,
+    waitUntil: 1000,
+    pausedRunIds: ['chat-run', 'mission-run'],
+    minimumAvailableMemoryMiB: 0,
+  }
+
+  it('keeps suspended work in Live, with failures, questions and user pauses taking priority', () => {
+    const fil = filOf([
+      chat('suspended', { status: 'running', suspendedByExclusive: reservation }),
+      chat('failed', { status: 'failed', suspendedByExclusive: reservation }),
+      chat('question', { status: 'running', pendingQuestions: 1, suspendedByExclusive: reservation }),
+      chat('paused', { status: 'running', paused: true, suspendedByExclusive: reservation }),
+    ], [task('compile')], [run('mission-run', 'compile', { status: 'running', finishedAt: null, suspendedByExclusive: reservation })])
+    expect(fil.live.map(item => [item.title, item.kind, item.subtitle])).toEqual([
+      ['suspended', 'suspended', exclusiveSuspensionLabel],
+      ['compile', 'suspended', exclusiveSuspensionLabel],
+    ])
+    expect(fil.forYou.map(item => item.kind)).toEqual(['failed', 'question'])
+    expect(fil.recent.map(item => item.kind)).toEqual(['paused'])
+  })
+
+  it('keeps settled mission review visible after an earlier exclusive suspension', () => {
+    const fil = filOf([], [task('compile')], [run('mission-run', 'compile', {
+      status: 'succeeded',
+      suspendedByExclusive: reservation,
+      outcome: {
+        status: 'blocked',
+        reason: 'Needs a device',
+        evidence: [],
+        reportedAt: 2,
+      },
+    })])
+    expect(fil.live).toEqual([])
+    expect(fil.forYou[0]).toMatchObject({ kind: 'review', subtitle: 'Blocked · Needs a device' })
+  })
+
   it('puts what needs the user first, then live work, then recent conversations', () => {
     const fil = filOf([
       chat('recent', { updatedAt: 5 }),

@@ -40,6 +40,7 @@ const MAX_ATTEMPT_MS: i64 = 13 * 3_600_000;
 pub(super) struct Attempt {
     pub stop: CancellationToken,
     pub done: watch::Receiver<bool>,
+    pub physical_teardown: Option<watch::Receiver<bool>>,
     pub socket: Arc<OnceCell<PathBuf>>,
     pub plan: Plan,
     pub imports: Arc<Mutex<()>>,
@@ -55,6 +56,9 @@ pub(super) struct Broker {
     pub stop: CancellationToken,
     /// Node lease deadline of each attempt, in controller boot milliseconds.
     pub leases: Arc<Mutex<HashMap<String, u64>>>,
+    /// Serializes new attempts with exclusive admission and its recovery.
+    pub admission: Arc<Mutex<()>>,
+    pub exclusive: Arc<Mutex<super::exclusive::Ledger>>,
 }
 
 /// Body of `POST /runs/{id}/projects/{project}`.
@@ -141,6 +145,8 @@ impl Broker {
             active: Arc::default(),
             stop,
             leases: Arc::default(),
+            admission: Arc::default(),
+            exclusive: Arc::default(),
         }
     }
 
@@ -184,6 +190,7 @@ impl Broker {
     }
 
     pub async fn start(&self, id: &str) -> Result<()> {
+        let _admission = self.admission.lock().await;
         if self.active.lock().await.contains_key(id) {
             return Ok(());
         }
@@ -192,6 +199,7 @@ impl Broker {
                 "This execution attempt has already stopped.",
             ));
         }
+        self.allow_exclusive_admission(id).await?;
         let plan = self.load_plan(id).await?;
         if plan.node_lease_required() && !self.lease_valid(id).await {
             return Err(Error::conflict(
@@ -209,7 +217,7 @@ impl Broker {
                 "This workspace already has an active attempt.",
             ));
         }
-        let reservation = self.pool.reserve(&plan).await?;
+        let mut reservation = self.pool.reserve(&plan).await?;
         // Reservation can wait for preparation teardown. Keep health, stop and imports responsive.
         let mut active = self.active.lock().await;
         if active.contains_key(id) {
@@ -218,6 +226,7 @@ impl Broker {
         if self.stop.is_cancelled() || self.has_stopped(id) {
             return Err(Error::conflict("This execution attempt has stopped."));
         }
+        self.pool.ensure_not_quarantined()?;
         validate(&plan, id, &self.data)?;
         if active.values().any(|a| a.plan.run_id() == plan.run_id()) {
             return Err(Error::conflict(
@@ -229,6 +238,7 @@ impl Broker {
         let control = Arc::new(Mutex::new(()));
         let stop = self.stop.child_token();
         let (done, receiver) = watch::channel(false);
+        let physical_teardown = reservation.subscribe_teardown();
         atomic_write(&self.state_file(id, "run"), plan.run_id().as_bytes()).await?;
         atomic_write(&self.state_file(id, "active"), b"1").await?;
         active.insert(
@@ -236,6 +246,7 @@ impl Broker {
             Attempt {
                 stop: stop.clone(),
                 done: receiver,
+                physical_teardown: Some(physical_teardown),
                 socket: socket.clone(),
                 plan: plan.clone(),
                 imports: Arc::default(),
@@ -308,13 +319,40 @@ impl Broker {
             let active = self.active.lock().await;
             active.get(id).map(|a| {
                 a.stop.cancel();
-                a.done.clone()
+                (a.done.clone(), a.physical_teardown.clone())
             })
         };
-        if let Some(mut done) = attempt {
-            let _ = tokio::time::timeout(Duration::from_secs(15), done.wait_for(|done| *done))
-                .await
-                .map_err(|_| Error::unavailable("Waiting for the previous VM to stop."))?;
+        if let Some((mut done, physical_teardown)) = attempt {
+            let recovered = tokio::time::timeout(Duration::from_secs(15), async {
+                if done.wait_for(|done| *done).await.is_ok() {
+                    return Ok::<bool, Error>(false);
+                }
+                let mut teardown = physical_teardown.ok_or_else(|| {
+                    self.pool.quarantine();
+                    Error::unavailable("VM completion was lost; teardown is not confirmed.")
+                })?;
+                teardown.wait_for(|finished| *finished).await.map_err(|_| {
+                    self.pool.quarantine();
+                    Error::unavailable(
+                        "VM teardown completion was lost; physical cleanup is not confirmed.",
+                    )
+                })?;
+                Ok(true)
+            })
+            .await
+            .map_err(|_| Error::unavailable("Waiting for the previous VM to stop."))??;
+            if recovered {
+                // Only physical teardown acknowledgment allows removal of a stale
+                // logical attempt after its execution task panicked or was aborted.
+                let mut active = self.active.lock().await;
+                atomic_write(
+                    &self.state_file(id, "exit"),
+                    CONTROLLER_INTERRUPTED.to_string().as_bytes(),
+                )
+                .await?;
+                remove_if_present(&self.state_file(id, "active")).await?;
+                active.remove(id);
+            }
         }
         Ok(())
     }
@@ -412,8 +450,14 @@ async fn enforce_limits(
             return;
         }
         let disk_directory = crate::storage::environment::directory(&broker.state, plan.run_id());
+        let paused =
+            crate::microvm::suspension::administrative_suspended_ms(&broker.state, &attempt)
+                .await
+                .unwrap_or(0);
         let lost_lease = leased && !broker.lease_valid(&attempt).await;
-        if deadline.is_some_and(|d| now() >= d) || lost_lease {
+        let active_deadline = deadline
+            .map(|deadline| deadline.saturating_add(i64::try_from(paused).unwrap_or(i64::MAX)));
+        if active_deadline.is_some_and(|d| now() >= d) || lost_lease {
             if expiry.is_cancelled() {
                 return;
             }
@@ -541,6 +585,78 @@ mod ownership_tests {
         .await
         .unwrap();
         assert!(stop.is_cancelled());
+    }
+
+    async fn abandoned_attempt(
+        broker: &Broker,
+        run: &str,
+        physical_teardown: Option<watch::Receiver<bool>>,
+    ) -> String {
+        let id = crate::config::id();
+        let (done, receiver) = watch::channel(false);
+        drop(done);
+        atomic_write(&broker.state_file(&id, "active"), b"1")
+            .await
+            .unwrap();
+        broker.active.lock().await.insert(
+            id.clone(),
+            Attempt {
+                stop: CancellationToken::new(),
+                done: receiver,
+                physical_teardown,
+                socket: Arc::default(),
+                plan: Plan::new(json!({ "runId": run })),
+                imports: Arc::default(),
+                control: Arc::default(),
+            },
+        );
+        id
+    }
+
+    #[tokio::test]
+    async fn lost_logical_completion_stays_fenced_until_physical_cleanup_acknowledges() {
+        let root = tempfile::tempdir().unwrap();
+        let (broker, run) = pending_claim(root.path()).await;
+        let (physical, receiver) = watch::channel(false);
+        let id = abandoned_attempt(&broker, &run, Some(receiver)).await;
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), broker.stop(&id))
+                .await
+                .is_err()
+        );
+        assert!(broker.active.lock().await.contains_key(&id));
+        assert!(broker.state_file(&id, "active").exists());
+        assert!(!broker.state_file(&id, "exit").exists());
+
+        physical.send(true).unwrap();
+        broker.stop(&id).await.unwrap();
+        assert!(!broker.active.lock().await.contains_key(&id));
+        assert!(!broker.state_file(&id, "active").exists());
+        assert_eq!(
+            tokio::fs::read_to_string(broker.state_file(&id, "exit"))
+                .await
+                .unwrap(),
+            CONTROLLER_INTERRUPTED.to_string()
+        );
+        assert!(!broker.run_is_active(&run).await);
+        broker.stop(&id).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn lost_physical_completion_and_missing_subscription_remain_fail_closed() {
+        let root = tempfile::tempdir().unwrap();
+        let (broker, run) = pending_claim(root.path()).await;
+        let (physical, receiver) = watch::channel(false);
+        drop(physical);
+        for subscription in [Some(receiver), None] {
+            let id = abandoned_attempt(&broker, &run, subscription).await;
+            let error = broker.stop(&id).await.unwrap_err();
+            assert!(error.is_unavailable());
+            assert!(broker.active.lock().await.contains_key(&id));
+            assert!(broker.state_file(&id, "active").exists());
+            assert!(!broker.state_file(&id, "exit").exists());
+            assert!(broker.pool.health().await.quarantined);
+        }
     }
 }
 

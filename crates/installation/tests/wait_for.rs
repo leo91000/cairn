@@ -1,4 +1,6 @@
 mod common;
+#[path = "wait_for/pr_checks.rs"]
+mod pr_checks;
 
 use cairn_installation::{
     chats::{sleep, wait_for},
@@ -42,7 +44,19 @@ fs.appendFileSync(`${__dirname}/github-calls.jsonl`, JSON.stringify({
 }) + '\n');
 if (state.delay) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, state.delay);
 if (state.error) { console.error('fixture-secret-must-not-leak'); process.exit(1); }
-console.log(JSON.stringify(state.response));
+const args = process.argv.slice(2);
+if (state.pr) {
+  const query = args.find(arg => arg.startsWith('query=')) || '';
+  if (query) {
+    const cursor = args.find(arg => arg.startsWith('cursor='));
+    const response = cursor ? state.pages?.[cursor.slice(7)] : !query.includes('contexts(') ? state.finalPr : state.pr;
+    console.log(JSON.stringify(state.graphqlError ? { errors: [{ message: 'fixture-secret-must-not-leak' }] } : { data: { repository: { pullRequest: response || state.pr } } }));
+  } else {
+    const page = (args[3].match(/[?&]page=(\d+)/) || [null, '1'])[1];
+    const rulesCalls = state.rulesAfter ? fs.readFileSync(`${__dirname}/github-calls.jsonl`, 'utf8').trim().split('\n').map(JSON.parse).filter(call => call.args[3]?.includes('/rules/branches/')).length : 0;
+    console.log(JSON.stringify(state.rulePages?.[page] || (rulesCalls > 1 ? state.rulesAfter : null) || state.rules || []));
+  }
+} else console.log(JSON.stringify(state.response));
 "#,
         )
         .unwrap();
@@ -780,23 +794,42 @@ fn process_cpu_ms() -> f64 {
     time.tv_sec as f64 * 1000.0 + time.tv_nsec as f64 / 1_000_000.0
 }
 
+fn child_cpu_ms() -> f64 {
+    let mut usage: libc::rusage = unsafe { std::mem::zeroed() };
+    assert_eq!(
+        unsafe { libc::getrusage(libc::RUSAGE_CHILDREN, &mut usage) },
+        0
+    );
+    let millis = |time: libc::timeval| time.tv_sec as f64 * 1000.0 + time.tv_usec as f64 / 1000.0;
+    millis(usage.ru_utime) + millis(usage.ru_stime)
+}
+
 #[tokio::test]
 #[ignore = "reproducible local metadata measurements; run explicitly without other tests"]
 async fn measure_wait_metadata_against_sleep() {
-    for conditional in [false, true] {
+    for mode in ["sleep", "run_finished", "github_pr_checks"] {
         let f = Fixture::new().await;
         let target = f.target().await;
+        if mode == "github_pr_checks" {
+            pr_checks::pending(&f);
+        }
         let mut writes = Vec::new();
         let cpu_start = process_cpu_ms();
+        let child_cpu_start = child_cpu_ms();
         for i in 0..100 {
             let reason = format!("Measurement {i}");
             let started = std::time::Instant::now();
-            if conditional {
+            if mode != "sleep" {
+                let condition = if mode == "run_finished" {
+                    json!({ "type": "run_finished", "runId": target["id"] })
+                } else {
+                    json!({ "type": "github_pr_checks", "projectId": f.project, "prNumber": 7, "headSha": SHA })
+                };
                 wait_for::schedule(
                     &f.s,
                     &f.token,
                     &json!({
-                        "condition": { "type": "run_finished", "runId": target["id"] },
+                        "condition": condition,
                         "reason": reason,
                         "timeoutSeconds": 420,
                     }),
@@ -811,6 +844,7 @@ async fn measure_wait_metadata_against_sleep() {
             writes.push(started.elapsed().as_secs_f64() * 1000.0);
         }
         let write_cpu_ms = process_cpu_ms() - cpu_start;
+        let child_cpu_ms = child_cpu_ms() - child_cpu_start;
         let chat = f.s.get("chats", &f.chat).await.unwrap();
         let mut warm = Vec::new();
         for _ in 0..500 {
@@ -846,11 +880,13 @@ async fn measure_wait_metadata_against_sleep() {
         println!(
             "WAIT_FOR_MEASUREMENT {}",
             json!({
-                "mode": if conditional { "run_finished" } else { "sleep" },
+                "mode": mode,
                 "chatEncodedBytes": serde_json::to_vec(&chat).unwrap().len(),
                 "wakeupEncodedBytes": serde_json::to_vec(&chat["wakeup"]).unwrap().len(),
                 "write": milliseconds(&mut writes),
                 "writeProcessCpuMs": write_cpu_ms,
+                "writeChildCpuMs": child_cpu_ms,
+                "externalProbeRequests": f.calls().len(),
                 "warmRead": milliseconds(&mut warm),
                 "firstReadFreshPool": milliseconds(&mut reopened),
                 "freshPoolOpen": milliseconds(&mut pool_open),

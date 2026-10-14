@@ -13,7 +13,7 @@ use serde_json::{Value, json};
 
 pub const INSTRUCTIONS: &str = "When waiting for a remote result before continuing the current task, \
     prefer cairn_workspace.wait_for for a supported condition (an authorized Cairn run finishing or \
-    a GitHub workflow run completing at a specific commit SHA). If its result says deferred=false, \
+    a GitHub workflow run or required PR checks completing at a specific commit SHA). If its result says deferred=false, \
     the condition is already complete: inspect the result and continue this turn. If deferred=true, \
     end this turn; Cairn observes the condition without keeping this execution active. \
     For other remote waits, call cairn_workspace.sleep with a delay in seconds and a concrete reason, then end this turn. \
@@ -97,6 +97,7 @@ pub async fn schedule(s: &Service, bearer: &str, input: &Value) -> Result<Value>
                 "wakeAt": created + seconds * 1000,
             });
             chat["wakeup"] = wakeup.clone();
+            crate::nodes::exclusive::release_before_wait(db, text(&run, "id"))?;
             chat["updatedAt"] = created.into();
             db.put("chats", &chat)?;
             db.event(
@@ -112,7 +113,7 @@ pub async fn schedule(s: &Service, bearer: &str, input: &Value) -> Result<Value>
     Ok(result)
 }
 
-pub(super) fn has_pending_input(db: &Db<'_>, chat: &Value) -> Result<bool> {
+pub(crate) fn has_pending_input(db: &Db<'_>, chat: &Value) -> Result<bool> {
     Ok(db
         .messages(text(chat, "id"))?
         .iter()

@@ -191,7 +191,7 @@ fn settings(plan: &Value) -> Value {
     settings
 }
 
-pub fn args(plan: &Value) -> Vec<String> {
+pub fn args(plan: &Value, instructions: &Path) -> Vec<String> {
     let mut args = [
         "-p",
         "--input-format",
@@ -212,8 +212,8 @@ pub fn args(plan: &Value) -> Vec<String> {
     .map(str::to_owned)
     .to_vec();
     args.extend([
-        "--append-system-prompt".into(),
-        text(plan, "instructions").into(),
+        "--append-system-prompt-file".into(),
+        instructions.to_string_lossy().into_owned(),
         "--mcp-config".into(),
         plan["claudeMcps"].to_string(),
     ]);
@@ -1031,9 +1031,14 @@ pub async fn run(
     } else {
         None
     };
+    // Linux limits each argument independently of the total command size. Keep
+    // large skill instructions in a private file for this process's lifetime.
+    let instructions = tempfile::NamedTempFile::new()?;
+    tokio::fs::write(instructions.path(), text(&plan, "instructions")).await?;
+
     let mut cmd = command(
         &config.claude_bin,
-        &args(&plan),
+        &args(&plan, instructions.path()),
         &claude::environment(config, &directory),
         Some(Path::new(text(&plan, "cwd"))),
     );
@@ -1041,8 +1046,10 @@ pub async fn run(
         cmd.env("CLAUDE_SECURESTORAGE_CONFIG_DIR", &directory);
     }
     cmd.stdin(std::process::Stdio::piped()).process_group(0);
-    let mut child = cmd.spawn().map_err(|_| {
-        Error::unavailable("Unable to start Claude Code. Check the server installation.")
+    let mut child = cmd.spawn().map_err(|error| {
+        Error::unavailable(format!(
+            "Unable to start Claude Code: {error}. Check the server installation."
+        ))
     })?;
     let pid = child.id().unwrap();
     let stdin = child.stdin.take().unwrap();

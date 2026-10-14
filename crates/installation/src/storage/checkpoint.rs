@@ -1,7 +1,10 @@
 //! A generation is sealed before resuming the guest; its blocks can be sent later.
 use crate::{
     error::{Error, Result},
-    microvm::host,
+    microvm::{
+        host,
+        suspension::{self, Reason},
+    },
     skills::atomic_write,
 };
 use serde::Deserialize;
@@ -182,10 +185,25 @@ pub(crate) async fn seal_target(
     let paused_at = std::time::Instant::now();
     timing.next("freeze_and_pause");
     if let Some(socket) = &socket {
+        if volume.paused() || volume.transition_pending() {
+            suspension::adopt_storage_state(
+                state,
+                &attempt,
+                volume.paused(),
+                volume.transition_pending(),
+            )
+            .await?;
+        }
+        let held = suspension::inspect(state, &attempt).await?;
+        // An administrative owner cannot be released by a storage checkpoint.
+        // Its already-fenced disk can still produce a crash-consistent capture.
+        emergency |= held.reasons.iter().any(|reason| *reason != Reason::Storage);
         // A healthy VM may still be paused after its previous protection cycle.
         // Resume it before asking the guest to freeze; paused CPUs cannot reply.
         if !emergency && (volume.paused() || volume.transition_pending()) {
-            if let Err(error) = host::settle_attempt(state, &attempt, false, &stop).await {
+            if let Err(error) =
+                suspension::settle_reason(state, &attempt, &Reason::Storage, false, &stop).await
+            {
                 stop.cancel();
                 return Err(error);
             }
@@ -208,9 +226,11 @@ pub(crate) async fn seal_target(
         // A failed response does not establish that the pause was rejected.
         // Keep the monitor aware of the possible pause until resume succeeds.
         volume.set_paused(true);
-        if let Err(error) = host::settle_attempt(state, &attempt, true, &stop).await {
+        if let Err(error) =
+            suspension::settle_reason(state, &attempt, &Reason::Capture, true, &stop).await
+        {
             if !emergency && !stop.is_cancelled() {
-                if host::settle_attempt(state, &attempt, false, &stop)
+                if suspension::settle_reason(state, &attempt, &Reason::Capture, false, &stop)
                     .await
                     .is_ok()
                 {
@@ -237,13 +257,25 @@ pub(crate) async fn seal_target(
     let captured_at = crate::config::now();
     timing.next("seal_and_resume");
     let generation = volume.seal().await;
-    if socket.is_some() && !stop.is_cancelled() && !emergency {
-        if let Err(error) = host::settle_attempt(state, &attempt, false, &stop).await {
+    if socket.is_some() && !stop.is_cancelled() {
+        if emergency {
+            // Transfer the protection fence to its monitor before releasing
+            // the capture owner; exclusive and retention owners remain intact.
+            if let Err(error) =
+                suspension::settle_reason(state, &attempt, &Reason::Storage, true, &stop).await
+            {
+                stop.cancel();
+                return Err(error);
+            }
+        }
+        if let Err(error) =
+            suspension::settle_reason(state, &attempt, &Reason::Capture, false, &stop).await
+        {
             // The controller tears down an attempt whose CPUs cannot be resumed.
             stop.cancel();
             return Err(error);
         }
-        volume.set_paused(false);
+        volume.set_paused(emergency);
     }
     // Guest thaw can itself wait on remote I/O. Leave lease enforcement and
     // storage pause/resume free to operate while the ordered thaw is pending.

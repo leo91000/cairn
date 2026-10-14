@@ -19,6 +19,9 @@ export interface ExecutionNode {
   name: string
   local: boolean
   accepting: boolean
+  exclusiveAgents?: string[]
+  exclusiveReservations?: boolean
+  exclusiveReservation?: ExclusiveReservation | null
   revoked: boolean
   status: 'online' | 'offline' | 'revoked' | 'local'
   tags: string[]
@@ -48,6 +51,21 @@ export interface ExecutionNode {
   agents?: NodeAgent[]
   // Disk kept on the node that no conversation needs there any more.
   staleDisks?: { count: number, diskMiB: number }
+}
+
+export interface ExclusiveReservation {
+  id: string
+  nodeId: string
+  ownerRunId: string
+  reason: string
+  state: 'queued' | 'acquiring' | 'acquired' | 'releasing' | 'released' | 'failed' | 'expired'
+  createdAt: number
+  expiresAt: number | null
+  renewalPending?: boolean
+  waitUntil: number
+  pausedRunIds: string[]
+  minimumAvailableMemoryMiB: number
+  error?: string | null
 }
 
 export interface NodeAgent {
@@ -116,6 +134,8 @@ export function nodeDiagnostics(node: ExecutionNode, now = Date.now()) {
     reasons.push(node.budgetError ? `The shared budget could not be applied: ${node.budgetError}` : node.updateError ? `The runtime is not ready: ${node.updateError}` : 'The runtime is not ready yet or does not match the version approved by the master.')
   if (node.maintenance)
     reasons.push('Maintenance in progress: new work waits until the update finishes.')
+  if (node.exclusiveReservation)
+    reasons.push(`Exclusive reservation: ${node.exclusiveReservation.reason}. Other work resumes automatically after release.`)
   if (node.pressure)
     reasons.push(node.pressure === 'memory' ? 'Shared RAM is under pressure: new work waits for headroom.' : 'Shared disk space is low: new work waits for headroom.')
   if (!node.accepting)

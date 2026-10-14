@@ -115,11 +115,13 @@ internal fun buildFeed(chats: List<Chat>, activity: List<Run>, tasks: List<Task>
                     running +=
                         item(
                                 FeedKind.RUNNING_CHAT,
-                                if (chat.status == "queued")
+                                if (chat.exclusiveSuspended)
+                                    "Suspendue (exclusivité) · ${context(agent, chat.projectName)}"
+                                else if (chat.status == "queued")
                                     "En attente · ${context(agent, chat.projectName)}"
                                 else context(agent, chat.projectName),
                             )
-                            .copy(working = chat.status == "running")
+                            .copy(working = chat.status == "running" && !chat.exclusiveSuspended)
                 else ->
                     recent +=
                         item(
@@ -156,10 +158,15 @@ internal fun buildFeed(chats: List<Chat>, activity: List<Run>, tasks: List<Task>
                     running +=
                         item(
                                 FeedKind.RUNNING_TASK,
-                                if (run.status == "queued") "Mission en attente · $agent"
+                                if (run.suspendedByExclusive != null)
+                                    "Suspendue (exclusivité) · Mission · $agent"
+                                else if (run.status == "queued") "Mission en attente · $agent"
                                 else "Mission · $agent",
                             )
-                            .copy(working = run.status == "running")
+                            .copy(
+                                working =
+                                    run.status == "running" && run.suspendedByExclusive == null
+                            )
                 run.status in setOf("failed", "interrupted") ->
                     forYou +=
                         item(

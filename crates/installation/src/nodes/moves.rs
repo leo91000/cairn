@@ -65,6 +65,10 @@ struct NodeSummary<'a> {
     pressure: &'a Value,
     limits: &'a Value,
     current: bool,
+    exclusive_allowed: bool,
+    exclusive_reservations: bool,
+    exclusive_in_use: bool,
+    exclusive_until: &'a Value,
 }
 
 /// A pending move, persisted in `run.moveRequest` until the destination resumes.
@@ -115,6 +119,12 @@ pub async fn list(s: &Service, run: &Value) -> Result<Value> {
                 pressure: &node["pressure"],
                 limits: &node["limits"],
                 current: node["id"] == *current,
+                exclusive_allowed: node["exclusiveAgents"].as_array().is_some_and(|agents| {
+                    agents.iter().any(|agent| agent == super::run_agent(run))
+                }),
+                exclusive_reservations: node["exclusiveReservations"] == true,
+                exclusive_in_use: node["exclusiveReservation"].is_object(),
+                exclusive_until: &node["exclusiveReservation"]["expiresAt"],
             })
         })
         .collect::<std::result::Result<Vec<_>, _>>()?;

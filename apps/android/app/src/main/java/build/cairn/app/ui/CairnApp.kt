@@ -483,7 +483,10 @@ private fun WorkspaceApp(
                                 composable("connections") {
                                     ConnectionsScreen(vm, state) { nav.navigate("run/$it") }
                                 }
-                            if (state.isOwner) composable("nodes") { NodesScreen(vm, state) }
+                            if (state.isOwner)
+                                composable("nodes") {
+                                    NodesScreen(vm, state) { nav.navigate("run/$it") }
+                                }
                             composable("settings") { SettingsScreen(vm, state) }
                             if (state.isOwner)
                                 composable("authorize") {
@@ -592,7 +595,7 @@ fun RunCard(run: Run, open: (String) -> Unit) {
         padding = PaddingValues(14.dp),
     ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
-            RunStatusTile(run.status)
+            RunStatusTile(runPresentationStatus(run))
             Spacer(Modifier.width(12.dp))
             Column(Modifier.weight(1f)) {
                 Text(
@@ -608,7 +611,7 @@ fun RunCard(run: Run, open: (String) -> Unit) {
                 )
             }
             Spacer(Modifier.width(8.dp))
-            Status(run.status)
+            Status(runPresentationStatus(run))
         }
     }
 }
@@ -621,6 +624,7 @@ internal fun RunStatusTile(status: String, size: androidx.compose.ui.unit.Dp = 3
             "succeeded" -> signal.success
             "failed",
             "interrupted" -> signal.attention
+            "suspended-exclusive" -> signal.warning
             "running",
             "queued" -> MaterialTheme.colorScheme.primary
             else -> MaterialTheme.colorScheme.onSurfaceVariant

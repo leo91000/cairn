@@ -7,7 +7,7 @@ travail autorisé avec un résultat précis.
 
 ## Ce que cette PR permet déjà
 
-Deux conditions sont disponibles dans `cairn_workspace.wait_for` :
+Trois conditions sont disponibles dans `cairn_workspace.wait_for` :
 
 - `run_finished` : une exécution Cairn autorisée atteint un état terminal. Une
   conversation dont le tour a réussi mais qui possède encore un réveil ou des
@@ -17,6 +17,12 @@ Deux conditions sont disponibles dans `cairn_workspace.wait_for` :
   un identifiant d’exécution et le SHA complet du commit termine. Le résultat
   inclut sa conclusion et son numéro de tentative. Les credentials existants de
   l’agent sont utilisés ; ils restent dans l’installation.
+- `github_pr_checks` : les checks requis d’une PR sont observés sur son head
+  exact. Les protections classiques et les règles actives de branche fournissent
+  les exigences, y compris les checks qui n’ont pas encore publié de résultat.
+  Un échec ou une annulation réveille immédiatement ; la réussite exige que tous
+  les checks requis soient satisfaits. Les checks facultatifs restent hors de
+  cette condition.
 
 Exemple pour une dépendance Cairn :
 
@@ -52,6 +58,39 @@ Si le résultat est déjà disponible, l’outil renvoie `deferred: false` et
 même conversation, session et environnement après observation du résultat ou
 expiration du délai, une fois l’exécution précédente libérée et selon la capacité.
 
+Exemple pour les checks requis d’une PR :
+
+```json
+{
+  "condition": {
+    "type": "github_pr_checks",
+    "projectId": "22222222-2222-4222-8222-222222222222",
+    "prNumber": 193,
+    "headSha": "1111111111111111111111111111111111111111"
+  },
+  "timeoutSeconds": 1800,
+  "reason": "Reprendre après les checks requis du commit à relire"
+}
+```
+
+Un nouveau head produit `state: superseded`, avec le SHA actuel. Une PR fermée
+ou mergée produit `state: closed`, avec son état GitHub. Ces observations
+interrompent l’attente de l’ancien commit. L’absence de checks requis produit
+`conclusion: no_required_checks` ; elle ne prouve pas que la CI a réussi. Une PR
+peut avoir de nombreux jobs facultatifs, comme Cairn sans checks imposés par des
+protections de branche. Leur vérification reste nécessaire avant un merge demandé.
+
+Les résultats listent au plus 100 checks requis, présents et manquants confondus,
+et indiquent une troncature ; les comptes et la décision utilisent l’ensemble
+observé. Les échecs sont prioritaires dans les détails. Les conclusions GitHub
+`SUCCESS`, `NEUTRAL` et `SKIPPED` satisfont un check requis. Les checks manquants,
+`EXPECTED` et en cours gardent l’attente. Les règles de workflows obligatoires
+qui ne sont pas des status checks ne sont pas prises en charge : elles donnent
+une observation d’indisponibilité plutôt qu’une réussite supposée.
+Un legacy status ne fournit pas son identité d’application. Si son nom correspond
+à plusieurs exigences d’applications, son attribution est ambiguë : la condition
+signale aussi une indisponibilité et demande une vérification directe de la PR.
+
 Une conclusion `failure`, `cancelled` ou `timed_out` est aussi un résultat utile :
 elle réveille l’agent pour qu’il puisse diagnostiquer le problème. Attendre
 uniquement un succès masquerait les échecs jusqu’à l’expiration du délai.
@@ -86,8 +125,8 @@ des VM suivent la politique existante des réveils durables.
 | --- | --- | --- |
 | Exécution Cairn terminée | Enchaîner une tâche après une dépendance et libérer un créneau pour elle | Disponible, pour le même agent et les ressources autorisées |
 | Workflow GitHub terminé | Reprendre pour analyser la réussite, les logs d’un échec ou une annulation | Disponible, avec projet, run ID et commit précis |
-| Tous les checks d’une PR | Reprendre quand tous les contrôles requis du commit sont terminés | Ajouter un adaptateur pour les checks requis ; un workflow seul ne représente pas toute la CI |
-| Nouveau commit sur une PR | Abandonner une attente devenue obsolète et vérifier le nouveau commit | Ajouter une condition de changement de head, avec résultat `superseded` explicite |
+| Checks requis d’une PR | Reprendre quand les contrôles requis du commit sont satisfaits ou sur un premier échec | Disponible ; exigences des protections classiques et règles actives, checks manquants inclus |
+| Nouveau commit sur une PR | Abandonner une attente devenue obsolète et vérifier le nouveau commit | Disponible pour `github_pr_checks`, avec résultat `superseded` explicite |
 | Review GitHub humaine | Reprendre après une décision de review sur le commit attendu | Définir les reviewers requis et traiter les approbations périmées ou révoquées |
 | Review d’un agent indépendant | Reprendre après la fin de la review et lire les findings | Ajouter une source durable de fin de sous-agent et sa délégation d’accès ; les outils natifs de collaboration ne sont pas des runs Cairn |
 | Plusieurs dépendances | Attendre tout un groupe ou la première réponse utile | Ajouter des conditions `all`/`any`, des limites de taille et une politique sur les échecs |
@@ -116,7 +155,8 @@ périmètre de la demande initiale et des permissions courantes.
 - Le timeout est obligatoire, entre 1 seconde et 24 heures. Dans une attente
   conditionnelle, `wakeAt` représente l’échéance de secours, pas l’heure minimale
   de reprise. Un résultat disponible peut provoquer une reprise plus tôt.
-- Les résultats indiquent `completed`, `timed_out` ou `unavailable`. Une reprise
+- Les résultats indiquent `completed`, `timed_out`, `unavailable`, `superseded`
+  ou `closed`. Une reprise
   apporte une observation et demande de vérifier l’état actuel avant d’agir.
 - Un nouveau message, un arrêt, une annulation, une suppression, un échec terminal
   ou une reprise manuelle d’un run invalide son ancien réveil. La pause de file
@@ -142,8 +182,12 @@ Le prototype réutilise la connexion GitHub existante, sans demander de nouvelle
 configuration de webhook. Les observateurs identiques d’un même agent et des
 mêmes permissions et de la même origine de projet partagent une vérification. Chaque lot contient au plus
 16 cibles et quatre appels CLI simultanés ; un lot est lancé toutes les
-30 secondes. Cela borne la surveillance périodique à environ 1 920 appels par
-heure, auxquels s’ajoutent les inscriptions et les autres usages de GitHub.
+30 secondes. Cela borne la surveillance périodique à environ 1 920 observations
+par heure. Un workflow requiert un appel ; une PR en requiert normalement quatre,
+au plus dix avec pagination : 500 checks, 500 exigences distinctes et moins de
+200 règles de branche. Une observation de PR est bornée à 20 secondes au total.
+Les appels revalident les règles, le head et l’état de la PR, sans bloquer
+l’admission. Les inscriptions et les autres usages de GitHub s’ajoutent à ce budget.
 Avec beaucoup de cibles, la reprise peut attendre plusieurs lots.
 
 Les [webhooks GitHub](https://docs.github.com/en/webhooks/webhook-events-and-payloads)
@@ -158,7 +202,7 @@ Les [Tasks MCP](https://modelcontextprotocol.io/specification/2025-11-25/basic/u
 de la spécification 2025-11-25, encore expérimentales, décrivent des identifiants
 durables, des résultats différés et l’annulation. Elles pourraient servir aux
 jobs gérés et à leur interopérabilité. Le réveil de la conversation reste une
-responsabilité du scheduler Cairn. Les deux conditions livrées utilisent le
+responsabilité du scheduler Cairn. Les trois conditions livrées utilisent le
 protocole ordinaire des outils MCP.
 
 ## Mesures et suite proposée
@@ -167,8 +211,7 @@ Les [mesures reproductibles](WAIT-FOR-MEASUREMENTS.md) comparent les métadonné
 et les lectures/écritures à la référence `sleep`. Les latences réseau GitHub et
 la capacité de production sont distinctes de ces mesures locales.
 
-La suite la plus utile serait une attente des checks requis d’une PR, liée à son
-head exact, puis les groupes de dépendances. Les autres sources peuvent suivre
+La suite proposée est maintenant les groupes de dépendances. Les autres sources peuvent suivre
 les usages observés, avec un identifiant stable, une lecture autorisée, un
 résultat explicite et un timeout. L’état d’attente dans le Fil et les notifications
 doit aussi distinguer une conversation différée d’un travail achevé.
