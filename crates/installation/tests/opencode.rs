@@ -136,7 +136,7 @@ fn plan(root: &TempDir, body: &str) -> Value {
 async fn run(s: &Service, plan: Value) -> (cairn_installation::error::Result<()>, Vec<Value>) {
     let lease = s
         .accounts
-        .acquire(s, "protocol-test", Provider::Opencode, MODEL)
+        .acquire(s, "protocol-test", Provider::Opencode, text(&plan, "model"))
         .await
         .unwrap()
         .unwrap();
@@ -230,6 +230,71 @@ async fn rejected_credentials_are_masked_and_truncated_responses_fail_without_ha
                 .contains("Continue if you have next steps")
         );
     }
+}
+
+#[tokio::test]
+async fn persisted_usage_errors_do_not_poison_the_replacement_provider() {
+    let root = TempDir::new().unwrap();
+    let s = service(&root).await;
+    connect(&s).await;
+    s.accounts
+        .connect_api_key(&s, Provider::Opencode, "Go", "opencode-go", "go-key", None)
+        .await
+        .unwrap();
+    let mut first = plan(&root, "fixture:opencode-limit Build the status panel.");
+    first["model"] = "opencode-go/ling-3.1-flash-free".into();
+    let (result, events) = run(&s, first.clone()).await;
+    assert!(result.unwrap_err().message.contains("Usage limit reached"));
+    let session = text(
+        events
+            .iter()
+            .find(|event| event["type"] == "thread.started")
+            .unwrap(),
+        "thread_id",
+    )
+    .to_owned();
+    let native_path = Provider::Opencode
+        .driver()
+        .home(&s, "protocol-test")
+        .join("data/opencode/fixture-sessions.json");
+    let mut history: Value =
+        serde_json::from_slice(&tokio::fs::read(&native_path).await.unwrap()).unwrap();
+    let messages = history[session.as_str()]["messages"].as_array().unwrap();
+    assert_eq!(
+        messages.last().unwrap()["info"]["error"]["data"]["statusCode"],
+        429
+    );
+    // Across an ID rollover the old error sorts after the replacement's response.
+    // Full creation times must decide which assistant response is newest.
+    history[session.as_str()]["messages"]
+        .as_array_mut()
+        .unwrap()
+        .last_mut()
+        .unwrap()["info"]["id"] = "msg_ffffffffffffabcdefghijklmn".into();
+    tokio::fs::write(&native_path, history.to_string())
+        .await
+        .unwrap();
+
+    // Keep the same native session and receipt, as the worker does on fallback.
+    let mut resumed = first;
+    resumed["sessionId"] = session.clone().into();
+    resumed["model"] = MODEL.into();
+    resumed["execution"]["recovery"] = true.into();
+    let (result, events) = run(&s, resumed).await;
+    result.unwrap();
+    assert!(events.iter().any(|event| event["type"] == "turn.completed"));
+    let history: Value =
+        serde_json::from_slice(&tokio::fs::read(native_path).await.unwrap()).unwrap();
+    assert_eq!(
+        history[session.as_str()]["lastModel"]["providerID"],
+        "opencode"
+    );
+    assert!(
+        tokio::fs::read_to_string(root.path().join("result.md"))
+            .await
+            .unwrap()
+            .contains("compact status panel")
+    );
 }
 
 #[tokio::test]

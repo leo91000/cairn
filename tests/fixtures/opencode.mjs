@@ -143,8 +143,31 @@ async function main() {
     emit('session.status', { sessionID: session.id, status: { type: 'busy' } })
     // A subscription past its limit; Auto continues on the next connection.
     if (body.includes('fixture:opencode-limit') && provider === 'opencode-go') {
-      emit('session.error', { sessionID: session.id, error: { name: 'APIError', data: { statusCode: 429, message: 'Go limit reached' } } })
+      const error = { name: 'APIError', data: { statusCode: 429, message: 'Go limit reached' } }
+      const failed = {
+        info: {
+          id: id('msg'),
+          sessionID: session.id,
+          parentID: input.messageID,
+          role: 'assistant',
+          error,
+          time: { created: Date.now(), completed: Date.now() },
+        },
+        parts: [],
+      }
+      // The real processor retains its terminal error before a session resumes.
+      session.messages.push(failed)
+      await persist()
+      emit('message.updated', { info: failed.info })
+      emit('session.error', { sessionID: session.id, error })
       return
+    }
+
+    if (body.includes('fixture:opencode-limit')) {
+      // An idle observation can still expose the previous provider's saved error
+      // while the replacement's request has no assistant message yet.
+      emit('session.status', { sessionID: session.id, status: { type: 'idle' } })
+      await new Promise(resolve => setTimeout(resolve, 100))
     }
 
     if (body.includes('fixture:opencode-error')) {

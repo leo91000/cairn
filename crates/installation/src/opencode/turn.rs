@@ -546,11 +546,13 @@ impl Turn<'_> {
                     "message": "This tool is outside the agent's access policy. Ask the user in your response.",
                 })).await?;
             }
-            "session.idle" if props["sessionID"] == self.session => return self.settle().await,
+            "session.idle" if props["sessionID"] == self.session => {
+                return self.settle(false).await;
+            }
             "session.status"
                 if props["sessionID"] == self.session && props["status"]["type"] == "idle" =>
             {
-                return self.settle().await;
+                return self.settle(false).await;
             }
             "session.status"
                 if props["sessionID"] == self.session
@@ -565,7 +567,7 @@ impl Turn<'_> {
         Ok(false)
     }
 
-    async fn settle(&mut self) -> Result<bool> {
+    async fn settle(&mut self, recovering: bool) -> Result<bool> {
         let messages = self
             .server
             .get(&format!("/session/{}/message?limit=100", self.session))
@@ -605,12 +607,28 @@ impl Turn<'_> {
                         .iter()
                         .any(|(_, wire)| m["info"]["parentID"] == wire.as_str())
             })
-            .max_by_key(|m| text(&m["info"], "id"))
+            .max_by_key(|message| {
+                let info = &message["info"];
+                (
+                    info["time"]["created"].as_i64().unwrap_or(0),
+                    text(info, "id"),
+                )
+            })
         else {
             return Ok(false);
         };
         let info = &response["info"];
         if !info["error"].is_null() {
+            let current = self
+                .receipt
+                .submissions
+                .last()
+                .is_some_and(|(_, wire)| info["parentID"] == wire.as_str());
+            // A replacement account resumes the same native history. Its new
+            // submission must not inherit the previous account's terminal error.
+            if recovering || !current {
+                return Ok(false);
+            }
             return Err(native_error(&info["error"]));
         }
         if info["time"]["completed"].is_null() {
@@ -825,7 +843,7 @@ async fn execute(
         .collect();
     turn.pending = turn.submitted.clone();
     // Recover a native result saved just before the manager's completion receipt.
-    if !turn.receipt.submissions.is_empty() && turn.settle().await? {
+    if !turn.receipt.submissions.is_empty() && turn.settle(true).await? {
         return turn.complete().await;
     }
     let mut message = crate::chats::execution_text(&plan);
