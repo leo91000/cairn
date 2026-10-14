@@ -22,7 +22,12 @@ async function main() {
   const auth = JSON.parse(process.env.OPENCODE_AUTH_CONTENT || '{}')
   const headers = `Basic ${Buffer.from(`cairn:${process.env.OPENCODE_SERVER_PASSWORD}`).toString('base64')}`
   let counter = 100
-  const id = prefix => `${prefix}_${(Date.now() * 4096 + counter++).toString(16)}${randomUUID().replaceAll('-', '').slice(0, 14)}`
+  const id = (prefix) => {
+    // The native CLI stores the lower six timestamp bytes in its IDs.
+    const timestamp = (BigInt(Date.now()) * 4096n + BigInt(counter++)) & 0xFFFFFFFFFFFFn
+    return `${prefix}_${timestamp.toString(16).padStart(12, '0')}${randomUUID().replaceAll('-', '').slice(0, 14)}`
+  }
+
   const persist = () => writeFile(file, JSON.stringify(sessions))
 
   function emit(type, properties) {

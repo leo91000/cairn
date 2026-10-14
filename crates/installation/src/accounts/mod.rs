@@ -984,6 +984,21 @@ impl Accounts {
             return Err(Error::bad("This coding agent does not order its accounts."));
         }
         let _selection = self.selection.lock().await;
+        // Refresh and edits save complete account records under these locks. Wait
+        // for their snapshots before changing priorities, so a stale save cannot
+        // undo the user's order. Creation and removal are fenced by selection.
+        let mut account_ids = self
+            .of(s, provider)
+            .await?
+            .into_iter()
+            .map(|account| account.id)
+            .collect::<Vec<_>>();
+        account_ids.sort_unstable();
+        let mut account_guards = Vec::new();
+        for id in account_ids {
+            account_guards.push(self.lock(&id).await);
+        }
+
         let ids = ids.to_vec();
         s.store
             .transaction(move |db| {
@@ -1006,6 +1021,7 @@ impl Accounts {
                 db.audit("account.reordered", &json!({ "provider": provider }))
             })
             .await?;
+        drop(account_guards);
         self.overview(s).await
     }
 

@@ -233,6 +233,78 @@ async fn rejected_credentials_are_masked_and_truncated_responses_fail_without_ha
 }
 
 #[tokio::test]
+async fn legacy_receipts_reject_native_continuations_during_recovery() {
+    let root = TempDir::new().unwrap();
+    let s = service(&root).await;
+    connect(&s).await;
+    let session = "ses_legacy";
+    let legacy_wire = "msg_1a000000000001abcdefghijklmn";
+    let native_wire = "msg_000000001002abcdefghijklmn";
+    let submitted_at: i64 = 0x1a000000000000 / 4096;
+    assert!(native_wire < legacy_wire);
+
+    // An older incomplete receipt has an untruncated ID and no submission time.
+    tokio::fs::write(
+        root.path().join("result.opencode-receipt.json"),
+        json!({
+            "messageId": "initial",
+            "submissions": [["initial", legacy_wire]],
+            "delivered": ["initial"],
+        })
+        .to_string(),
+    )
+    .await
+    .unwrap();
+    let native_data = Provider::Opencode
+        .driver()
+        .home(&s, "protocol-test")
+        .join("data/opencode");
+    tokio::fs::create_dir_all(&native_data).await.unwrap();
+    // Put the unknown continuation first, so detection must establish the
+    // timestamp boundary from owned history before visiting any unknown user.
+    tokio::fs::write(
+        native_data.join("fixture-sessions.json"),
+        json!({
+            session: {
+                "id": session,
+                "messages": [
+                    {
+                        "info": {
+                            "id": native_wire,
+                            "role": "user",
+                            "time": { "created": submitted_at + 1 },
+                        },
+                        "parts": [],
+                    },
+                    {
+                        "info": {
+                            "id": legacy_wire,
+                            "role": "user",
+                            "time": { "created": submitted_at },
+                        },
+                        "parts": [],
+                    },
+                ],
+            },
+        })
+        .to_string(),
+    )
+    .await
+    .unwrap();
+
+    let mut input = plan(&root, "Continue the interrupted request.");
+    input["sessionId"] = session.into();
+    let (result, events) = run(&s, input).await;
+    assert!(
+        result
+            .unwrap_err()
+            .message
+            .contains("unsupported continuation")
+    );
+    assert!(!events.iter().any(|event| event["type"] == "turn.completed"));
+}
+
+#[tokio::test]
 async fn cancellation_stops_a_busy_native_turn() {
     let root = TempDir::new().unwrap();
     let s = service(&root).await;
@@ -474,6 +546,46 @@ async fn native_questions_use_cairn_ids_and_answers_reach_the_original_native_re
             .await
             .unwrap()
             .contains("compact status panel")
+    );
+}
+
+#[tokio::test]
+async fn connection_order_waits_for_in_flight_account_updates() {
+    let root = TempDir::new().unwrap();
+    let s = service(&root).await;
+    let zen = text(&connect(&s).await, "id").to_owned();
+    let go = s
+        .accounts
+        .connect_api_key(&s, Provider::Opencode, "Go", "opencode-go", "go-key", None)
+        .await
+        .unwrap();
+    let go = text(&go, "id").to_owned();
+
+    // A refresh or edit holds this lock while saving its account snapshot.
+    let update_guard = s.accounts.lock(&zen).await;
+    let mut updating = s.accounts.account(&s, &zen).await.unwrap();
+    let order = [go.clone(), zen.clone()];
+    let mut reorder = Box::pin(s.accounts.reorder(&s, Provider::Opencode, &order));
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), &mut reorder)
+            .await
+            .is_err(),
+        "ordering must wait for the account update to finish"
+    );
+    updating.name = "Updated Zen".into();
+    s.store.put(KIND, updating.to_value()).await.unwrap();
+    drop(update_guard);
+
+    tokio::time::timeout(Duration::from_secs(5), reorder)
+        .await
+        .unwrap()
+        .unwrap();
+    let zen = s.accounts.account(&s, &zen).await.unwrap();
+    assert_eq!(zen.name, "Updated Zen");
+    assert_eq!(zen.extra["priority"], 1);
+    assert_eq!(
+        s.accounts.account(&s, &go).await.unwrap().extra["priority"],
+        0
     );
 }
 

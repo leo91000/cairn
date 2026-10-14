@@ -26,6 +26,8 @@ struct Receipt {
     #[serde(default)]
     submissions: Vec<(String, String)>,
     #[serde(default)]
+    submitted_at: Option<i64>,
+    #[serde(default)]
     delivered: HashSet<String>,
     #[serde(default)]
     previously_delivered: HashSet<String>,
@@ -45,6 +47,25 @@ async fn emit(events: &mpsc::Sender<Value>, value: Value) -> Result<()> {
 }
 
 impl Receipt {
+    fn unexpected_user(&self, info: &Value) -> bool {
+        let id = text(info, "id");
+        if self.submissions.iter().any(|(_, wire)| wire == id) {
+            return false;
+        }
+        // Native IDs retain only 48 timestamp bits. Creation times distinguish
+        // historical messages from continuations even across an ID rollover.
+        self.submitted_at
+            .zip(info["time"]["created"].as_i64())
+            .map_or_else(
+                || {
+                    self.submissions
+                        .first()
+                        .is_some_and(|(_, wire)| id >= wire.as_str())
+                },
+                |(submitted_at, created_at)| created_at >= submitted_at,
+            )
+    }
+
     async fn read(path: &Path, id: &str) -> Option<Self> {
         let file = tokio::fs::File::open(path).await.ok()?;
         let bytes = crate::process::read_bounded(file, 8_000_000).await.ok()?;
@@ -96,8 +117,9 @@ impl Receipt {
     }
 }
 
-fn wire_id(counter: u64) -> String {
-    let time = crate::config::now() as u64 * 4096 + counter % 4096;
+fn wire_id(timestamp: i64, counter: u64) -> String {
+    // OpenCode encodes the lower six bytes, followed by 14 random characters.
+    let time = (timestamp as u64 * 4096 + counter % 4096) & 0xffff_ffff_ffff;
     let random = crate::config::id().replace('-', "");
     format!("msg_{time:012x}{}", &random[..14])
 }
@@ -246,13 +268,15 @@ impl Turn<'_> {
     async fn submit(&mut self, id: &str, body: &str, attachments: &Value) -> Result<()> {
         let (provider, model) = model_id(text(self.plan, "model"))?;
         self.wire_counter += 1;
-        let wire = wire_id(self.wire_counter);
+        let submitted_at = crate::config::now();
+        let wire = wire_id(submitted_at, self.wire_counter);
         let input = parts(
             body,
             attachments,
             Path::new(text(self.plan, "inputDirectory")),
         )
         .await?;
+        self.receipt.submitted_at.get_or_insert(submitted_at);
         self.receipt.submissions.push((id.into(), wire.clone()));
         self.receipt.save(&self.receipt_path).await?;
         let mut message = json!({
@@ -332,13 +356,7 @@ impl Turn<'_> {
     fn observe_user(&mut self, info: &Value) -> Result<()> {
         let id = text(info, "id");
         self.user_messages.insert(id.into());
-        let owned = self.receipt.submissions.iter().any(|(_, wire)| wire == id);
-        let current = self
-            .receipt
-            .submissions
-            .first()
-            .is_some_and(|(_, wire)| id >= wire.as_str());
-        if current && !owned {
+        if self.receipt.unexpected_user(info) {
             return Err(Error::bad_gateway(
                 "OpenCode created an unsupported continuation. Automatic compaction is disabled for this integration. Start a new conversation; working files were preserved.",
             ));
@@ -552,6 +570,24 @@ impl Turn<'_> {
             .server
             .get(&format!("/session/{}/message?limit=100", self.session))
             .await?;
+        if self.receipt.submitted_at.is_none() {
+            // Older receipts did not record submission time. Infer it from the
+            // native history before checking continuations, regardless of order.
+            self.receipt.submitted_at = messages
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter(|message| {
+                    message["info"]["role"] == "user"
+                        && self
+                            .receipt
+                            .submissions
+                            .iter()
+                            .any(|(_, wire)| message["info"]["id"] == wire.as_str())
+                })
+                .filter_map(|message| message["info"]["time"]["created"].as_i64())
+                .min();
+        }
         for message in messages.as_array().into_iter().flatten() {
             if message["info"]["role"] == "user" {
                 self.observe_user(&message["info"])?;
@@ -821,4 +857,37 @@ async fn execute(
 
 fn question_id(session: &str, native: &str) -> String {
     crate::auth::hex_digest(&format!("opencode:{session}:{native}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn wire_ids_use_the_native_six_byte_timestamp() {
+        let id = wire_id(1_800_000_000_000, 1);
+        assert_eq!(id.len(), 30);
+        assert_eq!(&id[..16], "msg_3185c5000001");
+    }
+
+    #[test]
+    fn continuation_detection_uses_creation_time_instead_of_wrapped_ids() {
+        let receipt = Receipt {
+            submitted_at: Some(1_800_000_000_000),
+            submissions: vec![("initial".into(), "msg_ffffffffffffabcdefghijklmn".into())],
+            ..Receipt::default()
+        };
+        assert!(!receipt.unexpected_user(&json!({
+            "id": "msg_ffffffffffffabcdefghijklmn",
+            "time": { "created": 1_800_000_000_001_i64 },
+        })));
+        assert!(!receipt.unexpected_user(&json!({
+            "id": "msg_ffffffffffffzyxwvutsrqponm",
+            "time": { "created": 1_799_999_999_999_i64 },
+        })));
+        assert!(receipt.unexpected_user(&json!({
+            "id": "msg_000000000000abcdefghijklmn",
+            "time": { "created": 1_800_000_000_000_i64 },
+        })));
+    }
 }
