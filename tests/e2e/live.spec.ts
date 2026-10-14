@@ -267,19 +267,21 @@ test('cached history survives reload before a delayed stream, then clear on logo
   await page.goto(workspacePath(`${workspace.url}/chats/${chat.id}`))
   await authenticateWorkspace(page)
   await expect(page.locator('.activity-message').filter({ hasText: 'Cache persistence proof' }).first()).toBeVisible()
-  const count = () => page.evaluate(() => new Promise<number>((resolve, reject) => {
+  const count = (current = false) => page.evaluate(({ chatId, current }) => new Promise<number>((resolve, reject) => {
     const request = indexedDB.open('cairn-history-v1', 1)
     request.onsuccess = () => {
       const db = request.result
       const tx = db.transaction('entries', 'readonly')
-      const read = tx.objectStore('entries').count()
-      read.onsuccess = () => resolve(read.result)
+      const read = tx.objectStore('entries').getAll()
+      read.onsuccess = () => resolve(current
+        ? read.result.filter(entry => entry.key.endsWith(`/chats/${chatId}/stream`) && JSON.parse(entry.text).cursor > 0).length
+        : read.result.length)
       tx.oncomplete = () => db.close()
     }
 
     request.onerror = () => reject(request.error)
-  }))
-  await expect.poll(count).toBeGreaterThan(0)
+  }), { chatId: chat.id, current })
+  await expect.poll(() => count(true)).toBe(1)
   const requests: string[] = []
   let release!: () => void
   const gate = new Promise<void>((resolve) => {
@@ -311,7 +313,8 @@ test('cached history survives reload before a delayed stream, then clear on logo
 
   await page.getByRole('button', { name: 'Sign out', exact: true }).click()
   await expect(page.getByLabel('Email address')).toBeVisible()
-  await expect.poll(count).toBe(0)
+  // The account redirect can replace the execution context while storage is inspected.
+  await expect(async () => expect(await count()).toBe(0)).toPass()
 })
 
 test('a cached run restores the reading offset while its stream is still connecting', async ({ page, workspace }) => {
@@ -402,6 +405,8 @@ test('a cached run restores the reading offset while its stream is still connect
   await page.keyboard.press('Enter')
   await expect(scroller).toBeFocused()
   await expectFollowing(page)
+  // Finish removing the previous button before starting a fresh reading gesture.
+  await expect(latest).toHaveCount(0)
   // Scrolling up pauses following again; scrolling back to the end resumes it, as on Android.
   await scroller.evaluate(element => element.scrollTop = 300)
   await expect(latest).toBeVisible()
