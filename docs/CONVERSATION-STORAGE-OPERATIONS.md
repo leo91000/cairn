@@ -41,7 +41,7 @@ dedicated bucket without public domains, locks or enabled lifecycle rules, with
 
 Conversation archival, archive restoration and cold transitions have been removed. Before deploying this change, finish the owner-authorized deletion of existing archived conversations and their objects using the prior release or an explicitly scoped maintenance procedure. Never empty a bucket referenced by active on-demand disks.
 
-Trash revokes public links and cancels pending work. Conversations are recoverable for 30 days without automatically restarting execution or restoring public grants. Expired trash removes conversation files, disk instances, S3 publications and database records. Failures remain visible and retryable.
+Deleting a conversation immediately revokes public links, cancels pending work and removes the ability to restore it. There is no 30-day retention window for new deletions. Deletion wakes the cleanup worker immediately; it also checks every 15 seconds and removes one eligible conversation per pass after its agent stops: conversation files, disk instances, S3 publications and database records. Unavailable nodes and other failures remain visible and retryable. Existing trash keeps its original recovery deadline; this change does not accelerate previously promised retention. See [ADR-0041](adr/0041-immediate-conversation-deletion.md).
 
 ## Recovery prerequisites
 

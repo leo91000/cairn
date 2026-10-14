@@ -11,6 +11,10 @@ on:
         type: choice
         options: ['1', '2']
         default: '2'
+      exclusive-android:
+        description: Qualify live nested Android continuity on a compatible host
+        type: boolean
+        default: false
 permissions:
   contents: read
 concurrency:
@@ -126,7 +130,7 @@ jobs:
           cache: true
       - run: rustup toolchain install 1.97.1 --profile minimal --component rustfmt,clippy && rustup default 1.97.1
       - name: Install bindings toolchain for the optional ublk transport
-        run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends libclang-dev
+        run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends libclang-dev age
       - uses: actions/cache@v6.1.0
         env:
           # A stalled segment must leave time for the uncached quality checks.
@@ -155,6 +159,7 @@ jobs:
           python3 scripts/tests/installation_installer_test.py
           python3 scripts/tests/compressed_swap_test.py
           python3 scripts/tests/installation_updates_test.py
+          python3 scripts/tests/production_recovery_test.py
           bash tests/installation-installer-container.sh
           python3 tests/installation_update_containers.py
           python3 -m venv .node-s3-test
@@ -533,6 +538,29 @@ jobs:
         run: |
           node tests/container-smoke.mjs "$SMOKE_IMAGE"
           node tests/runner-smoke.mjs "$SMOKE_IMAGE"
+      - name: Qualify exclusive pause, private memory paging and live nested KVM
+        env:
+          CAIRN_EXCLUSIVE_REQUIRE_RECLAIM: 'true'
+          # Hosted AMD nested Android remains unqualified (NESTED-KVM-RESEARCH.md).
+          # Keep the same-emulator mode available for explicit qualification.
+          CAIRN_EXCLUSIVE_ANDROID: ${{ inputs.exclusive-android && 'true' || 'false' }}
+        run: |
+          if [[ "$CAIRN_EXCLUSIVE_ANDROID" != true ]]; then
+            echo 'Nested Android continuity skipped: the hosted AMD platform is unqualified.'
+          fi
+          # This runner is disposable. Never page conversation credentials to
+          # the hosted image's default plaintext swap.
+          if sudo modprobe zram num_devices=1; then
+            sudo swapoff -a
+            echo zstd | sudo tee /sys/block/zram0/comp_algorithm > /dev/null
+            echo 4G | sudo tee /sys/block/zram0/disksize > /dev/null
+            sudo mkswap /dev/zram0
+            sudo swapon --priority 100 /dev/zram0
+          else
+            export CAIRN_EXCLUSIVE_REQUIRE_RECLAIM=false
+            echo 'Positive RAM reclamation skipped: zram is unavailable. Unqualified-memory refusal and rollback, live CPU/KVM continuity and admission fencing are still tested.'
+          fi
+          node tests/runner-exclusive-smoke.mjs "$SMOKE_IMAGE"
       - name: Remove the disposable beacon database
         if: always()
         run: docker rm --force cairn-beacon-smoke-db
@@ -603,6 +631,8 @@ jobs:
       - uses: ./.github/actions/setup-pnpm
         with:
           install: false
+      - name: Install encrypted backup test dependency
+        run: sudo apt-get update && sudo apt-get install -y age
       - name: Smoke-test the exact beacon image with disposable Postgres
         env:
           IMAGE_DIGEST: ${{ steps.build.outputs.digest }}
@@ -728,7 +758,7 @@ jobs:
     permissions:
       contents: read
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 45
     environment:
       name: production
       url: ${{ vars.CAIRN_BEACON_ORIGIN }}
@@ -737,17 +767,47 @@ jobs:
       cancel-in-progress: false
     steps:
       - uses: actions/checkout@v7.0.1
+        with:
+          fetch-depth: 0
       - uses: ./.github/actions/setup-pnpm
         with:
           cache: true
+      - name: Prepare and verify encrypted production recovery
+        id: recovery
+        env:
+          CAIRN_RELEASE_SSH_HOST: ${{ vars.CAIRN_RELEASE_SSH_HOST }}
+          CAIRN_RELEASE_SSH_USER: ${{ vars.CAIRN_RELEASE_SSH_USER }}
+          CAIRN_RELEASE_SSH_KNOWN_HOSTS: ${{ vars.CAIRN_RELEASE_SSH_KNOWN_HOSTS }}
+          CAIRN_RELEASE_SSH_KEY: ${{ secrets.CAIRN_RELEASE_SSH_KEY }}
+          PRODUCTION_RECOVERY_DIRECTORY: ${{ runner.temp }}/production-recovery
+          DEPLOY_IMAGE: ghcr.io/${{ github.repository_owner }}/cairn-beacon@${{ needs.resolve.outputs.beacon-digest || needs.beacon-image.outputs.digest }}
+          DEPLOY_INSTALLATION_IMAGE: ghcr.io/${{ github.repository_owner }}/cairn@${{ needs.resolve.outputs.digest || needs.image.outputs.digest }}
+        run: node scripts/production-recovery.mjs prepare
+      - name: Retain encrypted recovery outside the production host
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: production-recovery-${{ github.ref_name }}-${{ steps.recovery.outputs.backup-id }}
+          path: |
+            ${{ runner.temp }}/production-recovery/beacon.dump.age
+            ${{ runner.temp }}/production-recovery/release.json
+          retention-days: 90
+          if-no-files-found: error
       - name: Deploy the published image and verify the running commit
         env:
           COOLIFY_URL: ${{ vars.COOLIFY_URL }}
           COOLIFY_SERVICE_UUID: ${{ vars.COOLIFY_SERVICE_UUID }}
-          COOLIFY_TOKEN: ${{ secrets.COOLIFY_TOKEN }}
+          COOLIFY_TOKEN: ${{ secrets.CAIRN_RELEASE_COOLIFY_TOKEN }}
           CAIRN_BEACON_ORIGIN: ${{ vars.CAIRN_BEACON_ORIGIN }}
           DEPLOY_IMAGE: ghcr.io/${{ github.repository_owner }}/cairn-beacon@${{ needs.resolve.outputs.beacon-digest || needs.beacon-image.outputs.digest }}
           DEPLOY_INSTALLATION_IMAGE: ghcr.io/${{ github.repository_owner }}/cairn@${{ needs.resolve.outputs.digest || needs.image.outputs.digest }}
           # A reused image reports the commit it was validated at, with this tag's tree.
           DEPLOY_COMMIT: ${{ needs.resolve.outputs.commit }}
         run: node scripts/deploy-coolify.mjs
+      - name: Verify installation update and execution readiness
+        env:
+          CAIRN_RELEASE_SSH_HOST: ${{ vars.CAIRN_RELEASE_SSH_HOST }}
+          CAIRN_RELEASE_SSH_USER: ${{ vars.CAIRN_RELEASE_SSH_USER }}
+          CAIRN_RELEASE_SSH_KNOWN_HOSTS: ${{ vars.CAIRN_RELEASE_SSH_KNOWN_HOSTS }}
+          CAIRN_RELEASE_SSH_KEY: ${{ secrets.CAIRN_RELEASE_SSH_KEY }}
+          DEPLOY_INSTALLATION_IMAGE: ghcr.io/${{ github.repository_owner }}/cairn@${{ needs.resolve.outputs.digest || needs.image.outputs.digest }}
+        run: node scripts/production-recovery.mjs verify

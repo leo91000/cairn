@@ -5,34 +5,53 @@ import {
   reactive,
   watch,
 } from 'vue'
-import { api, notify } from './api'
+import { api, notify, state } from './api'
 
 /**
  * Fil items read here, by the end of the agent's work that was read, until the server's lists
  * catch up. Keeping the finish time rather than a clock reading lets a later turn show again.
  */
 export const localReads = reactive<Record<string, number>>({})
+let generation = 0
+watch(() => [state.accountId, state.installationId, state.authenticated, state.signingOut], () => {
+  generation++
+  for (const key of Object.keys(localReads))
+    delete localReads[key]
+}, { flush: 'sync' })
 
 /** Marks finished work as read for the signed-in account, on every device. */
 export async function markRead(items: Pick<FilItem, 'key' | 'at'>[]) {
+  if (!state.authenticated || state.signingOut)
+    return
   const unread = items.filter(item => !(localReads[item.key] >= item.at))
   if (!unread.length)
     return
-  const previous = unread.map(item => [item.key, localReads[item.key]] as const)
-  for (const item of unread)
-    localReads[item.key] = item.at
-  try {
-    await api('/reads', { method: 'POST', body: JSON.stringify({ items: unread.map(item => item.key) }) })
-  }
-  catch (error) {
-    for (const [key, at] of previous) {
-      if (at === undefined)
-        delete localReads[key]
-      else
-        localReads[key] = at
+  const current = generation
+  for (let offset = 0; offset < unread.length; offset += 200) {
+    if (current !== generation)
+      return
+    const batch = unread.slice(offset, offset + 200)
+    const previous = batch.map(item => [item.key, localReads[item.key]] as const)
+    for (const item of batch)
+      localReads[item.key] = Math.max(localReads[item.key] ?? 0, item.at)
+    try {
+      await api('/reads', { method: 'POST', body: JSON.stringify({ items: batch.map(item => ({ key: item.key, finishedAt: item.at })) }) })
     }
+    catch (error) {
+      if (current !== generation)
+        return
+      for (const [index, [key, at]] of previous.entries()) {
+        if (localReads[key] !== batch[index].at)
+          continue
+        if (at === undefined)
+          delete localReads[key]
+        else
+          localReads[key] = at
+      }
 
-    notify((error as Error).message)
+      notify((error as Error).message)
+      return
+    }
   }
 }
 

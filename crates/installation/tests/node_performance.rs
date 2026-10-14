@@ -109,6 +109,7 @@ async fn service(root: &TempDir, origin: String, runner: String) -> Arc<Service>
         public_url: origin,
         codex_bin: "false".into(),
         claude_bin: "false".into(),
+        opencode_bin: "opencode".into(),
         gh_bin: "false".into(),
         concurrency: 4,
         runner_url: runner,

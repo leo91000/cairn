@@ -6,6 +6,7 @@ import {
   expect,
   expectSingleScroll,
   test,
+  useRelayForHttpMocks,
   workspacePath,
 } from './fixtures'
 
@@ -51,6 +52,7 @@ const unreadOf = async (workspace: Workspace, id: string) => (await workspace.ap
 test('finished work waits in For you until it is read, on the desktop and the phone', async ({ page, workspace }, testInfo) => {
   test.setTimeout(150000)
   const { chat, done, notes } = await seed(workspace)
+  await useRelayForHttpMocks(page)
   await page.emulateMedia({ colorScheme: 'dark' })
   await page.goto(workspacePath('/'))
   await authenticateWorkspace(page)
@@ -82,9 +84,25 @@ test('finished work waits in For you until it is read, on the desktop and the ph
   await page.setViewportSize({ width: 1440, height: 900 })
 
   // Reading the conversation marks it read for the account; it stays in place, read, while open.
+  let release!: () => void
+  let requested!: () => void
+  const held = new Promise<void>(resolve => release = resolve)
+  const started = new Promise<void>(resolve => requested = resolve)
+  const streamRoute = `**/api/chats/${chat.slug}/stream*`
+  await page.route(streamRoute, async (route) => {
+    requested()
+    await held
+    await route.continue()
+  })
   await conversation.getByRole('button', { name: /^Read “/ }).click()
   await expect(page).toHaveURL(workspacePath(`/chats/${chat.slug}`))
+  await started
+  // The selected result has not arrived yet: opening its route alone must not mark it read.
+  await page.waitForTimeout(500)
+  expect(await unreadOf(workspace, chat.id)).toBe(true)
+  release()
   await expect.poll(() => unreadOf(workspace, chat.id)).toBe(false)
+  await page.unroute(streamRoute)
   const beside = page.getByRole('complementary', { name: 'Fil' }).getByRole('region', { name: 'For you', exact: true })
   const opened = beside.locator(`[data-fil-key="chat:${chat.id}"]`)
   await expect(opened.getByText('Read', { exact: true })).toBeVisible()

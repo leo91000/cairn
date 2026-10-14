@@ -209,6 +209,7 @@ internal fun ConversationList(
                                                 val working =
                                                     chat.pendingQuestions == 0 &&
                                                         !chat.paused &&
+                                                        !chat.exclusiveSuspended &&
                                                         chat.status == "running"
                                                 if (working)
                                                     WorkingAvatar(
@@ -229,6 +230,7 @@ internal fun ConversationList(
                                                                         "interrupted",
                                                                     ) -> AvatarBadge.ATTENTION
                                                             !chat.paused &&
+                                                                !chat.exclusiveSuspended &&
                                                                 chat.status == "queued" ->
                                                                 AvatarBadge.LIVE
                                                             else -> null
@@ -250,6 +252,8 @@ internal fun ConversationList(
                                                                 chat.pendingQuestions > 0 ->
                                                                     "${chat.pendingQuestions} question(s) en attente"
                                                                 chat.paused -> "En pause"
+                                                                chat.exclusiveSuspended ->
+                                                                    "Suspendue (exclusivité)"
                                                                 chat.status in
                                                                     listOf(
                                                                         "running",
@@ -325,6 +329,14 @@ internal fun ChatPage(
         if (id == null) conversations
         else rememberLive(vm, state, "/chats/${segment(id)}/stream", streaming = selected)
     val chat = live.state?.chat?.takeIf { it.id == id }
+    ReadWhileOpen(
+        vm,
+        chat
+            ?.run
+            ?.takeIf { selected && live.synced && !live.catchingUp && it.status == "succeeded" }
+            ?.finishedAt
+            ?.let { "chat:${chat.id}" to it },
+    )
     var createdId by rememberSaveable(id) { mutableStateOf<String?>(null) }
     var agent by rememberSaveable(id) { mutableStateOf(initialAgent) }
     var project by rememberSaveable(id) { mutableStateOf(initialProject) }
@@ -410,7 +422,8 @@ internal fun ChatPage(
         ) {
             follow = it
         }
-    val loadOlder = rememberHistoryPaging(live, listState, positionReady && !gallery)
+    // Neighbors need a real preview, not an unbounded backwards history crawl.
+    val loadOlder = rememberHistoryPaging(live, listState, selected && positionReady && !gallery)
     val active = chat?.run?.active == true
     val running = chat?.run?.status == "running"
     val waitingTasks =
@@ -847,6 +860,7 @@ internal fun ChatPage(
                         Text(chat?.projectName ?: "Tous les projets autorisés")
                         Text(
                             if (chat?.paused == true) "En pause"
+                            else if (chat?.exclusiveSuspended == true) "Suspendue (exclusivité)"
                             else if (chat?.run?.status == "queued") "En attente"
                             else if (waitingTasks != null) {
                                 val now = rememberNow(waitingTasks.since)
@@ -910,19 +924,25 @@ internal fun ChatPage(
                         Modifier.weight(1f).fillMaxWidth().padding(24.dp),
                         verticalArrangement = Arrangement.Center,
                     ) {
+                        val recoverable =
+                            chat.lifecycle == "trash" &&
+                                (chat.purgeAt ?: 0L) > System.currentTimeMillis()
                         Text(
                             when (chat.lifecycle) {
-                                "trash" -> "Cette conversation est dans la corbeille."
+                                "trash" ->
+                                    if (recoverable) "Cette conversation est dans la corbeille."
+                                    else "Effacement en cours…"
                                 "purging" -> "Effacement en cours…"
                                 else -> "Cette conversation est indisponible."
                             },
                             style = MaterialTheme.typography.titleLarge,
                         )
-                        chat.purgeAt?.let { Text("Effacement prévu : ${date(it)}") }
+                        if (recoverable)
+                            chat.purgeAt?.let { Text("Effacement prévu : ${date(it)}") }
                         chat.lifecycleError?.let {
                             Text(it, color = MaterialTheme.colorScheme.error)
                         }
-                        if (chat.lifecycle == "trash")
+                        if (recoverable)
                             Button(
                                 onClick = {
                                     vm.perform {
@@ -1069,7 +1089,14 @@ internal fun ChatPage(
                                             )
                                         }
                                     }
-                                    if (chat?.run?.status == "running" && !live.catchingUp)
+                                    if (chat?.exclusiveSuspended == true)
+                                        item(key = "exclusive-suspended") {
+                                            Text(
+                                                "Suspendue (exclusivité) · ${chat.suspendedByExclusive?.reason ?: chat.run?.suspendedByExclusive?.reason.orEmpty()}",
+                                                color = signal.warning,
+                                            )
+                                        }
+                                    else if (chat?.run?.status == "running" && !live.catchingUp)
                                         item(key = "agent-working") {
                                             WorkingIndicator(
                                                 remember(

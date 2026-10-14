@@ -1,9 +1,13 @@
 package build.cairn.app.data
 
+import build.cairn.app.diagnostics.PerfOperation
+import build.cairn.app.diagnostics.Performance
 import java.io.IOException
 import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.jsonObject
@@ -197,25 +201,47 @@ class CairnApi(
             .header("Origin", origin.toString().removeSuffix("/"))
             .header("X-CSRF-Token", csrf)
 
-    suspend inline fun <reified T> get(path: String): T =
-        wireJson.decodeFromString(request("GET", path))
+    suspend inline fun <reified T> get(path: String): T {
+        val response = request("GET", path)
+        return withContext(Dispatchers.Default) {
+            Performance.measure(PerfOperation.JSON_DECODE) {
+                wireJson.decodeFromString<T>(response)
+            }
+        }
+    }
 
     suspend inline fun <reified T> send(
         method: String,
         path: String,
         body: JsonElement? = null,
-    ): T = wireJson.decodeFromString(request(method, path, body))
+    ): T {
+        val response = request(method, path, body)
+        return withContext(Dispatchers.Default) {
+            Performance.measure(PerfOperation.JSON_DECODE) {
+                wireJson.decodeFromString<T>(response)
+            }
+        }
+    }
 
     suspend fun request(method: String, path: String, body: JsonElement? = null): String {
         val payload =
             if (method in setOf("GET", "HEAD")) null
             else (body?.toString() ?: "{}").toRequestBody("application/json".toMediaType())
-        return exchange(
-            builder(path).header("Accept", "application/json").method(method, payload).build(),
-            if (method == "POST" && path == "/projects/github") imports else http,
+        val request =
+            builder(path).header("Accept", "application/json").method(method, payload).build()
+        // Telemetry must not create measurements of its own uploads.
+        if (path == "/account/telemetry/performance")
+            return exchange(request) {
+                checkResponse(it)
+                it.body.string()
+            }
+        return Performance.measure(
+            if (method in setOf("GET", "HEAD")) PerfOperation.API_READ else PerfOperation.API_WRITE
         ) {
-            checkResponse(it)
-            it.body.string()
+            exchange(request, if (method == "POST" && longRequest(path)) imports else http) {
+                checkResponse(it)
+                it.body.string()
+            }
         }
     }
 
@@ -230,6 +256,19 @@ class CairnApi(
             wireJson.decodeFromString<ChatAttachment>(response.body.string())
         }
     }
+
+    /** POSTs raw bytes (`application/octet-stream`) and returns the JSON response. */
+    suspend fun postBytes(path: String, bytes: ByteArray): String =
+        exchange(
+            builder(path)
+                .header("Accept", "application/json")
+                .post(bytes.toRequestBody("application/octet-stream".toMediaType()))
+                .build(),
+            transfers,
+        ) { response ->
+            checkResponse(response)
+            response.body.string()
+        }
 
     suspend fun agentPortrait(id: String, revision: String): ByteArray =
         exchange(builder("/agents/${segment(id)}/avatar?v=${segment(revision)}").get().build()) {
@@ -310,6 +349,17 @@ class CairnApi(
             }
         )
     }
+}
+
+/** Imports, skill batches and staged uploads may clone or transfer several megabytes. */
+internal fun longRequest(path: String): Boolean {
+    val route = path.substringBefore('?')
+    return route == "/projects/github" ||
+        route == "/skills/uploads" ||
+        (route.startsWith("/skills/") &&
+            (route.endsWith("/import") ||
+                route.endsWith("/bundle") ||
+                route.endsWith("/source/update")))
 }
 
 internal fun checkResponse(response: Response) {

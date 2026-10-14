@@ -31,7 +31,7 @@ fn key(chat: &str, id: &str) -> String {
     format!("chat-attachment:{chat}:{id}")
 }
 
-fn filename(name: &str) -> String {
+pub(crate) fn filename(name: &str) -> String {
     let mut clean = String::new();
     for c in name.chars() {
         let c = if c.is_alphanumeric() || " ._-()".contains(c) {

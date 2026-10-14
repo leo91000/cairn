@@ -1,6 +1,7 @@
 package build.cairn.app.ui
 
 import android.app.Application
+import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.material3.Surface
 import androidx.compose.runtime.*
@@ -29,6 +30,44 @@ import org.junit.runner.RunWith
 @RunWith(AndroidJUnit4::class)
 class HistoryScrollDeviceTest {
     @get:Rule val compose = createComposeRule()
+
+    @Test
+    fun toolGroupsCountCompletedCallsRatherThanHiddenEvents() {
+        val events =
+            (0L..64L).flatMap { index ->
+                val id = 1000L + index * 100L
+                val item = buildJsonObject {
+                    put("id", "tool-$index")
+                    put("type", "command_execution")
+                    put("command", "echo ok")
+                    put("status", "completed")
+                    put("exit_code", 0)
+                }
+                listOf(
+                    RunEvent(id, id, "item.started", "", mapOf("item" to item)),
+                    RunEvent(id + 1, id + 1, "diagnostic", "heartbeat"),
+                    RunEvent(id + 2, id + 2, "item.completed", "", mapOf("item" to item)),
+                )
+            }
+        val entries = TimelineKeys().stabilize("grouping", timelineEntries(events, chat = true))
+        compose.setContent {
+            CairnTheme("dark") {
+                Column {
+                    for (entry in entries) {
+                        AgentActions(
+                            entry.key,
+                            entry.events.map(::presentActivity),
+                            hideRunning = false,
+                        )
+                    }
+                }
+            }
+        }
+        compose.onAllNodesWithTag("agent-actions").assertCountEquals(3)
+        compose.onAllNodesWithText("A lancé 30 commandes").assertCountEquals(2)
+        compose.onNodeWithText("A lancé 5 commandes").assertIsDisplayed()
+    }
+
     private val turns = 60
     private val history = "v1:long:1"
 
@@ -165,6 +204,7 @@ class HistoryScrollDeviceTest {
                 }
             val application = ApplicationProvider.getApplicationContext<Application>()
 
+            var visible by mutableStateOf(true)
             val vm = CairnViewModel(application, beaconOrigin = "")
             runBlocking {
                 vm.state.first { it.ready }
@@ -173,7 +213,7 @@ class HistoryScrollDeviceTest {
             try {
                 compose.setContent {
                     val workspace by vm.state.collectAsStateWithLifecycle()
-                    if (workspace.session.authenticated)
+                    if (visible && workspace.session.authenticated)
                         CairnTheme("dark") {
                             Surface(Modifier.fillMaxSize()) {
                                 ChatScreen(vm, workspace, "long", openChat = {}, openRun = {})
@@ -237,6 +277,17 @@ class HistoryScrollDeviceTest {
                 compose.waitUntil(10000) { pages.size == 5 }
                 assertEquals("Each older page is requested once", pages.distinct(), pages)
                 Thread.sleep(1500)
+                compose.runOnIdle { visible = false }
+                compose.waitForIdle()
+                compose.runOnIdle { visible = true }
+                compose.waitUntil(10000) {
+                    compose
+                        .onAllNodesWithText("Question 1 :", substring = true)
+                        .fetchSemanticsNodes()
+                        .isNotEmpty()
+                }
+                Thread.sleep(1500)
+                assertEquals("Reopening cached pages must not download them again", 5, pages.size)
             } finally {
                 vm.api.closeStreams()
             }

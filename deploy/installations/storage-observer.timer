@@ -1,0 +1,11 @@
+[Unit]
+Description=Keep Cairn storage history across manager updates
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=5min
+RandomizedDelaySec=15
+Persistent=true
+
+[Install]
+WantedBy=timers.target

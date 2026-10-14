@@ -10,6 +10,7 @@ use crate::{
     network,
     rpc::jsonrpc::{Frame, Message},
     service::Service,
+    store::Db,
     validation::text,
 };
 use base64::Engine;
@@ -140,7 +141,10 @@ fn resource_covers(resource: &url::Url, endpoint: &url::Url) -> bool {
             || path[resource_path.len()..].starts_with('/'))
 }
 
-async fn discover(s: &Service, server: &McpServer) -> Result<OAuthDiscovery> {
+async fn discover<F>(s: &Service, server: &McpServer, authorize: F) -> Result<OAuthDiscovery>
+where
+    F: Fn(&Db<'_>) -> Result<()> + Clone + Send + Sync + 'static,
+{
     let endpoint = valid_url(server, &server.url)?;
     let challenge = challenge(server, &endpoint).await?;
     let (resource_metadata_url, resource) =
@@ -166,7 +170,12 @@ async fn discover(s: &Service, server: &McpServer) -> Result<OAuthDiscovery> {
     };
     let stored = discovery.clone();
     s.mcps
-        .update_secrets(s, &server.id, |secrets| secrets.discovery = Some(stored))
+        .update_secrets_authorized(
+            s,
+            &server.id,
+            |secrets| secrets.discovery = Some(stored),
+            authorize,
+        )
         .await?;
     Ok(discovery)
 }
@@ -263,11 +272,15 @@ async fn register(s: &Service, server: &McpServer, endpoint: &str) -> Result<Val
     Ok(client)
 }
 
-async fn client(
+async fn client<F>(
     s: &Service,
     server: &McpServer,
     discovery: &OAuthDiscovery,
-) -> Result<OAuthClient> {
+    authorize: F,
+) -> Result<OAuthClient>
+where
+    F: Fn(&Db<'_>) -> Result<()> + Clone + Send + Sync + 'static,
+{
     let secrets = s.mcps.server_secrets(s, &server.id).await?;
     if !server.client_id.is_empty() {
         return Ok(OAuthClient {
@@ -292,7 +305,12 @@ async fn client(
     let client = register(s, server, endpoint).await?;
     let registered = OAuthClient::from_registration(&client);
     s.mcps
-        .update_secrets(s, &server.id, |secrets| secrets.client = Some(client))
+        .update_secrets_authorized(
+            s,
+            &server.id,
+            |secrets| secrets.client = Some(client),
+            authorize,
+        )
         .await?;
     Ok(registered)
 }
@@ -349,13 +367,17 @@ fn validate_tokens(tokens: &Value) -> Result<()> {
     Ok(())
 }
 
-async fn exchange(
+async fn exchange<F>(
     s: &Service,
     server: &McpServer,
     mut parameters: HashMap<String, String>,
     discovery: &OAuthDiscovery,
-) -> Result<()> {
-    let client = client(s, server, discovery).await?;
+    authorize: F,
+) -> Result<()>
+where
+    F: Fn(&Db<'_>) -> Result<()> + Clone + Send + Sync + 'static,
+{
+    let client = client(s, server, discovery, authorize.clone()).await?;
     parameters.insert("client_id".into(), client.id.clone());
     let authorization = authenticate_client(&client, discovery, &mut parameters)?;
     parameters.insert("resource".into(), discovery.resource().to_owned());
@@ -393,14 +415,30 @@ async fn exchange(
         .as_f64()
         .map(|seconds| now() + (seconds * 1000.) as i64);
     s.mcps
-        .update_secrets(s, &server.id, |secrets| {
-            secrets.tokens = Some(tokens);
-            secrets.token_expires_at = expires;
-        })
+        .update_secrets_authorized(
+            s,
+            &server.id,
+            |secrets| {
+                secrets.tokens = Some(tokens);
+                secrets.token_expires_at = expires;
+            },
+            authorize,
+        )
         .await
 }
 
 pub async fn refresh(s: &Service, server: &McpServer) -> Result<()> {
+    refresh_authorized(s, server, |_| Ok(())).await
+}
+
+pub(crate) async fn refresh_authorized<F>(
+    s: &Service,
+    server: &McpServer,
+    authorize: F,
+) -> Result<()>
+where
+    F: Fn(&Db<'_>) -> Result<()> + Clone + Send + Sync + 'static,
+{
     let secrets = s.mcps.server_secrets(s, &server.id).await?;
     let refresh = secrets.refresh_token();
     if refresh.is_empty() {
@@ -408,13 +446,13 @@ pub async fn refresh(s: &Service, server: &McpServer) -> Result<()> {
     }
     let discovery = match secrets.discovery.clone() {
         Some(discovery) => discovery,
-        None => discover(s, server).await?,
+        None => discover(s, server, authorize.clone()).await?,
     };
     let parameters = HashMap::from([
         ("grant_type".into(), "refresh_token".into()),
         ("refresh_token".into(), refresh.into()),
     ]);
-    exchange(s, server, parameters, &discovery).await
+    exchange(s, server, parameters, &discovery, authorize).await
 }
 
 /// The authorization endpoint URL with PKCE, state, resource and scope parameters.
@@ -505,8 +543,8 @@ impl Mcps {
         session: &str,
         native: bool,
     ) -> Result<Value> {
-        let discovery = discover(s, server).await?;
-        let client = client(s, server, &discovery).await?;
+        let discovery = discover(s, server, |_| Ok(())).await?;
+        let client = client(s, server, &discovery, |_| Ok(())).await?;
         let verifier = token();
         let nonce = token();
         let url = authorization_url(s, server, &discovery, &client, &verifier, &nonce).await?;
@@ -690,7 +728,7 @@ impl Mcps {
             ("redirect_uri".into(), callback_url(s).await?),
             ("code_verifier".into(), secrets.verifier().to_owned()),
         ]);
-        exchange(s, server, parameters, discovery).await?;
+        exchange(s, server, parameters, discovery, |_| Ok(())).await?;
         self.update_secrets(s, &server.id, |secrets| secrets.verifier = None)
             .await?;
         Client::list_tools(s, server).await

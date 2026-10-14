@@ -239,6 +239,9 @@ async fn marking_as_read_accepts_only_conversations_and_missions() {
         json!(["agent:00000000-0000-4000-8000-000000000000"]),
         json!(["chat:not-a-uuid"]),
         json!([7]),
+        json!([{ "key": format!("chat:{}", id()), "finishedAt": 0 }]),
+        json!([{ "key": format!("chat:{}", id()), "finishedAt": now() + 60_000 }]),
+        json!([{ "key": format!("chat:{}", id()) }]),
         json!(vec![format!("chat:{}", id()); 201]),
     ] {
         let (status, body) = app
@@ -254,6 +257,84 @@ async fn marking_as_read_accepts_only_conversations_and_missions() {
         .await;
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(body["read"], 2);
+}
+
+#[tokio::test]
+async fn reading_an_observed_completion_does_not_consume_newer_work() {
+    let app = App::new().await;
+    app.get(&app.owner, "/api/chats").await;
+    let chat = app.finished_chat().await;
+    let chat_id = text(&chat, "id");
+    let listed = app.get(&app.owner, "/api/chats").await;
+    let first_at = find(&listed, "id", chat_id)["finishedAt"].as_i64().unwrap();
+    let run = app
+        .finished_run(chat_id, "chat", RunStatus::Succeeded)
+        .await;
+    let mut stored = app.service.get("chats", chat_id).await.unwrap();
+    stored["runId"] = run.into();
+    app.service.store.put("chats", stored).await.unwrap();
+
+    let read = |at| {
+        json!({
+            "items": [{ "key": format!("chat:{chat_id}"), "finishedAt": at }],
+        })
+    };
+    let (status, _) = app
+        .request(&app.owner, "POST", "/api/reads", read(first_at))
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    let listed = app.get(&app.owner, "/api/chats").await;
+    assert_eq!(find(&listed, "id", chat_id)["unread"], true);
+    let latest_at = find(&listed, "id", chat_id)["finishedAt"].as_i64().unwrap();
+
+    let (status, _) = app
+        .request(&app.owner, "POST", "/api/reads", read(latest_at))
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    // An older request finishing later never lowers the watermark.
+    app.request(&app.owner, "POST", "/api/reads", read(first_at))
+        .await;
+    let listed = app.get(&app.owner, "/api/chats").await;
+    assert_eq!(find(&listed, "id", chat_id)["unread"], false);
+}
+
+#[tokio::test]
+async fn opening_an_old_mission_run_leaves_the_latest_result_unread() {
+    let app = App::new().await;
+    let task = app
+        .service
+        .task(
+            json!({
+                "name": "Release notes",
+                "prompt": "Write them",
+                "agentId": MAIN_AGENT_ID,
+            }),
+            None,
+        )
+        .await
+        .unwrap();
+    let task_id = text(&task, "id");
+    app.get(&app.owner, "/api/tasks/activity").await;
+    let first = app
+        .finished_run(task_id, "schedule", RunStatus::Succeeded)
+        .await;
+    let old = app.service.store.run(&first).await.unwrap();
+    let latest = app
+        .finished_run(task_id, "schedule", RunStatus::Succeeded)
+        .await;
+    let (status, _) = app
+        .request(
+            &app.owner,
+            "POST",
+            "/api/reads",
+            json!({
+                "items": [{ "key": format!("task:{task_id}"), "finishedAt": old["finishedAt"] }],
+            }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    let runs = app.get(&app.owner, "/api/tasks/activity").await;
+    assert_eq!(find(&runs, "id", &latest)["unread"], true);
 }
 
 #[tokio::test]
@@ -305,4 +386,81 @@ async fn the_live_conversation_list_follows_each_subscribers_reads() {
     .expect("the read mark reached the stream");
     assert_eq!(unread_states, [json!(true), json!(false)]);
     server.abort();
+}
+
+/// Local SQLite measurements, comparing the original overwrite with observed monotonic marks.
+#[tokio::test]
+#[ignore = "manual storage measurements"]
+async fn read_watermark_measurements() {
+    use cairn_installation::store::Store;
+    use std::time::Instant;
+
+    fn cpu_ms() -> f64 {
+        let mut time = libc::timespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        };
+        // CLOCK_PROCESS_CPUTIME_ID includes the SQLite actor threads.
+        assert_eq!(
+            unsafe { libc::clock_gettime(libc::CLOCK_PROCESS_CPUTIME_ID, &mut time) },
+            0
+        );
+        time.tv_sec as f64 * 1000.0 + time.tv_nsec as f64 / 1_000_000.0
+    }
+
+    for monotonic in [false, true] {
+        let root = TempDir::new().unwrap();
+        let store = Store::open(root.path()).unwrap();
+        let finished_at = 1_792_000_000_000_i64;
+        let keys: Vec<String> = (0..200)
+            .map(|n| format!("read:account:chat:{n:08x}-0000-4000-8000-000000000000"))
+            .collect();
+        let records = keys.clone();
+        let cpu_start = cpu_ms();
+        let start = Instant::now();
+        for _ in 0..100 {
+            let keys = keys.clone();
+            store
+                .transaction(move |db| {
+                    for key in keys {
+                        let at = if monotonic {
+                            db.kv_as::<i64>(&key)?.unwrap_or(0).max(finished_at)
+                        } else {
+                            finished_at
+                        };
+                        db.set(&key, &at.into(), None)?;
+                    }
+                    Ok(())
+                })
+                .await
+                .unwrap();
+        }
+        let write_ms = start.elapsed().as_secs_f64() * 10.0;
+        let write_cpu_ms = (cpu_ms() - cpu_start) / 100.0;
+        drop(store);
+
+        // New connections and empty statement caches; OS page cache remains warm.
+        let store = Store::open(root.path()).unwrap();
+        let start = Instant::now();
+        let marks = store.keys_as::<i64>("read:account:").await.unwrap();
+        let cold_ms = start.elapsed().as_secs_f64() * 1000.0;
+        assert_eq!(marks.len(), 200);
+        let cpu_start = cpu_ms();
+        let start = Instant::now();
+        for _ in 0..100 {
+            assert_eq!(
+                store.keys_as::<i64>("read:account:").await.unwrap().len(),
+                200
+            );
+        }
+        let warm_ms = start.elapsed().as_secs_f64() * 10.0;
+        let read_cpu_ms = (cpu_ms() - cpu_start) / 100.0;
+        let encoded_bytes: usize = records
+            .iter()
+            .map(|key| key.len() + finished_at.to_string().len())
+            .sum();
+        println!(
+            "monotonic={monotonic} marks=200 encoded_bytes={encoded_bytes} cold_ms={cold_ms:.3} warm_ms={warm_ms:.3} write_ms={write_ms:.3} read_cpu_ms={read_cpu_ms:.3} write_cpu_ms={write_cpu_ms:.3}"
+        );
+    }
 }

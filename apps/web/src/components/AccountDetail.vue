@@ -83,7 +83,7 @@ const note = computed(() => {
           <span class="block truncate font-heading text-[19px] leading-tight font-extrabold tracking-[-0.02em]">{{ account.name }}</span>
           <span class="mt-0.5 flex min-w-0 items-center gap-1.5 text-xs font-normal text-muted">
             <ProviderMark :provider="account.provider" :size="15" />
-            <span class="truncate">{{ provider.label }}<template v-if="account.email"> · {{ account.email }}</template><template v-if="account.plan"> · {{ account.plan }}</template></span>
+            <span class="truncate">{{ provider.label }}<template v-if="account.modelProviderName || account.email"> · {{ account.modelProviderName || account.email }}</template><template v-if="account.plan"> · {{ account.plan }}</template></span>
           </span>
           <span v-if="account.status !== 'ready'" class="mt-2 flex"><AccountBadge :account="account" /></span>
         </span>
@@ -211,7 +211,7 @@ const note = computed(() => {
 
       <footer class="mt-auto flex flex-wrap items-center gap-2 border-t border-line px-6.5 py-4 phone:px-5">
         <UiButton size="small" :disabled="busy || running.length > 0" @click="emit('reconnect')">
-          <Icon :name="RefreshCw" :size="14" />{{ account.state === 'pending' ? 'Sign in' : 'Reconnect' }}
+          <Icon :name="RefreshCw" :size="14" />{{ provider.connection === 'apiKey' ? 'Replace API key' : account.state === 'pending' ? 'Sign in' : 'Reconnect' }}
         </UiButton>
         <UiButton
           size="small"

@@ -146,7 +146,7 @@ def compose(image, origin):
                 'stop_grace_period': '30s', 'read_only': True,
                 'environment': {'DATA_DIR': '/data'},
                 'cap_drop': ['ALL'],
-                'cap_add': ['SYS_ADMIN', 'NET_ADMIN', 'SYS_CHROOT', 'SETUID', 'SETGID', 'MKNOD', 'CHOWN', 'FOWNER', 'KILL', 'DAC_OVERRIDE'],
+                'cap_add': ['SYS_ADMIN', 'SYS_PTRACE', 'SYS_NICE', 'NET_ADMIN', 'SYS_CHROOT', 'SETUID', 'SETGID', 'MKNOD', 'CHOWN', 'FOWNER', 'KILL', 'DAC_OVERRIDE'],
                 'security_opt': ['apparmor:unconfined', 'seccomp:unconfined'],
                 'devices': ['/dev/kvm:/dev/kvm', '/dev/net/tun:/dev/net/tun', '/dev/fuse:/dev/fuse'],
                 'sysctls': {'net.ipv4.ip_forward': '1', 'net.ipv6.conf.all.disable_ipv6': '1'},
@@ -422,6 +422,14 @@ fetch('http://127.0.0.1:4310/health', {{ signal: AbortSignal.timeout(5000) }}).t
         deployment['services']['manager']['image'] = image
         deployment['services']['manager']['environment']['CAIRN_NODE_IMAGE'] = image
         deployment['services']['runner']['image'] = image
+        # Add only the paging capabilities; preserve operator resource limits,
+        # environment expressions and any additional approved capabilities.
+        capabilities = deployment['services']['runner'].setdefault('cap_add', [])
+        if not isinstance(capabilities, list):
+            raise ValueError('Runner cap_add must be a list')
+        for capability in ('SYS_PTRACE', 'SYS_NICE'):
+            if capability not in capabilities:
+                capabilities.append(capability)
 
         # The manager saves checkpoints before the runner is stopped. Persistent
         # volumes and Garage are never recreated or removed by this supervisor.

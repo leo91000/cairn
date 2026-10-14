@@ -58,12 +58,15 @@ export const test = base.extend<object, { workspace: Workspace }>({
   // Playwright requires a destructuring pattern even with no fixture dependencies.
   // eslint-disable-next-line no-empty-pattern
   workspace: [async ({}, use, workerInfo) => {
+    const portBase = Number(process.env.CAIRN_BROWSER_PORT_BASE ?? 4322)
+    if (!Number.isInteger(portBase) || portBase < 1024 || portBase + 100 + workerInfo.parallelIndex > 65535)
+      throw new Error('CAIRN_BROWSER_PORT_BASE must select valid unprivileged installation and beacon ports.')
     const directory = await mkdtemp(path.join(os.tmpdir(), 'cairn-browser-'))
     const home = path.join(directory, 'home')
     const projectPath = path.join(directory, 'project')
-    const port = 4322 + workerInfo.parallelIndex
+    const port = portBase + workerInfo.parallelIndex
     const managerUrl = `http://127.0.0.1:${port}`
-    const beacon = await beaconRelayFixture(4422 + workerInfo.parallelIndex)
+    const beacon = await beaconRelayFixture(port + 100)
     const url = beacon.url
     const database = new URL(process.env.CAIRN_BEACON_TEST_DATABASE_URL!)
     const schema = `browser_${crypto.randomUUID().replaceAll('-', '')}`
@@ -90,7 +93,7 @@ export const test = base.extend<object, { workspace: Workspace }>({
     const configuration = path.join(directory, 'config.json')
     const usageFile = path.join(directory, 'usage.json')
     const usage: Record<string, unknown> = {}
-    await writeFile(configuration, JSON.stringify({ ...config, claudeBin: path.resolve('tests/fixtures/claude.mjs') }))
+    await writeFile(configuration, JSON.stringify({ ...config, claudeBin: path.resolve('tests/fixtures/claude.mjs'), opencodeBin: path.resolve('tests/fixtures/opencode.mjs') }))
     await writeFile(usageFile, '{}')
     // A developer may rebuild Cargo while this fixture is active. Keep the
     // supervisor's current executable stable for the entire browser journey.

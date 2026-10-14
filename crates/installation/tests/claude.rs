@@ -24,6 +24,7 @@ fn config(root: &TempDir) -> Config {
     Config {
         codex_bin: "/nonexistent-codex".into(),
         claude_bin: common::fixture("claude.mjs"),
+        opencode_bin: "opencode".into(),
         ..common::config(root.path())
     }
 }
@@ -700,6 +701,46 @@ async fn run_events(c: &Config, p: Value) -> Vec<Value> {
 }
 
 #[tokio::test]
+async fn stopped_background_tasks_do_not_wait_for_a_notification_that_never_arrives() {
+    for prompt in [
+        "fixture:stopped-background",
+        "fixture:stopped-background snapshot-first",
+        "fixture:stopped-background legacy-id",
+    ] {
+        let root = TempDir::new().unwrap();
+        let c = setup(&root);
+        let events = run_events(&c, plan(&root, prompt)).await;
+        assert!(events.iter().any(|event| event["type"] == "turn.waiting"));
+        assert_eq!(
+            std::fs::read_to_string(root.path().join("result.md")).unwrap(),
+            "Stopped all background work"
+        );
+        let receipt: Value = serde_json::from_slice(
+            &std::fs::read(root.path().join("result.claude-receipt.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(receipt["delivered"], json!(["original"]));
+        assert_eq!(receipt["text"], "Stopped all background work");
+    }
+}
+
+#[tokio::test]
+async fn failed_stops_and_unrelated_results_still_wait_for_background_followups() {
+    for prompt in [
+        "fixture:stopped-background failed-stop",
+        "fixture:stopped-background unrelated-tool",
+    ] {
+        let root = TempDir::new().unwrap();
+        let c = setup(&root);
+        run_events(&c, plan(&root, prompt)).await;
+        assert_eq!(
+            std::fs::read_to_string(root.path().join("result.md")).unwrap(),
+            "Background followup handled"
+        );
+    }
+}
+
+#[tokio::test]
 async fn background_work_and_its_followup_finish_before_the_run_completes() {
     let root = TempDir::new().unwrap();
     let c = setup(&root);
@@ -726,6 +767,103 @@ async fn background_work_and_its_followup_finish_before_the_run_completes() {
     )
     .unwrap();
     assert_eq!(receipt["text"], "Build checked and task finished");
+}
+
+#[tokio::test]
+async fn subagents_report_their_own_steps_without_replacing_the_reply() {
+    let root = TempDir::new().unwrap();
+    let c = setup(&root);
+    let events = run_events(&c, plan(&root, "fixture:subagents")).await;
+    let subagent = |id: &str| {
+        events
+            .iter()
+            .filter(|e| e["item"]["type"] == "subagent" && e["item"]["id"] == id)
+            .map(|e| (e["type"].as_str().unwrap(), e["item"].clone()))
+            .collect::<Vec<_>>()
+    };
+
+    let count = subagent("agent-count");
+    assert_eq!(count[0].0, "item.started", "{count:#?}");
+    assert_eq!(count[0].1["name"], "Count lines");
+    assert_eq!(count[0].1["agent_type"], "general-purpose");
+    assert_eq!(count[0].1["prompt"], "Count lines in the workspace.");
+    assert!(
+        count
+            .iter()
+            .any(|(_, item)| item["activity"] == "Running wc -l")
+    );
+    let (kind, last) = count.last().unwrap();
+    assert_eq!(*kind, "item.completed");
+    assert_eq!(last["status"], "completed");
+    assert_eq!(last["task_id"], "task-agent-count");
+    // The report drops Claude Code's hand-back framing and keeps the final usage.
+    assert_eq!(last["result"], "Total: 3 lines.");
+    assert_eq!(last["tokens"], 1510);
+    assert_eq!(last["duration_ms"], 1150);
+
+    // A background subagent outlives its tool call and settles with its notification.
+    let list = subagent("agent-list");
+    let launched = list
+        .iter()
+        .find(|(kind, _)| *kind == "item.completed")
+        .unwrap();
+    assert_eq!(launched.1["status"], "in_progress");
+    assert_eq!(launched.1["background"], true);
+    let (kind, last) = list.last().unwrap();
+    assert_eq!(*kind, "item.updated");
+    assert_eq!(last["status"], "completed");
+    assert_eq!(last["result"], "Files: one.txt, two.txt");
+
+    let children: Vec<_> = events
+        .iter()
+        .filter(|e| e["item"]["parent_id"].is_string())
+        .map(|e| {
+            (
+                e["item"]["parent_id"].as_str().unwrap(),
+                e["item"]["type"].as_str().unwrap(),
+            )
+        })
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    assert_eq!(
+        children,
+        vec![
+            ("agent-count", "command_execution"),
+            ("agent-count", "subagent_message"),
+            ("agent-list", "command_execution"),
+            ("agent-list", "subagent_message"),
+        ]
+    );
+    let replies: Vec<_> = events
+        .iter()
+        .filter(|e| e["item"]["type"] == "agent_message" && e["type"] == "item.completed")
+        .map(|e| e["item"]["text"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        replies,
+        vec![
+            "Counted while the listing continues",
+            "Both subagents reported back"
+        ]
+    );
+    assert_eq!(
+        std::fs::read_to_string(root.path().join("result.md")).unwrap(),
+        "Both subagents reported back"
+    );
+}
+
+#[tokio::test]
+async fn a_subagent_tool_result_preserves_its_stopped_notification() {
+    let root = TempDir::new().unwrap();
+    let c = setup(&root);
+    let events = run_events(&c, plan(&root, "fixture:subagents-stopped")).await;
+    let last = events
+        .iter()
+        .rfind(|event| event["item"]["id"] == "agent-count")
+        .unwrap();
+    assert_eq!(last["item"]["status"], "stopped");
+    assert_eq!(last["item"]["result"], "Total: 3 lines.");
 }
 
 #[tokio::test]

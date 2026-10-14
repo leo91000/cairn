@@ -11,6 +11,7 @@ import {
   inject,
   nextTick,
   onBeforeUnmount,
+  provide,
   ref,
   watch,
 } from 'vue'
@@ -27,12 +28,14 @@ import ChatAttachments from '../components/ChatAttachments.vue'
 import ChatQuestions from '../components/ChatQuestions.vue'
 import ChatSwitcher from '../components/ChatSwitcher.vue'
 import ConnectionSheet from '../components/ConnectionSheet.vue'
-import FilColumn from '../components/FilColumn.vue'
+import ConversationDeletion from '../components/ConversationDeletion.vue'
 import Icon from '../components/Icon.vue'
 import Modal from '../components/Modal.vue'
 import NodeExecution from '../components/NodeExecution.vue'
 import QueueStrip from '../components/QueueStrip.vue'
 import SkillTextarea from '../components/SkillTextarea.vue'
+import SubagentBar from '../components/SubagentBar.vue'
+import SubagentPanel from '../components/SubagentPanel.vue'
 import ThemeControl from '../components/ThemeControl.vue'
 import UiAlert from '../components/UiAlert.vue'
 import UiButton from '../components/UiButton.vue'
@@ -56,14 +59,17 @@ import {
   Plug,
   Plus,
   Search,
+  Trash2,
   X,
   Zap,
 } from '../icons'
 import { connectionTone, installationKey, routeLabel } from '../installation-context'
 import { useReadWhileOpen } from '../reads'
 import { useRetryNotice } from '../run-retry'
+import { exclusiveSuspensionLabel, isExclusivelySuspended } from '../run-status'
 import { backgroundWait } from '../signal'
 import { chatSkills } from '../skill-mentions'
+import { openSubagentKey, subagentState } from '../subagents'
 import { iconButton } from '../ui'
 import { useLiveRun } from '../use-live-run'
 import { workspaceActionsKey } from '../workspace-actions'
@@ -72,6 +78,7 @@ import { chatPath } from '../workspace-links'
 const router = useRouter()
 const route = useRoute()
 const detail = ref<(ChatDetail & { error?: string }) | null>(null)
+const recoverable = computed(() => detail.value?.lifecycle === 'trash' && (detail.value?.purgeAt ?? 0) > Date.now())
 const inactive = computed(() => !!detail.value?.lifecycle && detail.value.lifecycle !== 'active')
 const chatId = computed(() => typeof route.params.id === 'string' ? route.params.id : undefined)
 const selectedChatId = computed(() => {
@@ -86,7 +93,7 @@ const selectedChatId = computed(() => {
   return key
 })
 const streamPath = computed(() => chatId.value ? `/chats/${chatId.value}/stream` : '/chats/stream')
-const live = useLiveRun(() => streamPath.value, { hold: 1000 })
+const live = useLiveRun(() => streamPath.value, { hold: true })
 const { events, connectionNotice, catchingUp } = live
 // The previous conversation stays visible until the selected one is ready.
 const switching = computed(() => live.shown.value !== streamPath.value)
@@ -96,14 +103,47 @@ const model = ref('')
 const reasoning = ref('')
 const provider = ref<'' | Provider>('')
 const history = ref(false)
+const deletingConversation = ref<ChatDetail>()
 const detailsOpen = ref(false)
 const detailsButton = ref<HTMLButtonElement>()
 const activity = ref<InstanceType<typeof ActivityFeed>>()
+const textarea = ref<InstanceType<typeof SkillTextarea>>()
 const workspaceActions = inject(workspaceActionsKey)
 const installation = inject(installationKey, null)
 const currentInstallation = computed(() => installation?.current.value ?? null)
 const connectionOpen = ref(false)
 const fileCount = computed(() => latestArtifacts(deliverables.value).length)
+
+// A subagent's full activity opens beside the conversation on wide screens, in a drawer otherwise.
+// The current request's subagents stay in sight beside the composer while one of them works.
+const openedSubagent = ref<string | null>(null)
+let subagentOpener: HTMLElement | null = null
+const wideQuery = window.matchMedia('(width > 1200px)')
+const wide = ref(wideQuery.matches)
+const onWide = () => wide.value = wideQuery.matches
+wideQuery.addEventListener('change', onWide)
+onBeforeUnmount(() => wideQuery.removeEventListener('change', onWide))
+
+function openSubagent(id: string, opener?: HTMLElement) {
+  subagentOpener = opener ?? (document.activeElement instanceof HTMLElement ? document.activeElement : null)
+  openedSubagent.value = id
+}
+
+async function closeSubagent() {
+  openedSubagent.value = null
+  await nextTick()
+  if (subagentOpener?.isConnected && subagentOpener.getClientRects().length)
+    subagentOpener.focus()
+  else
+    textarea.value?.focus()
+  subagentOpener = null
+}
+
+provide(openSubagentKey, openSubagent)
+const runActive = computed(() => detail.value?.run?.status === 'running')
+const subagentTeam = computed(() => activity.value?.teams.find(team => team.some(agent => agent.id === openedSubagent.value)))
+const currentSubagents = computed(() => activity.value?.subagents ?? [])
+const subagentBar = computed(() => currentSubagents.value.some(agent => subagentState(agent, runActive.value) === 'running'))
 
 async function detailAction(action: () => void) {
   detailsOpen.value = false
@@ -131,7 +171,6 @@ const submitting = ref(false)
 const editing = ref<string | null>(null)
 const agentId = ref(typeof route.query.agent === 'string' ? route.query.agent : MAIN_AGENT_ID)
 const projectId = ref(typeof route.query.project === 'string' ? route.query.project : '')
-const textarea = ref<InstanceType<typeof SkillTextarea>>()
 const fileInput = ref<HTMLInputElement>()
 const attachments = ref<ChatAttachment[]>([])
 const previews = ref<Record<string, string>>({})
@@ -212,6 +251,7 @@ function pasteFiles(event: ClipboardEvent) {
 }
 
 const active = computed(() => !!detail.value?.run && ['queued', 'running'].includes(detail.value.run.status))
+const suspended = computed(() => isExclusivelySuspended(detail.value?.run))
 const retryNotice = useRetryNotice(() => detail.value?.run)
 const sleepNotice = computed(() => chatSleepNotice(detail.value))
 const waitNotice = computed(() => retryNotice.value
@@ -219,10 +259,16 @@ const waitNotice = computed(() => retryNotice.value
   : chatWaitNotice(detail.value?.run) ?? sleepNotice.value)
 const backgroundTasks = computed(() => detail.value?.run?.status === 'running' ? backgroundWait(events.value)?.tasks.length ?? 0 : 0)
 const chatStatus = computed(() => {
+  const status = detail.value?.run?.status
+  if (status === 'failed')
+    return 'Failed'
+  if (status === 'interrupted')
+    return 'Interrupted'
   if (detail.value?.paused)
     return 'Paused'
 
-  const status = detail.value?.run?.status
+  if (suspended.value)
+    return exclusiveSuspensionLabel
   if (status === 'queued')
     return 'Waiting'
   if (status === 'running') {
@@ -231,10 +277,6 @@ const chatStatus = computed(() => {
     return 'Working'
   }
 
-  if (status === 'failed')
-    return 'Failed'
-  if (status === 'interrupted')
-    return 'Interrupted'
   if (sleepNotice.value)
     return detail.value?.wakeup?.condition ? 'Waiting for a result' : 'Scheduled wait'
   return 'Ready'
@@ -300,8 +342,11 @@ watch(live.snapshot, (value) => {
 })
 // The open conversation's finished turns are read while the page is visible.
 useReadWhileOpen(() => {
-  const chat = chats.value.find(chat => chat.id === selectedChatId.value)
-  return chat?.unread ? { key: `chat:${chat.id}`, at: chat.finishedAt ?? chat.updatedAt } : null
+  const chat = detail.value
+  const run = chat?.run
+  if (!chat || !live.synced.value || catchingUp.value || switching.value || chat.id !== selectedChatId.value || run?.status !== 'succeeded' || !run.finishedAt)
+    return null
+  return { key: `chat:${chat.id}`, at: run.finishedAt }
 })
 watch(live.error, (value) => {
   if (value)
@@ -453,6 +498,7 @@ function edit(message: ChatMessage) {
 
 // The view stays mounted across conversations: reset what belongs to the previous one.
 watch(chatId, (id) => {
+  openedSubagent.value = null
   history.value = false
   detailsOpen.value = false
   connectionOpen.value = false
@@ -553,6 +599,14 @@ function key(event: KeyboardEvent) {
           <Icon :name="Maximize2" :size="18" />Open activity fullscreen
         </button>
       </template>
+      <button
+        v-if="detail && !inactive"
+        class="chat-detail-action text-danger!"
+        aria-haspopup="dialog"
+        @click="detailAction(() => { deletingConversation = detail! })"
+      >
+        <Icon :name="Trash2" :size="18" />Delete conversation
+      </button>
       <div class="border-t border-line pt-1">
         <button class="chat-detail-action" @click="detailAction(() => workspaceActions?.search())">
           <Icon :name="Search" :size="18" />Search workspace
@@ -566,6 +620,12 @@ function key(event: KeyboardEvent) {
       </div>
     </div>
   </Modal>
+  <ConversationDeletion
+    v-if="deletingConversation"
+    :chat="deletingConversation"
+    @close="deletingConversation = undefined"
+    @deleted="() => { deletingConversation = undefined; newConversation() }"
+  />
   <ConnectionSheet
     v-if="connectionOpen"
     :run="detail?.run"
@@ -574,10 +634,7 @@ function key(event: KeyboardEvent) {
     :return-focus="detailsButton"
     @close="connectionOpen = false"
   />
-  <div class="flex h-full min-h-0">
-    <aside class="w-88 shrink-0 border-r border-line bg-inset tablet:hidden" aria-label="Fil">
-      <FilColumn :chats="chats" :selected="selectedChatId" compact />
-    </aside>
+  <div class="flex h-full min-h-0 min-w-0 flex-1">
     <div class="chat-page flex h-full min-h-0 min-w-0 flex-1 flex-col gap-3 px-6 pb-4 pt-3 phone:gap-0 phone:px-3 phone:pb-2 phone:pt-[env(safe-area-inset-top)]">
       <ChatSwitcher
         v-if="history"
@@ -586,6 +643,7 @@ function key(event: KeyboardEvent) {
         :anchor="switcherAnchor"
         @close="history = false"
         @create="newConversation"
+        @deleted="id => { if (id === selectedChatId) newConversation() }"
       />
       <!-- One row, as on Android: who and what on the left, files and the ⋯ menu on the right. -->
       <header class="chat-header flex min-h-15 shrink-0 items-center gap-3 border-b border-line/70 pb-3 phone:h-15 phone:gap-2 phone:pb-0">
@@ -627,7 +685,7 @@ function key(event: KeyboardEvent) {
             :name="detail.agentName"
             :identity="detail.agentId"
             :size="36"
-            :working="detail.run?.status === 'running' && !detail.paused"
+            :working="detail.run?.status === 'running' && !detail.paused && !suspended"
           />
           <div class="min-w-0 flex-1">
             <div class="flex min-w-0 items-center gap-1">
@@ -700,33 +758,32 @@ function key(event: KeyboardEvent) {
       </header>
       <div class="flex min-h-0 flex-1 flex-col">
         <section
-          class="relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden transition-opacity"
-          :class="switching ? 'opacity-60 delay-150' : ''"
+          class="relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden"
           :aria-busy="switching"
           aria-label="Chat workspace"
         >
           <!-- A floating pill, as on Android: connection status never moves the conversation. -->
-          <p v-if="connectionNotice" role="status" class="pointer-events-none absolute top-3 left-1/2 z-10 m-0! -translate-x-1/2 rounded-full border border-line bg-surface/95 px-3 py-1.5 text-xs whitespace-nowrap text-muted shadow-[0_4px_16px_#0000000f] backdrop-blur-sm">
-            {{ connectionNotice }}
+          <p v-if="switching || connectionNotice" role="status" class="pointer-events-none absolute top-3 left-1/2 z-10 m-0! -translate-x-1/2 rounded-full border border-line bg-surface/95 px-3 py-1.5 text-xs whitespace-nowrap text-muted shadow-[0_4px_16px_#0000000f] backdrop-blur-sm">
+            {{ switching ? 'Opening conversation…' : connectionNotice }}
           </p>
           <div v-if="route.params.id && !detail" role="status" class="flex flex-1 items-center justify-center text-sm text-muted">
             Loading conversation…
           </div>
           <div v-else-if="inactive" class="m-auto w-full max-w-xl px-6 py-12 text-center">
             <h2 class="mb-3 text-xl">
-              {{ detail?.lifecycle === 'purging' ? 'Permanently deleting conversation…' : 'This conversation is in the trash.' }}
+              {{ recoverable ? 'This conversation is in the trash.' : 'Permanently deleting conversation…' }}
             </h2>
-            <p v-if="detail?.purgeAt" class="mb-5 text-sm text-muted">
+            <p v-if="recoverable && detail?.purgeAt" class="mb-5 text-sm text-muted">
               Permanently deleted on {{ new Date(detail.purgeAt).toLocaleDateString() }}.
             </p>
             <p v-else class="mb-5 text-sm text-muted">
-              Restore this conversation to access its history and working files.
+              This conversation cannot be restored. Its messages and working files are being removed.
             </p>
             <UiAlert v-if="error || detail?.lifecycleError" class="mb-4">
               {{ error || detail?.lifecycleError }}
             </UiAlert>
             <UiButton
-              v-if="detail?.lifecycle === 'trash'"
+              v-if="recoverable"
               :disabled="busy"
               variant="primary"
               @click="action('restore')"
@@ -767,6 +824,7 @@ function key(event: KeyboardEvent) {
             :sending="delivery.sending"
             :events="events"
             :active="detail?.run?.status === 'running'"
+            :suspended="suspended"
             :agent-id="detail?.agentId || selectedAgent?.id"
             :agent="detail?.agentName || selectedAgent?.name || 'Main agent'"
             :task="detail?.title || 'New conversation'"
@@ -776,6 +834,7 @@ function key(event: KeyboardEvent) {
             :loading="catchingUp"
             :trimmed="0"
             :skills="skillNames"
+            :subagent-bar="subagentBar"
             compact-toolbar
             chat
             @load="live.loadOlder"
@@ -786,6 +845,7 @@ function key(event: KeyboardEvent) {
               v-if="detail"
               :questions="detail.questions || []"
               :active="active"
+              :suspended="suspended"
               :highlighted="typeof route.query.question === 'string' ? route.query.question : undefined"
             />
             <UiAlert v-if="visibleError && !dismissedError" class="mb-3 flex items-start gap-2">
@@ -841,6 +901,13 @@ function key(event: KeyboardEvent) {
                 </button>
               </div>
             </details>
+            <SubagentBar
+              v-if="subagentBar"
+              :agents="currentSubagents"
+              :active="runActive"
+              :selected="openedSubagent"
+              @open="openSubagent"
+            />
             <form
               class="chat-composer relative rounded-[26px] border border-line bg-surface p-1 focus-within:border-accent/50"
               @submit.prevent="send()"
@@ -999,7 +1066,31 @@ function key(event: KeyboardEvent) {
         </section>
       </div>
     </div>
+    <aside v-if="subagentTeam && wide" class="w-100 shrink-0 border-l border-line" aria-label="Subagent activity">
+      <SubagentPanel
+        :team="subagentTeam"
+        :selected="openedSubagent!"
+        :active="runActive"
+        @select="openedSubagent = $event"
+        @close="closeSubagent"
+      />
+    </aside>
   </div>
+  <Modal
+    v-if="subagentTeam && !wide"
+    title="Subagent activity"
+    drawer
+    headless
+    @close="closeSubagent"
+  >
+    <SubagentPanel
+      :team="subagentTeam"
+      :selected="openedSubagent!"
+      :active="runActive"
+      @select="openedSubagent = $event"
+      @close="closeSubagent"
+    />
+  </Modal>
 </template>
 
 <style scoped>

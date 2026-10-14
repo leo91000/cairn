@@ -1,6 +1,7 @@
 import type { ChatView } from '../../../packages/contracts/chats'
 import type { RunEvent, RunListItem, Task } from '../../../packages/contracts/contracts'
 import type { ActivityEntry } from './activity'
+import { exclusiveSuspensionLabel, isExclusivelySuspended } from './run-status'
 import { chatPath } from './workspace-links'
 
 // Same identity palette as the Android « Signal » design: readable on white text in both themes.
@@ -16,7 +17,7 @@ export function identityColor(key: string) {
 
 export const initial = (name: string) => name.trim().match(/[\p{L}\p{N}]/u)?.[0]?.toUpperCase() ?? '?'
 
-export type FilKind = 'question' | 'failed' | 'failed-mission' | 'review' | 'unread' | 'running' | 'queued' | 'paused' | 'recent'
+export type FilKind = 'question' | 'failed' | 'failed-mission' | 'review' | 'unread' | 'running' | 'queued' | 'paused' | 'suspended' | 'recent'
 export interface FilItem {
   key: string
   kind: FilKind
@@ -76,6 +77,9 @@ export function filOf(chats: ChatView[], tasks: Task[], runs: RunListItem[], rea
     else if (chat.paused) {
       recent.push({ ...base, kind: 'paused', subtitle: 'Paused' })
     }
+    else if (isExclusivelySuspended(chat)) {
+      live.push({ ...base, kind: 'suspended', subtitle: exclusiveSuspensionLabel })
+    }
     else if (chat.status === 'running') {
       live.push({ ...base, kind: 'running', subtitle: 'Working' })
     }
@@ -120,7 +124,10 @@ export function filOf(chats: ChatView[], tasks: Task[], runs: RunListItem[], rea
       taskId: task.id,
       runId: run.id,
     }
-    if (run.status === 'running' || run.status === 'queued') {
+    if (isExclusivelySuspended(run)) {
+      live.push({ ...base, kind: 'suspended', subtitle: exclusiveSuspensionLabel })
+    }
+    else if (run.status === 'running' || run.status === 'queued') {
       live.push({ ...base, kind: run.status === 'running' ? 'running' : 'queued', subtitle: run.status === 'running' ? 'Mission running' : 'Mission waiting for a runner' })
     }
     else if (run.status === 'failed' || run.status === 'interrupted') {
@@ -154,11 +161,18 @@ export interface WorkingStep {
   detail: string
   since: number | null
   waiting?: string[]
+  /** The agent only waits for its subagents. */
+  subagents?: boolean
 }
 
-/** Events that show the agent active again after it announced a background wait. */
+/**
+ * Events that show the agent active again after it announced a background wait. Its subagents
+ * working in the background are what it waits for.
+ */
 function resumesWork(event: RunEvent) {
-  return event.type === 'chat.user' || event.type === 'thread.started' || event.type.startsWith('turn.') || event.type.startsWith('item.')
+  const item = event.payload?.item && typeof event.payload.item === 'object' ? event.payload.item as Record<string, unknown> : {}
+  const subagent = item.type === 'subagent' || typeof item.parent_id === 'string'
+  return event.type === 'chat.user' || event.type === 'thread.started' || event.type.startsWith('turn.') || (event.type.startsWith('item.') && !subagent)
 }
 
 /**
@@ -208,11 +222,22 @@ export function workingStep(entries: ActivityEntry[], agent: string, fallbackSta
   const turn = turnStart >= 0 ? entries.slice(turnStart + 1) : entries
   const opening = entries[turnStart]
   const since = (opening?.kind === 'message' && opening.time > 0 ? opening.time : null) ?? fallbackStart
-  const artifacts = turn.flatMap(entry => entry.kind === 'group' ? entry.artifacts : [])
+  const artifacts = turn.flatMap(entry => entry.kind === 'group' ? entry.artifacts : entry.kind === 'team' ? entry.agents : [])
   const latest = artifacts.findLast(artifact => artifact.kind !== 'notice')
   const name = agent.trim() || 'The agent'
   if (!latest)
     return { title: `${name} is working`, detail: '', since }
+  const subagents = artifacts.filter(artifact => artifact.kind === 'subagent' && artifact.status === 'running')
+  if (latest.kind === 'subagent' && subagents.length) {
+    const title = subagents.length === 1 ? 'Waiting for a subagent' : `Waiting for ${subagents.length} subagents`
+    return {
+      title,
+      detail: subagents.map(subagent => subagent.title).join(' · '),
+      since,
+      subagents: true,
+    }
+  }
+
   if (latest.status === 'running')
     return { title: latest.title, detail: latest.command || latest.subtitle, since }
   return { title: `${name} is working`, detail: `Last step: ${latest.title}`, since }

@@ -1,3 +1,5 @@
+@file:OptIn(androidx.compose.material3.ExperimentalMaterial3Api::class)
+
 package build.cairn.app.ui
 
 import androidx.compose.foundation.Canvas
@@ -34,6 +36,7 @@ import java.time.Instant
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
 import java.util.Locale
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.JsonPrimitive
@@ -184,6 +187,7 @@ internal fun AccountRow(account: Account, open: () -> Unit) {
         when {
             account.state != "ready" -> null
             account.usage?.error != null -> "Usage indisponible"
+            account.modelProvider != null -> "Usage non consulté"
             windows.isEmpty() -> "Usage pas encore connu"
             else -> null
         }
@@ -222,7 +226,7 @@ internal fun AccountRow(account: Account, open: () -> Unit) {
                         AccountBadge(account)
                     }
                     Text(
-                        account.email ?: "Pas encore connecté",
+                        account.modelProviderName ?: account.email ?: "Pas encore connecté",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         maxLines = 1,
@@ -271,9 +275,16 @@ internal fun CodingAgentCard(
     accounts: List<Account>,
     required: Boolean,
     add: () -> Unit,
+    reorder: ((List<String>) -> Unit)? = null,
     open: (Account) -> Unit,
 ) {
     val provider = agent.provider
+    // Auto tries ordered connections top to bottom.
+    val accounts =
+        if (agent.ordered)
+            accounts.sortedWith(compareBy({ it.priority ?: Int.MAX_VALUE }, { it.createdAt ?: 0L }))
+        else accounts
+    val movable = agent.ordered && reorder != null && accounts.size > 1
     val running = accounts.sumOf { it.activeRunIds.size }
     SignalCard(
         Modifier.fillMaxWidth().testTag("accounts-$provider").semantics {
@@ -303,9 +314,47 @@ internal fun CodingAgentCard(
                 onClick = add,
             )
         }
-        accounts.forEach { account ->
+        if (movable) {
             HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
-            AccountRow(account) { open(account) }
+            Text(
+                "Un modèle proposé par plusieurs connexions passe par la première disponible, de haut en bas.",
+                Modifier.padding(horizontal = 16.dp, vertical = 10.dp),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+        accounts.forEachIndexed { index, account ->
+            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+            if (!movable) AccountRow(account) { open(account) }
+            else
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Box(Modifier.weight(1f)) { AccountRow(account) { open(account) } }
+                    Column(Modifier.padding(end = 4.dp)) {
+                        fun move(offset: Int) {
+                            val ids = accounts.map { it.id }.toMutableList()
+                            ids.add(index + offset, ids.removeAt(index))
+                            reorder?.invoke(ids)
+                        }
+                        IconButton(
+                            onClick = { move(-1) },
+                            enabled = index > 0,
+                            modifier = Modifier.size(36.dp),
+                        ) {
+                            Icon(CairnIcons.Up, "Monter ${account.name}", Modifier.size(16.dp))
+                        }
+                        IconButton(
+                            onClick = { move(1) },
+                            enabled = index < accounts.lastIndex,
+                            modifier = Modifier.size(36.dp),
+                        ) {
+                            Icon(
+                                CairnIcons.Bottom,
+                                "Descendre ${account.name}",
+                                Modifier.size(16.dp),
+                            )
+                        }
+                    }
+                }
         }
         if (accounts.isEmpty()) {
             HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
@@ -617,7 +666,8 @@ internal fun AccountSheet(
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 SignalButton(
-                    if (account.state == "pending") "Se connecter" else "Reconnecter",
+                    if (codingAgent(account.provider).apiKeys) "Remplacer la clé API"
+                    else if (account.state == "pending") "Se connecter" else "Reconnecter",
                     icon = CairnIcons.Retry,
                     container = MaterialTheme.colorScheme.surface,
                     content = MaterialTheme.colorScheme.onSurface,
@@ -717,11 +767,41 @@ internal fun AccountSignInSheet(
     state: Workspace,
     signIn: AccountSignIn?,
     initialProvider: String?,
+    account: Account? = null,
     changed: suspend () -> Unit,
     close: () -> Unit,
 ) {
     var provider by remember { mutableStateOf(initialProvider ?: "codex") }
-    var name by remember { mutableStateOf("") }
+    var name by remember { mutableStateOf(account?.name.orEmpty()) }
+    var apiKey by remember { mutableStateOf("") }
+    var modelProvider by remember { mutableStateOf(account?.modelProvider ?: "opencode") }
+    var keyProviders by remember { mutableStateOf<List<ApiKeyProvider>>(emptyList()) }
+    var providerError by remember { mutableStateOf("") }
+    var loadingProviders by remember { mutableStateOf(false) }
+    var providerMenu by remember { mutableStateOf(false) }
+    val usesKey = codingAgent(provider).apiKeys
+    LaunchedEffect(provider) {
+        apiKey = ""
+        providerError = ""
+        keyProviders = emptyList()
+        loadingProviders = usesKey
+        if (usesKey) {
+            try {
+                keyProviders =
+                    withContext(Dispatchers.IO) {
+                        vm.api.get<List<ApiKeyProvider>>("/accounts/providers/${segment(provider)}")
+                    }
+                if (keyProviders.none { it.id == modelProvider })
+                    modelProvider = keyProviders.firstOrNull()?.id.orEmpty()
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                providerError = e.message ?: "Impossible de charger les fournisseurs."
+            } finally {
+                loadingProviders = false
+            }
+        }
+    }
     // Authorization codes never enter saved instance state or preferences.
     var code by remember { mutableStateOf("") }
     var submitted by remember(signIn?.accountId, signIn?.state) { mutableStateOf(false) }
@@ -750,7 +830,8 @@ internal fun AccountSignInSheet(
             Column {
                 Text(
                     when {
-                        flow == null -> "Ajouter un compte"
+                        flow == null ->
+                            if (account != null) "Remplacer la clé API" else "Ajouter un compte"
                         flow.state == "failed" -> "Nouvel essai nécessaire"
                         else ->
                             "Connecter votre ${codingAgent(flow.provider).subscription.replaceFirstChar { it.lowercase() }}"
@@ -759,58 +840,143 @@ internal fun AccountSignInSheet(
                 )
                 if (flow == null)
                     Text(
-                        "Votre mot de passe reste chez ${codingAgent(provider).vendor}.",
+                        if (usesKey) "Une clé API par fournisseur de modèles."
+                        else "Votre mot de passe reste chez ${codingAgent(provider).vendor}.",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
             }
             when {
                 flow == null -> {
-                    Row(
-                        horizontalArrangement = Arrangement.spacedBy(10.dp),
-                        modifier = Modifier.height(IntrinsicSize.Min),
-                    ) {
-                        codingAgents.forEach { agent ->
-                            ProviderTile(
-                                agent.provider,
-                                agent.subscription,
-                                provider == agent.provider,
-                                !state.busy,
-                                Modifier.weight(1f).fillMaxHeight(),
-                            ) {
-                                provider = agent.provider
+                    if (account == null)
+                        Row(
+                            horizontalArrangement = Arrangement.spacedBy(10.dp),
+                            modifier = Modifier.height(IntrinsicSize.Min),
+                        ) {
+                            codingAgents.forEach { agent ->
+                                ProviderTile(
+                                    agent.provider,
+                                    agent.subscription,
+                                    provider == agent.provider,
+                                    !state.busy,
+                                    Modifier.weight(1f).fillMaxHeight(),
+                                ) {
+                                    provider = agent.provider
+                                }
                             }
                         }
-                    }
                     OutlinedTextField(
                         value = name,
                         onValueChange = { name = it.take(100) },
                         label = { Text("Nom") },
                         placeholder = { Text("ex. Travail") },
                         singleLine = true,
-                        enabled = !state.busy,
+                        enabled = !state.busy && account == null,
                         modifier = Modifier.fillMaxWidth(),
                     )
+                    if (usesKey) {
+                        if (providerError.isNotBlank())
+                            Text(providerError, color = MaterialTheme.colorScheme.error)
+                        ExposedDropdownMenuBox(
+                            expanded = providerMenu,
+                            onExpandedChange = {
+                                if (!state.busy && !loadingProviders && account == null)
+                                    providerMenu = it
+                            },
+                        ) {
+                            OutlinedTextField(
+                                value =
+                                    keyProviders.find { it.id == modelProvider }?.name
+                                        ?: modelProvider,
+                                onValueChange = {},
+                                readOnly = true,
+                                label = { Text("Fournisseur du modèle") },
+                                trailingIcon = {
+                                    ExposedDropdownMenuDefaults.TrailingIcon(providerMenu)
+                                },
+                                enabled = !state.busy && !loadingProviders && account == null,
+                                modifier =
+                                    Modifier.fillMaxWidth()
+                                        .menuAnchor(
+                                            ExposedDropdownMenuAnchorType.PrimaryNotEditable
+                                        ),
+                            )
+                            ExposedDropdownMenu(
+                                expanded = providerMenu,
+                                onDismissRequest = { providerMenu = false },
+                            ) {
+                                keyProviders.forEach { item ->
+                                    DropdownMenuItem(
+                                        text = { Text(item.name) },
+                                        onClick = {
+                                            modelProvider = item.id
+                                            apiKey = ""
+                                            providerMenu = false
+                                        },
+                                    )
+                                }
+                            }
+                        }
+                        OutlinedTextField(
+                            value = apiKey,
+                            onValueChange = { apiKey = it.take(8192) },
+                            label = { Text("Clé API") },
+                            singleLine = true,
+                            visualTransformation = PasswordVisualTransformation(),
+                            keyboardOptions = KeyboardOptions(autoCorrectEnabled = false),
+                            enabled = !state.busy && !loadingProviders,
+                            modifier = Modifier.fillMaxWidth(),
+                        )
+                        Text(
+                            "La clé est chiffrée sur votre installation. L’usage de ces clés n’est pas consulté ici.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
                     SignalButton(
-                        "Continuer vers la connexion",
-                        icon = CairnIcons.External,
+                        if (usesKey)
+                            if (account == null) "Enregistrer la clé API"
+                            else "Remplacer la clé API"
+                        else "Continuer vers la connexion",
+                        icon = if (usesKey) null else CairnIcons.External,
                         container = MaterialTheme.colorScheme.primary,
                         content = MaterialTheme.colorScheme.onPrimary,
                         expand = true,
-                        enabled = !state.busy,
+                        enabled =
+                            !state.busy &&
+                                (!usesKey ||
+                                    (!loadingProviders &&
+                                        keyProviders.isNotEmpty() &&
+                                        apiKey.isNotBlank())),
                         modifier = Modifier.fillMaxWidth(),
                     ) {
                         vm.perform {
+                            val accountName =
+                                name.trim().ifBlank { "Compte ${providerLabel(provider)}" }
+                            val input =
+                                if (usesKey) {
+                                    body(
+                                        "provider" to provider,
+                                        "name" to accountName,
+                                        "modelProvider" to modelProvider,
+                                        "apiKey" to apiKey,
+                                    )
+                                } else {
+                                    body("provider" to provider, "name" to accountName)
+                                }
                             api.request(
                                 "POST",
-                                "/accounts",
-                                body(
-                                    "provider" to provider,
-                                    "name" to
-                                        name.trim().ifBlank { "Compte ${providerLabel(provider)}" },
-                                ),
+                                if (usesKey && account != null)
+                                    "/accounts/${segment(account.id)}/api-key"
+                                else "/accounts",
+                                input,
                             )
                             changed()
+                            if (usesKey)
+                                withContext(Dispatchers.Main) {
+                                    apiKey = ""
+                                    close()
+                                }
                         }
                     }
                 }

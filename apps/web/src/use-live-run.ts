@@ -11,6 +11,7 @@ import {
   watch,
 } from 'vue'
 import { api, ApiError, state } from './api'
+import { publishChats } from './chat-list'
 import {
   cacheScope,
   clearHistoryCache,
@@ -21,10 +22,10 @@ import {
 import { liveConnection } from './live-connection'
 import { LiveEvents } from './live-events'
 
-// `hold` keeps the previous stream's data on screen for up to that many milliseconds after the
-// path changes, so switching views swaps content directly instead of flashing a loading state.
+// `hold` keeps the previous stream's data on screen until the new stream is ready,
+// so switching views swaps content directly instead of flashing a loading state.
 // `shown` is the path whose data is currently displayed.
-export function useLiveRun(path: () => string, options: { hold?: number } = {}) {
+export function useLiveRun(path: () => string, options: { hold?: boolean } = {}) {
   const snapshot = ref<LiveState>()
   const shown = ref(path())
   const events = ref<RunEvent[]>([])
@@ -43,7 +44,6 @@ export function useLiveRun(path: () => string, options: { hold?: number } = {}) 
   let generation = 0
   let persist: (() => void) | undefined
   let saveTimer: ReturnType<typeof setTimeout> | undefined
-  let holdTimer: ReturnType<typeof setTimeout> | undefined
 
   function scheduleSave() {
     if (saveTimer !== undefined)
@@ -62,8 +62,6 @@ export function useLiveRun(path: () => string, options: { hold?: number } = {}) 
   }
 
   function show(value: string) {
-    clearTimeout(holdTimer)
-    holdTimer = undefined
     shown.value = value
   }
 
@@ -87,10 +85,8 @@ export function useLiveRun(path: () => string, options: { hold?: number } = {}) 
       catchingUp.value = true
     }
 
-    clearTimeout(holdTimer)
-    if (options.hold && enabled && snapshot.value && previous?.[0] !== value && previous?.[1])
-      holdTimer = setTimeout(clear, options.hold)
-    else
+    const holding = options.hold && enabled && snapshot.value && previous?.[0] !== value && previous?.[1]
+    if (!holding)
       clear()
     status.value = 'connecting'
     error.value = ''
@@ -106,6 +102,7 @@ export function useLiveRun(path: () => string, options: { hold?: number } = {}) 
     let accumulator = new LiveEvents()
     let rows: RunEvent[] = cached?.events.slice() ?? []
     let detail = cached?.state
+    let restoredState = !!cached
     let cursor = cached?.cursor ?? 0
     let history = cached?.history
     let oldest = cached?.oldest ?? 0
@@ -116,9 +113,14 @@ export function useLiveRun(path: () => string, options: { hold?: number } = {}) 
     position.value = storedPosition
     accumulator.restore(rows, cursor)
     if (cached) {
+      if (cached.state.chats)
+        publishChats(cached.state.chats, { cached: true })
+
       show(value)
       hasOlder.value = older
-      snapshot.value = cached.state
+      // Retain the complete saved state for offline persistence, while the
+      // shared list accepts it only when no current Fil is known.
+      snapshot.value = { ...cached.state, chats: undefined }
       events.value = cached.events
       catchingUp.value = false
     }
@@ -264,6 +266,8 @@ export function useLiveRun(path: () => string, options: { hold?: number } = {}) 
       if (reset) {
         rows = []
         accumulator = new LiveEvents()
+        oldest = 0
+        older = false
         complete = false
         position.value = undefined
         olderError.value = ''
@@ -277,11 +281,16 @@ export function useLiveRun(path: () => string, options: { hold?: number } = {}) 
       candidate.append(next, batch.events)
       accumulator = candidate
       rows = next
-      if (batch.state)
+      if (batch.state) {
         detail = batch.state
+        restoredState = false
+      }
+
       cursor = accepted
       history = batch.history
-      if (batch.oldest !== undefined) {
+      // Revalidation describes the server's recent window, not the pages already read.
+      // Keep the earliest loaded boundary unless the stream replaces the history.
+      if (batch.oldest !== undefined && (reset || !oldest || batch.oldest <= oldest)) {
         oldest = batch.oldest
         older = batch.hasOlder ?? false
       }
@@ -290,7 +299,7 @@ export function useLiveRun(path: () => string, options: { hold?: number } = {}) 
       if (complete) {
         show(value)
         hasOlder.value = older
-        snapshot.value = detail
+        snapshot.value = restoredState && detail ? { ...detail, chats: undefined } : detail
         events.value = rows.slice()
         catchingUp.value = false
         synced.value = true
@@ -317,7 +326,7 @@ export function useLiveRun(path: () => string, options: { hold?: number } = {}) 
         }
       }).finally(() => { checking = false })
     }, cached ? { cursor: cached.cursor, history: cached.history } : undefined)
-    if (state.installationId) {
+    if (state.installationId && !cached) {
       void readSnapshot()
     }
   }, { immediate: true, flush: 'sync' })
@@ -327,7 +336,6 @@ export function useLiveRun(path: () => string, options: { hold?: number } = {}) 
     window.removeEventListener('pagehide', leaving)
     persist?.()
     clearTimeout(saveTimer)
-    clearTimeout(holdTimer)
     disposed = true
     generation++
     connection?.close()

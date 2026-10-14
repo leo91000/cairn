@@ -142,11 +142,13 @@ internal fun buildFeed(
                     running +=
                         item(
                                 FeedKind.RUNNING_CHAT,
-                                if (chat.status == "queued")
+                                if (chat.exclusiveSuspended)
+                                    "Suspendue (exclusivité) · ${context(agent, chat.projectName)}"
+                                else if (chat.status == "queued")
                                     "En attente · ${context(agent, chat.projectName)}"
                                 else context(agent, chat.projectName),
                             )
-                            .copy(working = chat.status == "running")
+                            .copy(working = chat.status == "running" && !chat.exclusiveSuspended)
                 chat.unread && !chat.paused && unreadNow("chat:${chat.id}", chat.finishedAt) ->
                     toRead +=
                         item(FeedKind.UNREAD_CHAT, context(agent, chat.projectName))
@@ -187,10 +189,15 @@ internal fun buildFeed(
                     running +=
                         item(
                                 FeedKind.RUNNING_TASK,
-                                if (run.status == "queued") "Mission en attente · $agent"
+                                if (run.suspendedByExclusive != null)
+                                    "Suspendue (exclusivité) · Mission · $agent"
+                                else if (run.status == "queued") "Mission en attente · $agent"
                                 else "Mission · $agent",
                             )
-                            .copy(working = run.status == "running")
+                            .copy(
+                                working =
+                                    run.status == "running" && run.suspendedByExclusive == null
+                            )
                 run.status in setOf("failed", "interrupted") ->
                     forYou +=
                         item(

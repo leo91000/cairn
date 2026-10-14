@@ -469,6 +469,277 @@ async fn native_in_flight_question_accepts_answer_and_preserves_receipt() {
 }
 
 #[tokio::test]
+async fn subagent_threads_show_as_steps_of_their_subagent() {
+    let root = TempDir::new().unwrap();
+    let home = prepare(&root);
+    let config = config(&root);
+    let plan = plan(&root, "fixture:subagents");
+    let (tx, mut rx) = mpsc::channel(256);
+    let task = tokio::spawn(async move {
+        chat_process::run(&config, &home, plan, tx, CancellationToken::new()).await
+    });
+    let mut events = Vec::new();
+    while let Some(event) = rx.recv().await {
+        events.push(event);
+    }
+    task.await.unwrap().unwrap();
+
+    let subagent: Vec<_> = events
+        .iter()
+        .filter(|e| e["item"]["type"] == "subagent")
+        .map(|e| {
+            (
+                e["type"].as_str().unwrap(),
+                e["item"]["status"].as_str().unwrap(),
+            )
+        })
+        .collect();
+    // The spawn call completes at once; the child's turn and the wait settle the subagent.
+    // Closing it afterwards keeps its completion.
+    assert_eq!(
+        subagent,
+        vec![
+            ("item.started", "in_progress"),
+            ("item.completed", "in_progress"),
+            ("item.updated", "completed"),
+        ]
+    );
+    let last = events
+        .iter()
+        .rfind(|e| e["item"]["type"] == "subagent")
+        .unwrap();
+    assert_eq!(last["item"]["name"], "Review the keyboard handling");
+    assert_eq!(last["item"]["model"], "gpt-fixture-mini");
+    assert_eq!(last["item"]["result"], "Keyboard handling looks right.");
+
+    let spawn = last["item"]["id"].as_str().unwrap();
+    let children: Vec<_> = events
+        .iter()
+        .filter(|e| e["item"]["parent_id"] == spawn)
+        .map(|e| e["item"]["type"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        children,
+        vec![
+            "command_execution",
+            "subagent_message",
+            "subagent_message",
+            "subagent_message"
+        ]
+    );
+    // Waiting only refreshes statuses; closing the subagent remains a visible step.
+    let tools: Vec<_> = events
+        .iter()
+        .filter(|e| e["item"]["type"] == "collab_tool_call")
+        .map(|e| e["item"]["tool"].as_str().unwrap())
+        .collect();
+    assert_eq!(tools, vec!["closeAgent"]);
+    let output = std::fs::read_to_string(root.path().join("result.md")).unwrap();
+    assert!(
+        !output.contains("Keyboard handling looks right."),
+        "{output}"
+    );
+}
+
+#[tokio::test]
+async fn messages_to_the_parent_preserve_its_commands_reply_and_turn_completion() {
+    for fixture in [
+        "fixture:subagents-message-parent",
+        "fixture:subagents-message-parent-direct",
+    ] {
+        let root = TempDir::new().unwrap();
+        let home = prepare(&root);
+        let config = config(&root);
+        let plan = plan(&root, fixture);
+        let (tx, mut rx) = mpsc::channel(256);
+        let stop = CancellationToken::new();
+        let stopping = stop.clone();
+        let task =
+            tokio::spawn(
+                async move { chat_process::run(&config, &home, plan, tx, stopping).await },
+            );
+        let mut events = Vec::new();
+        let collected = tokio::time::timeout(Duration::from_secs(5), async {
+            while let Some(event) = rx.recv().await {
+                events.push(event);
+            }
+        })
+        .await;
+        stop.cancel();
+        let result = task.await.unwrap();
+        assert!(collected.is_ok(), "{fixture}: parent completion was lost");
+        result.unwrap();
+
+        let commands: Vec<_> = events
+            .iter()
+            .filter(|event| event["item"]["command"] == "pnpm check")
+            .collect();
+        assert_eq!(commands.len(), 2, "{fixture}");
+        assert_eq!(commands[0]["type"], "item.started");
+        assert_eq!(commands[1]["type"], "item.completed");
+        for event in commands {
+            assert_eq!(event["item"]["id"], "parent-command");
+            assert!(event["item"]["parent_id"].is_null());
+        }
+        assert!(events.iter().any(|event| event["type"] == "turn.completed"));
+        assert!(events.iter().all(|event| event["item"]["name"] != "root"));
+        assert!(events.iter().any(|event| {
+            event["item"]["type"] == "subagent_message"
+                && event["item"]["text"] == "Keyboard handling looks right."
+        }));
+        let output = std::fs::read_to_string(root.path().join("result.md")).unwrap();
+        assert!(output.contains("Ready for the next step."), "{output}");
+        assert!(
+            !output.contains("Keyboard handling looks right."),
+            "{output}"
+        );
+    }
+}
+
+#[test]
+fn shortened_subagent_activity_preserves_a_redacted_prompt_and_report() {
+    let event = json!({
+        "type": "item.completed",
+        "item": {
+            "id": "spawn",
+            "type": "subagent",
+            "status": "completed",
+            "name": "Review",
+            "replaces_id": "early",
+            "prompt": format!("{}secret-value", "é".repeat(20_000)),
+            "result": format!("secret-value {}", "é".repeat(20_000)),
+            "model": "model",
+            "tokens": 100,
+        },
+    });
+    let shortened =
+        cairn_installation::run_output::compact_activity(&event, &["secret-value".into()]);
+    let item = &shortened["item"];
+    assert_eq!(item["replaces_id"], "early");
+    assert_eq!(item["tokens"], 100);
+    assert!(item["prompt"].as_str().unwrap().ends_with('…'));
+    assert!(item["result"].as_str().unwrap().starts_with("[redacted] "));
+    assert!(serde_json::to_vec(&shortened).unwrap().len() < 16 * 1024);
+    assert!(!shortened.to_string().contains("secret-value"));
+}
+
+#[tokio::test]
+async fn subagent_lifecycle_handles_early_activity_nested_spawns_and_interruption() {
+    let root = TempDir::new().unwrap();
+    let home = prepare(&root);
+    let config = config(&root);
+    let (tx, mut rx) = mpsc::channel(256);
+    let task = tokio::spawn(async move {
+        chat_process::run(
+            &config,
+            &home,
+            plan(&root, "fixture:subagents-lifecycle"),
+            tx,
+            CancellationToken::new(),
+        )
+        .await
+    });
+    let mut events = Vec::new();
+    while let Some(event) = rx.recv().await {
+        events.push(event);
+    }
+    task.await.unwrap().unwrap();
+    let spawn = events
+        .iter()
+        .find(|event| event["item"]["replaces_id"] == "early-activity")
+        .unwrap();
+    let id = spawn["item"]["id"].as_str().unwrap();
+    let last = events
+        .iter()
+        .rfind(|event| event["item"]["id"] == id)
+        .unwrap();
+    assert_eq!(last["item"]["status"], "completed");
+    assert_eq!(last["item"]["name"], "keyboard");
+    assert!(
+        events.iter().any(|event| event["item"]["command"] == "pwd"
+            && event["item"]["parent_id"] == "early-activity")
+    );
+    let nested = events
+        .iter()
+        .rfind(|event| event["item"]["type"] == "subagent" && event["item"]["parent_id"] == id)
+        .unwrap();
+    assert_eq!(nested["item"]["status"], "completed");
+    let nested_id = &nested["item"]["id"];
+    assert!(
+        events
+            .iter()
+            .any(|event| event["item"]["command"] == "pnpm test"
+                && event["item"]["parent_id"] == *nested_id)
+    );
+    let interrupted = events
+        .iter()
+        .find(|event| event["item"]["id"] == "interrupted-spawn")
+        .unwrap();
+    assert_eq!(interrupted["item"]["status"], "stopped");
+}
+
+#[tokio::test]
+async fn failed_subagents_keep_their_failure_after_completion_activity_and_close() {
+    let root = TempDir::new().unwrap();
+    let home = prepare(&root);
+    let config = config(&root);
+    let (tx, mut rx) = mpsc::channel(256);
+    let task = tokio::spawn(async move {
+        chat_process::run(
+            &config,
+            &home,
+            plan(&root, "fixture:subagents-errored"),
+            tx,
+            CancellationToken::new(),
+        )
+        .await
+    });
+    let mut events = Vec::new();
+    while let Some(event) = rx.recv().await {
+        events.push(event);
+    }
+    task.await.unwrap().unwrap();
+    let states: Vec<_> = events
+        .iter()
+        .filter(|event| event["item"]["type"] == "subagent")
+        .map(|event| event["item"]["status"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        states,
+        vec!["in_progress", "in_progress", "failed", "failed"]
+    );
+}
+
+#[tokio::test]
+async fn subagent_followups_clear_the_previous_report() {
+    let root = TempDir::new().unwrap();
+    let home = prepare(&root);
+    let config = config(&root);
+    let (tx, mut rx) = mpsc::channel(256);
+    let task = tokio::spawn(async move {
+        chat_process::run(
+            &config,
+            &home,
+            plan(&root, "fixture:subagents-followup"),
+            tx,
+            CancellationToken::new(),
+        )
+        .await
+    });
+    let mut events = Vec::new();
+    while let Some(event) = rx.recv().await {
+        events.push(event);
+    }
+    task.await.unwrap().unwrap();
+    let last = events
+        .iter()
+        .rfind(|event| event["item"]["type"] == "subagent")
+        .unwrap();
+    assert_eq!(last["item"]["status"], "in_progress");
+    assert_eq!(last["item"]["result"], "");
+}
+
+#[tokio::test]
 async fn replay_of_completed_turn_does_not_submit_the_instruction_again() {
     let root = TempDir::new().unwrap();
     let home = prepare(&root);

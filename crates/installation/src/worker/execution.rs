@@ -74,6 +74,7 @@ async fn heartbeat(s: Arc<Service>, checkpoint: Arc<Checkpoint>, stop: Cancellat
                 // the next beat retries and execution notices the revocation itself.
                 let _ = crate::nodes::moves::pause_pending(&s, run_id).await;
                 let _ = crate::nodes::placement::renew_local(&s, run_id).await;
+                let _ = checkpoint.refresh_pause(&s).await;
                 if let Err(error) = checkpoint.persist().await {
                     tracing::warn!(run_id, error = %error, "Could not save the run checkpoint");
                 }
@@ -319,6 +320,7 @@ mod tests {
             port: 0,
             codex_bin: "codex".into(),
             claude_bin: "claude".into(),
+            opencode_bin: "opencode".into(),
             gh_bin: "gh".into(),
             concurrency: 1,
             logger: false,

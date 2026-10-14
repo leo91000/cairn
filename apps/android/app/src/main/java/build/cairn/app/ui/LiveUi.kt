@@ -12,6 +12,8 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.repeatOnLifecycle
 import build.cairn.app.data.*
+import build.cairn.app.diagnostics.PerfOperation
+import build.cairn.app.diagnostics.Performance
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.flow.collectLatest
@@ -330,30 +332,32 @@ private fun StatusPill(content: @Composable RowScope.() -> Unit) {
  */
 internal class TimelineKeys {
     private var history: String? = null
-    private var owners = mapOf<String, String>()
+    private var owners = mapOf<Long, String>()
+    private var fullPositions = mapOf<Long, Int>()
 
-    fun stabilize(history: String?, entries: List<TimelineEntry>): List<TimelineEntry> {
+    fun stabilize(history: String?, input: List<TimelineEntry>): List<TimelineEntry> {
         if (history != this.history) {
             this.history = history
             owners = emptyMap()
+            fullPositions = emptyMap()
         }
+        val entries = regroup(input)
         val used =
             entries.filter { !it.key.startsWith("activity:") }.mapTo(mutableSetOf()) { it.key }
         val keys = arrayOfNulls<String>(entries.size)
-        // Event ids are unique; item ids only help when a folded update replaced the known event.
-        for (identity in
-            listOf<(RunEvent) -> String?>({ "event:${it.id}" }, { it.itemIdentity() })) {
-            entries.forEachIndexed { index, entry ->
-                if (keys[index] == null && entry.key.startsWith("activity:"))
-                    entry.events
-                        .firstNotNullOfOrNull { event ->
-                            identity(event)?.let(owners::get)?.takeIf { it !in used }
+        // Match any persisted event folded into the activity, including older starts.
+        entries.forEachIndexed { index, entry ->
+            if (entry.key.startsWith("activity:"))
+                entry.events
+                    .firstNotNullOfOrNull { event ->
+                        entry.sources(event).firstNotNullOfOrNull {
+                            owners[it]?.takeIf { key -> key !in used }
                         }
-                        ?.let {
-                            keys[index] = it
-                            used.add(it)
-                        }
-            }
+                    }
+                    ?.let {
+                        keys[index] = it
+                        used.add(it)
+                    }
         }
         val result = entries.mapIndexed { index, entry ->
             val key =
@@ -366,15 +370,70 @@ internal class TimelineKeys {
         owners = buildMap {
             for (entry in result) if (entry.key.startsWith("activity:"))
                 for (event in entry.events) {
-                    put("event:${event.id}", entry.key)
-                    event.itemIdentity()?.let { put(it, entry.key) }
+                    for (id in entry.sources(event)) put(id, entry.key)
                 }
         }
         return result
     }
 
-    private fun RunEvent.itemIdentity(): String? =
-        item().string("id").takeIf { it.isNotBlank() }?.let { "item:${item().string("type")}:$it" }
+    /** Keep full visible groups intact when older pages arrive or new tools append. */
+    private fun regroup(entries: List<TimelineEntry>): List<TimelineEntry> {
+        val result = mutableListOf<TimelineEntry>()
+        val nextPositions = mutableMapOf<Long, Int>()
+        val activity = mutableListOf<RunEvent>()
+        val sources = mutableMapOf<Long, List<Long>>()
+        fun identities(event: RunEvent) = sources[event.id] ?: listOf(event.id)
+        fun previous(event: RunEvent) = identities(event).firstNotNullOfOrNull(fullPositions::get)
+        fun flush() {
+            if (activity.isEmpty()) return
+            // Older starts may move the oldest tool around a notice; anchor from the end.
+            val anchor = activity.indexOfLast { previous(it) != null }
+            val offset = if (anchor < 0) 0 else checkNotNull(previous(activity[anchor])) - anchor
+            var group = mutableListOf<RunEvent>()
+            var previousWindow: Int? = null
+            fun append() {
+                if (group.isEmpty()) return
+                result.add(
+                    TimelineEntry(
+                        "activity:${group.first().id}",
+                        group.toList(),
+                        false,
+                        sourceIds = group.associate { it.id to identities(it) },
+                    )
+                )
+                if (group.size == MAX_ACTIVITY_GROUP_SIZE) {
+                    for ((position, event) in group.withIndex()) {
+                        for (id in identities(event)) nextPositions[id] = position
+                    }
+                }
+                group = mutableListOf()
+            }
+            for ((index, event) in activity.withIndex()) {
+                val window = Math.floorDiv(offset + index, MAX_ACTIVITY_GROUP_SIZE)
+                if (previousWindow != null && previousWindow != window) append()
+                group.add(event)
+                previousWindow = window
+            }
+            append()
+            activity.clear()
+        }
+        for (entry in entries) {
+            if (entry.key.startsWith("activity:")) {
+                activity.addAll(entry.events)
+                sources.putAll(entry.sourceIds)
+            } else {
+                flush()
+                result.add(entry)
+            }
+        }
+        flush()
+        // Retain only anchors in the loaded timeline. Partial edge groups can still grow.
+        fullPositions = nextPositions
+        return result
+    }
+
+    private fun TimelineEntry.sources(event: RunEvent): List<Long> =
+        sourceIds[event.id] ?: listOf(event.id)
 }
 
 /** Restore once the feed exists; background resumes retain the existing list state. */
@@ -454,90 +513,143 @@ internal data class TimelineEntry(
     val message: Boolean,
     val files: List<Deliverable> = emptyList(),
     val notice: Boolean = false,
+    /** The model provider that wrote this reply, when the engine chose among several. */
+    val via: String = "",
+    /** Persisted events folded into each activity; item IDs may repeat in later turns. */
+    val sourceIds: Map<Long, List<Long>> = emptyMap(),
 )
 
 /** Fold updates in place within a turn; keep messages and errors in chronological order. */
-internal fun timelineEntries(events: List<RunEvent>, chat: Boolean = false): List<TimelineEntry> {
-    val folded = mutableListOf<RunEvent>()
-    val positions = mutableMapOf<String, Int>()
-    var legacyTool: Int? = null
-    for (event in events) {
-        if (event.type == "artifact") continue
-        if (event.type == "turn.started") {
-            positions.clear()
-            legacyTool = null
-        }
-        val legacy =
-            (event.type == "item.started" || event.type == "item.completed") &&
-                event.activityData() == null
-        if (legacy && event.type == "item.completed" && legacyTool != null) {
-            val index = legacyTool
-            val original = folded[index]
-            folded[index] =
-                event.copy(
-                    id = original.id,
-                    createdAt = original.createdAt,
-                    payload =
-                        mapOf(
-                            "item" to
-                                buildJsonObject {
-                                    put("type", "saved_output")
-                                    put("text", event.text)
-                                }
-                        ),
-                )
-            legacyTool = null
-            continue
-        }
-        if (legacy && event.type == "item.started") legacyTool = folded.size
-        val item = event.item()
-        val id = item.string("id")
-        if (!event.isMessage() && id.isNotBlank()) {
-            val key = "${item.string("type")}:$id"
-            val index = positions[key]
-            if (index == null) {
-                positions[key] = folded.size
-                folded.add(event)
-            } else folded[index] = event.copy(id = folded[index].id)
-        } else folded.add(event)
-    }
-    val result = mutableListOf<TimelineEntry>()
-    var activity = mutableListOf<RunEvent>()
-    fun flushActivity() {
-        if (activity.isNotEmpty()) {
-            result.add(TimelineEntry("activity:${activity.first().id}", activity.toList(), false))
-            activity = mutableListOf()
-        }
-    }
-    val recovered =
-        if (chat)
-            recoveredChatConnections(events, folded.filter { it.isMessage() }.map { it.id }.toSet())
-        else emptySet()
-    for (event in folded) {
-        if (event.isMessage()) {
-            flushActivity()
-            result.add(TimelineEntry("message:${event.displayId ?: event.id}", listOf(event), true))
-        } else {
-            val presentation = if (chat) presentActivity(event) else null
-            if (presentation?.kind == ActivityKind.NOTICE) {
-                val interrupted =
-                    event.type == "status" &&
-                        event.text.lowercase() in listOf("cancelled", "interrupted")
-                if (
-                    event.id !in recovered &&
-                        (presentation.failed || interrupted || presentation.connectionInterrupted())
-                ) {
-                    flushActivity()
-                    result.add(
-                        TimelineEntry("notice:${event.id}", listOf(event), false, notice = true)
+internal fun timelineEntries(events: List<RunEvent>, chat: Boolean = false): List<TimelineEntry> =
+    Performance.measure(PerfOperation.TIMELINE) {
+        val folded = mutableListOf<RunEvent>()
+        val sources = mutableListOf<MutableList<Long>>()
+        val positions = mutableMapOf<String, Int>()
+        var legacyTool: Int? = null
+        for (event in events) {
+            if (event.type == "artifact") continue
+            if (event.type == "turn.started") {
+                positions.clear()
+                legacyTool = null
+            }
+            val legacy =
+                (event.type == "item.started" || event.type == "item.completed") &&
+                    event.activityData() == null
+            if (legacy && event.type == "item.completed" && legacyTool != null) {
+                val index = legacyTool
+                val original = folded[index]
+                sources[index].add(event.id)
+                folded[index] =
+                    event.copy(
+                        id = original.id,
+                        createdAt = original.createdAt,
+                        payload =
+                            mapOf(
+                                "item" to
+                                    buildJsonObject {
+                                        put("type", "saved_output")
+                                        put("text", event.text)
+                                    }
+                            ),
                     )
+                legacyTool = null
+                continue
+            }
+            if (legacy && event.type == "item.started") legacyTool = folded.size
+            val item = event.item()
+            val id = item.string("id")
+            if (!event.isMessage() && id.isNotBlank()) {
+                val key = "${item.string("type")}:$id"
+                val index = positions[key]
+                if (index == null) {
+                    positions[key] = folded.size
+                    folded.add(event)
+                    sources.add(mutableListOf(event.id))
+                } else {
+                    folded[index] = event.copy(id = folded[index].id)
+                    sources[index].add(event.id)
                 }
-            } else activity.add(event)
+            } else {
+                folded.add(event)
+                sources.add(mutableListOf(event.id))
+            }
         }
+        val sourceIds =
+            folded.mapIndexed { index, event -> event.id to sources[index].toList() }.toMap()
+        val result = mutableListOf<TimelineEntry>()
+        var activity = mutableListOf<RunEvent>()
+        fun flushActivity() {
+            if (activity.isNotEmpty()) {
+                result.add(
+                    TimelineEntry(
+                        "activity:${activity.first().id}",
+                        activity,
+                        false,
+                        sourceIds = activity.associate { it.id to sourceIds.getValue(it.id) },
+                    )
+                )
+                activity = mutableListOf()
+            }
+        }
+        val recovered =
+            if (chat)
+                recoveredChatConnections(
+                    events,
+                    folded.filter { it.isMessage() }.map { it.id }.toSet(),
+                )
+            else emptySet()
+        var via = ""
+        for (event in folded) {
+            val route = event.activityData()?.get("route") as? JsonObject
+            // An attempt may name the provider of its replies; the next attempt ends that label.
+            val data = event.activityData()
+            if (
+                event.type == "status" &&
+                    (data?.get("attempt") as? JsonPrimitive)?.booleanOrNull == true
+            )
+                via = ""
+            if (event.type == "status" && route.string("providerName").isNotBlank()) {
+                via = route.string("providerName")
+                if (chat) continue
+            }
+            if (event.isMessage()) {
+                flushActivity()
+                result.add(
+                    TimelineEntry(
+                        "message:${event.displayId ?: event.id}",
+                        listOf(event),
+                        true,
+                        via = if (event.type == "chat.user") "" else via,
+                    )
+                )
+            } else {
+                val presentation = if (chat) presentActivity(event) else null
+                if (presentation?.kind == ActivityKind.NOTICE) {
+                    val interrupted =
+                        event.type == "status" &&
+                            event.text.lowercase() in listOf("cancelled", "interrupted")
+                    if (
+                        event.id !in recovered &&
+                            (presentation.failed ||
+                                interrupted ||
+                                presentation.connectionInterrupted())
+                    ) {
+                        flushActivity()
+                        result.add(
+                            TimelineEntry("notice:${event.id}", listOf(event), false, notice = true)
+                        )
+                    }
+                } else {
+                    if (activity.size == MAX_ACTIVITY_GROUP_SIZE) {
+                        flushActivity()
+                    }
+                    activity.add(event)
+                }
+            }
+        }
+        flushActivity()
+        result
     }
-    flushActivity()
-    return result
-}
 
 /**
  * Match the web feed: attach each publication beside its response, keeping versions per message.
@@ -600,7 +712,11 @@ internal fun TimelineRow(
     if (entry.files.isNotEmpty()) ArtifactStrip(vm, entry.files)
     else if (entry.message)
         CompositionLocalProvider(LocalMarkdownRendering provides rendering) {
-            EventRow(vm, entry.events.single(), agent)
+            EventRow(
+                vm,
+                entry.events.single(),
+                if (entry.via.isBlank()) agent else "$agent · via ${entry.via}",
+            )
         }
     else if (entry.notice) ChatNotice(presentActivity(entry.events.single()))
     else {

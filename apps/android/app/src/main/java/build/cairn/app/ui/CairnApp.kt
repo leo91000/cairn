@@ -25,6 +25,9 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.navigation.compose.*
 import build.cairn.app.data.*
+import build.cairn.app.diagnostics.PerfConnection
+import build.cairn.app.diagnostics.PerfScreen
+import build.cairn.app.diagnostics.Performance
 
 /** Top-level destinations reached from the dock; everything else is a pushed screen. */
 private val topLevel = setOf("fil", "missions", "atelier")
@@ -87,6 +90,17 @@ private fun CairnAppContent(
     targetAccount: String,
 ) {
     val state by vm.state.collectAsStateWithLifecycle()
+    PerformanceUpload(vm, state)
+    SideEffect {
+        Performance.connection =
+            when {
+                !state.session.authenticated || state.installation == null -> PerfConnection.NONE
+                state.installation?.online != true -> PerfConnection.OFFLINE
+                state.transportRoute == "direct" -> PerfConnection.DIRECT
+                else -> PerfConnection.RELAY
+            }
+        if (!state.session.authenticated) Performance.screen = PerfScreen.STARTUP
+    }
     val pushReenrollmentRequired by
         vm.notifications.nativeReenrollmentRequired.collectAsStateWithLifecycle(false)
     val snackbar = remember { SnackbarHostState() }
@@ -172,6 +186,7 @@ private fun CairnAppContent(
                 }
                 AccountSettings(vm, state)
                 NotificationSettings(vm)
+                PerformanceSettings(vm)
                 TextButton(onClick = { vm.perform { logout() } }) { Text("Se déconnecter") }
                 state.error?.let { ErrorNotice(it, vm::clearMessage) }
             }
@@ -195,6 +210,7 @@ private fun CairnAppContent(
                     TextButton(onClick = { vm.perform { refreshInstallations() } }) {
                         Text("Actualiser")
                     }
+                    PerformanceSettings(vm)
                     TextButton(onClick = { vm.perform { logout() } }) { Text("Se déconnecter") }
                     state.error?.let { ErrorNotice(it, vm::clearMessage) }
                 }
@@ -247,6 +263,9 @@ private fun WorkspaceApp(
 
     val backStack by nav.currentBackStackEntryAsState()
     val route = backStack?.destination?.route ?: "fil"
+    var detailScreen by remember(route) { mutableStateOf<PerfScreen?>(null) }
+    val performanceScreen = detailScreen ?: PerfScreen.fromRoute(route)
+    SideEffect { Performance.screen = performanceScreen }
     LaunchedEffect(sharedUrl) {
         if (sharedUrl.isNotBlank()) {
             if (state.isOwner) nav.navigate("authorize") { launchSingleTop = true }
@@ -282,6 +301,7 @@ private fun WorkspaceApp(
     fun create() = nav.navigate("new-chat") { launchSingleTop = true }
     CompositionLocalProvider(
         LocalFocusMode provides { focusedContent = it },
+        LocalPerformanceScreen provides { detailScreen = it },
         LocalSnackbar provides snackbar,
         LocalAgentPortraits provides rememberAgentPortraits(vm, state),
     ) {
@@ -483,7 +503,10 @@ private fun WorkspaceApp(
                                 composable("connections") {
                                     ConnectionsScreen(vm, state) { nav.navigate("run/$it") }
                                 }
-                            if (state.isOwner) composable("nodes") { NodesScreen(vm, state) }
+                            if (state.isOwner)
+                                composable("nodes") {
+                                    NodesScreen(vm, state) { nav.navigate("run/$it") }
+                                }
                             composable("settings") { SettingsScreen(vm, state) }
                             if (state.isOwner)
                                 composable("authorize") {
@@ -592,7 +615,7 @@ fun RunCard(run: Run, open: (String) -> Unit) {
         padding = PaddingValues(14.dp),
     ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
-            RunStatusTile(run.status)
+            RunStatusTile(runPresentationStatus(run))
             Spacer(Modifier.width(12.dp))
             Column(Modifier.weight(1f)) {
                 Text(
@@ -608,7 +631,7 @@ fun RunCard(run: Run, open: (String) -> Unit) {
                 )
             }
             Spacer(Modifier.width(8.dp))
-            Status(run.status)
+            Status(runPresentationStatus(run))
         }
     }
 }
@@ -621,6 +644,7 @@ internal fun RunStatusTile(status: String, size: androidx.compose.ui.unit.Dp = 3
             "succeeded" -> signal.success
             "failed",
             "interrupted" -> signal.attention
+            "suspended-exclusive" -> signal.warning
             "running",
             "queued" -> MaterialTheme.colorScheme.primary
             else -> MaterialTheme.colorScheme.onSurfaceVariant

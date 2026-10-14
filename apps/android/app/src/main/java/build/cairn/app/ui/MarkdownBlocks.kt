@@ -3,23 +3,39 @@ package build.cairn.app.ui
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
+import android.text.Spannable
+import android.text.SpannableStringBuilder
 import android.text.Spanned
 import android.text.method.LinkMovementMethod
+import android.text.style.ClickableSpan
+import android.text.style.LeadingMarginSpan
 import android.view.ActionMode
 import android.view.Menu
 import android.view.MenuItem
+import android.view.MotionEvent
 import android.view.View
 import android.widget.TextView
 import androidx.compose.runtime.*
+import build.cairn.app.diagnostics.PerfOperation
+import build.cairn.app.diagnostics.Performance
 import io.noties.markwon.Markwon
+import io.noties.markwon.core.spans.BulletListItemSpan
+import io.noties.markwon.core.spans.OrderedListItemSpan
+import io.noties.markwon.ext.tables.TableRowSpan
+import io.noties.markwon.ext.tables.TableSpan
+import io.noties.markwon.ext.tables.TableTheme
 import kotlinx.coroutines.flow.first
 import org.commonmark.ext.gfm.strikethrough.StrikethroughExtension
+import org.commonmark.ext.gfm.tables.TableBlock
+import org.commonmark.ext.gfm.tables.TableCell
 import org.commonmark.ext.gfm.tables.TablesExtension
+import org.commonmark.node.AbstractVisitor
+import org.commonmark.node.CustomBlock
 import org.commonmark.node.Document
 import org.commonmark.renderer.html.HtmlRenderer
 
 /** A rendered group is immutable and shared with the UI until its parsed content changes. */
-internal class MarkdownBlock(val signature: String, val text: Spanned)
+internal class MarkdownBlock(val signature: String, val text: Spanned, val tableColumns: Int = 0)
 
 /**
  * Parse the full document so references, unfinished fences and lists stay correct. Render small
@@ -32,31 +48,97 @@ internal class MarkdownBlocks(private val markwon: Markwon) {
         HtmlRenderer.builder()
             .extensions(listOf(TablesExtension.create(), StrikethroughExtension.create()))
             .build()
-    private var previous = emptyList<MarkdownBlock>()
 
-    fun render(content: String): List<MarkdownBlock> {
-        val document = markwon.parse(content)
-        val result = mutableListOf<MarkdownBlock>()
-        var node = document.firstChild
-        while (node != null) {
-            val group = Document()
-            var count = 0
-            // Fixed groups keep already displayed boundaries stable while appending.
-            while (node != null && count < 8) {
-                val next = node.next
-                group.appendChild(node)
-                node = next
-                count++
+    private class Group(val signature: String, val blocks: List<MarkdownBlock>)
+
+    private var previous = emptyList<Group>()
+
+    fun render(content: String): List<MarkdownBlock> =
+        Performance.measure(PerfOperation.MARKDOWN) {
+            val document = markwon.parse(content)
+            val result = mutableListOf<Group>()
+            var node = document.firstChild
+            while (node != null) {
+                val group = Document()
+                var count = 0
+                // Fixed groups keep already displayed boundaries stable while appending.
+                while (node != null && count < 8) {
+                    val next = node.next
+                    group.appendChild(node)
+                    node = next
+                    count++
+                }
+                val signature = signatures.render(group)
+                val cached = previous.getOrNull(result.size)
+                result.add(
+                    if (cached?.signature == signature) cached
+                    else Group(signature, renderGroup(group, signature))
+                )
             }
-            val signature = signatures.render(group)
-            val cached = previous.getOrNull(result.size)
-            result.add(
-                if (cached?.signature == signature) cached
-                else MarkdownBlock(signature, markwon.render(group))
-            )
+            previous = result
+            result.flatMap { it.blocks }
         }
-        previous = result
-        return result
+
+    /** Split rendered spans, so tables at any nesting depth scroll without widening prose. */
+    private fun renderGroup(group: Document, signature: String): List<MarkdownBlock> {
+        val text = markwon.render(group)
+        val tables =
+            text.getSpans(0, text.length, TableSpan::class.java).sortedBy { text.getSpanStart(it) }
+        if (tables.isEmpty()) return listOf(MarkdownBlock(signature, text))
+
+        val columns = mutableListOf<Int>()
+        group.accept(
+            object : AbstractVisitor() {
+                override fun visit(block: CustomBlock) {
+                    if (block is TableBlock) {
+                        var cell = block.firstChild
+                        while (cell != null && cell !is TableCell) cell = cell.firstChild
+                        var count = 0
+                        while (cell != null) {
+                            count++
+                            cell = cell.next
+                        }
+                        columns.add(count)
+                    }
+                    visitChildren(block)
+                }
+            }
+        )
+        val blocks = mutableListOf<MarkdownBlock>()
+        fun append(from: Int, to: Int, tableColumns: Int = 0) {
+            var start = from
+            var end = to
+            while (start < end && text[start] == '\n') start++
+            while (end > start && text[end - 1] == '\n') end--
+            if (start == end) return
+            val part = SpannableStringBuilder(text, start, end)
+            // Continued list items retain indentation without repeating a bullet or number.
+            for (span in text.getSpans(start, end, LeadingMarginSpan::class.java)) {
+                if (
+                    text.getSpanStart(span) < start &&
+                        (span is BulletListItemSpan || span is OrderedListItemSpan)
+                ) {
+                    part.removeSpan(span)
+                    part.setSpan(
+                        LeadingMarginSpan.Standard(span.getLeadingMargin(false)),
+                        0,
+                        minOf(end, text.getSpanEnd(span)) - start,
+                        Spanned.SPAN_EXCLUSIVE_EXCLUSIVE,
+                    )
+                }
+            }
+            blocks.add(MarkdownBlock("$signature#${blocks.size}", part, tableColumns))
+        }
+        var start = 0
+        tables.forEachIndexed { index, table ->
+            val tableStart = text.getSpanStart(table)
+            val tableEnd = text.getSpanEnd(table)
+            append(start, tableStart)
+            append(tableStart, tableEnd, columns[index])
+            start = tableEnd
+        }
+        append(start, text.length)
+        return blocks
     }
 }
 
@@ -72,7 +154,15 @@ internal class MarkdownTextView(context: Context, copyText: (() -> String)? = nu
         setTextIsSelectable(true)
         // Selectable text installs ArrowKeyMovementMethod, so Markwon's default
         // (only installed when movementMethod is null) never handles link taps.
-        movementMethod = LinkMovementMethod.getInstance()
+        movementMethod =
+            object : LinkMovementMethod() {
+                override fun onTouchEvent(
+                    widget: TextView,
+                    buffer: Spannable,
+                    event: MotionEvent,
+                ): Boolean =
+                    tableLink(widget, buffer, event) || super.onTouchEvent(widget, buffer, event)
+            }
         if (copyText != null)
             customSelectionActionModeCallback =
                 object : ActionMode.Callback {
@@ -96,6 +186,49 @@ internal class MarkdownTextView(context: Context, copyText: (() -> String)? = nu
 
                     override fun onDestroyActionMode(mode: ActionMode) = Unit
                 }
+    }
+
+    /** Markwon's table hit test omits the leading margin and the cell's drawing offsets. */
+    private fun tableLink(widget: TextView, buffer: Spannable, event: MotionEvent): Boolean {
+        if (event.action != MotionEvent.ACTION_UP) return false
+        val layout = widget.layout ?: return false
+        val y = event.y - widget.totalPaddingTop + widget.scrollY
+        if (y < 0 || y >= layout.height) return false
+        val line = layout.getLineForVertical(y.toInt())
+        val row =
+            buffer
+                .getSpans(
+                    layout.getLineStart(line),
+                    layout.getLineEnd(line),
+                    TableRowSpan::class.java,
+                )
+                .firstOrNull() ?: return false
+        // Cell layouts are created on the first draw, which may still be pending.
+        val width = runCatching { row.cellWidth() }.getOrDefault(0)
+        if (width <= 0) return false
+        val x =
+            event.x - widget.totalPaddingLeft + widget.scrollX -
+                layout.getPrimaryHorizontal(buffer.getSpanStart(row))
+        if (x < 0) return false
+        val cell = row.findLayoutForHorizontalOffset(x.toInt()) ?: return false
+        val padding = TableTheme.create(context).tableCellPadding()
+        val rowHeight =
+            (0 until (bound?.tableColumns ?: 0)).maxOfOrNull {
+                row.findLayoutForHorizontalOffset(it * width)!!.height
+            } ?: return false
+        // TableRowSpan draws each cell after this additional quarter of the row's spare height.
+        val spare = (layout.getLineBottom(line) - layout.getLineTop(line) - rowHeight) / 4
+        val cellY = y - layout.getLineTop(line) - padding - spare
+        val cellX = x % width - padding
+        if (cellY < 0 || cellY >= cell.height) return false
+        val cellLine = cell.getLineForVertical(cellY.toInt())
+        if (cellX < cell.getLineLeft(cellLine) || cellX > cell.getLineRight(cellLine)) return false
+        val offset = cell.getOffsetForHorizontal(cellLine, cellX)
+        val text = cell.text as? Spanned ?: return false
+        val link =
+            text.getSpans(offset, offset, ClickableSpan::class.java).firstOrNull() ?: return false
+        link.onClick(widget)
+        return true
     }
 
     fun bind(markwon: Markwon, block: MarkdownBlock) {

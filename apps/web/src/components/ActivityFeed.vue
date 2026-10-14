@@ -10,14 +10,17 @@ import {
   nextTick,
   onBeforeUnmount,
   ref,
+  shallowRef,
   watch,
 } from 'vue'
 import { latestArtifacts } from '../../../../packages/contracts/artifacts'
-import { activityEntries } from '../activity'
+import { activityEntries, ActivityGroups } from '../activity'
 import { deliveryEntries } from '../deliverables'
 import { ArrowDown, Maximize2, Minimize2 } from '../icons'
+import { exclusiveSuspensionLabel } from '../run-status'
 import { backgroundWait, waitingStep, workingStep } from '../signal'
 import { mentionSegments } from '../skill-mentions'
+import { currentSubagents, subagentTeams, waitingForSubagents } from '../subagents'
 import { iconButton } from '../ui'
 import ActivityContent from './ActivityContent.vue'
 import AgentActions from './AgentActions.vue'
@@ -27,12 +30,14 @@ import ChatAttachments from './ChatAttachments.vue'
 import ChatNotice from './ChatNotice.vue'
 import ChatOutcome from './ChatOutcome.vue'
 import Icon from './Icon.vue'
+import SubagentTeam from './SubagentTeam.vue'
 import UiButton from './UiButton.vue'
 import WorkingIndicator from './WorkingIndicator.vue'
 
 const props = defineProps<{
   events: RunEvent[]
   active: boolean
+  suspended?: boolean
   agent: string
   agentId?: string
   task: string
@@ -49,11 +54,17 @@ const props = defineProps<{
   loadingOlder?: boolean
   olderError?: string
   skills?: string[]
+  /** The page shows the current subagents beside the composer, so the feed need not. */
+  subagentBar?: boolean
 }>()
 const emit = defineEmits<{ load: [], position: [value: ReadingPosition, key?: string] }>()
 const skillNames = computed(() => new Set(props.skills ?? []))
+const activityGroups = shallowRef(new ActivityGroups())
+watch([() => props.cacheKey, () => props.chat, () => props.events[0]?.runId], () => {
+  activityGroups.value = new ActivityGroups()
+}, { flush: 'sync' })
 const entries = computed(() => {
-  const entries = activityEntries(props.events, props.chat)
+  const entries = activityEntries(props.events, props.chat, activityGroups.value)
   const acknowledged = new Set(props.events.filter(event => event.type === 'chat.user').map(event => event.payload?.messageId))
   for (const { message, label } of props.sending ?? []) {
     if (!acknowledged.has(message.id)) {
@@ -71,10 +82,12 @@ const entries = computed(() => {
 
   return deliveryEntries(entries, props.deliverables ?? [])
 })
+const teams = computed(() => subagentTeams(entries.value))
+const subagents = computed(() => currentSubagents(entries.value))
 const working = computed(() => {
   const wait = backgroundWait(props.events)
   if (wait)
-    return waitingStep(wait)
+    return { ...waitingStep(wait), subagents: waitingForSubagents(props.events, subagents.value) }
   return workingStep(entries.value.filter((entry): entry is ActivityEntry => entry.kind !== 'deliverables'), props.agent, props.events[0]?.createdAt ?? null)
 })
 const visibleOutcome = computed(() => !props.active && !props.sending?.length && !props.loading ? props.outcome : null)
@@ -267,6 +280,8 @@ async function exitFullscreen() {
 
 onBeforeUnmount(() => viewer.value?.close())
 defineExpose({
+  teams,
+  subagents,
   openFiles: () => { artifactViewer.value = '' },
   enterFullscreen,
   followLatest,
@@ -289,7 +304,7 @@ defineExpose({
       <section class="activity-feed flex flex-1 min-h-0 min-w-0 flex-col overflow-hidden bg-transparent" :class="{ 'is-fullscreen': fullscreen }" aria-label="Run conversation">
         <header v-if="!compactToolbar || fullscreen" :class="chat ? ['py-0! phone:py-0!', { 'phone:hidden!': !fullscreen }] : ''" class="activity-toolbar flex justify-between items-center gap-4.5 bg-transparent shrink-0 phone:gap-2.5 phone:flex-wrap px-6 py-[17px] phone:px-[15px] phone:py-[13px]">
           <div v-if="!chat" class="activity-toolbar-title flex items-center gap-[11px] font-semibold text-sm min-w-0 phone:[flex:1_1_160px]">
-            <span class="activity-presence w-[7px] h-[7px] rounded-full bg-[light-dark(#8e8baa,_var(--dark-accent-surface))] shrink-0" :class="{ live: active }" /><span>{{ fullscreen ? task : chat ? (active ? 'Working' : 'Conversation') : 'Agent activity' }}</span>
+            <span class="activity-presence w-[7px] h-[7px] rounded-full bg-[light-dark(#8e8baa,_var(--dark-accent-surface))] shrink-0" :class="{ live: active && !suspended }" /><span>{{ active && suspended ? exclusiveSuspensionLabel : fullscreen ? task : chat ? (active ? 'Working' : 'Conversation') : 'Agent activity' }}</span>
           </div>
           <div class="activity-toolbar-controls ml-auto flex items-center gap-5 shrink-0 phone:flex-1 phone:justify-end phone:gap-4">
             <button v-if="deliverables?.length" class="rounded-md px-2 py-2 text-xs text-muted hover:bg-hover hover:text-ink" @click="artifactViewer = ''">
@@ -353,13 +368,19 @@ defineExpose({
                 </article>
                 <article v-else-if="entry.kind === 'message'" class="activity-message chat-message my-3 py-2" :class="visibleOutcome && entry.id === outcomeEntryId ? 'mb-1!' : ''">
                   <p class="mb-1.5! flex justify-between gap-3 text-2xs text-muted">
-                    <span class="truncate">{{ agent }}</span>
+                    <span class="truncate">{{ agent }}<template v-if="entry.via"> · via {{ entry.via }}</template></span>
                     <time :datetime="new Date(entry.time).toISOString()" :title="new Date(entry.time).toLocaleString()">{{ new Date(entry.time).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) }}</time>
                   </p>
                   <ActivityContent :content="entry.text" />
                 </article>
                 <ChatNotice v-else-if="entry.kind === 'notice'" :notice="entry.artifact" />
-                <AgentActions v-else :artifacts="entry.artifacts" :active="active" />
+                <SubagentTeam v-else-if="entry.kind === 'team'" :agents="entry.agents" :active="active" />
+                <AgentActions
+                  v-else
+                  :artifacts="entry.artifacts"
+                  :active="active"
+                  :suspended="active && suspended"
+                />
                 <ChatOutcome
                   v-if="visibleOutcome && entry.id === outcomeEntryId"
                   :key="`${visibleOutcome.messageId}:${visibleOutcome.reportedAt}`"
@@ -375,10 +396,13 @@ defineExpose({
                 :agent="agent"
               />
 
-              <div v-if="active && !sending?.length && events.length" class="activity-working mt-4 mb-0.5">
+              <p v-if="active && suspended" role="status" class="mt-4 mb-0.5 text-xs text-muted">
+                {{ exclusiveSuspensionLabel }}. Work resumes automatically when the reservation and other pauses are cleared.
+              </p>
+              <div v-else-if="active && !sending?.length && events.length && !(subagentBar && working.subagents)" class="activity-working mt-4 mb-0.5">
                 <WorkingIndicator :step="working" />
               </div>
-              <div v-else-if="active && !sending?.length" class="activity-working flex items-center justify-center gap-3 text-muted text-3xs mt-7.5 mb-0.5 mx-0">
+              <div v-else-if="active && !sending?.length && !events.length" class="activity-working flex items-center justify-center gap-3 text-muted text-3xs mt-7.5 mb-0.5 mx-0">
                 <span class="activity-presence w-[7px] h-[7px] rounded-full bg-[light-dark(#8e8baa,_var(--dark-accent-surface))] shrink-0 live" />Waiting for the worker…
               </div>
               <div v-else-if="!chat && !events.length" class="activity-end flex items-center justify-center gap-3 text-muted text-3xs mt-7.5 mb-0.5 mx-0">

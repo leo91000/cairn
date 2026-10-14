@@ -3,6 +3,7 @@
 mod claude;
 mod codex;
 pub mod mcp;
+mod opencode;
 
 pub(crate) use codex::args_for_run as codex_args;
 
@@ -123,6 +124,7 @@ impl Provider {
         match self {
             Self::Codex => &codex::Codex,
             Self::Claude => &claude::Claude,
+            Self::Opencode => &opencode::Opencode,
         }
     }
 }

@@ -1,6 +1,6 @@
 # Coding-agent accounts
 
-Codex and Claude Code accounts share one model. **Connections → Add account** asks for the coding agent and a name, then follows its official sign-in. Each coding agent can have up to ten accounts. An account can be renamed, paused, reconnected or removed. Accounts that are running something cannot be reconnected or removed until their runs finish. Pausing stops the account from being picked for new runs. Web and Android show the same list, detail panel and sign-in steps. See [ADR 0002](adr/0002-one-account-pool-for-coding-agents.md) for the design.
+Codex, Claude Code and OpenCode accounts share one model. **Connections → Add account** asks for the coding agent and a name, then follows its official sign-in or saves a model-provider API key for OpenCode. Each coding agent can have up to ten accounts. An account can be renamed, paused, reconnected or removed. Accounts that are running something cannot be reconnected or removed until their runs finish. Pausing stops the account from being picked for new runs. Web and Android show the same list, detail panel and sign-in steps. See [ADR 0002](adr/0002-one-account-pool-for-coding-agents.md) for the design.
 
 ## What the list shows
 
@@ -50,6 +50,43 @@ The manager rotates each account's OAuth login with the refresh endpoint and cli
 
 Usage is read every five minutes per account with the CLI's `get_usage` control response (`skip_behaviors: true`), without sending a prompt, including while the account runs. The pinned CLI 2.1.280 reports utilization as a percentage and reset dates as ISO 8601 timestamps. Five-hour and weekly windows limit every model. Opus, Sonnet and model-scoped weekly windows only limit the models of their family, including catalog aliases that run it, such as `default` when it resolves to Opus. This protocol is experimental: when usage is unavailable, the last known windows stay visible, and runs can still use the account. Only allowlisted quota fields are exposed, and a quota error never changes the account's connection.
 
+## OpenCode
+
+Choose **OpenCode → Model provider** and paste the provider's API key, including an
+OpenCode Zen key. Keys are encrypted in the installation vault. Each account stays
+bound to its model provider; add a separate account to use a different provider.
+**Replace API key** is available once the account's active/recoverable runs finish.
+No key is returned by the account API or written to the native authentication file.
+
+The model picker discovers the connected providers' native inventory and variants,
+and lists each model once, even when several connections offer it: for example,
+Claude Sonnet through OpenCode Go, Zen and an Anthropic key. Only active connections
+contribute models. A chosen model offers a **Connection** choice:
+
+- **Auto**, the default, stores `auto/<model>`. A run uses the first connection in
+  your **Connections** order that offers the model and has capacity, then continues
+  on the next one when a connection reaches its limit. Auto offers only the reasoning
+  levels all its connections share.
+- A specific connection stores `provider/model`, preserving nested IDs such as
+  `openrouter/anthropic/claude-sonnet-4.6`. The run uses only that provider and waits
+  when it reaches its limit.
+
+Each connection is labelled by who pays: **Included** (OpenCode Go subscription),
+**Credits** (Zen balance) or **Your key**. Reorder OpenCode connections with the
+arrows on **Connections**. The conversation records which connection ran, such as
+*Claude Sonnet 4.5 via OpenCode Zen*. Usage is not polled: the account row says
+**Usage not reported**. Saving a key validates its format; the first model request
+checks authentication. A provider rejection asks you to replace the key. A rate
+limit enters the shared exhaustion flow and retries the account after five minutes
+when no readable quota is available.
+
+Install **OpenCode 1.19.0** on the manager and runners, or set `OPENCODE_BIN` to its
+executable. The runner image installs this pinned release and startup rejects a
+version mismatch. Initial OpenCode agents require **YOLO** access because the native
+engine does not implement Cairn's read-only/workspace-write sandbox. Production
+runner isolation still applies. OAuth, custom endpoints and quota reporting are
+outside this first integration. See [ADR 0042](adr/0042-opencode-api-key-integration.md).
+
 ## Migration
 
 The first start of this version migrates existing data once: Codex account records and their raw rate limits move into the shared collection, runs record `accountId`/`accountName` instead of their Codex-only fields, and the single Claude login in `DATA_DIR/claude` becomes an account named **Claude** with its email, plan and simultaneous-conversation limit. Local runs keep their Claude sessions, which are copied into each run. A login still marked by the earlier serialized credential transfer (`sync-required`) is migrated as **Reconnect**, because a guest may have rotated its refresh token. Drain existing runs with the deployment lease before upgrading, and keep the data volume and encryption key: nobody needs to reconnect. Rolling back to an earlier version would not see the migrated accounts; restore the backup taken before upgrading instead.
@@ -61,7 +98,10 @@ Screenshots use synthetic accounts: [desktop](screenshots/agent-accounts/desktop
 | Route | Purpose |
 | --- | --- |
 | `GET /api/accounts` | `{accounts, signIn, required}`: every account, the sign-in in progress, and the coding agents whose runs wait for you |
-| `POST /api/accounts` | `{provider, name}` adds an account and starts its sign-in |
+| `POST /api/accounts` | `{provider, name}` starts sign-in; OpenCode additionally requires `{modelProvider, apiKey}` |
+| `GET /api/accounts/providers/opencode` | Supported API-key model providers from the pinned native catalog |
+| `POST /api/accounts/order` | `{provider, ids}` saves the order Auto tries OpenCode connections in; `ids` lists every account once |
+| `POST /api/accounts/{id}/api-key` | `{modelProvider, apiKey}` replaces an OpenCode key when the account is idle |
 | `POST /api/accounts/{id}/sign-in` | Signs an existing account in again |
 | `POST /api/accounts/sign-in/code` | `{code}` for coding agents whose page shows a code to paste back (Claude Code) |
 | `DELETE /api/accounts/sign-in` | Cancels the sign-in; an account that never connected is removed |

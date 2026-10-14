@@ -8,6 +8,7 @@ pub mod broker;
 pub mod claude;
 pub mod codex;
 pub(crate) mod lenient;
+pub mod opencode;
 mod record;
 mod sign_in;
 pub mod usage;
@@ -54,6 +55,24 @@ pub struct Lease {
 
 #[async_trait::async_trait]
 pub trait Driver: Send + Sync {
+    fn accepts_api_keys(&self) -> bool {
+        false
+    }
+
+    async fn api_key_providers(&self, _s: &Service) -> Result<Value> {
+        Err(Error::bad("This coding agent does not accept API keys."))
+    }
+
+    async fn connect_api_key(
+        &self,
+        _s: &Service,
+        _account: &Account,
+        _model_provider: &str,
+        _api_key: &str,
+    ) -> Result<()> {
+        Err(Error::bad("This coding agent does not accept API keys."))
+    }
+
     /// Cleans up interrupted work and migrates state from earlier versions, once per start.
     async fn initialize(&self, s: &Service) -> Result<()>;
 
@@ -86,6 +105,17 @@ pub trait Driver: Send + Sync {
 
     async fn supports(&self, s: &Service, id: &str, model: &str) -> Result<bool>;
 
+    /// Loads what [`Driver::supports`] needs for `model` before selection takes its locks.
+    async fn warm(&self, _s: &Service, _model: &str) -> Result<()> {
+        Ok(())
+    }
+
+    /// Whether the user orders these accounts. Ordered accounts are tried first to last,
+    /// before remaining capacity and recent use.
+    fn ordered(&self) -> bool {
+        false
+    }
+
     /// The private home a run's CLI reads its credentials from.
     fn home(&self, s: &Service, run_id: &str) -> PathBuf;
 
@@ -112,6 +142,7 @@ impl Provider {
         match self {
             Provider::Codex => &codex::Codex,
             Provider::Claude => &claude::Claude,
+            Provider::Opencode => &opencode::Opencode,
         }
     }
 }
@@ -449,9 +480,12 @@ impl Accounts {
             }
         }
         let rank = |a: &Account| capacity(a, driver, model).unwrap_or(-1.);
+        let ordered = driver.ordered();
         candidates.sort_by(|a, b| {
-            rank(b)
-                .total_cmp(&rank(a))
+            let position = |a: &Account| ordered.then(|| a.priority());
+            position(a)
+                .cmp(&position(b))
+                .then(rank(b).total_cmp(&rank(a)))
                 .then(
                     a.last_used_at
                         .unwrap_or(0)
@@ -478,6 +512,7 @@ impl Accounts {
             return Ok(None);
         }
         timing.next("availability");
+        driver.warm(s, model).await?;
         let available = {
             let leases = self.leases.lock().await;
             if leases.contains_key(run_id) {
@@ -788,6 +823,69 @@ impl Accounts {
         self.begin(s, &mut current, &account).await
     }
 
+    /// Saves an API-key account, fencing edits against admission and active leases.
+    pub async fn connect_api_key(
+        &self,
+        s: &Service,
+        provider: Provider,
+        name: &str,
+        model_provider: &str,
+        api_key: &str,
+        id: Option<&str>,
+    ) -> Result<Value> {
+        let name = valid_name(name)?;
+        let api_key = api_key.trim();
+        if api_key.is_empty()
+            || api_key.len() > 8192
+            || api_key.chars().any(|c| c.is_whitespace() || c.is_control())
+        {
+            return Err(Error::bad("Enter a valid provider API key."));
+        }
+        self.initialize(s).await?;
+        let _selection = self.selection.lock().await;
+        let replacing = id.is_some();
+        let account = if let Some(id) = id {
+            let account = self.account(s, id).await?;
+            if account.provider != provider {
+                return Err(Error::bad(
+                    "The coding agent of this account cannot change.",
+                ));
+            }
+            if self.busy(s, id).await? || !self.active(id).await.is_empty() {
+                return Err(Error::conflict(
+                    "Wait for this account’s runs to finish before replacing its key.",
+                ));
+            }
+            account
+        } else {
+            if self.of(s, provider).await?.len() >= MAX_ACCOUNTS {
+                return Err(Error::bad(format!(
+                    "A maximum of {MAX_ACCOUNTS} {} accounts can be connected.",
+                    provider.label()
+                )));
+            }
+            Account::new(provider, name, AccountState::Pending)
+        };
+        let id = account.id.clone();
+        let _guard = self.lock(&id).await;
+        // An edit or refresh can finish while replacement waits for the lock.
+        let account = if replacing {
+            self.account(s, &id).await?
+        } else {
+            account
+        };
+        provider
+            .driver()
+            .connect_api_key(s, &account, model_provider, api_key)
+            .await?;
+        Ok(self
+            .list(s)
+            .await?
+            .into_iter()
+            .find(|a| a["id"] == id)
+            .unwrap_or(Value::Null))
+    }
+
     pub async fn reconnect(&self, s: &Arc<Service>, id: &str) -> Result<Value> {
         self.initialize(s).await?;
         let _selection = self.selection.lock().await;
@@ -885,6 +983,53 @@ impl Accounts {
             .into_iter()
             .find(|a| a["id"] == id)
             .unwrap_or(Value::Null))
+    }
+
+    /// Saves the user's order for `provider`'s accounts; `ids` lists every account once.
+    pub async fn reorder(&self, s: &Service, provider: Provider, ids: &[String]) -> Result<Value> {
+        if !provider.driver().ordered() {
+            return Err(Error::bad("This coding agent does not order its accounts."));
+        }
+        let _selection = self.selection.lock().await;
+        // Refresh and edits save complete account records under these locks. Wait
+        // for their snapshots before changing priorities, so a stale save cannot
+        // undo the user's order. Creation and removal are fenced by selection.
+        let mut account_ids = self
+            .of(s, provider)
+            .await?
+            .into_iter()
+            .map(|account| account.id)
+            .collect::<Vec<_>>();
+        account_ids.sort_unstable();
+        let mut account_guards = Vec::new();
+        for id in account_ids {
+            account_guards.push(self.lock(&id).await);
+        }
+
+        let ids = ids.to_vec();
+        s.store
+            .transaction(move |db| {
+                let mut accounts = stored(db)?;
+                accounts.retain(|a| a.provider == provider);
+                let mut expected = accounts.iter().map(|a| a.id.as_str()).collect::<Vec<_>>();
+                let mut given = ids.iter().map(String::as_str).collect::<Vec<_>>();
+                expected.sort_unstable();
+                given.sort_unstable();
+                if expected != given {
+                    return Err(Error::conflict(
+                        "Connections changed. Reload them and order them again.",
+                    ));
+                }
+                for mut account in accounts {
+                    let position = ids.iter().position(|id| *id == account.id).unwrap_or(0);
+                    account.extra.insert("priority".into(), position.into());
+                    db.put(KIND, &account.to_value())?;
+                }
+                db.audit("account.reordered", &json!({ "provider": provider }))
+            })
+            .await?;
+        drop(account_guards);
+        self.overview(s).await
     }
 
     pub async fn remove(&self, s: &Service, id: &str) -> Result<()> {
@@ -987,9 +1132,41 @@ pub async fn routes(s: &Arc<Service>, input: &Input) -> Result<Value> {
             accounts.initialize(s).await?;
             accounts.overview(s).await
         }
+        ("GET", ["providers", provider]) => {
+            Provider::parse(provider)?
+                .driver()
+                .api_key_providers(s)
+                .await
+        }
         ("POST", []) => {
             let provider = Provider::parse(input.string("provider", 20)?)?;
-            accounts.add(s, provider, input.string("name", 200)?).await
+            if provider.driver().accepts_api_keys() {
+                accounts
+                    .connect_api_key(
+                        s,
+                        provider,
+                        input.string("name", 200)?,
+                        input.string("modelProvider", 80)?,
+                        input.string("apiKey", 8192)?,
+                        None,
+                    )
+                    .await
+            } else {
+                accounts.add(s, provider, input.string("name", 200)?).await
+            }
+        }
+        ("POST", ["order"]) => {
+            let provider = Provider::parse(input.string("provider", 20)?)?;
+            let ids = input.body["ids"]
+                .as_array()
+                .filter(|ids| ids.len() <= MAX_ACCOUNTS)
+                .and_then(|ids| {
+                    ids.iter()
+                        .map(|id| id.as_str().filter(|id| uuid(id).is_ok()).map(str::to_owned))
+                        .collect::<Option<Vec<_>>>()
+                })
+                .ok_or_else(|| Error::bad("List the accounts in their new order."))?;
+            accounts.reorder(s, provider, &ids).await
         }
         ("POST", ["refresh"]) => {
             accounts.poll(s, false).await?;
@@ -1012,6 +1189,20 @@ pub async fn routes(s: &Arc<Service>, input: &Input) -> Result<Value> {
         ("POST", [id, "sign-in"]) => {
             uuid(id)?;
             accounts.reconnect(s, id).await
+        }
+        ("POST", [id, "api-key"]) => {
+            uuid(id)?;
+            let account = accounts.account(s, id).await?;
+            accounts
+                .connect_api_key(
+                    s,
+                    account.provider,
+                    &account.name,
+                    input.string("modelProvider", 80)?,
+                    input.string("apiKey", 8192)?,
+                    Some(id),
+                )
+                .await
         }
         ("PATCH", [id]) => {
             uuid(id)?;

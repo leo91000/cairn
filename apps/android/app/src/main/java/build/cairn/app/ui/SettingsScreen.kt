@@ -50,6 +50,7 @@ fun SettingsScreen(vm: CairnViewModel, state: Workspace) {
         AppUpdateSettings()
         AccountSettings(vm, state)
         NotificationSettings(vm)
+        PerformanceSettings(vm)
         if (state.isOwner) {
             settings?.let { info ->
                 Panel {

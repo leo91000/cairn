@@ -315,4 +315,72 @@ class AccountsJourneyTest {
             }
         }
     }
+
+    @Test
+    fun `OpenCode saves a model-provider key through the shared account sheet`() {
+        val server = Accounts()
+        journey(
+            server,
+            { request, _ ->
+                when ("${request.method} ${request.path}") {
+                    "GET /api/installations/fixture/api/accounts/providers/opencode" ->
+                        """[{"id":"opencode","name":"OpenCode Zen"},{"id":"openai","name":"OpenAI"}]"""
+                    "POST /api/installations/fixture/api/accounts" -> {
+                        assertEquals("fixture", request.getHeader("X-CSRF-Token"))
+                        val account =
+                            """{"id":"zen","provider":"opencode","name":"Zen","modelProvider":"opencode","modelProviderName":"OpenCode Zen","state":"ready","status":"next"}"""
+                        server.accounts += account
+                        account
+                    }
+                    else -> null
+                }
+            },
+        ) {
+            waitText("AGENTS DE CODE")
+            compose.waitUntil(15000) {
+                compose
+                    .onAllNodes(hasContentDescription("Ajouter un compte") and isEnabled())
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
+            }
+            compose.onNodeWithContentDescription("Ajouter un compte").performClick()
+            waitText("Ajouter un compte")
+            compose
+                .onNode(
+                    hasText("OpenCode") and
+                        hasClickAction() and
+                        hasAnyAncestor(hasTestTag("account-sign-in"))
+                )
+                .performClick()
+            waitText("Une clé API par fournisseur de modèles.")
+            waitText("OpenCode Zen")
+            compose.onNodeWithText("Nom").performTextInput("Zen")
+            capture("opencode-connect-light")
+            compose
+                .onNode(hasText("Clé API") and hasSetTextAction())
+                .performTextInput("synthetic-android-zen-key")
+            compose.onNodeWithText("Enregistrer la clé API").performScrollTo().performClick()
+            compose.waitUntil(15000) {
+                server.requests.any { it.first == "POST /api/installations/fixture/api/accounts" }
+            }
+            val saved =
+                wireJson
+                    .parseToJsonElement(
+                        server.requests
+                            .first { it.first == "POST /api/installations/fixture/api/accounts" }
+                            .second
+                    )
+                    .jsonObject
+            assertEquals("opencode", saved["provider"]?.jsonPrimitive?.content)
+            assertEquals("opencode", saved["modelProvider"]?.jsonPrimitive?.content)
+            assertEquals("synthetic-android-zen-key", saved["apiKey"]?.jsonPrimitive?.content)
+            compose.waitUntil(15000) {
+                compose.onAllNodesWithTag("account-sign-in").fetchSemanticsNodes().isEmpty()
+            }
+            waitText("Zen")
+            waitText("Usage non consulté")
+            compose.onNodeWithText("Usage non consulté", substring = true).assertExists()
+            capture("opencode-account-light")
+        }
+    }
 }

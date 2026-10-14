@@ -52,6 +52,7 @@ impl Fixture {
         let config = Config {
             codex_bin: common::fixture("codex.mjs"),
             claude_bin: common::fixture("claude.mjs"),
+            opencode_bin: "opencode".into(),
             concurrency,
             worker_enabled: true,
             ..common::config(root.path())
@@ -452,6 +453,60 @@ async fn codex_credentials(s: &Service, account: &str, tokens: Value) {
         )
         .await
         .unwrap();
+}
+
+#[tokio::test]
+async fn preparing_runs_keep_their_original_cancellation_reservation() {
+    let root = TempDir::new().unwrap();
+    std::fs::create_dir(root.path().join("home")).unwrap();
+    let service = Service::new(Config {
+        concurrency: 2,
+        codex_bin: common::fixture("codex.mjs"),
+        claude_bin: common::fixture("claude.mjs"),
+        ..common::config(root.path())
+    })
+    .await
+    .unwrap();
+    common::relay_fixture::claimed(&service).await.unwrap();
+    let task = service
+        .task(
+            json!({
+                "name": "Preparing run",
+                "prompt": "Inspect the workspace.",
+                "worktree": false,
+                "agentId": MAIN_AGENT_ID,
+            }),
+            None,
+        )
+        .await
+        .unwrap();
+    let run = service
+        .enqueue(text(&task, "id"), "manual", None)
+        .await
+        .unwrap();
+    let run_id = text(&run, "id");
+    service.worker.initialize(&service).await.unwrap();
+
+    // Admission reserves the run before asynchronous preparation marks it running.
+    // Another tick in that window must preserve the original execution and its stop token.
+    let reservation = tokio_util::sync::CancellationToken::new();
+    service
+        .worker
+        .active
+        .lock()
+        .await
+        .insert(run_id.to_owned(), reservation.clone());
+    service.worker.tick(&service).await.unwrap();
+    reservation.cancel();
+    let reservation_retained = service.worker.active.lock().await[run_id].is_cancelled();
+
+    service.shutdown.cancel();
+    service.worker.active.lock().await.remove(run_id);
+    service.worker.close().await;
+    assert!(
+        reservation_retained,
+        "A queued run already in preparation must not launch a second execution"
+    );
 }
 
 #[tokio::test]
@@ -1180,6 +1235,9 @@ async fn serve_controller(State(state): State<Arc<Controller>>, request: Request
     if path.ends_with("/lease") {
         return Json(json!({})).into_response();
     }
+    if path.ends_with("/administrative-pause") {
+        return Json(json!({ "administrativePausedMs": 0 })).into_response();
+    }
     if path.ends_with("/snapshot") {
         return StatusCode::SERVICE_UNAVAILABLE.into_response();
     }
@@ -1220,6 +1278,9 @@ async fn serve_controller(State(state): State<Arc<Controller>>, request: Request
         };
         return Json(json!({ "StatusCode": code })).into_response();
     }
+    if request.method() != "POST" {
+        return StatusCode::NOT_FOUND.into_response();
+    }
     let plan = state
         .data
         .join("runner-plans")
@@ -1231,6 +1292,44 @@ async fn serve_controller(State(state): State<Arc<Controller>>, request: Request
         .await
         .push(serde_json::from_slice(&bytes).unwrap());
     Json(json!({})).into_response()
+}
+
+#[tokio::test]
+async fn controller_reads_do_not_launch_vm_attempts() {
+    let root = TempDir::new().unwrap();
+    let controller = Arc::new(Controller {
+        data: root.path().to_owned(),
+        plans: tokio::sync::Mutex::new(Vec::new()),
+        failures: 0,
+        slots: 1,
+        hold: std::sync::atomic::AtomicBool::new(false),
+    });
+    let request = |path| {
+        Request::builder()
+            .method("GET")
+            .uri(path)
+            .body(Body::empty())
+            .unwrap()
+    };
+    let response = serve_controller(
+        State(controller.clone()),
+        request("/runs/fixture/administrative-pause"),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), 1024)
+        .await
+        .unwrap();
+    let value: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(value["administrativePausedMs"], 0);
+
+    let unknown = serve_controller(
+        State(controller.clone()),
+        request("/runs/fixture/unknown-read"),
+    )
+    .await;
+    assert_eq!(unknown.status(), StatusCode::NOT_FOUND);
+    assert!(controller.plans.lock().await.is_empty());
 }
 
 #[tokio::test]

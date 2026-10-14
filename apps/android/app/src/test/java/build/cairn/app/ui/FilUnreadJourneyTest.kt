@@ -2,6 +2,7 @@ package build.cairn.app.ui
 
 import android.app.Application
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
@@ -14,6 +15,8 @@ import java.io.File
 import java.util.Collections
 import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.flow.first
+import kotlinx.serialization.json.jsonArray
+import kotlinx.serialization.json.jsonObject
 import okhttp3.mockwebserver.*
 import org.junit.Assert.assertEquals
 import org.junit.Rule
@@ -25,7 +28,7 @@ import org.robolectric.annotation.GraphicsMode
 
 /**
  * Finished work waits in Pour vous until it is read, then leaves it for every device. The same
- * journey runs on a device in `FilUnreadDeviceTest`; this one also renders review captures.
+ * journey also renders review captures using Robolectric native graphics.
  */
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [36], qualifiers = "w412dp-h915dp-xhdpi")
@@ -205,7 +208,10 @@ class FilUnreadJourneyTest {
                     compose.onAllNodes(isRoot()).fetchSemanticsNodes()
                     reads.isNotEmpty()
                 }
-                assertEquals("{\"items\":[\"chat:done\"]}", reads.first())
+                assertEquals(
+                    "{\"items\":[{\"key\":\"chat:done\",\"finishedAt\":${chats.first().finishedAt}}]}",
+                    reads.first(),
+                )
                 compose.waitUntil(10000) {
                     compose
                         .onAllNodesWithContentDescription(
@@ -222,13 +228,180 @@ class FilUnreadJourneyTest {
                     compose.onAllNodes(isRoot()).fetchSemanticsNodes()
                     reads.size == 2
                 }
-                assertEquals("{\"items\":[\"task:notes\"]}", reads[1])
+                assertEquals(
+                    "{\"items\":[{\"key\":\"task:notes\",\"finishedAt\":${activity.first().finishedAt}}]}",
+                    reads[1],
+                )
                 compose.waitUntil(10000) {
                     compose.onAllNodesWithTag("read-all").fetchSemanticsNodes().isEmpty()
                 }
                 compose.onAllNodesWithTag("unread").assertCountEquals(0)
                 capture("fil-read-dark")
             } finally {
+                vm.api.closeStreams()
+            }
+        }
+    }
+
+    @Test
+    fun `bulk read survives partial failure and resets for another account`() {
+        val reads = Collections.synchronizedList(mutableListOf<String>())
+        val account = java.util.concurrent.atomic.AtomicReference("fixture-account")
+        MockWebServer().use { server ->
+            server.dispatcher =
+                object : Dispatcher() {
+                    override fun dispatch(request: RecordedRequest): MockResponse {
+                        val path = request.path!!.substringBefore('?')
+                        val response =
+                            when {
+                                path == "/api/account/session" ->
+                                    beaconAccountFixture("fixture")
+                                        .replace("fixture-account", account.get())
+                                path == "/api/installations" -> beaconInstallationsFixture()
+                                path.endsWith("/reads") -> {
+                                    reads += request.body.readUtf8()
+                                    if (reads.size == 2)
+                                        return MockResponse()
+                                            .setResponseCode(503)
+                                            .setBody("{\"error\":\"Offline\"}")
+                                    "{\"read\":1}"
+                                }
+                                path.endsWith("/overview") || path.endsWith("/models") -> "{}"
+                                else -> "[]"
+                            }
+                        return MockResponse()
+                            .setHeader("Content-Type", "application/json")
+                            .setBody(response)
+                    }
+                }
+            val origin = server.url("/").toString()
+            val vm =
+                CairnViewModel(
+                    ApplicationProvider.getApplicationContext<Application>(),
+                    MemoryVault(),
+                    beaconOrigin = "",
+                )
+            compose.setContent {
+                LaunchedEffect(Unit) {
+                    vm.state.first { it.ready }
+                    vm.connect(origin)
+                }
+                CairnTheme { androidx.compose.material3.Text("Read state test") }
+            }
+            fun waitFor(condition: () -> Boolean) =
+                compose.waitUntil(20000) {
+                    compose.onAllNodes(isRoot()).fetchSemanticsNodes()
+                    condition()
+                }
+            try {
+                waitFor { vm.state.value.installation != null && !vm.state.value.busy }
+                compose.runOnIdle { vm.markRead((0..200).map { "chat:$it" to (now - 1000) }) }
+                waitFor { reads.size == 2 && vm.state.value.error == "Offline" }
+                val batches = reads.map {
+                    wireJson.parseToJsonElement(it).jsonObject["items"]!!.jsonArray
+                }
+                assertEquals(listOf(200, 1), batches.map { it.size })
+                compose.runOnIdle {
+                    assertEquals(200, vm.localReads.size)
+                    assertEquals(null, vm.localReads["chat:200"])
+                    vm.report(ApiException(401, "Expired"))
+                    assertEquals(0, vm.localReads.size)
+                }
+                account.set("member")
+                compose.runOnIdle { vm.perform { connect(origin) } }
+                waitFor { vm.state.value.session.account?.id == "member" && !vm.state.value.busy }
+                compose.runOnIdle { vm.markRead(listOf("chat:0" to (now - 1000))) }
+                waitFor { reads.size == 3 }
+                compose.runOnIdle { assertEquals(now - 1000, vm.localReads["chat:0"]) }
+            } finally {
+                vm.api.closeStreams()
+            }
+        }
+    }
+
+    @Test
+    fun `opening a conversation waits for its output before marking it read`() {
+        val release = java.util.concurrent.CountDownLatch(1)
+        val started = java.util.concurrent.atomic.AtomicBoolean(false)
+        val reads = Collections.synchronizedList(mutableListOf<String>())
+        MockWebServer().use { server ->
+            server.dispatcher =
+                object : Dispatcher() {
+                    override fun dispatch(request: RecordedRequest): MockResponse {
+                        val path = request.path!!.substringBefore('?')
+                        if (path.endsWith("/chats/done/stream")) {
+                            started.set(true)
+                            check(release.await(20, TimeUnit.SECONDS))
+                            val run =
+                                Run(
+                                    "done-run",
+                                    taskId = "done",
+                                    status = "succeeded",
+                                    trigger = "chat",
+                                    finishedAt = chats.first().finishedAt,
+                                )
+                            return stream(LiveState(chat = chats.first().copy(run = run)))
+                        }
+                        if (path.endsWith("/chats/stream")) return stream(LiveState(chats = chats))
+                        val response =
+                            when {
+                                path == "/api/account/session" -> beaconAccountFixture("fixture")
+                                path == "/api/installations" -> beaconInstallationsFixture()
+                                path.endsWith("/reads") -> {
+                                    reads += request.body.readUtf8()
+                                    "{\"read\":1}"
+                                }
+                                path.endsWith("/overview") || path.endsWith("/models") -> "{}"
+                                else -> "[]"
+                            }
+                        return MockResponse()
+                            .setHeader("Content-Type", "application/json")
+                            .setBody(response)
+                    }
+                }
+            val vm =
+                CairnViewModel(
+                    ApplicationProvider.getApplicationContext<Application>(),
+                    MemoryVault(),
+                    beaconOrigin = "",
+                )
+            compose.setContent {
+                val state by vm.state.collectAsState()
+                LaunchedEffect(Unit) {
+                    vm.state.first { it.ready }
+                    vm.connect(server.url("/").toString())
+                }
+                CairnTheme {
+                    if (state.installation != null)
+                        ChatScreen(vm, state, "done", openChat = {}, openRun = {})
+                }
+            }
+            try {
+                compose.waitUntil(20000) {
+                    compose.onAllNodes(isRoot()).fetchSemanticsNodes()
+                    started.get()
+                }
+                // Let the list arrive while the selected conversation response is still held.
+                compose.waitUntil(10000) {
+                    compose.onAllNodes(isRoot()).fetchSemanticsNodes()
+                    compose
+                        .onAllNodesWithTag("chat-page:question")
+                        .fetchSemanticsNodes()
+                        .isNotEmpty()
+                }
+                compose.waitForIdle()
+                assertEquals(0, reads.size)
+                release.countDown()
+                compose.waitUntil(20000) {
+                    compose.onAllNodes(isRoot()).fetchSemanticsNodes()
+                    reads.isNotEmpty()
+                }
+                assertEquals(
+                    "{\"items\":[{\"key\":\"chat:done\",\"finishedAt\":${chats.first().finishedAt}}]}",
+                    reads.first(),
+                )
+            } finally {
+                release.countDown()
                 vm.api.closeStreams()
             }
         }

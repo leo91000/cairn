@@ -31,6 +31,7 @@ pub struct Service {
     pub plugins: Arc<crate::plugins::Plugins>,
     pub accounts: Arc<crate::accounts::Accounts>,
     pub models: Arc<crate::models::Models>,
+    pub opencode: Arc<crate::opencode::Catalog>,
     pub connections: Arc<crate::connections::Connections>,
     pub conversation_storage_lock: Arc<tokio::sync::Mutex<()>>,
     pub attachment_upload: Arc<tokio::sync::Mutex<()>>,
@@ -76,6 +77,7 @@ impl Service {
             plugins: Arc::default(),
             accounts: Arc::default(),
             models: Arc::default(),
+            opencode: Arc::default(),
             connections: Arc::default(),
             conversation_storage_lock: Arc::default(),
             attachment_upload: Arc::default(),
@@ -154,11 +156,19 @@ impl Service {
         required(self.store.get(kind, id).await?, "Record not found")
     }
 
-    pub async fn agent(
+    pub async fn agent(self: &Arc<Self>, input: Value, existing_id: Option<&str>) -> Result<Value> {
+        self.agent_authorized(input, existing_id, |_| Ok(())).await
+    }
+
+    pub(crate) async fn agent_authorized<F>(
         self: &Arc<Self>,
         mut input: Value,
         existing_id: Option<&str>,
-    ) -> Result<Value> {
+        authorize: F,
+    ) -> Result<Value>
+    where
+        F: FnOnce(&Db<'_>) -> Result<()> + Send + 'static,
+    {
         let existing = match existing_id {
             Some(id) => Some(self.get("agents", id).await?),
             None => None,
@@ -179,7 +189,10 @@ impl Service {
         self.require_access_targets(&access).await?;
         let agent = self
             .store
-            .transaction(move |db| save_agent(db, agent, &access))
+            .transaction(move |db| {
+                authorize(db)?;
+                save_agent(db, agent, &access)
+            })
             .await?;
         if existing_id.is_none() && self.avatars.configured(self).await? {
             // Creation remains successful even when portrait scheduling fails.
@@ -214,6 +227,18 @@ impl Service {
     }
 
     pub async fn project(&self, input: Value, existing: Option<&str>) -> Result<Value> {
+        self.project_authorized(input, existing, |_| Ok(())).await
+    }
+
+    pub(crate) async fn project_authorized<F>(
+        &self,
+        input: Value,
+        existing: Option<&str>,
+        authorize: F,
+    ) -> Result<Value>
+    where
+        F: FnOnce(&Db<'_>) -> Result<()> + Send + 'static,
+    {
         let mut project = parse("project", input)?;
         let actual = crate::skills::workspace(
             Path::new(text(&project, "path")),
@@ -228,7 +253,14 @@ impl Service {
         project["path"] = actual.to_string_lossy().into_owned().into();
         project["id"] = existing.map_or_else(id, str::to_owned).into();
         project["createdAt"] = previous.map_or_else(|| now().into(), |v| v["createdAt"].clone());
-        self.store.save("projects", project, "project.saved").await
+        self.store
+            .transaction(move |db| {
+                authorize(db)?;
+                let project = db.put("projects", &project)?;
+                db.audit("project.saved", &json!({ "id": project["id"] }))?;
+                Ok(project)
+            })
+            .await
     }
 
     pub async fn task(&self, input: Value, existing: Option<&str>) -> Result<Value> {
@@ -293,9 +325,22 @@ impl Service {
     }
 
     pub async fn remove(&self, kind: &str, id: &str) -> Result<()> {
+        self.remove_authorized(kind, id, |_| Ok(())).await
+    }
+
+    pub(crate) async fn remove_authorized<F>(
+        &self,
+        kind: &str,
+        id: &str,
+        authorize: F,
+    ) -> Result<()>
+    where
+        F: FnOnce(&Db<'_>) -> Result<()> + Send + 'static,
+    {
         let (kind, id) = (kind.to_owned(), id.to_owned());
         self.store
             .transaction(move |db| {
+                authorize(db)?;
                 required(db.get(&kind, &id)?, "Record not found")?;
                 ensure_removable(db, &kind, &id)?;
                 if kind == "agents" {
@@ -366,10 +411,15 @@ impl Service {
                 .iter()
                 .find(|s| skill_key(s) == key && s["valid"] == true)
                 .ok_or_else(|| Error::bad(format!("Skill unavailable or invalid: {key}")))?;
+            // Freezing keeps queued and restarted runs on the files they were created with.
+            let (bundle, content) = self.skills.freeze(Path::new(text(skill, "path"))).await?;
+            let frozen_metadata = crate::skills::parse(&content)?;
             skills.push(json!({
                 "name": skill["name"],
+                "description": frozen_metadata["description"],
                 "path": skill["path"],
-                "content": skill["content"],
+                "content": content,
+                "bundle": bundle,
             }));
         }
         let snapshot = json!({
@@ -452,7 +502,6 @@ impl Service {
             .store
             .transaction(move |db| {
                 if let Some(bearer) = bearer {
-                    crate::installation_mcp::authorize_target_run_in(db, &bearer, &run)?;
                     crate::installation_mcp::authorize_task_in(
                         db,
                         &bearer,

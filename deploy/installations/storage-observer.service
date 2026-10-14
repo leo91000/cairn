@@ -1,0 +1,19 @@
+[Unit]
+Description=Record private Cairn storage performance observations
+Requires=docker.service
+After=docker.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 /var/lib/cairn-installation/storage-observer.py
+TimeoutStartSec=75
+Nice=15
+IOSchedulingClass=idle
+CPUQuota=25%
+MemoryMax=192M
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/var/lib/cairn-installation/observations/storage
+UMask=0077

@@ -25,6 +25,8 @@ export default defineConfig({
     { name: 'layout-webkit-agent-avatars', testMatch: 'agent-avatars.spec.ts', use: { browserName: 'webkit', hasTouch: true } },
     { name: 'journeys-github-projects', testMatch: 'github-projects.spec.ts' },
     { name: 'layout-webkit-github-projects', testMatch: 'github-projects.spec.ts', use: { browserName: 'webkit', isMobile: true, hasTouch: true } },
+    { name: 'journeys-opencode', testMatch: 'opencode.spec.ts' },
+    { name: 'layout-webkit-opencode', testMatch: 'opencode.spec.ts', use: { browserName: 'webkit', isMobile: true, hasTouch: true } },
     { name: 'journeys-claude', testMatch: 'claude.spec.ts' },
     { name: 'layout-webkit-claude', testMatch: 'claude.spec.ts', use: { browserName: 'webkit', isMobile: true, hasTouch: true } },
     { name: 'journeys-plugins', testMatch: 'plugins.spec.ts' },
@@ -51,6 +53,7 @@ export default defineConfig({
     { name: 'journeys-installation-subdomains', testMatch: 'installation-subdomains.spec.ts' },
     { name: 'layout-webkit-installation-drafts', testMatch: 'installation-subdomains.spec.ts', use: { browserName: 'webkit' } },
     { name: 'journeys-chat-switch', testMatch: ['chat-switch.spec.ts', 'readable-slugs.spec.ts'] },
+    { name: 'layout-webkit-chat-switch', testMatch: 'chat-switch.spec.ts', use: { browserName: 'webkit' } },
     { name: 'journeys-chat-attachments', testMatch: 'chat-attachments.spec.ts' },
     { name: 'layout-webkit-chat-attachments', testMatch: 'chat-attachments.spec.ts', use: { browserName: 'webkit', hasTouch: true } },
     { name: 'layout-webkit-chats', testMatch: 'chats.spec.ts', use: { browserName: 'webkit', hasTouch: true } },
@@ -67,6 +70,17 @@ export default defineConfig({
     { name: 'journeys-agent-access', testMatch: 'agent-access.spec.ts' },
     { name: 'journeys-skill-mentions', testMatch: 'skill-mentions.spec.ts' },
     { name: 'layout-webkit-skill-mentions', testMatch: 'skill-mentions.spec.ts', use: { browserName: 'webkit', hasTouch: true } },
+    { name: 'journeys-skill-bundles', testMatch: 'skill-bundles.spec.ts' },
+    {
+      name: 'layout-webkit-skill-bundles',
+      testMatch: 'skill-bundles.spec.ts',
+      use: {
+        browserName: 'webkit',
+        isMobile: true,
+        hasTouch: true,
+        viewport: { width: 390, height: 844 },
+      },
+    },
     ...(['chromium', 'webkit'] as const).flatMap(browserName =>
       (['light', 'dark'] as const).map(colorScheme => ({
         name: `layout-${browserName}-${colorScheme}`,

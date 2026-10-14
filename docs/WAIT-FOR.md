@@ -12,7 +12,9 @@ Trois conditions sont disponibles dans `cairn_workspace.wait_for` :
 - `run_finished` : une exécution Cairn autorisée atteint un état terminal. Une
   conversation dont le tour a réussi mais qui possède encore un réveil ou des
   messages à traiter reste une dépendance en attente. Cette source exige l’accès
-  à l’installation, le même agent et des permissions qui couvrent la cible.
+  à l’installation et peut viser les exécutions d’autres agents de cette
+  installation, selon la délégation du propriétaire décrite dans
+  [l’accès agent](AGENT-ACCESS.md).
 - `github_workflow` : un workflow GitHub Actions identifié par un projet autorisé,
   un identifiant d’exécution et le SHA complet du commit termine. Le résultat
   inclut sa conclusion et son numéro de tentative. Les credentials existants de
@@ -123,7 +125,7 @@ des VM suivent la politique existante des réveils durables.
 
 | Cas | Ce que cela permettrait | État et travail nécessaire |
 | --- | --- | --- |
-| Exécution Cairn terminée | Enchaîner une tâche après une dépendance et libérer un créneau pour elle | Disponible, pour le même agent et les ressources autorisées |
+| Exécution Cairn terminée | Enchaîner une tâche après une dépendance et libérer un créneau pour elle | Disponible, avec accès à l’installation, y compris pour les exécutions d’autres agents |
 | Workflow GitHub terminé | Reprendre pour analyser la réussite, les logs d’un échec ou une annulation | Disponible, avec projet, run ID et commit précis |
 | Checks requis d’une PR | Reprendre quand les contrôles requis du commit sont satisfaits ou sur un premier échec | Disponible ; exigences des protections classiques et règles actives, checks manquants inclus |
 | Nouveau commit sur une PR | Abandonner une attente devenue obsolète et vérifier le nouveau commit | Disponible pour `github_pr_checks`, avec résultat `superseded` explicite |

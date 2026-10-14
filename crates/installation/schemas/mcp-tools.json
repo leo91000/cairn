@@ -375,6 +375,27 @@
     }
   },
   {
+    "name": "delete_agent",
+    "description": "Delete an unused agent and its saved credentials, portrait and 1Password assignments. Main, agents referenced by tasks (including archived tasks), and agents with active work cannot be deleted. Completed run history is preserved.",
+    "scope": "manage",
+    "destructive": true,
+    "inputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "format": "uuid",
+          "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+        }
+      },
+      "required": [
+        "id"
+      ],
+      "additionalProperties": false
+    }
+  },
+  {
     "name": "list_mcps",
     "description": "List MCP connections, discovered tools, authentication state and saved credential indicators. Secret values are never returned.",
     "scope": "read",
@@ -1184,6 +1205,34 @@
     }
   },
   {
+    "name": "read_skill",
+    "description": "Read a skill's files with their sizes, modes and revision, or one file's content with path. Text is returned as utf-8, other files as base64.",
+    "scope": "read",
+    "destructive": false,
+    "inputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "path": {
+          "type": "string",
+          "maxLength": 240
+        },
+        "projectId": {
+          "type": "string",
+          "format": "uuid",
+          "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "additionalProperties": false
+    }
+  },
+  {
     "name": "save_skill",
     "description": "Create or update SKILL.md with validated frontmatter in .agents/skills.",
     "scope": "manage",
@@ -1208,6 +1257,86 @@
       "required": [
         "name",
         "content"
+      ],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "edit_skill_files",
+    "description": "Apply file changes to a skill in one atomic save: write (utf-8 or base64 content, optional executable), delete, move or mode. Pass the revision from read_skill as base, or null to create the skill. The result needs a valid SKILL.md.",
+    "scope": "manage",
+    "destructive": true,
+    "inputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "base": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "changes": {
+          "type": "array",
+          "maxItems": 2000,
+          "items": {
+            "type": "object",
+            "properties": {
+              "op": {
+                "type": "string",
+                "enum": [
+                  "write",
+                  "delete",
+                  "move",
+                  "mode"
+                ]
+              },
+              "path": {
+                "type": "string",
+                "maxLength": 240
+              },
+              "from": {
+                "type": "string",
+                "maxLength": 240
+              },
+              "to": {
+                "type": "string",
+                "maxLength": 240
+              },
+              "content": {
+                "type": "string",
+                "maxLength": 120000
+              },
+              "encoding": {
+                "type": "string",
+                "enum": [
+                  "utf-8",
+                  "base64"
+                ]
+              },
+              "executable": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "op"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "projectId": {
+          "type": "string",
+          "format": "uuid",
+          "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+        }
+      },
+      "required": [
+        "name",
+        "base",
+        "changes"
       ],
       "additionalProperties": false
     }

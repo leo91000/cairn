@@ -1213,6 +1213,7 @@ dependencies = [
  "chrono",
  "chrono-tz",
  "croner",
+ "flate2",
  "fuser",
  "futures-util",
  "hex",
@@ -6271,8 +6272,6 @@ dependencies = [
 [[package]]
 name = "vhost-user-backend"
 version = "0.23.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "555753b65bc33837bd011f981e2c6d52d8ddc330d92c2deb9aa3f0b378a58bcc"
 dependencies = [
  "libc",
  "log",

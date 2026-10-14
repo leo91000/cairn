@@ -19,7 +19,7 @@ use crate::{
 use serde_json::{Value, json};
 use std::{
     collections::HashMap,
-    sync::{Arc, atomic::AtomicI64},
+    sync::{Arc, Weak, atomic::AtomicI64},
     time::Duration,
 };
 use tokio::sync::{Mutex, Notify, OnceCell, OwnedMutexGuard};
@@ -30,7 +30,9 @@ pub struct Worker {
     pub active: Mutex<HashMap<String, CancellationToken>>,
     tick_lock: Mutex<()>,
     preparation: Arc<Mutex<()>>,
+    run_preparation_locks: Mutex<HashMap<String, Weak<Mutex<()>>>>,
     wake: Notify,
+    conversation_cleanup: Notify,
     initialized: OnceCell<()>,
     maintenance: AtomicI64,
     tasks: TaskTracker,
@@ -43,6 +45,18 @@ struct Admission {
 }
 
 impl Worker {
+    /// Coordinates admission/recovery filesystem writes with permanent run cleanup.
+    pub(crate) async fn run_preparation_lock(&self, run_id: &str) -> Arc<Mutex<()>> {
+        let mut locks = self.run_preparation_locks.lock().await;
+        locks.retain(|_, lock| lock.strong_count() > 0);
+        let lock = locks
+            .get(run_id)
+            .and_then(Weak::upgrade)
+            .unwrap_or_default();
+        locks.insert(run_id.to_owned(), Arc::downgrade(&lock));
+        lock
+    }
+
     pub async fn initialize(&self, s: &Service) -> Result<()> {
         self.initialized
             .get_or_try_init(|| s.store.transaction(restore_after_restart))
@@ -60,6 +74,8 @@ impl Worker {
         self.tasks
             .spawn(crate::nodes::shared_blocks::maintain(s.clone()));
         self.tasks.spawn(crate::nodes::storage::monitor(s.clone()));
+        self.tasks
+            .spawn(crate::nodes::exclusive::maintain(s.clone()));
         self.tasks.spawn(clean_conversations(s.clone()));
         self.tasks.spawn(schedule_tasks(s.clone()));
         self.tasks.spawn(self.clone().run_forever(s));
@@ -84,6 +100,10 @@ impl Worker {
                 .await;
             }
         }
+    }
+
+    pub fn notify_conversation_cleanup(&self) {
+        self.conversation_cleanup.notify_one();
     }
 
     /// Coalesce wakeups without losing work queued during an active scheduling pass.
@@ -195,6 +215,7 @@ async fn clean_conversations(s: Arc<Service>) {
         tokio::select! {
             () = s.shutdown.cancelled() => break,
             _ = timer.tick() => {}
+            () = s.worker.conversation_cleanup.notified() => {}
         }
         tokio::select! {
             () = s.shutdown.cancelled() => break,
@@ -232,6 +253,7 @@ mod tests {
             port: 0,
             codex_bin: "unused".into(),
             claude_bin: "claude".into(),
+            opencode_bin: "opencode".into(),
             gh_bin: "unused".into(),
             concurrency: 1,
             logger: false,

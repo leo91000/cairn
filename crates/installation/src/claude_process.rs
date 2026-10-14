@@ -257,6 +257,9 @@ pub fn item(block: &Value, message: &str, index: usize) -> Option<Value> {
     Some(match text(block, "type") {
         "text" => json!({ "id": id, "type": "agent_message", "text": block["text"] }),
         "thinking" => json!({ "id": id, "type": "reasoning", "text": block["thinking"] }),
+        "tool_use" if matches!(text(block, "name"), "Agent" | "Task") => {
+            subagent(&id, &block["input"])
+        }
         "tool_use" if block["name"] == "Bash" => json!({
             "id": id,
             "type": "command_execution",
@@ -273,6 +276,46 @@ pub fn item(block: &Value, message: &str, index: usize) -> Option<Value> {
         }),
         _ => return None,
     })
+}
+
+/// A subagent the agent delegates work to, followed until it reports back.
+fn subagent(id: &str, input: &Value) -> Value {
+    let name = [text(input, "description"), text(input, "name")]
+        .into_iter()
+        .find(|name| !name.trim().is_empty())
+        .unwrap_or("Subagent");
+    json!({
+        "id": id,
+        "type": "subagent",
+        "name": name,
+        "agent_type": input["subagent_type"],
+        "prompt": input["prompt"],
+        "model": input["model"],
+        "background": input["run_in_background"] == true,
+        "status": "in_progress",
+    })
+}
+
+/// The final report of a subagent's tool result, without Claude Code's hand-back framing.
+fn subagent_report(block: &Value, outcome: &Value) -> String {
+    let texts = |content: &Value| {
+        content
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|part| part["type"] == "text")
+            .map(|part| text(part, "text"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    let report = texts(&outcome["content"]);
+    if !report.is_empty() {
+        return report;
+    }
+    match &block["content"] {
+        Value::String(content) => content.clone(),
+        content => texts(content),
+    }
 }
 
 /// Saved before a turn completes, so a restart never repeats a finished request.
@@ -347,6 +390,8 @@ struct Turn<'a> {
     questions: HashMap<String, Question>,
     /// Running tools, by tool use ID.
     tools: HashMap<String, Value>,
+    /// Subagents still working, by the ID of the tool use that started them.
+    subagents: HashMap<String, Value>,
     /// Streamed blocks of the current message, by index.
     streams: HashMap<usize, Value>,
     /// Content blocks seen per assistant message.
@@ -470,6 +515,14 @@ impl Turn<'_> {
             "system" if value["subtype"] == "background_tasks_changed" => {
                 self.background_tasks(value).await?;
             }
+            "system"
+                if matches!(
+                    text(value, "subtype"),
+                    "task_started" | "task_progress" | "task_notification"
+                ) =>
+            {
+                self.subagent_task(value).await?;
+            }
             "user" => self.on_user(value).await?,
             "assistant" => self.on_assistant(value).await?,
             "stream_event" if value["parent_tool_use_id"].is_null() => {
@@ -528,13 +581,29 @@ impl Turn<'_> {
         if value["origin"]["kind"] == "task-notification" {
             self.background_replayed = true;
         }
-        for block in value["message"]["content"].as_array().into_iter().flatten() {
+        let blocks = value["message"]["content"].as_array().into_iter().flatten();
+        let results = blocks
+            .clone()
+            .filter(|block| block["type"] == "tool_result")
+            .count();
+        for block in blocks {
             if block["type"] != "tool_result" {
                 continue;
             }
-            let Some(mut item) = self.tools.remove(text(block, "tool_use_id")) else {
+            let id = text(block, "tool_use_id");
+            let Some(mut item) = self.tools.remove(id) else {
                 continue;
             };
+            if item["type"] == "subagent" {
+                // Claude Code describes the outcome once per message, beside its only result.
+                let outcome = if results == 1 {
+                    &value["tool_use_result"]
+                } else {
+                    &Value::Null
+                };
+                self.subagent_result(item, block, outcome).await?;
+                continue;
+            }
             let environment_failed = shell_environment_failed(&item, block);
             let status = if block["is_error"] == true {
                 "failed"
@@ -542,6 +611,18 @@ impl Turn<'_> {
                 "completed"
             };
             item["status"] = status.into();
+
+            if item["tool"] == "TaskStop" && block["is_error"] != true {
+                // TaskStop can finish without replaying a task-notification
+                // turn. Its successful result settles that notification wait.
+                let arguments = &item["arguments"];
+                let task = arguments["task_id"]
+                    .as_str()
+                    .or_else(|| arguments["shell_id"].as_str())
+                    .unwrap_or_default();
+                self.awaiting_background.remove(task);
+            }
+
             let content = &block["content"];
             // The raw spawn error includes environment exports, which can contain
             // secrets. Persist only the recovery message.
@@ -571,21 +652,35 @@ impl Turn<'_> {
     }
 
     // Claude Code emits one assistant event per content block, all sharing the message id.
-    // Count blocks per message so ids match the streamed block index.
+    // Count blocks per message so ids match the streamed block index. A subagent's messages name
+    // the tool use that started it: they show as its steps, never as the agent's own reply.
     async fn on_assistant(&mut self, value: &Value) -> Result<()> {
-        // The agent responds again, so it no longer only waits for background tasks.
-        self.waiting_for_background = false;
+        let parent = value["parent_tool_use_id"].as_str();
+        if parent.is_none() {
+            // The agent responds again, so it no longer only waits for background tasks.
+            self.waiting_for_background = false;
+        }
         let message = text(&value["message"], "id").to_owned();
         for block in value["message"]["content"].as_array().into_iter().flatten() {
             let next = self.blocks.entry(message.clone()).or_insert(0);
             let index = *next;
             *next += 1;
-            let Some(item) = item(block, &message, index) else {
+            let Some(mut item) = item(block, &message, index) else {
                 continue;
             };
+            if let Some(parent) = parent {
+                item["parent_id"] = parent.into();
+                if item["type"] == "agent_message" {
+                    item["type"] = "subagent_message".into();
+                }
+            }
             if item["type"] == "agent_message" {
                 self.last = text(&item, "text").into();
                 self.last_id = text(&item, "id").into();
+            }
+            if item["type"] == "subagent" {
+                self.subagents
+                    .insert(text(&item, "id").into(), item.clone());
             }
             let running = block["type"] == "tool_use";
             if running {
@@ -599,6 +694,99 @@ impl Turn<'_> {
             self.emit(json!({ "type": kind, "item": item })).await?;
         }
         Ok(())
+    }
+
+    /// The tool result of a subagent: its report, or its launch when it keeps working in the
+    /// background.
+    async fn subagent_result(&mut self, item: Value, block: &Value, outcome: &Value) -> Result<()> {
+        let id = text(&item, "id").to_owned();
+        let mut item = self.subagents.remove(&id).unwrap_or(item);
+        let launched = matches!(
+            text(outcome, "status"),
+            "async_launched" | "remote_launched"
+        );
+        if block["is_error"] == true {
+            item["status"] = "failed".into();
+            item["result"] = subagent_report(block, &Value::Null).into();
+        } else if launched {
+            item["background"] = true.into();
+        } else {
+            if item["status"] == "in_progress" {
+                item["status"] = "completed".into();
+            }
+            item["result"] = subagent_report(block, outcome).into();
+            for (source, target) in [
+                ("totalDurationMs", "duration_ms"),
+                ("totalTokens", "tokens"),
+                ("totalToolUseCount", "tool_uses"),
+            ] {
+                if outcome[source].is_u64() {
+                    item[target] = outcome[source].clone();
+                }
+            }
+        }
+        // A background subagent reports through its task notification. Until then, the tool
+        // call is complete but the subagent is still working.
+        if launched && item["status"] == "in_progress" {
+            self.subagents.insert(id, item.clone());
+        }
+        self.emit(json!({ "type": "item.completed", "item": item }))
+            .await
+    }
+
+    /// Progress and completion that Claude Code reports for a subagent while it works.
+    async fn subagent_task(&mut self, value: &Value) -> Result<()> {
+        let id = text(value, "tool_use_id");
+        let Some(item) = self.subagents.get_mut(id) else {
+            return Ok(());
+        };
+        let before = item.clone();
+        if !text(value, "task_id").is_empty() {
+            item["task_id"] = value["task_id"].clone();
+        }
+        let usage = &value["usage"];
+        match text(value, "subtype") {
+            "task_started" => {
+                item["background"] = (value["is_backgrounded"] == true).into();
+                if item["agent_type"].is_null() {
+                    item["agent_type"] = value["subagent_type"].clone();
+                }
+            }
+            "task_progress" => {
+                item["activity"] = value["description"].clone();
+                item["last_tool"] = value["last_tool_name"].clone();
+            }
+            _ => {
+                item["status"] = match text(value, "status") {
+                    "completed" => "completed",
+                    "stopped" | "killed" | "cancelled" => "stopped",
+                    _ => "failed",
+                }
+                .into();
+                if text(item, "result").is_empty() {
+                    item["result"] = value["summary"].clone();
+                }
+            }
+        }
+        for (source, target) in [
+            ("duration_ms", "duration_ms"),
+            ("total_tokens", "tokens"),
+            ("tool_uses", "tool_uses"),
+        ] {
+            if usage[source].is_u64() {
+                item[target] = usage[source].clone();
+            }
+        }
+        if *item == before {
+            return Ok(());
+        }
+        let item = item.clone();
+        // A foreground subagent's tool result follows its notification and completes it.
+        if item["status"] != "in_progress" && !self.tools.contains_key(id) {
+            self.subagents.remove(id);
+        }
+        self.emit(json!({ "type": "item.updated", "item": item }))
+            .await
     }
 
     async fn on_stream_event(&mut self, event: &Value) -> Result<()> {
@@ -896,6 +1084,7 @@ pub async fn run(
         consumed: HashSet::new(),
         questions: HashMap::new(),
         tools: HashMap::new(),
+        subagents: HashMap::new(),
         streams: HashMap::new(),
         blocks: HashMap::new(),
         stream_message: String::new(),

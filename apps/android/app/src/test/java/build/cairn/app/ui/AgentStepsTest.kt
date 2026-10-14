@@ -100,6 +100,15 @@ class AgentStepsTest {
     private val presentations = events.map(::presentActivity)
 
     @Test
+    fun `a thousand reads split into steps of at most thirty calls`() {
+        val items = (1L..1001L).map { presentActivity(command(it, "cat file$it.kt")) }
+        val steps = agentSteps(items)
+        assertEquals(34, steps.size)
+        assertTrue(steps.all { it.items.size <= 30 })
+        assertEquals(items, steps.flatMap { it.items })
+    }
+
+    @Test
     fun `the sentence summarises finished actions by kind`() {
         val finished = presentations.filter { !it.isRunning() }
         assertEquals(

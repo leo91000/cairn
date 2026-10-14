@@ -92,7 +92,13 @@ data class Chat(
     val sessionRestartRequested: Boolean = false,
     val lifecycleError: String? = null,
     val wakeup: ChatWakeup? = null,
-)
+    val suspendedByExclusive: ExclusiveReservation? = null,
+) {
+    val exclusiveSuspended
+        get() =
+            (run?.status ?: status) in listOf("running", "queued") &&
+                (suspendedByExclusive != null || run?.suspendedByExclusive != null)
+}
 
 @Serializable
 data class Deliverable(
@@ -155,6 +161,18 @@ data class HistoryPage(
 
 @Serializable data class ReasoningOption(val reasoningEffort: String, val description: String = "")
 
+/** One connected provider offering a model, as `provider/model`. */
+@Serializable
+data class ModelRoute(
+    val model: String,
+    val provider: String = "",
+    val providerName: String = "",
+    /** `subscription`, `credits` or `key`: who pays for this route's usage. */
+    val billing: String = "key",
+    val hidden: Boolean = false,
+    val supportedReasoningEfforts: List<ReasoningOption> = emptyList(),
+)
+
 @Serializable
 data class CodingAgentModel(
     val model: String,
@@ -164,7 +182,14 @@ data class CodingAgentModel(
     val isDefault: Boolean = false,
     val defaultReasoningEffort: String = "",
     val supportedReasoningEfforts: List<ReasoningOption> = emptyList(),
+    /** Models offered by several providers. [model] then runs on the first available route. */
+    val routes: List<ModelRoute> = emptyList(),
 )
+
+fun CodingAgentModel.route(value: String): ModelRoute? = routes.find { it.model == value }
+
+/** Whether [value] selects this model, on any of its routes. */
+fun CodingAgentModel.matches(value: String) = model == value || route(value) != null
 
 @Serializable
 data class ModelCatalog(

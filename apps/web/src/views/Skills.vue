@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import type { Skill } from '../../../../packages/contracts/contracts'
+import type { Skill, SkillBundle } from '../../../../packages/contracts/contracts'
 import { twMerge } from 'tailwind-merge'
 import { computed, ref } from 'vue'
 import {
@@ -10,42 +10,38 @@ import {
 } from '../api'
 import Empty from '../components/Empty.vue'
 import Icon from '../components/Icon.vue'
-import Markdown from '../components/Markdown.vue'
 import Modal from '../components/Modal.vue'
+import SkillImport from '../components/SkillImport.vue'
+import SkillWorkbench from '../components/SkillWorkbench.vue'
 import UiAlert from '../components/UiAlert.vue'
 import UiButton from '../components/UiButton.vue'
-import UiSegments from '../components/UiSegments.vue'
 import VirtualSelect from '../components/VirtualSelect.vue'
 import {
   BookOpen,
-  Code,
-  Eye,
-  FileCode,
+  Files,
   FolderGit2,
+  Github,
   Globe,
+  HardDrive,
+  Import,
   Layers,
   Pencil,
   Plus,
   Search,
+  Terminal,
   Trash2,
 } from '../icons'
+import { formatBytes, plural, shortCommit } from '../skill-bundle'
 import { iconButton } from '../ui'
 
 const query = ref('')
 const scopeFilter = ref('all')
-const open = ref(false)
-const preview = ref(false)
-const original = ref<Skill>()
-const name = ref('')
-const scope = ref('global')
-const content = ref('')
 const error = ref('')
-const busy = ref(false)
 const deleting = ref<Skill>()
-const files = ref<string[]>([])
-const file = ref('SKILL.md')
-const fileContent = ref('')
-const newFile = ref('')
+const importing = ref(false)
+// `undefined` keeps the workbench closed; `null` opens it on a new skill.
+const editing = ref<{ scope: string, name: string } | null>()
+const owner = computed(() => state.installationRole === 'owner')
 const scopes = computed(() => [
   {
     value: 'global',
@@ -63,81 +59,31 @@ const scopes = computed(() => [
   })),
 ])
 const scopeFilters = computed(() => [{ value: 'all', label: 'All skills', icon: Layers }, ...scopes.value])
-const fileOptions = computed(() => [...new Set([...files.value, file.value])].map(entry => ({ value: entry, label: entry, icon: FileCode })))
 const items = computed(() =>
   state.skills.filter(
-    s =>
-      (scopeFilter.value === 'all' || s.scope === scopeFilter.value)
-      && `${s.name} ${s.description}`
+    skill =>
+      (scopeFilter.value === 'all' || skill.scope === scopeFilter.value)
+      && `${skill.name} ${skill.description} ${skill.source?.repository ?? ''}`
         .toLowerCase()
         .includes(query.value.toLowerCase()),
   ),
 )
 
-async function edit(skill?: Skill) {
-  if (state.installationRole === 'member' && !skill)
+function scopeName(skill: Skill) {
+  return skill.scope === 'global' ? 'Global' : state.projects.find(project => project.id === skill.scope)?.name ?? 'Project'
+}
+
+function open(skill?: Skill) {
+  if (!skill && !owner.value)
     return
-
-  original.value = skill
-  name.value = skill?.name ?? ''
-  scope.value = skill?.scope ?? 'global'
-  content.value
-    = skill?.content
-      ?? '---\nname: my-skill\ndescription: Describe when this skill should be used.\n---\n\n# My skill\n\nDescribe the workflow and how to verify completion.\n'
-  file.value = 'SKILL.md'
-  error.value = ''
-  preview.value = state.installationRole === 'member'
-  open.value = true
-  files.value = skill
-    ? await api(`/skills/${skill.scope}/${skill.name}/files`)
-    : []
+  editing.value = skill ? { scope: skill.scope, name: skill.name } : null
 }
 
-async function save() {
-  busy.value = true
-  error.value = ''
-  try {
-    if (file.value === 'SKILL.md') {
-      await api(`/skills/${scope.value}/${name.value}`, {
-        method: 'PUT',
-        body: JSON.stringify({ content: content.value }),
-      })
-    }
-    else {
-      await api(`/skills/${scope.value}/${name.value}/file`, {
-        method: 'PUT',
-        body: JSON.stringify({ path: file.value, content: fileContent.value }),
-      })
-    }
-
-    await refresh()
-    notify('Skill saved')
-    open.value = false
-  }
-  catch (e) {
-    error.value = (e as Error).message
-  }
-  finally {
-    busy.value = false
-  }
-}
-
-async function readFile(value: string) {
-  error.value = ''
-  try {
-    if (value !== 'SKILL.md') {
-      fileContent.value = (
-        await api<{ content: string }>(
-          `/skills/${scope.value}/${name.value}/file?path=${encodeURIComponent(value)}`,
-        )
-      ).content
-    }
-
-    file.value = value
-  }
-  catch (e) {
-    error.value = (e as Error).message
-  }
+async function imported(bundle: SkillBundle) {
+  importing.value = false
+  notify(`Imported ${bundle.name}`)
+  editing.value = { scope: bundle.scope, name: bundle.name }
+  await refresh()
 }
 
 async function remove() {
@@ -156,16 +102,21 @@ async function remove() {
 </script>
 
 <template>
-  <div class="page-heading flex items-center justify-between gap-5 mb-[27px] phone:gap-2.5 phone:flex-wrap phone:mb-[21px]">
+  <div class="page-heading mb-[27px] flex items-center justify-between gap-5 phone:mb-[21px] phone:flex-wrap phone:gap-2.5">
     <div>
       <h1>Skills library</h1>
     </div>
-    <UiButton v-if="state.installationRole === 'owner'" variant="primary" @click="edit()">
-      <Icon :name="Plus" :size="17" />New skill
-    </UiButton>
+    <div v-if="owner" class="flex items-center gap-2.5 phone:w-full">
+      <UiButton class="phone:flex-1" @click="importing = true">
+        <Icon :name="Import" :size="17" />Import
+      </UiButton>
+      <UiButton variant="primary" class="phone:flex-1" @click="open()">
+        <Icon :name="Plus" :size="17" />New skill
+      </UiButton>
+    </div>
   </div>
-  <div class="toolbar flex items-center justify-between gap-5 mb-[23px] tablet:items-start tablet:flex-wrap phone:gap-4 phone:min-w-0">
-    <div class="inline-label flex flex-row items-center gap-2.5 text-xs text-muted whitespace-nowrap min-w-0 max-w-full">
+  <div class="toolbar mb-[23px] flex items-center justify-between gap-5 tablet:flex-wrap tablet:items-start phone:min-w-0 phone:gap-4">
+    <div class="inline-label flex max-w-full min-w-0 flex-row items-center gap-2.5 text-xs whitespace-nowrap text-muted">
       <span>Scope</span><VirtualSelect
         v-model="scopeFilter"
         label="Scope"
@@ -173,44 +124,57 @@ async function remove() {
         compact
         hide-label
       />
-    </div><label class="search-field flex flex-row items-center gap-[7px] text-subtle bg-raised border border-line rounded-[7px] min-w-0 phone:w-full px-2.5 py-0"><Icon :name="Search" :size="17" /><input
+    </div><label class="search-field flex min-w-0 flex-row items-center gap-[7px] rounded-[7px] border border-line bg-raised px-2.5 py-0 text-subtle phone:w-full"><Icon :name="Search" :size="17" /><input
       v-model="query"
       placeholder="Search skills"
       aria-label="Search skills"
     ></label>
   </div>
-  <UiAlert v-if="error && !open">
+  <UiAlert v-if="error">
     {{ error }}
   </UiAlert>
-  <div v-if="items.length" class="skill-grid grid grid-cols-3 gap-5 compact:grid-cols-2 phone:grid-cols-1">
+  <div v-if="items.length" class="skill-grid grid grid-cols-3 gap-x-5 gap-y-2 compact:grid-cols-2 phone:grid-cols-1!">
     <article
       v-for="skill in items"
       :key="`${skill.scope}/${skill.name}`"
-      class="skill-card border-t border-line py-6"
+      class="skill-card group flex min-w-0 flex-col border-t border-line py-6"
     >
-      <div class="skill-card-top flex items-center gap-2 mb-[17px]">
-        <span class="skill-symbol text-muted bg-surface w-[35px] h-[35px] grid place-items-center rounded-[9px]"><Icon :name="BookOpen" :size="21" /></span><span class="pill inline-flex bg-soft text-accent rounded-[5px] text-xs font-[650] whitespace-nowrap px-2 py-1" :class="{ 'error-pill': !skill.valid }">{{
-          !skill.valid
-            ? "Needs attention"
-            : skill.scope === "global"
-              ? "Global"
-              : state.projects.find((p) => p.id === skill.scope)?.name
-        }}</span><button
-          v-if="state.installationRole === 'owner'"
+      <div class="skill-card-top mb-[17px] flex min-w-0 items-center gap-2">
+        <span class="skill-symbol grid h-[35px] w-[35px] shrink-0 place-items-center rounded-[9px] bg-surface text-muted transition-colors group-hover:bg-soft group-hover:text-accent"><Icon :name="BookOpen" :size="21" /></span>
+        <span class="pill inline-flex shrink-0 rounded-[5px] bg-soft px-2 py-1 text-xs font-[650] whitespace-nowrap text-accent" :class="{ 'error-pill': !skill.valid }">{{ skill.valid ? scopeName(skill) : 'Needs attention' }}</span>
+        <span
+          v-if="skill.source"
+          class="inline-flex min-w-0 items-center gap-1.5 rounded-[5px] border border-line bg-surface px-1.5 py-[3px] text-2xs text-muted"
+          :title="`Imported from github.com/${skill.source.repository}${skill.source.path ? `/${skill.source.path}` : ''} at ${shortCommit(skill.source.commit)}${skill.source.modified ? ' · edited since' : ''}`"
+          data-testid="skill-source"
+        >
+          <Icon :name="Github" :size="12" class="shrink-0 text-ink" />
+          <span class="truncate font-medium text-ink">{{ skill.source.repository }}</span>
+          <code class="shrink-0 text-3xs">{{ shortCommit(skill.source.commit) }}</code>
+          <span v-if="skill.source.modified" class="shrink-0 text-3xs font-semibold text-warning">· edited</span>
+        </span>
+        <button
+          v-if="owner"
           :class="twMerge(iconButton, 'icon-button')"
           :aria-label="`Edit ${skill.name}`"
-          @click="edit(skill)"
+          @click="open(skill)"
         >
           <Icon :name="Pencil" :size="16" />
         </button>
       </div>
-      <button class="skill-title font-heading [font-size:15px] font-[650] text-left wrap-anywhere p-0" @click="edit(skill)">
+      <button class="skill-title p-0 text-left font-heading [font-size:15px] font-[650] wrap-anywhere hover:underline" @click="open(skill)">
         {{ skill.name }}
       </button>
-      <p>{{ skill.description }}</p>
-      <footer>
-        <code>.agents/skills</code><button
-          v-if="state.installationRole === 'owner'"
+      <p class="flex-1">
+        {{ skill.valid ? skill.description : skill.error || skill.description }}
+      </p>
+      <footer class="gap-3">
+        <span class="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1 text-2xs tabular-nums">
+          <span class="inline-flex items-center gap-1" :title="plural(skill.files ?? 1, 'file')"><Icon :name="Files" :size="13" />{{ plural(skill.files ?? 1, 'file') }}</span>
+          <span v-if="skill.bytes !== undefined" class="inline-flex items-center gap-1"><Icon :name="HardDrive" :size="13" />{{ formatBytes(skill.bytes) }}</span>
+          <span v-if="skill.executables" class="inline-flex items-center gap-1 text-success"><Icon :name="Terminal" :size="13" />{{ plural(skill.executables, 'script') }}</span>
+        </span><button
+          v-if="owner"
           :class="twMerge(iconButton, 'icon-button')"
           :aria-label="`Delete ${skill.name}`"
           @click="deleting = skill"
@@ -222,119 +186,37 @@ async function remove() {
   </div>
   <Empty
     v-else
-    title="Your playbook starts here"
-    description="Add repeatable instructions for reviews, releases, research, and the work you do often."
+    :title="query || scopeFilter !== 'all' ? 'No matching skills' : 'Your playbook starts here'"
+    :description="query || scopeFilter !== 'all' ? 'Try another search or scope.' : 'Add repeatable instructions, scripts and references for reviews, releases, research, and the work you do often.'"
   >
-    <UiButton v-if="state.installationRole === 'owner'" @click="edit()">
-      <Icon :name="Plus" :size="16" />Create your first skill
-    </UiButton>
-  </Empty><Modal
-    v-if="open"
-    :title="state.installationRole === 'member' ? 'View skill' : original ? 'Edit skill' : 'Add to your playbook'"
-    wide
-    @close="open = false"
-  >
-    <form @submit.prevent="save">
-      <div class="modal-body px-6.5 py-6 phone:p-5">
-        <div class="form-grid grid grid-cols-[1fr_1fr] gap-5 phone:grid-cols-1 phone:gap-4.5">
-          <label>Name<input
-            v-model="name"
-            aria-label="Skill name"
-            :disabled="!!original"
-            required
-            pattern="[a-z0-9][a-z0-9\-]{0,63}"
-            placeholder="my-skill"
-          ><small>Match the name in your YAML frontmatter.</small></label><VirtualSelect
-            v-model="scope"
-            label="Scope"
-            :options="scopes"
-            :disabled="!!original"
-          />
-        </div>
-        <div class="editor-toolbar flex justify-between items-center mt-4.5 mb-2.5 text-xs text-muted phone:flex-wrap phone:gap-2.5">
-          <VirtualSelect
-            v-if="original"
-            :model-value="file"
-            label="Skill file"
-            :options="fileOptions"
-            compact
-            hide-label
-            @update:model-value="readFile"
-          /><span v-else>SKILL.md</span>
-          <UiSegments
-            v-if="state.installationRole === 'owner'"
-            v-model="preview"
-            label="Skill editor view"
-            compact
-            :options="[{ value: false, label: 'Write', icon: Code }, { value: true, label: 'Preview', icon: Eye }]"
-          />
-        </div>
-        <div v-if="preview" class="skill-preview h-82.5 overflow-auto border border-line rounded-lg p-5">
-          <Markdown :content="file === 'SKILL.md' ? content : fileContent" />
-        </div>
-        <textarea
-          v-else-if="file === 'SKILL.md'"
-          v-model="content"
-          class="code-editor font-mono! leading-[1.8]! text-xs! [tab-size:2]"
-          rows="15"
-          spellcheck="false"
-          aria-label="Skill content"
-        /><textarea
-          v-else
-          v-model="fileContent"
-          class="code-editor font-mono! leading-[1.8]! text-xs! [tab-size:2]"
-          rows="15"
-          spellcheck="false"
-          aria-label="Supporting file content"
-        />
-        <div v-if="original && state.installationRole === 'owner'" class="supporting-file flex gap-2.5 mt-3.5 phone:flex-wrap">
-          <input
-            v-model="newFile"
-            placeholder="Add supporting file, e.g. checklist.md"
-            aria-label="New supporting file"
-          ><UiButton
-            type="button"
-            size="small"
-            :disabled="!newFile"
-            @click="
-              file = newFile;
-              fileContent = '';
-              newFile = '';
-              preview = false;
-            "
-          >
-            Add file
-          </UiButton>
-        </div>
-        <UiAlert v-if="error">
-          {{ error }}
-        </UiAlert>
-      </div>
-      <footer class="modal-actions flex justify-end gap-2.5 bg-surface border-t border-line sticky bottom-0 phone:flex-wrap px-6.5 py-4.5 phone:px-5 phone:py-4">
-        <UiButton type="button" @click="open = false">
-          Cancel
-        </UiButton><UiButton
-          v-if="state.installationRole === 'owner'"
-          variant="primary"
-          type="submit"
-          :disabled="busy"
-        >
-          {{ busy ? "Saving…" : "Save skill" }}
-        </UiButton>
-      </footer>
-    </form>
-  </Modal><Modal
+    <div v-if="owner && !query && scopeFilter === 'all'" class="flex flex-wrap justify-center gap-2.5">
+      <UiButton @click="importing = true">
+        <Icon :name="Import" :size="16" />Import a skill
+      </UiButton>
+      <UiButton variant="primary" @click="open()">
+        <Icon :name="Plus" :size="16" />Create your first skill
+      </UiButton>
+    </div>
+  </Empty>
+  <SkillWorkbench
+    v-if="editing !== undefined"
+    :key="editing ? `${editing.scope}/${editing.name}` : 'new'"
+    :target="editing"
+    @close="editing = undefined"
+  />
+  <SkillImport v-if="importing" @close="importing = false" @imported="imported" />
+  <Modal
     v-if="deleting"
     title="Remove this skill?"
     @close="deleting = undefined"
   >
     <div class="modal-body px-6.5 py-6 phone:p-5">
       <p>
-        This removes “{{ deleting.name }}” and its supporting files from disk.
+        This removes “{{ deleting.name }}” and its {{ plural(deleting.files ?? 1, 'file') }} from disk.
         Existing run snapshots remain available.
       </p>
     </div>
-    <footer class="modal-actions flex justify-end gap-2.5 bg-surface border-t border-line sticky bottom-0 phone:flex-wrap px-6.5 py-4.5 phone:px-5 phone:py-4">
+    <footer class="modal-actions sticky bottom-0 flex justify-end gap-2.5 border-t border-line bg-surface px-6.5 py-4.5 phone:flex-wrap phone:px-5 phone:py-4">
       <UiButton @click="deleting = undefined">
         Cancel
       </UiButton><UiButton variant="danger" @click="remove">

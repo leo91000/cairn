@@ -18,7 +18,7 @@ export const accessPolicy = z.object({
 })
 export const agentInput = z.object({
   name,
-  provider: z.enum(['codex', 'claude']).default('codex'),
+  provider: z.enum(['codex', 'claude', 'opencode']).default('codex'),
   description: z.string().max(500).default(''),
   model: z.string().max(100).default(''),
   reasoning: reasoningEffort.default('high'),
@@ -98,6 +98,7 @@ export interface TaskOutcome {
   messageId?: string | null
 }
 export interface Run {
+  suspendedByExclusive?: import('./nodes').ExclusiveReservation | null
   retry?: {
     attempt: number
     limit: number
@@ -165,7 +166,12 @@ export interface Run {
     agent: Agent
     project: Project | null
     projects?: Project[]
-    skills: { name: string, path: string, content: string }[]
+    skills: {
+      name: string
+      path: string
+      content: string
+      bundle?: string
+    }[]
   }
   usage: Record<string, number> | null
 }
@@ -177,6 +183,86 @@ export interface Skill {
   path: string
   valid: boolean
   error?: string
+  files?: number
+  bytes?: number
+  executables?: number
+  source?: SkillSource | null
+}
+// Multi-file skill bundles; see docs/SKILLS.md.
+export interface SkillSource {
+  type: 'github'
+  repository: string
+  path: string
+  ref: string
+  commit: string
+  importedAt: number
+  modified: boolean
+}
+export interface SkillFile {
+  path: string
+  size: number
+  executable: boolean
+  text: boolean
+}
+export interface SkillLimits {
+  fileBytes: number
+  bundleBytes: number
+  files: number
+  uploadBytes: number
+}
+export interface SkillBundle {
+  scope: string
+  name: string
+  revision: string
+  files: SkillFile[]
+  limits: SkillLimits
+  source: SkillSource | null
+  description?: string | null
+}
+export interface SkillFileContent {
+  content: string
+  encoding: 'utf-8' | 'base64'
+  size: number
+  executable: boolean
+}
+export type SkillChange
+  = | {
+    op: 'write'
+    path: string
+    content?: string
+    encoding?: 'utf-8' | 'base64'
+    upload?: string
+    executable?: boolean
+  }
+  | { op: 'delete', path: string }
+  | { op: 'move', from: string, to: string }
+  | { op: 'mode', path: string, executable: boolean }
+export interface SkillImport {
+  imported: SkillBundle | null
+  candidates: string[]
+}
+export interface SkillArchiveChunk {
+  filename: string
+  revision: string
+  size: number
+  offset: number
+  content: string
+}
+export interface SkillDiffLine {
+  kind: 'context' | 'added' | 'removed' | 'gap'
+  text: string
+}
+export interface SkillSourceChange {
+  path: string
+  status: 'added' | 'removed' | 'modified'
+  binary: boolean
+  lines?: SkillDiffLine[]
+}
+export interface SkillSourceStatus {
+  source: SkillSource
+  latest: { commit: string, message: string, date: string }
+  current: boolean
+  changes: SkillSourceChange[]
 }
 export interface RunEvent {
   id: number

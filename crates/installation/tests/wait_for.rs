@@ -234,6 +234,43 @@ async fn run_wait_survives_restart_and_only_resumes_after_target_completion() {
 }
 
 #[tokio::test]
+async fn installation_access_can_wait_for_another_agents_run() {
+    let f = Fixture::new().await;
+    let agent =
+        f.s.agent(json!({ "name": "Delegated worker" }), None)
+            .await
+            .unwrap();
+    let task =
+        f.s.task(
+            json!({
+                "name": "Delegated work",
+                "prompt": "Check result",
+                "worktree": false,
+                "agentId": agent["id"]
+            }),
+            None,
+        )
+        .await
+        .unwrap();
+    let target =
+        f.s.enqueue(text(&task, "id"), "manual", None)
+            .await
+            .unwrap();
+    let wait = f
+        .schedule(json!({ "type": "run_finished", "runId": target["id"] }))
+        .await;
+    assert_eq!(wait["deferred"], true);
+    f.finish().await;
+    f.s.store
+        .patch_run(text(&target, "id"), json!({ "status": "succeeded" }))
+        .await
+        .unwrap();
+    let resumed = f.tick().await;
+    assert_eq!(resumed["run"]["status"], "queued");
+    assert!(text(&resumed["run"]["chatExecution"], "text").contains(text(&target, "id")));
+}
+
+#[tokio::test]
 async fn already_finished_sources_return_results_without_scheduling_or_ending_the_turn() {
     for status in ["succeeded", "failed", "cancelled", "interrupted"] {
         let f = Fixture::new().await;
@@ -446,11 +483,12 @@ async fn sleep_replaces_condition_waits_and_private_tokens_follow_agent_identity
         &f.token,
         &json!({
             "condition": { "type": "run_finished", "runId": target["id"] },
-            "timeoutSeconds": 420, "reason": "Not this agent",
+            "timeoutSeconds": 420,
+            "reason": "Observe another agent",
         }),
     )
     .await;
-    assert_eq!(result.unwrap_err().status, 403);
+    assert_eq!(result.unwrap()["deferred"], true);
 }
 
 #[tokio::test]
@@ -651,7 +689,7 @@ async fn all_existing_cancellation_paths_also_invalidate_condition_waits() {
             "cancel" => f.s.worker.cancel(&f.s, &f.run).await.unwrap(),
             "trash" => {
                 f.s.chat_trash(&f.chat, true).await.unwrap();
-                f.s.chat_restore(&f.chat).await.unwrap();
+                assert_eq!(f.s.chat_restore(&f.chat).await.unwrap_err().status, 410);
             }
             "failure" => {
                 f.s.chat_pause(&f.chat, true).await.unwrap();

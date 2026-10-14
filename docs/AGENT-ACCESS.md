@@ -11,17 +11,23 @@ under **Connections → 1Password**. Those grants can be revoked live; see
 **Allow access to the current Cairn installation** is also opt-in, including for
 Main and existing agents. The owner enables it in the web or Android agent editor.
 It automatically supplies `cairn_installation` to Codex and Claude Code, without
-a server URL, personal access token, or OAuth setup. The agent can list its
-profile, permitted projects, missions and runs; create or schedule missions;
-update or start them; inspect run history; and cancel runs. Agent, project, skill,
-account and MCP connection administration are not exposed through this execution
-grant.
+a server URL, personal access token, or OAuth setup. This delegates the complete
+public management catalogue across the installation: agents, projects, global
+and project skills, MCP connections, missions and runs. This authority applies
+even when the agent's direct resource, GitHub or node permissions are restricted.
+It includes changing other agents' permissions and managing their work. Account
+administration remains outside the public MCP catalogue.
 
-Missions and runs must use the calling agent, with resource, tool, execution
-and node permissions within its snapshotted permissions. Another agent may have
-different GitHub credentials or 1Password grants even with an identical access
-policy, so creating or changing a mission cannot select another agent. New
-missions default to the calling agent when no agent ID is supplied. The owner
+The `delete_agent` management tool removes an unused agent, including its saved
+credentials, portrait and 1Password assignments. Main, agents referenced by tasks
+(including archived tasks), and agents with active work cannot be deleted. Move
+their tasks to another agent and finish or cancel active work first. Completed
+run history is preserved.
+
+New missions default to the calling agent when no agent ID is supplied; another
+agent can be selected explicitly. A mission uses its selected agent's permissions,
+GitHub credentials and 1Password grants. Installation access can also inspect,
+cancel or wait for runs belonging to other agents in the installation. The owner
 delegates these operations through the agent setting; newly created scheduled
 missions use the owner's authorship, as with the existing management MCP. The
 ordinary author reconciliation still ends them if that owner's access ends.

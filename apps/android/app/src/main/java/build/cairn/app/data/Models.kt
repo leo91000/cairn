@@ -104,10 +104,20 @@ data class Skill(
     val path: String = "",
     val valid: Boolean = true,
     val error: String? = null,
+    /** Counts over the whole skill directory; see docs/SKILLS.md. */
+    val files: Int = 0,
+    val bytes: Long = 0,
+    val executables: Int = 0,
+    val source: SkillSource? = null,
 )
 
 @Serializable
-data class SnapshotSkill(val name: String, val path: String = "", val content: String = "")
+data class SnapshotSkill(
+    val name: String,
+    val path: String = "",
+    val content: String = "",
+    val bundle: String? = null,
+)
 
 @Serializable
 data class Snapshot(
@@ -162,6 +172,7 @@ data class Run(
     val movementError: String? = null,
     val backup: NodeBackup? = null,
     val storage: RunStorage? = null,
+    val suspendedByExclusive: ExclusiveReservation? = null,
 ) {
     val active
         get() = status == "running" || status == "queued"

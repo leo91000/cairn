@@ -1,8 +1,7 @@
 <script setup lang="ts">
 import { computed, watch } from 'vue'
 import { useRoute } from 'vue-router'
-import { chatList, publishChats } from '../chat-list'
-import FilColumn from '../components/FilColumn.vue'
+import { publishChats } from '../chat-list'
 import Icon from '../components/Icon.vue'
 import RunWorkspace from '../components/RunWorkspace.vue'
 import { Plus } from '../icons'
@@ -22,10 +21,7 @@ watch(live.snapshot, (value) => {
 </script>
 
 <template>
-  <div class="fil-page flex h-full min-h-0">
-    <div class="w-96 shrink-0 border-r border-line bg-inset tablet:w-full tablet:border-0 tablet:bg-transparent" :class="{ 'tablet:hidden': runId }">
-      <FilColumn :chats="chatList" :selected-run="runId" />
-    </div>
+  <div class="fil-page flex h-full min-h-0 min-w-0 flex-1" :class="{ 'tablet:hidden': !runId }">
     <section
       v-if="runId"
       class="fil-run flex min-h-0 min-w-0 flex-1 flex-col px-9 pt-8 pb-7 tablet:px-6 phone:px-3 phone:pt-[max(14px,env(safe-area-inset-top))] phone:pb-3 [&_.back-link]:hidden tablet:[&_.back-link]:inline-flex"

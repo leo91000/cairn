@@ -46,7 +46,7 @@ handshake without an adapter or server-side transport sessions.
 
 ## Agents inside a VM
 
-The tools above are for external clients. An agent running in a VM receives two
+The tools above are for external clients. An agent running in a VM receives
 run-scoped endpoints instead: `cairn_workspace` at
 `http://127.0.0.1:5202/mcp-workspace`, and each assigned HTTP connection at
 `http://127.0.0.1:5202/mcp-gateway/{id}`. Codex and Claude Code receive the same
@@ -57,6 +57,15 @@ firewall exception. The manager accepts only these two endpoints on that channel
 and only with a token granted to that run; the token expires or is revoked with
 the run. A host execution without a VM uses `PUBLIC_URL`. See
 [VM-local MCP channel](MICROVMS.md#vm-local-mcp-channel).
+
+When the owner enables **Allow access to the current Cairn installation**, the
+agent also receives `cairn_installation` at `/mcp-installation`. It exposes the
+complete public management tool catalogue, including `save_skill`, through the
+run's revocable grant. This delegates management across the entire installation,
+including other agents and their work, even when the caller's direct resource
+access is restricted. It requires no external OAuth connection or personal token.
+Disabling the option, ending or cancelling the execution, or changing its chat
+turn invalidates the access. See [the installation-access decision](adr/0036-opt-in-installation-tools-for-agents.md).
 
 ## Authorization
 
@@ -77,12 +86,13 @@ hour, and refresh tokens after 30 days. Browser sessions are separate credential
 
 | Scope | Tools |
 | --- | --- |
-| `read` | `list_agents`, `list_projects`, `list_tasks`, `list_runs`, `get_run`, `read_run_content`, `list_skills`, `list_mcps` |
-| `manage` | `save_agent`, `update_agent`, `save_project`, `create_task`, `update_task`, `save_skill`, `create_mcp`, `update_mcp`, `test_mcp`, `disconnect_mcp`, `delete_mcp` |
+| `read` | `list_agents`, `list_projects`, `list_tasks`, `list_runs`, `get_run`, `read_run_content`, `list_skills`, `read_skill`, `list_mcps` |
+| `manage` | `save_agent`, `update_agent`, `save_project`, `create_task`, `update_task`, `save_skill`, `edit_skill_files`, `create_mcp`, `update_mcp`, `test_mcp`, `disconnect_mcp`, `delete_mcp` |
 | `run` | `run_task`, `cancel_run` |
 
 `save_agent` and `save_project` create new records. `update_task` replaces the
-existing task configuration; `save_skill` creates or replaces its SKILL.md.
+existing task configuration; `save_skill` creates or replaces its SKILL.md;
+`edit_skill_files` applies a batch of file changes (see [skills](SKILLS.md)).
 `update_agent` preserves omitted top-level fields; an explicit access policy
 replaces the complete policy. MCP connection tools share the UI's validation,
 encrypted credential storage and run-grant enforcement. See

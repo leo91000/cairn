@@ -9,6 +9,7 @@ import {
   watch,
 } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
+import { providers as codingAgents } from '../../../../packages/contracts/accounts'
 import { api, notify, state } from '../api'
 import AgentAvatar from '../components/AgentAvatar.vue'
 import Icon from '../components/Icon.vue'
@@ -549,7 +550,7 @@ const radio = 'size-4.5 shrink-0 accent-[var(--color-accent)]'
                 <AgentAvatar :name="item.name" :identity="item.id" :size="32" />
                 <span class="min-w-0 flex-1">
                   <span class="block truncate text-xs font-semibold">{{ item.name }}</span>
-                  <span class="block truncate text-2xs text-muted">{{ item.provider === 'claude' ? 'Claude Code' : 'Codex' }} · {{ item.access.projects === null ? 'all projects' : state.projects.find(p => p.id === item.access.projects?.[0])?.name ?? 'no project' }}{{ item.access.installation ? ' · installation access' : '' }}</span>
+                  <span class="block truncate text-2xs text-muted">{{ codingAgents[item.provider || 'codex'].label }} · {{ item.access.projects === null ? 'all projects' : state.projects.find(p => p.id === item.access.projects?.[0])?.name ?? 'no project' }}{{ item.access.installation ? ' · installation access' : '' }}</span>
                 </span>
                 <span v-if="problem(item)" class="inline-flex shrink-0 items-center gap-1 rounded-full bg-warning-surface px-2.25 py-0.5 text-2xs font-semibold text-warning"><Icon :name="TriangleAlert" :size="12" />{{ problem(item) }}</span>
               </label>

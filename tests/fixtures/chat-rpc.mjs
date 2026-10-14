@@ -306,6 +306,183 @@ export function chatFixture() {
         return true
       }
 
+      if (text.includes('fixture:subagents')) {
+        // Codex names the spawned thread once the spawn completes, then reports that thread's
+        // own activity and the statuses its collaboration tools observe.
+        const child = 'fixture-child'
+        const collab = (id, tool, status, fields) => ({
+          id,
+          type: 'collabAgentToolCall',
+          tool,
+          status,
+          senderThreadId: thread.id,
+          receiverThreadIds: [child],
+          prompt: null,
+          model: null,
+          reasoningEffort: null,
+          agentsStates: {},
+          ...fields,
+        })
+        const spawn = collab(`spawn-${active.id}`, 'spawnAgent', 'inProgress', { receiverThreadIds: [], prompt: 'Review the keyboard handling\nCheck every shortcut.', model: 'gpt-fixture-mini' })
+        notify('item/started', { threadId: thread.id, item: spawn })
+        if (text.includes('fixture:subagents-lifecycle')) {
+          notify('item/completed', {
+            threadId: thread.id,
+            item: {
+              id: 'early-activity',
+              type: 'subAgentActivity',
+              kind: 'started',
+              agentThreadId: child,
+              agentPath: '/root/keyboard',
+              model: 'gpt-fixture-mini',
+            },
+          })
+          notify('item/completed', {
+            threadId: child,
+            item: {
+              id: 'early-command',
+              type: 'commandExecution',
+              command: 'pwd',
+              status: 'completed',
+              exitCode: 0,
+            },
+          })
+        }
+
+        const spawned = {
+          ...spawn,
+          status: 'completed',
+          receiverThreadIds: [child],
+          agentsStates: { [child]: { status: 'pendingInit', message: null } },
+        }
+        active.items.push(spawned)
+        notify('item/completed', { threadId: thread.id, item: spawned })
+        if (text.includes('fixture:subagents-message-parent')) {
+          const command = {
+            id: 'parent-command',
+            type: 'commandExecution',
+            command: 'pnpm check',
+            status: 'inProgress',
+          }
+          notify('item/started', { threadId: thread.id, turnId: active.id, item: command })
+          notify('item/completed', {
+            threadId: text.includes('fixture:subagents-message-parent-direct') ? thread.id : child,
+            turnId: 'child-turn',
+            item: {
+              id: 'message-parent',
+              type: 'subAgentActivity',
+              kind: 'interacted',
+              agentThreadId: thread.id,
+              agentPath: '/root',
+            },
+          })
+          notify('item/completed', { threadId: thread.id, turnId: active.id, item: { ...command, status: 'completed', exitCode: 0 } })
+        }
+
+        const childTurn = { id: 'child-turn', status: 'inProgress', items: [] }
+        notify('turn/started', { threadId: child, turn: childTurn })
+        if (text.includes('fixture:subagents-lifecycle')) {
+          const nested = {
+            ...spawn,
+            id: 'nested-spawn',
+            senderThreadId: child,
+            status: 'completed',
+            receiverThreadIds: ['fixture-grandchild'],
+            agentsStates: { 'fixture-grandchild': { status: 'running', message: null } },
+          }
+          notify('item/completed', { threadId: child, item: nested })
+          notify('item/completed', {
+            threadId: 'fixture-grandchild',
+            item: {
+              id: 'child-command',
+              type: 'commandExecution',
+              command: 'pnpm test',
+              status: 'completed',
+              exitCode: 0,
+            },
+          })
+          notify('turn/completed', { threadId: 'fixture-grandchild', turn: { id: 'nested-turn', status: 'completed' } })
+          const interrupted = {
+            ...spawn,
+            id: 'interrupted-spawn',
+            status: 'interrupted',
+            receiverThreadIds: [],
+          }
+          notify('item/completed', { threadId: thread.id, item: interrupted })
+        }
+
+        notify('item/completed', {
+          threadId: child,
+          item: {
+            id: 'child-command',
+            type: 'commandExecution',
+            command: 'rg -n shortcut src',
+            status: 'completed',
+            exitCode: 0,
+            aggregatedOutput: 'src/shortcuts.ts:1',
+            durationMs: 9,
+          },
+        })
+        // `fixture:subagents-working` leaves the subagent at work while the turn stays open.
+        if (text.includes('fixture:subagents-working')) {
+          if (text.includes('fixture:subagents-working-team')) {
+            const second = collab(`second-${active.id}`, 'spawnAgent', 'completed', {
+              receiverThreadIds: ['fixture-second'],
+              prompt: 'Check the panel accessibility',
+              agentsStates: { 'fixture-second': { status: 'running', message: null } },
+            })
+            active.items.push(second)
+            notify('item/completed', { threadId: thread.id, item: second })
+          }
+
+          hold = true
+        }
+        else {
+          notify('item/started', { threadId: child, item: { id: 'child-reply', type: 'agentMessage', text: '' } })
+          notify('item/agentMessage/delta', { threadId: child, itemId: 'child-reply', delta: 'Keyboard handling looks right.' })
+          notify('item/completed', { threadId: child, item: { id: 'child-reply', type: 'agentMessage', text: 'Keyboard handling looks right.' } })
+          const failed = text.includes('fixture:subagents-errored')
+          notify('turn/completed', { threadId: child, turn: { ...childTurn, status: failed ? 'failed' : 'completed' } })
+          if (failed) {
+            notify('item/completed', {
+              threadId: thread.id,
+              item: {
+                id: 'completion',
+                type: 'subAgentActivity',
+                kind: 'completed',
+                agentThreadId: child,
+                agentPath: '/root/keyboard',
+              },
+            })
+          }
+
+          if (text.includes('fixture:subagents-lifecycle')) {
+            notify('item/completed', {
+              threadId: thread.id,
+              item: {
+                id: 'interaction',
+                type: 'subAgentActivity',
+                kind: 'interacted',
+                agentThreadId: child,
+                agentPath: '/root/keyboard',
+              },
+            })
+          }
+
+          const waited = collab(`wait-${active.id}`, 'wait', 'completed', { agentsStates: { [child]: { status: failed ? 'errored' : 'completed', message: 'Keyboard handling looks right.' } } })
+          const closed = collab(`close-${active.id}`, 'closeAgent', 'completed', { agentsStates: { [child]: { status: 'shutdown', message: null } } })
+          for (const item of [waited, closed]) {
+            active.items.push(item)
+            notify('item/completed', { threadId: thread.id, item })
+          }
+
+          if (text.includes('fixture:subagents-followup'))
+            notify('turn/started', { threadId: child, turn: { id: 'follow-up', status: 'inProgress', items: [] } })
+        }
+
+        save()
+      }
+
       if (text.includes('fixture:disconnect'))
         process.exit(1)
       if (text.includes('finish now'))

@@ -32,7 +32,7 @@ application. `PUBLIC_URL` continues to describe private installation traffic.
 `/privacy` is the public privacy policy, linked from the sign-in screen. The
 account shell renders it without loading the session or calling the account API.
 Its text describes Beacon's stored data, retention and providers; keep it in step
-with them (see [production](PRODUCTION-CAIRN.md#4-resend-and-optional-sign-inpush)).
+with them (see [production configuration](PRODUCTION-CAIRN-SETUP.md#email-oauth-and-push)).
 
 Browser tests use the production `cairn-beacon` and `cairn` binaries, a separate
 Postgres schema per worker, a real email proof and installation claim, and the
@@ -51,8 +51,10 @@ Use the `beacon` target in `Dockerfile` and
 `deploy/beacon/compose.production.yaml`. The image bundles the beacon binary
 and matching web output, runs as UID 1000, and requires environment-only secrets.
 The existing `deploy/beacon/compose.yaml` remains development-only.
-Follow [the cairn.build runbook](PRODUCTION-CAIRN.md) for the fresh same-server
-installation, proxy trust, email, OAuth, approval gates and Postgres rollback.
+Follow [production configuration](PRODUCTION-CAIRN-SETUP.md) for a fresh same-server
+installation, proxy trust, email and OAuth. Follow the
+[release runbook](PRODUCTION-CAIRN.md) for subsequent releases, approval and
+Postgres rollback. The [v0.53 cutover](archive/CAIRN-V0.53-MIGRATION.md) is historical.
 `/health` returns no-store JSON (`status`, `commit`, `runtimeId`) and verifies
 Postgres availability through a cache sampled every five seconds with a
 one-second timeout. HTTP probes never query the database, and startup remains
@@ -103,7 +105,7 @@ notification. Sticky routing per installation alone does not provide immediate
 session revocation across installations. Persisted checks eventually detect
 machine revocation in another process, but do not make that deployment supported.
 Do not add beacon replicas until shared connection routing and revocation
-notifications are implemented. [ADR-0032](adr/0032-single-beacon-relay-process.md)
+notifications are implemented. [ADR-0032](adr/0032-single-official-relay-process.md)
 records this restriction of spec #43 and the persisted-check tolerance trade-off.
 Terminate TLS at the public origin with a reverse proxy. The service checks the
 configured origin on every account mutation. IP limits use the TCP peer unless

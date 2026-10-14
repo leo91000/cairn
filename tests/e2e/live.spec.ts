@@ -1,4 +1,5 @@
 import type { BrowserContext, Page } from '@playwright/test'
+import type { RunEvent } from '../../packages/contracts/contracts'
 import { randomUUID } from 'node:crypto'
 import {
   signIn as authenticateWorkspace,
@@ -11,6 +12,123 @@ import {
   useRelayForHttpMocks,
   workspacePath,
 } from './fixtures'
+
+test('chat groups visible calls despite diagnostics, updates and global event ID gaps', async ({ page, workspace }) => {
+  const original = workspace.service.store.runs().find(run => run.status === 'succeeded')!
+  const run = workspace.service.store.addRun({
+    ...original,
+    id: randomUUID(),
+    taskId: randomUUID(),
+    trigger: 'grouping-fixture',
+  })
+  const chat = await workspace.api('/api/chats', 'POST', {})
+  workspace.service.store.put('chats', { ...chat, runId: run.id, title: 'Visible tool groups' })
+  for (let i = 0; i < 65; i++) {
+    const item = { id: `group-tool-${i}`, type: 'command_execution', command: `echo grouping-${i}` }
+    workspace.service.store.event(run.id, 'item.started', '', { item: { ...item, status: 'in_progress' } })
+    workspace.service.store.event(run.id, 'diagnostic', 'heartbeat')
+    workspace.service.store.event(original.id, 'diagnostic', 'Other conversation')
+    workspace.service.store.event(run.id, 'item.updated', '', { item })
+    workspace.service.store.event(run.id, 'item.completed', '', { item: { ...item, exit_code: 0 } })
+  }
+
+  // Keep this test about grouping rather than paging; paging has a separate modal/anchor test.
+  const events = workspace.service.store.events(run.id, 0, 500) as RunEvent[]
+  await useRelayForHttpMocks(page)
+  await page.route(`**/chats/${chat.id}/stream*`, route => route.fulfill({
+    contentType: 'text/event-stream',
+    body: `event: batch\ndata: ${JSON.stringify({
+      events,
+      state: { run, chat },
+      reset: true,
+      more: false,
+      history: `grouping:${run.id}`,
+      hasOlder: false,
+    })}\n\n`,
+  }))
+  await page.goto(workspacePath(`${workspace.url}/chats/${chat.id}`))
+  await authenticateWorkspace(page)
+  const groups = page.getByTestId('agent-actions')
+  await expect(groups).toHaveCount(3)
+  expect(await groups.allTextContents()).toEqual([
+    expect.stringContaining('Ran 30 commands'),
+    expect.stringContaining('Ran 30 commands'),
+    expect.stringContaining('Ran 5 commands'),
+  ])
+})
+
+test('markdown tables wrap prose and keep wide columns reachable within the conversation', async ({ page, workspace }) => {
+  await useRelayForHttpMocks(page)
+  const run = workspace.service.store.runs().find(run => run.status === 'succeeded' && run.trigger !== 'chat')!
+  const description = 'Missing or running required checks keep waiting; required failure wakes the agent. Optional checks do not block. Push a new commit or close the PR and the old wait should report that change.'
+  const longPath = `https://example.test/${'long-path-segment/'.repeat(20)}`
+  const columns = Array.from({ length: 12 }, (_, i) => `Column ${i + 1}`)
+  const text = [
+    '| Feature | What to verify |',
+    '| --- | --- |',
+    `| Waiting for required PR checks | ${description} |`,
+    `| Long link and code | [Reference](${longPath}) and \`${longPath}\` |`,
+    '',
+    'The paragraph after the table stays readable.',
+    '',
+    `| ${columns.join(' | ')} |`,
+    `| ${columns.map(() => '---').join(' | ')} |`,
+    `| ${columns.map((_, i) => `Value ${i + 1}`).join(' | ')} |`,
+  ].join('\n')
+  workspace.service.store.event(run.id, 'item.completed', text, { item: { id: 'table-layout', type: 'agent_message', text } })
+  await page.goto(workspacePath(`${workspace.url}/runs/${run.id}`))
+  await authenticateWorkspace(page)
+  const message = page.locator('.activity-message').filter({ hasText: 'The paragraph after the table stays readable.' })
+  await expect(message.getByRole('table')).toHaveCount(2)
+
+  for (const width of [1488, 390, 320]) {
+    await page.setViewportSize({ width, height: 900 })
+    const proseTable = message.getByRole('table').first()
+    const layout = await proseTable.evaluate((table) => {
+      const markdown = table.closest('.markdown')!
+      const cell = table.querySelector('tbody tr td:last-child')!
+      const range = document.createRange()
+      range.selectNodeContents(cell)
+      return {
+        tableWidth: table.getBoundingClientRect().width,
+        messageWidth: markdown.clientWidth,
+        messageOverflow: markdown.scrollWidth - markdown.clientWidth,
+        textLines: range.getClientRects().length,
+        cellFont: getComputedStyle(cell).fontSize,
+        messageFont: getComputedStyle(markdown).fontSize,
+      }
+    })
+    expect(layout.tableWidth).toBeLessThanOrEqual(layout.messageWidth + 1)
+    expect(layout.messageOverflow).toBeLessThanOrEqual(1)
+    expect(layout.textLines).toBeGreaterThan(1)
+    expect(layout.cellFont).toBe(layout.messageFont)
+    const output = page.getByRole('region', { name: 'Activity output' })
+    expect(await output.evaluate(el => el.scrollWidth - el.clientWidth)).toBeLessThanOrEqual(1)
+    expect(await page.evaluate(() => document.documentElement.scrollWidth - innerWidth)).toBeLessThanOrEqual(1)
+    await expect(message.getByRole('link', { name: 'Reference', exact: true })).toHaveAttribute('href', longPath)
+
+    if (width === 320) {
+      const wideTable = message.getByRole('table').last()
+      const headerLines = await wideTable.getByRole('columnheader').first().evaluate((cell) => {
+        const range = document.createRange()
+        range.selectNodeContents(cell)
+        return range.getClientRects().length
+      })
+      expect(headerLines).toBeLessThanOrEqual(2)
+      const scroll = await wideTable.evaluate((table) => {
+        const container = table.parentElement!
+        container.scrollLeft = container.scrollWidth
+        return { left: container.scrollLeft, overflow: container.scrollWidth - container.clientWidth }
+      })
+      expect(scroll.overflow).toBeGreaterThan(0)
+      expect(scroll.left).toBeGreaterThan(0)
+      await expect(wideTable.getByRole('cell', { name: 'Value 12', exact: true })).toBeInViewport()
+    }
+
+    await message.scrollIntoViewIfNeeded()
+    await page.screenshot({ path: test.info().outputPath(`markdown-tables-${width}.png`), animations: 'disabled' })
+  }
+})
 
 for (const kind of ['chat', 'task'] as const) {
   test(`${kind} automatically fills folded history without a click or scroll`, async ({ page, workspace }) => {
@@ -32,7 +150,7 @@ for (const kind of ['chat', 'task'] as const) {
       workspace.service.store.event(run.id, 'item.completed', text, { item: { id: `buffer-${i}`, type: 'agent_message', text } })
     }
 
-    // Several API pages collapse into one tool group, leaving no scrollbar.
+    // Reads fold into bounded groups; short output should still prefetch older pages.
     for (let i = 0; i < 250; i++) {
       workspace.service.store.event(run.id, 'item.completed', 'Checked a file', {
         item: {
@@ -56,6 +174,10 @@ for (const kind of ['chat', 'task'] as const) {
     await expect(page.locator('.activity-message').filter({ hasText: 'Buffered message 99:' })).toBeAttached()
     expect(requests.length).toBeGreaterThanOrEqual(2)
     expect(new Set(requests).size).toBe(requests.length)
+    const summaries = await page.getByTestId('agent-actions').allTextContents()
+    const readCounts = summaries.flatMap(text => [...text.matchAll(/Read (\d+) files/g)].map(match => Number(match[1])))
+    expect(readCounts.length).toBeGreaterThan(1)
+    expect(readCounts.every(count => count <= 30)).toBe(true)
     // Loading older pages must keep following the latest output.
     const scroller = page.getByRole('region', { name: 'Activity output' })
     await expect.poll(() => scroller.evaluate(el => el.scrollHeight - el.clientHeight - el.scrollTop)).toBeLessThan(2)
@@ -63,6 +185,59 @@ for (const kind of ['chat', 'task'] as const) {
     await page.screenshot({ path: test.info().outputPath(`${kind}-automatic-history.png`), animations: 'disabled' })
   })
 }
+
+test('an older page preserves expanded newer tools and their open detail sheet', async ({ page, workspace }) => {
+  await useRelayForHttpMocks(page)
+  const run = workspace.service.store.runs().find(run => run.status === 'succeeded' && run.trigger !== 'chat')!
+  workspace.service.store.event(run.id, 'turn.started', '')
+  for (let i = 0; i < 260; i++) {
+    workspace.service.store.event(run.id, 'item.completed', '', {
+      item: {
+        id: `inspect-${i}`,
+        type: 'command_execution',
+        command: `echo inspect-${i}`,
+        exit_code: 0,
+      },
+    })
+  }
+
+  let release!: () => void
+  const gate = new Promise<void>((resolve) => {
+    release = resolve
+  })
+  let requested = false
+  await page.route('**/history?**', async (route) => {
+    requested = true
+    await gate
+    await route.continue()
+  })
+  try {
+    await page.goto(workspacePath(`${workspace.url}/runs/${run.id}`))
+    await authenticateWorkspace(page)
+    const groups = page.getByTestId('agent-actions')
+    await expect(groups.nth(1)).toBeVisible()
+    const group = groups.nth(1)
+    await group.locator(':scope > button').click()
+    const step = group.getByTestId('agent-step').first()
+    const label = (await step.textContent())!.match(/echo inspect-\d+/)![0]
+    const groupCount = await groups.count()
+    const stepCount = await group.getByTestId('agent-step').count()
+    await step.click()
+    const sheet = page.getByTestId('agent-step-sheet')
+    await expect(sheet).toBeVisible()
+    // A pending automatic page can finish while the reader inspects a tool.
+    await expect.poll(() => requested).toBe(true)
+    release()
+    await expect.poll(() => groups.count()).toBeGreaterThan(groupCount)
+    await expect(sheet).toBeVisible()
+    await expect(sheet).toContainText(label)
+    await expect(page.getByTestId('agent-step')).toHaveCount(stepCount)
+  }
+  finally {
+    release()
+    await page.unrouteAll({ behavior: 'wait' })
+  }
+})
 
 test('automatic history pauses on errors and resumes only after retry', async ({ page, workspace }) => {
   await useRelayForHttpMocks(page)
@@ -263,19 +438,21 @@ test('cached history survives reload before a delayed stream, then clear on logo
   await page.goto(workspacePath(`${workspace.url}/chats/${chat.id}`))
   await authenticateWorkspace(page)
   await expect(page.locator('.activity-message').filter({ hasText: 'Cache persistence proof' }).first()).toBeVisible()
-  const count = () => page.evaluate(() => new Promise<number>((resolve, reject) => {
+  const count = (current = false) => page.evaluate(({ chatId, current }) => new Promise<number>((resolve, reject) => {
     const request = indexedDB.open('cairn-history-v1', 1)
     request.onsuccess = () => {
       const db = request.result
       const tx = db.transaction('entries', 'readonly')
-      const read = tx.objectStore('entries').count()
-      read.onsuccess = () => resolve(read.result)
+      const read = tx.objectStore('entries').getAll()
+      read.onsuccess = () => resolve(current
+        ? read.result.filter(entry => entry.key.endsWith(`/chats/${chatId}/stream`) && JSON.parse(entry.text).cursor > 0).length
+        : read.result.length)
       tx.oncomplete = () => db.close()
     }
 
     request.onerror = () => reject(request.error)
-  }))
-  await expect.poll(count).toBeGreaterThan(0)
+  }), { chatId: chat.id, current })
+  await expect.poll(() => count(true)).toBe(1)
   const requests: string[] = []
   let release!: () => void
   const gate = new Promise<void>((resolve) => {
@@ -307,7 +484,8 @@ test('cached history survives reload before a delayed stream, then clear on logo
 
   await page.getByRole('button', { name: 'Sign out', exact: true }).click()
   await expect(page.getByLabel('Email address')).toBeVisible()
-  await expect.poll(count).toBe(0)
+  // The account redirect can replace the execution context while storage is inspected.
+  await expect(async () => expect(await count()).toBe(0)).toPass()
 })
 
 test('a cached run restores the reading offset while its stream is still connecting', async ({ page, workspace }) => {
@@ -398,6 +576,8 @@ test('a cached run restores the reading offset while its stream is still connect
   await page.keyboard.press('Enter')
   await expect(scroller).toBeFocused()
   await expectFollowing(page)
+  // Finish removing the previous button before starting a fresh reading gesture.
+  await expect(latest).toHaveCount(0)
   // Scrolling up pauses following again; scrolling back to the end resumes it, as on Android.
   await scroller.evaluate(element => element.scrollTop = 300)
   await expect(latest).toBeVisible()
@@ -448,6 +628,29 @@ test('recent history loads older pages without moving the reader and survives a 
   await expect.poll(async () => Math.abs((await anchor.boundingBox())!.y - top)).toBeLessThan(2)
   await page.unrouteAll({ behavior: 'wait' })
   await useRelayForHttpMocks(page)
+  // Read beyond the former 200-event cache window, then persist all loaded pages.
+  await scroller.evaluate(el => el.scrollTop = 0)
+  await expect(page.locator('.activity-message').filter({ hasText: 'Paged line 050' })).toBeAttached()
+  await scroller.evaluate(el => el.scrollTop = 0)
+  await expect(page.locator('.activity-message').filter({ hasText: 'Paged line 000' })).toBeAttached()
+  // The run also has fixture events before line 000: load that unread prefix before
+  // asserting that reopening needs no history requests at all.
+  await expect.poll(async () => {
+    await scroller.evaluate(el => el.scrollTop = 0)
+    return page.evaluate(runId => new Promise<boolean>((resolve) => {
+      const open = indexedDB.open('cairn-history-v1', 1)
+      open.onsuccess = () => {
+        const db = open.result
+        const tx = db.transaction('entries')
+        const request = tx.objectStore('entries').getAll()
+        request.onsuccess = () => resolve(request.result.some((entry) => {
+          const saved = JSON.parse(entry.text)
+          return saved.state.run?.id === runId && saved.events.length >= 350 && saved.hasOlder === false
+        }))
+        tx.oncomplete = () => db.close()
+      }
+    }), run.id)
+  }).toBe(true)
   // Move back to the latest content and let its bounded disk snapshot commit.
   await page.getByRole('button', { name: 'Latest activity', exact: true }).click()
   await expect(page.locator('.activity-message').filter({ hasText: 'Paged line 349' })).toBeVisible()
@@ -460,9 +663,25 @@ test('recent history loads older pages without moving the reader and survives a 
       request.onsuccess = () => resolve(Math.max(0, ...request.result.map(e => JSON.parse(e.text).events.length)))
       tx.oncomplete = () => db.close()
     }
-  }))).toBe(200)
+  }))).toBeGreaterThanOrEqual(350)
+  let repeatedHistoryReads = 0
+  page.on('request', (request) => {
+    if (request.url().includes(`/runs/${run.id}/history?`) || request.url().includes(`/runs/${run.id}/events?`))
+      repeatedHistoryReads++
+  })
   await page.route(`**/api/runs/${run.id}/stream?**`, route => route.abort())
   await page.reload()
   await page.getByRole('button', { name: /^Conversation/ }).click()
   await expect(page.locator('.activity-message').filter({ hasText: 'Paged line 349' })).toBeVisible()
+  await expect(page.locator('.activity-message').filter({ hasText: 'Paged line 000' })).toBeAttached()
+  await scroller.evaluate(el => el.scrollTop = 0)
+  await page.waitForTimeout(750)
+  expect(repeatedHistoryReads).toBe(0)
+  await page.unroute(`**/api/runs/${run.id}/stream?**`)
+  await page.reload()
+  await page.getByRole('button', { name: /^Conversation/ }).click()
+  await expect(page.locator('.activity-message').filter({ hasText: 'Paged line 000' })).toBeAttached()
+  await scroller.evaluate(el => el.scrollTop = 0)
+  await page.waitForTimeout(750)
+  expect(repeatedHistoryReads).toBe(0)
 })

@@ -243,7 +243,7 @@ private fun AgentEditor(vm: CairnViewModel, state: Workspace, initial: Agent, cl
             form = form.copy(access = form.access.copy(installation = it))
         }
         Text(
-            "Consulter les exécutions et gérer les missions de cet agent au nom du propriétaire.",
+            "Gérer les agents, projets, skills, connexions MCP, missions et exécutions de toute l’installation au nom du propriétaire.",
             style = MaterialTheme.typography.bodySmall,
         )
         Choice(

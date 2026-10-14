@@ -524,12 +524,12 @@ class SignalJourneyTest {
             compose.onNodeWithContentDescription("Atelier").performClick()
             waitText("Compte Claude Code requis")
             waitText("1/1 prêt · 64 % restant")
-            // Claude Code and 1Password, which loads after the coding-agent accounts.
+            // Claude Code, OpenCode and 1Password, which loads after the coding-agent accounts.
             compose.waitUntil(15000) {
                 compose
                     .onAllNodesWithText("Aucun compte", useUnmergedTree = true)
                     .fetchSemanticsNodes()
-                    .size == 2
+                    .size == 3
             }
             capture("atelier-light")
             compose.onNodeWithText("Journal des exécutions").performScrollTo().performClick()

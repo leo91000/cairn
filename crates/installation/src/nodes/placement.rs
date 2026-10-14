@@ -154,6 +154,7 @@ impl<'a> Request<'a> {
         // has not passed the storage probe cannot receive that disk.
         node["capabilities"]["fuse"] == true
             && !node["maintenance"].is_string()
+            && !node["exclusiveReservation"].is_object()
             && !(local_unconfigured && run["isolated"] == true)
             && has_tags
             && has_runtime

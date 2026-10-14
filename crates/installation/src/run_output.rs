@@ -83,6 +83,12 @@ pub fn compact_activity(event: &Value, secrets: &[String]) -> Value {
         "exitCode",
         "duration_ms",
         "durationMs",
+        "parent_id",
+        "replaces_id",
+        "task_id",
+        "name",
+        "agent_type",
+        "background",
     ] {
         if let Some(value) = source
             .get(key)
@@ -154,6 +160,20 @@ pub fn compact_activity(event: &Value, secrets: &[String]) -> Value {
                 })
                 .collect();
             item.insert("items".into(), tasks.into());
+        }
+        "subagent" => {
+            for (key, limit) in [
+                ("prompt", 4096),
+                ("result", 4096),
+                ("activity", 1024),
+                ("model", 256),
+                ("tokens", 0),
+                ("tool_uses", 0),
+            ] {
+                if let Some(value) = source.get(key) {
+                    item.insert(key.into(), activity_preview(value, limit, secrets));
+                }
+            }
         }
         _ => {
             item.insert("text".into(), NOTICE.into());
@@ -236,13 +256,7 @@ pub fn prompt(run: &Value, chat: bool) -> String {
         .map(|project| project_line(run, project))
         .collect::<Vec<_>>()
         .join("\n");
-    let skills = run["snapshot"]["skills"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .map(|s| format!("\n{}\n{}", text(s, "path"), text(s, "content")))
-        .collect::<Vec<_>>()
-        .join("\n");
+    let skills = skill_index(&run["snapshot"]["skills"]);
     format!(
         "{}\n\n{}\n\nAuthorized projects (open only those needed for the task; \
             unopened repositories are not on disk):\n{}\n\nTooling: mise manages \
@@ -264,8 +278,8 @@ pub fn prompt(run: &Value, chat: bool) -> String {
             evidence; Robolectric and JVM tests are not emulator tests. Use mise exec \
             -- <command> when project environment variables are needed; use uv for \
             Python environments. Do not upgrade project pins unless the task requests \
-            it.\n\nSelected skills (use their supporting resources from the supplied \
-            paths):\n{skills}\n\n{onepassword}\n\nRun this task to completion within \
+            it.\n\nSelected skills (read a skill's SKILL.md before using it; its \
+            scripts and references sit beside it):\n{skills}\n\n{onepassword}\n\nRun this task to completion within \
             its stated scope. Preserve unrelated files. Do not expose credentials. \
             {interaction}\n{deliverables}\n{waiting} All task-authorized effects such as creating \
             PRs or releasing must follow their checks. Use .agents/skills for skills. \
@@ -362,9 +376,46 @@ pub fn chat_plan(
     Ok(plan)
 }
 
+/// One line per selected skill: name, description and `SKILL.md` path. The
+/// agent reads the file itself, so supporting files load only when used.
+fn skill_index(skills: &Value) -> String {
+    skills
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|skill| {
+            let description = match text(skill, "description") {
+                "" => crate::skills::parse(text(skill, "content"))
+                    .map(|parsed| text(&parsed, "description").to_owned())
+                    .unwrap_or_default(),
+                description => description.to_owned(),
+            };
+            let description = description.split_whitespace().collect::<Vec<_>>().join(" ");
+            format!(
+                "- {}: {description}\n  {}",
+                text(skill, "name"),
+                text(skill, "path")
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn selected_skills_list_paths_instead_of_contents() {
+        let skills = json!([
+            { "name": "review", "description": "Review a\n  change.", "path": "/home/node/.agents/skills/0/review/SKILL.md", "content": "body" },
+            { "name": "legacy", "path": "/skills/1/legacy/SKILL.md", "content": "---\nname: legacy\ndescription: Older snapshot\n---\nBody" },
+        ]);
+        assert_eq!(
+            skill_index(&skills),
+            "- review: Review a change.\n  /home/node/.agents/skills/0/review/SKILL.md\n- legacy: Older snapshot\n  /skills/1/legacy/SKILL.md"
+        );
+    }
 
     #[test]
     fn subscription_limits_of_both_coding_agents_are_exhaustion() {

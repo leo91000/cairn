@@ -160,30 +160,40 @@ pub(crate) fn preview(summary: &str) -> String {
     format!("{}…", cut.trim_end_matches([',', ';', ':', '.']))
 }
 
-/// Records that the account read these Fil items now.
+/// Records the completion the account actually saw, so opening an older run or a delayed
+/// request cannot consume newer work. String keys remain accepted for older clients.
 async fn mark(s: &Service, account: &str, body: &Value) -> Result<Value> {
     let items = body["items"]
         .as_array()
         .filter(|items| !items.is_empty() && items.len() <= MAX_ITEMS)
         .ok_or_else(|| Error::bad("List between 1 and 200 items to mark as read."))?;
+    let read_at = now();
     let mut keys = Vec::with_capacity(items.len());
     for item in items {
-        let item = item.as_str().unwrap_or_default();
-        let id = item
+        let (key, finished_at) = if let Some(key) = item.as_str() {
+            (key, read_at)
+        } else {
+            let finished_at = item["finishedAt"]
+                .as_i64()
+                .filter(|at| *at > 0 && *at <= read_at)
+                .ok_or_else(|| Error::bad("Include the finish time of the work you read."))?;
+            (text(item, "key"), finished_at)
+        };
+        let id = key
             .strip_prefix("chat:")
-            .or_else(|| item.strip_prefix("task:"))
+            .or_else(|| key.strip_prefix("task:"))
             .ok_or_else(|| Error::bad("Mark conversations or missions as read."))?;
         uuid(id)?;
-        keys.push(format!("{}{item}", marks_prefix(account)));
+        keys.push((format!("{}{key}", marks_prefix(account)), finished_at));
     }
 
     begin(s, account).await?;
-    let read_at = now();
     let count = keys.len();
     s.store
         .transaction(move |db| {
-            for key in &keys {
-                db.set(key, &read_at.into(), None)?;
+            for (key, finished_at) in &keys {
+                let previous = db.kv_as::<i64>(key)?.unwrap_or(0);
+                db.set(key, &previous.max(*finished_at).into(), None)?;
             }
             Ok(())
         })

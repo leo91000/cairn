@@ -276,6 +276,73 @@ else {
       return
     }
 
+    if (prompt.includes('fixture:stopped-background')) {
+      const snapshotFirst = prompt.includes('snapshot-first')
+      const failedStop = prompt.includes('failed-stop')
+      const unrelatedTool = prompt.includes('unrelated-tool')
+      const tasks = ['first', 'second', 'third'].map(task_id => ({
+        task_id,
+        task_type: 'local_bash',
+        description: `Wait for ${task_id}`,
+      }))
+      out({ type: 'system', subtype: 'background_tasks_changed', tasks })
+      complete('Waiting for background work', false, correlation)
+      setTimeout(() => {
+        for (const [index, task] of tasks.entries()) {
+          const id = `stop-${task.task_id}`
+          const last = index === tasks.length - 1
+          const args = prompt.includes('legacy-id') ? { shell_id: task.task_id } : { task_id: task.task_id }
+          out({
+            type: 'assistant',
+            message: {
+              id,
+              content: [{
+                type: 'tool_use',
+                id,
+                name: last && unrelatedTool ? 'Read' : 'TaskStop',
+                input: args,
+              }],
+            },
+          })
+          // A failed stop can race with the task finishing naturally. Its
+          // follow-up still needs to run after the next foreground result.
+          const snapshot = { type: 'system', subtype: 'background_tasks_changed', tasks: tasks.slice(index + 1) }
+          if (snapshotFirst)
+            out(snapshot)
+          const stopFailed = last && failedStop
+          out({
+            type: 'user',
+            message: {
+              role: 'user',
+              content: [{
+                type: 'tool_result',
+                tool_use_id: id,
+                is_error: stopFailed,
+                content: JSON.stringify({ message: stopFailed ? 'Task already finished' : `Successfully stopped task: ${task.task_id}`, task_id: task.task_id, task_type: task.task_type }),
+              }],
+            },
+          })
+          if (!snapshotFirst)
+            out(snapshot)
+        }
+
+        // TaskStop does not replay a task-notification user message for these tasks.
+        complete('Stopped all background work', false, correlation)
+        if (failedStop || unrelatedTool) {
+          setTimeout(() => {
+            out({
+              type: 'user',
+              uuid: 'notification',
+              origin: { kind: 'task-notification' },
+              message: { role: 'user', content: [] },
+            })
+            complete('Background followup handled', false, { origin: { kind: 'task-notification' } })
+          }, 200)
+        }
+      }, 100)
+      return
+    }
+
     if (prompt.includes('fixture:background')) {
       const ambient = prompt.includes('fixture:background-ambient')
       // A slow build leaves time to observe the idle agent waiting for it.
@@ -328,6 +395,123 @@ else {
         }, buildMs)
       }
 
+      return
+    }
+
+    if (prompt.includes('fixture:subagents')) {
+      // Mirrors Claude Code 2.1.280: one subagent in the foreground, one in the background.
+      // Both stream their own messages, tagged with the tool use that started them.
+      const agent = (id, description, background) => out({
+        type: 'assistant',
+        parent_tool_use_id: null,
+        message: {
+          id: `spawn-${id}`,
+          content: [{
+            type: 'tool_use',
+            id,
+            name: 'Agent',
+            input: {
+              description,
+              subagent_type: 'general-purpose',
+              prompt: `${description} in the workspace.`,
+              run_in_background: background,
+            },
+          }],
+        },
+      })
+      const task = (subtype, id, fields) => out({
+        type: 'system',
+        subtype,
+        task_id: `task-${id}`,
+        tool_use_id: id,
+        ...fields,
+      })
+      const child = (parent, message) => out({ type: 'assistant', parent_tool_use_id: parent, message })
+      const childResult = (parent, toolId, content) => out({
+        type: 'user',
+        parent_tool_use_id: parent,
+        message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: toolId, content }] },
+      })
+
+      agent('agent-count', 'Count lines', false)
+      task('task_started', 'agent-count', {
+        description: 'Count lines',
+        subagent_type: 'general-purpose',
+        is_backgrounded: false,
+        task_type: 'local_agent',
+      })
+      out({ type: 'user', parent_tool_use_id: 'agent-count', message: { role: 'user', content: [{ type: 'text', text: 'Count lines in the workspace.' }] } })
+      agent('agent-list', 'List files', true)
+      out({ type: 'system', subtype: 'background_tasks_changed', tasks: [{ task_id: 'task-agent-list', task_type: 'local_agent', description: 'List files' }] })
+      task('task_started', 'agent-list', {
+        description: 'List files',
+        subagent_type: 'general-purpose',
+        is_backgrounded: true,
+        task_type: 'local_agent',
+      })
+      out({
+        type: 'user',
+        parent_tool_use_id: null,
+        message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'agent-list', content: [{ type: 'text', text: 'Async agent launched successfully.' }] }] },
+        tool_use_result: {
+          isAsync: true,
+          status: 'async_launched',
+          agentId: 'task-agent-list',
+          description: 'List files',
+          prompt: 'List files in the workspace.',
+        },
+      })
+      task('task_progress', 'agent-count', { description: 'Running wc -l', usage: { total_tokens: 1200, tool_uses: 1, duration_ms: 900 }, last_tool_name: 'Bash' })
+      child('agent-count', {
+        id: 'count-1',
+        content: [{
+          type: 'tool_use',
+          id: 'count-bash',
+          name: 'Bash',
+          input: { command: 'wc -l *.txt' },
+        }],
+      })
+      childResult('agent-count', 'count-bash', '3 total')
+      child('agent-list', {
+        id: 'list-1',
+        content: [{
+          type: 'tool_use',
+          id: 'list-bash',
+          name: 'Bash',
+          input: { command: 'ls' },
+        }],
+      })
+      childResult('agent-list', 'list-bash', 'one.txt\ntwo.txt')
+      child('agent-count', { id: 'count-2', content: [{ type: 'text', text: 'Total: 3 lines.' }] })
+      task('task_notification', 'agent-count', { status: prompt.includes('fixture:subagents-stopped') ? 'stopped' : 'completed', summary: 'Total: 3 lines.', usage: { total_tokens: 1500, tool_uses: 1, duration_ms: 1100 } })
+      out({
+        type: 'user',
+        parent_tool_use_id: null,
+        message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'agent-count', content: [{ type: 'text', text: '[Subagent hand-back] Total: 3 lines.' }] }] },
+        tool_use_result: {
+          status: 'completed',
+          agentId: 'task-agent-count',
+          content: [{ type: 'text', text: 'Total: 3 lines.' }],
+          totalDurationMs: 1150,
+          totalTokens: 1510,
+          totalToolUseCount: 1,
+        },
+      })
+      complete('Counted while the listing continues', false, correlation)
+      setTimeout(() => {
+        child('agent-list', { id: 'list-2', content: [{ type: 'text', text: 'Files: one.txt, two.txt' }] })
+        out({ type: 'system', subtype: 'background_tasks_changed', tasks: [] })
+        task('task_notification', 'agent-list', { status: 'completed', summary: 'Files: one.txt, two.txt', usage: { total_tokens: 900, tool_uses: 1, duration_ms: 700 } })
+        setTimeout(() => {
+          out({
+            type: 'user',
+            uuid: 'notification',
+            origin: { kind: 'task-notification' },
+            message: { role: 'user', content: [] },
+          })
+          complete('Both subagents reported back', false, { origin: { kind: 'task-notification' } })
+        }, 100)
+      }, 300)
       return
     }
 

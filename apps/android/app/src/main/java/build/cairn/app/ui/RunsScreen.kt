@@ -144,7 +144,13 @@ fun RunScreen(
     // Opening a finished mission run reads its mission in the Fil, on every device.
     ReadWhileOpen(
         vm,
-        run?.takeIf { selected && it.trigger != "chat" && it.status == "succeeded" }
+        run?.takeIf {
+                selected &&
+                    live.synced &&
+                    !live.catchingUp &&
+                    it.trigger != "chat" &&
+                    it.status == "succeeded"
+            }
             ?.finishedAt
             ?.let { "task:${run.taskId}" to it },
     )
@@ -187,7 +193,7 @@ fun RunScreen(
         ) {
             follow = it
         }
-    val loadOlder = rememberHistoryPaging(live, logState, positionReady && tab == 1)
+    val loadOlder = rememberHistoryPaging(live, logState, selected && positionReady && tab == 1)
     LaunchedEffect(run?.id, live.synced) {
         if (autoTab && run != null && live.synced) {
             autoTab = false
@@ -269,7 +275,7 @@ fun RunScreen(
                 if (!fullscreen)
                     DetailHeader(
                         current.title,
-                        "${statusLabel(current.status)} · ${duration(current)}",
+                        "${statusLabel(runPresentationStatus(current))} · ${duration(current)}",
                         back,
                         headerActions,
                     )
@@ -352,7 +358,9 @@ fun RunScreen(
                         Page {
                             if (current.summary.isBlank())
                                 Empty(
-                                    if (current.active) "Le travail est en cours"
+                                    if (current.active && current.suspendedByExclusive != null)
+                                        "Exécution suspendue"
+                                    else if (current.active) "Le travail est en cours"
                                     else "Aucun résumé",
                                     "Consultez l’activité pour les détails.",
                                 )
@@ -396,7 +404,14 @@ fun RunScreen(
                                                 )
                                             }
                                         }
-                                if (current.active)
+                                if (current.active && current.suspendedByExclusive != null)
+                                    item(key = "exclusive-suspended") {
+                                        Text(
+                                            "Suspendue (exclusivité) · ${current.suspendedByExclusive.reason}",
+                                            color = signal.warning,
+                                        )
+                                    }
+                                else if (current.active)
                                     item(key = "agent-working") {
                                         WorkingIndicator(
                                             remember(events, current.status, current.startedAt) {
@@ -481,7 +496,9 @@ fun RunScreen(
                                 Text(
                                     "Espace de travail et conversation conservés dans un disque privé. Reprenez cette exécution pour continuer."
                                 )
-                            Text("${statusLabel(current.status)} · ${duration(current)}")
+                            Text(
+                                "${statusLabel(runPresentationStatus(current))} · ${duration(current)}"
+                            )
                             Text("Déclenchement : ${current.trigger}")
                             Text(
                                 "Créée : ${date(current.createdAt)}\nDébut : ${date(current.startedAt)}\nFin : ${date(current.finishedAt)}"
