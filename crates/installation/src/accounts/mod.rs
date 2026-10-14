@@ -843,6 +843,7 @@ impl Accounts {
         }
         self.initialize(s).await?;
         let _selection = self.selection.lock().await;
+        let replacing = id.is_some();
         let account = if let Some(id) = id {
             let account = self.account(s, id).await?;
             if account.provider != provider {
@@ -867,6 +868,12 @@ impl Accounts {
         };
         let id = account.id.clone();
         let _guard = self.lock(&id).await;
+        // An edit or refresh can finish while replacement waits for the lock.
+        let account = if replacing {
+            self.account(s, &id).await?
+        } else {
+            account
+        };
         provider
             .driver()
             .connect_api_key(s, &account, model_provider, api_key)

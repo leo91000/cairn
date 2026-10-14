@@ -615,6 +615,50 @@ async fn native_questions_use_cairn_ids_and_answers_reach_the_original_native_re
 }
 
 #[tokio::test]
+async fn key_replacement_keeps_concurrent_account_edits() {
+    let root = TempDir::new().unwrap();
+    let s = service(&root).await;
+    let id = text(&connect(&s).await, "id").to_owned();
+    let update_guard = s.accounts.lock(&id).await;
+    let mut updated = s.accounts.account(&s, &id).await.unwrap();
+    let mut replace = Box::pin(s.accounts.connect_api_key(
+        &s,
+        Provider::Opencode,
+        "Zen",
+        "opencode",
+        "replacement-key",
+        Some(&id),
+    ));
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), &mut replace)
+            .await
+            .is_err(),
+        "replacement must wait for the account edit"
+    );
+    updated.name = "Paused Zen".into();
+    updated.enabled = false;
+    updated.max_concurrent_runs = Some(1);
+    s.store.put(KIND, updated.to_value()).await.unwrap();
+    drop(update_guard);
+
+    tokio::time::timeout(Duration::from_secs(5), replace)
+        .await
+        .unwrap()
+        .unwrap();
+    let account = s.accounts.account(&s, &id).await.unwrap();
+    assert_eq!(account.name, "Paused Zen");
+    assert!(!account.enabled);
+    assert_eq!(account.max_concurrent_runs, Some(1));
+    let credentials = s
+        .vault
+        .get(&format!("opencode-account:{id}"))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(credentials["key"], "replacement-key");
+}
+
+#[tokio::test]
 async fn connection_order_waits_for_in_flight_account_updates() {
     let root = TempDir::new().unwrap();
     let s = service(&root).await;
