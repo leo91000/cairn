@@ -1,11 +1,11 @@
 //! Opt-in installation tools for an agent, using its revocable execution grant.
-//! The owner delegates mission management, not account or resource administration.
+//! The owner delegates the complete public MCP management catalogue.
 use crate::{
-    error::{Error, Result},
+    error::{Error, Result, required},
     mcp_server::{ToolResult, empty_listing},
     mcps::{grant_key, record::RunGrant},
     run_status::RunStatus,
-    service::{Service, allowed, covers, policy, run_projects},
+    service::{Service, allowed, covers, policy},
     store::Db,
     validation::{parse, text},
 };
@@ -13,25 +13,12 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use std::sync::Arc;
 
-const TOOLS: &[&str] = &[
-    "list_agents",
-    "list_projects",
-    "list_tasks",
-    "create_task",
-    "update_task",
-    "run_task",
-    "cancel_run",
-    "list_runs",
-    "get_run",
-    "read_run_content",
-];
-
 pub(crate) async fn authorize(s: &Service, bearer: &str) -> Result<Value> {
     let bearer = bearer.to_owned();
     s.store.read(move |db| authorize_in(db, &bearer)).await
 }
 
-fn authorize_in(db: &Db<'_>, bearer: &str) -> Result<Value> {
+pub(crate) fn authorize_in(db: &Db<'_>, bearer: &str) -> Result<Value> {
     let denied = || Error::unauthorized("Installation access expired or was revoked.");
     let grant = db.kv(&grant_key(bearer))?.ok_or_else(denied)?;
     let grant = RunGrant::deserialize(&grant)?;
@@ -51,10 +38,8 @@ fn authorize_in(db: &Db<'_>, bearer: &str) -> Result<Value> {
     Ok(run)
 }
 
-/// A mission cannot delegate broader resource, tool, execution or node access.
+/// Reducing the calling agent's permissions invalidates its active grant.
 fn agent_allowed(caller: &Value, target: &Value) -> bool {
-    // GitHub credentials and 1Password grants belong to an agent identity, not
-    // its access policy. Matching policies alone cannot authorize another agent.
     if caller["id"] != target["id"] {
         return false;
     }
@@ -69,86 +54,35 @@ fn agent_allowed(caller: &Value, target: &Value) -> bool {
     covers(caller, target) && nodes
 }
 
-fn task_allowed(db: &Db<'_>, caller: &Value, task: &Value) -> Result<bool> {
-    let Some(agent) = db.get("agents", text(task, "agentId"))? else {
-        return Ok(false);
-    };
-    Ok(agent_allowed(caller, &agent)
-        && (task["projectId"].is_null()
-            || allowed(&policy(caller)["projects"], text(task, "projectId"))))
-}
-
-pub(crate) fn run_allowed(caller: &Value, run: &Value) -> bool {
-    agent_allowed(caller, &run["snapshot"]["agent"])
-        && run_projects(run)
-            .iter()
-            .all(|project| allowed(&policy(caller)["projects"], text(project, "id")))
-}
-
-fn require_access(permitted: bool) -> Result<()> {
-    if permitted {
+/// Authorization for management effects after asynchronous preparation.
+pub(crate) fn management_authorization(
+    bearer: Option<&str>,
+) -> impl Fn(&Db<'_>) -> Result<()> + Clone + Send + Sync + 'static {
+    let bearer = bearer.map(str::to_owned);
+    move |db| {
+        if let Some(bearer) = &bearer {
+            authorize_in(db, bearer)?;
+        }
         Ok(())
-    } else {
-        Err(Error::forbidden(
-            "This resource is outside the agent's permissions.",
-        ))
     }
 }
 
-/// Called inside the mutation transaction, after asynchronous author/skill work.
+/// Rechecks the grant and referenced records in the task mutation transaction.
 pub(crate) fn authorize_task_in(
     db: &Db<'_>,
     bearer: &str,
     task: &Value,
     existing: Option<&str>,
 ) -> Result<()> {
-    let run = authorize_in(db, bearer)?;
-    let caller = &run["snapshot"]["agent"];
+    authorize_in(db, bearer)?;
+
     if let Some(id) = existing {
-        let previous = db
-            .get("tasks", id)?
-            .ok_or_else(|| Error::not_found("Task not found"))?;
-        require_access(task_allowed(db, caller, &previous)?)?;
+        required(db.get("tasks", id)?, "Task not found")?;
     }
-    require_access(task_allowed(db, caller, task)?)
-}
 
-pub(crate) fn authorize_target_run_in(db: &Db<'_>, bearer: &str, target: &Value) -> Result<()> {
-    let run = authorize_in(db, bearer)?;
-    require_access(run_allowed(&run["snapshot"]["agent"], target))
-}
+    required(db.get("agents", text(task, "agentId"))?, "Agent not found")?;
 
-/// Filter before applying the public pagination offset, so hidden runs neither
-/// consume pages nor expose their metadata. Read only one bounded batch at a time.
-fn list_runs(db: &Db<'_>, caller: &Value, args: &Value) -> Result<Value> {
-    let mut scan = 0;
-    let mut skip = args["offset"].as_i64().unwrap();
-    let limit = args["limit"].as_i64().unwrap() as usize;
-    let mut visible = Vec::new();
-    loop {
-        let batch = db.runs(args["status"].as_str(), None, 100, scan, false)?;
-        let exhausted = batch.len() < 100;
-        scan += batch.len() as i64;
-        for summary in batch {
-            let Some(run) = db.run(text(&summary, "id"))? else {
-                continue;
-            };
-            if !run_allowed(caller, &run) {
-                continue;
-            }
-            if skip > 0 {
-                skip -= 1;
-            } else {
-                visible.push(summary);
-                if visible.len() == limit {
-                    return Ok(visible.into());
-                }
-            }
-        }
-        if exhausted {
-            return Ok(visible.into());
-        }
-    }
+    Ok(())
 }
 
 pub(crate) async fn rpc(
@@ -166,27 +100,20 @@ pub(crate) async fn rpc(
         "tools/list" => {
             let tools: Vec<_> = crate::mcp_server::catalog()
                 .into_iter()
-                .filter_map(|mut tool| {
-                    if !TOOLS.contains(&text(&tool, "name")) {
-                        return None;
-                    }
+                .map(|mut tool| {
                     // This endpoint uses the run grant, never external OAuth consent.
                     tool.as_object_mut().unwrap().remove("_meta");
-                    tool["description"] = format!(
-                        "{} Results and mutations are limited to the calling agent and its permitted projects.",
-                        text(&tool, "description"),
-                    )
-                    .into();
                     let properties = match text(&tool, "name") {
                         "create_task" => Some(&mut tool["inputSchema"]["properties"]),
-                        "update_task" => Some(&mut tool["inputSchema"]["properties"]["task"]["properties"]),
+                        "update_task" => {
+                            Some(&mut tool["inputSchema"]["properties"]["task"]["properties"])
+                        }
                         _ => None,
                     };
                     if let Some(properties) = properties {
                         properties["agentId"]["default"] = agent_id.clone();
-                        properties["agentId"]["const"] = agent_id.clone();
                     }
-                    Some(tool)
+                    tool
                 })
                 .collect();
             Ok(json!({ "tools": tools }))
@@ -194,9 +121,13 @@ pub(crate) async fn rpc(
         "tools/call" => {
             let name = text(params, "name");
             let operation = async {
-                if !TOOLS.contains(&name) {
+                let known = crate::mcp_server::catalog()
+                    .iter()
+                    .any(|tool| text(tool, "name") == name);
+                if !known {
                     return Err(Error::not_found("Unknown tool"));
                 }
+
                 let mut args = params
                     .get("arguments")
                     .cloned()
@@ -232,78 +163,37 @@ async fn invoke(s: &Arc<Service>, bearer: &str, name: &str, args: Value) -> Resu
     let listing = s
         .store
         .read(move |db| {
-            // Store readers use separate connections from the writer. Keep the
-            // authorization and returned data in one consistent SQLite snapshot.
+            // Authorize database reads in the same snapshot as the returned data.
             let transaction = rusqlite::Transaction::new_unchecked(
                 db.0,
                 rusqlite::TransactionBehavior::Deferred,
             )?;
             let db = &Db(&transaction);
-            let run = authorize_in(db, &token)?;
-            let caller = &run["snapshot"]["agent"];
+            authorize_in(db, &token)?;
+
             let result = match operation.as_str() {
-                "list_agents" => Ok(Some(
-                    db.list("agents")?
-                        .into_iter()
-                        .filter(|agent| agent_allowed(caller, agent))
-                        .collect::<Vec<_>>()
-                        .into(),
-                )),
-                "list_projects" => Ok(Some(
-                    db.list("projects")?
-                        .into_iter()
-                        .filter(|project| allowed(&policy(caller)["projects"], text(project, "id")))
-                        .collect::<Vec<_>>()
-                        .into(),
-                )),
-                "list_tasks" => {
-                    let mut tasks = Vec::new();
-                    for task in db.list("tasks")? {
-                        if task_allowed(db, caller, &task)? {
-                            tasks.push(task);
-                        }
-                    }
-                    Ok(Some(tasks.into()))
-                }
-                "list_runs" => Ok(Some(list_runs(db, caller, &input)?)),
-                "create_task" => {
-                    require_access(task_allowed(db, caller, &input)?)?;
-                    Ok(None)
-                }
-                "update_task" | "run_task" => {
-                    let id = if operation == "update_task" {
-                        "id"
-                    } else {
-                        "taskId"
-                    };
-                    let task = db
-                        .get("tasks", text(&input, id))?
-                        .ok_or_else(|| Error::not_found("Task not found"))?;
-                    require_access(task_allowed(db, caller, &task)?)?;
-                    if operation == "update_task" {
-                        require_access(task_allowed(db, caller, &input["task"])?)?;
-                    }
-                    Ok(None)
-                }
-                "get_run" | "read_run_content" | "cancel_run" => {
-                    let target = db
-                        .run(text(&input, "runId"))?
-                        .ok_or_else(|| Error::not_found("Run not found"))?;
-                    require_access(run_allowed(caller, &target))?;
-                    match operation.as_str() {
-                        "get_run" => Ok(Some(crate::mcp_server::run_history(
-                            db,
-                            text(&input, "runId"),
-                            input["after"].as_i64().unwrap(),
-                        )?)),
-                        "read_run_content" => {
-                            Ok(Some(crate::mcp_server::read_run_content(db, &input)?))
-                        }
-                        _ => Ok(None),
-                    }
-                }
-                _ => Err(Error::not_found("Unknown tool")),
-            }?;
+                "list_agents" => Some(db.list("agents")?.into()),
+                "list_projects" => Some(db.list("projects")?.into()),
+                "list_tasks" => Some(db.list("tasks")?.into()),
+                "list_runs" => Some(
+                    db.runs(
+                        input["status"].as_str(),
+                        None,
+                        input["limit"].as_i64().unwrap(),
+                        input["offset"].as_i64().unwrap(),
+                        false,
+                    )?
+                    .into(),
+                ),
+                "get_run" => Some(crate::mcp_server::run_history(
+                    db,
+                    text(&input, "runId"),
+                    input["after"].as_i64().unwrap(),
+                )?),
+                "read_run_content" => Some(crate::mcp_server::read_run_content(db, &input)?),
+                _ => None,
+            };
+
             transaction.commit()?;
             Ok(result)
         })
@@ -311,6 +201,7 @@ async fn invoke(s: &Arc<Service>, bearer: &str, name: &str, args: Value) -> Resu
     if let Some(listing) = listing {
         return Ok(listing);
     }
+
     match name {
         "create_task" => s.task_from_run(args, None, bearer).await,
         "update_task" => {
@@ -324,6 +215,6 @@ async fn invoke(s: &Arc<Service>, bearer: &str, name: &str, args: Value) -> Resu
                 .await?;
             Ok(json!({ "cancelled": true }))
         }
-        _ => Err(Error::not_found("Unknown tool")),
+        _ => crate::mcp_server::invoke(s, name, args, Some(bearer)).await,
     }
 }

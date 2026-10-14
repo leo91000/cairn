@@ -1,6 +1,7 @@
 use crate::{
     config::Config,
     error::{Error, Result},
+    store::{Db, Store},
     validation::text,
 };
 use serde::Serialize;
@@ -186,6 +187,12 @@ pub async fn private_dir(path: &Path) -> Result<()> {
 }
 
 pub async fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
+    let temporary = prepare_atomic_write(path, bytes).await?;
+    fs::rename(temporary, path).await?;
+    Ok(())
+}
+
+async fn prepare_atomic_write(path: &Path, bytes: &[u8]) -> Result<PathBuf> {
     let temporary = path.with_file_name(format!(".{}.tmp", crate::config::id()));
     let mut file = fs::OpenOptions::new()
         .write(true)
@@ -196,8 +203,7 @@ pub async fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
     file.write_all(bytes).await?;
     file.sync_all().await?;
     drop(file);
-    fs::rename(&temporary, path).await?;
-    Ok(())
+    Ok(temporary)
 }
 
 pub async fn small_file(path: &Path) -> Result<String> {
@@ -286,6 +292,41 @@ impl Skills {
     }
 
     pub async fn save(&self, skill: &str, content: &str, project: Option<&Path>) -> Result<Value> {
+        let (parsed, file) = self.prepare_save(skill, content, project).await?;
+        atomic_write(&file, content.as_bytes()).await?;
+        Ok(serde_json::to_value(parsed)?)
+    }
+
+    pub(crate) async fn save_authorized<F>(
+        &self,
+        store: &Store,
+        skill: &str,
+        content: &str,
+        project: Option<&Path>,
+        authorize: F,
+    ) -> Result<Value>
+    where
+        F: FnOnce(&Db<'_>) -> Result<()> + Send + 'static,
+    {
+        let (parsed, file) = self.prepare_save(skill, content, project).await?;
+        let temporary = prepare_atomic_write(&file, content.as_bytes()).await?;
+        let temporary = tempfile::TempPath::try_from_path(temporary)?;
+        store
+            .transaction(move |db| {
+                authorize(db)?;
+                std::fs::rename(&temporary, &file)?;
+                Ok(())
+            })
+            .await?;
+        Ok(serde_json::to_value(parsed)?)
+    }
+
+    async fn prepare_save(
+        &self,
+        skill: &str,
+        content: &str,
+        project: Option<&Path>,
+    ) -> Result<(Metadata, PathBuf)> {
         name(skill)?;
         let parsed = metadata(content)?;
         if parsed.name != skill {
@@ -297,8 +338,7 @@ impl Skills {
         let directory = bounded(&root, skill, true).await?;
         private_dir(&directory).await?;
         let file = bounded(&root, &format!("{skill}/SKILL.md"), true).await?;
-        atomic_write(&file, content.as_bytes()).await?;
-        Ok(serde_json::to_value(parsed)?)
+        Ok((parsed, file))
     }
 
     pub async fn remove(&self, skill: &str, project: Option<&Path>) -> Result<()> {

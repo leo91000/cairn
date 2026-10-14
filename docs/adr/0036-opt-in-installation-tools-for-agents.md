@@ -2,6 +2,8 @@
 
 Date : 2026-10-11.
 
+Mise à jour : 2026-10-14 — l’accès porte sur tout le catalogue MCP de gestion.
+
 ## Constat
 
 Les agents ont un canal MCP privé (ADR-0035), mais consulter les missions et les
@@ -22,15 +24,30 @@ ne confère aucun accès. Le manager vérifie l’exécution active, le tour cou
 l’absence d’annulation et les permissions actuelles avant chaque requête.
 Le canal refuse le jeton d’une autre exécution, sur la node locale comme distante.
 
-Le catalogue reprend les contrats publics pour consulter les agents et projets
-autorisés, gérer les missions et lire ou annuler leurs exécutions. Il exclut
-l’administration des agents, projets, skills, comptes et connexions MCP.
-Les missions et exécutions doivent utiliser l’agent appelant : un autre agent
-peut avoir des identifiants GitHub ou des grants 1Password différents malgré une
-politique d’accès identique. Une mission ne peut déléguer des droits de ressources,
-outils, sandbox ou nodes plus larges que ceux accordés à l’appelant. Les listes filtrent les ressources
-avant pagination ; les lectures et mutations revérifient l’accès dans leur
-transaction, après les étapes asynchrones de préparation.
+Le catalogue reprend tous les contrats publics MCP de gestion : agents, projets,
+skills, connexions MCP, missions et exécutions. La première version limitait cet
+accès aux missions et exécutions de l’agent appelant ; cette limite empêchait le
+propriétaire de lui demander de créer une skill globale dans Cairn.
+
+Cocher cette option délègue désormais la gestion de toute l’installation, même
+si les accès directs de l’agent aux projets, skills, connexions, GitHub ou nodes
+sont restreints. L’agent peut modifier les permissions d’autres agents et leur
+confier des missions ; ces missions utilisent leurs propres identifiants et
+grants. Cette autorité est celle déjà accordée au MCP externe de gestion, plutôt
+qu’un nouveau sous-ensemble divergent de ses outils. Elle n’ajoute pas de fonctions
+d’administration absentes du catalogue MCP public, notamment pour les comptes.
+
+Chaque requête revérifie le grant de l’exécution et les permissions actuelles.
+Toutes les écritures de gestion revérifient le grant dans leur transaction,
+après la préparation asynchrone et les attentes de verrou. Les skills préparent
+leur fichier temporaire avant cette vérification, puis publient le fichier final
+sous la même transaction d’autorisation. La découverte MCP revérifie aussi le
+grant avant la requête externe et avant d’enregistrer son résultat. Les écritures
+OAuth de découverte, d’enregistrement du client et de renouvellement des jetons
+revérifient ce même grant dans la transaction de publication.
+La création d’une mission utilise l’agent appelant par défaut, mais un autre agent
+peut être choisi explicitement. Les listes et lectures couvrent l’installation
+entière. Les attentes durables peuvent aussi viser les exécutions d’autres agents.
 
 Cet accès est une délégation explicite du propriétaire à l’agent. Comme avec le
 MCP de gestion existant, les nouvelles missions planifiées ont le propriétaire
@@ -47,6 +64,10 @@ l’agent, et le pare-feu de la VM ne change pas.
 
 Les tests natifs couvrent l’option désactivée, les deux configurations de moteur,
 la création et modification de missions planifiées, les lectures, l’annulation,
-le refus de délégation plus large, les écritures invalides atomiques, les anciens
+les écritures invalides atomiques, les anciens
 grants et clients, la révocation et la liaison du canal à une seule exécution.
 Les parcours web et Android vérifient la persistance du choix dans les éditeurs.
+Les tests couvrent aussi la parité avec le catalogue MCP public, la création et
+modification de ressources (dont les skills globales et de projet), et la gestion
+des missions et exécutions d’autres agents, ainsi que la révocation pendant
+une découverte MCP ou un renouvellement OAuth en cours.
