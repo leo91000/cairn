@@ -184,6 +184,51 @@ async fn trash_denies_direct_run_history_and_artifact_access() {
 }
 
 #[tokio::test]
+async fn cleanup_racing_cancellation_still_returns_successful_deletion() {
+    let app = Arc::new(App::new().await);
+    let mut chat = app.create_chat().await;
+    let run = id();
+    app.add_finished_run(&run, RunStatus::Succeeded, json!({}), "Finished work")
+        .await;
+    chat["runId"] = run.into();
+    app.service.store.put("chats", chat.clone()).await.unwrap();
+    let path = chat_path(&chat);
+    let active = app.service.worker.active.lock().await;
+    let deleting = app.clone();
+    let deleting_path = path.clone();
+    let response = tokio::spawn(async move {
+        deleting
+            .request("DELETE", &deleting_path, json!({ "confirm": true }))
+            .await
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        loop {
+            let current = app
+                .service
+                .store
+                .get("chats", chat["id"].as_str().unwrap())
+                .await
+                .unwrap()
+                .unwrap();
+            if current["lifecycle"] == "trash" {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    let cleaning = app.clone();
+    let cleanup =
+        tokio::spawn(async move { cleaning.service.cleanup_conversations().await.unwrap() });
+    drop(active);
+    let (status, deleted) = response.await.unwrap();
+    assert_eq!(status, StatusCode::OK, "{deleted}");
+    cleanup.await.unwrap();
+    assert_eq!(app.get(&path).await.0, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
 async fn deletion_waits_for_running_agents_before_removing_their_files() {
     let app = App::new().await;
     let mut chat = app.create_chat().await;
@@ -222,6 +267,18 @@ async fn deletion_waits_for_running_agents_before_removing_their_files() {
         .patch_run(&run, json!({ "status": RunStatus::Succeeded }))
         .await
         .unwrap();
+    app.service.cleanup_conversations().await.unwrap();
+    assert_eq!(
+        app.get(&path).await.0,
+        StatusCode::OK,
+        "Worker finalization must finish before cleanup"
+    );
+    app.service
+        .worker
+        .active
+        .lock()
+        .await
+        .remove(chat["runId"].as_str().unwrap());
     app.service.cleanup_conversations().await.unwrap();
     assert_eq!(app.get(&path).await.0, StatusCode::NOT_FOUND);
 }

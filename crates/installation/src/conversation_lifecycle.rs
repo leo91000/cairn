@@ -230,7 +230,8 @@ impl Service {
             .await?;
         if let Some(run) = result["runId"].as_str() {
             match self.worker.cancel(self, run).await {
-                Err(error) if !error.is_conflict() => return Err(error),
+                // Cleanup may have already removed a finished run after deletion committed.
+                Err(error) if error.status != 404 && !error.is_conflict() => return Err(error),
                 _ => {}
             }
         }
@@ -280,6 +281,12 @@ impl Service {
         let mut chats = self.store.list("chats").await?;
         chats.sort_by_key(|chat| chat["retryAfter"].as_i64().unwrap_or(0));
         for chat in chats.iter().filter(|chat| purge_due(chat)) {
+            // Terminal status is published before checkpointing and resource release finish.
+            let active = self.worker.active.lock().await;
+            if active.contains_key(text(chat, "runId")) {
+                continue;
+            }
+
             let id = text(chat, "id").to_owned();
             let claim = id.clone();
             let Some(chat) = self
@@ -289,6 +296,7 @@ impl Service {
             else {
                 continue;
             };
+            drop(active);
             if let Err(error) = crate::conversation_deletion::purge(self, chat).await {
                 self.record_purge_failure(id, error).await?;
             }

@@ -10,7 +10,7 @@ Décision utilisateur du 28 septembre 2026, applicable au-dessus de la PR nodes 
 - Les blocs communs sont partagés. Seuls l’état courant et les générations effectivement référencées par des lecteurs ou déplacements restent protégés. Nettoyage possible sans nouvelle écriture et après redémarrage.
 - Une publication incomplète conserve l’état courant et le journal local. Un manifeste nécessaire manquant ou endommagé bloque la collecte destructive.
 - Supprimer création/restauration d’archives, transitions froides, réglages et vues d’archives Web/Android, transferts export/import dédiés et code devenu inutile.
-- Conserver la corbeille (30 jours), la révocation des liens publics, l’annulation du travail et la suppression sûre des disques.
+- Décision ultérieure : les nouvelles suppressions sont irréversibles immédiatement ; conserver la révocation des liens publics, l’annulation du travail et la suppression sûre des disques. La corbeille existante garde son délai initial. Voir [ADR-0041](adr/0041-immediate-conversation-deletion.md).
 - Nettoyage de production demandé séparément : supprimer les conversations archivées et vider le bucket OVH après vérification des références actives. Aucun merge/déploiement implicite.
 - Décision ultérieure : S3/FUSE obligatoire sur toutes les nodes ; suppression de l’activation par node, de la migration automatique des anciennes images locales, du transfert complet et de dm-era. Les conversations encore sur image locale doivent être supprimées avant déploiement ; voir ADR-0009.
 
