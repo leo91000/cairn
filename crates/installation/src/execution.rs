@@ -134,7 +134,7 @@ pub async fn prepare_execution(
             workspaces,
             isolated: false,
             mounts,
-            skills: run["snapshot"]["skills"].clone(),
+            skills: home::frozen_skills(&run["snapshot"]["skills"], config).await?,
             backend: None,
         });
     }

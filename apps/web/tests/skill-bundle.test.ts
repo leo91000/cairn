@@ -193,6 +193,33 @@ describe('skill change sets', () => {
     ])
   })
 
+  it('frees a file before a folder takes its name, and a folder before a file takes its name', () => {
+    const files = [file('SKILL.md'), file('zeta'), file('alpha/x.md'), file('beta/y.md'), file('notes')]
+    const draft = draftFromBundle(files)
+    const rename = (from: string, to: string) => draft.find(entry => entry.path === from)!.path = to
+    rename('alpha/x.md', 'zeta/x.md')
+    rename('zeta', 'zeta.md')
+    rename('notes', 'beta')
+    rename('beta/y.md', 'archive/y.md')
+
+    expect(skillChanges(files, draft)).toEqual([
+      { op: 'move', from: 'zeta', to: 'zeta.md' },
+      { op: 'move', from: 'alpha/x.md', to: 'zeta/x.md' },
+      { op: 'move', from: 'beta/y.md', to: 'archive/y.md' },
+      { op: 'move', from: 'notes', to: 'beta' },
+    ])
+  })
+
+  it('turns a file into a folder of the same name through a temporary name', () => {
+    const files = [file('SKILL.md'), file('guide')]
+    const draft = draftFromBundle(files)
+    draft.find(entry => entry.path === 'guide')!.path = 'guide/index.md'
+    expect(skillChanges(files, draft)).toEqual([
+      { op: 'move', from: 'guide', to: 'guide~1' },
+      { op: 'move', from: 'guide~1', to: 'guide/index.md' },
+    ])
+  })
+
   it('reports nothing for an untouched draft', () => {
     const draft = draftFromBundle(original)
     expect(skillChanges(original, draft)).toEqual([])

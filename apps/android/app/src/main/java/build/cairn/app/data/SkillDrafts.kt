@@ -220,7 +220,11 @@ data class SkillDraft(
         val occupied = (files.map { it.path } + files.mapNotNull { it.origin }).toMutableSet()
         var temporary = 0
         while (pending.isNotEmpty()) {
-            val ready = pending.firstOrNull { move -> pending.none { it.from == move.to } }
+            // A move waits while its target, one of the target's parent folders, or a folder at
+            // the target path is still held by a file that moves later in the batch.
+            val ready = pending.firstOrNull { move ->
+                pending.none { it !== move && pathsCollide(move.to, it.from) }
+            }
             if (ready != null) {
                 result += ready
                 pending.remove(ready)
@@ -292,6 +296,10 @@ data class SkillDraft(
                 )
     }
 }
+
+/** True when [a] and [b] are the same path, or one is a folder containing the other. */
+fun pathsCollide(a: String, b: String): Boolean =
+    a == b || a.startsWith("$b/") || b.startsWith("$a/")
 
 fun parents(path: String): List<String> {
     val segments = path.split('/')

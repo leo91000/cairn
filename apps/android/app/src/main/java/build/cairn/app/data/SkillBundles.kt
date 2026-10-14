@@ -403,6 +403,11 @@ fun githubSkillReference(input: String): GithubSkillReference? {
     if (!githubName.matches(owner) || !githubName.matches(repository)) return null
     if (parts.size == 2) return GithubSkillReference("$owner/$repository")
     if (parts[2] !in setOf("tree", "blob") || parts.size < 4) return null
-    val path = parts.drop(4).joinToString("/").removeSuffix("/$SKILL_FILE").removeSuffix(SKILL_FILE)
+    // A link to the SKILL.md itself points at its folder; other file names stay as they are.
+    val segments = parts.drop(4)
+    val path =
+        (if (segments.lastOrNull() == SKILL_FILE) segments.dropLast(1) else segments).joinToString(
+            "/"
+        )
     return GithubSkillReference("$owner/$repository", parts[3], path)
 }

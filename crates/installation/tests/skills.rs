@@ -512,6 +512,18 @@ async fn runs_install_the_files_frozen_when_they_were_created() {
         "#!/bin/sh\necho v1\n"
     );
     assert!(cairn_installation::skills::frozen(&s.config, "../escape").is_none());
+
+    // Runs without their own home read the frozen copy in place.
+    let prepared = cairn_installation::execution::prepare(&next, &s.config, None, None, None)
+        .await
+        .unwrap();
+    assert_eq!(prepared["isolated"], false);
+    let installed = Path::new(text(&prepared["skills"][0], "path"));
+    assert!(installed.starts_with(s.config.data_dir.join("skill-bundles")));
+    assert_eq!(
+        std::fs::read_to_string(installed.with_file_name("scripts/check.sh")).unwrap(),
+        "#!/bin/sh\necho v2\n"
+    );
 }
 
 /// A `gh` that serves `fixture/skills` from JSON files named after endpoints.
@@ -800,4 +812,55 @@ async fn owner_mcp_clients_read_and_edit_multi_file_skills() {
     )
     .await;
     assert_eq!(stale["isError"], true);
+}
+
+#[tokio::test]
+async fn skills_written_outside_cairn_stay_editable() {
+    let api = Api::new().await;
+    let directory = api.skill_dir("review");
+    std::fs::create_dir_all(directory.join(".venv/bin")).unwrap();
+    std::fs::create_dir_all(directory.join("a")).unwrap();
+    std::fs::write(directory.join("SKILL.md"), SKILL).unwrap();
+    std::fs::write(directory.join("a/x.md"), "x").unwrap();
+    std::fs::write(directory.join("b.md"), "b").unwrap();
+    std::fs::write(directory.join("big.bin"), vec![0u8; 4 * 1024 * 1024 + 1]).unwrap();
+    std::os::unix::fs::symlink("/usr/bin/python3", directory.join(".venv/bin/python")).unwrap();
+
+    // Hidden links survive, the oversized legacy file does not block edits, and a
+    // file may take the name of a folder that the same batch emptied.
+    let base = api.ok("GET", "/skills/global/review/bundle", None).await["revision"].clone();
+    let edited = api
+        .ok(
+            "POST",
+            "/skills/global/review/bundle",
+            Some(json!({
+                "base": base,
+                "changes": [
+                    { "op": "move", "from": "a/x.md", "to": "z/x.md" },
+                    { "op": "move", "from": "b.md", "to": "a" },
+                ],
+            })),
+        )
+        .await;
+    assert_eq!(paths(&edited), ["SKILL.md", "a", "big.bin", "z/x.md"]);
+    assert!(
+        std::fs::symlink_metadata(directory.join(".venv/bin/python"))
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
+    api.ok(
+        "PUT",
+        "/skills/global/review",
+        Some(json!({ "content": SKILL.replace("Run", "Then run") })),
+    )
+    .await;
+    let (status, _) = api
+        .call(
+            "GET",
+            "/skills/global/review/file?path=.venv/bin/python",
+            None,
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
 }

@@ -182,6 +182,22 @@ async fn install_skills(home: &Path, skills: &Value, config: &Config) -> Result<
     Ok(installed)
 }
 
+/// Points the selected skills of a run without its own home at their frozen
+/// copies, which later edits of the live skills cannot change.
+pub(super) async fn frozen_skills(skills: &Value, config: &Config) -> Result<Value> {
+    let mut skills = skills.clone();
+    for skill in skills.as_array_mut().into_iter().flatten() {
+        let revision = text(skill, "bundle").to_owned();
+        if let Some(path) = crate::skills::frozen(config, &revision)
+            && tokio::fs::try_exists(&path).await?
+        {
+            crate::skills::touch(config, &revision).await?;
+            skill["path"] = path.join("SKILL.md").to_string_lossy().into_owned().into();
+        }
+    }
+    Ok(skills)
+}
+
 pub(super) struct HomeOptions<'a> {
     pub github: Option<&'a str>,
     pub github_access: bool,

@@ -145,6 +145,64 @@ class SkillBundlesTest {
     }
 
     @Test
+    fun movesWaitWhileAParentFolderOfTheTargetIsStillAFile() {
+        val base =
+            SkillBundle(
+                "global",
+                "review",
+                "rev-1",
+                // alpha/x comes first, so only the parent-folder check keeps it waiting.
+                listOf(SkillFile("SKILL.md", 10), SkillFile("alpha/x", 4), SkillFile("zeta", 3)),
+            )
+        val draft = SkillDraft.of(base).move("zeta", "zeta.md").moveFolder("alpha", "zeta")
+        assertEquals(
+            listOf(SkillChange.Move("zeta", "zeta.md"), SkillChange.Move("alpha/x", "zeta/x")),
+            draft.changes(),
+        )
+
+        // The reverse: a file takes the path of a folder whose file moves away later.
+        val reverse =
+            SkillDraft.of(
+                    base.copy(
+                        files =
+                            listOf(
+                                SkillFile("SKILL.md", 10),
+                                SkillFile("lib.md", 4),
+                                SkillFile("lib/a.sh", 3),
+                            )
+                    )
+                )
+                .move("lib.md", "notes.md")
+                .move("lib/a.sh", "scripts/a.sh")
+                .move("notes.md", "lib")
+        assertEquals(
+            listOf(SkillChange.Move("lib/a.sh", "scripts/a.sh"), SkillChange.Move("lib.md", "lib")),
+            reverse.changes(),
+        )
+
+        // Mutually blocking folder/file moves still resolve through a temporary path.
+        val crossed =
+            SkillDraft.of(
+                    base.copy(
+                        files =
+                            listOf(SkillFile("SKILL.md", 10), SkillFile("a", 1), SkillFile("b", 1))
+                    )
+                )
+                .move("a", "c")
+                .move("b", "a/y")
+                .move("c", "b/x")
+        val moves = crossed.changes().filterIsInstance<SkillChange.Move>()
+        val files = mutableSetOf("SKILL.md", "a", "b")
+        for (move in moves) {
+            assertTrue(move.from in files)
+            assertFalse(files.any { pathsCollide(move.to, it) })
+            files -= move.from
+            files += move.to
+        }
+        assertEquals(setOf("SKILL.md", "a/y", "b/x"), files)
+    }
+
+    @Test
     fun foldersMoveTheirFilesAndDeletedFilesCanBeRestored() {
         val moved = draft().moveFolder("scripts", "tools/scripts")
         assertEquals(
@@ -347,6 +405,14 @@ class SkillBundlesTest {
         assertEquals(
             GithubSkillReference("o/r"),
             githubSkillReference("https://github.com/o/r.git"),
+        )
+        assertEquals(
+            GithubSkillReference("o/r", "main", "foo/MYSKILL.md"),
+            githubSkillReference("https://github.com/o/r/blob/main/foo/MYSKILL.md"),
+        )
+        assertEquals(
+            GithubSkillReference("o/r", "main", ""),
+            githubSkillReference("https://github.com/o/r/blob/main/SKILL.md"),
         )
         assertNull(githubSkillReference("owner"))
         assertNull(githubSkillReference("https://gitlab.com/o/r"))

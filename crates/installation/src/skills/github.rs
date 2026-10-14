@@ -465,7 +465,12 @@ pub async fn update(
     let repo = repository(text(&record, "repository"))?.to_owned();
     let folder = text(&record, "path").to_owned();
     let commit = commit(s, &repo, target).await?;
-    let (files, _) = files(s, &repo, &commit.tree, &folder).await?;
+    let (files, truncated) = files(s, &repo, &commit.tree, &folder).await?;
+    if truncated {
+        return Err(Error::bad(
+            "GitHub listed only part of this folder, so it cannot be updated safely.",
+        ));
+    }
     let changes = download(s, &repo, files).await?;
     s.skills.replace(skill, base, &changes, project).await?;
 

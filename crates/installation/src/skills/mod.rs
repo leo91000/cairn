@@ -489,6 +489,11 @@ impl Skills {
 
     /// Text files as UTF-8, other files as base64.
     pub async fn read(&self, skill: &str, file: &str, project: Option<&Path>) -> Result<Value> {
+        if !visible(file) {
+            return Err(Error::bad(
+                "Files whose names start with . are not part of a skill.",
+            ));
+        }
         let directory = self.directory(skill, project).await?;
         let target = bounded(&directory, file, false).await?;
         let metadata = fs::symlink_metadata(&target).await?;
@@ -539,6 +544,7 @@ impl Skills {
         }
         let mut changes = Vec::with_capacity(items.len());
         let mut uploads = Vec::new();
+        let mut written = 0;
         for item in items {
             let field = |key: &str| {
                 item[key]
@@ -549,11 +555,18 @@ impl Skills {
             let change = match item["op"].as_str() {
                 Some("write") => {
                     let bytes = if let Some(upload) = item["upload"].as_str() {
+                        if uploads.iter().any(|used| used == upload) {
+                            return Err(Error::bad("Each upload can be used once."));
+                        }
                         uploads.push(upload.to_owned());
                         self.upload(upload).await?
                     } else {
                         decode(&field("content")?, item["encoding"].as_str())?
                     };
+                    written += bytes.len() as u64;
+                    if written > 2 * bundle::BUNDLE_BYTES {
+                        return Err(Error::too_large("This save writes too much at once."));
+                    }
                     Change::Write {
                         path: field("path")?,
                         bytes,

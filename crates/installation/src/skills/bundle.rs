@@ -46,6 +46,15 @@ pub fn path(value: &str) -> Result<()> {
     Ok(())
 }
 
+/// A path of a file that may already exist, written before the current rules.
+fn existing(value: &str) -> Result<()> {
+    relative(value)?;
+    if !super::visible(value) {
+        return Err(Error::bad(format!("{value} is hidden.")));
+    }
+    Ok(())
+}
+
 pub fn is_text(bytes: &[u8]) -> bool {
     !bytes.contains(&0) && std::str::from_utf8(bytes).is_ok()
 }
@@ -250,27 +259,27 @@ async fn apply(root: &Path, change: &Change) -> Result<()> {
             write_file(&target, bytes, executable).await
         }
         Change::Delete { path: file } => {
-            path(file)?;
+            existing(file)?;
             existing_file(root, file).await?;
             fs::remove_file(root.join(file)).await?;
-            Ok(())
+            emptied(root, file).await
         }
         Change::Move { from, to } => {
-            path(from)?;
+            existing(from)?;
             path(to)?;
             existing_file(root, from).await?;
+            parents(root, to).await?;
             if kind(&root.join(to)).await?.is_some() {
                 return Err(Error::bad(format!("{to} already exists.")));
             }
-            parents(root, to).await?;
             fs::rename(root.join(from), root.join(to)).await?;
-            Ok(())
+            emptied(root, from).await
         }
         Change::Mode {
             path: file,
             executable,
         } => {
-            path(file)?;
+            existing(file)?;
             existing_file(root, file).await?;
             fs::set_permissions(
                 root.join(file),
@@ -280,6 +289,20 @@ async fn apply(root: &Path, change: &Change) -> Result<()> {
             Ok(())
         }
     }
+}
+
+/// Removes the folders above `file` that its delete or move left empty, so
+/// later changes of the same batch can use their names.
+async fn emptied(root: &Path, file: &str) -> Result<()> {
+    let mut folder = Path::new(file).parent();
+    while let Some(relative) = folder.filter(|relative| !relative.as_os_str().is_empty()) {
+        match fs::remove_dir(root.join(relative)).await {
+            Ok(()) => folder = relative.parent(),
+            Err(error) if error.kind() == ErrorKind::DirectoryNotEmpty => break,
+            Err(error) => return Err(error.into()),
+        }
+    }
+    Ok(())
 }
 
 /// Removes folders left empty by deletes and moves; returns whether `directory`
@@ -297,30 +320,39 @@ async fn prune(directory: &Path) -> Result<bool> {
     Ok(empty)
 }
 
-/// Checks the limits and `SKILL.md` of a prepared directory.
-async fn validate(directory: &Path, skill: &str) -> Result<()> {
+/// Totals of a skill, compared before and after a batch.
+#[derive(Clone, Copy, Default)]
+struct Size {
+    files: usize,
+    bytes: u64,
+}
+
+impl Size {
+    fn of(entries: &[Entry]) -> Self {
+        Self {
+            files: entries.len(),
+            bytes: entries.iter().map(|entry| entry.size).sum(),
+        }
+    }
+}
+
+/// Checks the limits and `SKILL.md` of a prepared directory. Each written file
+/// was checked when written; a skill that already exceeded a total, for example
+/// one cloned with a project, can still be edited as long as it does not grow
+/// further beyond it.
+async fn validate(directory: &Path, skill: &str, before: Size) -> Result<()> {
     let entries = scan(directory).await?;
-    if entries.len() > FILES {
+    let after = Size::of(&entries);
+    if after.files > FILES.max(before.files) {
         return Err(Error::too_large(format!(
             "A skill can contain at most {FILES} files."
         )));
     }
-    let total = entries.iter().map(|entry| entry.size).sum::<u64>();
-    if total > BUNDLE_BYTES {
+    if after.bytes > BUNDLE_BYTES.max(before.bytes) {
         return Err(Error::too_large(format!(
             "A skill can contain at most {} MiB.",
             BUNDLE_BYTES >> 20
         )));
-    }
-    for entry in &entries {
-        path(&entry.path)?;
-        if entry.size > FILE_BYTES {
-            return Err(Error::too_large(format!(
-                "{} is larger than {} MiB.",
-                entry.path,
-                FILE_BYTES >> 20
-            )));
-        }
     }
     if !entries.iter().any(|entry| entry.path == "SKILL.md") {
         return Err(Error::bad("A skill needs a SKILL.md file."));
@@ -335,7 +367,8 @@ async fn validate(directory: &Path, skill: &str) -> Result<()> {
     Ok(())
 }
 
-/// Copies a directory tree, preserving file modes and refusing links.
+/// Copies a directory tree, preserving file modes. Links inside hidden folders
+/// (such as a `.venv`) are copied as links; `scan` refuses visible ones.
 pub async fn copy_dir(source: &Path, target: &Path) -> Result<()> {
     private_dir(target).await?;
     let mut items = fs::read_dir(source).await?;
@@ -346,8 +379,12 @@ pub async fn copy_dir(source: &Path, target: &Path) -> Result<()> {
             Box::pin(copy_dir(&item.path(), &destination)).await?;
         } else if kind.is_file() {
             fs::copy(item.path(), destination).await?;
+        } else if kind.is_symlink() {
+            fs::symlink(fs::read_link(item.path()).await?, destination).await?;
         } else {
-            return Err(Error::bad("Skills must not contain symbolic links."));
+            return Err(Error::bad(
+                "Skills can contain only regular files and folders.",
+            ));
         }
     }
     Ok(())
@@ -441,6 +478,7 @@ pub async fn save(root: &Path, skill: &str, base: Base<'_>, changes: &[Change]) 
         Some(_) => return Err(Error::bad("The skill path is not a directory.")),
         None => false,
     };
+    let mut before = Size::default();
     match (&base, exists) {
         (Base::Create, true) => {
             return Err(Error::conflict(format!(
@@ -456,6 +494,7 @@ pub async fn save(root: &Path, skill: &str, base: Base<'_>, changes: &[Change]) 
                     "This skill changed since you opened it. Reload it and try again.",
                 ));
             }
+            before = Size::of(&scan(&directory).await?);
         }
         (Base::Create, false) => {}
     }
@@ -471,7 +510,7 @@ pub async fn save(root: &Path, skill: &str, base: Base<'_>, changes: &[Change]) 
             apply(&staging, change).await?;
         }
         prune(&staging).await?;
-        validate(&staging, skill).await?;
+        validate(&staging, skill, before).await?;
         swap(&staging, &directory, exists).await
     }
     .await;

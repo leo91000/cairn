@@ -353,8 +353,21 @@ export function skillChanges(original: SkillFile[], draft: DraftFile[]): SkillCh
     .filter(file => file.origin !== null && file.origin !== file.path)
     .map(file => ({ from: file.origin!, to: file.path }))
 
+  // A path is taken by a file at it, by a file at one of its parent folders, or by files
+  // inside it (it is still a folder).
+  const taken = (path: string) => {
+    if (occupied.has(path))
+      return true
+    for (let folder = dirname(path); folder; folder = dirname(folder)) {
+      if (occupied.has(folder))
+        return true
+    }
+
+    return [...occupied].some(file => isInside(file, path))
+  }
+
   while (pending.length) {
-    const ready = pending.findIndex(move => !occupied.has(move.to))
+    const ready = pending.findIndex(move => !taken(move.to))
     if (ready >= 0) {
       const [move] = pending.splice(ready, 1)
       changes.push({ op: 'move', from: move!.from, to: move!.to })
@@ -366,7 +379,7 @@ export function skillChanges(original: SkillFile[], draft: DraftFile[]): SkillCh
     const blocked = pending[0]!
     let attempt = 1
     let temporary = `${blocked.from}~${attempt}`
-    while (occupied.has(temporary) || targets.has(temporary)) {
+    while (taken(temporary) || targets.has(temporary)) {
       attempt += 1
       temporary = `${blocked.from}~${attempt}`
     }
