@@ -313,7 +313,7 @@ fn category(kind: &str) -> &'static str {
         "mcp_tool_call" => "mcp",
         "file_change" => "file_change",
         "web_search" => "web",
-        "collab_tool_call" => "collaboration",
+        "collab_tool_call" | "subagent" => "collaboration",
         "reasoning" => "reasoning",
         "agent_message" => "message",
         _ => "other",

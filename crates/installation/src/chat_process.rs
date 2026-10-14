@@ -66,6 +66,36 @@ pub fn chat_item(mut item: Value) -> Value {
     item
 }
 
+/// A Codex agent status as a subagent status.
+fn subagent_status(status: &str) -> &'static str {
+    match status {
+        "pendingInit" | "running" => "in_progress",
+        "completed" => "completed",
+        "interrupted" | "shutdown" => "stopped",
+        _ => "failed",
+    }
+}
+
+/// A short name for a subagent Codex identifies only by its prompt or its path.
+fn subagent_name(prompt: &str, path: &str) -> String {
+    let path = path.rsplit('/').find(|part| !part.is_empty()).unwrap_or("");
+    if !path.is_empty() {
+        return path.replace(['_', '-'], " ");
+    }
+    let line = prompt
+        .lines()
+        .find(|line| !line.trim().is_empty())
+        .unwrap_or("");
+    let line = line.trim();
+    if line.is_empty() {
+        return "Subagent".into();
+    }
+    if line.chars().count() <= 60 {
+        return line.into();
+    }
+    format!("{}…", line.chars().take(59).collect::<String>().trim_end())
+}
+
 /// `thread/start` and `thread/resume`.
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -159,6 +189,10 @@ struct Chat<'a> {
     attempted: HashSet<String>,
     texts: HashMap<String, String>,
     questions: HashMap<String, Question>,
+    /// Subagents this conversation started, by the ID of the item that started them.
+    subagents: HashMap<String, Value>,
+    /// The subagent each spawned thread works for.
+    children: HashMap<String, String>,
 }
 
 impl Chat<'_> {
@@ -207,6 +241,12 @@ impl Chat<'_> {
         if user_input_result {
             return Ok(());
         }
+        if matches!(
+            text(&item, "type"),
+            "collabAgentToolCall" | "subAgentActivity"
+        ) {
+            return self.collaboration(item, kind, None).await;
+        }
         if item["type"] == "userMessage" {
             if let Some(id) = item["clientId"].as_str() {
                 self.acknowledge(id).await?;
@@ -223,6 +263,242 @@ impl Chat<'_> {
         }
         self.emit(json!({ "type": kind, "item": chat_item(item) }))
             .await
+    }
+
+    /// Codex's subagent tools as the subagents they start and the statuses they report. Waiting
+    /// for or listing subagents only refreshes those statuses.
+    async fn collaboration(&mut self, item: Value, kind: &str, parent: Option<&str>) -> Result<()> {
+        let tool = text(&item, "tool");
+        let spawned = item["type"] == "collabAgentToolCall" && tool == "spawnAgent";
+        if spawned {
+            // The spawned thread is known once the call completes; the call's ID names the
+            // subagent throughout.
+            let id = text(&item, "id").to_owned();
+            let mut subagent = self.subagents.remove(&id).unwrap_or_else(|| {
+                json!({
+                    "id": id,
+                    "type": "subagent",
+                    "name": subagent_name(text(&item, "prompt"), ""),
+                    "prompt": item["prompt"],
+                    "model": item["model"],
+                    "status": "in_progress",
+                })
+            });
+            if let Some(parent) = parent {
+                subagent["parent_id"] = parent.into();
+            }
+            if text(&item, "status") == "failed" {
+                subagent["status"] = "failed".into();
+            } else if text(&item, "status") == "interrupted" {
+                subagent["status"] = "stopped".into();
+            }
+            for thread in item["receiverThreadIds"].as_array().into_iter().flatten() {
+                if let Some(thread) = thread.as_str() {
+                    // A lifecycle notification can precede the spawn result. Fold its
+                    // provisional row and any steps into the original spawn item.
+                    if let Some(previous) = self.children.get(thread).filter(|old| **old != id)
+                        && let Some(previous) = self.subagents.remove(previous)
+                    {
+                        subagent["replaces_id"] = previous["id"].clone();
+                        for field in ["name", "model", "result", "status"] {
+                            if !previous[field].is_null() {
+                                subagent[field] = previous[field].clone();
+                            }
+                        }
+                    }
+                    self.children.insert(thread.to_owned(), id.clone());
+                    if let Some(state) = item["agentsStates"].get(thread) {
+                        let status = subagent_status(text(state, "status"));
+                        if subagent["status"] == "in_progress" || status != "in_progress" {
+                            subagent["status"] = status.into();
+                        }
+                        if !text(state, "message").is_empty() {
+                            subagent["result"] = state["message"].clone();
+                        }
+                    }
+                }
+            }
+            self.subagents.insert(id, subagent.clone());
+            return self.emit(json!({ "type": kind, "item": subagent })).await;
+        }
+
+        if item["type"] == "subAgentActivity" {
+            let thread = text(&item, "agentThreadId");
+            let status = match text(&item, "kind") {
+                "completed" => "completed",
+                "interrupted" => "stopped",
+                _ => "in_progress",
+            };
+            let path = text(&item, "agentPath");
+            if thread.is_empty() || self.children.contains_key(thread) {
+                return self
+                    .update_subagent(thread, |subagent| {
+                        // An interaction can message an already finished agent without
+                        // starting another turn; only a started activity reopens it.
+                        if text(&item, "kind") == "started"
+                            || (text(&item, "kind") != "interacted"
+                                && subagent["status"] == "in_progress")
+                        {
+                            subagent["status"] = status.into();
+                        }
+                        if !path.is_empty() {
+                            subagent["name"] = subagent_name("", path).into();
+                        }
+                    })
+                    .await;
+            }
+            let id = text(&item, "id").to_owned();
+            let mut subagent = json!({
+                "id": id,
+                "type": "subagent",
+                "name": subagent_name("", path),
+                "model": item["model"],
+                "status": status,
+            });
+            if let Some(parent) = parent {
+                subagent["parent_id"] = parent.into();
+            }
+            self.children.insert(thread.to_owned(), id.clone());
+            self.subagents.insert(id, subagent.clone());
+            return self
+                .emit(json!({ "type": "item.started", "item": subagent }))
+                .await;
+        }
+
+        let states = item["agentsStates"]
+            .as_object()
+            .cloned()
+            .unwrap_or_default();
+        for (thread, state) in &states {
+            let status = subagent_status(text(state, "status"));
+            self.update_subagent(thread, |subagent| {
+                // Closing a finished subagent does not undo its completion.
+                let finished =
+                    matches!(text(subagent, "status"), "completed" | "failed" | "stopped");
+                if !finished || status != "stopped" {
+                    subagent["status"] = status.into();
+                }
+                if !text(state, "message").is_empty() {
+                    subagent["result"] = state["message"].clone();
+                }
+            })
+            .await?;
+        }
+        if matches!(tool, "wait" | "listAgents") {
+            return Ok(());
+        }
+        let mut item = chat_item(item);
+        if let Some(parent) = parent {
+            item["parent_id"] = parent.into();
+        }
+        self.emit(json!({ "type": kind, "item": item })).await
+    }
+
+    /// Applies a change to the subagent working in `thread`, and shows it when it changed.
+    async fn update_subagent(
+        &mut self,
+        thread: &str,
+        change: impl FnOnce(&mut Value),
+    ) -> Result<()> {
+        let Some(subagent) = self
+            .children
+            .get(thread)
+            .and_then(|id| self.subagents.get_mut(id))
+        else {
+            return Ok(());
+        };
+        let before = subagent.clone();
+        change(subagent);
+        if before["status"] != "in_progress" && subagent["status"] == "in_progress" {
+            subagent["result"] = "".into();
+        }
+        if *subagent == before {
+            return Ok(());
+        }
+        let subagent = subagent.clone();
+        self.emit(json!({ "type": "item.updated", "item": subagent }))
+            .await
+    }
+
+    /// Activity of a subagent's own thread, shown as its steps. Its messages never become the
+    /// conversation's reply, and its turn only settles the subagent.
+    async fn subagent_activity(
+        &mut self,
+        method: &str,
+        params: &Value,
+        parent: &str,
+    ) -> Result<()> {
+        match method {
+            "item/started" | "item/completed" => {
+                let item = &params["item"];
+                if item["type"] == "userMessage" {
+                    return Ok(());
+                }
+                let mut item = item.clone();
+                item["id"] = format!(
+                    "{}:{}:{}",
+                    text(params, "threadId"),
+                    text(params, "turnId"),
+                    text(&item, "id")
+                )
+                .into();
+                if matches!(
+                    text(&item, "type"),
+                    "collabAgentToolCall" | "subAgentActivity"
+                ) {
+                    let kind = method.replace('/', ".");
+                    return self.collaboration(item, &kind, Some(parent)).await;
+                }
+                let mut item = chat_item(item);
+                if item["type"] == "agent_message" {
+                    item["type"] = "subagent_message".into();
+                    // Its latest message is its report once its turn completes.
+                    let subagent = self.subagents.get_mut(parent);
+                    if let Some(subagent) = subagent.filter(|_| method == "item/completed") {
+                        subagent["result"] = item["text"].clone();
+                    }
+                }
+                item["parent_id"] = parent.into();
+                let kind = method.replace('/', ".");
+                self.emit(json!({ "type": kind, "item": item })).await
+            }
+            "item/agentMessage/delta" => {
+                let id = format!(
+                    "{}:{}:{}",
+                    text(params, "threadId"),
+                    text(params, "turnId"),
+                    text(params, "itemId")
+                );
+                let value = self.texts.entry(id.clone()).or_default();
+                if value.len() + text(params, "delta").len() > MAX_MESSAGE {
+                    return Ok(());
+                }
+                value.push_str(text(params, "delta"));
+                let item = json!({
+                    "id": id,
+                    "type": "subagent_message",
+                    "text": value,
+                    "parent_id": parent,
+                });
+                self.emit(json!({ "type": "item.updated", "item": item }))
+                    .await
+            }
+            "turn/started" | "turn/completed" => {
+                let status = if method == "turn/started" {
+                    "in_progress"
+                } else {
+                    match text(&params["turn"], "status") {
+                        "completed" => "completed",
+                        "interrupted" => "stopped",
+                        _ => "failed",
+                    }
+                };
+                let thread = text(params, "threadId");
+                self.update_subagent(thread, |subagent| subagent["status"] = status.into())
+                    .await
+            }
+            _ => Ok(()),
+        }
     }
 
     /// Questions an agent message asks, shown without blocking the conversation.
@@ -343,6 +619,15 @@ impl Chat<'_> {
                 return self.request_user_input(request_id, &params).await;
             }
             return self.session.rpc.reject(request_id).await;
+        }
+        let parent = params["threadId"]
+            .as_str()
+            .and_then(|thread| self.children.get(thread))
+            .cloned();
+        if let Some(parent) = parent {
+            return self
+                .subagent_activity(&incoming.method, &params, &parent)
+                .await;
         }
         let other_thread = params["threadId"].is_string()
             && !self.thread.is_empty()
@@ -812,6 +1097,8 @@ async fn run_session(
         seen: HashSet::new(),
         attempted: HashSet::new(),
         texts: HashMap::new(),
+        subagents: HashMap::new(),
+        children: HashMap::new(),
         questions: HashMap::new(),
     };
     let mut result = chat.execute(&plan).await;

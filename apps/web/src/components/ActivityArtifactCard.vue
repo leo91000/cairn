@@ -9,6 +9,7 @@ import {
   Clock,
   FileCode,
   FolderSearch,
+  GitFork,
   Globe,
   Info,
   ListChecks,
@@ -53,6 +54,7 @@ const icons = {
   plan: ListChecks,
   thinking: Sparkles,
   notice: Info,
+  subagent: GitFork,
 }
 const labels = {
   command: 'Terminal',
@@ -65,6 +67,7 @@ const labels = {
   plan: 'Plan',
   thinking: 'Thinking',
   notice: 'Session',
+  subagent: 'Subagent',
 }
 const running = computed(() => props.artifact.status === 'running' && props.active)
 const suspended = computed(() => running.value && props.suspended)

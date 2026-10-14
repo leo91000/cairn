@@ -126,9 +126,14 @@ export interface WorkingStep {
   waiting?: string[]
 }
 
-/** Events that show the agent active again after it announced a background wait. */
+/**
+ * Events that show the agent active again after it announced a background wait. Its subagents
+ * working in the background are what it waits for.
+ */
 function resumesWork(event: RunEvent) {
-  return event.type === 'chat.user' || event.type === 'thread.started' || event.type.startsWith('turn.') || event.type.startsWith('item.')
+  const item = event.payload?.item && typeof event.payload.item === 'object' ? event.payload.item as Record<string, unknown> : {}
+  const subagent = item.type === 'subagent' || typeof item.parent_id === 'string'
+  return event.type === 'chat.user' || event.type === 'thread.started' || event.type.startsWith('turn.') || (event.type.startsWith('item.') && !subagent)
 }
 
 /**
@@ -178,11 +183,17 @@ export function workingStep(entries: ActivityEntry[], agent: string, fallbackSta
   const turn = turnStart >= 0 ? entries.slice(turnStart + 1) : entries
   const opening = entries[turnStart]
   const since = (opening?.kind === 'message' && opening.time > 0 ? opening.time : null) ?? fallbackStart
-  const artifacts = turn.flatMap(entry => entry.kind === 'group' ? entry.artifacts : [])
+  const artifacts = turn.flatMap(entry => entry.kind === 'group' ? entry.artifacts : entry.kind === 'team' ? entry.agents : [])
   const latest = artifacts.findLast(artifact => artifact.kind !== 'notice')
   const name = agent.trim() || 'The agent'
   if (!latest)
     return { title: `${name} is working`, detail: '', since }
+  const subagents = artifacts.filter(artifact => artifact.kind === 'subagent' && artifact.status === 'running')
+  if (latest.kind === 'subagent' && subagents.length) {
+    const title = subagents.length === 1 ? 'Waiting for a subagent' : `Waiting for ${subagents.length} subagents`
+    return { title, detail: subagents.map(subagent => subagent.title).join(' · '), since }
+  }
+
   if (latest.status === 'running')
     return { title: latest.title, detail: latest.command || latest.subtitle, since }
   return { title: `${name} is working`, detail: `Last step: ${latest.title}`, since }

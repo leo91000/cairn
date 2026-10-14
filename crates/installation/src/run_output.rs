@@ -83,6 +83,12 @@ pub fn compact_activity(event: &Value, secrets: &[String]) -> Value {
         "exitCode",
         "duration_ms",
         "durationMs",
+        "parent_id",
+        "replaces_id",
+        "task_id",
+        "name",
+        "agent_type",
+        "background",
     ] {
         if let Some(value) = source
             .get(key)
@@ -154,6 +160,20 @@ pub fn compact_activity(event: &Value, secrets: &[String]) -> Value {
                 })
                 .collect();
             item.insert("items".into(), tasks.into());
+        }
+        "subagent" => {
+            for (key, limit) in [
+                ("prompt", 4096),
+                ("result", 4096),
+                ("activity", 1024),
+                ("model", 256),
+                ("tokens", 0),
+                ("tool_uses", 0),
+            ] {
+                if let Some(value) = source.get(key) {
+                    item.insert(key.into(), activity_preview(value, limit, secrets));
+                }
+            }
         }
         _ => {
             item.insert("text".into(), NOTICE.into());

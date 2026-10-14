@@ -28,6 +28,7 @@ import ChatAttachments from './ChatAttachments.vue'
 import ChatNotice from './ChatNotice.vue'
 import ChatOutcome from './ChatOutcome.vue'
 import Icon from './Icon.vue'
+import SubagentTeam from './SubagentTeam.vue'
 import UiButton from './UiButton.vue'
 import WorkingIndicator from './WorkingIndicator.vue'
 
@@ -361,6 +362,7 @@ defineExpose({
                   <ActivityContent :content="entry.text" />
                 </article>
                 <ChatNotice v-else-if="entry.kind === 'notice'" :notice="entry.artifact" />
+                <SubagentTeam v-else-if="entry.kind === 'team'" :agents="entry.agents" :active="active" />
                 <AgentActions
                   v-else
                   :artifacts="entry.artifacts"

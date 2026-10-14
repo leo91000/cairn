@@ -7,8 +7,26 @@ export interface ActivityCode {
   code: string
   language: string
 }
+/** A subagent the agent delegated work to, with the steps it took on its own. */
+export interface ActivitySubagent {
+  taskId?: string
+  type: string
+  prompt: string
+  /** Its final report, once it finished. */
+  result: string
+  /** Its latest message while it works. */
+  message: string
+  /** What Claude Code says it is doing. */
+  activity: string
+  model: string
+  background: boolean
+  state: 'running' | 'done' | 'failed' | 'stopped'
+  tokens?: number
+  toolUses?: number
+  steps: ActivityArtifact[]
+}
 export interface ActivityArtifact {
-  kind: 'command' | 'read' | 'browse' | 'output' | 'files' | 'search' | 'tool' | 'plan' | 'thinking' | 'notice'
+  kind: 'command' | 'read' | 'browse' | 'output' | 'files' | 'search' | 'tool' | 'plan' | 'thinking' | 'notice' | 'subagent'
   id: string
   time: number
   title: string
@@ -25,6 +43,7 @@ export interface ActivityArtifact {
   historical?: boolean
   statusLabel?: string
   attention?: boolean
+  subagent?: ActivitySubagent
 }
 export type ActivityEntry
   = | {
@@ -37,6 +56,7 @@ export type ActivityEntry
     attachments?: import('../../../packages/contracts/chats').ChatAttachment[]
   }
   | { kind: 'group', id: string, artifacts: ActivityArtifact[] }
+  | { kind: 'team', id: string, agents: ActivityArtifact[] }
   | { kind: 'notice', id: string, artifact: ActivityArtifact }
 
 function record(value: unknown): Record<string, unknown> {
@@ -67,11 +87,36 @@ function readable(value: string) {
   return value.replaceAll(/[._]/g, ' ').replace(/^./, letter => letter.toUpperCase())
 }
 
+const subagentStates: Record<string, ActivitySubagent['state']> = {
+  completed: 'done',
+  failed: 'failed',
+  stopped: 'stopped',
+}
+// Codex's other subagent tools; spawning, waiting and listing are folded into the subagents.
+const collaborationTitles: Record<string, string> = {
+  sendInput: 'Sent instructions to a subagent',
+  sendMessage: 'Messaged a subagent',
+  followupTask: 'Gave a subagent a follow-up task',
+  resumeAgent: 'Resumed a subagent',
+  interruptAgent: 'Interrupted a subagent',
+  closeAgent: 'Closed a subagent',
+}
+
 /** Keep tool updates in their original position and fold actions between messages. */
 export function activityEntries(events: RunEvent[], chat = false): ActivityEntry[] {
   const entries: ActivityEntry[] = []
   const artifacts = new Map<string, ActivityArtifact>()
   const messages = new Map<string, Extract<ActivityEntry, { kind: 'message' }>>()
+  // By the agent's own item ID: a subagent's steps can arrive after the turn that started it.
+  const subagents = new Map<string, ActivityArtifact>()
+  const aliases = new Map<string, string>()
+  for (const event of events) {
+    const item = record(payload(event).item)
+    if (item.type === 'subagent' && text(item.replaces_id))
+      aliases.set(`${event.runId}:${text(item.replaces_id)}`, text(item.id))
+  }
+
+  const agentKey = (event: RunEvent, id: string) => `${event.runId}:${aliases.get(`${event.runId}:${id}`) ?? id}`
   let connectionNotices: ActivityArtifact[] = []
 
   function recovered() {
@@ -105,6 +150,26 @@ export function activityEntries(events: RunEvent[], chat = false): ActivityEntry
     const data = payload(event)
     const item = record(data.item)
     const type = text(item.type)
+    // Keep ended children stopped in the history when a later execution starts.
+    const ended = ['turn.completed', 'turn.failed'].includes(event.type) || (event.type === 'status' && ['succeeded', 'failed', 'cancelled', 'interrupted'].includes(event.text))
+    if (ended) {
+      for (const [key, agent] of subagents) {
+        if (key.startsWith(`${event.runId}:`) && agent.subagent?.state === 'running') {
+          agent.subagent.state = 'stopped'
+          agent.status = 'done'
+          agent.statusLabel = 'Stopped'
+          agent.durationMs = Math.max(0, event.createdAt - agent.time)
+          for (const step of agent.subagent.steps) {
+            if (step.status === 'running' && !step.subagent) {
+              step.status = 'info'
+              step.statusLabel = 'Stopped'
+              step.durationMs = Math.max(0, event.createdAt - step.time)
+            }
+          }
+        }
+      }
+    }
+
     if (event.type === 'turn.started') {
       connectionNotices = []
       turn++
@@ -115,9 +180,18 @@ export function activityEntries(events: RunEvent[], chat = false): ActivityEntry
     if (event.type === 'turn.completed' || (type === 'command_execution' && event.type === 'item.completed' && item.exit_code === 0 && item.status !== 'failed'))
       recovered()
     const itemId = text(item.id)
-    const id = itemId ? `${turn}:${itemId}` : `event:${event.id}`
+    // A subagent keeps its row when its updates arrive after the turn that started it.
+    const parentArtifact = subagents.get(agentKey(event, text(item.parent_id)))
+    const agentId = type === 'subagent' ? subagents.get(agentKey(event, itemId))?.id ?? `${turn}:${agentKey(event, itemId)}` : undefined
+    const id = agentId || (itemId ? `${parentArtifact?.id ?? turn}:${itemId}` : `event:${event.id}`)
     const legacy = !event.payload && !Object.keys(data).length
     const legacyMessage = legacy && event.type === 'item.completed' && !legacyTool && event.text.trim()
+    const parent = parentArtifact?.subagent
+    if (type === 'subagent_message' && parent) {
+      parent.message = text(item.text)
+      continue
+    }
+
     if (type === 'agent_message' || legacyMessage) {
       recovered()
       const content = text(item.text) || event.text
@@ -229,6 +303,46 @@ export function activityEntries(events: RunEvent[], chat = false): ActivityEntry
       artifact.title = 'Thinking'
       block('Reasoning summary', item.text)
     }
+    else if (type === 'subagent') {
+      const previous = artifacts.get(id)?.subagent
+      const state = subagentStates[status] ?? 'running'
+      artifact.kind = 'subagent'
+      artifact.title = text(item.name) || 'Subagent'
+      artifact.subtitle = text(item.agent_type) || previous?.type || ''
+      artifact.status = state === 'failed' ? 'error' : state === 'running' ? 'running' : 'done'
+      if (state === 'stopped')
+        artifact.statusLabel = 'Stopped'
+      if (typeof item.duration_ms === 'number')
+        artifact.durationMs = item.duration_ms
+      artifact.subagent = {
+        taskId: text(item.task_id) || previous?.taskId,
+        type: artifact.subtitle,
+        prompt: text(item.prompt) || previous?.prompt || '',
+        result: typeof item.result === 'string' ? item.result : previous?.result || '',
+        message: state === 'running' && previous?.state !== 'running' ? '' : previous?.message ?? '',
+        activity: text(item.activity),
+        model: text(item.model) || previous?.model || '',
+        background: item.background === true,
+        state,
+        tokens: typeof item.tokens === 'number' ? item.tokens : undefined,
+        toolUses: typeof item.tool_uses === 'number' ? item.tool_uses : undefined,
+        steps: previous?.steps ?? [],
+      }
+      block('Prompt', item.prompt)
+      block('Report', item.result)
+    }
+    else if (type === 'collab_tool_call') {
+      artifact.kind = 'tool'
+      artifact.title = collaborationTitles[text(item.tool)] ?? 'Worked with a subagent'
+      artifact.subtitle = text(item.prompt).split('\n')[0] ?? ''
+      block('Prompt', item.prompt)
+    }
+    else if (type === 'subagent_message') {
+      // Its subagent is outside the loaded history.
+      artifact.kind = 'tool'
+      artifact.title = 'Subagent message'
+      block('Message', item.text)
+    }
     else {
       const labels: Record<string, string> = {
         'thread.started': 'Session connected',
@@ -270,11 +384,19 @@ export function activityEntries(events: RunEvent[], chat = false): ActivityEntry
 
     const previous = artifacts.get(id)
     if (previous) {
-      Object.assign(previous, artifact, { time: previous.time, durationMs: running ? undefined : Math.max(0, event.createdAt - previous.time) })
+      const durationMs = artifact.kind === 'subagent' ? artifact.durationMs : undefined
+      Object.assign(previous, artifact, { time: previous.time, durationMs: running ? undefined : durationMs ?? Math.max(0, event.createdAt - previous.time) })
       continue
     }
 
     artifacts.set(id, artifact)
+    if (artifact.kind === 'subagent' && itemId)
+      subagents.set(agentKey(event, itemId), artifact)
+    if (parent) {
+      parent.steps.push(artifact)
+      continue
+    }
+
     const last = entries.at(-1)
     if (last?.kind === 'group')
       last.artifacts.push(artifact)
@@ -284,7 +406,31 @@ export function activityEntries(events: RunEvent[], chat = false): ActivityEntry
       legacyTool = Object.assign(artifact, { kind: 'output' as const, title: 'Recorded step', historical: true })
   }
 
-  return chat ? chatEntries(entries) : entries
+  return teamEntries(chat ? chatEntries(entries) : entries)
+}
+
+/** Subagents started one after another work as a team, shown apart from the agent's own steps. */
+export function teamEntries(entries: ActivityEntry[]): ActivityEntry[] {
+  const result: ActivityEntry[] = []
+  for (const entry of entries) {
+    if (entry.kind !== 'group' || !entry.artifacts.some(artifact => artifact.kind === 'subagent')) {
+      result.push(entry)
+      continue
+    }
+
+    let last: ActivityEntry | undefined
+    for (const artifact of entry.artifacts) {
+      const team = artifact.kind === 'subagent'
+      if (team && last?.kind === 'team')
+        last.agents.push(artifact)
+      else if (!team && last?.kind === 'group')
+        last.artifacts.push(artifact)
+      else
+        result.push(last = team ? { kind: 'team', id: `team:${artifact.id}`, agents: [artifact] } : { kind: 'group', id: `group:${artifact.id}`, artifacts: [artifact] })
+    }
+  }
+
+  return result
 }
 
 /** Hide lifecycle bookkeeping in chat without removing persisted diagnostics. */

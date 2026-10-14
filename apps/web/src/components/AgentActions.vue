@@ -9,6 +9,7 @@ import {
   Clock,
   FileText,
   Folder,
+  GitFork,
   Pencil,
   Plug,
   Search,
@@ -44,6 +45,7 @@ const glyphs = {
   thinking: Sparkles,
   tool: Plug,
   notice: Clock,
+  subagent: GitFork,
 }
 const openedStep = computed(() => opened.value === null ? undefined : steps.value[opened.value])
 
