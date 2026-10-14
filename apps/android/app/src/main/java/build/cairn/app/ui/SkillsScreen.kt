@@ -1,262 +1,326 @@
 package build.cairn.app.ui
 
+import androidx.compose.foundation.background
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.dp
+import androidx.lifecycle.viewmodel.compose.viewModel
 import build.cairn.app.data.*
 
+/** Skills library: cards per skill, then a full-screen workbench for the opened one. */
 @Composable
 fun SkillsScreen(vm: CairnViewModel, state: Workspace) {
     var query by rememberSaveable { mutableStateOf("") }
     var scope by rememberSaveable { mutableStateOf("all") }
-    var editing by rememberSaveable { mutableStateOf<String?>(null) }
-    var deleting by rememberSaveable { mutableStateOf<String?>(null) }
+    var opened by rememberSaveable { mutableStateOf<String?>(null) }
+    var creating by rememberSaveable { mutableStateOf(false) }
+    var importing by rememberSaveable { mutableStateOf(false) }
+    val workbench = viewModel<SkillWorkbenchModel>(key = "skill-workbench")
+    val target = opened?.let(SkillTarget::parse)
+    if (target != null) {
+        LaunchedEffect(target) { workbench.open(vm, target) }
+        SkillWorkbench(
+            vm,
+            state,
+            workbench,
+            opened = { opened = it.key },
+            close = {
+                opened = null
+                workbench.reset()
+            },
+        )
+        return
+    }
     val skills =
         state.skills.filter {
             (scope == "all" || it.scope == scope) &&
-                "${it.name} ${it.description}".contains(query, true)
+                "${it.name} ${it.description} ${it.source?.repository.orEmpty()}"
+                    .contains(query.trim(), true)
         }
-    Page {
-        Heading("Skills")
+    Column(
+        Modifier.fillMaxSize()
+            .verticalScroll(rememberScrollState())
+            .testTag("skills")
+            .padding(horizontal = 16.dp)
+            .padding(top = 12.dp, bottom = 32.dp),
+        verticalArrangement = Arrangement.spacedBy(10.dp),
+    ) {
+        ScreenTitle(
+            "Skills",
+            if (state.isOwner) "Méthodes, scripts et références que vos agents emportent."
+            else "Méthodes partagées dans cette installation.",
+            Modifier.padding(start = 4.dp, bottom = 4.dp),
+        )
         if (state.isOwner)
-            Button(
-                onClick = {
-                    vm.clearMessage()
-                    editing = ""
-                }
+            Row(
+                Modifier.fillMaxWidth().padding(vertical = 2.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
             ) {
-                Text("Créer un skill")
+                SignalButton(
+                    "Nouveau skill",
+                    Modifier.weight(1f).testTag("skill-new"),
+                    icon = CairnIcons.Plus,
+                    expand = true,
+                ) {
+                    vm.clearMessage()
+                    creating = true
+                }
+                SignalButton(
+                    "Importer",
+                    Modifier.weight(1f).testTag("skill-import"),
+                    icon = CairnIcons.Download,
+                    container = MaterialTheme.colorScheme.surface,
+                    content = MaterialTheme.colorScheme.onSurface,
+                    border = true,
+                    expand = true,
+                ) {
+                    vm.clearMessage()
+                    importing = true
+                }
             }
-        SearchField("Rechercher", query, { query = it })
-        Choice(
-            "Portée",
-            scope,
-            listOf("all" to "Toutes", "global" to "Globale") +
-                state.projects.map { it.id to it.name },
+        SearchField("Rechercher un skill", query, { query = it })
+        Row(
+            Modifier.horizontalScroll(rememberScrollState()),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
         ) {
-            scope = it
+            SignalChip("Tous", scope == "all", state.skills.size) { scope = "all" }
+            SignalChip("Global", scope == "global", state.skills.count { it.scope == "global" }) {
+                scope = "global"
+            }
+            state.projects
+                .filter { project -> state.skills.any { it.scope == project.id } }
+                .forEach { project ->
+                    SignalChip(
+                        project.name,
+                        scope == project.id,
+                        state.skills.count { it.scope == project.id },
+                        identityColor(project.id),
+                    ) {
+                        scope = project.id
+                    }
+                }
         }
-        if (skills.isEmpty()) Empty("Aucun skill", "Ajoutez vos méthodes de travail réutilisables.")
-        skills.forEach { skill ->
-            Panel {
-                Text(skill.name, style = MaterialTheme.typography.titleMedium)
-                Status(
-                    if (!skill.valid) "À corriger"
-                    else if (skill.scope == "global") "Global"
-                    else state.projects.find { it.id == skill.scope }?.name ?: "Projet"
-                )
-                Text(skill.description)
-                skill.error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
-                Row {
-                    ActionIcon(
-                        "Ouvrir",
-                        CairnIcons.File,
-                        onClick = {
-                            vm.clearMessage()
-                            editing = "${skill.scope}/${skill.name}"
-                        },
+        if (skills.isEmpty())
+            SignalCard(Modifier.fillMaxWidth(), padding = PaddingValues(24.dp)) {
+                Column(
+                    Modifier.fillMaxWidth(),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    SkillKindBadge(SkillFileKind.SKILL, 48.dp)
+                    Text(
+                        if (state.skills.isEmpty()) "Aucun skill" else "Aucun résultat",
+                        style = MaterialTheme.typography.titleMedium,
                     )
-                    if (state.isOwner)
-                        ActionIcon(
-                            "Supprimer",
-                            Icons.Default.Delete,
-                            onClick = {
-                                vm.clearMessage()
-                                deleting = "${skill.scope}/${skill.name}"
-                            },
-                        )
+                    Text(
+                        if (state.skills.isEmpty())
+                            "Créez un skill ou importez-en un depuis une archive ou GitHub."
+                        else "Aucun skill ne correspond à cette recherche.",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
                 }
+            }
+        skills.forEach { skill ->
+            SkillCard(skill, scopeLabel(state, skill.scope)) {
+                vm.clearMessage()
+                opened = SkillTarget(skill.scope, skill.name).key
             }
         }
     }
-    editing?.let { key ->
-        val original = state.skills.find { "${it.scope}/${it.name}" == key }
-        if (state.isOwner) SkillEditor(vm, state, original) { editing = null }
-        else if (original != null)
-            AlertDialog(
-                onDismissRequest = { editing = null },
-                title = { Text(original.name) },
-                text = {
-                    androidx.compose.foundation.layout.Column(
-                        Modifier.verticalScroll(androidx.compose.foundation.rememberScrollState())
-                    ) {
-                        Markdown(original.content)
+    if (creating)
+        NewSkillSheet(state, scope, close = { creating = false }) { skillScope, name ->
+            creating = false
+            opened = SkillTarget(skillScope, name, create = true).key
+        }
+    if (importing)
+        SkillImportSheet(vm, state, scope, close = { importing = false }) {
+            opened = it.key
+        }
+}
+
+internal fun scopeLabel(state: Workspace, scope: String) =
+    if (scope == "global") "Global" else state.projects.find { it.id == scope }?.name ?: "Projet"
+
+@Composable
+private fun SkillCard(skill: Skill, scopeName: String, open: () -> Unit) {
+    SignalCard(
+        Modifier.fillMaxWidth().testTag("skill-card-${skill.scope}-${skill.name}"),
+        onClick = open,
+        padding = PaddingValues(16.dp),
+    ) {
+        Row(verticalAlignment = Alignment.Top) {
+            Box(
+                Modifier.size(42.dp)
+                    .clip(RoundedCornerShape(13.dp))
+                    .background(
+                        if (skill.valid) identityColor(skill.name)
+                        else MaterialTheme.colorScheme.surfaceVariant
+                    ),
+                contentAlignment = Alignment.Center,
+            ) {
+                Icon(
+                    if (skill.valid) CairnIcons.Spark else CairnIcons.Alert,
+                    null,
+                    Modifier.size(22.dp),
+                    tint = if (skill.valid) Color.White else signal.attention,
+                )
+            }
+            Spacer(Modifier.width(12.dp))
+            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        skill.name,
+                        Modifier.weight(1f, fill = false),
+                        style = MaterialTheme.typography.titleMedium,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                    if (!skill.valid) {
+                        Spacer(Modifier.width(8.dp))
+                        SkillPill("à corriger", signal.attention, signal.attentionSoft)
                     }
-                },
-                confirmButton = { TextButton(onClick = { editing = null }) { Text("Fermer") } },
+                }
+                ProjectLabel(scopeName, if (skill.scope == "global") null else skill.scope)
+            }
+            Icon(
+                CairnIcons.Right,
+                null,
+                Modifier.padding(top = 4.dp).size(16.dp),
+                tint = MaterialTheme.colorScheme.onSurfaceVariant,
             )
-    }
-    deleting?.let { key ->
-        Confirm(
-            "Supprimer ce skill ?",
-            "Le skill et ses fichiers seront supprimés. Un skill utilisé par une tâche ne peut pas être supprimé.",
-            state.busy,
-            state.error,
-            { deleting = null },
+        }
+        if (skill.description.isNotBlank())
+            Text(
+                skill.description,
+                Modifier.padding(top = 10.dp),
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis,
+            )
+        skill.error?.let {
+            Text(
+                it,
+                Modifier.padding(top = 6.dp),
+                style = MaterialTheme.typography.bodySmall,
+                color = signal.attention,
+            )
+        }
+        Row(
+            Modifier.padding(top = 12.dp).horizontalScroll(rememberScrollState()),
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
+            verticalAlignment = Alignment.CenterVertically,
         ) {
-            vm.perform {
-                delete("/skills/" + key.split('/').joinToString("/") { segment(it) })
-                deleting = null
+            if (skill.files > 0) {
+                SkillPill(plural(skill.files, "fichier"), icon = CairnIcons.File)
+                SkillPill(formatBytes(skill.bytes))
             }
-        }
-    }
-}
-
-@Composable
-private fun SkillEditor(vm: CairnViewModel, state: Workspace, initial: Skill?, close: () -> Unit) {
-    var name by rememberSaveable { mutableStateOf(initial?.name ?: "my-skill") }
-    var scope by rememberSaveable { mutableStateOf(initial?.scope ?: "global") }
-    var content by rememberSaveable {
-        mutableStateOf(
-            initial?.content
-                ?: "---\nname: my-skill\ndescription: Décrire quand utiliser ce skill.\n---\n\n# Mon skill\n\nDécrire la méthode et les critères de réussite.\n"
-        )
-    }
-    var preview by rememberSaveable { mutableStateOf(false) }
-    var files by remember { mutableStateOf<List<String>>(emptyList()) }
-    var filesRevision by remember { mutableIntStateOf(0) }
-    var supportingFile by rememberSaveable { mutableStateOf<String?>(null) }
-    val path = "/skills/${segment(scope)}/${segment(name)}"
-    LaunchedEffect(initial?.name, filesRevision) {
-        if (initial != null)
-            try {
-                files = vm.api.get("$path/files")
-            } catch (e: Exception) {
-                vm.report(e)
-            }
-    }
-    Editor(
-        if (initial == null) "Créer un skill" else initial.name,
-        state.busy,
-        state.error,
-        close,
-        save = {
-            vm.perform {
-                api.request("PUT", path, body("content" to content))
-                refresh()
-                close()
-            }
-        },
-        valid =
-            name.matches(Regex("[a-z0-9][a-z0-9-]*")) &&
-                content.isNotBlank() &&
-                content.length <= 100000,
-    ) {
-        Field(
-            "Nom du dossier",
-            name,
-            { name = it },
-            enabled = initial == null,
-            keyboardOptions = InputKeyboards.Literal,
-        )
-        if (initial == null)
-            Choice(
-                "Portée",
-                scope,
-                listOf("global" to "Globale") + state.projects.map { it.id to it.name },
-            ) {
-                scope = it
-            }
-        Toggle("Aperçu Markdown", preview) { preview = it }
-        if (preview) Markdown(content)
-        else
-            Field(
-                "SKILL.md",
-                content,
-                { content = it },
-                12,
-                keyboardOptions = InputKeyboards.Literal,
-            )
-        if (initial != null) {
-            Text("Fichiers de support", style = MaterialTheme.typography.titleMedium)
-            files
-                .filter { it != "SKILL.md" }
-                .forEach { file ->
-                    OutlinedButton(
-                        onClick = {
-                            vm.clearMessage()
-                            supportingFile = file
-                        }
-                    ) {
-                        Text(file)
+            if (skill.executables > 0)
+                SkillPill(
+                    plural(skill.executables, "script"),
+                    signal.success,
+                    signal.success.copy(alpha = 0.12f),
+                    CairnIcons.Terminal,
+                )
+            skill.source?.let { source ->
+                Row(
+                    Modifier.clip(androidx.compose.foundation.shape.CircleShape)
+                        .background(signal.ink.copy(alpha = 0.07f))
+                        .padding(horizontal = 9.dp, vertical = 3.dp)
+                        .testTag("skill-source-${skill.name}"),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Icon(CairnIcons.Branch, null, Modifier.size(13.dp))
+                    Spacer(Modifier.width(4.dp))
+                    Text(
+                        source.label,
+                        style = MaterialTheme.typography.labelMedium,
+                        fontFamily = FontFamily.Monospace,
+                        maxLines = 1,
+                    )
+                    if (source.modified) {
+                        Spacer(Modifier.width(6.dp))
+                        Text(
+                            "modifié",
+                            style = MaterialTheme.typography.labelMedium,
+                            color = signal.warning,
+                        )
                     }
                 }
-            TextButton(
-                onClick = {
-                    vm.clearMessage()
-                    supportingFile = ""
-                }
-            ) {
-                Text("Ajouter un fichier")
             }
-        } else Text("Enregistrez le skill pour ajouter des fichiers de support.")
-    }
-    supportingFile?.let { file ->
-        SupportingFileEditor(vm, state, path, file) {
-            supportingFile = null
-            filesRevision++
         }
     }
 }
 
 @Composable
-private fun SupportingFileEditor(
-    vm: CairnViewModel,
+private fun NewSkillSheet(
     state: Workspace,
-    skillPath: String,
-    initialPath: String,
+    initialScope: String,
     close: () -> Unit,
+    create: (scope: String, name: String) -> Unit,
 ) {
-    var path by rememberSaveable { mutableStateOf(initialPath) }
-    var content by rememberSaveable { mutableStateOf("") }
-    var ready by rememberSaveable { mutableStateOf(initialPath.isEmpty()) }
-    var preview by rememberSaveable { mutableStateOf(false) }
-    LaunchedEffect(initialPath) {
-        if (!ready)
-            try {
-                content =
-                    vm.api.get<FileContent>("$skillPath/file?path=${segment(initialPath)}").content
-                ready = true
-            } catch (e: Exception) {
-                vm.report(e)
-            }
+    var name by rememberSaveable { mutableStateOf("") }
+    var scope by rememberSaveable {
+        mutableStateOf(initialScope.takeIf { it != "all" } ?: "global")
     }
-    Editor(
-        "Fichier de support",
-        state.busy,
-        state.error,
+    val taken = state.skills.any { it.scope == scope && it.name == name }
+    val problem =
+        when {
+            name.isEmpty() -> null
+            !skillNamePattern.matches(name) ->
+                "Lettres minuscules, chiffres et tirets ; commence par une lettre ou un chiffre."
+            taken -> "Un skill porte déjà ce nom dans cette portée."
+            else -> null
+        }
+    FormSheet(
+        "Nouveau skill",
         close,
-        save = {
-            vm.perform {
-                api.request("PUT", "$skillPath/file", body("path" to path, "content" to content))
-                close()
-            }
-        },
-        valid = ready && path.isNotBlank() && path != "SKILL.md" && content.length <= 100000,
+        "Créer",
+        confirmEnabled = name.isNotEmpty() && problem == null,
+        confirmTag = "skill-new-confirm",
+        confirm = { create(scope, name) },
     ) {
-        if (!ready) LinearProgressIndicator(Modifier.fillMaxWidth())
-        Field(
-            "Chemin relatif (ex. references/guide.md)",
-            path,
-            { path = it },
-            enabled = initialPath.isEmpty(),
+        OutlinedTextField(
+            name,
+            { name = it.trim() },
+            Modifier.fillMaxWidth().testTag("skill-new-name"),
+            label = { Text("Nom du dossier") },
+            placeholder = { Text("revue-de-code") },
+            singleLine = true,
+            textStyle = LocalTextStyle.current.copy(fontFamily = FontFamily.Monospace),
             keyboardOptions = InputKeyboards.Literal,
+            isError = problem != null,
+            supportingText = { Text(problem ?: "Ce nom sera aussi celui déclaré dans SKILL.md.") },
         )
-        Toggle("Aperçu Markdown", preview) { preview = it }
-        if (preview) Markdown(content)
-        else
-            Field(
-                "Contenu",
-                content,
-                { content = it },
-                15,
-                enabled = ready,
-                keyboardOptions = InputKeyboards.Literal,
-            )
+        Eyebrow("Portée")
+        Row(
+            Modifier.horizontalScroll(rememberScrollState()),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            (listOf("global" to "Global") + state.projects.map { it.id to it.name }).forEach {
+                (key, label) ->
+                SignalChip(
+                    label,
+                    scope == key,
+                    leading = if (key == "global") null else identityColor(key),
+                ) {
+                    scope = key
+                }
+            }
+        }
     }
 }

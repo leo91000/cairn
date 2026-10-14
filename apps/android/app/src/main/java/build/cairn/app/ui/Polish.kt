@@ -441,6 +441,146 @@ internal object CairnIcons {
             arcTo(1.5f, 1.5f, 0f, false, true, 7.9f, 14.9f)
             lineTo(15f, 7.8f)
         }
+    // Skill workbench: file kinds and file actions.
+    val Image =
+        line("Image") {
+            moveTo(4f, 5f)
+            lineTo(20f, 5f)
+            lineTo(20f, 19f)
+            lineTo(4f, 19f)
+            close()
+            moveTo(4f, 16f)
+            lineTo(9f, 11f)
+            lineTo(13f, 15f)
+            lineTo(15.5f, 12.5f)
+            lineTo(20f, 17f)
+            moveTo(15.5f, 8.2f)
+            arcTo(1.3f, 1.3f, 0f, true, true, 15.49f, 8.2f)
+        }
+    val Binary =
+        line("Binary") {
+            moveTo(14f, 3f)
+            lineTo(5f, 3f)
+            lineTo(5f, 21f)
+            lineTo(19f, 21f)
+            lineTo(19f, 8f)
+            lineTo(14f, 3f)
+            lineTo(14f, 8f)
+            lineTo(19f, 8f)
+            moveTo(9f, 12f)
+            lineTo(9f, 17f)
+            moveTo(13f, 12f)
+            lineTo(15f, 12f)
+            lineTo(15f, 17f)
+            lineTo(13f, 17f)
+            close()
+        }
+    val Markdown =
+        line("Markdown") {
+            moveTo(3f, 6f)
+            lineTo(21f, 6f)
+            lineTo(21f, 18f)
+            lineTo(3f, 18f)
+            close()
+            moveTo(6.5f, 15f)
+            lineTo(6.5f, 9f)
+            lineTo(9f, 12f)
+            lineTo(11.5f, 9f)
+            lineTo(11.5f, 15f)
+            moveTo(16.5f, 9f)
+            lineTo(16.5f, 15f)
+            moveTo(14.5f, 13f)
+            lineTo(16.5f, 15f)
+            lineTo(18.5f, 13f)
+        }
+    val Branch =
+        line("Branch") {
+            moveTo(6f, 3.5f)
+            lineTo(6f, 14f)
+            moveTo(6f, 16f)
+            arcTo(2f, 2f, 0f, true, true, 5.99f, 16f)
+            moveTo(18f, 5f)
+            arcTo(2f, 2f, 0f, true, true, 17.99f, 5f)
+            moveTo(18f, 9f)
+            quadTo(18f, 14f, 8f, 16.5f)
+        }
+    val Upload =
+        line("Upload") {
+            moveTo(12f, 15f)
+            lineTo(12f, 3f)
+            moveTo(7f, 8f)
+            lineTo(12f, 3f)
+            lineTo(17f, 8f)
+            moveTo(4f, 16f)
+            lineTo(4f, 21f)
+            lineTo(20f, 21f)
+            lineTo(20f, 16f)
+        }
+    val Trash =
+        line("Delete") {
+            moveTo(4f, 7f)
+            lineTo(20f, 7f)
+            moveTo(9.5f, 7f)
+            lineTo(9.5f, 4f)
+            lineTo(14.5f, 4f)
+            lineTo(14.5f, 7f)
+            moveTo(6f, 7f)
+            lineTo(7f, 20f)
+            lineTo(17f, 20f)
+            lineTo(18f, 7f)
+            moveTo(10f, 11f)
+            lineTo(10f, 16f)
+            moveTo(14f, 11f)
+            lineTo(14f, 16f)
+        }
+    val FilePlus =
+        line("New file") {
+            moveTo(14f, 3f)
+            lineTo(5f, 3f)
+            lineTo(5f, 21f)
+            lineTo(19f, 21f)
+            lineTo(19f, 8f)
+            lineTo(14f, 3f)
+            lineTo(14f, 8f)
+            lineTo(19f, 8f)
+            moveTo(12f, 11.5f)
+            lineTo(12f, 17.5f)
+            moveTo(9f, 14.5f)
+            lineTo(15f, 14.5f)
+        }
+    val FolderPlus =
+        line("New folder") {
+            moveTo(3f, 6f)
+            lineTo(10f, 6f)
+            lineTo(12f, 8.5f)
+            lineTo(21f, 8.5f)
+            lineTo(21f, 19f)
+            lineTo(3f, 19f)
+            close()
+            moveTo(12f, 11f)
+            lineTo(12f, 16.5f)
+            moveTo(9.25f, 13.75f)
+            lineTo(14.75f, 13.75f)
+        }
+    val Move =
+        line("Move") {
+            moveTo(4f, 12f)
+            lineTo(20f, 12f)
+            moveTo(15f, 7f)
+            lineTo(20f, 12f)
+            lineTo(15f, 17f)
+        }
+    val Undo =
+        line("Undo") {
+            moveTo(9f, 5f)
+            lineTo(4f, 10f)
+            lineTo(9f, 15f)
+            moveTo(4f, 10f)
+            lineTo(14f, 10f)
+            quadTo(20f, 10f, 20f, 15f)
+            quadTo(20f, 20f, 14f, 20f)
+            lineTo(11f, 20f)
+        }
     val More =
         SignalIcons.solid("More") {
             for (x in listOf(5f, 12f, 19f)) {
