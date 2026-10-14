@@ -160,19 +160,18 @@ impl Worker {
             Ok(account) => account,
             Err(error) => return report_account_wait(s, &run, provider, &error).await,
         };
-        if s.shutdown.is_cancelled() || s.store.run(&run_id).await?["status"] != RunStatus::Queued {
-            if let Some(account) = account {
-                s.accounts.release(&account).await?;
+        let cancel = CancellationToken::new();
+        match self.register(s, &run_id, cancel.clone()).await {
+            Ok(true) => {}
+            result => {
+                if let Some(account) = account {
+                    s.accounts.release(&account).await?;
+                }
+                return result.map(|_| ());
             }
-            return Ok(());
         }
         projects.extend(locked_projects(s, &run));
         timing.next("launch");
-        let cancel = CancellationToken::new();
-        self.active
-            .lock()
-            .await
-            .insert(run_id.clone(), cancel.clone());
         let worker = self.clone();
         let s = s.clone();
         self.tasks.spawn(async move {
@@ -191,6 +190,36 @@ impl Worker {
         });
         timing.finish();
         Ok(())
+    }
+
+    /// Rechecks persisted eligibility under the cancellation/cleanup lock before admission.
+    async fn register(&self, s: &Service, run_id: &str, cancel: CancellationToken) -> Result<bool> {
+        let mut active = self.active.lock().await;
+        if s.shutdown.is_cancelled() || active.contains_key(run_id) {
+            return Ok(false);
+        }
+        let id = run_id.to_owned();
+        let eligible = s
+            .store
+            .read(move |db| {
+                let Some(run) = db.run(&id)? else {
+                    return Ok(false);
+                };
+                if run["status"] != RunStatus::Queued || !run["cancelRequestedAt"].is_null() {
+                    return Ok(false);
+                }
+                match crate::conversation_lifecycle::require_active_run(db, &id) {
+                    Ok(()) => Ok(true),
+                    Err(error) if error.is_conflict() => Ok(false),
+                    Err(error) => Err(error),
+                }
+            })
+            .await?;
+        if !eligible {
+            return Ok(false);
+        }
+        active.insert(run_id.to_owned(), cancel);
+        Ok(true)
     }
 }
 
@@ -382,4 +411,130 @@ async fn requeue_after_error(store: &Store, run_id: &str, lease: Option<Lease>) 
             Ok(())
         })
         .await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::{future::Future, task::Poll};
+
+    #[tokio::test]
+    async fn deletion_committed_before_registration_prevents_stale_admission() {
+        let root = tempfile::tempdir().unwrap();
+        let service = Service::new(crate::config::Config {
+            data_dir: root.path().join("data"),
+            home: root.path().join("home"),
+            workspace_roots: vec![root.path().into()],
+            public_url: "http://localhost:4310".into(),
+            host: "127.0.0.1".into(),
+            port: 0,
+            codex_bin: "unused".into(),
+            claude_bin: "unused".into(),
+            gh_bin: "unused".into(),
+            concurrency: 1,
+            logger: false,
+            worker_enabled: false,
+            runner_url: String::new(),
+        })
+        .await
+        .unwrap();
+        let mut chat = service.chat_create(json!({})).await.unwrap();
+        let chat_id = text(&chat, "id").to_owned();
+        let run_id = crate::config::id();
+        service.store.transaction({
+            let run_id = run_id.clone();
+            move |db| {
+                let run = json!({ "id": run_id, "status": RunStatus::Queued });
+                db.0.execute(
+                    "INSERT INTO runs(id,task_id,project_id,status,created_at,data) VALUES(?1,?1,'','queued',0,?2)",
+                    rusqlite::params![run_id, run.to_string()],
+                )?;
+                Ok(())
+            }
+        }).await.unwrap();
+        chat["runId"] = run_id.clone().into();
+        service.store.put("chats", chat).await.unwrap();
+        let workspace = service.config.data_dir.join("runs").join(&run_id);
+        tokio::fs::create_dir_all(&workspace).await.unwrap();
+        tokio::fs::write(workspace.join("work.txt"), "Private work")
+            .await
+            .unwrap();
+
+        assert!(
+            service
+                .worker
+                .register(&service, &run_id, CancellationToken::new())
+                .await
+                .unwrap()
+        );
+        assert!(
+            !service
+                .worker
+                .register(&service, &run_id, CancellationToken::new())
+                .await
+                .unwrap()
+        );
+        service.worker.active.lock().await.remove(&run_id);
+
+        let active = service.worker.active.lock().await;
+        let registration = service
+            .worker
+            .register(&service, &run_id, CancellationToken::new());
+        tokio::pin!(registration);
+        std::future::poll_fn(|cx| {
+            assert!(registration.as_mut().poll(cx).is_pending());
+            Poll::Ready(())
+        })
+        .await;
+        let deleting = service.clone();
+        let deleting_id = chat_id.clone();
+        let deletion = tokio::spawn(async move { deleting.chat_trash(&deleting_id, true).await });
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let chat = service.store.get("chats", &chat_id).await.unwrap().unwrap();
+                let run = service.store.run(&run_id).await.unwrap();
+                if chat["lifecycle"] == "trash" && !run["cancelRequestedAt"].is_null() {
+                    assert_eq!(run["status"], RunStatus::Queued);
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        drop(active);
+
+        assert!(
+            !registration.await.unwrap(),
+            "A deleted conversation must not gain an execution"
+        );
+        deletion.await.unwrap().unwrap();
+        assert!(service.worker.active.lock().await.is_empty());
+        service.cleanup_conversations().await.unwrap();
+        assert!(
+            service
+                .store
+                .get("chats", &chat_id)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(service.store.run(&run_id).await.unwrap_err().status, 404);
+        assert!(
+            service
+                .store
+                .kv(&format!("run-checkpoint:{run_id}"))
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(!workspace.exists());
+        assert!(
+            !service
+                .worker
+                .register(&service, &run_id, CancellationToken::new())
+                .await
+                .unwrap()
+        );
+    }
 }
