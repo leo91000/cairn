@@ -16,8 +16,8 @@ export const defaultSkillLimits: SkillLimits = {
   files: 500,
   uploadBytes: 5 * 1024 * 1024,
 }
-// Installation JSON bodies are capped at 150 KB: binaries, larger text files, and the largest
-// files of a batch that would pass `inlineRequestBytes` are staged as raw uploads first.
+// Keep batch contents near `inlineRequestBytes` by staging binaries and larger text files.
+// Folder moves and staged references can exceed that target within the 8 MB transport limit.
 export const inlineFileBytes = 32 * 1024
 export const inlineRequestBytes = 120_000
 const pathBytes = 240

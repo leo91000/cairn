@@ -204,8 +204,8 @@ fun SkillChange.toJson(): JsonObject = buildJsonObject {
 }
 
 /**
- * Installation JSON bodies are capped at 150 KB: a batch keeps small text files inline and stages
- * every binary file and larger text with `POST /skills/uploads`.
+ * Keep small text inline and stage binaries or larger text with `POST /skills/uploads`.
+ * Metadata-heavy batches may exceed this target within the 8 MB transport limit.
  */
 const val SKILL_REQUEST_BUDGET = 120_000L
 

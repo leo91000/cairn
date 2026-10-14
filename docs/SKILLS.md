@@ -106,9 +106,12 @@ skill never shows a partial save.
   Existing files over the supporting-file limit can be kept or moved without
   rewriting them. An already over-limit total or file count may be reduced or
   kept unchanged; a save cannot grow it further beyond that base.
-- JSON request bodies are limited to 150 KB. Send small text files inline and
-  stage binary or larger files with `POST /skills/uploads`.
-- The response is the new bundle (as `GET …/bundle`) plus `description`.
+- Atomic batch JSON requests allow up to the relay's 8 MB ceiling so large folder
+  moves and staged-file references fit. Other JSON routes retain their 150 KB limit.
+  Clients keep small text files inline and stage binary or larger files with
+  `POST /skills/uploads`, targeting a 120 KB inline payload where possible.
+- The response describes the version this save committed (as `GET …/bundle`)
+  plus `description`, even if another save immediately follows.
 
 ### `POST /skills/:scope/import`
 

@@ -365,8 +365,16 @@ impl Input {
             .map_err(|_| Error::bad("Invalid query parameters."))?;
         let path = parts.uri.path();
         let large = path.ends_with("/result") || path.ends_with("/mcp");
+        let skill_batch = parts.method == "POST"
+            && matches!(
+                path.split('/').collect::<Vec<_>>().as_slice(),
+                ["", "api", "skills", _, _, "bundle"]
+            );
         let limit = if path.starts_with("/internal/node-workspace/") && large {
             2_000_000
+        } else if skill_batch {
+            // A folder move can carry hundreds of paths even when all file contents are staged.
+            cairn_protocol::MAX_BODY
         } else {
             150000
         };

@@ -20,6 +20,70 @@ use tempfile::TempDir;
 const SKILL: &str =
     "---\nname: review\ndescription: Review the current changes\n---\nRun scripts/check.sh.\n";
 
+#[tokio::test]
+async fn maximum_file_count_folder_moves_fit_the_atomic_batch_transport() {
+    use cairn_installation::skills::bundle::Change;
+
+    let api = Api::new().await;
+    let old_folder = "a".repeat(231);
+    let new_folder = "b".repeat(231);
+    let mut writes = vec![Change::Write {
+        path: "SKILL.md".into(),
+        bytes: SKILL.as_bytes().to_vec(),
+        executable: None,
+    }];
+    let mut moves = Vec::new();
+    for index in 0..499 {
+        let from = format!("{old_folder}/{index:03}.txt");
+        let to = format!("{new_folder}/{index:03}.txt");
+        writes.push(Change::Write {
+            path: from.clone(),
+            bytes: b"notes".to_vec(),
+            executable: None,
+        });
+        moves.push(json!({
+            "op": "move",
+            "from": from,
+            "to": to,
+        }));
+    }
+    let saved = api
+        .service
+        .skills
+        .apply("review", None, &writes, None)
+        .await
+        .unwrap();
+    let payload = json!({
+        "base": saved.revision,
+        "changes": moves,
+    });
+    assert!(payload.to_string().len() > 150_000);
+
+    let renamed = api
+        .ok(
+            "POST",
+            "/skills/global/review/bundle",
+            Some(payload.clone()),
+        )
+        .await;
+    assert_eq!(renamed["files"].as_array().unwrap().len(), 500);
+    assert_eq!(
+        std::fs::read(
+            api.skill_dir("review")
+                .join(format!("{new_folder}/000.txt"))
+        )
+        .unwrap(),
+        b"notes"
+    );
+    assert!(!api.skill_dir("review").join(old_folder).exists());
+
+    // Only the atomic batch route accepts larger JSON; other skill routes retain their limit.
+    let (status, _) = api
+        .call("POST", "/skills/global/import", Some(payload))
+        .await;
+    assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
+}
+
 struct Api {
     _root: TempDir,
     service: Arc<Service>,
