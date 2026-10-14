@@ -20,7 +20,6 @@ pub fn storage_lock(directory: &std::path::Path) -> Result<StorageLock> {
 }
 
 pub const DAY: i64 = 86_400_000;
-const TRASH_RETENTION: i64 = 30 * DAY;
 const PURGE_RETRY_MS: i64 = 60_000;
 
 string_enum! {
@@ -59,9 +58,7 @@ fn in_trash(chat: &Value) -> bool {
 
 pub fn require_active(chat: &Value) -> Result<()> {
     if !is_active(chat) {
-        return Err(Error::conflict(
-            "Restore this conversation before continuing.",
-        ));
+        return Err(Error::conflict("This conversation has been deleted."));
     }
     Ok(())
 }
@@ -172,7 +169,7 @@ fn trash(db: &Db<'_>, id: &str, confirmed: bool) -> Result<Value> {
     chat["lifecycle"] = Lifecycle::Trash.into();
     let trashed_at = now();
     chat["trashedAt"] = trashed_at.into();
-    chat["purgeAt"] = (trashed_at + TRASH_RETENTION).into();
+    chat["purgeAt"] = trashed_at.into();
     chat["paused"] = true.into();
     db.set(
         "conversation-cache-revision",
@@ -233,10 +230,12 @@ impl Service {
             .await?;
         if let Some(run) = result["runId"].as_str() {
             match self.worker.cancel(self, run).await {
-                Err(error) if !error.is_conflict() => return Err(error),
+                // Cleanup may have already removed a finished run after deletion committed.
+                Err(error) if error.status != 404 && !error.is_conflict() => return Err(error),
                 _ => {}
             }
         }
+        self.worker.notify_conversation_cleanup();
         Ok(result)
     }
 
@@ -282,6 +281,17 @@ impl Service {
         let mut chats = self.store.list("chats").await?;
         chats.sort_by_key(|chat| chat["retryAfter"].as_i64().unwrap_or(0));
         for chat in chats.iter().filter(|chat| purge_due(chat)) {
+            // Preparation can create run files before execution is registered as active.
+            let preparation = self.worker.run_preparation_lock(text(chat, "runId")).await;
+            let Ok(_preparation) = preparation.try_lock_owned() else {
+                continue;
+            };
+            // Terminal status is published before checkpointing and resource release finish.
+            let active = self.worker.active.lock().await;
+            if active.contains_key(text(chat, "runId")) {
+                continue;
+            }
+
             let id = text(chat, "id").to_owned();
             let claim = id.clone();
             let Some(chat) = self
@@ -291,6 +301,7 @@ impl Service {
             else {
                 continue;
             };
+            drop(active);
             if let Err(error) = crate::conversation_deletion::purge(self, chat).await {
                 self.record_purge_failure(id, error).await?;
             }

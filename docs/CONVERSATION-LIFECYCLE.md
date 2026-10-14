@@ -1,5 +1,7 @@
 # Archivage et suppression des conversations
 
+Document historique : l’archivage a été retiré par [ADR-0008](adr/0008-current-disk-publication-without-archives.md), et la récupération pendant 30 jours ne concerne plus les nouvelles suppressions depuis [ADR-0041](adr/0041-immediate-conversation-deletion.md). Voir le [fonctionnement actuel](CONVERSATION-STORAGE-OPERATIONS.md).
+
 Conception validée par l’utilisateur le 25 septembre 2026, y compris les modalités techniques et les interfaces de test. Implémentation réalisée dans le dépôt. Les résultats et limites des vérifications sont consignés dans CONVERSATION-LIFECYCLE-VALIDATION.md ; la reprise sur un véritable hôte Firecracker reste à vérifier faute de KVM dans cet environnement.
 
 ## Synthèse
