@@ -194,6 +194,12 @@ abstract class ConversationLifecycleCases {
                     .boolean
             )
             assertTrue("Permanent deletion must never restore", restores.isEmpty())
+            compose.waitUntil(10000) {
+                compose
+                    .onAllNodesWithText("Annuler", substring = false)
+                    .fetchSemanticsNodes()
+                    .isEmpty()
+            }
             compose.onNodeWithText("Annuler", substring = false).assertDoesNotExist()
             compose.waitUntil(15000) {
                 compose.onAllNodesWithText(chat.title).fetchSemanticsNodes().isEmpty()
