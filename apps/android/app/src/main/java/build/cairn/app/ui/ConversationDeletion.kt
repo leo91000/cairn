@@ -18,7 +18,6 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.SnackbarDuration
 import androidx.compose.material3.SnackbarHostState
-import androidx.compose.material3.SnackbarResult
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.*
@@ -36,14 +35,13 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import androidx.lifecycle.viewModelScope
 import build.cairn.app.data.*
 import kotlin.math.roundToInt
 import kotlinx.coroutines.launch
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
 
-/** The app-wide snackbar, so screens can offer an undo without owning a Scaffold. */
+/** The app-wide snackbar, so screens can show feedback without owning a Scaffold. */
 internal val LocalSnackbar = staticCompositionLocalOf<SnackbarHostState?> { null }
 
 /**
@@ -51,10 +49,7 @@ internal val LocalSnackbar = staticCompositionLocalOf<SnackbarHostState?> { null
  */
 internal class ConversationTrash(val hidden: Set<String>, val trash: (String) -> Unit)
 
-/**
- * Trashes optimistically: the row leaves at once, comes back if the server refuses or the user
- * cancels the working-conversation confirmation, and an undo restores it for a few seconds.
- */
+/** Confirms permanent deletion before hiding the row; there is no undo window. */
 @Composable
 internal fun rememberConversationTrash(
     vm: CairnViewModel,
@@ -65,64 +60,14 @@ internal fun rememberConversationTrash(
     var confirming by remember { mutableStateOf<String?>(null) }
     val scope = rememberCoroutineScope()
     val change by rememberUpdatedState(onChange)
-    fun restore(id: String) {
-        vm.viewModelScope.launch {
-            try {
-                vm.api.request("POST", "/chats/${segment(id)}/restore")
-                hidden = hidden - id
-                change()
-            } catch (e: Exception) {
-                vm.report(e)
-            }
-        }
-    }
-    fun trashed(id: String) {
-        vm.chatDrafts.remove(id)
-        confirming = null
-        change()
-        if (snackbar != null)
-            scope.launch {
-                snackbar.currentSnackbarData?.dismiss()
-                val result =
-                    snackbar.showSnackbar(
-                        "Conversation supprimée",
-                        "Annuler",
-                        duration = SnackbarDuration.Short,
-                    )
-                if (result == SnackbarResult.ActionPerformed) restore(id)
-            }
-    }
-    fun trash(id: String) {
-        hidden = hidden + id
-        vm.viewModelScope.launch {
-            try {
-                vm.api.request(
-                    "DELETE",
-                    "/chats/${segment(id)}",
-                    buildJsonObject { put("confirm", false) },
-                )
-                vm.historyCache.clear()
-                trashed(id)
-            } catch (e: Exception) {
-                if (e is ApiException && e.status == 409) confirming = id
-                else {
-                    hidden = hidden - id
-                    vm.report(e)
-                }
-            }
-        }
-    }
     confirming?.let { id ->
         val state by vm.state.collectAsStateWithLifecycle()
         Confirm(
-            "Arrêter et supprimer ?",
-            "Le travail sera arrêté et les envois annulés. La conversation restera récupérable pendant 30 jours.",
+            "Supprimer définitivement ?",
+            "La conversation, ses messages et ses fichiers de travail seront supprimés sans possibilité de récupération. Le travail sera arrêté, les envois annulés et les liens publics révoqués immédiatement.",
             state.busy,
             state.error,
-            {
-                confirming = null
-                hidden = hidden - id
-            },
+            { confirming = null },
         ) {
             vm.perform {
                 api.request(
@@ -131,11 +76,22 @@ internal fun rememberConversationTrash(
                     buildJsonObject { put("confirm", true) },
                 )
                 historyCache.clear()
-                trashed(id)
+                chatDrafts.remove(id)
+                hidden = hidden + id
+                confirming = null
+                change()
+                if (snackbar != null)
+                    scope.launch {
+                        snackbar.currentSnackbarData?.dismiss()
+                        snackbar.showSnackbar(
+                            "Conversation supprimée",
+                            duration = SnackbarDuration.Short,
+                        )
+                    }
             }
         }
     }
-    return ConversationTrash(hidden, ::trash)
+    return ConversationTrash(hidden) { confirming = it }
 }
 
 private const val COMMIT_FRACTION = 0.4f
@@ -221,7 +177,10 @@ internal fun SwipeToTrashRow(
                         ) { value, _ ->
                             offset = value
                         }
-                        if (commit) onTrash()
+                        if (commit) {
+                            offset = 0f
+                            onTrash()
+                        }
                     },
                 )
         )

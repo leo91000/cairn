@@ -290,7 +290,10 @@ async fn user_input_cancel_and_trash_prevent_obsolete_wakeups() {
             "trash" => {
                 assert!(f.service.chat_trash(&f.chat, false).await.is_err());
                 f.service.chat_trash(&f.chat, true).await.unwrap();
-                f.service.chat_restore(&f.chat).await.unwrap();
+                assert_eq!(
+                    f.service.chat_restore(&f.chat).await.unwrap_err().status,
+                    410
+                );
             }
             "failure" => {
                 f.service
@@ -303,10 +306,17 @@ async fn user_input_cancel_and_trash_prevent_obsolete_wakeups() {
         }
         let detail = f.tick().await;
         assert!(detail["wakeup"].is_null(), "{action}: {detail}");
-        assert_ne!(
-            detail["run"]["chatExecution"]["messageId"],
-            detail["wakeup"]["id"]
-        );
+        if action == "trash" {
+            assert_eq!(
+                f.service.store.run(&f.run).await.unwrap()["status"],
+                "succeeded"
+            );
+        } else {
+            assert_ne!(
+                detail["run"]["chatExecution"]["messageId"],
+                detail["wakeup"]["id"]
+            );
+        }
         if action != "message" {
             assert_ne!(detail["run"]["status"], "queued", "{action}");
         }

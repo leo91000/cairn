@@ -84,7 +84,7 @@ fn chat_path(chat: &Value) -> String {
 }
 
 #[tokio::test]
-async fn deleting_a_conversation_moves_it_to_trash_and_recovery_preserves_it() {
+async fn deleting_a_conversation_has_no_recovery_window() {
     let app = App::new().await;
     let (status, chat) = app.request("POST", CHATS, json!({})).await;
     assert_eq!(status, StatusCode::OK);
@@ -94,7 +94,7 @@ async fn deleting_a_conversation_moves_it_to_trash_and_recovery_preserves_it() {
     assert_eq!(deleted["lifecycle"], "trash");
     assert_eq!(
         deleted["purgeAt"].as_i64().unwrap() - deleted["trashedAt"].as_i64().unwrap(),
-        30 * 86_400_000
+        0
     );
     let (_, active) = app.get(CHATS).await;
     assert!(active.as_array().unwrap().is_empty());
@@ -103,18 +103,17 @@ async fn deleting_a_conversation_moves_it_to_trash_and_recovery_preserves_it() {
     let (status, restored) = app
         .request("POST", &format!("{path}/restore"), json!({}))
         .await;
-    assert_eq!(status, StatusCode::OK, "{restored}");
-    assert_eq!(restored["lifecycle"], "active");
-    let (_, active) = app.get(CHATS).await;
-    assert_eq!(active[0]["id"], chat["id"]);
+    assert_eq!(status, StatusCode::GONE, "{restored}");
+    app.service.cleanup_conversations().await.unwrap();
+    assert_eq!(app.get(&path).await.0, StatusCode::NOT_FOUND);
 }
 
 #[tokio::test]
-async fn trash_requires_confirmation_for_pending_work_and_never_replays_cancelled_messages() {
+async fn deletion_requires_confirmation_for_pending_work_and_never_replays_cancelled_messages() {
     let app = App::new().await;
     let path = chat_path(&app.create_chat().await);
     let messages = format!("{path}/messages");
-    let instructions = "Keep these instructions, do not execute them after recovery";
+    let instructions = "Do not execute these instructions after deletion";
     let status_of =
         async |method: &str, path: &str, body: Value| app.request(method, path, body).await.0;
     assert_eq!(
@@ -151,15 +150,13 @@ async fn trash_requires_confirmation_for_pending_work_and_never_replays_cancelle
     assert!(hidden["messages"].as_array().unwrap().is_empty());
     assert_eq!(
         status_of("POST", &format!("{path}/restore"), json!({})).await,
-        StatusCode::OK
+        StatusCode::GONE
     );
-    let (_, restored) = app.get(&path).await;
-    assert_eq!(restored["messages"][0]["status"], "cancelled");
-    assert_eq!(restored["messages"][0]["text"], instructions);
     app.tick().await;
     let (_, after) = app.get(&path).await;
     assert!(after["run"].is_null());
-    assert_eq!(after["messages"][0]["status"], "cancelled");
+    app.service.cleanup_conversations().await.unwrap();
+    assert_eq!(app.get(&path).await.0, StatusCode::NOT_FOUND);
 }
 
 #[tokio::test]
@@ -184,6 +181,49 @@ async fn trash_denies_direct_run_history_and_artifact_access() {
             "run{suffix} must be inaccessible in trash"
         );
     }
+}
+
+#[tokio::test]
+async fn deletion_waits_for_running_agents_before_removing_their_files() {
+    let app = App::new().await;
+    let mut chat = app.create_chat().await;
+    let run = id();
+    app.add_finished_run(&run, RunStatus::Running, json!({}), "Work in progress")
+        .await;
+    chat["runId"] = run.clone().into();
+    app.service.store.put("chats", chat.clone()).await.unwrap();
+    let cancellation = tokio_util::sync::CancellationToken::new();
+    app.service
+        .worker
+        .active
+        .lock()
+        .await
+        .insert(run.clone(), cancellation.clone());
+    let path = chat_path(&chat);
+    assert_eq!(
+        app.request("DELETE", &path, json!({ "confirm": true }))
+            .await
+            .0,
+        StatusCode::OK
+    );
+    assert!(cancellation.is_cancelled());
+    app.service.cleanup_conversations().await.unwrap();
+    assert_eq!(app.get(&path).await.0, StatusCode::OK);
+    let (_, retained) = app.get(&format!("{CHATS}?view=trash")).await;
+    assert_eq!(retained[0]["id"], chat["id"]);
+    assert_eq!(
+        app.request("POST", &format!("{path}/restore"), json!({}))
+            .await
+            .0,
+        StatusCode::GONE
+    );
+    app.service
+        .store
+        .patch_run(&run, json!({ "status": RunStatus::Succeeded }))
+        .await
+        .unwrap();
+    app.service.cleanup_conversations().await.unwrap();
+    assert_eq!(app.get(&path).await.0, StatusCode::NOT_FOUND);
 }
 
 #[tokio::test]
@@ -269,7 +309,7 @@ async fn inactivity_never_archives_even_with_an_old_enabled_policy() {
 }
 
 #[tokio::test]
-async fn expired_trash_removes_files_and_records_without_archival() {
+async fn immediate_deletion_removes_files_and_records_without_archival() {
     let app = App::new().await;
     let chat = app.create_chat().await;
     let directory = app
@@ -281,9 +321,7 @@ async fn expired_trash_removes_files_and_records_without_archival() {
     std::fs::create_dir_all(&directory).unwrap();
     std::fs::write(directory.join("private.txt"), "private content").unwrap();
     let path = chat_path(&chat);
-    let (_, mut deleted) = app.request("DELETE", &path, json!({})).await;
-    deleted["purgeAt"] = 1.into();
-    app.service.store.put("chats", deleted).await.unwrap();
+    app.request("DELETE", &path, json!({})).await;
     assert_eq!(
         app.request("POST", &format!("{path}/restore"), json!({}))
             .await
@@ -343,10 +381,27 @@ async fn readable_slugs_resolve_live_requests_and_keep_uuid_links_and_lifecycle(
     assert_eq!(
         app.request("POST", &format!("{path}/restore"), json!({}))
             .await
-            .1["lifecycle"],
-        "active"
+            .0,
+        StatusCode::GONE
     );
     assert_eq!(app.get(&path).await.1["slug"], slug);
+}
+
+#[tokio::test]
+async fn previously_trashed_conversations_keep_their_recovery_deadline() {
+    let app = App::new().await;
+    let mut chat = app.create_chat().await;
+    let path = chat_path(&chat);
+    chat["lifecycle"] = "trash".into();
+    chat["trashedAt"] = cairn_installation::config::now().into();
+    chat["purgeAt"] = (cairn_installation::config::now() + 30 * 86_400_000).into();
+    app.service.store.put("chats", chat).await.unwrap();
+    app.service.cleanup_conversations().await.unwrap();
+    let (status, restored) = app
+        .request("POST", &format!("{path}/restore"), json!({}))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{restored}");
+    assert_eq!(restored["lifecycle"], "active");
 }
 
 #[tokio::test]

@@ -651,7 +651,7 @@ async fn all_existing_cancellation_paths_also_invalidate_condition_waits() {
             "cancel" => f.s.worker.cancel(&f.s, &f.run).await.unwrap(),
             "trash" => {
                 f.s.chat_trash(&f.chat, true).await.unwrap();
-                f.s.chat_restore(&f.chat).await.unwrap();
+                assert_eq!(f.s.chat_restore(&f.chat).await.unwrap_err().status, 410);
             }
             "failure" => {
                 f.s.chat_pause(&f.chat, true).await.unwrap();

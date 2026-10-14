@@ -20,7 +20,6 @@ pub fn storage_lock(directory: &std::path::Path) -> Result<StorageLock> {
 }
 
 pub const DAY: i64 = 86_400_000;
-const TRASH_RETENTION: i64 = 30 * DAY;
 const PURGE_RETRY_MS: i64 = 60_000;
 
 string_enum! {
@@ -59,9 +58,7 @@ fn in_trash(chat: &Value) -> bool {
 
 pub fn require_active(chat: &Value) -> Result<()> {
     if !is_active(chat) {
-        return Err(Error::conflict(
-            "Restore this conversation before continuing.",
-        ));
+        return Err(Error::conflict("This conversation has been deleted."));
     }
     Ok(())
 }
@@ -172,7 +169,7 @@ fn trash(db: &Db<'_>, id: &str, confirmed: bool) -> Result<Value> {
     chat["lifecycle"] = Lifecycle::Trash.into();
     let trashed_at = now();
     chat["trashedAt"] = trashed_at.into();
-    chat["purgeAt"] = (trashed_at + TRASH_RETENTION).into();
+    chat["purgeAt"] = trashed_at.into();
     chat["paused"] = true.into();
     db.set(
         "conversation-cache-revision",
@@ -237,6 +234,7 @@ impl Service {
                 _ => {}
             }
         }
+        self.worker.notify_conversation_cleanup();
         Ok(result)
     }
 

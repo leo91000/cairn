@@ -22,9 +22,9 @@ abstract class ConversationLifecycleCases {
 
     protected open fun captureSwipe() = Unit
 
-    @Test fun swipeTrashesWithUndoAndTrashRemainsSecondary() = withConversation(false)
+    @Test fun swipeRequiresConfirmationAndPermanentlyDeletes() = withConversation(false)
 
-    @Test fun swipeFromFilTrashesWithUndoWithoutOpeningTheConversation() = withConversation(true)
+    @Test fun swipeFromFilConfirmsBeforePermanentlyDeleting() = withConversation(true)
 
     @Test
     fun deletingWorkingConversationFromFilRequiresConfirmation() = withConversation(true, true)
@@ -160,97 +160,46 @@ abstract class ConversationLifecycleCases {
             compose.waitForIdle()
             row.assertIsDisplayed()
             assertTrue("A short drag must not delete", deletes.isEmpty())
-            if (working) {
-                row.performTouchInput { swipeLeft() }
-                compose.waitUntil(10000) {
-                    compose
-                        .onAllNodesWithText("Arrêter et supprimer ?")
-                        .fetchSemanticsNodes()
-                        .isNotEmpty()
-                }
-                assertFalse("Work must not be stopped before confirmation", deleted.get())
-                compose.onNodeWithText("Annuler", substring = false).performClick()
-                compose.waitUntil(10000) {
-                    compose.onAllNodesWithText(chat.title).fetchSemanticsNodes().isNotEmpty()
-                }
-                compose.onNodeWithText(chat.title).assertIsDisplayed()
-                assertFalse(deleted.get())
-                compose.onNodeWithText(chat.title).performTouchInput { swipeLeft() }
-                compose.waitUntil(10000) {
-                    compose.onAllNodesWithText("Confirmer").fetchSemanticsNodes().isNotEmpty()
-                }
-                compose.onNodeWithText("Confirmer", substring = false).performClick()
-                compose.waitUntil(10000) { deletes.size == 3 }
-                assertEquals(
-                    listOf(false, false, true),
-                    deletes.map {
-                        wireJson
-                            .parseToJsonElement(it)
-                            .jsonObject
-                            .getValue("confirm")
-                            .jsonPrimitive
-                            .boolean
-                    },
-                )
-            } else {
-                // Past the threshold the row slides out on release; the snackbar offers an undo.
-                row.performTouchInput {
-                    down(Offset(width * .9f, centerY))
-                    moveTo(Offset(width * .6f, centerY))
-                    moveTo(Offset(width * .3f, centerY))
-                }
-                if (fromFil) {
-                    compose.waitForIdle()
-                    captureSwipe()
-                }
-                row.performTouchInput { up() }
-                compose.waitUntil(10000) { deletes.size == 1 }
-                compose.waitUntil(10000) {
-                    compose
-                        .onAllNodesWithText("Conversation supprimée")
-                        .fetchSemanticsNodes()
-                        .isNotEmpty()
-                }
-                compose.onNodeWithText(chat.title).assertDoesNotExist()
-                compose.onNodeWithText("Annuler", substring = false).performClick()
-                compose.waitUntil(10000) { restores.size == 1 }
-                compose.waitUntil(15000) {
-                    compose.onAllNodesWithText(chat.title).fetchSemanticsNodes().isNotEmpty()
-                }
-                compose.onNodeWithText(chat.title).performTouchInput { swipeLeft() }
-                compose.waitUntil(10000) { deletes.size == 2 }
-            }
-            compose.waitUntil(15000) {
-                compose.onAllNodesWithText(chat.title).fetchSemanticsNodes().isEmpty()
-            }
-            if (fromFil) {
-                compose.onNodeWithTag("fil").assertIsDisplayed()
-                vm.api.closeStreams()
-                return@use
-            }
-            compose.onNodeWithContentDescription("Afficher les conversations").performClick()
-            compose.onNodeWithText("Corbeille", substring = false).performClick()
+            row.performTouchInput { swipeLeft() }
             compose.waitUntil(10000) {
-                compose.onAllNodesWithText(chat.title).fetchSemanticsNodes().isNotEmpty()
-            }
-            compose.onNodeWithText(chat.title).assertIsDisplayed()
-            compose.onNodeWithText(chat.title).performClick()
-            compose.waitUntil(15000) {
                 compose
-                    .onAllNodesWithText("Restaurer la conversation")
+                    .onAllNodesWithText("Supprimer définitivement ?")
                     .fetchSemanticsNodes()
                     .isNotEmpty()
             }
-            assertEquals("Opening the trash must not restore it", 1, restores.size)
-            compose.onNodeWithText("Restaurer la conversation").performClick()
-            compose.waitUntil(15000) { restores.size == 2 }
-            compose.waitUntil(15000) {
-                compose
-                    .onAllNodesWithText("Cette conversation est dans la corbeille.")
-                    .fetchSemanticsNodes()
-                    .isEmpty()
+            assertTrue("No request is sent before confirmation", deletes.isEmpty())
+            compose.onNodeWithText("Annuler", substring = false).performClick()
+            compose.onNodeWithText(chat.title).assertIsDisplayed()
+            assertFalse(deleted.get())
+            compose.onNodeWithText(chat.title).performTouchInput {
+                down(Offset(width * .9f, centerY))
+                moveTo(Offset(width * .3f, centerY))
             }
-            compose.onNodeWithTag("conversation-composer").assertIsDisplayed()
+            if (fromFil) {
+                compose.waitForIdle()
+                captureSwipe()
+            }
+            row.performTouchInput { up() }
+            compose.waitUntil(10000) {
+                compose.onAllNodesWithText("Confirmer").fetchSemanticsNodes().isNotEmpty()
+            }
+            compose.onNodeWithText("Confirmer", substring = false).performClick()
+            compose.waitUntil(10000) { deletes.size == 1 }
+            assertTrue(
+                wireJson
+                    .parseToJsonElement(deletes.single())
+                    .jsonObject
+                    .getValue("confirm")
+                    .jsonPrimitive
+                    .boolean
+            )
+            assertTrue("Permanent deletion must never restore", restores.isEmpty())
+            compose.onNodeWithText("Annuler", substring = false).assertDoesNotExist()
+            compose.waitUntil(15000) {
+                compose.onAllNodesWithText(chat.title).fetchSemanticsNodes().isEmpty()
+            }
+            if (fromFil) compose.onNodeWithTag("fil").assertIsDisplayed()
+            vm.api.closeStreams()
         }
     }
 }

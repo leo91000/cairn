@@ -31,6 +31,7 @@ pub struct Worker {
     tick_lock: Mutex<()>,
     preparation: Arc<Mutex<()>>,
     wake: Notify,
+    conversation_cleanup: Notify,
     initialized: OnceCell<()>,
     maintenance: AtomicI64,
     tasks: TaskTracker,
@@ -86,6 +87,10 @@ impl Worker {
                 .await;
             }
         }
+    }
+
+    pub fn notify_conversation_cleanup(&self) {
+        self.conversation_cleanup.notify_one();
     }
 
     /// Coalesce wakeups without losing work queued during an active scheduling pass.
@@ -197,6 +202,7 @@ async fn clean_conversations(s: Arc<Service>) {
         tokio::select! {
             () = s.shutdown.cancelled() => break,
             _ = timer.tick() => {}
+            () = s.worker.conversation_cleanup.notified() => {}
         }
         tokio::select! {
             () = s.shutdown.cancelled() => break,
