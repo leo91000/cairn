@@ -85,7 +85,7 @@ executable. The runner image installs this pinned release and startup rejects a
 version mismatch. Initial OpenCode agents require **YOLO** access because the native
 engine does not implement Cairn's read-only/workspace-write sandbox. Production
 runner isolation still applies. OAuth, custom endpoints and quota reporting are
-outside this first integration. See [ADR 0040](adr/0040-opencode-api-key-integration.md).
+outside this first integration. See [ADR 0042](adr/0042-opencode-api-key-integration.md).
 
 ## Migration
 

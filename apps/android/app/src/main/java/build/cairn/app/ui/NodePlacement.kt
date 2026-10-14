@@ -34,6 +34,7 @@ private val nodeStates =
 
 @Composable
 fun NodePlacement(vm: CairnViewModel, run: Run) {
+    val exclusive = run.suspendedByExclusive.takeIf { run.active }
     var expanded by remember(run.id) { mutableStateOf(false) }
     var moving by remember(run.id) { mutableStateOf(false) }
     var loaded by remember(run.id) { mutableStateOf(false) }
@@ -80,6 +81,7 @@ fun NodePlacement(vm: CairnViewModel, run: Run) {
             run.capacityWaitUntil != null ||
             run.backup?.error != null ||
             run.storage?.mode == "on-demand" ||
+            exclusive != null ||
             error != null
     if (!relevant) return
     val current =
@@ -111,6 +113,7 @@ fun NodePlacement(vm: CairnViewModel, run: Run) {
             run.movementError != null -> "Déplacement en échec"
             run.backup?.error != null -> "Synchronisation en échec"
             run.storage?.waitingFor != null -> storageState(run.storage.waitingFor)
+            exclusive != null -> "Suspendue pour une réservation exclusive"
             run.nodeState != null -> nodeStates[run.nodeState] ?: run.nodeState
             run.capacityWaitUntil != null -> "En attente de capacité"
             run.backup?.status == "saving" -> "Synchronisation…"
@@ -123,6 +126,7 @@ fun NodePlacement(vm: CairnViewModel, run: Run) {
         when {
             failed -> MaterialTheme.colorScheme.error
             pending -> signal.warning
+            exclusive != null -> signal.warning
             else -> MaterialTheme.colorScheme.onSurfaceVariant
         }
     OutlinedCard(onClick = { expanded = true }, modifier = Modifier.fillMaxWidth()) {
@@ -147,6 +151,20 @@ fun NodePlacement(vm: CairnViewModel, run: Run) {
                         "Fichiers chargés à la demande",
                         style = MaterialTheme.typography.bodySmall,
                     )
+            }
+            exclusive?.let { reservation ->
+                Panel {
+                    Text(
+                        "Suspendue pour une réservation exclusive",
+                        style = MaterialTheme.typography.titleSmall,
+                    )
+                    Text(reservation.reason)
+                    Text(exclusiveReservationState(reservation.state))
+                    reservation.expiresAt?.let { Text("Réservation jusqu’au ${date(it)}") }
+                    Text(
+                        "La reprise est automatique après la libération, dès que la node est disponible."
+                    )
+                }
             }
             Panel {
                 Text("Synchronisation", style = MaterialTheme.typography.titleSmall)

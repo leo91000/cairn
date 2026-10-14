@@ -6,7 +6,6 @@ import androidx.test.platform.app.InstrumentationRegistry
 import java.io.File
 import org.junit.runner.RunWith
 
-@RobolectricTwin
 @RunWith(AndroidJUnit4::class)
 class NodePlacementDeviceTest : NodePlacementCases() {
     override fun capture(name: String) {

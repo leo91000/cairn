@@ -138,6 +138,7 @@ fun ErrorNotice(message: String, dismiss: () -> Unit) {
 
 internal fun statusLabel(value: String): String =
     when (value) {
+        "suspended-exclusive" -> "Suspendue (exclusivité)"
         "running" -> "En cours"
         "queued" -> "En attente"
         "succeeded" -> "Terminée"
@@ -147,6 +148,9 @@ internal fun statusLabel(value: String): String =
         else -> value
     }
 
+internal fun runPresentationStatus(run: Run): String =
+    if (run.active && run.suspendedByExclusive != null) "suspended-exclusive" else run.status
+
 @Composable
 fun Status(value: String) {
     val label = statusLabel(value)
@@ -154,6 +158,7 @@ fun Status(value: String) {
         when (value) {
             "failed",
             "interrupted" -> signal.attentionSoft to signal.attention
+            "suspended-exclusive" -> signal.warning.copy(alpha = 0.14f) to signal.warning
             "running",
             "queued" ->
                 MaterialTheme.colorScheme.primaryContainer to

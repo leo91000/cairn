@@ -27,6 +27,7 @@ import ChatAttachments from '../components/ChatAttachments.vue'
 import ChatQuestions from '../components/ChatQuestions.vue'
 import ChatSwitcher from '../components/ChatSwitcher.vue'
 import ConnectionSheet from '../components/ConnectionSheet.vue'
+import ConversationDeletion from '../components/ConversationDeletion.vue'
 import FilColumn from '../components/FilColumn.vue'
 import Icon from '../components/Icon.vue'
 import Modal from '../components/Modal.vue'
@@ -56,11 +57,13 @@ import {
   Plug,
   Plus,
   Search,
+  Trash2,
   X,
   Zap,
 } from '../icons'
 import { connectionTone, installationKey, routeLabel } from '../installation-context'
 import { useRetryNotice } from '../run-retry'
+import { exclusiveSuspensionLabel, isExclusivelySuspended } from '../run-status'
 import { backgroundWait } from '../signal'
 import { chatSkills } from '../skill-mentions'
 import { iconButton } from '../ui'
@@ -71,6 +74,7 @@ import { chatPath } from '../workspace-links'
 const router = useRouter()
 const route = useRoute()
 const detail = ref<(ChatDetail & { error?: string }) | null>(null)
+const recoverable = computed(() => detail.value?.lifecycle === 'trash' && (detail.value?.purgeAt ?? 0) > Date.now())
 const inactive = computed(() => !!detail.value?.lifecycle && detail.value.lifecycle !== 'active')
 const chatId = computed(() => typeof route.params.id === 'string' ? route.params.id : undefined)
 const selectedChatId = computed(() => {
@@ -95,6 +99,7 @@ const model = ref('')
 const reasoning = ref('')
 const provider = ref<'' | Provider>('')
 const history = ref(false)
+const deletingConversation = ref<ChatDetail>()
 const detailsOpen = ref(false)
 const detailsButton = ref<HTMLButtonElement>()
 const activity = ref<InstanceType<typeof ActivityFeed>>()
@@ -211,6 +216,7 @@ function pasteFiles(event: ClipboardEvent) {
 }
 
 const active = computed(() => !!detail.value?.run && ['queued', 'running'].includes(detail.value.run.status))
+const suspended = computed(() => isExclusivelySuspended(detail.value?.run))
 const retryNotice = useRetryNotice(() => detail.value?.run)
 const sleepNotice = computed(() => chatSleepNotice(detail.value))
 const waitNotice = computed(() => retryNotice.value
@@ -218,10 +224,16 @@ const waitNotice = computed(() => retryNotice.value
   : chatWaitNotice(detail.value?.run) ?? sleepNotice.value)
 const backgroundTasks = computed(() => detail.value?.run?.status === 'running' ? backgroundWait(events.value)?.tasks.length ?? 0 : 0)
 const chatStatus = computed(() => {
+  const status = detail.value?.run?.status
+  if (status === 'failed')
+    return 'Failed'
+  if (status === 'interrupted')
+    return 'Interrupted'
   if (detail.value?.paused)
     return 'Paused'
 
-  const status = detail.value?.run?.status
+  if (suspended.value)
+    return exclusiveSuspensionLabel
   if (status === 'queued')
     return 'Waiting'
   if (status === 'running') {
@@ -230,10 +242,6 @@ const chatStatus = computed(() => {
     return 'Working'
   }
 
-  if (status === 'failed')
-    return 'Failed'
-  if (status === 'interrupted')
-    return 'Interrupted'
   if (sleepNotice.value)
     return detail.value?.wakeup?.condition ? 'Waiting for a result' : 'Scheduled wait'
   return 'Ready'
@@ -547,6 +555,14 @@ function key(event: KeyboardEvent) {
           <Icon :name="Maximize2" :size="18" />Open activity fullscreen
         </button>
       </template>
+      <button
+        v-if="detail && !inactive"
+        class="chat-detail-action text-danger!"
+        aria-haspopup="dialog"
+        @click="detailAction(() => { deletingConversation = detail! })"
+      >
+        <Icon :name="Trash2" :size="18" />Delete conversation
+      </button>
       <div class="border-t border-line pt-1">
         <button class="chat-detail-action" @click="detailAction(() => workspaceActions?.search())">
           <Icon :name="Search" :size="18" />Search workspace
@@ -560,6 +576,12 @@ function key(event: KeyboardEvent) {
       </div>
     </div>
   </Modal>
+  <ConversationDeletion
+    v-if="deletingConversation"
+    :chat="deletingConversation"
+    @close="deletingConversation = undefined"
+    @deleted="() => { deletingConversation = undefined; newConversation() }"
+  />
   <ConnectionSheet
     v-if="connectionOpen"
     :run="detail?.run"
@@ -580,6 +602,7 @@ function key(event: KeyboardEvent) {
         :anchor="switcherAnchor"
         @close="history = false"
         @create="newConversation"
+        @deleted="id => { if (id === selectedChatId) newConversation() }"
       />
       <!-- One row, as on Android: who and what on the left, files and the ⋯ menu on the right. -->
       <header class="chat-header flex min-h-15 shrink-0 items-center gap-3 border-b border-line/70 pb-3 phone:h-15 phone:gap-2 phone:pb-0">
@@ -621,7 +644,7 @@ function key(event: KeyboardEvent) {
             :name="detail.agentName"
             :identity="detail.agentId"
             :size="36"
-            :working="detail.run?.status === 'running' && !detail.paused"
+            :working="detail.run?.status === 'running' && !detail.paused && !suspended"
           />
           <div class="min-w-0 flex-1">
             <div class="flex min-w-0 items-center gap-1">
@@ -708,19 +731,19 @@ function key(event: KeyboardEvent) {
           </div>
           <div v-else-if="inactive" class="m-auto w-full max-w-xl px-6 py-12 text-center">
             <h2 class="mb-3 text-xl">
-              {{ detail?.lifecycle === 'purging' ? 'Permanently deleting conversation…' : 'This conversation is in the trash.' }}
+              {{ recoverable ? 'This conversation is in the trash.' : 'Permanently deleting conversation…' }}
             </h2>
-            <p v-if="detail?.purgeAt" class="mb-5 text-sm text-muted">
+            <p v-if="recoverable && detail?.purgeAt" class="mb-5 text-sm text-muted">
               Permanently deleted on {{ new Date(detail.purgeAt).toLocaleDateString() }}.
             </p>
             <p v-else class="mb-5 text-sm text-muted">
-              Restore this conversation to access its history and working files.
+              This conversation cannot be restored. Its messages and working files are being removed.
             </p>
             <UiAlert v-if="error || detail?.lifecycleError" class="mb-4">
               {{ error || detail?.lifecycleError }}
             </UiAlert>
             <UiButton
-              v-if="detail?.lifecycle === 'trash'"
+              v-if="recoverable"
               :disabled="busy"
               variant="primary"
               @click="action('restore')"
@@ -761,6 +784,7 @@ function key(event: KeyboardEvent) {
             :sending="delivery.sending"
             :events="events"
             :active="detail?.run?.status === 'running'"
+            :suspended="suspended"
             :agent-id="detail?.agentId || selectedAgent?.id"
             :agent="detail?.agentName || selectedAgent?.name || 'Main agent'"
             :task="detail?.title || 'New conversation'"
@@ -780,6 +804,7 @@ function key(event: KeyboardEvent) {
               v-if="detail"
               :questions="detail.questions || []"
               :active="active"
+              :suspended="suspended"
               :highlighted="typeof route.query.question === 'string' ? route.query.question : undefined"
             />
             <UiAlert v-if="visibleError && !dismissedError" class="mb-3 flex items-start gap-2">

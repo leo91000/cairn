@@ -9,6 +9,36 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class SignalPresentationTest {
+    @Test
+    fun `exclusive suspension keeps active work visible without working animation and preserves attention`() {
+        val reservation = ExclusiveReservation("reservation", "node", "owner", "Build", "acquired")
+        val chat =
+            Chat(
+                "suspended",
+                status = "running",
+                agentName = "Cairn",
+                suspendedByExclusive = reservation,
+            )
+        val mission =
+            Run("mission", taskId = "task", status = "running", suspendedByExclusive = reservation)
+        val feed =
+            buildFeed(
+                listOf(
+                    chat,
+                    chat.copy(id = "question", pendingQuestions = 1),
+                    chat.copy(id = "failed", status = "failed", error = "Erreur prioritaire"),
+                ),
+                listOf(mission),
+                emptyList(),
+            )
+        assertEquals(2, feed.running.size)
+        assertTrue(
+            feed.running.all { !it.working && it.subtitle.startsWith("Suspendue (exclusivité)") }
+        )
+        assertEquals(listOf(FeedKind.QUESTION, FeedKind.FAILED_CHAT), feed.forYou.map { it.kind })
+        assertEquals("Erreur prioritaire", feed.forYou.last().subtitle)
+    }
+
     private val zone = ZoneId.of("Europe/Paris")
 
     private fun at(year: Int, month: Int, day: Int, hour: Int, minute: Int = 0) =

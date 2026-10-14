@@ -2,6 +2,7 @@
 pub mod budget;
 mod codex_state;
 pub mod guest;
+pub mod hibernation;
 pub mod host;
 pub(crate) mod images;
 pub(crate) mod listener;
@@ -11,5 +12,6 @@ pub mod plan;
 pub mod pool;
 pub mod projects;
 pub mod protocol;
+pub mod suspension;
 pub mod vm;
 pub mod wire;

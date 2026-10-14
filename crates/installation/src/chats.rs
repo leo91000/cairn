@@ -90,7 +90,7 @@ fn chat(db: &Db<'_>, id: &str) -> Result<Value> {
     required(db.get("chats", id)?, "Chat not found")
 }
 
-fn chat_for_run(db: &Db<'_>, run_id: &str) -> Result<Option<Value>> {
+pub(crate) fn chat_for_run(db: &Db<'_>, run_id: &str) -> Result<Option<Value>> {
     Ok(db
         .list("chats")?
         .into_iter()
@@ -148,9 +148,13 @@ fn view(db: &Db<'_>, mut chat: Value) -> Result<Value> {
     } else {
         record_name(db, &chat, "projects", "projectName", "Deleted project")?
     };
-    chat["status"] = db
-        .run(text(&chat, "runId"))?
+    let run = db.run(text(&chat, "runId"))?;
+    chat["status"] = run
+        .as_ref()
         .map_or_else(|| "idle".into(), |run| run["status"].clone());
+    chat["suspendedByExclusive"] = run
+        .as_ref()
+        .map_or(Value::Null, |run| run["suspendedByExclusive"].clone());
     Ok(chat)
 }
 

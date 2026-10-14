@@ -25,6 +25,7 @@ import {
   Square,
   TriangleAlert,
 } from '../icons'
+import { runDisplayStatus } from '../run-status'
 import { iconButton } from '../ui'
 
 const runs = ref<any[]>([])
@@ -148,7 +149,7 @@ onBeforeUnmount(() => clearInterval(timer))
             </RouterLink><small>{{ run.agentName }}</small>
           </td>
           <td data-label="Outcome">
-            <Status :status="run.status" /><Outcome :outcome="run.outcome" :status="run.status" />
+            <Status :status="runDisplayStatus(run)" /><Outcome :outcome="run.outcome" :status="run.status" />
           </td>
           <td data-label="Started">
             {{ date(run.createdAt) }}

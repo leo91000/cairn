@@ -97,6 +97,7 @@ pub async fn schedule(s: &Service, bearer: &str, input: &Value) -> Result<Value>
                 "wakeAt": created + seconds * 1000,
             });
             chat["wakeup"] = wakeup.clone();
+            crate::nodes::exclusive::release_before_wait(db, text(&run, "id"))?;
             chat["updatedAt"] = created.into();
             db.put("chats", &chat)?;
             db.event(
@@ -112,7 +113,7 @@ pub async fn schedule(s: &Service, bearer: &str, input: &Value) -> Result<Value>
     Ok(result)
 }
 
-pub(super) fn has_pending_input(db: &Db<'_>, chat: &Value) -> Result<bool> {
+pub(crate) fn has_pending_input(db: &Db<'_>, chat: &Value) -> Result<bool> {
     Ok(db
         .messages(text(chat, "id"))?
         .iter()

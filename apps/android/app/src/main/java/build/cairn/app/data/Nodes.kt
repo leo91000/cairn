@@ -26,6 +26,9 @@ data class ExecutionNode(
     val name: String,
     val local: Boolean = false,
     val accepting: Boolean = false,
+    val exclusiveAgents: List<String> = emptyList(),
+    val exclusiveReservations: Boolean = false,
+    val exclusiveReservation: ExclusiveReservation? = null,
     val revoked: Boolean = false,
     val status: String,
     val tags: List<String> = emptyList(),
@@ -49,6 +52,34 @@ data class ExecutionNode(
     val staleDisks: StaleDisks = StaleDisks(),
     val storage: NodeStoragePolicy? = null,
 )
+
+@Serializable
+data class ExclusiveReservation(
+    val id: String,
+    val nodeId: String,
+    val ownerRunId: String,
+    val reason: String,
+    val state: String,
+    val createdAt: Long = 0,
+    val expiresAt: Long? = null,
+    val renewalPending: Boolean = false,
+    val waitUntil: Long = 0,
+    val pausedRunIds: List<String> = emptyList(),
+    val minimumAvailableMemoryMiB: Long = 0,
+    val error: String? = null,
+)
+
+fun exclusiveReservationState(state: String): String =
+    when (state) {
+        "queued" -> "En attente"
+        "acquiring" -> "Suspension des autres tâches"
+        "acquired" -> "Exclusivité acquise"
+        "releasing" -> "Reprise des autres tâches"
+        "released" -> "Libérée"
+        "failed" -> "Échec de la réservation"
+        "expired" -> "Expirée"
+        else -> state
+    }
 
 @Serializable data class NodeUsage(val memoryMiB: Long = 0, val diskMiB: Long = 0)
 
@@ -95,6 +126,7 @@ data class NodeConfiguration(
     val tags: List<String>,
     val limits: NodeResources,
     val slots: Int = 4,
+    val exclusiveAgents: List<String>? = null,
 )
 
 @Serializable

@@ -81,6 +81,7 @@ export interface ChatMessage {
   createdAt: number
 }
 export interface ChatView extends Chat {
+  suspendedByExclusive?: Run['suspendedByExclusive']
   pendingQuestions: number
   agentName: string
   projectName: string | null

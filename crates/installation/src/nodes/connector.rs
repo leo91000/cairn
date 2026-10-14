@@ -50,6 +50,7 @@ struct HeartbeatRequest<'a> {
     shared_resources: bool,
     budget: &'a Value,
     budget_error: &'a Value,
+    exclusive_reservations: bool,
 }
 
 pub(crate) fn master(input: &str) -> Result<url::Url> {
@@ -377,6 +378,13 @@ pub(super) async fn budget_error(
     }
 }
 
+fn controller_ready(health: &Value) -> bool {
+    health["status"] == "ok"
+        && health["pool"]["quarantined"] != true
+        && health["nodeProtocol"] == NODE_PROTOCOL
+        && health["dataRoot"] == super::node_data_dir().to_string_lossy().as_ref()
+}
+
 async fn heartbeat(
     client: &reqwest::Client,
     origin: &url::Url,
@@ -388,8 +396,7 @@ async fn heartbeat(
         let started = super::boot_ms();
         let runner = std::env::var("RUNNER_URL").unwrap_or_default();
         let health = local_health(client, &runner).await;
-        let ready = health["nodeProtocol"] == NODE_PROTOCOL
-            && health["dataRoot"] == super::node_data_dir().to_string_lossy().as_ref();
+        let ready = controller_ready(&health);
         let report = HeartbeatRequest {
             image_digest: std::env::var("CAIRN_NODE_IMAGE").ok(),
             runtime_id: health["runtimeId"]
@@ -405,6 +412,7 @@ async fn heartbeat(
             shared_resources: health["sharedResources"] == true,
             budget: &health["budget"],
             budget_error: &budget_error_value,
+            exclusive_reservations: health["exclusiveReservations"] == true,
         };
         let request = client
             .post(
@@ -491,6 +499,22 @@ async fn forward_leases(
 #[cfg(test)]
 mod capacity_tests {
     use super::*;
+
+    #[test]
+    fn a_quarantined_controller_never_advertises_remote_execution_readiness() {
+        let mut health = json!({
+            "status": "ok",
+            "nodeProtocol": NODE_PROTOCOL,
+            "dataRoot": super::super::node_data_dir(),
+            "pool": { "quarantined": false },
+        });
+        assert!(controller_ready(&health));
+        health["status"] = "quarantined".into();
+        assert!(!controller_ready(&health));
+        health["status"] = "ok".into();
+        health["pool"]["quarantined"] = true.into();
+        assert!(!controller_ready(&health));
+    }
 
     #[test]
     fn parent_cpu_capacity_tracks_resize_and_affinity_independently_of_leaf_budget() {

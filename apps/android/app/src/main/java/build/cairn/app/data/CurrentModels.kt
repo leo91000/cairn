@@ -86,7 +86,13 @@ data class Chat(
     val sessionRestartRequested: Boolean = false,
     val lifecycleError: String? = null,
     val wakeup: ChatWakeup? = null,
-)
+    val suspendedByExclusive: ExclusiveReservation? = null,
+) {
+    val exclusiveSuspended
+        get() =
+            (run?.status ?: status) in listOf("running", "queued") &&
+                (suspendedByExclusive != null || run?.suspendedByExclusive != null)
+}
 
 @Serializable
 data class Deliverable(

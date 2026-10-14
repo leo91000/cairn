@@ -8,25 +8,25 @@ import {
   useId,
   watch,
 } from 'vue'
-import { api, ApiError, state } from '../api'
+import { api } from '../api'
 import {
   Clock,
   MessageCircle,
-  MoreHorizontal,
   Plus,
   Search,
+  Trash2,
   X,
 } from '../icons'
+import { exclusiveSuspensionLabel, isExclusivelySuspended } from '../run-status'
 import { iconButton } from '../ui'
 import { chatPath } from '../workspace-links'
+import ConversationDeletion from './ConversationDeletion.vue'
 import Icon from './Icon.vue'
-import Modal from './Modal.vue'
-import UiButton from './UiButton.vue'
 import VirtualSelect from './VirtualSelect.vue'
 
 // The anchor is resolved when used: a breakpoint change can hide the trigger that opened it.
 const props = defineProps<{ chats: ChatView[], selected?: string, anchor?: () => HTMLElement | undefined }>()
-const emit = defineEmits<{ close: [], create: [] }>()
+const emit = defineEmits<{ close: [], create: [], deleted: [id: string] }>()
 const dialog = ref<HTMLDialogElement>()
 const query = ref('')
 const view = ref<'active' | 'trash'>('active')
@@ -38,7 +38,6 @@ const other = ref<ChatView[]>([])
 const loading = ref(false)
 const error = ref('')
 const confirmation = ref<ChatView>()
-const deleting = ref(false)
 const conversations = computed(() => view.value === 'active' ? props.chats : other.value)
 let request = 0
 
@@ -67,27 +66,6 @@ async function load() {
 }
 
 watch([view, () => props.chats], load)
-
-async function remove(chat: ChatView, confirm = false) {
-  if (deleting.value)
-    return
-  deleting.value = true
-  error.value = ''
-  try {
-    await api(`/chats/${chat.id}`, { method: 'DELETE', body: JSON.stringify({ confirm }) })
-    const draftScope = state.installationId ? `${state.installationId}:` : ''
-    sessionStorage.removeItem(`cairn-chat-draft:${draftScope}${chat.id}`)
-    confirmation.value = undefined
-    await load()
-  }
-  catch (e) {
-    if (e instanceof ApiError && e.status === 409 && !confirm)
-      confirmation.value = chat
-    else
-      error.value = (e as Error).message
-  }
-  finally { deleting.value = false }
-}
 
 const titleId = useId()
 const previous = document.activeElement as HTMLElement | null
@@ -204,19 +182,19 @@ function time(timestamp: number) {
                   <span class="line-clamp-2 text-xs font-semibold leading-relaxed wrap-anywhere">{{ chat.title }}</span>
                   <span class="mt-1.5 block text-[11px] leading-relaxed text-muted wrap-anywhere">{{ chat.agentName }}<template v-if="chat.projectName"> · {{ chat.projectName }}</template></span>
                   <span v-if="chat.pendingQuestions" class="mt-2 inline-block rounded-md bg-warning-surface px-2 py-1 text-[10px] text-warning">{{ chat.pendingQuestions }} awaiting answer</span>
-                  <span v-else-if="chat.status === 'running' || chat.status === 'queued'" class="mt-2 flex items-center gap-1.5 text-[10px] text-accent"><Icon :name="Clock" :size="12" />{{ chat.status === 'queued' ? 'Waiting' : 'Working' }}</span>
+                  <span v-else-if="chat.status === 'running' || chat.status === 'queued'" class="mt-2 flex items-center gap-1.5 text-[10px]" :class="chat.paused || isExclusivelySuspended(chat) ? 'text-muted' : 'text-accent'"><Icon :name="Clock" :size="12" />{{ chat.paused ? 'Paused' : isExclusivelySuspended(chat) ? exclusiveSuspensionLabel : chat.status === 'queued' ? 'Waiting' : 'Working' }}</span>
                   <span v-else-if="chat.status === 'failed' || chat.status === 'interrupted'" class="mt-2 block text-[10px] text-danger">{{ chat.status === 'failed' ? 'Response failed' : 'Interrupted' }}</span>
                 </div>
                 <time :datetime="new Date(chat.updatedAt).toISOString()" class="shrink-0 pt-1 text-[10px] text-muted">{{ time(chat.updatedAt) }}</time>
               </RouterLink>
-              <details v-if="view !== 'trash'" class="relative shrink-0 pt-3">
-                <summary :aria-label="`Actions for ${chat.title}`" class="cursor-pointer list-none rounded-md p-1.5 text-muted hover:bg-hover">
-                  <Icon :name="MoreHorizontal" :size="18" />
-                </summary>
-                <button class="absolute right-0 z-10 rounded-lg border border-line bg-raised px-4 py-2 text-xs text-danger shadow-lg" :disabled="deleting" @click="remove(chat)">
-                  Delete
-                </button>
-              </details>
+              <button
+                v-if="view !== 'trash'"
+                :aria-label="`Delete ${chat.title}`"
+                class="mt-2 flex min-h-11 shrink-0 items-center gap-1.5 rounded-lg px-2 text-[11px] text-muted hover:bg-danger-surface hover:text-danger focus-visible:outline-2 focus-visible:outline-accent"
+                @click="confirmation = chat"
+              >
+                <Icon :name="Trash2" :size="15" />Delete
+              </button>
             </div>
           </section>
         </nav>
@@ -225,19 +203,12 @@ function time(timestamp: number) {
         </p>
       </div>
     </dialog>
-    <Modal v-if="confirmation" title="Stop and delete conversation?" @close="confirmation = undefined">
-      <p class="mb-5 text-sm text-muted">
-        This stops the agent, cancels pending messages and questions, and moves the conversation to the trash for 30 days. Public links are revoked immediately.
-      </p>
-      <div class="flex justify-end gap-3">
-        <UiButton :disabled="deleting" @click="confirmation = undefined">
-          Cancel
-        </UiButton>
-        <UiButton :disabled="deleting" variant="primary" @click="remove(confirmation!, true)">
-          Stop and delete
-        </UiButton>
-      </div>
-    </Modal>
+    <ConversationDeletion
+      v-if="confirmation"
+      :chat="confirmation"
+      @close="confirmation = undefined"
+      @deleted="id => { confirmation = undefined; emit('deleted', id); load() }"
+    />
   </Teleport>
 </template>
 

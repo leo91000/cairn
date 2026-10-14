@@ -1,6 +1,7 @@
 import type { ChatView } from '../../../packages/contracts/chats'
 import type { RunEvent, RunListItem, Task } from '../../../packages/contracts/contracts'
 import type { ActivityEntry } from './activity'
+import { exclusiveSuspensionLabel, isExclusivelySuspended } from './run-status'
 import { chatPath } from './workspace-links'
 
 // Same identity palette as the Android « Signal » design: readable on white text in both themes.
@@ -16,7 +17,7 @@ export function identityColor(key: string) {
 
 export const initial = (name: string) => name.trim().match(/[\p{L}\p{N}]/u)?.[0]?.toUpperCase() ?? '?'
 
-export type FilKind = 'question' | 'failed' | 'failed-mission' | 'review' | 'running' | 'queued' | 'paused' | 'recent'
+export type FilKind = 'question' | 'failed' | 'failed-mission' | 'review' | 'running' | 'queued' | 'paused' | 'suspended' | 'recent'
 export interface FilItem {
   key: string
   kind: FilKind
@@ -66,6 +67,8 @@ export function filOf(chats: ChatView[], tasks: Task[], runs: RunListItem[]): Fi
       forYou.push({ ...base, kind: 'failed', subtitle: chat.status === 'failed' ? 'Failed' : 'Interrupted' })
     else if (chat.paused)
       recent.push({ ...base, kind: 'paused', subtitle: 'Paused' })
+    else if (isExclusivelySuspended(chat))
+      live.push({ ...base, kind: 'suspended', subtitle: exclusiveSuspensionLabel })
     else if (chat.status === 'running')
       live.push({ ...base, kind: 'running', subtitle: 'Working' })
     else if (chat.status === 'queued')
@@ -98,7 +101,9 @@ export function filOf(chats: ChatView[], tasks: Task[], runs: RunListItem[]): Fi
       taskId: task.id,
       runId: run.id,
     }
-    if (run.status === 'running' || run.status === 'queued')
+    if (isExclusivelySuspended(run))
+      live.push({ ...base, kind: 'suspended', subtitle: exclusiveSuspensionLabel })
+    else if (run.status === 'running' || run.status === 'queued')
       live.push({ ...base, kind: run.status === 'running' ? 'running' : 'queued', subtitle: run.status === 'running' ? 'Mission running' : 'Mission waiting for a runner' })
     else if (run.status === 'failed' || run.status === 'interrupted')
       forYou.push({ ...base, kind: 'failed-mission', subtitle: run.error?.split('\n')[0] || (run.status === 'failed' ? 'Mission failed' : 'Mission interrupted') })
