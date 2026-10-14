@@ -167,6 +167,15 @@ internal class SkillWorkbenchModel : ViewModel() {
         }
     }
 
+    fun delete(vm: CairnViewModel, deleted: () -> Unit) {
+        val opened = target ?: return
+        val session = editorSession
+        vm.perform {
+            delete(skillRoute(opened.scope, opened.name))
+            if (editorSession == session) deleted()
+        }
+    }
+
     fun save(vm: CairnViewModel, saved: (SkillTarget) -> Unit) {
         val current = draft ?: return
         val opened = target ?: return

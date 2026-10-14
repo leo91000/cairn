@@ -147,6 +147,9 @@ abstract class SkillWorkbenchCases {
         val batches = CopyOnWriteArrayList<Pair<String, JsonObject>>()
         var saveGate: java.util.concurrent.CountDownLatch? = null
         @Volatile var saveReturned = false
+        var deleteGate: java.util.concurrent.CountDownLatch? = null
+        @Volatile var deleteStarted = false
+        @Volatile var deleteReturned = false
         val referenceReads = java.util.concurrent.atomic.AtomicInteger()
         var oldReferenceGate: java.util.concurrent.CountDownLatch? = null
         var newReferenceGate: java.util.concurrent.CountDownLatch? = null
@@ -174,6 +177,12 @@ abstract class SkillWorkbenchCases {
                             """{"authenticated":true,"csrf":"fixture","account":{"id":"a","email":"owner@example.test"},"installations":[{"id":"fixture","name":"Installation de test","role":"$role","online":true}]}"""
                         )
                     path == "$api/skills" -> json(wireJson.encodeToString(skills))
+                    path == "$api/skills/global/review" && request.method == "DELETE" -> {
+                        fixture.deleteStarted = true
+                        fixture.deleteGate?.await(60, java.util.concurrent.TimeUnit.SECONDS)
+                        fixture.deleteReturned = true
+                        json("""{"deleted":true}""")
+                    }
                     path == "$api/projects" ->
                         json(wireJson.encodeToString(listOf(Project("project", "Cairn"))))
                     path == "$api/skills/global/review/bundle" && request.method == "GET" -> {
@@ -411,6 +420,40 @@ abstract class SkillWorkbenchCases {
             .onNodeWithContentDescription("Actions pour ${path.substringAfterLast('/')}")
             .performClick()
         shown(hasTestTag("skill-file-actions"))
+    }
+
+    @Test
+    fun delayedDeletionDoesNotCloseTheNextSkillDraft() {
+        val gate = java.util.concurrent.CountDownLatch(1)
+        val fixture = Fixture().apply { deleteGate = gate }
+        launch(fixture).use {
+            try {
+                compose.onNodeWithTag("skill-card-global-review").performClick()
+                shown(hasTestTag("skill-workbench"))
+                compose.onNodeWithContentDescription("Plus d’actions").performClick()
+                compose.onNodeWithText("Supprimer le skill").performClick()
+                compose.onNodeWithText("Confirmer").performClick()
+                compose.waitUntil(15000) { fixture.deleteStarted }
+                compose.onNodeWithContentDescription("Retour").performClick()
+                shown(hasTestTag("skill-card-global-pdf-tools"))
+                compose.onNodeWithTag("skill-card-global-pdf-tools").performClick()
+                openFile("SKILL.md")
+                shown(hasText("# PDF", substring = true))
+                val edited =
+                    "---\nname: pdf-tools\ndescription: Draft B\n---\nB survives deletion\n"
+                compose.onNodeWithTag("skill-code-editor").performTextReplacement(edited)
+                gate.countDown()
+                compose.waitUntil(15000) { fixture.deleteReturned }
+                compose.waitForIdle()
+                Thread.sleep(500)
+                compose.waitForIdle()
+                compose
+                    .onNodeWithTag("skill-code-editor")
+                    .assertTextContains("B survives deletion", substring = true)
+            } finally {
+                gate.countDown()
+            }
+        }
     }
 
     @Test

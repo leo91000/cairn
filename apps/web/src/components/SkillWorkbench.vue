@@ -98,7 +98,7 @@ const fileLoading = ref('')
 const saving = ref('')
 const sourceWorking = ref(false)
 const addingFiles = ref(0)
-const editingLocked = computed(() => readonly.value || !!saving.value || sourceWorking.value)
+const editingLocked = computed(() => readonly.value || !!saving.value || sourceWorking.value || !!addingFiles.value)
 const downloading = ref(false)
 const error = ref('')
 const conflict = ref(false)
@@ -666,6 +666,8 @@ function discard() {
 }
 
 async function reload() {
+  if (editingLocked.value)
+    return
   conflict.value = false
   await load()
   notice.value = 'Reloaded the latest version.'
@@ -947,7 +949,7 @@ onMounted(async () => {
               :revision="bundle.revision"
               :source="bundle.source"
               :unsaved="changes"
-              :readonly="readonly || !!saving"
+              :readonly="readonly || !!saving || !!addingFiles"
               @working="sourceWorking = $event"
               @replaced="replaced"
               @detached="detached"
@@ -1095,7 +1097,7 @@ onMounted(async () => {
       <div v-if="conflict" class="flex items-center gap-3 border-t border-line bg-warning-surface px-5 py-3 text-xs text-warning phone:flex-wrap phone:px-3.5" role="alert">
         <Icon :name="TriangleAlert" :size="17" class="shrink-0" />
         <span class="min-w-0 flex-1 leading-relaxed"><strong class="font-semibold">This skill changed since you opened it.</strong> Reload to get the latest version; your unsaved edits here will be discarded.</span>
-        <UiButton size="small" @click="reload">
+        <UiButton size="small" :disabled="editingLocked" @click="reload">
           <Icon :name="RefreshCw" :size="14" />Reload
         </UiButton>
       </div>
@@ -1118,7 +1120,12 @@ onMounted(async () => {
           </template>
           <template v-else-if="changes">
             <span class="size-2 rounded-full bg-warning" /><span class="font-medium text-ink">{{ plural(changes, 'unsaved change') }}</span>
-            <button type="button" class="text-xs font-medium text-accent hover:underline" @click="discard">
+            <button
+              type="button"
+              class="text-xs font-medium text-accent hover:underline"
+              :disabled="editingLocked"
+              @click="discard"
+            >
               Discard
             </button>
           </template>

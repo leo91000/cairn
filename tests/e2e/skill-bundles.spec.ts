@@ -459,6 +459,66 @@ test('an archive cannot be replaced while its upload is pending', async ({ page 
   await expect(page.getByRole('dialog', { name: 'Edit skill' }).getByRole('heading', { name: 'archive-a', exact: true })).toBeVisible()
 })
 
+test('pending replacement reads lock draft resets and source mutations', async ({ page, workspace }) => {
+  await useRelayForHttpMocks(page)
+  await workspace.api('/api/skills/global/upload-race/bundle', 'POST', { base: null, changes: [{ op: 'write', path: 'SKILL.md', content: manifest('upload-race', 'Original') }] })
+  await page.route(/\/skills\/global\/upload-race\/bundle$/, async (route) => {
+    const bundle = await workspace.api('/api/skills/global/upload-race/bundle')
+    await route.fulfill({
+      json: {
+        ...bundle,
+        source: {
+          type: 'github',
+          repository: 'acme/skills',
+          path: 'review',
+          ref: 'main',
+          commit: 'a'.repeat(40),
+          importedAt: 1,
+          modified: false,
+        },
+      },
+    })
+  })
+  await page.goto(workspacePath('/skills'))
+  await authenticateWorkspace(page)
+  await page.getByRole('button', { name: 'Edit upload-race', exact: true }).click()
+  await page.getByLabel('Skill content').fill(manifest('upload-race', 'Unsaved'))
+  await page.evaluate(() => {
+    const state = window as unknown as { skillReadStarted: boolean, releaseSkillRead: () => void }
+    let release!: () => void
+    const pending = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    state.skillReadStarted = false
+    state.releaseSkillRead = release
+    const read = File.prototype.arrayBuffer
+    File.prototype.arrayBuffer = async function () {
+      if (this.name === 'SKILL.md') {
+        state.skillReadStarted = true
+        await pending
+      }
+
+      return read.call(this)
+    }
+  })
+  const replacement = manifest('upload-race', 'Replacement survives')
+  await page.getByLabel('Upload skill files').setInputFiles({ name: 'SKILL.md', mimeType: 'text/markdown', buffer: Buffer.from(replacement) })
+  try {
+    await expect.poll(() => page.evaluate(() => (window as unknown as { skillReadStarted: boolean }).skillReadStarted)).toBe(true)
+    await expect(page.getByRole('button', { name: 'Discard', exact: true })).toBeDisabled()
+    await showTree(page)
+    await page.getByRole('button', { name: 'Open GitHub source', exact: true }).click()
+    await expect(page.getByRole('button', { name: 'Check for updates', exact: true })).toHaveCount(0)
+  }
+  finally {
+    await page.evaluate(() => (window as unknown as { releaseSkillRead: () => void }).releaseSkillRead())
+  }
+
+  await openFile(page, 'SKILL.md')
+  await expect(page.getByLabel('Skill content')).toHaveValue(replacement)
+  await expect(page.getByRole('button', { name: 'Save skill', exact: true })).toBeEnabled()
+})
+
 test('detaching a GitHub source preserves unsaved files', async ({ page, workspace }) => {
   let releaseDetach!: () => void
   const detachGate = new Promise<void>((resolve) => {

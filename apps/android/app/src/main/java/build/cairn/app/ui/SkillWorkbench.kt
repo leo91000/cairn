@@ -523,10 +523,7 @@ internal fun SkillWorkbench(
             { deletingSkill = false },
         ) {
             deletingSkill = false
-            vm.perform {
-                delete(skillRoute(target.scope, target.name))
-                close()
-            }
+            model.delete(vm, close)
         }
 }
 
