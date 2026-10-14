@@ -915,19 +915,25 @@ internal fun ChatPage(
                         Modifier.weight(1f).fillMaxWidth().padding(24.dp),
                         verticalArrangement = Arrangement.Center,
                     ) {
+                        val recoverable =
+                            chat.lifecycle == "trash" &&
+                                (chat.purgeAt ?: 0L) > System.currentTimeMillis()
                         Text(
                             when (chat.lifecycle) {
-                                "trash" -> "Cette conversation est dans la corbeille."
+                                "trash" ->
+                                    if (recoverable) "Cette conversation est dans la corbeille."
+                                    else "Effacement en cours…"
                                 "purging" -> "Effacement en cours…"
                                 else -> "Cette conversation est indisponible."
                             },
                             style = MaterialTheme.typography.titleLarge,
                         )
-                        chat.purgeAt?.let { Text("Effacement prévu : ${date(it)}") }
+                        if (recoverable)
+                            chat.purgeAt?.let { Text("Effacement prévu : ${date(it)}") }
                         chat.lifecycleError?.let {
                             Text(it, color = MaterialTheme.colorScheme.error)
                         }
-                        if (chat.lifecycle == "trash")
+                        if (recoverable)
                             Button(
                                 onClick = {
                                     vm.perform {
