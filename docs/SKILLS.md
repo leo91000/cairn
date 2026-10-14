@@ -196,3 +196,11 @@ inside the VM.
 
 The prompt lists each selected skill by name, description and `SKILL.md` path.
 The agent reads `SKILL.md` and its supporting files when it uses the skill.
+
+## Screens
+
+| Web | Android |
+| --- | --- |
+| ![Skills library](screenshots/skills/web-library.png) | ![Workbench](screenshots/skills/android-workbench.png) |
+| ![Workbench](screenshots/skills/web-workbench.png) | ![Source update](screenshots/skills/android-source-update.png) |
+| ![Source update](screenshots/skills/web-source-update.png) | |
