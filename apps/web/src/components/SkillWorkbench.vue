@@ -690,6 +690,7 @@ function keydown(event: KeyboardEvent) {
 }
 
 function replaced(result: SkillBundle) {
+  sourceWorking.value = false
   applyBundle(result)
   pane.value = 'file'
   notify('Skill updated from GitHub')
@@ -697,6 +698,7 @@ function replaced(result: SkillBundle) {
 }
 
 async function detached() {
+  sourceWorking.value = false
   pane.value = 'file'
   notify('Source detached')
   if (bundle.value)
