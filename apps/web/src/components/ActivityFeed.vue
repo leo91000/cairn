@@ -363,7 +363,7 @@ defineExpose({
                 </article>
                 <article v-else-if="entry.kind === 'message'" class="activity-message chat-message my-3 py-2" :class="visibleOutcome && entry.id === outcomeEntryId ? 'mb-1!' : ''">
                   <p class="mb-1.5! flex justify-between gap-3 text-2xs text-muted">
-                    <span class="truncate">{{ agent }}</span>
+                    <span class="truncate">{{ agent }}<template v-if="entry.via"> · via {{ entry.via }}</template></span>
                     <time :datetime="new Date(entry.time).toISOString()" :title="new Date(entry.time).toLocaleString()">{{ new Date(entry.time).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) }}</time>
                   </p>
                   <ActivityContent :content="entry.text" />

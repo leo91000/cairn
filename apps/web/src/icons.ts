@@ -86,6 +86,7 @@ export const RotateCcw = 'i-lucide-rotate-ccw' as const
 export const Github = 'i-simple-icons-github' as const
 export const BrandOpenAI = 'i-simple-icons-openai' as const
 export const BrandClaude = 'i-simple-icons-claude' as const
+export const BrandOpenCode = 'i-simple-icons-opencode' as const
 export const BrandMcp = 'i-simple-icons-modelcontextprotocol' as const
 export const Robot = 'i-tabler-robot' as const
 

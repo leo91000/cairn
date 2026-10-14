@@ -454,6 +454,8 @@ internal data class TimelineEntry(
     val message: Boolean,
     val files: List<Deliverable> = emptyList(),
     val notice: Boolean = false,
+    /** The model provider that wrote this reply, when the engine chose among several. */
+    val via: String = "",
 )
 
 /** Fold updates in place within a turn; keep messages and errors in chronological order. */
@@ -513,10 +515,30 @@ internal fun timelineEntries(events: List<RunEvent>, chat: Boolean = false): Lis
         if (chat)
             recoveredChatConnections(events, folded.filter { it.isMessage() }.map { it.id }.toSet())
         else emptySet()
+    var via = ""
     for (event in folded) {
+        val route = event.activityData()?.get("route") as? JsonObject
+        // An attempt may name the provider of its replies; the next attempt ends that label.
+        val data = event.activityData()
+        if (
+            event.type == "status" &&
+                (data?.get("attempt") as? JsonPrimitive)?.booleanOrNull == true
+        )
+            via = ""
+        if (event.type == "status" && route.string("providerName").isNotBlank()) {
+            via = route.string("providerName")
+            if (chat) continue
+        }
         if (event.isMessage()) {
             flushActivity()
-            result.add(TimelineEntry("message:${event.displayId ?: event.id}", listOf(event), true))
+            result.add(
+                TimelineEntry(
+                    "message:${event.displayId ?: event.id}",
+                    listOf(event),
+                    true,
+                    via = if (event.type == "chat.user") "" else via,
+                )
+            )
         } else {
             val presentation = if (chat) presentActivity(event) else null
             if (presentation?.kind == ActivityKind.NOTICE) {
@@ -600,7 +622,11 @@ internal fun TimelineRow(
     if (entry.files.isNotEmpty()) ArtifactStrip(vm, entry.files)
     else if (entry.message)
         CompositionLocalProvider(LocalMarkdownRendering provides rendering) {
-            EventRow(vm, entry.events.single(), agent)
+            EventRow(
+                vm,
+                entry.events.single(),
+                if (entry.via.isBlank()) agent else "$agent · via ${entry.via}",
+            )
         }
     else if (entry.notice) ChatNotice(presentActivity(entry.events.single()))
     else {

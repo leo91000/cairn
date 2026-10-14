@@ -210,8 +210,14 @@ impl Execution<'_> {
             let message = format!("Using {} account: {name}", self.provider.label());
             s.store.event(&self.id, "status", &message, None).await?;
         }
+        // Marks where an attempt begins, for labels that last one attempt.
         s.store
-            .event(&self.id, "status", "Preparing workspace", None)
+            .event(
+                &self.id,
+                "status",
+                "Preparing workspace",
+                Some(json!({ "attempt": true })),
+            )
             .await?;
         private_dir(&self.directory).await
     }

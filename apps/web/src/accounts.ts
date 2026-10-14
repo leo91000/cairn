@@ -9,7 +9,7 @@ import type {
 import type { IconName } from './icons'
 import { onBeforeUnmount, onMounted, ref } from 'vue'
 import { api, notify } from './api'
-import { BrandClaude, BrandOpenAI } from './icons'
+import { BrandClaude, BrandOpenAI, BrandOpenCode } from './icons'
 
 /** Each coding agent's brand mark and colors. */
 export const brands: Record<Provider, {
@@ -29,6 +29,12 @@ export const brands: Record<Provider, {
     text: 'text-claude',
     tile: 'bg-claude text-white',
     chosen: 'border-claude bg-claude/8 shadow-[0_0_0_1px_var(--color-claude)]',
+  },
+  opencode: {
+    icon: BrandOpenCode,
+    text: 'text-ink',
+    tile: 'bg-ink text-canvas',
+    chosen: 'border-accent bg-accent/8 shadow-[0_0_0_1px_var(--color-accent)]',
   },
 }
 
@@ -160,10 +166,17 @@ export function useAccounts() {
     error,
     refresh: () => action(async () => apply(await api<Accounts>('/accounts/refresh', json('POST')))),
     add: (provider: Provider, name: string) => action(() => api<SignIn>('/accounts', json('POST', { provider, name }))),
+    connectKey: (provider: Provider, name: string, modelProvider: string, apiKey: string, id?: string) => action(() => api<Account>(id ? `/accounts/${id}/api-key` : '/accounts', json('POST', {
+      provider,
+      name,
+      modelProvider,
+      apiKey,
+    }))),
     reconnect: (id: string) => action(() => api<SignIn>(`/accounts/${id}/sign-in`, json('POST'))),
     submitCode: (code: string) => action(() => api('/accounts/sign-in/code', json('POST', { code }))),
     cancel: () => action(() => api('/accounts/sign-in', json('DELETE'))),
     update: (id: string, patch: Partial<Pick<Account, 'name' | 'enabled' | 'maxConcurrentRuns'>>) => action(() => api<Account>(`/accounts/${id}`, json('PATCH', patch))),
+    reorder: (provider: Provider, ids: string[]) => action(async () => apply(await api<Accounts>('/accounts/order', json('POST', { provider, ids })))),
     remove: (id: string) => action(() => api(`/accounts/${id}`, json('DELETE'))),
   }
 }

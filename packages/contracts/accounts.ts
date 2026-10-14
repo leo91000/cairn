@@ -1,5 +1,7 @@
 // Coding-agent accounts, as served by /api/accounts.
-export type Provider = 'codex' | 'claude'
+export type Provider = 'codex' | 'claude' | 'opencode'
+
+export interface ApiKeyProvider { id: string, name: string }
 
 /** What the account needs or does, computed by the server's selection rules. */
 export type AccountStatus = 'signIn' | 'reconnect' | 'paused' | 'unavailable' | 'waiting' | 'full' | 'next' | 'low' | 'ready'
@@ -29,6 +31,10 @@ export interface Account {
   enabled: boolean
   email: string | null
   plan: string | null
+  modelProvider?: string
+  modelProviderName?: string
+  /** The user's order among accounts of a coding agent that orders them. */
+  priority?: number
   state: 'pending' | 'ready' | 'error'
   status: AccountStatus
   error: string
@@ -64,9 +70,39 @@ export interface Accounts {
   required: Provider[]
 }
 
-export const providers: Record<Provider, { label: string, vendor: string, subscription: string }> = {
-  codex: { label: 'Codex', vendor: 'OpenAI', subscription: 'ChatGPT account' },
-  claude: { label: 'Claude Code', vendor: 'Anthropic', subscription: 'Claude account' },
+export const providers: Record<Provider, {
+  label: string
+  vendor: string
+  subscription: string
+  connection: 'oauth' | 'apiKey'
+  requiresModel: boolean
+  /** Runs try accounts in the user's order instead of by remaining capacity. */
+  ordered: boolean
+}> = {
+  codex: {
+    label: 'Codex',
+    vendor: 'OpenAI',
+    subscription: 'ChatGPT account',
+    connection: 'oauth',
+    requiresModel: false,
+    ordered: false,
+  },
+  claude: {
+    label: 'Claude Code',
+    vendor: 'Anthropic',
+    subscription: 'Claude account',
+    connection: 'oauth',
+    requiresModel: false,
+    ordered: false,
+  },
+  opencode: {
+    label: 'OpenCode',
+    vendor: 'Model providers',
+    subscription: 'Provider API key',
+    connection: 'apiKey',
+    requiresModel: true,
+    ordered: true,
+  },
 }
 
 /** Remaining percentage under which a window is running low. */

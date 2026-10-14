@@ -313,8 +313,9 @@ internal fun presentActivity(event: RunEvent): ActivityPresentation {
                 subtitle = item.string("server"),
             )
         else -> {
+            // Statuses keep their text as the title; a payload only adds metadata.
             val plain =
-                if (data == null) event.text
+                if (data == null || event.type == "status") event.text
                 else
                     data.string("message").ifBlank {
                         data?.get("error").asObject().string("message")
@@ -396,8 +397,8 @@ internal fun presentActivity(event: RunEvent): ActivityPresentation {
                                 "turn.completed",
                             )
                     ) {
-                        if (data != null) plain
-                        else if (event.type == "status") ""
+                        if (event.type == "status") ""
+                        else if (data != null) plain
                         else plain.takeUnless { it.startsWith('{') }.orEmpty()
                     } else plain.ifBlank { if (data == null) event.text else "" },
             )

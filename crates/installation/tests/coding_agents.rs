@@ -81,6 +81,23 @@ fn adapters_preserve_native_mcp_permissions_and_thread_credentials() {
                     "synthetic-tool-secret"
                 );
             }
+            Provider::Opencode => {
+                let native = &chat["opencodeConfig"];
+                assert_eq!(native["mcp"]["cairn_workspace"]["type"], "remote");
+                assert_eq!(
+                    native["mcp"]["cairn_workspace"]["headers"]["Authorization"],
+                    "Bearer synthetic-run-token"
+                );
+                assert_eq!(native["mcp"]["cairn_workspace"]["timeout"], 3_660_000);
+                assert_eq!(native["mcp"]["cairn_workspace"]["oauth"], false);
+                assert_eq!(
+                    native["mcp"]["cairn_selected"]["command"],
+                    json!(["fixture-tool", "--fixture"])
+                );
+                assert_eq!(native["permission"]["cairn_selected_*"], "deny");
+                assert_eq!(native["permission"]["cairn_selected_read"], "allow");
+                assert!(native["permission"].get("cairn_selected_write").is_none());
+            }
         }
     }
 }
@@ -89,7 +106,7 @@ fn adapters_preserve_native_mcp_permissions_and_thread_credentials() {
 fn malformed_engine_selection_cannot_produce_a_launch_plan() {
     let root = TempDir::new().unwrap();
     let prepared = json!({ "output": root.path().join("output/result.md") });
-    for value in [json!("opencode"), json!(""), json!(null), json!(42)] {
+    for value in [json!("unsupported"), json!(""), json!(null), json!(42)] {
         let run = json!({ "snapshot": { "agent": { "provider": value } } });
         assert!(run_output::chat_plan(&run, &prepared, root.path(), &json!({}), None).is_err());
     }
@@ -138,6 +155,73 @@ fn engine_configuration_and_validation_do_not_depend_on_the_other_engine() {
                     root.path().join("home/.codex").to_string_lossy()
                 );
             }
+            Provider::Opencode => {
+                assert_eq!(environment["CAIRN_OPENCODE_HOME"], home.to_string_lossy());
+                assert!(!environment.contains_key("XDG_DATA_HOME"));
+                assert_eq!(environment["OPENCODE_AUTH_CONTENT"], "{}");
+                assert!(adapter.uses_chat(false, false));
+                assert!(adapter.validate_agent(&json!({ "provider": "opencode", "model": "openrouter/anthropic/claude-sonnet", "access": { "sandbox": "read-only" } })).is_err());
+                assert!(adapter.validate_agent(&json!({ "provider": "opencode", "model": "openrouter/anthropic/claude-sonnet" })).is_ok());
+            }
         }
     }
+}
+
+#[test]
+fn opencode_normalizes_mcp_permissions_and_rejects_ambiguous_tool_names() {
+    let mut configuration = Configuration::new("synthetic-token".into());
+    configuration.servers.insert(
+        "docs.v1".into(),
+        Server::Stdio {
+            command: "fixture-tool".into(),
+            args: Vec::new(),
+            env: BTreeMap::new(),
+            enabled_tools: Some(vec!["read.file".into()]),
+            tools: vec!["read.file".into(), "write.file".into()],
+        },
+    );
+    let native = Provider::Opencode
+        .adapter()
+        .mcp_configuration(&configuration)
+        .unwrap();
+    assert_eq!(native["opencodeConfig"]["permission"]["docs_v1_*"], "deny");
+    assert_eq!(
+        native["opencodeConfig"]["permission"]["docs_v1_read_file"],
+        "allow"
+    );
+    assert!(
+        native["opencodeConfig"]["permission"]
+            .get("docs_v1_write_file")
+            .is_none()
+    );
+    if let Server::Stdio { tools, .. } = configuration.servers.get_mut("docs.v1").unwrap() {
+        tools.push("read_file".into());
+    }
+    assert!(
+        Provider::Opencode
+            .adapter()
+            .mcp_configuration(&configuration)
+            .is_err()
+    );
+}
+
+#[test]
+fn opencode_rejects_utf16_normalization_collisions_with_excluded_mcp_tools() {
+    let mut configuration = Configuration::new("synthetic-token".into());
+    configuration.servers.insert(
+        "docs".into(),
+        Server::Stdio {
+            command: "fixture-tool".into(),
+            args: Vec::new(),
+            env: BTreeMap::new(),
+            enabled_tools: Some(vec!["read__".into()]),
+            tools: vec!["read__".into(), "read😀".into()],
+        },
+    );
+    assert!(
+        Provider::Opencode
+            .adapter()
+            .mcp_configuration(&configuration)
+            .is_err()
+    );
 }

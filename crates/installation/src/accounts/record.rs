@@ -121,6 +121,17 @@ impl Account {
             .map_or(fallback, |e| e.model.as_str())
     }
 
+    /// The user's position for this account, earlier first; unordered accounts follow by age.
+    pub fn priority(&self) -> (u64, i64) {
+        (
+            self.extra
+                .get("priority")
+                .and_then(Value::as_u64)
+                .unwrap_or(u64::MAX),
+            self.created_at.unwrap_or(0),
+        )
+    }
+
     /// Records a successful reading of the account's identity just now.
     pub fn mark_ready(&mut self) {
         self.state = AccountState::Ready;

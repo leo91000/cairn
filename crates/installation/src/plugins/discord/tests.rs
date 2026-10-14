@@ -16,6 +16,7 @@ pub(super) async fn fixture() -> (TempDir, Arc<Service>, Connection) {
         port: 0,
         codex_bin: "codex".into(),
         claude_bin: "claude".into(),
+        opencode_bin: "opencode".into(),
         gh_bin: "gh".into(),
         concurrency: 1,
         logger: false,

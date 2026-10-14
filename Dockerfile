@@ -128,6 +128,7 @@ RUN npm exec --yes --package="playwright@${PLAYWRIGHT_VERSION}" -- playwright in
 ARG GH_VERSION
 ARG CODEX_VERSION
 ARG CLAUDE_VERSION=2.1.280
+ARG OPENCODE_VERSION=1.19.0
 ARG TARGETARCH
 RUN test -n "$CODEX_VERSION" && test -n "$GH_VERSION"
 ENV NODE_ENV=production HOST=0.0.0.0 PORT=4310 DATA_DIR=/data AGENT_HOME=/home/node WORKSPACE_ROOTS=/workspaces
@@ -147,6 +148,8 @@ RUN arch="${TARGETARCH:-amd64}" \
 # Claude's pinned postinstall places the native executable; pnpm otherwise skips it.
 RUN pnpm add --global --allow-build @anthropic-ai/claude-code "@openai/codex@${CODEX_VERSION}" "@anthropic-ai/claude-code@${CLAUDE_VERSION}" \
     && claude --version
+RUN pnpm add --global --allow-build opencode-ai "opencode-ai@${OPENCODE_VERSION}" \
+    && opencode --version
 COPY deploy/codex-state/prepare.mjs /opt/cairn-codex-state-builder.mjs
 RUN --network=none node /opt/cairn-codex-state-builder.mjs /opt/cairn-codex-state
 COPY deploy/toolkit /opt/cairn-toolkit

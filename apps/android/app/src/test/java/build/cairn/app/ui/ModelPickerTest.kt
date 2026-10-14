@@ -124,4 +124,66 @@ class ModelPickerTest : ModelPickerCases() {
         compose.onNodeWithText("Terminé").performClick()
         capture("assistant-pill-dark", "picker-preview")
     }
+
+    @Test
+    fun oneModelOfferedByTwoConnectionsRunsAutoOrOnAPinnedOne() {
+        val shared = listOf("medium", "high").map { ReasoningOption(it) }
+        val catalog =
+            ModelCatalog(
+                listOf(
+                    CodingAgentModel(
+                        "auto/claude-sonnet-4-5",
+                        routes =
+                            listOf(
+                                ModelRoute(
+                                    "opencode-go/claude-sonnet-4.5",
+                                    "opencode-go",
+                                    "OpenCode Go",
+                                    "subscription",
+                                    supportedReasoningEfforts = shared,
+                                ),
+                                ModelRoute(
+                                    "opencode/claude-sonnet-4-5",
+                                    "opencode",
+                                    "OpenCode Zen",
+                                    "credits",
+                                    supportedReasoningEfforts = shared + ReasoningOption("max"),
+                                ),
+                            ),
+                        displayName = "Claude Sonnet 4.5",
+                        description = "Via OpenCode Go, then OpenCode Zen",
+                        isDefault = true,
+                        supportedReasoningEfforts = shared,
+                    )
+                )
+            )
+        var chosen = "auto/claude-sonnet-4-5" to "high"
+        compose.setContent {
+            var model by remember { mutableStateOf(chosen.first) }
+            var reasoning by remember { mutableStateOf(chosen.second) }
+            CairnTheme("light") {
+                Surface(Modifier.fillMaxSize()) {
+                    ModelPicker(catalog, model, reasoning, provider = "opencode") { m, r ->
+                        model = m
+                        reasoning = r
+                        chosen = m to r
+                    }
+                }
+            }
+        }
+        compose.onNodeWithTag("model-picker").performClick()
+        compose
+            .onNodeWithText("Essaie OpenCode Go, puis OpenCode Zen", substring = true)
+            .assertExists()
+        capture("opencode-routes-auto")
+        compose.onNodeWithText("OpenCode Zen · Crédits").performClick()
+        compose.waitForIdle()
+        // Pinning keeps the model and a reasoning level both routes offer.
+        assert(chosen == ("opencode/claude-sonnet-4-5" to "high")) { chosen.toString() }
+        compose.onNodeWithText("Uniquement sur OpenCode Zen", substring = true).assertExists()
+        capture("opencode-routes-pinned")
+        compose.onNodeWithText("Auto").performClick()
+        compose.waitForIdle()
+        assert(chosen.first == "auto/claude-sonnet-4-5") { chosen.toString() }
+    }
 }

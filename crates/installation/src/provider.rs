@@ -1,4 +1,4 @@
-//! The coding agent (Codex or Claude Code) that executes an agent's work.
+//! The coding agent that executes an agent's work.
 use crate::error::{Error, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -8,10 +8,11 @@ use serde_json::Value;
 pub enum Provider {
     Codex,
     Claude,
+    Opencode,
 }
 
 impl Provider {
-    pub const ALL: [Provider; 2] = [Provider::Codex, Provider::Claude];
+    pub const ALL: [Provider; 3] = [Provider::Codex, Provider::Claude, Provider::Opencode];
 
     /// Agents saved before Claude Code support have no provider and run on Codex.
     pub fn of_agent(agent: &Value) -> Result<Self> {
@@ -34,6 +35,7 @@ impl Provider {
         match value {
             "codex" => Ok(Self::Codex),
             "claude" => Ok(Self::Claude),
+            "opencode" => Ok(Self::Opencode),
             _ => Err(Error::bad("Choose a supported coding agent.")),
         }
     }
@@ -42,6 +44,7 @@ impl Provider {
         match self {
             Self::Codex => "codex",
             Self::Claude => "claude",
+            Self::Opencode => "opencode",
         }
     }
 
@@ -49,6 +52,7 @@ impl Provider {
         match self {
             Self::Codex => "Codex",
             Self::Claude => "Claude Code",
+            Self::Opencode => "OpenCode",
         }
     }
 }
@@ -75,7 +79,7 @@ mod tests {
 
     #[test]
     fn explicit_unknown_or_malformed_providers_never_fall_back_to_codex() {
-        for value in [json!("opencode"), json!(""), json!(null), json!(42)] {
+        for value in [json!("unsupported"), json!(""), json!(null), json!(42)] {
             assert!(Provider::of_agent(&json!({ "provider": value })).is_err());
             assert!(Provider::of_account(&json!({ "provider": value })).is_err());
             assert!(

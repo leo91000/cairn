@@ -57,10 +57,10 @@ where
 /// "claude", or Codex for anything else.
 pub fn provider<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Provider, D::Error> {
     let value = Value::deserialize(deserializer)?;
-    Ok(if value == "claude" {
-        Provider::Claude
-    } else {
-        Provider::Codex
+    Ok(match value.as_str() {
+        Some("claude") => Provider::Claude,
+        Some("opencode") => Provider::Opencode,
+        _ => Provider::Codex,
     })
 }
 

@@ -438,21 +438,37 @@ fn needs_attention(chat: &Value, run: Option<&Value>) -> bool {
 
 /// Applies the provider, model and reasoning chosen for this message.
 fn select_agent(snapshot: &mut Value, run: Option<&Value>, message: &Value) -> Result<()> {
-    let provider = if text(message, "provider").is_empty() {
-        let previous = run.map_or(
-            &snapshot["snapshot"]["agent"],
-            |run| &run["snapshot"]["agent"],
-        );
+    let previous = run.map_or(
+        &snapshot["snapshot"]["agent"],
+        |run| &run["snapshot"]["agent"],
+    );
+    let implicit_provider = text(message, "provider").is_empty();
+    let provider = if implicit_provider {
         Provider::of_agent(previous)?.as_str()
     } else {
         text(message, "provider")
     }
     .to_owned();
+    let inherited_model = text(previous, "model").to_owned();
+    let inherited_reasoning = text(previous, "reasoning").to_owned();
+
     let switched = provider != Provider::of_run(snapshot)?.as_str();
     let agent = &mut snapshot["snapshot"]["agent"];
     if switched {
-        agent["model"] = "".into();
-        agent["reasoning"] = "".into();
+        // An implicit follow-up keeps the previous engine's qualified selection,
+        // even when the saved agent template still names a different engine.
+        agent["model"] = if implicit_provider {
+            inherited_model
+        } else {
+            String::new()
+        }
+        .into();
+        agent["reasoning"] = if implicit_provider {
+            inherited_reasoning
+        } else {
+            String::new()
+        }
+        .into();
     }
     agent["provider"] = provider.into();
     if !text(message, "model").is_empty() {
@@ -822,6 +838,38 @@ impl Service {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn implicit_follow_up_inherits_the_previous_engine_model_and_reasoning() {
+        let template = json!({
+            "snapshot": {
+                "agent": { "provider": "codex", "model": "gpt-6-sol", "reasoning": "high" },
+            },
+        });
+        let previous = json!({
+            "snapshot": {
+                "agent": { "provider": "opencode", "model": "opencode/ling-3.1-flash-free", "reasoning": "medium" },
+            },
+        });
+        let mut snapshot = template.clone();
+        select_agent(
+            &mut snapshot,
+            Some(&previous),
+            &json!({ "text": "Continue" }),
+        )
+        .unwrap();
+        assert_eq!(snapshot["snapshot"]["agent"], previous["snapshot"]["agent"]);
+
+        let mut explicit = template;
+        select_agent(
+            &mut explicit,
+            Some(&previous),
+            &json!({ "provider": "opencode" }),
+        )
+        .unwrap();
+        assert_eq!(explicit["snapshot"]["agent"]["model"], "");
+        assert_eq!(explicit["snapshot"]["agent"]["reasoning"], "");
+    }
 
     #[test]
     fn provider_changes_must_wait_for_the_next_turn_and_model_aliases_are_valid() {

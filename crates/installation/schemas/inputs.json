@@ -13,7 +13,8 @@
         "type": "string",
         "enum": [
           "codex",
-          "claude"
+          "claude",
+          "opencode"
         ]
       },
       "description": {
@@ -400,7 +401,8 @@
         "enum": [
           "",
           "codex",
-          "claude"
+          "claude",
+          "opencode"
         ]
       },
       "model": {

@@ -88,11 +88,11 @@ Une conversation supprimée par l’utilisateur, masquée pendant l’effacement
 Retour d’une conversation à l’état actif, sans relancer l’agent, les envois annulés ni les liens publics révoqués.
 
 **Agent de code** :
-Le moteur qui exécute le travail d’un agent : Codex (OpenAI) ou Claude Code (Anthropic). Chaque agent en choisit un, et une conversation peut en changer d’un message à l’autre.
+Le moteur qui exécute le travail d’un agent : Codex (OpenAI), Claude Code (Anthropic) ou OpenCode. Chaque agent en choisit un, et une conversation peut en changer d’un message à l’autre.
 _À éviter_ : fournisseur, driver, assistant de code.
 
 **Compte d’agent de code** :
-Un abonnement connecté à un agent de code (un compte ChatGPT pour Codex, un compte Claude pour Claude Code). Les exécutions consomment son usage. Un agent de code peut avoir plusieurs comptes ; un compte en pause n’est plus choisi pour les nouvelles exécutions.
+Un abonnement connecté à un agent de code (un compte ChatGPT pour Codex, un compte Claude pour Claude Code) ou une clé API liée à un fournisseur de modèles pour OpenCode (par exemple OpenCode Zen). Les exécutions consomment son usage. Un agent de code peut avoir plusieurs comptes ; un compte en pause n’est plus choisi pour les nouvelles exécutions.
 _À éviter_ : connexion Claude, compte Codex (sauf pour désigner un compte de cet agent de code).
 
 **Fenêtre d’usage** :

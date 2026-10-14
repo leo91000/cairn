@@ -36,6 +36,7 @@ pub mod nodes;
 pub mod notifications;
 pub mod object_storage;
 pub mod onepassword;
+pub mod opencode;
 pub mod outcome;
 pub mod performance;
 pub mod plugins;

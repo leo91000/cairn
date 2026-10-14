@@ -24,6 +24,7 @@ fn config(root: &TempDir) -> Config {
     Config {
         codex_bin: "/nonexistent-codex".into(),
         claude_bin: common::fixture("claude.mjs"),
+        opencode_bin: "opencode".into(),
         ..common::config(root.path())
     }
 }

@@ -25,6 +25,8 @@ export default defineConfig({
     { name: 'layout-webkit-agent-avatars', testMatch: 'agent-avatars.spec.ts', use: { browserName: 'webkit', hasTouch: true } },
     { name: 'journeys-github-projects', testMatch: 'github-projects.spec.ts' },
     { name: 'layout-webkit-github-projects', testMatch: 'github-projects.spec.ts', use: { browserName: 'webkit', isMobile: true, hasTouch: true } },
+    { name: 'journeys-opencode', testMatch: 'opencode.spec.ts' },
+    { name: 'layout-webkit-opencode', testMatch: 'opencode.spec.ts', use: { browserName: 'webkit', isMobile: true, hasTouch: true } },
     { name: 'journeys-claude', testMatch: 'claude.spec.ts' },
     { name: 'layout-webkit-claude', testMatch: 'claude.spec.ts', use: { browserName: 'webkit', isMobile: true, hasTouch: true } },
     { name: 'journeys-plugins', testMatch: 'plugins.spec.ts' },

@@ -12,7 +12,7 @@ export const chatMessageInput = z.object({
   text: z.string().trim().max(50000).default(''),
   attachmentIds: z.array(z.string().uuid()).max(8).default([]),
   mode: z.enum(['queue', 'steer']).default('queue'),
-  provider: z.enum(['', 'codex', 'claude']).default(''),
+  provider: z.enum(['', 'codex', 'claude', 'opencode']).default(''),
   // Rust's JSON Schema regex parser requires the opening bracket to be escaped.
   // eslint-disable-next-line regexp/no-useless-escape
   model: z.string().trim().max(120).regex(/^[\w./:\[\]-]*$/).default(''),
@@ -73,7 +73,7 @@ export interface ChatMessage {
   id: string
   chatId: string
   text: string
-  provider?: '' | 'codex' | 'claude'
+  provider?: '' | 'codex' | 'claude' | 'opencode'
   model: string
   reasoning?: string
   mode: 'queue' | 'steer'

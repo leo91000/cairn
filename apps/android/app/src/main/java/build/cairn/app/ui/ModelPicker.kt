@@ -43,6 +43,7 @@ import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.*
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.LayoutDirection
@@ -74,9 +75,16 @@ internal fun selectedModel(
     defaultModel: String,
 ): CodingAgentModel? {
     val name = model.ifBlank { defaultModel }
-    return if (name.isNotBlank()) catalog.models.find { it.model == name }
+    return if (name.isNotBlank()) catalog.models.find { it.matches(name) }
     else catalog.models.find { it.isDefault }
 }
+
+internal fun billingLabel(value: String) =
+    when (value) {
+        "subscription" -> "Inclus"
+        "credits" -> "Crédits"
+        else -> "Votre clé"
+    }
 
 internal val ClaudeTint = Color(0xFFD97757)
 private val ModelCardShape = RoundedCornerShape(18.dp)
@@ -104,11 +112,19 @@ private val OpenAiMark by lazy {
 internal fun ProviderMark(provider: String, size: Dp = 20.dp, tint: Color? = null) {
     val claude = provider == "claude"
     Icon(
-        if (claude) ClaudeMark else OpenAiMark,
+        when (provider) {
+            "claude" -> ClaudeMark
+            "opencode" -> OpenCodeMark
+            else -> OpenAiMark
+        },
         null,
         Modifier.size(size),
         tint = tint ?: if (claude) ClaudeTint else MaterialTheme.colorScheme.onSurface,
     )
+}
+
+private val OpenCodeMark by lazy {
+    brandMark("OpenCode", "M22 24H2V0h20zM17 4.8H7v14.4h10z")
 }
 
 /**
@@ -150,15 +166,36 @@ fun ModelPicker(
             refreshing = false
         }
     }
-    val selected = selectedModel(catalog, model, defaultModel)
+    val chosen = selectedModel(catalog, model, defaultModel)
+    // A pinned route offers its own reasoning levels; Auto offers those all routes share.
+    val route = chosen?.route(model.ifBlank { defaultModel })
+    val selected =
+        route?.let { chosen.copy(supportedReasoningEfforts = it.supportedReasoningEfforts) }
+            ?: chosen
+    LaunchedEffect(provider, catalog.models, model, defaultModel, inherit) {
+        if (
+            codingAgent(provider).requiresModel &&
+                model.isBlank() &&
+                !(inherit && defaultModel.isNotBlank())
+        ) {
+            val next =
+                catalog.models.find { it.isDefault && !it.hidden }
+                    ?: catalog.models.find { !it.hidden }
+            if (next != null) change(next.model, "")
+        }
+    }
     val inheritedEffort =
         if (inherit && model.isBlank())
             defaultReasoning.ifBlank { selected?.defaultReasoningEffort.orEmpty() }
         else selected?.defaultReasoningEffort.orEmpty()
     val effectiveEffort = reasoning.ifBlank { inheritedEffort }
     val modelLabel =
-        selected?.displayName?.ifBlank { selected.model }
-            ?: model.ifBlank { defaultModel }.ifBlank { "Modèle par défaut" }
+        listOfNotNull(
+                selected?.displayName?.ifBlank { selected.model }
+                    ?: model.ifBlank { defaultModel }.ifBlank { "Modèle par défaut" },
+                route?.providerName?.ifBlank { null },
+            )
+            .joinToString(" · ")
     val summary =
         listOfNotNull(
                 if (changeProvider != null || field) providerLabel(provider) else null,
@@ -189,7 +226,7 @@ fun ModelPicker(
                     ?.takeIf { !inherit || defaultModel.isBlank() }
             val visible =
                 catalog.models.filter {
-                    (!it.hidden || it.model == model) && (it != alias || model == it.model)
+                    (!it.hidden || it.matches(model)) && (it != alias || model == it.model)
                 }
             val models = visible.filter {
                 it.displayName.contains(query, true) || it.model.contains(query, true)
@@ -295,34 +332,48 @@ fun ModelPicker(
                     selectedModel(catalog, "", defaultModel)?.let {
                         it.displayName.ifBlank { it.model }
                     } ?: defaultModel
-                ModelCard(
-                    if (inherit) "Modèle de l’agent" else "Modèle par défaut",
-                    if (inherit)
-                        fallback.ifBlank { null }?.let { "$it · réglage de l’agent" }
-                            ?: "Suivre le réglage de l’agent"
-                    else
-                        alias?.description?.ifBlank { null }
-                            ?: fallback
-                                .ifBlank { null }
-                                ?.let { "$it · choisi par ${providerLabel(provider)}" }
-                            ?: "Suivre le réglage par défaut de ${providerLabel(provider)}",
-                    model.isBlank(),
-                    enabled,
-                    badge = if (alias != null && !inherit) "Recommandé" else "",
-                    reasoning = reasoningFor,
-                ) {
-                    change("", "")
-                }
-                models.forEach { item ->
+                if (!codingAgent(provider).requiresModel || (inherit && defaultModel.isNotBlank()))
                     ModelCard(
-                        item.displayName.ifBlank { item.model },
-                        item.description,
-                        item.model == model,
+                        if (inherit) "Modèle de l’agent" else "Modèle par défaut",
+                        if (inherit)
+                            fallback.ifBlank { null }?.let { "$it · réglage de l’agent" }
+                                ?: "Suivre le réglage de l’agent"
+                        else
+                            alias?.description?.ifBlank { null }
+                                ?: fallback
+                                    .ifBlank { null }
+                                    ?.let { "$it · choisi par ${providerLabel(provider)}" }
+                                ?: "Suivre le réglage par défaut de ${providerLabel(provider)}",
+                        model.isBlank(),
                         enabled,
-                        badge = if (item.isDefault) "Recommandé" else "",
+                        badge = if (alias != null && !inherit) "Recommandé" else "",
                         reasoning = reasoningFor,
                     ) {
-                        if (item.model != model) change(item.model, "")
+                        change("", "")
+                    }
+                models.forEach { item ->
+                    val routes = item.routes.filter { !it.hidden || it.model == model }
+                    ModelCard(
+                        item.displayName.ifBlank { item.model },
+                        routes
+                            .takeIf { it.isNotEmpty() }
+                            ?.joinToString(", puis ", "Via ") { it.providerName }
+                            ?: item.description,
+                        item.matches(model),
+                        enabled,
+                        badge = if (item.isDefault) "Recommandé" else "",
+                        reasoning = {
+                            RouteControl(item, routes, route, enabled) { value ->
+                                val efforts =
+                                    (item.route(value)?.supportedReasoningEfforts
+                                            ?: item.supportedReasoningEfforts)
+                                        .map { it.reasoningEffort }
+                                change(value, reasoning.takeIf { it in efforts }.orEmpty())
+                            }
+                            reasoningFor()
+                        },
+                    ) {
+                        if (!item.matches(model)) change(item.model, "")
                     }
                 }
                 if (models.isEmpty() && query.isNotBlank())
@@ -334,7 +385,7 @@ fun ModelPicker(
                         style = MaterialTheme.typography.bodyMedium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
-                if (model.isNotBlank() && catalog.models.none { it.model == model })
+                if (model.isNotBlank() && catalog.models.none { it.matches(model) })
                     ModelCard(
                         model,
                         "Modèle enregistré · absent du catalogue",
@@ -514,20 +565,27 @@ internal fun ProviderTile(
         border = BorderStroke(if (selected) 1.5.dp else 1.dp, border),
         modifier = modifier,
     ) {
-        Row(
-            Modifier.padding(horizontal = 12.dp, vertical = 12.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(10.dp),
+        Column(
+            Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 12.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
             ProviderMark(provider, 26.dp)
-            Column(Modifier.weight(1f)) {
-                Text(providerLabel(provider), style = MaterialTheme.typography.titleSmall)
-                Text(
-                    detail,
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            }
+            Text(
+                providerLabel(provider),
+                style = MaterialTheme.typography.titleSmall,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                textAlign = TextAlign.Center,
+            )
+            Text(
+                detail,
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis,
+                textAlign = TextAlign.Center,
+            )
         }
     }
 }
@@ -620,6 +678,64 @@ private fun ModelCard(
                 }
         }
     }
+}
+
+/** Auto, or one provider for a model several connected providers offer. */
+@Composable
+private fun RouteControl(
+    item: CodingAgentModel,
+    routes: List<ModelRoute>,
+    pinned: ModelRoute?,
+    enabled: Boolean,
+    change: (String) -> Unit,
+) {
+    val colors = MaterialTheme.colorScheme
+    if (routes.size == 1) {
+        Text(
+            "Via ${routes.single().providerName} · ${billingLabel(routes.single().billing)}",
+            style = MaterialTheme.typography.bodySmall,
+            color = colors.onSurfaceVariant,
+        )
+        return
+    }
+    if (routes.isEmpty()) return
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Text(
+            "Connexion",
+            Modifier.weight(1f),
+            style = MaterialTheme.typography.labelMedium,
+            color = colors.onSurfaceVariant,
+        )
+        Text(
+            pinned?.providerName ?: "Auto",
+            style = MaterialTheme.typography.titleSmall,
+            color = colors.primary,
+        )
+    }
+    FlowRow(
+        Modifier.testTag("model-routes"),
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        EffortChip("Auto", pinned == null, enabled) { change(item.model) }
+        routes.forEach { route ->
+            EffortChip(
+                "${route.providerName} · ${billingLabel(route.billing)}",
+                pinned?.model == route.model,
+                enabled,
+            ) {
+                change(route.model)
+            }
+        }
+    }
+    Text(
+        if (pinned != null)
+            "Uniquement sur ${pinned.providerName}. Si sa limite est atteinte, l’exécution attend."
+        else
+            "Essaie ${routes.joinToString(", puis ") { it.providerName }}, dans l’ordre de vos connexions.",
+        style = MaterialTheme.typography.bodySmall,
+        color = colors.onSurfaceVariant,
+    )
+    HorizontalDivider(Modifier.padding(vertical = 2.dp))
 }
 
 @Composable
