@@ -166,7 +166,12 @@ export interface Run {
     agent: Agent
     project: Project | null
     projects?: Project[]
-    skills: { name: string, path: string, content: string, bundle?: string }[]
+    skills: {
+      name: string
+      path: string
+      content: string
+      bundle?: string
+    }[]
   }
   usage: Record<string, number> | null
 }
@@ -221,10 +226,17 @@ export interface SkillFileContent {
   executable: boolean
 }
 export type SkillChange
-  = | { op: 'write', path: string, content?: string, encoding?: 'utf-8' | 'base64', upload?: string, executable?: boolean }
-    | { op: 'delete', path: string }
-    | { op: 'move', from: string, to: string }
-    | { op: 'mode', path: string, executable: boolean }
+  = | {
+    op: 'write'
+    path: string
+    content?: string
+    encoding?: 'utf-8' | 'base64'
+    upload?: string
+    executable?: boolean
+  }
+  | { op: 'delete', path: string }
+  | { op: 'move', from: string, to: string }
+  | { op: 'mode', path: string, executable: boolean }
 export interface SkillImport {
   imported: SkillBundle | null
   candidates: string[]
