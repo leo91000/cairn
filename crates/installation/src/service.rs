@@ -370,9 +370,10 @@ impl Service {
                 .ok_or_else(|| Error::bad(format!("Skill unavailable or invalid: {key}")))?;
             // Freezing keeps queued and restarted runs on the files they were created with.
             let (bundle, content) = self.skills.freeze(Path::new(text(skill, "path"))).await?;
+            let frozen_metadata = crate::skills::parse(&content)?;
             skills.push(json!({
                 "name": skill["name"],
-                "description": skill["description"],
+                "description": frozen_metadata["description"],
                 "path": skill["path"],
                 "content": content,
                 "bundle": bundle,

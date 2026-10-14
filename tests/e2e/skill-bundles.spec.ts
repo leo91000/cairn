@@ -459,6 +459,35 @@ test('an archive cannot be replaced while its upload is pending', async ({ page 
   await expect(page.getByRole('dialog', { name: 'Edit skill' }).getByRole('heading', { name: 'archive-a', exact: true })).toBeVisible()
 })
 
+test('GitHub candidate selections reset when repository, folder or ref changes', async ({ page }) => {
+  await useRelayForHttpMocks(page)
+  const requests: Record<string, string>[] = []
+  await page.route(/\/skills\/global\/import$/, async (route) => {
+    requests.push(route.request().postDataJSON())
+    await route.fulfill({ json: { imported: null, candidates: ['skills/first', 'skills/old-repo'] } })
+  })
+  await page.goto(workspacePath('/skills'))
+  await authenticateWorkspace(page)
+  for (const [label, value, field] of [
+    ['Repository', 'bob/new-repo', 'repository'],
+    ['Folder in repository', 'skills/new-folder', 'path'],
+    ['Ref', 'develop', 'ref'],
+  ] as const) {
+    await page.getByRole('button', { name: 'Import', exact: true }).click()
+    const dialog = page.getByRole('dialog', { name: 'Import a skill', exact: true })
+    await dialog.getByRole('button', { name: 'GitHub', exact: true }).click()
+    await page.getByLabel('Repository', { exact: true }).fill('alice/old-repo')
+    await dialog.getByRole('button', { name: 'Import skill', exact: true }).click()
+    await dialog.getByRole('radiogroup', { name: 'Skill folder', exact: true }).getByText('skills/old-repo', { exact: true }).click()
+    await page.getByLabel(label, { exact: true }).fill(value)
+    await expect(dialog.getByRole('radiogroup', { name: 'Skill folder', exact: true })).toHaveCount(0)
+    await dialog.getByRole('button', { name: 'Import skill', exact: true }).click()
+    await expect.poll(() => requests.length).toBe((['repository', 'path', 'ref'].indexOf(field) + 1) * 2)
+    expect(requests.at(-1)).toEqual({ source: 'github', repository: 'alice/old-repo', [field]: value })
+    await dialog.getByRole('button', { name: 'Close dialog', exact: true }).click()
+  }
+})
+
 test('pending replacement reads lock draft resets and source mutations', async ({ page, workspace }) => {
   await useRelayForHttpMocks(page)
   await workspace.api('/api/skills/global/upload-race/bundle', 'POST', { base: null, changes: [{ op: 'write', path: 'SKILL.md', content: manifest('upload-race', 'Original') }] })

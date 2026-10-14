@@ -959,6 +959,86 @@ async fn runs_install_the_files_frozen_when_they_were_created() {
     );
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn snapshots_describe_the_manifest_version_that_was_frozen() {
+    use cairn_installation::skills::bundle::{self, Base, Change};
+
+    let api = Api::new().await;
+    let saved = api
+        .ok(
+            "POST",
+            "/skills/global/review/bundle",
+            Some(json!({
+                "base": null,
+                "changes": [{ "op": "write", "path": "SKILL.md", "content": SKILL }],
+            })),
+        )
+        .await;
+    let task = api
+        .service
+        .task(
+            json!({
+                "name": "Review",
+                "agentId": MAIN_AGENT_ID,
+                "prompt": "Review",
+                "skills": ["global/review"],
+                "worktree": false,
+            }),
+            None,
+        )
+        .await
+        .unwrap();
+    let project = api._root.path().join("project");
+    std::fs::create_dir(&project).unwrap();
+    api.service
+        .store
+        .save(
+            "projects",
+            json!({
+                "id": cairn_installation::config::id(),
+                "name": "Listing trigger",
+                "path": project.to_string_lossy(),
+            }),
+            "project.saved",
+        )
+        .await
+        .unwrap();
+    let service = api.service.clone();
+    let snapshot = tokio::spawn(async move { service.snapshot(task, "manual").await.unwrap() });
+    // A project listing starts after the global listing. Its first directory creation
+    // marks that point; queue the writer behind its read lock and ahead of freeze's read.
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        while !project.join(".agents").exists() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    let content = SKILL.replace(
+        "Review the current changes",
+        "Use the latest branch conventions",
+    );
+    bundle::save(
+        api.skill_dir("review").parent().unwrap(),
+        "review",
+        Base::Edit(text(&saved, "revision")),
+        &[Change::Write {
+            path: "SKILL.md".into(),
+            bytes: content.as_bytes().to_vec(),
+            executable: None,
+        }],
+    )
+    .await
+    .unwrap();
+    let run = snapshot.await.unwrap();
+    let selected = &run["snapshot"]["skills"][0];
+    assert_eq!(
+        selected["content"], content,
+        "writer must commit between listing and freezing"
+    );
+    assert_eq!(selected["description"], "Use the latest branch conventions");
+}
+
 /// A `gh` that serves `fixture/skills` from JSON files named after endpoints.
 fn fake_github(root: &Path) -> PathBuf {
     let responses = root.join("github");

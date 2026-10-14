@@ -60,7 +60,7 @@ const scopes = computed(() => [
 ])
 const ready = computed(() => source.value === 'archive' ? !!archive.value : !!parseGithubSource(repository.value))
 
-watch([source, scope], () => {
+watch([source, scope, repository, path, ref_], () => {
   candidates.value = []
   candidate.value = ''
   error.value = ''
