@@ -11,6 +11,7 @@ import {
   watch,
 } from 'vue'
 import { api, ApiError, state } from './api'
+import { publishChats } from './chat-list'
 import {
   cacheScope,
   clearHistoryCache,
@@ -106,6 +107,7 @@ export function useLiveRun(path: () => string, options: { hold?: number } = {}) 
     let accumulator = new LiveEvents()
     let rows: RunEvent[] = cached?.events.slice() ?? []
     let detail = cached?.state
+    let restoredState = !!cached
     let cursor = cached?.cursor ?? 0
     let history = cached?.history
     let oldest = cached?.oldest ?? 0
@@ -116,9 +118,14 @@ export function useLiveRun(path: () => string, options: { hold?: number } = {}) 
     position.value = storedPosition
     accumulator.restore(rows, cursor)
     if (cached) {
+      if (cached.state.chats)
+        publishChats(cached.state.chats, { cached: true })
+
       show(value)
       hasOlder.value = older
-      snapshot.value = cached.state
+      // Retain the complete saved state for offline persistence, while the
+      // shared list accepts it only when no current Fil is known.
+      snapshot.value = { ...cached.state, chats: undefined }
       events.value = cached.events
       catchingUp.value = false
     }
@@ -277,8 +284,11 @@ export function useLiveRun(path: () => string, options: { hold?: number } = {}) 
       candidate.append(next, batch.events)
       accumulator = candidate
       rows = next
-      if (batch.state)
+      if (batch.state) {
         detail = batch.state
+        restoredState = false
+      }
+
       cursor = accepted
       history = batch.history
       if (batch.oldest !== undefined) {
@@ -290,7 +300,7 @@ export function useLiveRun(path: () => string, options: { hold?: number } = {}) 
       if (complete) {
         show(value)
         hasOlder.value = older
-        snapshot.value = detail
+        snapshot.value = restoredState && detail ? { ...detail, chats: undefined } : detail
         events.value = rows.slice()
         catchingUp.value = false
         synced.value = true

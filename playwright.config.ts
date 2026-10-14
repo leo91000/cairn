@@ -52,6 +52,7 @@ export default defineConfig({
     { name: 'journeys-installation-subdomains', testMatch: 'installation-subdomains.spec.ts' },
     { name: 'layout-webkit-installation-drafts', testMatch: 'installation-subdomains.spec.ts', use: { browserName: 'webkit' } },
     { name: 'journeys-chat-switch', testMatch: ['chat-switch.spec.ts', 'readable-slugs.spec.ts'] },
+    { name: 'layout-webkit-chat-switch', testMatch: 'chat-switch.spec.ts', use: { browserName: 'webkit' } },
     { name: 'journeys-chat-attachments', testMatch: 'chat-attachments.spec.ts' },
     { name: 'layout-webkit-chat-attachments', testMatch: 'chat-attachments.spec.ts', use: { browserName: 'webkit', hasTouch: true } },
     { name: 'layout-webkit-chats', testMatch: 'chats.spec.ts', use: { browserName: 'webkit', hasTouch: true } },

@@ -12,7 +12,10 @@ import { api, state } from './api'
 export const chatList = ref<ChatView[]>([])
 let publishedAt = 0
 
-export function publishChats(chats: ChatView[]) {
+export function publishChats(chats: ChatView[], options: { cached?: boolean } = {}) {
+  if (options.cached && publishedAt)
+    return
+
   chatList.value = chats
   publishedAt = Date.now()
 }
@@ -22,7 +25,7 @@ export async function refreshChats() {
   if (!state.authenticated || state.signingOut || state.redirecting)
     return
   try {
-    chatList.value = await api<ChatView[]>('/chats')
+    publishChats(await api<ChatView[]>('/chats'))
   }
   catch {
     // Keep the last known list while the server reconnects.
@@ -54,10 +57,13 @@ export function useChatList() {
     clearInterval(timer)
   })
   watch(() => state.authenticated, (signedIn) => {
-    if (signedIn)
+    if (signedIn) {
       start()
-    else
+    }
+    else {
       chatList.value = []
+      publishedAt = 0
+    }
   })
   return chatList
 }
