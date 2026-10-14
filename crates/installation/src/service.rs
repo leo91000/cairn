@@ -368,10 +368,14 @@ impl Service {
                 .iter()
                 .find(|s| skill_key(s) == key && s["valid"] == true)
                 .ok_or_else(|| Error::bad(format!("Skill unavailable or invalid: {key}")))?;
+            // Freezing keeps queued and restarted runs on the files they were created with.
+            let (bundle, content) = self.skills.freeze(Path::new(text(skill, "path"))).await?;
             skills.push(json!({
                 "name": skill["name"],
+                "description": skill["description"],
                 "path": skill["path"],
-                "content": skill["content"],
+                "content": content,
+                "bundle": bundle,
             }));
         }
         let snapshot = json!({

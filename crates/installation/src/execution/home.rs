@@ -155,16 +155,25 @@ async fn configure_git(
 }
 
 /// Copies the selected skills into the home and points their snapshot at the guest copy.
-async fn install_skills(home: &Path, skills: &Value) -> Result<Vec<Value>> {
+/// Runs created before frozen bundles copy the live skill directory.
+async fn install_skills(home: &Path, skills: &Value, config: &Config) -> Result<Vec<Value>> {
     let mut installed = Vec::new();
     for (index, skill) in skills.as_array().into_iter().flatten().enumerate() {
         let relative = format!("{index}/{}", text(skill, "name"));
         let target = home.join(".agents/skills").join(&relative);
         private_dir(target.parent().unwrap()).await?;
-        let source = Path::new(text(skill, "path"))
+        let revision = text(skill, "bundle");
+        let frozen = match crate::skills::frozen(config, revision) {
+            Some(path) if tokio::fs::try_exists(&path).await? => {
+                crate::skills::touch(config, revision).await?;
+                Some(path)
+            }
+            _ => None,
+        };
+        let live = Path::new(text(skill, "path"))
             .parent()
             .ok_or_else(|| Error::bad("Invalid selected skill path."))?;
-        copy_tree(source, &target, true).await?;
+        copy_tree(frozen.as_deref().unwrap_or(live), &target, true).await?;
         atomic_write(&target.join("SKILL.md"), text(skill, "content").as_bytes()).await?;
         let mut skill = skill.clone();
         skill["path"] = format!("{GUEST_SKILLS}/{relative}/SKILL.md").into();
@@ -192,5 +201,5 @@ pub(super) async fn prepare_home(
         .await?;
     github_home(home, config, options.github_access, options.github).await?;
     configure_git(home, config, options.github, options.github_access).await?;
-    install_skills(home, &run["snapshot"]["skills"]).await
+    install_skills(home, &run["snapshot"]["skills"], config).await
 }

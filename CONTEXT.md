@@ -110,6 +110,13 @@ Une remise à zéro de fenêtre d’usage offerte par Codex, utilisée automatiq
 **Auteur d’une tâche** :
 Le compte Cairn qui a créé une tâche. Le retrait de cet auteur met fin aux déclenchements planifiés de ses tâches ; leur travail reste partagé avec toute l’installation.
 
+**Skill** :
+Un savoir-faire réutilisable que les agents appliquent : ses instructions et les fichiers qui les accompagnent (références, modèles, scripts, images). Une skill est globale ou propre à un projet ; une conversation ou une exécution reçoit les skills sélectionnées telles qu’elles étaient à sa création.
+_Avoid_ : prompt, plugin
+
+**Source d’une skill** :
+Le dépôt GitHub d’où une skill a été importée, avec la version importée. La source permet de comparer la skill à une version plus récente et de la remplacer par celle-ci ; les modifications faites dans Cairn depuis l’import sont alors perdues.
+
 **Délégation externe d’un plugin** :
 L’accès précis que le propriétaire accorde à des identités externes, par exemple
 à des utilisateurs Discord dans un canal, pour faire travailler un agent dédié et
