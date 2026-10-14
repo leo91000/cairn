@@ -124,6 +124,11 @@ pub async fn scan(directory: &Path) -> Result<Vec<Entry>> {
 /// Every visible file of a skill with its content, read once, and the
 /// revision of exactly those contents.
 pub async fn read_all(directory: &Path) -> Result<(String, Vec<(Entry, Vec<u8>)>)> {
+    let _read = ACCESS.read().await;
+    read_all_locked(directory).await
+}
+
+async fn read_all_locked(directory: &Path) -> Result<(String, Vec<(Entry, Vec<u8>)>)> {
     let entries = scan(directory).await?;
     let mut hasher = blake3::Hasher::new();
     let mut files = Vec::with_capacity(entries.len());
@@ -146,7 +151,12 @@ pub struct Described {
 }
 
 pub async fn describe(directory: &Path) -> Result<Described> {
-    let (revision, files) = read_all(directory).await?;
+    let _read = ACCESS.read().await;
+    describe_locked(directory).await
+}
+
+pub(super) async fn describe_locked(directory: &Path) -> Result<Described> {
+    let (revision, files) = read_all_locked(directory).await?;
     let files = files
         .iter()
         .map(|(entry, bytes)| {
@@ -455,9 +465,9 @@ async fn swap(staging: &Path, target: &Path, exists: bool) -> Result<()> {
     Ok(())
 }
 
-/// Serializes batch saves so that each one checks its base revision against
-/// the skill it replaces.
-static SAVES: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+/// Reads hold one version for their entire walk; saves and removals wait for
+/// those readers before replacing a skill and serialize their revision checks.
+pub(super) static ACCESS: tokio::sync::RwLock<()> = tokio::sync::RwLock::const_new(());
 
 /// How a batch relates to the existing skill.
 pub enum Base<'a> {
@@ -471,7 +481,7 @@ pub enum Base<'a> {
 
 /// Applies `changes` to a copy of `root/skill`, validates it, then swaps it in.
 pub async fn save(root: &Path, skill: &str, base: Base<'_>, changes: &[Change]) -> Result<()> {
-    let _save = SAVES.lock().await;
+    let _save = ACCESS.write().await;
     let directory = root.join(skill);
     let exists = match kind(&directory).await? {
         Some(metadata) if metadata.is_dir() => true,
@@ -489,7 +499,7 @@ pub async fn save(root: &Path, skill: &str, base: Base<'_>, changes: &[Change]) 
             return Err(Error::not_found("Skill not found."));
         }
         (Base::Edit(revision) | Base::Replace(revision), true) => {
-            if describe(&directory).await?.revision != *revision {
+            if describe_locked(&directory).await?.revision != *revision {
                 return Err(Error::conflict(
                     "This skill changed since you opened it. Reload it and try again.",
                 ));

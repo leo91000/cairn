@@ -102,6 +102,231 @@ fn paths(bundle: &Value) -> Vec<&str> {
         .collect()
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn freezing_during_batch_saves_never_combines_versions() {
+    use cairn_installation::skills::bundle::{self, Change};
+    let api = Api::new().await;
+    let changes = |version: usize| {
+        let mut changes = vec![Change::Write {
+            path: "SKILL.md".into(),
+            bytes: SKILL.as_bytes().to_vec(),
+            executable: None,
+        }];
+        for index in 0..64 {
+            changes.push(Change::Write {
+                path: format!("files/{index:03}.txt"),
+                bytes: format!("version {version}\n").repeat(100).into_bytes(),
+                executable: None,
+            });
+        }
+        changes
+    };
+    api.service
+        .skills
+        .apply("review", None, &changes(0), None)
+        .await
+        .unwrap();
+    let service = api.service.clone();
+    let directory = api.skill_dir("review");
+    let writer_directory = directory.clone();
+    let writer = tokio::spawn(async move {
+        for version in 1..=20 {
+            let base = bundle::describe(&writer_directory).await.unwrap().revision;
+            service
+                .skills
+                .apply("review", Some(&base), &changes(version), None)
+                .await
+                .unwrap();
+        }
+    });
+    let mut reads = 0;
+    while !writer.is_finished() || reads < 20 {
+        let (revision, _) = api
+            .service
+            .skills
+            .freeze(&directory.join("SKILL.md"))
+            .await
+            .unwrap();
+        let frozen = cairn_installation::skills::frozen(&api.service.config, &revision).unwrap();
+        let (_, files) = bundle::read_all(&frozen).await.unwrap();
+        let supporting = files
+            .iter()
+            .filter(|(entry, _)| entry.path != "SKILL.md")
+            .collect::<Vec<_>>();
+        assert!(
+            supporting
+                .iter()
+                .all(|(_, bytes)| bytes == &supporting[0].1),
+            "Frozen files came from different saves"
+        );
+        reads += 1;
+    }
+    writer.await.unwrap();
+}
+
+#[tokio::test]
+async fn old_frozen_bundles_are_retained_for_later_runs() {
+    use cairn_installation::skills::bundle;
+    let api = Api::new().await;
+    api.service
+        .skills
+        .save("review", SKILL, None)
+        .await
+        .unwrap();
+    let directory = api.skill_dir("review");
+    let revision = bundle::describe(&directory).await.unwrap().revision;
+    let frozen = cairn_installation::skills::frozen(&api.service.config, &revision).unwrap();
+    bundle::copy_dir(&directory, &frozen).await.unwrap();
+    let marker = frozen.with_file_name(format!("{revision}.used"));
+    let old = std::time::SystemTime::now() - std::time::Duration::from_secs(31 * 24 * 60 * 60);
+    std::fs::File::create(marker)
+        .unwrap()
+        .set_times(std::fs::FileTimes::new().set_modified(old))
+        .unwrap();
+    api.service
+        .skills
+        .save("review", &format!("{SKILL}New instructions\n"), None)
+        .await
+        .unwrap();
+    api.service
+        .skills
+        .freeze(&directory.join("SKILL.md"))
+        .await
+        .unwrap();
+    assert_eq!(
+        std::fs::read_to_string(frozen.join("SKILL.md")).unwrap(),
+        SKILL
+    );
+}
+
+#[tokio::test]
+#[ignore = "explicit local skill storage benchmark; run alone with --nocapture"]
+async fn skill_bundle_storage_measurements() {
+    use cairn_installation::skills::bundle::{self, Change};
+    use std::{os::fd::AsRawFd, time::Instant};
+
+    fn cpu_ms() -> f64 {
+        let mut clock = libc::timespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        };
+        // SAFETY: clock points to a valid timespec and the clock ID is supported on Linux.
+        assert_eq!(
+            unsafe { libc::clock_gettime(libc::CLOCK_PROCESS_CPUTIME_ID, &mut clock) },
+            0
+        );
+        clock.tv_sec as f64 * 1000.0 + clock.tv_nsec as f64 / 1_000_000.0
+    }
+
+    async fn reads(directory: &Path, names: &[String], bundled: bool, cold: bool) -> Value {
+        let (mut wall, mut cpu) = (0.0, 0.0);
+        for _ in 0..100 {
+            if cold {
+                for name in names {
+                    let file = std::fs::File::open(directory.join(name)).unwrap();
+                    // SAFETY: this is a live file descriptor; advice only affects its cached pages.
+                    assert_eq!(
+                        unsafe {
+                            libc::posix_fadvise(file.as_raw_fd(), 0, 0, libc::POSIX_FADV_DONTNEED)
+                        },
+                        0
+                    );
+                }
+            }
+            let started_cpu = cpu_ms();
+            let started = Instant::now();
+            if bundled {
+                std::hint::black_box(bundle::read_all(directory).await.unwrap());
+            } else {
+                for name in names {
+                    std::hint::black_box(tokio::fs::read(directory.join(name)).await.unwrap());
+                }
+            }
+            wall += started.elapsed().as_secs_f64() * 1000.0;
+            cpu += cpu_ms() - started_cpu;
+        }
+        json!({
+            "wallMs": wall / 100.0,
+            "cpuMs": cpu / 100.0,
+        })
+    }
+
+    let api = Api::new().await;
+    let mut changes = vec![Change::Write {
+        path: "SKILL.md".into(),
+        bytes: SKILL.as_bytes().to_vec(),
+        executable: None,
+    }];
+    for index in 0..64 {
+        changes.push(Change::Write {
+            path: format!("data/{index:03}.bin"),
+            bytes: vec![index as u8; 4096],
+            executable: Some(index % 8 == 0),
+        });
+    }
+    api.service
+        .skills
+        .apply("review", None, &changes, None)
+        .await
+        .unwrap();
+    let directory = api.skill_dir("review");
+    let entries = bundle::scan(&directory).await.unwrap();
+    let names = entries
+        .iter()
+        .map(|entry| entry.path.clone())
+        .collect::<Vec<_>>();
+    let bytes = entries.iter().map(|entry| entry.size).sum::<u64>();
+    let mut results = json!({
+        "files": entries.len(),
+        "payloadBytes": bytes,
+        "frozenPayloadBytes": bytes,
+    });
+    for (label, bundled, cold) in [
+        ("referenceWarmRead", false, false),
+        ("bundleWarmRead", true, false),
+        ("referenceColdRead", false, true),
+        ("bundleColdRead", true, true),
+    ] {
+        results[label] = reads(&directory, &names, bundled, cold).await;
+    }
+    for bundled in [false, true] {
+        let (mut wall, mut cpu) = (0.0, 0.0);
+        for version in 0..20 {
+            let input = vec![version; 4096];
+            bundle::write_file(&directory.join("data/000.bin"), &input, true)
+                .await
+                .unwrap();
+            let started_cpu = cpu_ms();
+            let started = Instant::now();
+            if bundled {
+                api.service
+                    .skills
+                    .freeze(&directory.join("SKILL.md"))
+                    .await
+                    .unwrap();
+            } else {
+                bundle::copy_dir(
+                    &directory,
+                    &api._root.path().join(format!("reference-{version}")),
+                )
+                .await
+                .unwrap();
+            }
+            wall += started.elapsed().as_secs_f64() * 1000.0;
+            cpu += cpu_ms() - started_cpu;
+        }
+        results[if bundled {
+            "freezeWrite"
+        } else {
+            "referenceCopyWrite"
+        }] = json!({
+            "wallMs": wall / 20.0,
+            "cpuMs": cpu / 20.0,
+        });
+    }
+    println!("{}", serde_json::to_string_pretty(&results).unwrap());
+}
+
 #[tokio::test]
 async fn batches_save_every_file_at_once_with_modes_and_revisions() {
     let api = Api::new().await;
@@ -523,6 +748,43 @@ async fn runs_install_the_files_frozen_when_they_were_created() {
     assert_eq!(
         std::fs::read_to_string(installed.with_file_name("scripts/check.sh")).unwrap(),
         "#!/bin/sh\necho v2\n"
+    );
+
+    let mut malformed = next.clone();
+    malformed["snapshot"]["skills"][0]["bundle"] = "../invalid".into();
+    assert!(
+        cairn_installation::execution::prepare(&malformed, &s.config, None, None, None)
+            .await
+            .is_err()
+    );
+
+    let missing = cairn_installation::skills::frozen(
+        &s.config,
+        text(&next["snapshot"]["skills"][0], "bundle"),
+    )
+    .unwrap();
+    std::fs::remove_dir_all(missing).unwrap();
+    assert!(
+        cairn_installation::execution::prepare(&next, &s.config, None, None, None)
+            .await
+            .is_err()
+    );
+
+    // Only snapshots predating bundle revisions may use the live directory.
+    let mut legacy = next;
+    legacy["snapshot"]["skills"][0]
+        .as_object_mut()
+        .unwrap()
+        .remove("bundle");
+    let prepared = cairn_installation::execution::prepare(&legacy, &s.config, None, None, None)
+        .await
+        .unwrap();
+    assert_eq!(
+        prepared["skills"][0]["path"],
+        api.skill_dir("review")
+            .join("SKILL.md")
+            .to_string_lossy()
+            .as_ref()
     );
 }
 

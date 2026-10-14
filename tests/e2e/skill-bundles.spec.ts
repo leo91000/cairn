@@ -333,6 +333,79 @@ test('a stale editor reports the conflict and reloads the latest revision', asyn
   await expect(page.getByRole('dialog')).toHaveCount(0)
 })
 
+test('saving locks draft mutations until the batch completes', async ({ page, workspace }) => {
+  await useRelayForHttpMocks(page)
+  await workspace.api('/api/skills/global/save-lock/bundle', 'POST', { base: null, changes: [{ op: 'write', path: 'SKILL.md', content: manifest('save-lock', 'Initial') }] })
+  let release!: () => void
+  const pending = new Promise<void>((resolve) => {
+    release = resolve
+  })
+  await page.route(/\/skills\/global\/save-lock\/bundle$/, async (route) => {
+    if (route.request().method() === 'POST')
+      await pending
+    await route.continue()
+  })
+  await page.goto(workspacePath('/skills'))
+  await authenticateWorkspace(page)
+  await page.getByRole('button', { name: 'Edit save-lock', exact: true }).click()
+  const editor = page.getByLabel('Skill content')
+  const submitted = manifest('save-lock', 'Submitted')
+  await editor.fill(submitted)
+  await page.getByRole('button', { name: 'Save skill', exact: true }).click()
+  try {
+    await expect(editor).toHaveAttribute('readonly', '')
+    await showTree(page)
+    await expect(page.getByRole('button', { name: 'New file', exact: true })).toBeDisabled()
+    await expect(page.getByRole('button', { name: 'Cancel', exact: true })).toBeDisabled()
+  }
+  finally {
+    release()
+  }
+
+  await expect(page.getByRole('dialog', { name: 'Edit skill' }).getByText('All changes saved')).toBeVisible()
+  await openFile(page, 'SKILL.md')
+  await expect(editor).not.toHaveAttribute('readonly', '')
+  await expect(editor).toHaveValue(submitted)
+  expect((await workspace.api('/api/skills/global/save-lock/file?path=SKILL.md')).content).toBe(submitted)
+})
+
+test('detaching a GitHub source preserves unsaved files', async ({ page, workspace }) => {
+  await useRelayForHttpMocks(page)
+  await workspace.api('/api/skills/global/detach-draft/bundle', 'POST', { base: null, changes: [{ op: 'write', path: 'SKILL.md', content: manifest('detach-draft', 'Initial') }] })
+  const source = {
+    type: 'github',
+    repository: 'acme/skills',
+    path: 'review',
+    ref: 'main',
+    commit: 'a'.repeat(40),
+    importedAt: 1,
+    modified: false,
+  }
+  let detached = false
+  await page.route(/\/skills\/global\/detach-draft\/bundle$/, async (route) => {
+    const bundle = await workspace.api('/api/skills/global/detach-draft/bundle')
+    await route.fulfill({ json: { ...bundle, source: detached ? null : source } })
+  })
+  await page.route(/\/skills\/global\/detach-draft\/source$/, async (route) => {
+    expect(route.request().method()).toBe('DELETE')
+    detached = true
+    await route.fulfill({ json: { detached: true } })
+  })
+  await page.goto(workspacePath('/skills'))
+  await authenticateWorkspace(page)
+  await page.getByRole('button', { name: 'Edit detach-draft', exact: true }).click()
+  const edited = manifest('detach-draft', 'Unsaved local changes')
+  await page.getByLabel('Skill content').fill(edited)
+  await showTree(page)
+  await page.getByRole('button', { name: 'Open GitHub source', exact: true }).click()
+  await page.getByRole('button', { name: 'Detach source', exact: true }).click()
+  await page.getByRole('button', { name: 'Confirm detach', exact: true }).click()
+  await expect(page.getByRole('dialog', { name: 'Edit skill' })).toContainText('1 unsaved change')
+  await openFile(page, 'SKILL.md')
+  await expect(page.getByLabel('Skill content')).toHaveValue(edited)
+  expect((await workspace.api('/api/skills/global/detach-draft/file?path=SKILL.md')).content).toContain('Initial')
+})
+
 test('members browse a skill bundle read-only', async ({ page, workspace }, testInfo) => {
   await useRelayForHttpMocks(page)
   await workspace.api('/api/skills/global/reader/bundle', 'POST', {

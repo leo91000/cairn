@@ -132,6 +132,7 @@ internal class SkillWorkbenchModel : ViewModel() {
 
     /** Applies a local edit; returns the problem in French when it is refused. */
     fun update(change: (SkillDraft) -> SkillDraft): String? {
+        if (busy) return "Attendez la fin de l’enregistrement."
         val current = draft ?: return null
         return try {
             draft = change(current)

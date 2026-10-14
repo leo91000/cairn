@@ -64,6 +64,11 @@ describe('skill bundle files', () => {
     expect(validateSkillPath(`${'x'.repeat(241)}`)).toMatch(/bytes/)
   })
 
+  it('preserves a UTF-8 BOM when decoding an upload', () => {
+    const bytes = new Uint8Array([239, 187, 191, 104, 105])
+    expect(new TextEncoder().encode(decodeText(bytes)!)).toEqual(bytes)
+  })
+
   it('classifies files for icons and editors', () => {
     expect(skillFileKind(file('SKILL.md'))).toBe('manifest')
     expect(skillFileKind(file('references/notes.md'))).toBe('markdown')
@@ -106,6 +111,47 @@ describe('skill file tree', () => {
 
 describe('skill change sets', () => {
   const original = [file('SKILL.md', 20), file('notes.md'), file('scripts/run.py'), file('old.md'), file('a.md'), file('b.md')]
+
+  it('uses valid temporary paths when swapping maximum-length paths', () => {
+    const a = 'a'.repeat(240)
+    const b = 'b'.repeat(240)
+    const saved = [file('SKILL.md'), file(a), file(b)]
+    const draft = draftFromBundle(saved)
+    draft[1]!.path = b
+    draft[2]!.path = a
+    const occupied = new Set(saved.map(file => file.path))
+    for (const change of skillChanges(saved, draft)) {
+      if (change.op !== 'move')
+        continue
+      expect(validateSkillPath(change.to)).toBeNull()
+      expect(occupied.has(change.to)).toBe(false)
+      expect(occupied.delete(change.from)).toBe(true)
+      occupied.add(change.to)
+    }
+
+    expect(occupied).toEqual(new Set(['SKILL.md', a, b]))
+  })
+
+  it('allows unchanged legacy files and totals while refusing new growth', () => {
+    const limits = {
+      fileBytes: 10,
+      bundleBytes: 20,
+      files: 2,
+      uploadBytes: 100,
+    }
+    const saved = [file('SKILL.md', 5), file('large.bin', 50), file('old.txt', 4)]
+    const draft = draftFromBundle(saved)
+    draft[0]!.modified = true
+    draft[0]!.size = 6
+    draft[2]!.size = 3
+    draft[2]!.modified = true
+    expect(limitProblems(draft, limits, saved)).toEqual([])
+    draft[1]!.modified = true
+    expect(limitProblems(draft, limits, saved).some(problem => problem.path === 'large.bin')).toBe(true)
+    draft[1]!.modified = false
+    draft[0]!.size = 7
+    expect(limitProblems(draft, limits, saved).some(problem => !problem.path)).toBe(true)
+  })
 
   it('orders deletions, moves, writes and modes into one batch', () => {
     const draft = draftFromBundle(original).filter(entry => entry.path !== 'old.md')
@@ -181,9 +227,9 @@ describe('skill change sets', () => {
     const changes = skillChanges(original, draft)
     expect(changes).toEqual([
       { op: 'move', from: 'old.md', to: 'archive/old.md' },
-      { op: 'move', from: 'a.md', to: 'a.md~1' },
+      { op: 'move', from: 'a.md', to: 'cairn-move-1' },
       { op: 'move', from: 'b.md', to: 'a.md' },
-      { op: 'move', from: 'a.md~1', to: 'b.md' },
+      { op: 'move', from: 'cairn-move-1', to: 'b.md' },
       {
         op: 'write',
         path: 'old.md',
@@ -215,8 +261,8 @@ describe('skill change sets', () => {
     const draft = draftFromBundle(files)
     draft.find(entry => entry.path === 'guide')!.path = 'guide/index.md'
     expect(skillChanges(files, draft)).toEqual([
-      { op: 'move', from: 'guide', to: 'guide~1' },
-      { op: 'move', from: 'guide~1', to: 'guide/index.md' },
+      { op: 'move', from: 'guide', to: 'cairn-move-1' },
+      { op: 'move', from: 'cairn-move-1', to: 'guide/index.md' },
     ])
   })
 

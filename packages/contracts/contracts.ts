@@ -217,7 +217,7 @@ export interface SkillBundle {
   files: SkillFile[]
   limits: SkillLimits
   source: SkillSource | null
-  description?: string
+  description?: string | null
 }
 export interface SkillFileContent {
   content: string

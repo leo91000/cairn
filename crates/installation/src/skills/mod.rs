@@ -320,23 +320,11 @@ async fn expire(directory: &Path, age: i64) {
 
 const HOUR: i64 = 3_600_000;
 const ARCHIVE_CHUNK: usize = 4 * 1024 * 1024;
-// Frozen bundles serve queued and restarted runs; unused ones are collected.
-const BUNDLE_RETENTION: i64 = 30 * 24 * HOUR;
-static COLLECTED: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(0);
 
 /// The frozen copy of a skill revision, when `revision` is a revision.
 pub fn frozen(config: &Config, revision: &str) -> Option<PathBuf> {
     (revision.len() == 64 && revision.bytes().all(|b| b.is_ascii_hexdigit()))
         .then(|| config.data_dir.join("skill-bundles").join(revision))
-}
-
-/// Records that a frozen bundle is still in use.
-pub async fn touch(config: &Config, revision: &str) -> Result<()> {
-    let marker = config
-        .data_dir
-        .join("skill-bundles")
-        .join(format!("{revision}.used"));
-    atomic_write(&marker, b"").await
 }
 
 #[derive(Clone)]
@@ -374,6 +362,7 @@ impl Skills {
     }
 
     pub async fn list(&self, scope: &str, project: Option<&Path>) -> Result<Vec<Value>> {
+        let _read = bundle::ACCESS.read().await;
         let root = self.root(project).await?;
         let mut entries = fs::read_dir(&root).await?;
         let mut listings = Vec::new();
@@ -472,6 +461,7 @@ impl Skills {
     }
 
     pub async fn remove(&self, skill: &str, project: Option<&Path>) -> Result<()> {
+        let _write = bundle::ACCESS.write().await;
         let directory = self.directory(skill, project).await?;
         fs::remove_dir_all(directory).await?;
         Ok(())
@@ -479,6 +469,7 @@ impl Skills {
 
     /// Paths of the visible files, for clients that predate bundles.
     pub async fn files(&self, skill: &str, project: Option<&Path>) -> Result<Vec<String>> {
+        let _read = bundle::ACCESS.read().await;
         let directory = self.directory(skill, project).await?;
         Ok(bundle::scan(&directory)
             .await?
@@ -489,6 +480,7 @@ impl Skills {
 
     /// Text files as UTF-8, other files as base64.
     pub async fn read(&self, skill: &str, file: &str, project: Option<&Path>) -> Result<Value> {
+        let _read = bundle::ACCESS.read().await;
         if !visible(file) {
             return Err(Error::bad(
                 "Files whose names start with . are not part of a skill.",
@@ -519,8 +511,9 @@ impl Skills {
     }
 
     pub async fn bundle(&self, scope: &str, skill: &str, project: Option<&Path>) -> Result<Value> {
+        let _read = bundle::ACCESS.read().await;
         let directory = self.directory(skill, project).await?;
-        let described = bundle::describe(&directory).await?;
+        let described = bundle::describe_locked(&directory).await?;
         let content = small_file(&directory.join("SKILL.md")).await.ok();
         Ok(json!({
             "scope": scope,
@@ -814,46 +807,9 @@ impl Skills {
                 }
             }
         }
-        touch(&self.config, &revision).await?;
-        self.collect(&store).await;
+        // Completed bundles are immutable snapshot data. Age does not prove that
+        // queued runs or dormant conversations have released their references.
         Ok((revision, content))
-    }
-
-    /// Removes frozen bundles unused for the retention period, at most hourly.
-    async fn collect(&self, store: &Path) {
-        use std::sync::atomic::Ordering;
-        let now = crate::config::now();
-        let last = COLLECTED.load(Ordering::Relaxed);
-        if now - last < HOUR
-            || COLLECTED
-                .compare_exchange(last, now, Ordering::Relaxed, Ordering::Relaxed)
-                .is_err()
-        {
-            return;
-        }
-        let Ok(mut items) = fs::read_dir(store).await else {
-            return;
-        };
-        let cutoff =
-            |age: i64| std::time::SystemTime::now() - std::time::Duration::from_millis(age as u64);
-        while let Ok(Some(item)) = items.next_entry().await {
-            let name = item.file_name().to_string_lossy().into_owned();
-            let Ok(modified) = item
-                .metadata()
-                .await
-                .and_then(|metadata| metadata.modified())
-            else {
-                continue;
-            };
-            if let Some(revision) = name.strip_suffix(".used")
-                && modified < cutoff(BUNDLE_RETENTION)
-            {
-                let _ = fs::remove_dir_all(store.join(revision)).await;
-                let _ = fs::remove_file(item.path()).await;
-            } else if name.starts_with(".tmp-") && modified < cutoff(24 * HOUR) {
-                let _ = fs::remove_dir_all(item.path()).await;
-            }
-        }
     }
 }
 

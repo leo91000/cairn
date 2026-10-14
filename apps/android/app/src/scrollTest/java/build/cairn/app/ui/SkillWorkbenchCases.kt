@@ -145,6 +145,7 @@ abstract class SkillWorkbenchCases {
 
     private class Fixture {
         val batches = CopyOnWriteArrayList<Pair<String, JsonObject>>()
+        var saveGate: java.util.concurrent.CountDownLatch? = null
         val imports = CopyOnWriteArrayList<JsonObject>()
         val updates = CopyOnWriteArrayList<JsonObject>()
         @Volatile var conflict = false
@@ -191,6 +192,7 @@ abstract class SkillWorkbenchCases {
                     path.endsWith("/bundle") && request.method == "POST" -> {
                         val body = wireJson.parseToJsonElement(request.body.readUtf8()).jsonObject
                         fixture.batches += path to body
+                        fixture.saveGate?.await(20, java.util.concurrent.TimeUnit.SECONDS)
                         if (fixture.conflict)
                             MockResponse()
                                 .setResponseCode(409)
@@ -386,6 +388,35 @@ abstract class SkillWorkbenchCases {
             .onNodeWithContentDescription("Actions pour ${path.substringAfterLast('/')}")
             .performClick()
         shown(hasTestTag("skill-file-actions"))
+    }
+
+    @Test
+    fun savingMakesFileMutationsUnavailableUntilTheResponse() {
+        val gate = java.util.concurrent.CountDownLatch(1)
+        val fixture = Fixture().apply { saveGate = gate }
+        launch(fixture).use {
+            try {
+                compose.onNodeWithTag("skill-card-global-review").performClick()
+                openFile("SKILL.md")
+                shown(hasText(skillMarkdown.trimEnd(), substring = true))
+                compose
+                    .onNodeWithTag("skill-code-editor")
+                    .performTextReplacement(skillMarkdown + "More instructions\n")
+                backToFiles()
+                compose.onNodeWithTag("skill-save").performClick()
+                compose.waitUntil(15000) { fixture.batches.size == 1 }
+                compose.onNodeWithTag("skill-save").assertIsNotEnabled()
+                compose.onNodeWithContentDescription("Nouveau fichier").assertDoesNotExist()
+                compose
+                    .onNodeWithContentDescription("Ajouter depuis l’appareil")
+                    .assertDoesNotExist()
+                treeRow("old.md")
+                compose.onNodeWithContentDescription("Actions pour old.md").assertDoesNotExist()
+            } finally {
+                gate.countDown()
+            }
+            shown(hasContentDescription("Nouveau fichier"))
+        }
     }
 
     @Test

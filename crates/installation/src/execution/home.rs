@@ -162,19 +162,14 @@ async fn install_skills(home: &Path, skills: &Value, config: &Config) -> Result<
         let relative = format!("{index}/{}", text(skill, "name"));
         let target = home.join(".agents/skills").join(&relative);
         private_dir(target.parent().unwrap()).await?;
-        let revision = text(skill, "bundle");
-        let frozen = match crate::skills::frozen(config, revision) {
-            Some(path) if tokio::fs::try_exists(&path).await? => {
-                crate::skills::touch(config, revision).await?;
-                Some(path)
-            }
-            _ => None,
-        };
+        let frozen = recorded_bundle(skill, config).await?;
         let live = Path::new(text(skill, "path"))
             .parent()
             .ok_or_else(|| Error::bad("Invalid selected skill path."))?;
         copy_tree(frozen.as_deref().unwrap_or(live), &target, true).await?;
-        atomic_write(&target.join("SKILL.md"), text(skill, "content").as_bytes()).await?;
+        if frozen.is_none() {
+            atomic_write(&target.join("SKILL.md"), text(skill, "content").as_bytes()).await?;
+        }
         let mut skill = skill.clone();
         skill["path"] = format!("{GUEST_SKILLS}/{relative}/SKILL.md").into();
         installed.push(skill);
@@ -187,15 +182,28 @@ async fn install_skills(home: &Path, skills: &Value, config: &Config) -> Result<
 pub(super) async fn frozen_skills(skills: &Value, config: &Config) -> Result<Value> {
     let mut skills = skills.clone();
     for skill in skills.as_array_mut().into_iter().flatten() {
-        let revision = text(skill, "bundle").to_owned();
-        if let Some(path) = crate::skills::frozen(config, &revision)
-            && tokio::fs::try_exists(&path).await?
-        {
-            crate::skills::touch(config, &revision).await?;
+        if let Some(path) = recorded_bundle(skill, config).await? {
             skill["path"] = path.join("SKILL.md").to_string_lossy().into_owned().into();
         }
     }
     Ok(skills)
+}
+
+/// A live-directory fallback belongs only to snapshots created before bundles.
+async fn recorded_bundle(skill: &Value, config: &Config) -> Result<Option<std::path::PathBuf>> {
+    let Some(value) = skill.get("bundle") else {
+        return Ok(None);
+    };
+    let path = value
+        .as_str()
+        .and_then(|revision| crate::skills::frozen(config, revision))
+        .ok_or_else(|| Error::bad("Invalid frozen skill revision in the run snapshot."))?;
+    if !tokio::fs::try_exists(&path).await? {
+        return Err(Error::not_found(
+            "The frozen skill bundle recorded by this run is missing.",
+        ));
+    }
+    Ok(Some(path))
 }
 
 pub(super) struct HomeOptions<'a> {

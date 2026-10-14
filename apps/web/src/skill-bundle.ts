@@ -73,7 +73,7 @@ export function decodeText(bytes: Uint8Array) {
     return null
 
   try {
-    return new TextDecoder('utf-8', { fatal: true }).decode(bytes)
+    return new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(bytes)
   }
   catch {
     return null
@@ -378,10 +378,10 @@ export function skillChanges(original: SkillFile[], draft: DraftFile[]): SkillCh
 
     const blocked = pending[0]!
     let attempt = 1
-    let temporary = `${blocked.from}~${attempt}`
+    let temporary = `cairn-move-${attempt}`
     while (taken(temporary) || targets.has(temporary)) {
       attempt += 1
-      temporary = `${blocked.from}~${attempt}`
+      temporary = `cairn-move-${attempt}`
     }
 
     changes.push({ op: 'move', from: blocked.from, to: temporary })
@@ -478,17 +478,19 @@ export interface LimitProblem {
   message: string
 }
 
-export function limitProblems(draft: DraftFile[], limits: SkillLimits): LimitProblem[] {
+export function limitProblems(draft: DraftFile[], limits: SkillLimits, original: SkillFile[] = []): LimitProblem[] {
   const problems: LimitProblem[] = []
   for (const file of draft) {
-    if (file.size > limits.fileBytes)
+    const unchanged = !file.modified && original.some(saved => saved.path === file.origin && saved.size === file.size)
+    if (file.size > limits.fileBytes && !unchanged)
       problems.push({ path: file.path, message: `${file.path} is ${formatBytes(file.size)}; files are limited to ${formatBytes(limits.fileBytes)}.` })
   }
 
   const total = draft.reduce((sum, file) => sum + file.size, 0)
-  if (total > limits.bundleBytes)
+  const originalBytes = original.reduce((sum, file) => sum + file.size, 0)
+  if (total > Math.max(limits.bundleBytes, originalBytes))
     problems.push({ message: `This skill would hold ${formatBytes(total)}; skills are limited to ${formatBytes(limits.bundleBytes)}.` })
-  if (draft.length > limits.files)
+  if (draft.length > Math.max(limits.files, original.length))
     problems.push({ message: `This skill would hold ${draft.length} files; skills are limited to ${limits.files}.` })
   if (!draft.some(file => file.path === skillManifest))
     problems.push({ message: 'A skill needs a SKILL.md file.' })

@@ -28,7 +28,12 @@ const props = defineProps<{
   unsaved: number
   readonly: boolean
 }>()
-const emit = defineEmits<{ replaced: [bundle: SkillBundle], detached: [], conflict: [] }>()
+const emit = defineEmits<{
+  replaced: [bundle: SkillBundle]
+  detached: []
+  conflict: []
+  working: [value: boolean]
+}>()
 const status = ref<SkillSourceStatus>()
 const busy = ref<'' | 'check' | 'update' | 'detach'>('')
 const error = ref('')
@@ -40,6 +45,8 @@ const risky = computed(() => props.source.modified || props.unsaved > 0)
 
 async function run(kind: 'check' | 'update' | 'detach', action: () => Promise<void>) {
   busy.value = kind
+  if (kind !== 'check')
+    emit('working', true)
   error.value = ''
   try {
     await action()
@@ -51,6 +58,8 @@ async function run(kind: 'check' | 'update' | 'detach', action: () => Promise<vo
   }
   finally {
     busy.value = ''
+    if (kind !== 'check')
+      emit('working', false)
   }
 }
 

@@ -103,6 +103,9 @@ skill never shows a partial save.
   or removed by sending one change per file. Empty folders disappear.
 - The result must contain a valid `SKILL.md` whose `name` equals `:name`, and
   stay within the limits.
+  Existing files over the supporting-file limit can be kept or moved without
+  rewriting them. An already over-limit total or file count may be reduced or
+  kept unchanged; a save cannot grow it further beyond that base.
 - JSON request bodies are limited to 150 KB. Send small text files inline and
   stage binary or larger files with `POST /skills/uploads`.
 - The response is the new bundle (as `GET …/bundle`) plus `description`.
@@ -194,8 +197,52 @@ the run snapshot. The run installs exactly that bundle, so later edits do not
 change queued or restarted runs. Modes are preserved: scripts stay executable
 inside the VM.
 
+Completed bundles are retained regardless of inactivity: an old queued run or
+dormant conversation can still reference them. Cleanup must establish that all
+snapshot references have been released before reclaiming a bundle; there is no
+automatic collection of completed bundles yet. A missing or malformed recorded
+revision stops preparation with an error. Only snapshots created before bundles
+may use the live skill folder. Reads and saves share a lock so an export or
+freeze sees one complete saved version.
+
 The prompt lists each selected skill by name, description and `SKILL.md` path.
 The agent reads `SKILL.md` and its supporting files when it uses the skill.
+
+## Local storage measurements
+
+Reproduce through the isolated backend launcher, with no other builds running:
+
+```sh
+CARGO_PROFILE_DEV_DEBUG=0 CARGO_INCREMENTAL=0 node scripts/test-backend.mjs \
+  -p cairn-installation --test skills skill_bundle_storage_measurements \
+  -- --ignored --nocapture
+```
+
+Measured 2026-10-14 in the agent VM: Linux, 12 virtual Intel Xeon CPUs, 31 GiB
+RAM, no swap, overlay filesystem on a 32 GiB disk. Workload: one 83-byte
+manifest and 64 supporting files of 4,096 bytes, eight executable supporting
+files, one caller. Both the plain-folder reference and each frozen bundle store
+262,227 payload bytes without encoding or compression; snapshot references add
+a 64-character revision. Filesystem allocation and directory metadata are not
+included in that byte count.
+
+Means over 100 reads or 20 writes; CPU uses the process CPU clock across Tokio
+threads. Cold reads request `POSIX_FADV_DONTNEED` for each file before timing;
+warm reads reuse recently read pages. The advisory eviction does not guarantee
+a cold host disk beneath the VM's overlay filesystem.
+
+| Operation | Plain-folder reference wall / CPU | Bundle wall / CPU |
+| --- | --- | --- |
+| Warm read | 0.850 / 1.014 ms | 2.016 / 2.356 ms |
+| Cold read (advisory eviction) | 0.825 / 0.987 ms | 2.013 / 2.366 ms |
+| New copy / freeze write | 1.189 / 1.384 ms | 6.961 / 8.309 ms |
+
+The reference reads known paths and copies files directly. Bundle reads also
+scan modes and paths and hash all bytes under the read lock; first-time freezes
+add those reads plus synced file writes and an atomic directory rename. Input
+mutations and reference setup are outside the timed writes. Reusing an existing
+revision avoids writing another copy. These are local filesystem measurements,
+not production network or S3 latency, and do not measure concurrent lock waits.
 
 ## Screens
 

@@ -32,6 +32,57 @@ class SkillBundlesTest {
     private fun draft() = SkillDraft.of(bundle).withOriginal("SKILL.md", SkillBody.Text(skill))
 
     @Test
+    fun invalidSkillsCanBeDecodedAndRepaired() {
+        val decoded =
+            wireJson.decodeFromString<SkillBundle>(
+                """{"name":"review","description":null,"files":[{"path":"SKILL.md","size":3}]}"""
+            )
+        assertTrue(SkillDraft.of(decoded).edit(SKILL_FILE, skill).problems().isEmpty())
+    }
+
+    @Test
+    fun yamlCommentsDoNotPreventSavingValidSkills() {
+        val commented = skill.replace("name: review", "name: review # reusable")
+        assertTrue(draft().edit(SKILL_FILE, commented).problems().isEmpty())
+        val quoted = skill.replace("name: review", "name: 'review' # reusable")
+        assertTrue(draft().edit(SKILL_FILE, quoted).problems().isEmpty())
+    }
+
+    @Test
+    fun legacySizesAllowEditsWithoutFurtherGrowth() {
+        val legacy =
+            bundle.copy(
+                limits = SkillLimits(fileBytes = 100, bundleBytes = 200, files = 2),
+                files =
+                    listOf(
+                        SkillFile(SKILL_FILE, 50),
+                        SkillFile("large.bin", 1000),
+                        SkillFile("old", 10),
+                    ),
+            )
+        val edited = SkillDraft.of(legacy).edit(SKILL_FILE, skill).delete("old")
+        assertTrue(edited.problems().isEmpty())
+        assertTrue(edited.put("large.bin", SkillBody.Text("x".repeat(101))).problems().isNotEmpty())
+        assertTrue(edited.put("extra", SkillBody.Text("x".repeat(100))).problems().isNotEmpty())
+    }
+
+    @Test
+    fun maximumLengthPathsCanBeSwappedThroughValidTemporaryNames() {
+        val a = "a".repeat(240)
+        val b = "b".repeat(240)
+        val saved = bundle.copy(files = listOf(SkillFile(SKILL_FILE), SkillFile(a), SkillFile(b)))
+        val swapped = SkillDraft.of(saved).move(a, "parking").move(b, a).move("parking", b)
+        val occupied = mutableSetOf(SKILL_FILE, a, b)
+        for (move in swapped.changes().filterIsInstance<SkillChange.Move>()) {
+            assertNull(skillPathProblem(move.to))
+            assertFalse(occupied.any { pathsCollide(move.to, it) })
+            assertTrue(occupied.remove(move.from))
+            occupied += move.to
+        }
+        assertEquals(setOf(SKILL_FILE, a, b), occupied)
+    }
+
+    @Test
     fun treeKeepsSkillFirstThenFoldersThenFilesAndHidesCollapsedChildren() {
         val rows =
             skillTree(
@@ -242,13 +293,10 @@ class SkillBundlesTest {
     }
 
     @Test
-    fun problemsFollowTheServerLimitsAndTheDeclaredName() {
+    fun problemsFollowTheServerLimitsAndLeaveYamlValidationToTheServer() {
         assertEquals(emptyList<String>(), draft().problems())
         val renamed = draft().edit("SKILL.md", "---\nname: other\n---\n")
-        assertEquals(
-            listOf("Le nom déclaré dans SKILL.md doit être « review »."),
-            renamed.problems(),
-        )
+        assertTrue(renamed.problems().isEmpty())
         val large =
             draft()
                 .copy(
@@ -260,7 +308,11 @@ class SkillBundlesTest {
                 .put("big.txt", SkillBody.Text("12345"))
         val problems = large.problems()
         assertTrue(problems.any { it.startsWith("big.txt dépasse") })
-        assertTrue(problems.any { it.startsWith("Un skill compte au plus 3") })
+        assertTrue(
+            large.put("extra", SkillBody.Text("x")).problems().any {
+                it.startsWith("Un skill compte au plus 3")
+            }
+        )
         assertTrue(problems.any { it.startsWith("Le skill dépasse") })
         val created = SkillDraft.create("my-skill")
         assertTrue(created.dirty)

@@ -53,7 +53,7 @@ data class SkillBundle(
     val files: List<SkillFile> = emptyList(),
     val limits: SkillLimits = SkillLimits(),
     val source: SkillSource? = null,
-    val description: String = "",
+    val description: String? = null,
 )
 
 @Serializable

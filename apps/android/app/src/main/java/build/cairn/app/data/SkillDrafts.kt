@@ -234,8 +234,8 @@ data class SkillDraft(
             val parked = pending.removeAt(0)
             var path: String
             do {
-                path = "cairn-move-${temporary++}-${parked.from.substringAfterLast('/')}"
-            } while (path in occupied)
+                path = "cairn-move-${temporary++}"
+            } while (occupied.any { pathsCollide(path, it) })
             occupied += path
             result += SkillChange.Move(parked.from, path)
             pending += SkillChange.Move(path, parked.to)
@@ -261,19 +261,14 @@ data class SkillDraft(
             if (!skill.text) problems += "SKILL.md doit être un texte UTF-8."
             if (skill.size > SKILL_MARKDOWN_BYTES)
                 problems += "SKILL.md dépasse ${formatBytes(SKILL_MARKDOWN_BYTES)}."
-            (content(SKILL_FILE) as? SkillBody.Text)?.let { text ->
-                val declared = skillFrontmatter(text.value)["name"]
-                if (declared != null && declared != name)
-                    problems += "Le nom déclaré dans SKILL.md doit être « $name »."
-                if (declared == null) problems += "SKILL.md doit déclarer « name: $name »."
-            }
+            // The backend validates YAML; the lightweight preview parser is not authoritative.
         }
         files
-            .filter { it.size > limits.fileBytes }
+            .filter { it.size > limits.fileBytes && (it.body != null || original(it) == null) }
             .forEach { problems += "${it.path} dépasse ${formatBytes(limits.fileBytes)}." }
-        if (files.size > limits.files)
+        if (files.size > maxOf(limits.files, base?.files?.size ?: 0))
             problems += "Un skill compte au plus ${limits.files} fichiers."
-        if (totalBytes > limits.bundleBytes)
+        if (totalBytes > maxOf(limits.bundleBytes, base?.files?.sumOf { it.size } ?: 0))
             problems += "Le skill dépasse ${formatBytes(limits.bundleBytes)} au total."
         return problems
     }

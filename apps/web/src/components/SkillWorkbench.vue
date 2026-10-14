@@ -96,6 +96,9 @@ const mobilePane = ref<'tree' | 'editor'>('editor')
 const loading = ref(false)
 const fileLoading = ref('')
 const saving = ref('')
+const sourceWorking = ref(false)
+const addingFiles = ref(0)
+const editingLocked = computed(() => readonly.value || !!saving.value || sourceWorking.value)
 const downloading = ref(false)
 const error = ref('')
 const conflict = ref(false)
@@ -114,10 +117,10 @@ const deleted = computed(() => deletedFiles(original.value, draft.value))
 const changes = computed(() => countChanges(original.value, draft.value))
 const totalBytes = computed(() => draft.value.reduce((sum, file) => sum + file.size, 0))
 const scripts = computed(() => draft.value.filter(file => file.executable).length)
-const problems = computed(() => limitProblems(draft.value, limits.value))
+const problems = computed(() => limitProblems(draft.value, limits.value, original.value))
 const selected = computed(() => draft.value.find(file => file.path === selectedPath.value))
 const kind = computed(() => selected.value ? skillFileKind(selected.value) : null)
-const editable = computed(() => !readonly.value && !!selected.value?.text)
+const editable = computed(() => !editingLocked.value && !!selected.value?.text)
 const previewable = computed(() => !!selected.value && (kind.value === 'manifest' || isMarkdown(selected.value.path) || (kind.value === 'image' && selected.value.text)))
 const gutterText = computed(() => Array.from({ length: (selected.value?.content ?? '').split('\n').length }, (_, index) => index + 1).join('\n'))
 const scopeLabel = computed(() => scope.value === 'global' ? 'Global' : state.projects.find(project => project.id === scope.value)?.name ?? 'Project')
@@ -287,7 +290,7 @@ function select(path: string | null, openEditor = true) {
 
 function editText(value: string) {
   const file = selected.value
-  if (!file || readonly.value)
+  if (!file || editingLocked.value)
     return
   file.content = value
   file.data = undefined
@@ -315,83 +318,93 @@ function pathProblem(path: string, ignore: string[] = []) {
 }
 
 async function addFiles(picked: PickedFile[], folder: string) {
-  error.value = ''
-  const skipped: string[] = []
-  const oversized: string[] = []
-  let added = 0
-  let replaced = 0
-  let last = ''
-  for (const entry of picked) {
-    const path = joinPath(folder, normalizePath(entry.path))
-    if (validateSkillPath(path)) {
-      skipped.push(entry.path)
-      continue
+  if (editingLocked.value)
+    return
+  addingFiles.value += 1
+  try {
+    error.value = ''
+    const skipped: string[] = []
+    const oversized: string[] = []
+    let added = 0
+    let replaced = 0
+    let last = ''
+    for (const entry of picked) {
+      const path = joinPath(folder, normalizePath(entry.path))
+      if (validateSkillPath(path)) {
+        skipped.push(entry.path)
+        continue
+      }
+
+      if (entry.file.size > limits.value.fileBytes) {
+        oversized.push(entry.file.name)
+        continue
+      }
+
+      const existing = draft.value.find(file => file.path === path)
+      if (!existing && occupied(path)) {
+        skipped.push(entry.path)
+        continue
+      }
+
+      const read = await readPickedFile(entry.file)
+      if (path === skillManifest && !read.text) {
+        skipped.push(entry.path)
+        continue
+      }
+
+      if (existing) {
+        Object.assign(existing, {
+          size: read.size,
+          text: read.text,
+          content: read.content,
+          data: read.data,
+          modified: true,
+          executable: existing.executable || read.executable,
+        })
+        replaced += 1
+      }
+      else {
+        draft.value.push({
+          path,
+          origin: null,
+          size: read.size,
+          text: read.text,
+          executable: read.executable,
+          originExecutable: false,
+          content: read.content,
+          data: read.data,
+          modified: true,
+        })
+        added += 1
+      }
+
+      last = path
     }
 
-    if (entry.file.size > limits.value.fileBytes) {
-      oversized.push(entry.file.name)
-      continue
+    const parts = []
+    if (added)
+      parts.push(`Added ${plural(added, 'file')}`)
+    if (replaced)
+      parts.push(`replaced ${plural(replaced, 'file')}`)
+    if (parts.length)
+      notice.value = `${parts.join(', ')}. Save to keep ${added + replaced === 1 ? 'it' : 'them'}.`
+    if (oversized.length)
+      error.value = `${oversized.join(', ')} ${oversized.length === 1 ? 'is' : 'are'} larger than ${formatBytes(limits.value.fileBytes)}, the limit for one file.`
+    else if (skipped.length)
+      error.value = `Skipped ${skipped.join(', ')}: hidden files, invalid paths and paths taken by a folder are not added.`
+    if (last) {
+      tree.value?.reveal(last)
+      select(last)
     }
-
-    const existing = draft.value.find(file => file.path === path)
-    if (!existing && occupied(path)) {
-      skipped.push(entry.path)
-      continue
-    }
-
-    const read = await readPickedFile(entry.file)
-    if (path === skillManifest && !read.text) {
-      skipped.push(entry.path)
-      continue
-    }
-
-    if (existing) {
-      Object.assign(existing, {
-        size: read.size,
-        text: read.text,
-        content: read.content,
-        data: read.data,
-        modified: true,
-        executable: existing.executable || read.executable,
-      })
-      replaced += 1
-    }
-    else {
-      draft.value.push({
-        path,
-        origin: null,
-        size: read.size,
-        text: read.text,
-        executable: read.executable,
-        originExecutable: false,
-        content: read.content,
-        data: read.data,
-        modified: true,
-      })
-      added += 1
-    }
-
-    last = path
   }
-
-  const parts = []
-  if (added)
-    parts.push(`Added ${plural(added, 'file')}`)
-  if (replaced)
-    parts.push(`replaced ${plural(replaced, 'file')}`)
-  if (parts.length)
-    notice.value = `${parts.join(', ')}. Save to keep ${added + replaced === 1 ? 'it' : 'them'}.`
-  if (oversized.length)
-    error.value = `${oversized.join(', ')} ${oversized.length === 1 ? 'is' : 'are'} larger than ${formatBytes(limits.value.fileBytes)}, the limit for one file.`
-  else if (skipped.length)
-    error.value = `Skipped ${skipped.join(', ')}: hidden files, invalid paths and paths taken by a folder are not added.`
-  if (last) {
-    tree.value?.reveal(last)
-    select(last)
+  finally {
+    addingFiles.value -= 1
   }
 }
 
 function openPicker(folder: string) {
+  if (editingLocked.value)
+    return
   pickerFolder.value = folder
   picker.value!.value = ''
   picker.value!.click()
@@ -403,6 +416,8 @@ function picked(event: Event) {
 }
 
 function newFile(parent = selected.value ? dirname(selected.value.path) : '', folder = false) {
+  if (editingLocked.value)
+    return
   creatingFile.value = {
     folder,
     parent,
@@ -420,6 +435,8 @@ watch(() => creatingFile.value?.path, (path) => {
 })
 
 function createFile() {
+  if (editingLocked.value)
+    return
   const form = creatingFile.value!
   const path = form.folder ? joinPath(joinPath(form.parent, form.path), form.first) : normalizePath(form.path)
   form.error = pathProblem(path)
@@ -445,6 +462,8 @@ function createFile() {
 }
 
 function startRename(path: string, folder: boolean) {
+  if (editingLocked.value)
+    return
   renaming.value = {
     from: path,
     folder,
@@ -454,6 +473,8 @@ function startRename(path: string, folder: boolean) {
 }
 
 function move(from: string, to: string, folder: boolean) {
+  if (editingLocked.value)
+    return 'Wait for the save to finish.'
   const moving = folder ? draft.value.filter(file => isInside(file.path, from)) : draft.value.filter(file => file.path === from)
   if (moving.some(file => file.path === skillManifest))
     return 'SKILL.md stays at the top of the skill.'
@@ -497,6 +518,8 @@ function moveInto(path: string, folder: string) {
 }
 
 function remove(path: string, folder: boolean) {
+  if (editingLocked.value)
+    return
   if (folder) {
     removingFolder.value = path
     return
@@ -508,6 +531,8 @@ function remove(path: string, folder: boolean) {
 }
 
 function removeFolder() {
+  if (editingLocked.value)
+    return
   const folder = removingFolder.value!
   draft.value = draft.value.filter(file => !isInside(file.path, folder))
   if (selectedPath.value && isInside(selectedPath.value, folder))
@@ -516,6 +541,8 @@ function removeFolder() {
 }
 
 function restore(path: string) {
+  if (editingLocked.value)
+    return
   const file = original.value.find(entry => entry.path === path)
   if (!file || occupied(path))
     return
@@ -527,7 +554,7 @@ function restore(path: string) {
 
 function toggleExecutable(path = selectedPath.value) {
   const file = draft.value.find(entry => entry.path === path)
-  if (file && file.path !== skillManifest && !readonly.value)
+  if (file && file.path !== skillManifest && !editingLocked.value)
     file.executable = !file.executable
 }
 
@@ -561,7 +588,7 @@ async function exportArchive() {
 }
 
 async function save() {
-  if (readonly.value || saving.value)
+  if (editingLocked.value || addingFiles.value)
     return
   error.value = ''
   notice.value = ''
@@ -617,6 +644,8 @@ async function save() {
 }
 
 function discard() {
+  if (editingLocked.value)
+    return
   error.value = ''
   notice.value = ''
   if (!bundle.value) {
@@ -636,6 +665,8 @@ async function reload() {
 }
 
 function requestClose() {
+  if (saving.value || sourceWorking.value || addingFiles.value)
+    return
   if (dirty.value && !readonly.value && !closing.value) {
     closing.value = true
     return
@@ -661,7 +692,8 @@ function replaced(result: SkillBundle) {
 async function detached() {
   pane.value = 'file'
   notify('Source detached')
-  await load()
+  if (bundle.value)
+    bundle.value = { ...bundle.value, source: null }
   await refresh()
 }
 
@@ -755,6 +787,7 @@ onMounted(async () => {
         <label>Name<input
           ref="nameInput"
           v-model="name"
+          :disabled="editingLocked"
           aria-label="Skill name"
           required
           pattern="[a-z0-9][a-z0-9\-]{0,63}"
@@ -779,6 +812,7 @@ onMounted(async () => {
               <button
                 type="button"
                 :class="twMerge(iconButton, 'size-7 phone:size-10')"
+                :disabled="editingLocked"
                 aria-label="New file"
                 title="New file"
                 @click="newFile()"
@@ -788,6 +822,7 @@ onMounted(async () => {
               <button
                 type="button"
                 :class="twMerge(iconButton, 'size-7 phone:size-10')"
+                :disabled="editingLocked"
                 aria-label="New folder"
                 title="New folder"
                 @click="newFile(selected ? dirname(selected.path) : '', true)"
@@ -797,6 +832,7 @@ onMounted(async () => {
               <button
                 type="button"
                 :class="twMerge(iconButton, 'size-7 phone:size-10')"
+                :disabled="editingLocked"
                 aria-label="Upload files"
                 title="Upload files"
                 @click="openPicker('')"
@@ -819,7 +855,7 @@ onMounted(async () => {
             :files="draft"
             :deleted="deleted"
             :selected="pane === 'file' ? selectedPath : null"
-            :readonly="readonly"
+            :readonly="editingLocked"
             @select="select"
             @rename="startRename"
             @remove="remove"
@@ -895,7 +931,8 @@ onMounted(async () => {
               :revision="bundle.revision"
               :source="bundle.source"
               :unsaved="changes"
-              :readonly="readonly"
+              :readonly="editingLocked"
+              @working="sourceWorking = $event"
               @replaced="replaced"
               @detached="detached"
               @conflict="conflict = true"
@@ -927,6 +964,7 @@ onMounted(async () => {
                 type="button"
                 role="switch"
                 :aria-checked="selected.executable"
+                :disabled="editingLocked"
                 aria-label="Executable"
                 class="flex min-h-8 items-center gap-2 rounded-lg px-2 text-2xs font-medium transition-colors hover:bg-hover phone:min-h-10"
                 :class="selected.executable ? 'text-success' : 'text-muted'"
@@ -1072,13 +1110,13 @@ onMounted(async () => {
             <Icon :name="Check" :size="14" class="text-success" /><span class="truncate">{{ notice || 'All changes saved' }}</span>
           </template>
         </p>
-        <UiButton @click="requestClose">
+        <UiButton :disabled="!!saving || sourceWorking || !!addingFiles" @click="requestClose">
           {{ dirty && !readonly ? 'Cancel' : 'Close' }}
         </UiButton>
         <UiButton
           v-if="!readonly"
           variant="primary"
-          :disabled="!!saving || (!creating && !changes) || conflict"
+          :disabled="editingLocked || !!addingFiles || (!creating && !changes) || conflict"
           @click="save"
         >
           <Icon

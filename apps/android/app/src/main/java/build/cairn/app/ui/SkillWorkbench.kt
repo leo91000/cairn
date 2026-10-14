@@ -336,7 +336,7 @@ internal fun SkillWorkbench(
                     FilePane(
                         draft,
                         model,
-                        owner,
+                        owner && !model.busy,
                         scopeName,
                         modifier,
                         open = {
@@ -371,7 +371,7 @@ internal fun SkillWorkbench(
                                 replacing = path
                                 replacer.launch(arrayOf("*/*"))
                             },
-                            actions = { actionsFor = path },
+                            actions = { if (!model.busy) actionsFor = path },
                         )
                     }
                 else if (editing != null)
@@ -387,7 +387,7 @@ internal fun SkillWorkbench(
                             replacing = editing
                             replacer.launch(arrayOf("*/*"))
                         },
-                        actions = { actionsFor = editing },
+                        actions = { if (!model.busy) actionsFor = editing },
                     )
                 else files(Modifier.fillMaxSize())
             }
