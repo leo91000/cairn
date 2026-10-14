@@ -177,13 +177,25 @@ async fn install_skills(home: &Path, skills: &Value, config: &Config) -> Result<
     Ok(installed)
 }
 
-/// Points the selected skills of a run without its own home at their frozen
-/// copies, which later edits of the live skills cannot change.
-pub(super) async fn frozen_skills(skills: &Value, config: &Config) -> Result<Value> {
-    let mut skills = skills.clone();
-    for skill in skills.as_array_mut().into_iter().flatten() {
-        if let Some(path) = recorded_bundle(skill, config).await? {
-            skill["path"] = path.join("SKILL.md").to_string_lossy().into_owned().into();
+/// Shared runs receive writable working copies, leaving canonical frozen revisions intact.
+pub(super) async fn frozen_skills(run: &Value, config: &Config) -> Result<Value> {
+    let mut skills = run["snapshot"]["skills"].clone();
+    let root = super::run_directory(run, config).join("skills");
+    match tokio::fs::symlink_metadata(&root).await {
+        Ok(metadata) => super::workspace::remove(&root, metadata.is_dir()).await?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
+    for (index, skill) in skills.as_array_mut().into_iter().flatten().enumerate() {
+        if let Some(source) = recorded_bundle(skill, config).await? {
+            let target = root.join(index.to_string()).join(text(skill, "name"));
+            private_dir(target.parent().unwrap()).await?;
+            copy_tree(&source, &target, true).await?;
+            skill["path"] = target
+                .join("SKILL.md")
+                .to_string_lossy()
+                .into_owned()
+                .into();
         }
     }
     Ok(skills)

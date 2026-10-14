@@ -409,6 +409,42 @@ async fn skill_bundle_storage_measurements() {
             "cpuMs": cpu / 20.0,
         });
     }
+    let task = api
+        .service
+        .task(
+            json!({
+                "name": "Storage measurement",
+                "agentId": MAIN_AGENT_ID,
+                "prompt": "Measure skill delivery",
+                "skills": ["global/review"],
+                "worktree": false,
+            }),
+            None,
+        )
+        .await
+        .unwrap();
+    let run = api.service.snapshot(task, "manual").await.unwrap();
+    let (mut wall, mut cpu) = (0.0, 0.0);
+    for _ in 0..20 {
+        let started_cpu = cpu_ms();
+        let started = Instant::now();
+        let prepared =
+            cairn_installation::execution::prepare(&run, &api.service.config, None, None, None)
+                .await
+                .unwrap();
+        wall += started.elapsed().as_secs_f64() * 1000.0;
+        cpu += cpu_ms() - started_cpu;
+        let installed = Path::new(text(&prepared["skills"][0], "path"))
+            .parent()
+            .unwrap();
+        let copied = bundle::scan(installed).await.unwrap();
+        assert_eq!(copied.iter().map(|file| file.size).sum::<u64>(), bytes);
+    }
+    results["sharedRunPrepare"] = json!({
+        "wallMs": wall / 20.0,
+        "cpuMs": cpu / 20.0,
+        "payloadBytes": bytes,
+    });
     println!("{}", serde_json::to_string_pretty(&results).unwrap());
 }
 
@@ -846,17 +882,44 @@ async fn runs_install_the_files_frozen_when_they_were_created() {
     );
     assert!(cairn_installation::skills::frozen(&s.config, "../escape").is_none());
 
-    // Runs without their own home read the frozen copy in place.
+    // Shared runs get their own writable copy; scripts cannot mutate the canonical revision.
     let prepared = cairn_installation::execution::prepare(&next, &s.config, None, None, None)
         .await
         .unwrap();
     assert_eq!(prepared["isolated"], false);
     let installed = Path::new(text(&prepared["skills"][0], "path"));
-    assert!(installed.starts_with(s.config.data_dir.join("skill-bundles")));
     assert_eq!(
         std::fs::read_to_string(installed.with_file_name("scripts/check.sh")).unwrap(),
         "#!/bin/sh\necho v2\n"
     );
+    let canonical = cairn_installation::skills::frozen(
+        &s.config,
+        text(&next["snapshot"]["skills"][0], "bundle"),
+    )
+    .unwrap();
+    std::fs::write(
+        installed.with_file_name("scripts/check.sh"),
+        "script-generated output\n",
+    )
+    .unwrap();
+    assert_eq!(
+        std::fs::read_to_string(canonical.join("scripts/check.sh")).unwrap(),
+        "#!/bin/sh\necho v2\n"
+    );
+    assert!(installed.starts_with(s.config.data_dir.join("runs").join(text(&next, "id"))));
+    let mut another_run = next.clone();
+    another_run["id"] = cairn_installation::config::id().into();
+    for run in [&another_run, &next] {
+        let restarted = cairn_installation::execution::prepare(run, &s.config, None, None, None)
+            .await
+            .unwrap();
+        let path = Path::new(text(&restarted["skills"][0], "path"));
+        assert_eq!(
+            std::fs::read_to_string(path.with_file_name("scripts/check.sh")).unwrap(),
+            "#!/bin/sh\necho v2\n"
+        );
+        assert_eq!(mode(&path.with_file_name("scripts/check.sh")), 0o700);
+    }
 
     let mut malformed = next.clone();
     malformed["snapshot"]["skills"][0]["bundle"] = "../invalid".into();
@@ -1114,6 +1177,100 @@ async fn github_imports_record_their_source_and_preview_updates() {
         )
         .await;
     assert_eq!(code, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn pending_github_updates_cannot_restore_detached_or_reimported_sources() {
+    use cairn_installation::skills::github;
+
+    for reimport in [false, true] {
+        let root = TempDir::new().unwrap();
+        let gh = fake_github(root.path());
+        let actual = root.path().join("gh-real");
+        std::fs::rename(&gh, &actual).unwrap();
+        let started = root.path().join("started");
+        let released = root.path().join("released");
+        let upstream_blob = sha('e');
+        std::fs::write(&gh, format!(
+            "#!/bin/sh\nif [ \"$4\" = 'repos/fixture/skills/git/blobs/{upstream_blob}' ]; then touch '{}'; while [ ! -f '{}' ]; do sleep 0.01; done; fi\nexec '{}' \"$@\"\n",
+            started.display(), released.display(), actual.display(),
+        )).unwrap();
+        std::fs::set_permissions(&gh, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let api = Api::with(|config| config.gh_bin = gh.to_string_lossy().into_owned()).await;
+        let first = sha('a');
+        let second = sha('b');
+        let manifest_blob = sha('c');
+        let original_blob = sha('d');
+        blob(root.path(), &manifest_blob, SKILL);
+        blob(root.path(), &original_blob, "Original\n");
+        blob(root.path(), &upstream_blob, "Upstream\n");
+        for (revision, tree, notes) in [
+            (&first, '3', &original_blob),
+            (&second, '4', &upstream_blob),
+        ] {
+            commit(
+                root.path(),
+                revision,
+                tree,
+                &[
+                    ("SKILL.md", "100644", manifest_blob.as_str()),
+                    ("notes.md", "100644", notes.as_str()),
+                ],
+            );
+        }
+        let request = json!({
+            "source": "github",
+            "repository": "fixture/skills",
+            "ref": first,
+            "path": "skills/review",
+        });
+        let imported = api
+            .ok("POST", "/skills/global/import", Some(request.clone()))
+            .await;
+        let service = api.service.clone();
+        let base = imported["imported"]["revision"].clone();
+        let updater = tokio::spawn(async move {
+            github::update(
+                &service,
+                "global",
+                "review",
+                &json!({
+                    "base": base,
+                    "commit": second,
+                }),
+                None,
+            )
+            .await
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            while !started.exists() {
+                tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+            }
+        })
+        .await
+        .unwrap();
+        if reimport {
+            api.ok("DELETE", "/skills/global/review", None).await;
+            api.ok("POST", "/skills/global/import", Some(request)).await;
+        } else {
+            api.ok("DELETE", "/skills/global/review/source", None).await;
+        }
+        let before = api.ok("GET", "/skills/global/review/bundle", None).await;
+        std::fs::write(released, "release").unwrap();
+        let result = updater.await.unwrap();
+        assert!(
+            result.is_err(),
+            "a stale update succeeded after the source changed"
+        );
+        assert_eq!(result.unwrap_err().status, 409);
+        let after = api.ok("GET", "/skills/global/review/bundle", None).await;
+        assert_eq!(after["revision"], before["revision"]);
+        assert_eq!(after["source"], before["source"]);
+        assert_eq!(
+            std::fs::read_to_string(api.skill_dir("review").join("notes.md")).unwrap(),
+            "Original\n"
+        );
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

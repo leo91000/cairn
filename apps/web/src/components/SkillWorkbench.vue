@@ -765,6 +765,7 @@ onMounted(async () => {
           :class="pane === 'source' ? 'bg-soft' : 'bg-surface'"
           :aria-pressed="pane === 'source'"
           aria-label="GitHub source"
+          :disabled="sourceWorking"
           @click="pane = pane === 'source' ? 'file' : 'source'; mobilePane = 'editor'"
         >
           <Icon :name="Github" :size="15" />

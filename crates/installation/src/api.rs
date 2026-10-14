@@ -418,8 +418,7 @@ async fn delete_skill(
             "This skill is selected by a task. Update that task first.",
         ));
     }
-    s.skills.remove(name, project).await?;
-    crate::skills::github::forget(s, scope, name).await?;
+    crate::skills::github::remove(s, scope, name, project).await?;
     let detail = json!({
         "scope": scope,
         "name": name

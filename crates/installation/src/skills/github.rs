@@ -21,6 +21,9 @@ const PARALLEL_DOWNLOADS: usize = 6;
 // Files whose upstream changes include line diffs; others list only their status.
 const DIFF_FILES: usize = 60;
 const DIFF_BYTES: u64 = 1_000_000;
+// File replacement and source metadata form one lifecycle operation. GitHub downloads
+// happen before this lock so detach and deletion can invalidate a pending update.
+static MUTATIONS: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 fn key(scope: &str, skill: &str) -> String {
     format!("skill-source:{scope}/{skill}")
@@ -305,6 +308,7 @@ pub async fn import(
         .collect();
     let changes = download(s, repo, selected).await?;
     let skill = imported_name(&changes)?;
+    let _mutation = MUTATIONS.lock().await;
     let saved = s.skills.apply(&skill, None, &changes, project).await?;
     let mut bundle = super::bundle_response(scope, &skill, &saved);
     let record = json!({
@@ -359,6 +363,14 @@ pub async fn source(s: &Service, scope: &str, skill: &str, bundle: &mut Value) -
 }
 
 pub async fn forget(s: &Service, scope: &str, skill: &str) -> Result<()> {
+    let _mutation = MUTATIONS.lock().await;
+    s.store.delete(&key(scope, skill)).await
+}
+
+/// Deletes the skill files and source together, excluding import/update commits.
+pub async fn remove(s: &Service, scope: &str, skill: &str, project: Option<&Path>) -> Result<()> {
+    let _mutation = MUTATIONS.lock().await;
+    s.skills.remove(skill, project).await?;
     s.store.delete(&key(scope, skill)).await
 }
 
@@ -471,6 +483,12 @@ pub async fn update(
         ));
     }
     let changes = download(s, &repo, files).await?;
+    let _mutation = MUTATIONS.lock().await;
+    if s.store.kv(&key(scope, skill)).await?.as_ref() != Some(&record) {
+        return Err(Error::conflict(
+            "The GitHub source changed during this update. Reload the skill and try again.",
+        ));
+    }
     let saved = s.skills.replace(skill, base, &changes, project).await?;
 
     record["commit"] = commit.sha.into();

@@ -181,7 +181,8 @@ update.
   Text diffs are omitted for files over 2,000 lines.
 - `POST /skills/:scope/:name/source/update` with `{ "commit", "base" }` replaces
   the skill with that commit's files. Local edits are lost; clients warn when
-  `modified` is true.
+  `modified` is true. If the source was detached, deleted or reimported while
+  GitHub files were downloading, the update returns `409` before replacing files.
 - `DELETE /skills/:scope/:name/source` keeps the files and forgets the source.
 
 ## MCP tools
@@ -198,7 +199,9 @@ When a run or conversation is created, Cairn freezes each selected skill into
 a content-addressed bundle under the data directory and records its revision in
 the run snapshot. The run installs exactly that bundle, so later edits do not
 change queued or restarted runs. Modes are preserved: scripts stay executable
-inside the VM.
+inside the VM. Shared runs also receive a separate working copy under their run
+directory, so scripts that write supporting resources leave the canonical bundle
+intact. Re-preparing a shared run refreshes that copy from its recorded revision.
 
 Completed bundles are retained regardless of inactivity: an old queued run or
 dormant conversation can still reference them. Cleanup must establish that all
@@ -224,7 +227,7 @@ CARGO_PROFILE_DEV_DEBUG=0 CARGO_INCREMENTAL=0 node scripts/test-backend.mjs \
 Measured 2026-10-14 in the agent VM: Linux, 12 virtual Intel Xeon CPUs, 31 GiB
 RAM, no swap, overlay filesystem on a 32 GiB disk. Workload: one 83-byte
 manifest and 64 supporting files of 4,096 bytes, eight executable supporting
-files, one caller. Both the plain-folder reference and each frozen bundle store
+files, one caller. The plain-folder reference, each frozen bundle and each run copy store
 262,227 payload bytes without encoding or compression; snapshot references add
 a 64-character revision. Filesystem allocation and directory metadata are not
 included in that byte count.
@@ -236,9 +239,16 @@ a cold host disk beneath the VM's overlay filesystem.
 
 | Operation | Plain-folder reference wall / CPU | Bundle wall / CPU |
 | --- | --- | --- |
-| Warm read | 0.850 / 1.014 ms | 2.016 / 2.356 ms |
-| Cold read (advisory eviction) | 0.825 / 0.987 ms | 2.013 / 2.366 ms |
-| New copy / freeze write | 1.189 / 1.384 ms | 6.961 / 8.309 ms |
+| Warm read | 0.960 / 1.157 ms | 2.135 / 2.495 ms |
+| Cold read (advisory eviction) | 0.899 / 1.070 ms | 2.167 / 2.541 ms |
+| New copy / freeze write | 1.232 / 1.436 ms | 6.951 / 8.284 ms |
+| Shared run preparation with copy | same copy reference above | 2.372 / 2.758 ms |
+
+Shared run preparation refreshes a 262,227-byte working copy from the canonical
+bundle on each preparation. The measured operation includes ordinary shared-run
+preparation and removing any prior working copy; snapshot creation, agent launch,
+read verification and network requests are outside this timing. Working-copy
+bytes are additional storage per run, and are removed with that run's directory.
 
 The reference reads known paths and copies files directly. Bundle reads also
 scan modes and paths and hash all bytes under the read lock; first-time freezes

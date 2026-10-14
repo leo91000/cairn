@@ -500,6 +500,8 @@ test('detaching a GitHub source preserves unsaved files', async ({ page, workspa
   try {
     await expect.poll(() => detachStarted).toBe(true)
     await expect(page.getByRole('button', { name: 'Close source', exact: true })).toBeDisabled()
+    if (!phone(page))
+      await expect(page.getByRole('button', { name: 'GitHub source', exact: true })).toBeDisabled()
     await showTree(page)
     await row(page, 'SKILL.md').click()
     if (phone(page))
