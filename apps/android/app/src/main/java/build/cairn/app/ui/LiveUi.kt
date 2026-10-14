@@ -507,7 +507,9 @@ internal fun timelineEntries(events: List<RunEvent>, chat: Boolean = false): Lis
     var activity = mutableListOf<RunEvent>()
     fun flushActivity() {
         if (activity.isNotEmpty()) {
-            result.add(TimelineEntry("activity:${activity.first().id}", activity.toList(), false))
+            for (group in activity.chunked(MAX_ACTIVITY_GROUP_SIZE)) {
+                result.add(TimelineEntry("activity:${group.first().id}", group, false))
+            }
             activity = mutableListOf()
         }
     }

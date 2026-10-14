@@ -30,6 +30,55 @@ class LiveTest {
         "event: batch\nid: $cursor\ndata: ${wireJson.encodeToString(batch)}\n\n"
 
     @Test
+    fun `revalidation retains the cached paging boundary and a reset replaces it`() = runBlocking {
+        for (reset in listOf(false, true)) {
+            MockWebServer().use { server ->
+                val revision = "v1:r1:1"
+                val state = LiveState(run = Run("r1", status = "running"))
+                server.enqueue(
+                    MockResponse()
+                        .setHeader("Content-Type", "text/event-stream")
+                        .setBody(
+                            frame(
+                                350,
+                                LiveBatch(
+                                    emptyList(),
+                                    state,
+                                    reset,
+                                    false,
+                                    revision,
+                                    oldest = 251,
+                                    hasOlder = true,
+                                ),
+                            )
+                        )
+                )
+                server.start()
+                val api = CairnApi(server.url("/"), MemoryVault())
+                val path = "/runs/r1/stream"
+                val session = LiveSession()
+                session.restore(
+                    CachedHistory(
+                        350,
+                        revision,
+                        state,
+                        (1L..350L).map { message(it, "saved", itemId = "m$it") },
+                        oldest = 1,
+                        hasOlder = false,
+                    ),
+                    path,
+                    api.streamGeneration.get(),
+                )
+                val final = withTimeout(5000) { api.live(path, session).first { it.synced } }
+                assertEquals(if (reset) 251L else 1L, final.oldest)
+                assertEquals(reset, final.hasOlder)
+                assertEquals(if (reset) 0 else 350, final.events.size)
+                assertEquals("350", server.takeRequest().requestUrl!!.queryParameter("after"))
+            }
+        }
+    }
+
+    @Test
     fun `slow display receives the complete answer without blocking or dropping wire deltas`() =
         runBlocking {
             MockWebServer().use { server ->

@@ -271,6 +271,8 @@ export function useLiveRun(path: () => string, options: { hold?: number } = {}) 
       if (reset) {
         rows = []
         accumulator = new LiveEvents()
+        oldest = 0
+        older = false
         complete = false
         position.value = undefined
         olderError.value = ''
@@ -291,7 +293,9 @@ export function useLiveRun(path: () => string, options: { hold?: number } = {}) 
 
       cursor = accepted
       history = batch.history
-      if (batch.oldest !== undefined) {
+      // Revalidation describes the server's recent window, not the pages already read.
+      // Keep the earliest loaded boundary unless the stream replaces the history.
+      if (batch.oldest !== undefined && (reset || !oldest || batch.oldest <= oldest)) {
         oldest = batch.oldest
         older = batch.hasOlder ?? false
       }
@@ -327,7 +331,7 @@ export function useLiveRun(path: () => string, options: { hold?: number } = {}) 
         }
       }).finally(() => { checking = false })
     }, cached ? { cursor: cached.cursor, history: cached.history } : undefined)
-    if (state.installationId) {
+    if (state.installationId && !cached) {
       void readSnapshot()
     }
   }, { immediate: true, flush: 'sync' })

@@ -275,12 +275,15 @@ fun CairnApi.live(path: String, session: LiveSession = LiveSession()): Flow<Live
                     require(snapshot.history == null || batch.history != null) {
                         "Révision indisponible"
                     }
-                    if (
+                    val reset =
                         batch.reset ||
                             (snapshot.history != null && batch.history != snapshot.history) ||
                             (batch.state != null && snapshot.state?.run?.id != batch.state.run?.id)
-                    )
-                        accumulator.clear()
+                    if (reset) accumulator.clear()
+                    // A reconnect's recent window must not hide pages restored from disk.
+                    val replaceBoundary =
+                        batch.oldest != null &&
+                            (reset || snapshot.oldest == 0L || batch.oldest <= snapshot.oldest)
                     val events = accumulator.append(batch.events)
                     snapshot =
                         LiveSnapshot(
@@ -291,17 +294,13 @@ fun CairnApi.live(path: String, session: LiveSession = LiveSession()): Flow<Live
                             synced = !batch.more,
                             history = batch.history,
                             cursor = frame.cursor,
-                            oldest = batch.oldest ?: snapshot.oldest,
+                            oldest =
+                                if (replaceBoundary) batch.oldest!!
+                                else if (reset) 0 else snapshot.oldest,
                             hasOlder =
-                                if (batch.oldest != null) batch.hasOlder else snapshot.hasOlder,
-                            position =
-                                if (
-                                    batch.reset ||
-                                        (snapshot.history != null &&
-                                            batch.history != snapshot.history)
-                                )
-                                    null
-                                else snapshot.position,
+                                if (replaceBoundary) batch.hasOlder
+                                else !reset && snapshot.hasOlder,
+                            position = if (reset) null else snapshot.position,
                         )
                     cursor = frame.cursor
                     session.cursor = cursor

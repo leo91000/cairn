@@ -2,6 +2,8 @@ import type { RunEvent } from '../../../packages/contracts/contracts'
 import { describeCommand, expectedCommandOutcome } from './activity-command'
 import { outputSummary } from './activity-data'
 
+export const MAX_ACTIVITY_GROUP_SIZE = 30
+
 export interface ActivityCode {
   label: string
   code: string
@@ -427,7 +429,7 @@ export function activityEntries(events: RunEvent[], chat = false): ActivityEntry
 export function teamEntries(entries: ActivityEntry[]): ActivityEntry[] {
   const result: ActivityEntry[] = []
   for (const entry of entries) {
-    if (entry.kind !== 'group' || !entry.artifacts.some(artifact => artifact.kind === 'subagent')) {
+    if (entry.kind !== 'group') {
       result.push(entry)
       continue
     }
@@ -437,7 +439,7 @@ export function teamEntries(entries: ActivityEntry[]): ActivityEntry[] {
       const team = artifact.kind === 'subagent'
       if (team && last?.kind === 'team')
         last.agents.push(artifact)
-      else if (!team && last?.kind === 'group')
+      else if (!team && last?.kind === 'group' && last.artifacts.length < MAX_ACTIVITY_GROUP_SIZE)
         last.artifacts.push(artifact)
       else
         result.push(last = team ? { kind: 'team', id: `team:${artifact.id}`, agents: [artifact] } : { kind: 'group', id: `group:${artifact.id}`, artifacts: [artifact] })

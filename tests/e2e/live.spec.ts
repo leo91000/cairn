@@ -32,7 +32,7 @@ for (const kind of ['chat', 'task'] as const) {
       workspace.service.store.event(run.id, 'item.completed', text, { item: { id: `buffer-${i}`, type: 'agent_message', text } })
     }
 
-    // Several API pages collapse into one tool group, leaving no scrollbar.
+    // Reads fold into bounded groups; short output should still prefetch older pages.
     for (let i = 0; i < 250; i++) {
       workspace.service.store.event(run.id, 'item.completed', 'Checked a file', {
         item: {
@@ -56,6 +56,10 @@ for (const kind of ['chat', 'task'] as const) {
     await expect(page.locator('.activity-message').filter({ hasText: 'Buffered message 99:' })).toBeAttached()
     expect(requests.length).toBeGreaterThanOrEqual(2)
     expect(new Set(requests).size).toBe(requests.length)
+    const summaries = await page.getByTestId('agent-actions').allTextContents()
+    const readCounts = summaries.flatMap(text => [...text.matchAll(/Read (\d+) files/g)].map(match => Number(match[1])))
+    expect(readCounts.length).toBeGreaterThan(1)
+    expect(readCounts.every(count => count <= 30)).toBe(true)
     // Loading older pages must keep following the latest output.
     const scroller = page.getByRole('region', { name: 'Activity output' })
     await expect.poll(() => scroller.evaluate(el => el.scrollHeight - el.clientHeight - el.scrollTop)).toBeLessThan(2)
@@ -448,6 +452,11 @@ test('recent history loads older pages without moving the reader and survives a 
   await expect.poll(async () => Math.abs((await anchor.boundingBox())!.y - top)).toBeLessThan(2)
   await page.unrouteAll({ behavior: 'wait' })
   await useRelayForHttpMocks(page)
+  // Read beyond the former 200-event cache window, then persist all loaded pages.
+  await scroller.evaluate(el => el.scrollTop = 0)
+  await expect(page.locator('.activity-message').filter({ hasText: 'Paged line 050' })).toBeAttached()
+  await scroller.evaluate(el => el.scrollTop = 0)
+  await expect(page.locator('.activity-message').filter({ hasText: 'Paged line 000' })).toBeAttached()
   // Move back to the latest content and let its bounded disk snapshot commit.
   await page.getByRole('button', { name: 'Latest activity', exact: true }).click()
   await expect(page.locator('.activity-message').filter({ hasText: 'Paged line 349' })).toBeVisible()
@@ -460,9 +469,25 @@ test('recent history loads older pages without moving the reader and survives a 
       request.onsuccess = () => resolve(Math.max(0, ...request.result.map(e => JSON.parse(e.text).events.length)))
       tx.oncomplete = () => db.close()
     }
-  }))).toBe(200)
+  }))).toBeGreaterThanOrEqual(350)
+  let repeatedHistoryReads = 0
+  page.on('request', (request) => {
+    if (request.url().includes(`/runs/${run.id}/history?`) || request.url().includes(`/runs/${run.id}/events?`))
+      repeatedHistoryReads++
+  })
   await page.route(`**/api/runs/${run.id}/stream?**`, route => route.abort())
   await page.reload()
   await page.getByRole('button', { name: /^Conversation/ }).click()
   await expect(page.locator('.activity-message').filter({ hasText: 'Paged line 349' })).toBeVisible()
+  await expect(page.locator('.activity-message').filter({ hasText: 'Paged line 000' })).toBeAttached()
+  await scroller.evaluate(el => el.scrollTop = 0)
+  await page.waitForTimeout(750)
+  expect(repeatedHistoryReads).toBe(0)
+  await page.unroute(`**/api/runs/${run.id}/stream?**`)
+  await page.reload()
+  await page.getByRole('button', { name: /^Conversation/ }).click()
+  await expect(page.locator('.activity-message').filter({ hasText: 'Paged line 000' })).toBeAttached()
+  await scroller.evaluate(el => el.scrollTop = 0)
+  await page.waitForTimeout(750)
+  expect(repeatedHistoryReads).toBe(0)
 })

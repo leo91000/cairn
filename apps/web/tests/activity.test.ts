@@ -2,7 +2,7 @@ import type { RunEvent } from '../../../packages/contracts/contracts'
 import { describe, expect, it } from 'vitest'
 import sample from '../../../tests/fixtures/activity-events.json'
 import { redactPayload } from '../../../tests/fixtures/legacy/server/worker.ts'
-import { activityEntries } from '../src/activity'
+import { activityEntries, teamEntries } from '../src/activity'
 
 const events: RunEvent[] = sample.map((payload, index) => ({
   id: index + 1,
@@ -473,4 +473,37 @@ describe('expected command outcomes and connection recovery', () => {
     const result = artifacts([old, event(2, 'turn.completed', {})])[0]
     expect(result).toMatchObject({ status: 'info', statusLabel: 'Recovered', raw: old.text })
   })
+})
+
+it.each([false, true])('caps activity groups at thirty tools after folding updates (chat=%s)', (chat) => {
+  const events = Array.from({ length: 1001 }, (_, i): RunEvent => ({
+    id: i + 1,
+    runId: 'r',
+    createdAt: i,
+    type: 'item.completed',
+    text: '',
+    payload: {
+      item: {
+        id: `t${i}`,
+        type: 'command_execution',
+        command: 'pnpm test',
+        exit_code: 0,
+      },
+    },
+  }))
+  const entries = activityEntries(events, chat)
+  const groups = entries.flatMap(entry => entry.kind === 'group' ? [entry] : [])
+  expect(groups).toHaveLength(34)
+  expect(groups.every(group => group.artifacts.length <= 30)).toBe(true)
+  expect(groups.flatMap(group => group.artifacts).map(item => item.id)).toHaveLength(1001)
+  expect(new Set(entries.map(entry => entry.id)).size).toBe(entries.length)
+})
+
+it('also caps tool groups in a subagent timeline', () => {
+  const artifact = activityEntries(events).flatMap(entry => entry.kind === 'group' ? entry.artifacts : [])[0]!
+  const items = Array.from({ length: 1001 }, (_, i) => ({ ...artifact, kind: 'command' as const, id: `nested-${i}` }))
+  const entries = teamEntries([{ kind: 'group', id: 'parent', artifacts: items }])
+  expect(entries).toHaveLength(34)
+  expect(entries.every(entry => entry.kind === 'group' && entry.artifacts.length <= 30)).toBe(true)
+  expect(entries.flatMap(entry => entry.kind === 'group' ? entry.artifacts : [])).toEqual(items)
 })

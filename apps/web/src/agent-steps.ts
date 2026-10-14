@@ -1,4 +1,5 @@
 import type { ActivityArtifact } from './activity'
+import { MAX_ACTIVITY_GROUP_SIZE } from './activity'
 
 /** One line of the agent's timeline; consecutive reads fold into a single step. Mirrors Android's AgentSteps.kt. */
 export interface AgentStep {
@@ -29,7 +30,7 @@ export function agentSteps(artifacts: ActivityArtifact[]): AgentStep[] {
     const settledRead = (item?: ActivityArtifact) => item?.kind === 'read' && item.status !== 'error' && !isRunning(item)
     if (settledRead(artifact)) {
       let end = index
-      while (settledRead(artifacts[end + 1]))
+      while (end - index + 1 < MAX_ACTIVITY_GROUP_SIZE && settledRead(artifacts[end + 1]))
         end++
       const group = artifacts.slice(index, end + 1)
       const files = [...new Set(group.flatMap(item => item.files.map(file => fileName(file.path))))]

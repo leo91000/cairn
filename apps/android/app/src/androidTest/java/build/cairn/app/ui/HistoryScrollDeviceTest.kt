@@ -165,6 +165,7 @@ class HistoryScrollDeviceTest {
                 }
             val application = ApplicationProvider.getApplicationContext<Application>()
 
+            var visible by mutableStateOf(true)
             val vm = CairnViewModel(application, beaconOrigin = "")
             runBlocking {
                 vm.state.first { it.ready }
@@ -173,7 +174,7 @@ class HistoryScrollDeviceTest {
             try {
                 compose.setContent {
                     val workspace by vm.state.collectAsStateWithLifecycle()
-                    if (workspace.session.authenticated)
+                    if (visible && workspace.session.authenticated)
                         CairnTheme("dark") {
                             Surface(Modifier.fillMaxSize()) {
                                 ChatScreen(vm, workspace, "long", openChat = {}, openRun = {})
@@ -237,6 +238,17 @@ class HistoryScrollDeviceTest {
                 compose.waitUntil(10000) { pages.size == 5 }
                 assertEquals("Each older page is requested once", pages.distinct(), pages)
                 Thread.sleep(1500)
+                compose.runOnIdle { visible = false }
+                compose.waitForIdle()
+                compose.runOnIdle { visible = true }
+                compose.waitUntil(10000) {
+                    compose
+                        .onAllNodesWithText("Question 1 :", substring = true)
+                        .fetchSemanticsNodes()
+                        .isNotEmpty()
+                }
+                Thread.sleep(1500)
+                assertEquals("Reopening cached pages must not download them again", 5, pages.size)
             } finally {
                 vm.api.closeStreams()
             }
