@@ -97,6 +97,7 @@ data class SkillDraft(
     fun put(path: String, body: SkillBody, executable: Boolean? = null): SkillDraft {
         skillPathProblem(path)?.let { throw IllegalArgumentException(it) }
         val existing = file(path)
+        requireFileDestination(path, existing?.let { setOf(it.path) }.orEmpty())
         val text = body is SkillBody.Text
         if (existing != null)
             return replace(
@@ -108,7 +109,6 @@ data class SkillDraft(
                     executable = executable ?: existing.executable,
                 ),
             )
-        require(path !in folderPaths()) { "Un dossier porte déjà ce nom." }
         val shebang = body is SkillBody.Text && body.value.startsWith("#!")
         return copy(
             files =
@@ -120,7 +120,9 @@ data class SkillDraft(
     fun addFolder(path: String): SkillDraft {
         val clean = path.trim('/')
         skillPathProblem(clean)?.let { throw IllegalArgumentException(it) }
-        require(file(clean) == null) { "Un fichier porte déjà ce nom." }
+        require(files.none { it.path == clean || clean.startsWith("${it.path}/") }) {
+            "Un fichier occupe ce chemin ou un dossier parent."
+        }
         return copy(folders = folders + clean)
     }
 
@@ -129,7 +131,7 @@ data class SkillDraft(
         val file = requireNotNull(file(from)) { "Fichier introuvable." }
         require(from != SKILL_FILE) { "SKILL.md reste à la racine du skill." }
         skillPathProblem(to)?.let { throw IllegalArgumentException(it) }
-        require(file(to) == null && to !in folderPaths()) { "Ce chemin est déjà utilisé." }
+        requireFileDestination(to, setOf(from))
         return replace(from, file.copy(path = to))
     }
 
@@ -144,10 +146,8 @@ data class SkillDraft(
         val moved = files.filter { it.path.startsWith("$source/") }
         val renamed = moved.associate { it.path to target + it.path.removePrefix(source) }
         renamed.values.forEach { skillPathProblem(it)?.let { problem -> error(problem) } }
-        val others = files.filter { it.path !in renamed }.map { it.path }.toSet()
-        require(renamed.values.none { it in others } && target !in others) {
-            "Ce chemin est déjà utilisé."
-        }
+        val ignored = moved.map { it.path }.toSet()
+        renamed.values.forEach { requireFileDestination(it, ignored, source) }
         return copy(
             files = files.map { renamed[it.path]?.let { path -> it.copy(path = path) } ?: it },
             folders =
@@ -177,7 +177,7 @@ data class SkillDraft(
     /** Brings back a deleted base file at its saved path. */
     fun restore(origin: String): SkillDraft {
         val original = requireNotNull(baseFiles[origin]) { "Fichier introuvable." }
-        require(file(origin) == null) { "Ce chemin est déjà utilisé." }
+        requireFileDestination(origin)
         return copy(
             files =
                 files +
@@ -194,6 +194,27 @@ data class SkillDraft(
     fun setExecutable(path: String, executable: Boolean): SkillDraft {
         val file = requireNotNull(file(path)) { "Fichier introuvable." }
         return replace(path, file.copy(executable = executable))
+    }
+
+    /** A file cannot share its path with a file ancestor, a folder or a descendant. */
+    private fun requireFileDestination(
+        path: String,
+        ignored: Set<String> = emptySet(),
+        movedFolder: String? = null,
+    ) {
+        require(files.none { it.path !in ignored && pathsCollide(path, it.path) }) {
+            "Un fichier occupe ce chemin ou un dossier parent."
+        }
+        require(
+            folders.none { folder ->
+                val moving =
+                    movedFolder != null &&
+                        (folder == movedFolder || folder.startsWith("$movedFolder/"))
+                !moving && (folder == path || folder.startsWith("$path/"))
+            }
+        ) {
+            "Un dossier porte déjà ce nom."
+        }
     }
 
     private fun replace(path: String, file: DraftFile) =
@@ -223,7 +244,7 @@ data class SkillDraft(
             // A move waits while its target, one of the target's parent folders, or a folder at
             // the target path is still held by a file that moves later in the batch.
             val ready = pending.firstOrNull { move ->
-                pending.none { it !== move && pathsCollide(move.to, it.from) }
+                pending.none { pathsCollide(move.to, it.from) }
             }
             if (ready != null) {
                 result += ready

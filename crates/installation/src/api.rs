@@ -316,7 +316,8 @@ async fn skill_routes(s: &Arc<Service>, input: &Input, route: Route<'_>) -> Resu
                 _ => return Err(Error::bad("base: expected a revision or null")),
             };
             let (changes, uploads) = s.skills.changes(&input.body["changes"]).await?;
-            s.skills
+            let saved = s
+                .skills
                 .apply(name, base, &changes, project.as_deref())
                 .await?;
             s.skills.discard(&uploads).await;
@@ -325,7 +326,7 @@ async fn skill_routes(s: &Arc<Service>, input: &Input, route: Route<'_>) -> Resu
                 "name": name
             });
             s.store.audit("skill.saved", detail).await?;
-            let mut bundle = s.skills.bundle(scope, name, project.as_deref()).await?;
+            let mut bundle = crate::skills::bundle_response(scope, name, &saved);
             github::source(s, scope, name, &mut bundle).await?;
             bundle
         }
@@ -350,7 +351,17 @@ async fn skill_routes(s: &Arc<Service>, input: &Input, route: Route<'_>) -> Resu
             let result = if file == "SKILL.md" {
                 let content = std::str::from_utf8(&bytes)
                     .map_err(|_| Error::bad("SKILL.md must be UTF-8 text."))?;
-                s.skills.save(name, content, project.as_deref()).await?
+                let parsed = crate::skills::metadata(content)?;
+                s.skills
+                    .write(
+                        name,
+                        file,
+                        bytes,
+                        input.body["executable"].as_bool(),
+                        project.as_deref(),
+                    )
+                    .await?;
+                serde_json::to_value(parsed)?
             } else {
                 let executable = input.body["executable"].as_bool();
                 s.skills

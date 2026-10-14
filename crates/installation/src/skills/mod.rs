@@ -63,12 +63,12 @@ pub fn mentions(text: &str, names: &[&str]) -> Vec<String> {
 
 /// SKILL.md frontmatter.
 #[derive(Serialize)]
-struct Metadata {
+pub(crate) struct Metadata {
     name: String,
     description: String,
 }
 
-fn metadata(content: &str) -> Result<Metadata> {
+pub(crate) fn metadata(content: &str) -> Result<Metadata> {
     if content.len() > 100000 {
         return Err(Error::bad("Skill is too large (maximum 100 KB)."));
     }
@@ -327,6 +327,19 @@ pub fn frozen(config: &Config, revision: &str) -> Option<PathBuf> {
         .then(|| config.data_dir.join("skill-bundles").join(revision))
 }
 
+/// The wire description of one version, captured while reading or saving it.
+pub fn bundle_response(scope: &str, skill: &str, described: &bundle::Described) -> Value {
+    json!({
+        "scope": scope,
+        "name": skill,
+        "description": described.description,
+        "revision": described.revision,
+        "files": described.files,
+        "limits": bundle::limits(),
+        "source": null,
+    })
+}
+
 #[derive(Clone)]
 pub struct Skills {
     pub config: Config,
@@ -514,16 +527,7 @@ impl Skills {
         let _read = bundle::ACCESS.read().await;
         let directory = self.directory(skill, project).await?;
         let described = bundle::describe_locked(&directory).await?;
-        let content = small_file(&directory.join("SKILL.md")).await.ok();
-        Ok(json!({
-            "scope": scope,
-            "name": skill,
-            "description": content.and_then(|content| metadata(&content).ok()).map(|parsed| parsed.description),
-            "revision": described.revision,
-            "files": described.files,
-            "limits": bundle::limits(),
-            "source": null,
-        }))
+        Ok(bundle_response(scope, skill, &described))
     }
 
     /// Resolves the JSON changes of a batch, reading staged uploads. Returns the
@@ -593,7 +597,7 @@ impl Skills {
         base: Option<&str>,
         changes: &[Change],
         project: Option<&Path>,
-    ) -> Result<()> {
+    ) -> Result<bundle::Described> {
         name(skill)?;
         let root = self.root(project).await?;
         let base = base.map_or(Base::Create, Base::Edit);
@@ -607,7 +611,7 @@ impl Skills {
         base: &str,
         changes: &[Change],
         project: Option<&Path>,
-    ) -> Result<()> {
+    ) -> Result<bundle::Described> {
         name(skill)?;
         let root = self.root(project).await?;
         bundle::save(&root, skill, Base::Replace(base), changes).await
@@ -760,10 +764,10 @@ impl Skills {
         }
 
         let skill = imported_name(&changes)?;
-        self.apply(&skill, None, &changes, project).await?;
+        let saved = self.apply(&skill, None, &changes, project).await?;
         self.discard(&[upload.to_owned()]).await;
         Ok(json!({
-            "imported": self.bundle(scope, &skill, project).await?,
+            "imported": bundle_response(scope, &skill, &saved),
             "candidates": [],
         }))
     }

@@ -147,6 +147,11 @@ abstract class SkillWorkbenchCases {
         val batches = CopyOnWriteArrayList<Pair<String, JsonObject>>()
         var saveGate: java.util.concurrent.CountDownLatch? = null
         @Volatile var saveReturned = false
+        val referenceReads = java.util.concurrent.atomic.AtomicInteger()
+        var oldReferenceGate: java.util.concurrent.CountDownLatch? = null
+        var newReferenceGate: java.util.concurrent.CountDownLatch? = null
+        @Volatile var oldReferenceReturned = false
+        @Volatile var referenceUpdated = false
         val imports = CopyOnWriteArrayList<JsonObject>()
         val updates = CopyOnWriteArrayList<JsonObject>()
         @Volatile var conflict = false
@@ -226,13 +231,29 @@ abstract class SkillWorkbenchCases {
                     }
                     path == "$api/skills/global/pdf-tools/bundle" ->
                         json(wireJson.encodeToString(pdfBundle))
-                    path == "$api/skills/global/pdf-tools/file" ->
-                        json(
-                            """{"content":"---\nname: pdf-tools\ndescription: Extraire du texte et des tableaux depuis des PDF.\n---\n\n# PDF\n","encoding":"utf-8","size":120,"executable":false}"""
-                        )
+                    path == "$api/skills/global/pdf-tools/file" -> {
+                        if (query == "reference.md") {
+                            val index = fixture.referenceReads.incrementAndGet()
+                            val content =
+                                if (fixture.referenceUpdated) "Updated reference"
+                                else "Old reference"
+                            (if (index == 1) fixture.oldReferenceGate else fixture.newReferenceGate)
+                                ?.await(60, java.util.concurrent.TimeUnit.SECONDS)
+                            if (index == 1) fixture.oldReferenceReturned = true
+                            json(
+                                wireJson.encodeToString(
+                                    SkillFileContent(content, size = content.length.toLong())
+                                )
+                            )
+                        } else
+                            json(
+                                """{"content":"---\nname: pdf-tools\ndescription: Extraire du texte et des tableaux depuis des PDF.\n---\n\n# PDF\n","encoding":"utf-8","size":120,"executable":false}"""
+                            )
+                    }
                     path == "$api/skills/global/pdf-tools/source" ->
                         json(wireJson.encodeToString(sourceStatus))
                     path == "$api/skills/global/pdf-tools/source/update" -> {
+                        fixture.referenceUpdated = true
                         fixture.updates +=
                             wireJson.parseToJsonElement(request.body.readUtf8()).jsonObject
                         json(
@@ -471,6 +492,47 @@ abstract class SkillWorkbenchCases {
             shown(hasText("anthropics/skills", substring = false))
             compose.onNodeWithTag("skill-source-check").assertDoesNotExist()
             compose.onNodeWithTag("skill-source-update").assertDoesNotExist()
+        }
+    }
+
+    @Test
+    fun sourceUpdatesIgnoreFileReadsFromThePrecedingRevision() {
+        val oldGate = java.util.concurrent.CountDownLatch(1)
+        val newGate = java.util.concurrent.CountDownLatch(1)
+        val fixture =
+            Fixture().apply {
+                oldReferenceGate = oldGate
+                newReferenceGate = newGate
+            }
+        launch(fixture).use {
+            try {
+                compose.onNodeWithTag("skill-card-global-pdf-tools").performClick()
+                openFile("reference.md")
+                compose.waitUntil(15000) { fixture.referenceReads.get() == 1 }
+                backToFiles()
+                compose.onNodeWithTag("skill-source-chip").performClick()
+                shown(hasTestTag("skill-source-check"))
+                compose.onNodeWithTag("skill-source-check").performClick()
+                shown(hasTestTag("skill-source-update"))
+                compose.onNodeWithTag("skill-source-update").performScrollTo().performClick()
+                shown(hasTestTag("skill-source-update-confirm"))
+                compose.onNodeWithTag("skill-source-update-confirm").performClick()
+                gone(hasTestTag("skill-source-sheet"))
+                openFile("reference.md")
+                compose.waitUntil(15000) { fixture.referenceReads.get() == 2 }
+                oldGate.countDown()
+                compose.waitUntil(15000) { fixture.oldReferenceReturned }
+                compose.waitForIdle()
+                Thread.sleep(500)
+                newGate.countDown()
+                shown(hasText("Updated reference", substring = true))
+                compose
+                    .onNodeWithTag("skill-code-editor")
+                    .assertTextContains("Updated reference", substring = true)
+            } finally {
+                oldGate.countDown()
+                newGate.countDown()
+            }
         }
     }
 

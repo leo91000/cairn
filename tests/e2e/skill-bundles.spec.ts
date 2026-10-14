@@ -203,6 +203,7 @@ test('builds a multi-file skill, saves one batch and round-trips it through a zi
   await scripts.dispatchEvent('dragover', { dataTransfer: dropped })
   await expect(page.getByRole('status').filter({ hasText: 'Drop into scripts/' })).toBeVisible()
   await scripts.dispatchEvent('drop', { dataTransfer: dropped })
+  await expect(page.getByLabel('Supporting file content')).toHaveValue('#!/bin/sh\necho deploy\n')
   await showTree(page)
   await expect(row(page, 'scripts/deploy.sh')).toBeVisible()
 
@@ -493,6 +494,85 @@ test('detaching a GitHub source preserves unsaved files', async ({ page, workspa
   await openFile(page, 'SKILL.md')
   await expect(page.getByLabel('Skill content')).toHaveValue(edited)
   expect((await workspace.api('/api/skills/global/detach-draft/file?path=SKILL.md')).content).toContain('Initial')
+})
+
+test('a source update ignores file responses from the preceding revision', async ({ page, workspace }) => {
+  await useRelayForHttpMocks(page)
+  await workspace.api('/api/skills/global/read-race/bundle', 'POST', {
+    base: null,
+    changes: [
+      { op: 'write', path: 'SKILL.md', content: manifest('read-race', 'Revision reads') },
+      { op: 'write', path: 'notes.txt', content: 'Old notes' },
+    ],
+  })
+  const source = {
+    type: 'github',
+    repository: 'acme/skills',
+    path: 'review',
+    ref: 'main',
+    commit: 'a'.repeat(40),
+    importedAt: 1,
+    modified: false,
+  }
+  const latest = 'b'.repeat(40)
+  let releaseOld!: () => void
+  let releaseNew!: () => void
+  const oldGate = new Promise<void>((resolve) => {
+    releaseOld = resolve
+  })
+  const newGate = new Promise<void>((resolve) => {
+    releaseNew = resolve
+  })
+  let reads = 0
+  await page.route(/\/skills\/global\/read-race\/bundle$/, async (route) => {
+    await route.fulfill({ json: { ...await workspace.api('/api/skills/global/read-race/bundle'), source } })
+  })
+  await page.route(/\/skills\/global\/read-race\/file\?/, async (route) => {
+    if (new URL(route.request().url()).searchParams.get('path') !== 'notes.txt') {
+      await route.continue()
+      return
+    }
+
+    const response = await workspace.api('/api/skills/global/read-race/file?path=notes.txt')
+    reads += 1
+    await (reads === 1 ? oldGate : newGate)
+    await route.fulfill({ json: response })
+  })
+  await page.route(/\/skills\/global\/read-race\/source$/, route => route.fulfill({
+    json: {
+      source,
+      latest: { commit: latest, message: 'New notes', date: '2026-10-14T00:00:00Z' },
+      current: false,
+      changes: [{ path: 'notes.txt', status: 'modified', binary: false }],
+    },
+  }))
+  await page.route(/\/skills\/global\/read-race\/source\/update$/, async (route) => {
+    const current = await workspace.api('/api/skills/global/read-race/bundle')
+    const saved = await workspace.api('/api/skills/global/read-race/bundle', 'POST', { base: current.revision, changes: [{ op: 'write', path: 'notes.txt', content: 'New notes' }] })
+    await route.fulfill({ json: { ...saved, source: { ...source, commit: latest } } })
+  })
+  try {
+    await page.goto(workspacePath('/skills'))
+    await authenticateWorkspace(page)
+    await page.getByRole('button', { name: 'Edit read-race', exact: true }).click()
+    await openFile(page, 'notes.txt')
+    await expect.poll(() => reads).toBe(1)
+    await showTree(page)
+    await page.getByRole('button', { name: 'Open GitHub source', exact: true }).click()
+    await page.getByRole('button', { name: 'Check for updates', exact: true }).click()
+    await page.getByRole('button', { name: /^Update to/ }).click()
+    await expect.poll(() => reads).toBe(2)
+    const oldResponse = page.waitForResponse(response => response.url().includes('/read-race/file?path=notes.txt'))
+    releaseOld()
+    await (await oldResponse).finished()
+    await page.evaluate(() => new Promise<void>(resolve => requestAnimationFrame(() => resolve())))
+    releaseNew()
+    await expect(page.getByLabel('Supporting file content')).toHaveValue('New notes')
+  }
+  finally {
+    releaseOld()
+    releaseNew()
+  }
 })
 
 test('members browse a skill bundle read-only', async ({ page, workspace }, testInfo) => {

@@ -475,6 +475,29 @@ async fn batches_save_every_file_at_once_with_modes_and_revisions() {
 }
 
 #[tokio::test]
+async fn immediate_manifest_writes_apply_explicit_modes() {
+    let api = Api::new().await;
+    for executable in [true, false] {
+        let saved = api
+            .ok(
+                "PUT",
+                "/skills/global/review/file",
+                Some(json!({
+                    "path": "SKILL.md",
+                    "content": SKILL,
+                    "executable": executable,
+                })),
+            )
+            .await;
+        assert_eq!(saved["name"], "review");
+        assert_eq!(
+            mode(&api.skill_dir("review").join("SKILL.md")),
+            if executable { 0o700 } else { 0o600 }
+        );
+    }
+}
+
+#[tokio::test]
 async fn older_single_file_writes_keep_working_and_respect_limits() {
     let api = Api::new().await;
     api.ok(
@@ -1006,6 +1029,134 @@ async fn github_imports_record_their_source_and_preview_updates() {
         )
         .await;
     assert_eq!(code, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn github_updates_record_the_upstream_revision_before_a_queued_local_edit() {
+    use cairn_installation::skills::{
+        bundle::{self, Change},
+        github,
+    };
+    let root = TempDir::new().unwrap();
+    let gh = fake_github(root.path());
+    let api = Api::with(|config| config.gh_bin = gh.to_string_lossy().into_owned()).await;
+    let first = sha('a');
+    let second = sha('b');
+    let manifest_blob = sha('c');
+    let old_blob = sha('d');
+    let upstream_blob = sha('e');
+    blob(root.path(), &manifest_blob, SKILL);
+    blob(root.path(), &old_blob, "Old\n");
+    blob(root.path(), &upstream_blob, "Upstream\n");
+    commit(
+        root.path(),
+        &first,
+        '3',
+        &[
+            ("SKILL.md", "100644", manifest_blob.as_str()),
+            ("notes/000.txt", "100644", old_blob.as_str()),
+        ],
+    );
+    let names = (0..200)
+        .map(|index| format!("notes/{index:03}.txt"))
+        .collect::<Vec<_>>();
+    let mut files = vec![("SKILL.md", "100644", manifest_blob.as_str())];
+    files.extend(
+        names
+            .iter()
+            .map(|name| (name.as_str(), "100644", upstream_blob.as_str())),
+    );
+    commit(root.path(), &second, '4', &files);
+    let imported = github::import(
+        &api.service,
+        "global",
+        &json!({
+            "repository": "fixture/skills",
+            "ref": first,
+            "path": "skills/review",
+        }),
+        None,
+    )
+    .await
+    .unwrap();
+
+    let expected = root.path().join("expected");
+    std::fs::create_dir_all(expected.join("notes")).unwrap();
+    bundle::write_file(&expected.join("SKILL.md"), SKILL.as_bytes(), false)
+        .await
+        .unwrap();
+    for name in &names {
+        bundle::write_file(&expected.join(name), b"Upstream\n", false)
+            .await
+            .unwrap();
+    }
+    let upstream_revision = bundle::describe(&expected).await.unwrap().revision;
+    let service = api.service.clone();
+    let base = imported["imported"]["revision"].clone();
+    let updater = tokio::spawn(async move {
+        github::update(
+            &service,
+            "global",
+            "review",
+            &json!({
+                "base": base,
+                "commit": second,
+            }),
+            None,
+        )
+        .await
+        .unwrap()
+    });
+
+    // Queue the local writer while replacement owns the write lock. FIFO lock
+    // admission puts this edit ahead of any subsequent live-folder reread.
+    let skills_root = api.skill_dir("review").parent().unwrap().to_owned();
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            let mut entries = tokio::fs::read_dir(&skills_root).await.unwrap();
+            while let Some(entry) = entries.next_entry().await.unwrap() {
+                if entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".review.staging-")
+                {
+                    return;
+                }
+            }
+            assert!(
+                !updater.is_finished(),
+                "Did not observe the replacement staging directory"
+            );
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    api.service
+        .skills
+        .apply(
+            "review",
+            Some(&upstream_revision),
+            &[Change::Write {
+                path: "notes/000.txt".into(),
+                bytes: b"Local\n".to_vec(),
+                executable: None,
+            }],
+            None,
+        )
+        .await
+        .unwrap();
+    let receipt = updater.await.unwrap();
+    let current = api.ok("GET", "/skills/global/review/bundle", None).await;
+    assert_eq!(
+        current["source"]["modified"], true,
+        "Concurrent local edits must retain the overwrite warning"
+    );
+    assert_eq!(
+        receipt["revision"], upstream_revision,
+        "The update response must describe its own saved version"
+    );
+    assert_ne!(current["revision"], upstream_revision);
 }
 
 #[tokio::test]

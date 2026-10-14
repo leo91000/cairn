@@ -293,6 +293,31 @@ class SkillBundlesTest {
     }
 
     @Test
+    fun fileAncestorsAndDescendantFoldersCannotCollideInTheDraft() {
+        val saved =
+            bundle.copy(
+                files = listOf(SkillFile(SKILL_FILE), SkillFile("notes"), SkillFile("source/a.txt"))
+            )
+        val draft = SkillDraft.of(saved)
+        assertThrows { draft.put("notes/child.txt", SkillBody.Text("x")) }
+        assertThrows { draft.addFolder("notes/nested") }
+        assertThrows { draft.move("source/a.txt", "notes/a.txt") }
+        assertThrows { draft.moveFolder("source", "notes/moved") }
+        assertThrows {
+            draft.delete("notes").put("notes/child.txt", SkillBody.Text("x")).restore("notes")
+        }
+
+        val nested = draft.move("notes", "notes/index.txt")
+        val occupied = mutableSetOf(SKILL_FILE, "notes", "source/a.txt")
+        for (move in nested.changes().filterIsInstance<SkillChange.Move>()) {
+            assertFalse(occupied.any { pathsCollide(move.to, it) })
+            assertTrue(occupied.remove(move.from))
+            occupied += move.to
+        }
+        assertTrue("notes/index.txt" in occupied)
+    }
+
+    @Test
     fun problemsFollowTheServerLimitsAndLeaveYamlValidationToTheServer() {
         assertEquals(emptyList<String>(), draft().problems())
         val renamed = draft().edit("SKILL.md", "---\nname: other\n---\n")

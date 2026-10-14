@@ -148,6 +148,7 @@ async fn read_all_locked(directory: &Path) -> Result<(String, Vec<(Entry, Vec<u8
 pub struct Described {
     pub revision: String,
     pub files: Vec<Value>,
+    pub description: Option<String>,
 }
 
 pub async fn describe(directory: &Path) -> Result<Described> {
@@ -157,6 +158,12 @@ pub async fn describe(directory: &Path) -> Result<Described> {
 
 pub(super) async fn describe_locked(directory: &Path) -> Result<Described> {
     let (revision, files) = read_all_locked(directory).await?;
+    let description = files
+        .iter()
+        .find(|(entry, _)| entry.path == "SKILL.md")
+        .and_then(|(_, bytes)| std::str::from_utf8(bytes).ok())
+        .and_then(|content| metadata(content).ok())
+        .map(|parsed| parsed.description);
     let files = files
         .iter()
         .map(|(entry, bytes)| {
@@ -168,7 +175,11 @@ pub(super) async fn describe_locked(directory: &Path) -> Result<Described> {
             })
         })
         .collect();
-    Ok(Described { revision, files })
+    Ok(Described {
+        revision,
+        files,
+        description,
+    })
 }
 
 /// One edit of a batch, with its content already resolved.
@@ -480,7 +491,12 @@ pub enum Base<'a> {
 }
 
 /// Applies `changes` to a copy of `root/skill`, validates it, then swaps it in.
-pub async fn save(root: &Path, skill: &str, base: Base<'_>, changes: &[Change]) -> Result<()> {
+pub async fn save(
+    root: &Path,
+    skill: &str,
+    base: Base<'_>,
+    changes: &[Change],
+) -> Result<Described> {
     let _save = ACCESS.write().await;
     let directory = root.join(skill);
     let exists = match kind(&directory).await? {
@@ -521,7 +537,9 @@ pub async fn save(root: &Path, skill: &str, base: Base<'_>, changes: &[Change]) 
         }
         prune(&staging).await?;
         validate(&staging, skill, before).await?;
-        swap(&staging, &directory, exists).await
+        let described = describe_locked(&staging).await?;
+        swap(&staging, &directory, exists).await?;
+        Ok::<_, Error>(described)
     }
     .await;
     if result.is_err() {

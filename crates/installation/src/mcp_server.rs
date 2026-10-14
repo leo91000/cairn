@@ -738,11 +738,12 @@ async fn skills_tool(s: &Service, name: &str, args: &Value) -> Result<Value> {
         }
         "edit_skill_files" => {
             let (changes, uploads) = s.skills.changes(&args["changes"]).await?;
-            s.skills
+            let saved = s
+                .skills
                 .apply(skill, args["base"].as_str(), &changes, project)
                 .await?;
             s.skills.discard(&uploads).await;
-            let mut bundle = s.skills.bundle(scope, skill, project).await?;
+            let mut bundle = crate::skills::bundle_response(scope, skill, &saved);
             crate::skills::github::source(s, scope, skill, &mut bundle).await?;
             Ok(bundle)
         }

@@ -91,9 +91,23 @@ internal class SkillWorkbenchModel : ViewModel() {
         loading = false
     }
 
+    /** Installs one revision and invalidates requests for the preceding draft. */
+    private fun applyBundle(bundle: SkillBundle, known: Map<String, SkillBody> = emptyMap()) {
+        editorSession += 1
+        fileLoading = emptySet()
+        source = null
+        sourceLoading = false
+        progress = null
+        loading = false
+        draft = SkillDraft.of(bundle).copy(originals = known)
+    }
+
     /** Fetches the saved bundle again, dropping local edits. */
     fun load(vm: CairnViewModel) {
         val current = target ?: return
+        editorSession += 1
+        fileLoading = emptySet()
+        progress = null
         loading = true
         conflict = null
         error = null
@@ -102,7 +116,7 @@ internal class SkillWorkbenchModel : ViewModel() {
             try {
                 val bundle = vm.api.skillBundle(current.scope, current.name)
                 if (editorSession != session || target != current) return@launch
-                draft = SkillDraft.of(bundle)
+                applyBundle(bundle)
                 if (selected != null && draft?.file(selected!!) == null) selected = null
                 ensureLoaded(vm, SKILL_FILE)
                 selected?.let { ensureLoaded(vm, it) }
@@ -184,7 +198,7 @@ internal class SkillWorkbenchModel : ViewModel() {
                         .toMap()
                 val next = opened.copy(create = false)
                 target = next
-                draft = SkillDraft.of(bundle).copy(originals = known)
+                applyBundle(bundle, known)
                 saved(next)
                 vm.notify(if (opened.create) "Skill créé" else "Skill enregistré")
                 try {
@@ -321,7 +335,7 @@ internal class SkillWorkbenchModel : ViewModel() {
             try {
                 val bundle = vm.api.updateSkillSource(current.scope, current.name, commit, base)
                 if (editorSession != session) return@launch
-                draft = SkillDraft.of(bundle)
+                applyBundle(bundle)
                 source = null
                 selected = selected?.takeIf { draft?.file(it) != null }
                 ensureLoaded(vm, SKILL_FILE)

@@ -305,9 +305,8 @@ pub async fn import(
         .collect();
     let changes = download(s, repo, selected).await?;
     let skill = imported_name(&changes)?;
-    s.skills.apply(&skill, None, &changes, project).await?;
-
-    let mut bundle = s.skills.bundle(scope, &skill, project).await?;
+    let saved = s.skills.apply(&skill, None, &changes, project).await?;
+    let mut bundle = super::bundle_response(scope, &skill, &saved);
     let record = json!({
         "type": "github",
         "repository": repo,
@@ -472,10 +471,10 @@ pub async fn update(
         ));
     }
     let changes = download(s, &repo, files).await?;
-    s.skills.replace(skill, base, &changes, project).await?;
+    let saved = s.skills.replace(skill, base, &changes, project).await?;
 
     record["commit"] = commit.sha.into();
-    let mut bundle = s.skills.bundle(scope, skill, project).await?;
+    let mut bundle = super::bundle_response(scope, skill, &saved);
     remember(s, scope, skill, record, &mut bundle).await?;
     s.store
         .audit(

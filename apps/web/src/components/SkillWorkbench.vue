@@ -249,9 +249,13 @@ async function ensureContent(path: string | null) {
     return
 
   const origin = file.origin
+  const revision = bundle.value.revision
+  const destination = base.value
   fileLoading.value = origin
   try {
-    const result = await api<SkillFileContent>(`${base.value}/file?path=${encodeURIComponent(origin)}`)
+    const result = await api<SkillFileContent>(`${destination}/file?path=${encodeURIComponent(origin)}`)
+    if (bundle.value?.revision !== revision || base.value !== destination)
+      return
     const current = draft.value.find(entry => entry.origin === origin)
     if (!current || current.content !== undefined || current.data !== undefined)
       return
@@ -264,10 +268,11 @@ async function ensureContent(path: string | null) {
     }
   }
   catch (e) {
-    error.value = (e as Error).message
+    if (bundle.value?.revision === revision && base.value === destination)
+      error.value = (e as Error).message
   }
   finally {
-    if (fileLoading.value === origin)
+    if (fileLoading.value === origin && bundle.value?.revision === revision && base.value === destination)
       fileLoading.value = ''
   }
 }
