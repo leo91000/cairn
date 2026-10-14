@@ -460,6 +460,11 @@ test('an archive cannot be replaced while its upload is pending', async ({ page 
 })
 
 test('detaching a GitHub source preserves unsaved files', async ({ page, workspace }) => {
+  let releaseDetach!: () => void
+  const detachGate = new Promise<void>((resolve) => {
+    releaseDetach = resolve
+  })
+  let detachStarted = false
   await useRelayForHttpMocks(page)
   await workspace.api('/api/skills/global/detach-draft/bundle', 'POST', { base: null, changes: [{ op: 'write', path: 'SKILL.md', content: manifest('detach-draft', 'Initial') }] })
   const source = {
@@ -478,6 +483,8 @@ test('detaching a GitHub source preserves unsaved files', async ({ page, workspa
   })
   await page.route(/\/skills\/global\/detach-draft\/source$/, async (route) => {
     expect(route.request().method()).toBe('DELETE')
+    detachStarted = true
+    await detachGate
     detached = true
     await route.fulfill({ json: { detached: true } })
   })
@@ -490,6 +497,20 @@ test('detaching a GitHub source preserves unsaved files', async ({ page, workspa
   await page.getByRole('button', { name: 'Open GitHub source', exact: true }).click()
   await page.getByRole('button', { name: 'Detach source', exact: true }).click()
   await page.getByRole('button', { name: 'Confirm detach', exact: true }).click()
+  try {
+    await expect.poll(() => detachStarted).toBe(true)
+    await expect(page.getByRole('button', { name: 'Close source', exact: true })).toBeDisabled()
+    await showTree(page)
+    await row(page, 'SKILL.md').click()
+    if (phone(page))
+      await page.getByRole('button', { name: 'Open GitHub source', exact: true }).click()
+    await expect(page.getByRole('button', { name: 'Confirm detach', exact: true })).toBeVisible()
+  }
+  finally {
+    releaseDetach()
+  }
+
+  await expect(page.getByRole('button', { name: 'Save skill', exact: true })).toBeEnabled()
   await expect(page.getByRole('dialog', { name: 'Edit skill' })).toContainText('1 unsaved change')
   await openFile(page, 'SKILL.md')
   await expect(page.getByLabel('Skill content')).toHaveValue(edited)

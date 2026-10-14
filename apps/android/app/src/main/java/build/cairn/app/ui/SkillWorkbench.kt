@@ -444,7 +444,9 @@ internal fun SkillWorkbench(
                     ?: when {
                         current is PathPrompt.MoveFile && path == current.from -> null
                         current is PathPrompt.MoveFolder && path == current.from -> null
-                        currentDraft.file(path) != null || path in currentDraft.folderPaths() ->
+                        currentDraft.file(path) != null ||
+                            path in currentDraft.folders ||
+                            currentDraft.files.any { it.path.startsWith("$path/") } ->
                             "Ce chemin est déjà utilisé."
                         else -> null
                     }
@@ -675,7 +677,13 @@ private fun FilePane(
                 }
             }
         }
-        items(rows, key = { "row:" + it.path + (if (it.deleted) ":deleted" else "") }) { row ->
+        items(
+            rows,
+            key = {
+                val kind = if (it.folder) "folder" else if (it.deleted) "deleted" else "file"
+                "$kind:${it.path}"
+            },
+        ) { row ->
             TreeRow(
                 row,
                 draft,

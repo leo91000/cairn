@@ -414,6 +414,28 @@ abstract class SkillWorkbenchCases {
     }
 
     @Test
+    fun replacingADeletedFolderWithAFileKeepsBothTreeRowsUsable() {
+        launch(Fixture()).use {
+            compose.onNodeWithTag("skill-card-global-review").performClick()
+            shown(hasTestTag("skill-files"))
+            fileActions("scripts")
+            compose.onNodeWithText("Supprimer le dossier").performClick()
+            gone(hasTestTag("skill-file-actions"))
+            compose.onNodeWithContentDescription("Nouveau fichier").performClick()
+            compose.onNodeWithTag("skill-path-field").performTextReplacement("scripts")
+            compose.onNodeWithTag("skill-path-confirm").performClick()
+            shown(hasTestTag("skill-editor"))
+            backToFiles()
+            compose
+                .onNodeWithTag("skill-files")
+                .performScrollToNode(hasTestTag("skill-file-scripts"))
+            compose.onNodeWithTag("skill-file-scripts").assertExists()
+            compose.onNodeWithTag("skill-folder-scripts").assertExists()
+            compose.onNodeWithTag("skill-save").assertIsEnabled()
+        }
+    }
+
+    @Test
     fun savingMakesFileMutationsUnavailableUntilTheResponse() {
         val gate = java.util.concurrent.CountDownLatch(1)
         val fixture = Fixture().apply { saveGate = gate }

@@ -412,10 +412,18 @@ impl Skills {
                 Ok((path, content)) => listing.read(&directory, &path, content),
                 Err(error) => listing.error = Some(error.message),
             }
-            if let Ok(files) = bundle::scan(&root.join(&directory)).await {
-                listing.files = Some(files.len());
-                listing.bytes = Some(files.iter().map(|file| file.size).sum());
-                listing.executables = Some(files.iter().filter(|file| file.executable).count());
+            match bundle::scan(&root.join(&directory)).await {
+                Ok(files) => {
+                    listing.files = Some(files.len());
+                    listing.bytes = Some(files.iter().map(|file| file.size).sum());
+                    listing.executables = Some(files.iter().filter(|file| file.executable).count());
+                }
+                Err(error) => {
+                    listing.valid = false;
+                    if listing.error.is_none() {
+                        listing.error = Some(error.message);
+                    }
+                }
             }
             listings.push(listing);
         }

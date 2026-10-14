@@ -21,6 +21,27 @@ const SKILL: &str =
     "---\nname: review\ndescription: Review the current changes\n---\nRun scripts/check.sh.\n";
 
 #[tokio::test]
+async fn unusable_visible_files_mark_a_skill_invalid_in_the_library() {
+    let api = Api::new().await;
+    let directory = api.skill_dir("review");
+    std::fs::create_dir_all(&directory).unwrap();
+    std::fs::write(directory.join("SKILL.md"), SKILL).unwrap();
+    std::os::unix::fs::symlink("SKILL.md", directory.join("reference.md")).unwrap();
+
+    let listed = api.ok("GET", "/skills", None).await;
+    assert_eq!(listed[0]["valid"], false);
+    assert!(
+        listed[0]["error"]
+            .as_str()
+            .unwrap()
+            .contains("symbolic links")
+    );
+
+    std::fs::remove_file(directory.join("reference.md")).unwrap();
+    assert_eq!(api.ok("GET", "/skills", None).await[0]["valid"], true);
+}
+
+#[tokio::test]
 async fn maximum_file_count_folder_moves_fit_the_atomic_batch_transport() {
     use cairn_installation::skills::bundle::Change;
 

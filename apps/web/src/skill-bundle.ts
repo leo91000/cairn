@@ -541,7 +541,15 @@ export function parseGithubSource(input: string): { repository: string, ref?: st
   if (url.hostname !== 'github.com' && url.hostname !== 'www.github.com')
     return null
 
-  const [owner, repo, kind, ref, ...rest] = url.pathname.split('/').filter(Boolean)
+  let segments: string[]
+  try {
+    segments = url.pathname.split('/').filter(Boolean).map(segment => decodeURIComponent(segment))
+  }
+  catch {
+    return null
+  }
+
+  const [owner, repo, kind, ref, ...rest] = segments
   if (!owner || !repo)
     return null
 

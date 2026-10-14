@@ -868,7 +868,7 @@ onMounted(async () => {
             :deleted="deleted"
             :selected="pane === 'file' ? selectedPath : null"
             :readonly="editingLocked"
-            @select="select"
+            @select="path => !sourceWorking && select(path)"
             @rename="startRename"
             @remove="remove"
             @executable="toggleExecutable"
@@ -932,6 +932,7 @@ onMounted(async () => {
                 type="button"
                 :class="twMerge(iconButton, 'size-8')"
                 aria-label="Close source"
+                :disabled="sourceWorking"
                 @click="pane = 'file'"
               >
                 <Icon :name="X" :size="16" />
@@ -943,7 +944,7 @@ onMounted(async () => {
               :revision="bundle.revision"
               :source="bundle.source"
               :unsaved="changes"
-              :readonly="editingLocked"
+              :readonly="readonly || !!saving"
               @working="sourceWorking = $event"
               @replaced="replaced"
               @detached="detached"
