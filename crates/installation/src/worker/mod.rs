@@ -19,7 +19,7 @@ use crate::{
 use serde_json::{Value, json};
 use std::{
     collections::HashMap,
-    sync::{Arc, atomic::AtomicI64},
+    sync::{Arc, Weak, atomic::AtomicI64},
     time::Duration,
 };
 use tokio::sync::{Mutex, Notify, OnceCell, OwnedMutexGuard};
@@ -30,6 +30,7 @@ pub struct Worker {
     pub active: Mutex<HashMap<String, CancellationToken>>,
     tick_lock: Mutex<()>,
     preparation: Arc<Mutex<()>>,
+    run_preparation_locks: Mutex<HashMap<String, Weak<Mutex<()>>>>,
     wake: Notify,
     conversation_cleanup: Notify,
     initialized: OnceCell<()>,
@@ -44,6 +45,18 @@ struct Admission {
 }
 
 impl Worker {
+    /// Coordinates admission/recovery filesystem writes with permanent run cleanup.
+    pub(crate) async fn run_preparation_lock(&self, run_id: &str) -> Arc<Mutex<()>> {
+        let mut locks = self.run_preparation_locks.lock().await;
+        locks.retain(|_, lock| lock.strong_count() > 0);
+        let lock = locks
+            .get(run_id)
+            .and_then(Weak::upgrade)
+            .unwrap_or_default();
+        locks.insert(run_id.to_owned(), Arc::downgrade(&lock));
+        lock
+    }
+
     pub async fn initialize(&self, s: &Service) -> Result<()> {
         self.initialized
             .get_or_try_init(|| s.store.transaction(restore_after_restart))

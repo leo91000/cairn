@@ -281,6 +281,11 @@ impl Service {
         let mut chats = self.store.list("chats").await?;
         chats.sort_by_key(|chat| chat["retryAfter"].as_i64().unwrap_or(0));
         for chat in chats.iter().filter(|chat| purge_due(chat)) {
+            // Preparation can create run files before execution is registered as active.
+            let preparation = self.worker.run_preparation_lock(text(chat, "runId")).await;
+            let Ok(_preparation) = preparation.try_lock_owned() else {
+                continue;
+            };
             // Terminal status is published before checkpointing and resource release finish.
             let active = self.worker.active.lock().await;
             if active.contains_key(text(chat, "runId")) {

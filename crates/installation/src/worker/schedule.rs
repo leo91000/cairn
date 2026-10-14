@@ -11,7 +11,7 @@ use crate::{
     recovery,
     run_status::RunStatus,
     service::{Service, run_projects},
-    store::Store,
+    store::{Db, Store},
     validation::text,
 };
 use serde_json::{Value, json};
@@ -102,6 +102,12 @@ impl Worker {
         {
             return Ok(());
         }
+        let run_preparation = self.run_preparation_lock(&run_id).await;
+        let _run_preparation = run_preparation.lock_owned().await;
+        let current_id = run_id.clone();
+        let Some(run) = s.store.read(move |db| db.run(&current_id)).await? else {
+            return Ok(());
+        };
         let recovering = run["recoveryPending"] == true;
         let launched = RunCheckpoint::load(&s.store, &run_id)
             .await?
@@ -112,6 +118,14 @@ impl Worker {
             projects.extend(locked_projects(s, &run));
         }
         if recovering && !recover_or_wait(s, &run).await? {
+            return Ok(());
+        }
+        let eligibility_id = run_id.clone();
+        if !s
+            .store
+            .read(move |db| eligible_run(db, &eligibility_id))
+            .await?
+        {
             return Ok(());
         }
         let current = s.store.run(&run_id).await?;
@@ -199,27 +213,26 @@ impl Worker {
             return Ok(false);
         }
         let id = run_id.to_owned();
-        let eligible = s
-            .store
-            .read(move |db| {
-                let Some(run) = db.run(&id)? else {
-                    return Ok(false);
-                };
-                if run["status"] != RunStatus::Queued || !run["cancelRequestedAt"].is_null() {
-                    return Ok(false);
-                }
-                match crate::conversation_lifecycle::require_active_run(db, &id) {
-                    Ok(()) => Ok(true),
-                    Err(error) if error.is_conflict() => Ok(false),
-                    Err(error) => Err(error),
-                }
-            })
-            .await?;
+        let eligible = s.store.read(move |db| eligible_run(db, &id)).await?;
         if !eligible {
             return Ok(false);
         }
         active.insert(run_id.to_owned(), cancel);
         Ok(true)
+    }
+}
+
+fn eligible_run(db: &Db<'_>, id: &str) -> Result<bool> {
+    let Some(run) = db.run(id)? else {
+        return Ok(false);
+    };
+    if run["status"] != RunStatus::Queued || !run["cancelRequestedAt"].is_null() {
+        return Ok(false);
+    }
+    match crate::conversation_lifecycle::require_active_run(db, id) {
+        Ok(()) => Ok(true),
+        Err(error) if error.is_conflict() => Ok(false),
+        Err(error) => Err(error),
     }
 }
 
@@ -418,8 +431,13 @@ mod tests {
     use super::*;
     use std::{future::Future, task::Poll};
 
-    #[tokio::test]
-    async fn deletion_committed_before_registration_prevents_stale_admission() {
+    async fn fixture() -> (
+        tempfile::TempDir,
+        Arc<Service>,
+        String,
+        String,
+        std::path::PathBuf,
+    ) {
         let root = tempfile::tempdir().unwrap();
         let service = Service::new(crate::config::Config {
             data_dir: root.path().join("data"),
@@ -459,6 +477,99 @@ mod tests {
         tokio::fs::write(workspace.join("work.txt"), "Private work")
             .await
             .unwrap();
+
+        (root, service, chat_id, run_id, workspace)
+    }
+
+    #[tokio::test]
+    async fn deletion_during_account_preparation_leaves_no_orphan_files() {
+        let (_root, service, chat_id, run_id, workspace) = fixture().await;
+        service.accounts.initialize(&service).await.unwrap();
+        let mut account = service
+            .accounts
+            .create(&service, Provider::Codex, "Ready")
+            .await
+            .unwrap();
+        account["state"] = "ready".into();
+        account["usage"] = json!({
+            "allowed": true,
+            "checkedAt": now(),
+            "windows": [{ "id": "w", "usedPercent": 20, "models": [] }],
+            "resets": null
+        });
+        service
+            .store
+            .put(crate::accounts::KIND, account.clone())
+            .await
+            .unwrap();
+        let account_guard = service.accounts.lock(text(&account, "id")).await;
+        let run = service.store.run(&run_id).await.unwrap();
+        let mut projects = HashSet::new();
+        let admission = service.worker.try_launch(&service, run, &mut projects);
+        tokio::pin!(admission);
+        let account_mutex = tokio::sync::OwnedMutexGuard::mutex(&account_guard);
+        let owners = Arc::strong_count(account_mutex);
+        tokio::time::timeout(
+            Duration::from_secs(2),
+            std::future::poll_fn(|cx| {
+                assert!(admission.as_mut().poll(cx).is_pending());
+                if Arc::strong_count(account_mutex) > owners {
+                    Poll::Ready(())
+                } else {
+                    Poll::Pending
+                }
+            }),
+        )
+        .await
+        .unwrap();
+
+        service.chat_trash(&chat_id, true).await.unwrap();
+        let other = service.chat_create(json!({})).await.unwrap();
+        let other_id = text(&other, "id");
+        service.chat_trash(other_id, true).await.unwrap();
+        service.cleanup_conversations().await.unwrap();
+        service.cleanup_conversations().await.unwrap();
+        assert!(
+            service
+                .store
+                .get("chats", other_id)
+                .await
+                .unwrap()
+                .is_none(),
+            "Blocked preparation must not stall unrelated deletion"
+        );
+
+        drop(account_guard);
+        admission.await.unwrap();
+        assert!(service.worker.active.lock().await.is_empty());
+        assert!(service.accounts.lease(&run_id).await.is_none());
+        service.cleanup_conversations().await.unwrap();
+        assert!(
+            service
+                .store
+                .get("chats", &chat_id)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(service.store.run(&run_id).await.unwrap_err().status, 404);
+        assert!(
+            service
+                .store
+                .kv(&format!("run-checkpoint:{run_id}"))
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            !workspace.exists(),
+            "Account preparation must not recreate a purged run directory"
+        );
+    }
+
+    #[tokio::test]
+    async fn deletion_committed_before_registration_prevents_stale_admission() {
+        let (_root, service, chat_id, run_id, workspace) = fixture().await;
 
         assert!(
             service
