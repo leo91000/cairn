@@ -19,6 +19,7 @@ import { ArrowDown, Maximize2, Minimize2 } from '../icons'
 import { exclusiveSuspensionLabel } from '../run-status'
 import { backgroundWait, waitingStep, workingStep } from '../signal'
 import { mentionSegments } from '../skill-mentions'
+import { currentSubagents, subagentTeams, waitingForSubagents } from '../subagents'
 import { iconButton } from '../ui'
 import ActivityContent from './ActivityContent.vue'
 import AgentActions from './AgentActions.vue'
@@ -52,6 +53,8 @@ const props = defineProps<{
   loadingOlder?: boolean
   olderError?: string
   skills?: string[]
+  /** The page shows the current subagents beside the composer, so the feed need not. */
+  subagentBar?: boolean
 }>()
 const emit = defineEmits<{ load: [], position: [value: ReadingPosition, key?: string] }>()
 const skillNames = computed(() => new Set(props.skills ?? []))
@@ -74,10 +77,12 @@ const entries = computed(() => {
 
   return deliveryEntries(entries, props.deliverables ?? [])
 })
+const teams = computed(() => subagentTeams(entries.value))
+const subagents = computed(() => currentSubagents(entries.value))
 const working = computed(() => {
   const wait = backgroundWait(props.events)
   if (wait)
-    return waitingStep(wait)
+    return { ...waitingStep(wait), subagents: waitingForSubagents(props.events, subagents.value) }
   return workingStep(entries.value.filter((entry): entry is ActivityEntry => entry.kind !== 'deliverables'), props.agent, props.events[0]?.createdAt ?? null)
 })
 const visibleOutcome = computed(() => !props.active && !props.sending?.length && !props.loading ? props.outcome : null)
@@ -270,6 +275,8 @@ async function exitFullscreen() {
 
 onBeforeUnmount(() => viewer.value?.close())
 defineExpose({
+  teams,
+  subagents,
   openFiles: () => { artifactViewer.value = '' },
   enterFullscreen,
   followLatest,
@@ -387,10 +394,10 @@ defineExpose({
               <p v-if="active && suspended" role="status" class="mt-4 mb-0.5 text-xs text-muted">
                 {{ exclusiveSuspensionLabel }}. Work resumes automatically when the reservation and other pauses are cleared.
               </p>
-              <div v-else-if="active && !sending?.length && events.length" class="activity-working mt-4 mb-0.5">
+              <div v-else-if="active && !sending?.length && events.length && !(subagentBar && working.subagents)" class="activity-working mt-4 mb-0.5">
                 <WorkingIndicator :step="working" />
               </div>
-              <div v-else-if="active && !sending?.length" class="activity-working flex items-center justify-center gap-3 text-muted text-3xs mt-7.5 mb-0.5 mx-0">
+              <div v-else-if="active && !sending?.length && !events.length" class="activity-working flex items-center justify-center gap-3 text-muted text-3xs mt-7.5 mb-0.5 mx-0">
                 <span class="activity-presence w-[7px] h-[7px] rounded-full bg-[light-dark(#8e8baa,_var(--dark-accent-surface))] shrink-0 live" />Waiting for the worker…
               </div>
               <div v-else-if="!chat && !events.length" class="activity-end flex items-center justify-center gap-3 text-muted text-3xs mt-7.5 mb-0.5 mx-0">

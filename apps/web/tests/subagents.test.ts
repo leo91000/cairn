@@ -2,6 +2,13 @@ import type { RunEvent } from '../../../packages/contracts/contracts'
 import { describe, expect, it } from 'vitest'
 import { activityEntries } from '../src/activity'
 import { backgroundWait, workingStep } from '../src/signal'
+import {
+  currentSubagents,
+  subagentState,
+  subagentSummary,
+  subagentTeams,
+  waitingForSubagents,
+} from '../src/subagents'
 
 let serial = 0
 
@@ -244,7 +251,7 @@ describe('subagents', () => {
       subagent('item.started', 'Webhooks'),
       subagent('item.started', 'Tests'),
     ]
-    expect(workingStep(activityEntries(events, true), 'Claude', null)).toMatchObject({ title: 'Waiting for 2 subagents', detail: 'Webhooks · Tests' })
+    expect(workingStep(activityEntries(events, true), 'Claude', null)).toMatchObject({ title: 'Waiting for 2 subagents', detail: 'Webhooks · Tests', subagents: true })
     const one = [...events, subagent('item.completed', 'Tests', { status: 'completed' })]
     expect(workingStep(activityEntries(one, true), 'Claude', null)).toMatchObject({ title: 'Waiting for a subagent', detail: 'Webhooks' })
     const acting = [...one, item('item.started', {
@@ -271,5 +278,57 @@ describe('subagents', () => {
       subagent('item.updated', 'List files', { background: true, activity: 'Running ls' }),
     ])).toMatchObject({ tasks: ['List files'] })
     expect(backgroundWait([...events, item('item.started', { id: 'msg', type: 'agent_message', text: '' })])).toBeNull()
+  })
+
+  it('finds the subagents of the current request and what each one does', () => {
+    const entries = activityEntries([
+      user('First'),
+      subagent('item.completed', 'Earlier', { status: 'completed', result: '## Findings\nAll good' }),
+      user('Second'),
+      subagent('item.started', 'Webhooks', { activity: 'Reading webhook.rs' }),
+      item('item.completed', { id: 'note', type: 'agent_message', text: 'Meanwhile…' }),
+      subagent('item.started', 'Tests'),
+    ], true)
+    const current = currentSubagents(entries)
+    expect(current.map(agent => agent.title)).toEqual(['Webhooks', 'Tests'])
+    expect(current.map(agent => subagentSummary(agent, true))).toEqual(['Reading webhook.rs', 'Starting…'])
+    // Once the run ends, a subagent that never reported shows as stopped.
+    expect(subagentState(current[0]!, false)).toBe('stopped')
+    const earlier = activityEntries([subagent('item.completed', 'Earlier', { status: 'completed', result: '## Findings\nAll good' })])
+    expect(earlier[0]?.kind === 'team' && subagentSummary(earlier[0].agents[0]!, false)).toBe('Findings')
+  })
+
+  it('keeps earlier workers and nested children reachable after another user message', () => {
+    const entries = activityEntries([
+      user('First'),
+      subagent('item.started', 'Earlier'),
+      subagent('item.completed', 'Done', { status: 'completed' }),
+      subagent('item.started', 'Nested', { parent_id: 'Earlier' }),
+      user('Keep going'),
+      subagent('item.started', 'New'),
+    ], true)
+    expect(currentSubagents(entries).map(agent => agent.title)).toEqual(['Earlier', 'Nested', 'New'])
+    expect(subagentTeams(entries).map(team => team.map(agent => agent.title))).toEqual([
+      ['Earlier', 'Done'],
+      ['Nested'],
+      ['New'],
+    ])
+  })
+
+  it('replaces an explicit wait only when every awaited task is represented in the bar', () => {
+    const events = [
+      subagent('item.completed', 'Worker', { background: true, task_id: 'worker-task' }),
+      event('turn.waiting', { type: 'turn.waiting', tasks: [{ id: 'worker-task', description: 'Worker' }] }),
+    ]
+    const agents = currentSubagents(activityEntries(events, true))
+    expect(waitingForSubagents(events, agents)).toBe(true)
+    const mixed = [...events, event('turn.waiting', {
+      tasks: [
+        { id: 'worker-task', description: 'Worker' },
+        { id: 'build-task', description: 'Build' },
+      ],
+    })]
+    expect(waitingForSubagents(mixed, agents)).toBe(false)
+    expect(waitingForSubagents([event('turn.waiting', { tasks: [] })], agents)).toBe(false)
   })
 })

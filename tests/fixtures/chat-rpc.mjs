@@ -401,46 +401,62 @@ export function chatFixture() {
             durationMs: 9,
           },
         })
-        notify('item/started', { threadId: child, item: { id: 'child-reply', type: 'agentMessage', text: '' } })
-        notify('item/agentMessage/delta', { threadId: child, itemId: 'child-reply', delta: 'Keyboard handling looks right.' })
-        notify('item/completed', { threadId: child, item: { id: 'child-reply', type: 'agentMessage', text: 'Keyboard handling looks right.' } })
-        const failed = text.includes('fixture:subagents-errored')
-        notify('turn/completed', { threadId: child, turn: { ...childTurn, status: failed ? 'failed' : 'completed' } })
-        if (failed) {
-          notify('item/completed', {
-            threadId: thread.id,
-            item: {
-              id: 'completion',
-              type: 'subAgentActivity',
-              kind: 'completed',
-              agentThreadId: child,
-              agentPath: '/root/keyboard',
-            },
-          })
-        }
+        // `fixture:subagents-working` leaves the subagent at work while the turn stays open.
+        if (text.includes('fixture:subagents-working')) {
+          if (text.includes('fixture:subagents-working-team')) {
+            const second = collab(`second-${active.id}`, 'spawnAgent', 'completed', {
+              receiverThreadIds: ['fixture-second'],
+              prompt: 'Check the panel accessibility',
+              agentsStates: { 'fixture-second': { status: 'running', message: null } },
+            })
+            active.items.push(second)
+            notify('item/completed', { threadId: thread.id, item: second })
+          }
 
-        if (text.includes('fixture:subagents-lifecycle')) {
-          notify('item/completed', {
-            threadId: thread.id,
-            item: {
-              id: 'interaction',
-              type: 'subAgentActivity',
-              kind: 'interacted',
-              agentThreadId: child,
-              agentPath: '/root/keyboard',
-            },
-          })
+          hold = true
         }
+        else {
+          notify('item/started', { threadId: child, item: { id: 'child-reply', type: 'agentMessage', text: '' } })
+          notify('item/agentMessage/delta', { threadId: child, itemId: 'child-reply', delta: 'Keyboard handling looks right.' })
+          notify('item/completed', { threadId: child, item: { id: 'child-reply', type: 'agentMessage', text: 'Keyboard handling looks right.' } })
+          const failed = text.includes('fixture:subagents-errored')
+          notify('turn/completed', { threadId: child, turn: { ...childTurn, status: failed ? 'failed' : 'completed' } })
+          if (failed) {
+            notify('item/completed', {
+              threadId: thread.id,
+              item: {
+                id: 'completion',
+                type: 'subAgentActivity',
+                kind: 'completed',
+                agentThreadId: child,
+                agentPath: '/root/keyboard',
+              },
+            })
+          }
 
-        const waited = collab(`wait-${active.id}`, 'wait', 'completed', { agentsStates: { [child]: { status: failed ? 'errored' : 'completed', message: 'Keyboard handling looks right.' } } })
-        const closed = collab(`close-${active.id}`, 'closeAgent', 'completed', { agentsStates: { [child]: { status: 'shutdown', message: null } } })
-        for (const item of [waited, closed]) {
-          active.items.push(item)
-          notify('item/completed', { threadId: thread.id, item })
+          if (text.includes('fixture:subagents-lifecycle')) {
+            notify('item/completed', {
+              threadId: thread.id,
+              item: {
+                id: 'interaction',
+                type: 'subAgentActivity',
+                kind: 'interacted',
+                agentThreadId: child,
+                agentPath: '/root/keyboard',
+              },
+            })
+          }
+
+          const waited = collab(`wait-${active.id}`, 'wait', 'completed', { agentsStates: { [child]: { status: failed ? 'errored' : 'completed', message: 'Keyboard handling looks right.' } } })
+          const closed = collab(`close-${active.id}`, 'closeAgent', 'completed', { agentsStates: { [child]: { status: 'shutdown', message: null } } })
+          for (const item of [waited, closed]) {
+            active.items.push(item)
+            notify('item/completed', { threadId: thread.id, item })
+          }
+
+          if (text.includes('fixture:subagents-followup'))
+            notify('turn/started', { threadId: child, turn: { id: 'follow-up', status: 'inProgress', items: [] } })
         }
-
-        if (text.includes('fixture:subagents-followup'))
-          notify('turn/started', { threadId: child, turn: { id: 'follow-up', status: 'inProgress', items: [] } })
 
         save()
       }

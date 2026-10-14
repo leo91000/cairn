@@ -197,6 +197,16 @@ test('subagents show as a team with their own steps and report', async ({ page, 
   await expect(steps.getByTestId('agent-step').filter({ hasText: 'rg -n shortcut src' })).toHaveCount(1)
   // The subagent's messages stay with it instead of reading as the agent's reply.
   await expect(page.locator('.activity-message').filter({ hasText: 'Keyboard handling looks right.' })).toHaveCount(0)
+  // Its full activity opens beside the conversation, with each step's output.
+  await row.getByTestId('open-subagent').click()
+  const panel = page.getByRole('complementary', { name: 'Subagent activity' }).getByTestId('subagent-panel')
+  await expect(panel).toContainText('Review the keyboard handling')
+  await expect(panel).toContainText('Done')
+  await expect(panel.getByTestId('subagent-steps')).toContainText('rg -n shortcut src')
+  await expect(panel).toContainText('Keyboard handling looks right.')
+  await page.screenshot({ path: test.info().outputPath('subagent-panel-1280.png'), animations: 'disabled' })
+  await panel.getByRole('button', { name: 'Close subagent activity' }).click()
+  await expect(panel).toHaveCount(0)
   for (const colorScheme of ['light', 'dark'] as const) {
     await page.emulateMedia({ colorScheme })
     for (const width of [1280, 390]) {
@@ -205,6 +215,76 @@ test('subagents show as a team with their own steps and report', async ({ page, 
       await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth - innerWidth)).toBeLessThanOrEqual(1)
       await page.screenshot({ path: test.info().outputPath(`subagent-team-${colorScheme}-${width}.png`), animations: 'disabled' })
     }
+  }
+})
+
+test('working subagents stay in sight beside the composer and open as a drawer on phones', async ({ page, workspace }) => {
+  test.setTimeout(60000)
+  const chat = await workspace.api('/api/chats', 'POST', {})
+  try {
+    await workspace.api(`/api/chats/${chat.id}/messages`, 'POST', {
+      id: randomUUID(),
+      text: 'fixture:subagents-working-team',
+    })
+    await expect.poll(async () => (await workspace.api(`/api/chats/${chat.id}`)).run?.status, { timeout: 15000 }).toBe('running')
+    const run = (await workspace.api(`/api/chats/${chat.id}`)).run
+    const spawned = () => workspace.service.store.events(run.id, 0, 100)
+      .filter(event => event.type === 'item.completed' && (event.payload?.item as Record<string, unknown> | undefined)?.type === 'subagent')
+      .map(event => event.payload!.item as Record<string, unknown>)
+    await expect.poll(() => spawned().length).toBe(2)
+    // Mirror Claude's explicit background wait after its subagents have been launched.
+    for (const agent of spawned())
+      workspace.service.store.event(run.id, 'item.updated', '', { type: 'item.updated', item: { ...agent, task_id: agent.id } })
+    workspace.service.store.event(run.id, 'turn.waiting', '', { type: 'turn.waiting', tasks: spawned().map(agent => ({ id: agent.id, description: agent.name })) })
+    await page.setViewportSize({ width: 1440, height: 900 })
+    await page.goto(workspacePath(`/chats/${chat.id}`))
+    await authenticateWorkspace(page)
+    const bar = page.getByTestId('subagent-bar')
+    await expect(bar).toContainText('2 running')
+    // The bar replaces the working indicator while the agent only waits for its subagent.
+    await expect(page.locator('.agent-working')).toHaveCount(0)
+    await expect(page.getByText('Waiting for the worker…')).toHaveCount(0)
+    const chip = bar.getByTestId('subagent-chip').filter({ hasText: 'Review the keyboard handling' })
+    await chip.click()
+    await expect(chip).toHaveAttribute('aria-pressed', 'true')
+    const panel = page.getByRole('complementary', { name: 'Subagent activity' }).getByTestId('subagent-panel')
+    await expect(panel).toContainText('Running')
+    await expect(panel.getByTestId('subagent-steps')).toContainText('rg -n shortcut src')
+    const firstTab = panel.getByRole('tab', { name: 'Review the keyboard handling' })
+    const secondTab = panel.getByRole('tab', { name: 'Check the panel accessibility' })
+    await firstTab.focus()
+    await firstTab.press('ArrowRight')
+    await expect(secondTab).toBeFocused()
+    await expect(secondTab).toHaveAttribute('aria-selected', 'true')
+    await expect(firstTab).toHaveAttribute('tabindex', '-1')
+    await expect(panel.getByRole('tabpanel')).toHaveAccessibleName('Check the panel accessibility')
+    await secondTab.press('Home')
+    await expect(firstTab).toBeFocused()
+    await expect(firstTab).toHaveAttribute('aria-selected', 'true')
+    await expect(page.getByRole('textbox', { name: 'Message', exact: true })).toBeInViewport()
+    await panel.getByRole('button', { name: 'Close subagent activity' }).click()
+    await expect(chip).toBeFocused()
+    await chip.click()
+    await page.screenshot({ path: test.info().outputPath('subagent-bar-1440.png'), animations: 'disabled' })
+
+    await page.setViewportSize({ width: 390, height: 844 })
+    await expect(page.getByRole('complementary', { name: 'Subagent activity' })).toHaveCount(0)
+    const drawer = page.getByRole('dialog', { name: 'Subagent activity' })
+    await expect(drawer.getByTestId('subagent-panel')).toContainText('Review the keyboard handling')
+    await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth - innerWidth)).toBeLessThanOrEqual(1)
+    await page.screenshot({ path: test.info().outputPath('subagent-drawer-390.png'), animations: 'disabled' })
+    await drawer.getByRole('button', { name: 'Close subagent activity' }).click()
+    await expect(drawer).toHaveCount(0)
+    await expect(page.getByRole('textbox', { name: 'Message', exact: true })).toBeFocused()
+    await page.getByRole('textbox', { name: 'Message', exact: true }).fill('Keep going while I check the panel.')
+    await page.getByRole('button', { name: 'Queue', exact: true }).click()
+    await expect(bar).toContainText('2 running')
+    await bar.getByRole('button', { name: /2 subagents working/ }).click()
+    await expect(page.getByRole('dialog', { name: 'Subagent activity' })).toBeVisible()
+  }
+  finally {
+    await workspace.api(`/api/chats/${chat.id}/stop`, 'POST', {})
+    await expect.poll(async () => (await workspace.api(`/api/chats/${chat.id}`)).run?.status).not.toBe('running')
   }
 })
 

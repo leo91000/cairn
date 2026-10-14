@@ -11,6 +11,7 @@ import {
   inject,
   nextTick,
   onBeforeUnmount,
+  provide,
   ref,
   watch,
 } from 'vue'
@@ -34,6 +35,8 @@ import Modal from '../components/Modal.vue'
 import NodeExecution from '../components/NodeExecution.vue'
 import QueueStrip from '../components/QueueStrip.vue'
 import SkillTextarea from '../components/SkillTextarea.vue'
+import SubagentBar from '../components/SubagentBar.vue'
+import SubagentPanel from '../components/SubagentPanel.vue'
 import ThemeControl from '../components/ThemeControl.vue'
 import UiAlert from '../components/UiAlert.vue'
 import UiButton from '../components/UiButton.vue'
@@ -66,6 +69,7 @@ import { useRetryNotice } from '../run-retry'
 import { exclusiveSuspensionLabel, isExclusivelySuspended } from '../run-status'
 import { backgroundWait } from '../signal'
 import { chatSkills } from '../skill-mentions'
+import { openSubagentKey, subagentState } from '../subagents'
 import { iconButton } from '../ui'
 import { useLiveRun } from '../use-live-run'
 import { workspaceActionsKey } from '../workspace-actions'
@@ -103,11 +107,43 @@ const deletingConversation = ref<ChatDetail>()
 const detailsOpen = ref(false)
 const detailsButton = ref<HTMLButtonElement>()
 const activity = ref<InstanceType<typeof ActivityFeed>>()
+const textarea = ref<InstanceType<typeof SkillTextarea>>()
 const workspaceActions = inject(workspaceActionsKey)
 const installation = inject(installationKey, null)
 const currentInstallation = computed(() => installation?.current.value ?? null)
 const connectionOpen = ref(false)
 const fileCount = computed(() => latestArtifacts(deliverables.value).length)
+
+// A subagent's full activity opens beside the conversation on wide screens, in a drawer otherwise.
+// The current request's subagents stay in sight beside the composer while one of them works.
+const openedSubagent = ref<string | null>(null)
+let subagentOpener: HTMLElement | null = null
+const wideQuery = window.matchMedia('(width > 1200px)')
+const wide = ref(wideQuery.matches)
+const onWide = () => wide.value = wideQuery.matches
+wideQuery.addEventListener('change', onWide)
+onBeforeUnmount(() => wideQuery.removeEventListener('change', onWide))
+
+function openSubagent(id: string, opener?: HTMLElement) {
+  subagentOpener = opener ?? (document.activeElement instanceof HTMLElement ? document.activeElement : null)
+  openedSubagent.value = id
+}
+
+async function closeSubagent() {
+  openedSubagent.value = null
+  await nextTick()
+  if (subagentOpener?.isConnected && subagentOpener.getClientRects().length)
+    subagentOpener.focus()
+  else
+    textarea.value?.focus()
+  subagentOpener = null
+}
+
+provide(openSubagentKey, openSubagent)
+const runActive = computed(() => detail.value?.run?.status === 'running')
+const subagentTeam = computed(() => activity.value?.teams.find(team => team.some(agent => agent.id === openedSubagent.value)))
+const currentSubagents = computed(() => activity.value?.subagents ?? [])
+const subagentBar = computed(() => currentSubagents.value.some(agent => subagentState(agent, runActive.value) === 'running'))
 
 async function detailAction(action: () => void) {
   detailsOpen.value = false
@@ -135,7 +171,6 @@ const submitting = ref(false)
 const editing = ref<string | null>(null)
 const agentId = ref(typeof route.query.agent === 'string' ? route.query.agent : MAIN_AGENT_ID)
 const projectId = ref(typeof route.query.project === 'string' ? route.query.project : '')
-const textarea = ref<InstanceType<typeof SkillTextarea>>()
 const fileInput = ref<HTMLInputElement>()
 const attachments = ref<ChatAttachment[]>([])
 const previews = ref<Record<string, string>>({})
@@ -455,6 +490,7 @@ function edit(message: ChatMessage) {
 
 // The view stays mounted across conversations: reset what belongs to the previous one.
 watch(chatId, (id) => {
+  openedSubagent.value = null
   history.value = false
   detailsOpen.value = false
   connectionOpen.value = false
@@ -794,6 +830,7 @@ function key(event: KeyboardEvent) {
             :loading="catchingUp"
             :trimmed="0"
             :skills="skillNames"
+            :subagent-bar="subagentBar"
             compact-toolbar
             chat
             @load="live.loadOlder"
@@ -860,6 +897,13 @@ function key(event: KeyboardEvent) {
                 </button>
               </div>
             </details>
+            <SubagentBar
+              v-if="subagentBar"
+              :agents="currentSubagents"
+              :active="runActive"
+              :selected="openedSubagent"
+              @open="openSubagent"
+            />
             <form
               class="chat-composer relative rounded-[26px] border border-line bg-surface p-1 focus-within:border-accent/50"
               @submit.prevent="send()"
@@ -1018,7 +1062,31 @@ function key(event: KeyboardEvent) {
         </section>
       </div>
     </div>
+    <aside v-if="subagentTeam && wide" class="w-100 shrink-0 border-l border-line" aria-label="Subagent activity">
+      <SubagentPanel
+        :team="subagentTeam"
+        :selected="openedSubagent!"
+        :active="runActive"
+        @select="openedSubagent = $event"
+        @close="closeSubagent"
+      />
+    </aside>
   </div>
+  <Modal
+    v-if="subagentTeam && !wide"
+    title="Subagent activity"
+    drawer
+    headless
+    @close="closeSubagent"
+  >
+    <SubagentPanel
+      :team="subagentTeam"
+      :selected="openedSubagent!"
+      :active="runActive"
+      @select="openedSubagent = $event"
+      @close="closeSubagent"
+    />
+  </Modal>
 </template>
 
 <style scoped>
