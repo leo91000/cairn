@@ -18,6 +18,12 @@ even when the agent's direct resource, GitHub or node permissions are restricted
 It includes changing other agents' permissions and managing their work. Account
 administration remains outside the public MCP catalogue.
 
+The `delete_agent` management tool removes an unused agent, including its saved
+credentials, portrait and 1Password assignments. Main, agents referenced by tasks
+(including archived tasks), and agents with active work cannot be deleted. Move
+their tasks to another agent and finish or cancel active work first. Completed
+run history is preserved.
+
 New missions default to the calling agent when no agent ID is supplied; another
 agent can be selected explicitly. A mission uses its selected agent's permissions,
 GitHub credentials and 1Password grants. Installation access can also inspect,
