@@ -16,6 +16,7 @@ import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.selected
 import androidx.compose.ui.semantics.semantics
 import build.cairn.app.data.*
+import build.cairn.app.diagnostics.PerfScreen
 import build.cairn.app.diagnostics.Performance
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
@@ -166,6 +167,13 @@ private fun FilPager(
             }
         }
         val selectedKey = keys.getOrNull(pager.settledPage)
+        val reportScreen = LocalPerformanceScreen.current
+        DisposableEffect(selectedKey) {
+            reportScreen(
+                if (selectedKey?.startsWith("run:") == true) PerfScreen.RUN else PerfScreen.CHAT
+            )
+            onDispose { reportScreen(null) }
+        }
         LaunchedEffect(selectedKey) { focus.clearFocus() }
         fun show(target: String, elsewhere: () -> Unit) {
             val index = keys.indexOf(target)

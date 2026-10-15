@@ -8,6 +8,8 @@ installation. They are not anonymous. No conversation content is collected.
 After ten seconds in the foreground, the app sends the latest cumulative report
 to `POST /api/account/telemetry/performance`, then at most once per minute. Uploads
 stop when the app leaves STARTED, the account signs out or sharing is disabled.
+The monotonic upload deadline survives foreground entries, preference toggles and
+UI recreation within the process, including cancellation of an in-flight request.
 Serialization and upload run away from the UI dispatcher. Requests have a five-second
 budget; errors never display a toast or interrupt navigation. There is no background
 worker or persistent upload queue. Short foreground visits can produce no upload.
@@ -59,6 +61,8 @@ listener on a dedicated handler thread, attached only while the activity is star
 Screen/swipe attribution reflects the category when a callback is processed, so
 frames at navigation boundaries can fall into either adjacent category. These are
 diagnostics, not a replacement for a release-build Perfetto trace on the affected phone.
+The mixed Fil pager reports the settled page's conversation or mission category,
+including when a swipe does not change the original navigation route.
 
 ## Regressions addressed
 
@@ -83,7 +87,7 @@ From `apps/android/`, with `ANDROID_HOME` configured:
 ```sh
 ./gradlew spotlessCheck testDebugUnitTest lintDebug
 ./gradlew connectedDebugAndroidTest \
-  -Pandroid.testInstrumentationRunnerArguments.class=build.cairn.app.ui.ChatSwipeDeviceTest,build.cairn.app.ui.PerformanceDeviceTest
+  -Pandroid.testInstrumentationRunnerArguments.class=build.cairn.app.ui.ChatSwipeDeviceTest,build.cairn.app.ui.PerformanceDeviceTest,build.cairn.app.ui.FilPagerDeviceTest
 ```
 
 The device diagnostics test collects real native frame reports, copies and parses
@@ -91,13 +95,11 @@ the report, checks its shape and absence of auth fields, and saves synthetic-fix
 evidence under the app's private `files/performance-validation/` test directory.
 Tests in `PerformanceStoreTest` cover refresh-rate deadlines, frozen frames, bounded
 retention, reset, percentile bounds and concurrent collectors.
-
-Validation on 2026-10-15: all 257 JVM/Robolectric tests and the Android lint/format
-checks passed. Nine device tests passed on the local Android 15 x86_64 emulator
-(`yama_api_35`, host GPU, debug build): eight conversation/automatic upload cases and the native
-diagnostics/copy/opt-out/reset case. The exported report contained real frame metrics with
-no dropped reports. This synthetic local workload does not measure production
-network latency or performance on the affected physical phone.
+`PerformanceUploaderTest` exercises restarted foreground/opt-in collections and
+cancelled requests with a virtual clock. `FilPagerDeviceTest` checks screen
+attribution while swiping between missions and conversations and returning to Fil.
+These synthetic workloads do not measure production network latency or performance
+on the affected physical phone.
 
 ## Inspecting received reports
 

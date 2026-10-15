@@ -9,8 +9,7 @@ import build.cairn.app.data.CairnViewModel
 import build.cairn.app.data.Workspace
 import build.cairn.app.diagnostics.Performance
 import build.cairn.app.diagnostics.PerformanceUploader
-import kotlinx.coroutines.delay
-import kotlinx.coroutines.isActive
+import build.cairn.app.diagnostics.runPerformanceUploads
 
 @Composable
 internal fun PerformanceUpload(vm: CairnViewModel, state: Workspace) {
@@ -24,11 +23,7 @@ internal fun PerformanceUpload(vm: CairnViewModel, state: Workspace) {
         if (account == null || !enabled) return@LaunchedEffect
         val uploader = PerformanceUploader(vm::uploadPerformance)
         owner.lifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) {
-            delay(10_000)
-            while (isActive) {
-                uploader.upload()
-                delay(60_000)
-            }
+            runPerformanceUploads(Performance.uploadCadence, uploader::upload)
         }
     }
 }

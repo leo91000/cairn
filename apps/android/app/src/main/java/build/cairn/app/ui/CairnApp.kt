@@ -263,7 +263,9 @@ private fun WorkspaceApp(
 
     val backStack by nav.currentBackStackEntryAsState()
     val route = backStack?.destination?.route ?: "fil"
-    SideEffect { Performance.screen = PerfScreen.fromRoute(route) }
+    var detailScreen by remember(route) { mutableStateOf<PerfScreen?>(null) }
+    val performanceScreen = detailScreen ?: PerfScreen.fromRoute(route)
+    SideEffect { Performance.screen = performanceScreen }
     LaunchedEffect(sharedUrl) {
         if (sharedUrl.isNotBlank()) {
             if (state.isOwner) nav.navigate("authorize") { launchSingleTop = true }
@@ -299,6 +301,7 @@ private fun WorkspaceApp(
     fun create() = nav.navigate("new-chat") { launchSingleTop = true }
     CompositionLocalProvider(
         LocalFocusMode provides { focusedContent = it },
+        LocalPerformanceScreen provides { detailScreen = it },
         LocalSnackbar provides snackbar,
         LocalAgentPortraits provides rememberAgentPortraits(vm, state),
     ) {

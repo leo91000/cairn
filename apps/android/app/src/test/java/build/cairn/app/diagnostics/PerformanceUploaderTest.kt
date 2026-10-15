@@ -4,11 +4,73 @@ import build.cairn.app.data.wireJson
 import java.io.IOException
 import java.util.concurrent.Executors
 import kotlinx.coroutines.*
+import kotlinx.coroutines.test.*
 import kotlinx.serialization.encodeToString
 import org.junit.Assert.*
 import org.junit.Test
 
 class PerformanceUploaderTest {
+    @OptIn(ExperimentalCoroutinesApi::class)
+    @Test
+    fun `restarting foreground or opt-in collection preserves the process upload deadline`() =
+        runTest {
+            val cadence = UploadCadence { testScheduler.currentTime * 1_000_000 }
+            val attempts = mutableListOf<Long>()
+            fun startCollection() = launch {
+                runPerformanceUploads(cadence) { attempts.add(testScheduler.currentTime) }
+            }
+
+            val first = startCollection()
+            advanceTimeBy(10_000)
+            runCurrent()
+            assertEquals(listOf(10_000L), attempts)
+            first.cancelAndJoin()
+
+            advanceTimeBy(1_000)
+            val resumed = startCollection()
+            advanceTimeBy(10_000)
+            runCurrent()
+            assertEquals(listOf(10_000L), attempts)
+            advanceTimeBy(49_000)
+            runCurrent()
+            assertEquals(listOf(10_000L, 70_000L), attempts)
+            resumed.cancelAndJoin()
+
+            advanceTimeBy(1_000)
+            val optedInAgain = startCollection()
+            advanceTimeBy(59_000)
+            runCurrent()
+            assertEquals(listOf(10_000L, 70_000L, 130_000L), attempts)
+            optedInAgain.cancelAndJoin()
+        }
+
+    @OptIn(ExperimentalCoroutinesApi::class)
+    @Test
+    fun `cancelling an in-flight upload retains its deadline for a recreated collection`() =
+        runTest {
+            val cadence = UploadCadence { testScheduler.currentTime * 1_000_000 }
+            var attempts = 0
+            val first = launch {
+                runPerformanceUploads(cadence) {
+                    attempts++
+                    awaitCancellation()
+                }
+            }
+            advanceTimeBy(10_000)
+            runCurrent()
+            assertEquals(1, attempts)
+            first.cancelAndJoin()
+
+            val recreated = launch { runPerformanceUploads(cadence) { attempts++ } }
+            advanceTimeBy(59_999)
+            runCurrent()
+            assertEquals(1, attempts)
+            advanceTimeBy(1)
+            runCurrent()
+            assertEquals(2, attempts)
+            recreated.cancelAndJoin()
+        }
+
     @Test
     fun `idle windows are skipped and cumulative revisions are sent once`() = runBlocking {
         val store = PerformanceStore()

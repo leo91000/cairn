@@ -8,10 +8,13 @@ import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import build.cairn.app.data.*
+import build.cairn.app.diagnostics.PerfScreen
+import build.cairn.app.diagnostics.Performance
 import java.util.concurrent.TimeUnit
 import kotlin.concurrent.thread
 import kotlinx.coroutines.flow.first
 import okhttp3.mockwebserver.*
+import org.junit.Assert.assertEquals
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -159,6 +162,7 @@ class FilPagerDeviceTest {
                 waitText("Revue quotidienne")
                 compose.onNodeWithText("Revue quotidienne").performClick()
                 waitPage("run-page:failed-run")
+                compose.runOnIdle { assertEquals(PerfScreen.RUN, Performance.screen) }
                 // The mission itself is one tab away from its run.
                 waitText("Mission")
                 compose.onNodeWithText("Mission").performClick()
@@ -166,14 +170,18 @@ class FilPagerDeviceTest {
                 // Pour vous: the question, then this mission; then the live conversation.
                 swipe(left = true)
                 waitPage("chat-page:live")
+                compose.runOnIdle { assertEquals(PerfScreen.CHAT, Performance.screen) }
                 swipe(left = false)
                 waitPage("run-page:failed-run")
+                compose.runOnIdle { assertEquals(PerfScreen.RUN, Performance.screen) }
                 swipe(left = false)
                 waitPage("chat-page:question")
+                compose.runOnIdle { assertEquals(PerfScreen.CHAT, Performance.screen) }
                 compose.onNodeWithContentDescription("Retour").performClick()
                 compose.waitUntil(10000) {
                     compose.onAllNodesWithTag("fil").fetchSemanticsNodes().isNotEmpty()
                 }
+                compose.runOnIdle { assertEquals(PerfScreen.FIL, Performance.screen) }
             } finally {
                 vm.api.closeStreams()
             }

@@ -30,7 +30,8 @@ enum class PerfScreen {
                 "new-chat?agent={agent}&project={project}" -> CHAT
                 "missions",
                 "runs" -> MISSIONS
-                "run/{id}" -> RUN
+                "run/{id}",
+                "fil/run/{id}" -> RUN
                 "atelier",
                 "agents",
                 "projects",
@@ -266,6 +267,7 @@ class PerformanceStore(private val clock: () -> Long = System::nanoTime) {
 
 object Performance {
     val store = PerformanceStore()
+    val uploadCadence = UploadCadence()
     @Volatile var screen = PerfScreen.STARTUP
     @Volatile var swiping = false
     @Volatile var mainThread: Thread? = null
