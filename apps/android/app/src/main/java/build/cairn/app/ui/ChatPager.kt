@@ -16,6 +16,7 @@ import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.selected
 import androidx.compose.ui.semantics.semantics
 import build.cairn.app.data.*
+import build.cairn.app.diagnostics.Performance
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 
@@ -137,6 +138,13 @@ private fun FilPager(
         val pager = rememberPagerState { keys.size }
         val scope = rememberCoroutineScope()
         val focus = LocalFocusManager.current
+        LaunchedEffect(pager) {
+            try {
+                snapshotFlow { pager.isScrollInProgress }.collect { Performance.swiping = it }
+            } finally {
+                Performance.swiping = false
+            }
+        }
         val filKeys =
             remember(conversations.state?.chats, activity, state.tasks) {
                 val chats = conversations.state?.chats

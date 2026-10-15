@@ -4,6 +4,8 @@ import android.content.Context
 import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
 import android.util.AtomicFile
+import build.cairn.app.diagnostics.PerfOperation
+import build.cairn.app.diagnostics.Performance
 import java.io.File
 import java.security.KeyStore
 import java.security.MessageDigest
@@ -70,25 +72,27 @@ class HistoryCache(
 
     suspend fun read(key: String): CachedHistory? =
         withContext(Dispatchers.IO) {
-            lock.withLock {
-                val value =
-                    memory[key]
-                        ?: runCatching {
-                            val file = File(root, key)
-                            require(file.length() in 1..(maxEntry + 64).toLong())
-                            wireJson.decodeFromString<CachedHistory>(
-                                String(unseal(key, file.readBytes()), Charsets.UTF_8)
-                            )
-                        }
-                            .getOrNull()
-                if (value == null || !valid(value)) {
-                    removeLocked(key)
-                    null
-                } else {
-                    memory.remove(key)
-                    memory[key] = value
-                    trimMemory()
-                    value
+            Performance.measure(PerfOperation.CACHE_READ) {
+                lock.withLock {
+                    val value =
+                        memory[key]
+                            ?: runCatching {
+                                val file = File(root, key)
+                                require(file.length() in 1..(maxEntry + 64).toLong())
+                                wireJson.decodeFromString<CachedHistory>(
+                                    String(unseal(key, file.readBytes()), Charsets.UTF_8)
+                                )
+                            }
+                                .getOrNull()
+                    if (value == null || !valid(value)) {
+                        removeLocked(key)
+                        null
+                    } else {
+                        memory.remove(key)
+                        memory[key] = value
+                        trimMemory()
+                        value
+                    }
                 }
             }
         }
@@ -100,26 +104,29 @@ class HistoryCache(
         expectedGeneration: Long = generation,
     ) =
         withContext(Dispatchers.IO) {
-            lock.withLock {
-                if (expectedGeneration != generation) return@withLock
-                if (!valid(value)) {
-                    removeLocked(key)
-                    return@withLock
+            Performance.measure(PerfOperation.CACHE_SAVE) {
+                lock.withLock {
+                    if (expectedGeneration != generation) return@withLock
+                    if (!valid(value)) {
+                        removeLocked(key)
+                        return@withLock
+                    }
+                    val position =
+                        (value.position
+                                ?: memory[key]?.takeIf { it.history == value.history }?.position)
+                            ?.takeIf {
+                                it.firstEvent == null ||
+                                    it.firstEvent == value.events.firstOrNull()?.id
+                            }
+                    val original = value.copy(position = position)
+                    val next = recentHistory(original)
+                    memory.remove(key)
+                    memory[key] = next
+                    dirty.add(key)
+                    trimMemory()
+                    if (force || System.currentTimeMillis() - (written[key] ?: 0) >= 1000)
+                        writeLocked(key)
                 }
-                val position =
-                    (value.position
-                            ?: memory[key]?.takeIf { it.history == value.history }?.position)
-                        ?.takeIf {
-                            it.firstEvent == null || it.firstEvent == value.events.firstOrNull()?.id
-                        }
-                val original = value.copy(position = position)
-                val next = recentHistory(original)
-                memory.remove(key)
-                memory[key] = next
-                dirty.add(key)
-                trimMemory()
-                if (force || System.currentTimeMillis() - (written[key] ?: 0) >= 1000)
-                    writeLocked(key)
             }
         }
 

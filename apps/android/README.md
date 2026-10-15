@@ -12,6 +12,9 @@ Version 0.30.1 shows waiting reasons in conversations and links to Connections w
 Version 0.30.0 adds in-app APK updates from stable Git tags. See [update distribution](docs/UPDATES.md).
 
 Native Kotlin / Jetpack Compose client for the Cairn API in this repository.
+Performance reports are available in **Paramètres → Diagnostic des performances**.
+Automatic sharing of technical performance reports with Beacon is enabled by default and can be disabled there.
+See [performance diagnostics](docs/PERFORMANCE.md) for collection scope and reproduction steps.
 Swipe left or right across a conversation to slide between active chats in the
 selector's most-recent-first order. The full screens follow the finger, with the
 neighboring chat's real content prepared ahead of time. Only the settled chat keeps

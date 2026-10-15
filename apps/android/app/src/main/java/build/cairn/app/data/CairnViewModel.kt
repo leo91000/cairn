@@ -86,6 +86,28 @@ constructor(
 
     private val preferences = Preferences(application)
     val theme = preferences.theme
+    val telemetryEnabled = preferences.telemetryEnabled
+
+    fun setTelemetryEnabled(enabled: Boolean) {
+        viewModelScope.launch {
+            try {
+                preferences.setTelemetryEnabled(enabled)
+            } catch (e: Exception) {
+                report(e)
+            }
+        }
+    }
+
+    internal suspend fun uploadPerformance(report: String) {
+        val current = state.value
+        val account = accountConnection ?: return
+        if (!current.session.authenticated || current.signingOut) return
+        account.request(
+            "POST",
+            "/account/telemetry/performance",
+            wireJson.parseToJsonElement(report),
+        )
+    }
 
     fun setTheme(value: String) {
         viewModelScope.launch {

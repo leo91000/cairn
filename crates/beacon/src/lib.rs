@@ -18,6 +18,7 @@ mod passkeys;
 mod relay;
 mod sharing;
 pub mod stun;
+mod telemetry;
 
 pub use fcm::{AccountPushSender, FcmPushSender};
 pub use hosts::InstallationHosts;
@@ -227,6 +228,12 @@ pub async fn router_with_installation_hosts(
         .route("/api/account/sessions", get(account::sessions))
         .route("/api/account/delete", post(account::delete))
         .route("/api/account/audit", get(audit::list))
+        .route(
+            "/api/account/telemetry/performance",
+            post(telemetry::receive)
+                .get(telemetry::list)
+                .layer(axum::extract::DefaultBodyLimit::max(64 * 1024)),
+        )
         .route(
             "/api/account/sessions/revoke-others",
             post(account::revoke_others),
@@ -917,6 +924,7 @@ pub async fn cleanup_expired(pool: &PgPool) -> Result<(), sqlx_core::error::Erro
     let mut transaction = pool.begin().await?;
     for statement in [
         "DELETE FROM account_audit WHERE created_at <= now() - interval '90 days'",
+        "DELETE FROM client_performance WHERE updated_at <= now() - interval '14 days'",
         "DELETE FROM email_codes WHERE expires_at <= now()",
         "DELETE FROM web_sessions WHERE expires_at <= now()",
         "DELETE FROM account_rate_limits WHERE resets_at < now() - interval '1 day'",

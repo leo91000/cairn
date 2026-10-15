@@ -4,6 +4,7 @@ import android.content.Context
 import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
 import android.util.Base64
+import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
@@ -19,6 +20,13 @@ import kotlinx.coroutines.flow.map
 internal val Context.dataStore by preferencesDataStore("cairn_preferences")
 
 class Preferences(private val context: Context) {
+    private val telemetryKey = booleanPreferencesKey("performance_telemetry")
+    val telemetryEnabled = context.dataStore.data.map { it[telemetryKey] ?: true }
+
+    suspend fun setTelemetryEnabled(enabled: Boolean) {
+        context.dataStore.edit { it[telemetryKey] = enabled }
+    }
+
     private val themeKey = stringPreferencesKey("theme")
     val theme = context.dataStore.data.map { it[themeKey] ?: "system" }
 

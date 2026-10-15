@@ -14,6 +14,7 @@ import androidx.compose.runtime.setValue
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import build.cairn.app.data.CairnViewModel
+import build.cairn.app.diagnostics.FrameMonitor
 import build.cairn.app.ui.AppUpdatePrompt
 import build.cairn.app.ui.CairnApp
 import build.cairn.app.ui.CairnTheme
@@ -22,6 +23,7 @@ import build.cairn.app.ui.cairnDarkTheme
 import build.cairn.app.update.UpdateViewModel
 
 class MainActivity : ComponentActivity() {
+    private val frameMonitor by lazy { FrameMonitor(window) }
     private var targetAccount by mutableStateOf("")
     private var targetChat by mutableStateOf("")
     private var targetCacheScope by mutableStateOf("")
@@ -67,6 +69,16 @@ class MainActivity : ComponentActivity() {
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         receive(intent)
+    }
+
+    override fun onStart() {
+        super.onStart()
+        frameMonitor.start()
+    }
+
+    override fun onStop() {
+        frameMonitor.stop()
+        super.onStop()
     }
 
     private fun receive(intent: Intent) {
