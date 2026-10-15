@@ -357,6 +357,28 @@ export function chatFixture() {
         }
         active.items.push(spawned)
         notify('item/completed', { threadId: thread.id, item: spawned })
+        if (text.includes('fixture:subagents-message-parent')) {
+          const command = {
+            id: 'parent-command',
+            type: 'commandExecution',
+            command: 'pnpm check',
+            status: 'inProgress',
+          }
+          notify('item/started', { threadId: thread.id, turnId: active.id, item: command })
+          notify('item/completed', {
+            threadId: text.includes('fixture:subagents-message-parent-direct') ? thread.id : child,
+            turnId: 'child-turn',
+            item: {
+              id: 'message-parent',
+              type: 'subAgentActivity',
+              kind: 'interacted',
+              agentThreadId: thread.id,
+              agentPath: '/root',
+            },
+          })
+          notify('item/completed', { threadId: thread.id, turnId: active.id, item: { ...command, status: 'completed', exitCode: 0 } })
+        }
+
         const childTurn = { id: 'child-turn', status: 'inProgress', items: [] }
         notify('turn/started', { threadId: child, turn: childTurn })
         if (text.includes('fixture:subagents-lifecycle')) {

@@ -324,6 +324,12 @@ impl Chat<'_> {
 
         if item["type"] == "subAgentActivity" {
             let thread = text(&item, "agentThreadId");
+            // A child's message to its parent also reports activity on this thread.
+            // It must never register the main conversation as its own subagent.
+            if thread == self.thread {
+                return Ok(());
+            }
+
             let status = match text(&item, "kind") {
                 "completed" => "completed",
                 "interrupted" => "stopped",
@@ -620,20 +626,17 @@ impl Chat<'_> {
             }
             return self.session.rpc.reject(request_id).await;
         }
-        let parent = params["threadId"]
-            .as_str()
-            .and_then(|thread| self.children.get(thread))
-            .cloned();
-        if let Some(parent) = parent {
-            return self
-                .subagent_activity(&incoming.method, &params, &parent)
-                .await;
-        }
+        let thread = text(&params, "threadId");
         let other_thread = params["threadId"].is_string()
             && !self.thread.is_empty()
             && params["threadId"] != self.thread.as_str();
         if other_thread {
-            return Ok(());
+            let Some(parent) = self.children.get(thread).cloned() else {
+                return Ok(());
+            };
+            return self
+                .subagent_activity(&incoming.method, &params, &parent)
+                .await;
         }
         match incoming.method.as_str() {
             "serverRequest/resolved" => self.resolved(&params).await?,

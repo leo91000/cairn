@@ -541,6 +541,61 @@ async fn subagent_threads_show_as_steps_of_their_subagent() {
     );
 }
 
+#[tokio::test]
+async fn messages_to_the_parent_preserve_its_commands_reply_and_turn_completion() {
+    for fixture in [
+        "fixture:subagents-message-parent",
+        "fixture:subagents-message-parent-direct",
+    ] {
+        let root = TempDir::new().unwrap();
+        let home = prepare(&root);
+        let config = config(&root);
+        let plan = plan(&root, fixture);
+        let (tx, mut rx) = mpsc::channel(256);
+        let stop = CancellationToken::new();
+        let stopping = stop.clone();
+        let task =
+            tokio::spawn(
+                async move { chat_process::run(&config, &home, plan, tx, stopping).await },
+            );
+        let mut events = Vec::new();
+        let collected = tokio::time::timeout(Duration::from_secs(5), async {
+            while let Some(event) = rx.recv().await {
+                events.push(event);
+            }
+        })
+        .await;
+        stop.cancel();
+        let result = task.await.unwrap();
+        assert!(collected.is_ok(), "{fixture}: parent completion was lost");
+        result.unwrap();
+
+        let commands: Vec<_> = events
+            .iter()
+            .filter(|event| event["item"]["command"] == "pnpm check")
+            .collect();
+        assert_eq!(commands.len(), 2, "{fixture}");
+        assert_eq!(commands[0]["type"], "item.started");
+        assert_eq!(commands[1]["type"], "item.completed");
+        for event in commands {
+            assert_eq!(event["item"]["id"], "parent-command");
+            assert!(event["item"]["parent_id"].is_null());
+        }
+        assert!(events.iter().any(|event| event["type"] == "turn.completed"));
+        assert!(events.iter().all(|event| event["item"]["name"] != "root"));
+        assert!(events.iter().any(|event| {
+            event["item"]["type"] == "subagent_message"
+                && event["item"]["text"] == "Keyboard handling looks right."
+        }));
+        let output = std::fs::read_to_string(root.path().join("result.md")).unwrap();
+        assert!(output.contains("Ready for the next step."), "{output}");
+        assert!(
+            !output.contains("Keyboard handling looks right."),
+            "{output}"
+        );
+    }
+}
+
 #[test]
 fn shortened_subagent_activity_preserves_a_redacted_prompt_and_report() {
     let event = json!({
