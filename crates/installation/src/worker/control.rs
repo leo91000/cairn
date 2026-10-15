@@ -31,8 +31,7 @@ impl Worker {
         s.store
             .transaction(move |db| {
                 if let Some(bearer) = bearer {
-                    let target = required(db.run(&run_id)?, "Run not found")?;
-                    crate::installation_mcp::authorize_target_run_in(db, &bearer, &target)?;
+                    crate::installation_mcp::authorize_in(db, &bearer)?;
                 }
                 request_cancel(db, &run_id, is_active)
             })

@@ -279,6 +279,16 @@ fn revoke_agent_access(db: &Db<'_>, id: &str) -> Result<()> {
     Ok(())
 }
 
+fn record_failure(server: &mut McpServer, error: &Error) {
+    server.state = if error.is_unauthorized() {
+        ConnectionState::NeedsAuth
+    } else {
+        ConnectionState::Error
+    };
+    server.error = failure_message(error).to_owned();
+    server.checked_at = Some(now());
+}
+
 impl Mcps {
     pub async fn lock(&self, id: &str) -> tokio::sync::OwnedMutexGuard<()> {
         self.locks
@@ -321,9 +331,31 @@ impl Mcps {
         id: &str,
         change: impl FnOnce(&mut McpSecrets),
     ) -> Result<()> {
+        self.update_secrets_authorized(s, id, change, |_| Ok(()))
+            .await
+    }
+
+    pub(crate) async fn update_secrets_authorized<F>(
+        &self,
+        s: &Service,
+        id: &str,
+        change: impl FnOnce(&mut McpSecrets),
+        authorize: F,
+    ) -> Result<()>
+    where
+        F: FnOnce(&Db<'_>) -> Result<()> + Send + 'static,
+    {
         let mut secrets = self.server_secrets(s, id).await?;
         change(&mut secrets);
-        s.vault.set(id, &serde_json::to_value(&secrets)?).await
+        let secrets = serde_json::to_value(secrets)?;
+        let vault = s.vault.clone();
+        let id = id.to_owned();
+        s.store
+            .transaction(move |db| {
+                authorize(db)?;
+                vault.set_in(db, &id, &secrets)
+            })
+            .await
     }
 
     async fn view(&self, s: &Service, server: &McpServer) -> Result<Value> {
@@ -371,6 +403,19 @@ impl Mcps {
     }
 
     pub async fn save(&self, s: &Service, input: Value, existing: Option<&str>) -> Result<Value> {
+        self.save_authorized(s, input, existing, |_| Ok(())).await
+    }
+
+    pub(crate) async fn save_authorized<F>(
+        &self,
+        s: &Service,
+        input: Value,
+        existing: Option<&str>,
+        authorize: F,
+    ) -> Result<Value>
+    where
+        F: FnOnce(&Db<'_>) -> Result<()> + Send + 'static,
+    {
         let mut settings = parse("mcp", input)?;
         let changes = SecretChanges::take(&mut settings)?;
         let mut server = McpServer::deserialize(&settings)?;
@@ -400,6 +445,7 @@ impl Mcps {
         let vault = s.vault.clone();
         s.store
             .transaction(move |db| {
+                authorize(db)?;
                 db.put("mcps", &record)?;
                 vault.set_in(db, &id, &secrets)?;
                 cancel_pending(db, &id)?;
@@ -410,10 +456,24 @@ impl Mcps {
     }
 
     pub async fn disconnect(&self, s: &Service, id: &str, remove: bool) -> Result<()> {
+        self.disconnect_authorized(s, id, remove, |_| Ok(())).await
+    }
+
+    pub(crate) async fn disconnect_authorized<F>(
+        &self,
+        s: &Service,
+        id: &str,
+        remove: bool,
+        authorize: F,
+    ) -> Result<()>
+    where
+        F: FnOnce(&Db<'_>) -> Result<()> + Send + 'static,
+    {
         let _guard = self.lock(id).await;
         let id = id.to_owned();
         s.store
             .transaction(move |db| {
+                authorize(db)?;
                 let item = required(db.get("mcps", &id)?, NOT_FOUND)?;
                 cancel_pending(db, &id)?;
                 db.delete(&format!("mcp-secret:{id}"))?;
@@ -437,13 +497,7 @@ impl Mcps {
     }
 
     pub async fn failure(&self, s: &Service, mut server: McpServer, error: &Error) -> Result<()> {
-        server.state = if error.is_unauthorized() {
-            ConnectionState::NeedsAuth
-        } else {
-            ConnectionState::Error
-        };
-        server.error = failure_message(error).to_owned();
-        server.checked_at = Some(now());
+        record_failure(&mut server, error);
         self.put_server(s, &server).await
     }
 
@@ -451,23 +505,62 @@ impl Mcps {
     pub async fn record_discovery(
         &self,
         s: &Service,
-        mut server: McpServer,
+        server: McpServer,
         result: &Result<Vec<Value>>,
     ) -> Result<()> {
+        self.record_discovery_authorized(s, server, result, |_| Ok(()))
+            .await
+    }
+
+    async fn record_discovery_authorized<F>(
+        &self,
+        s: &Service,
+        mut server: McpServer,
+        result: &Result<Vec<Value>>,
+        authorize: F,
+    ) -> Result<()>
+    where
+        F: FnOnce(&Db<'_>) -> Result<()> + Send + 'static,
+    {
         match result {
-            Ok(tools) => {
-                server.record_success(tools.clone(), now());
-                self.put_server(s, &server).await
-            }
-            Err(error) => self.failure(s, server, error).await,
+            Ok(tools) => server.record_success(tools.clone(), now()),
+            Err(error) => record_failure(&mut server, error),
         }
+        let record = serde_json::to_value(server)?;
+        s.store
+            .transaction(move |db| {
+                authorize(db)?;
+                db.put("mcps", &record)?;
+                Ok(())
+            })
+            .await
     }
 
     pub async fn test(&self, s: &Service, id: &str) -> Result<Value> {
+        self.test_authorized(s, id, |_| Ok(())).await
+    }
+
+    pub(crate) async fn test_authorized<F>(
+        &self,
+        s: &Service,
+        id: &str,
+        authorize: F,
+    ) -> Result<Value>
+    where
+        F: Fn(&Db<'_>) -> Result<()> + Clone + Send + Sync + 'static,
+    {
         let _guard = self.lock(id).await;
         let server = self.server(s, id).await?;
-        let tools = crate::mcp_client::Client::list_tools(s, &server).await;
-        self.record_discovery(s, server, &tools).await?;
+        s.store
+            .read({
+                let authorize = authorize.clone();
+                move |db| authorize(db)
+            })
+            .await?;
+        let tools =
+            crate::mcp_client::Client::list_tools_authorized(s, &server, authorize.clone()).await;
+        self.record_discovery_authorized(s, server, &tools, authorize)
+            .await?;
         self.view(s, &self.server(s, id).await?).await
     }
 

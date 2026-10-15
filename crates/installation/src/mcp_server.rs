@@ -514,7 +514,7 @@ async fn call(
             ));
         }
         let args = parse(&format!("mcp:{name}"), args)?;
-        invoke(s, name, args).await
+        invoke(s, name, args, None).await
     }
     .await;
     let result = match operation {
@@ -665,19 +665,25 @@ pub(crate) fn read_run_content(db: &Db<'_>, args: &Value) -> Result<Value> {
     Ok(serde_json::to_value(chunk)?)
 }
 
-async fn invoke(s: &Arc<Service>, name: &str, args: Value) -> Result<Value> {
+pub(crate) async fn invoke(
+    s: &Arc<Service>,
+    name: &str,
+    args: Value,
+    bearer: Option<&str>,
+) -> Result<Value> {
+    let authorize = crate::installation_mcp::management_authorization(bearer);
     match name {
         "list_agents" => Ok(s.store.list("agents").await?.into()),
         "list_projects" => Ok(s.store.list("projects").await?.into()),
         "list_tasks" => Ok(s.store.list("tasks").await?.into()),
-        "save_agent" => s.agent(args, None).await,
-        "save_project" => s.project(args, None).await,
+        "save_agent" => s.agent_authorized(args, None, authorize).await,
+        "save_project" => s.project_authorized(args, None, authorize).await,
         "create_task" => s.task(args, None).await,
         "update_agent" => {
             let id = text(&args, "id");
             let mut agent = s.get("agents", id).await?;
             crate::store::merge(&mut agent, &args["agent"]);
-            s.agent(agent, Some(id)).await
+            s.agent_authorized(agent, Some(id), authorize).await
         }
         "update_task" => s.task(args["task"].clone(), Some(text(&args, "id"))).await,
         "run_task" => s.enqueue(text(&args, "taskId"), "mcp", None).await,
@@ -705,14 +711,14 @@ async fn invoke(s: &Arc<Service>, name: &str, args: Value) -> Result<Value> {
             s.store.read(move |db| run_history(db, &id, after)).await
         }
         "read_run_content" => s.store.read(move |db| read_run_content(db, &args)).await,
-        "list_skills" | "save_skill" => skills_tool(s, name, &args).await,
+        "list_skills" | "save_skill" => skills_tool(s, name, &args, bearer).await,
         "list_mcps" | "create_mcp" | "update_mcp" | "test_mcp" | "disconnect_mcp"
-        | "delete_mcp" => connection_tool(s, name, args).await,
+        | "delete_mcp" => connection_tool(s, name, args, bearer).await,
         _ => Err(Error::not_found("Unknown tool")),
     }
 }
 
-async fn skills_tool(s: &Service, name: &str, args: &Value) -> Result<Value> {
+async fn skills_tool(s: &Service, name: &str, args: &Value, bearer: Option<&str>) -> Result<Value> {
     let project_id = args["projectId"].as_str();
     let project = match project_id {
         Some(id) => Some(std::path::PathBuf::from(text(
@@ -726,12 +732,30 @@ async fn skills_tool(s: &Service, name: &str, args: &Value) -> Result<Value> {
         let scope = project_id.unwrap_or("global");
         return Ok(s.skills.list(scope, project).await?.into());
     }
+    if let Some(bearer) = bearer {
+        return s
+            .skills
+            .save_authorized(
+                &s.store,
+                text(args, "name"),
+                text(args, "content"),
+                project,
+                crate::installation_mcp::management_authorization(Some(bearer)),
+            )
+            .await;
+    }
     s.skills
         .save(text(args, "name"), text(args, "content"), project)
         .await
 }
 
-async fn connection_tool(s: &Service, name: &str, args: Value) -> Result<Value> {
+async fn connection_tool(
+    s: &Service,
+    name: &str,
+    args: Value,
+    bearer: Option<&str>,
+) -> Result<Value> {
+    let authorize = crate::installation_mcp::management_authorization(bearer);
     let management_url = crate::relay::beacon_address(&s.config.data_dir)
         .await?
         .map(|(origin, installation)| format!("{origin}/installations/{installation}/mcps"));
@@ -743,23 +767,32 @@ async fn connection_tool(s: &Service, name: &str, args: Value) -> Result<Value> 
     };
     match name {
         "list_mcps" => return Ok(s.mcps.list(s).await?.into()),
-        "create_mcp" => return Ok(with_management_url(s.mcps.save(s, args, None).await?)),
+        "create_mcp" => {
+            return Ok(with_management_url(
+                s.mcps.save_authorized(s, args, None, authorize).await?,
+            ));
+        }
         _ => {}
     }
     let id = text(&args, "id");
     s.mcps.assert_management(s, id).await?;
     match name {
         "update_mcp" => {
-            let saved = s.mcps.save(s, args["connection"].clone(), Some(id)).await?;
+            let saved = s
+                .mcps
+                .save_authorized(s, args["connection"].clone(), Some(id), authorize)
+                .await?;
             Ok(with_management_url(saved))
         }
-        "test_mcp" => s.mcps.test(s, id).await,
+        "test_mcp" => s.mcps.test_authorized(s, id, authorize).await,
         "delete_mcp" => {
-            s.mcps.disconnect(s, id, true).await?;
+            s.mcps.disconnect_authorized(s, id, true, authorize).await?;
             Ok(json!({ "deleted": true }))
         }
         _ => {
-            s.mcps.disconnect(s, id, false).await?;
+            s.mcps
+                .disconnect_authorized(s, id, false, authorize)
+                .await?;
             Ok(json!({ "disconnected": true }))
         }
     }
