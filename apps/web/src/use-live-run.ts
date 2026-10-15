@@ -22,10 +22,10 @@ import {
 import { liveConnection } from './live-connection'
 import { LiveEvents } from './live-events'
 
-// `hold` keeps the previous stream's data on screen for up to that many milliseconds after the
-// path changes, so switching views swaps content directly instead of flashing a loading state.
+// `hold` keeps the previous stream's data on screen until the new stream is ready,
+// so switching views swaps content directly instead of flashing a loading state.
 // `shown` is the path whose data is currently displayed.
-export function useLiveRun(path: () => string, options: { hold?: number } = {}) {
+export function useLiveRun(path: () => string, options: { hold?: boolean } = {}) {
   const snapshot = ref<LiveState>()
   const shown = ref(path())
   const events = ref<RunEvent[]>([])
@@ -44,7 +44,6 @@ export function useLiveRun(path: () => string, options: { hold?: number } = {}) 
   let generation = 0
   let persist: (() => void) | undefined
   let saveTimer: ReturnType<typeof setTimeout> | undefined
-  let holdTimer: ReturnType<typeof setTimeout> | undefined
 
   function scheduleSave() {
     if (saveTimer !== undefined)
@@ -63,8 +62,6 @@ export function useLiveRun(path: () => string, options: { hold?: number } = {}) 
   }
 
   function show(value: string) {
-    clearTimeout(holdTimer)
-    holdTimer = undefined
     shown.value = value
   }
 
@@ -88,10 +85,8 @@ export function useLiveRun(path: () => string, options: { hold?: number } = {}) 
       catchingUp.value = true
     }
 
-    clearTimeout(holdTimer)
-    if (options.hold && enabled && snapshot.value && previous?.[0] !== value && previous?.[1])
-      holdTimer = setTimeout(clear, options.hold)
-    else
+    const holding = options.hold && enabled && snapshot.value && previous?.[0] !== value && previous?.[1]
+    if (!holding)
       clear()
     status.value = 'connecting'
     error.value = ''
@@ -337,7 +332,6 @@ export function useLiveRun(path: () => string, options: { hold?: number } = {}) 
     window.removeEventListener('pagehide', leaving)
     persist?.()
     clearTimeout(saveTimer)
-    clearTimeout(holdTimer)
     disposed = true
     generation++
     connection?.close()

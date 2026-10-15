@@ -18,6 +18,7 @@ import {
 } from './api'
 import { useChatList } from './chat-list'
 import CommandPalette from './components/CommandPalette.vue'
+import FilColumn from './components/FilColumn.vue'
 import Icon from './components/Icon.vue'
 import ShortcutSheet from './components/ShortcutSheet.vue'
 import ThemeControl from './components/ThemeControl.vue'
@@ -91,10 +92,17 @@ watch(() => [state.installationRole, route.path], () => {
 
 // A mission opened from the Fil stays in the Fil, beside it as a conversation does.
 const filPage = computed(() => route.path === '/' || route.path.startsWith('/fil/'))
+const filWorkspace = computed(() => filPage.value || route.path.startsWith('/chats'))
 const place = computed(() => filPage.value || route.path.startsWith('/chats') ? 0 : route.path.startsWith('/tasks') ? 1 : atelierPaths.some(path => route.path.startsWith(path)) ? 2 : -1)
 // Reading screens take the whole phone; the dock returns on the three places.
 const reading = computed(() => route.path.startsWith('/chats') || /^\/(?:fil\/)?runs\/./.test(route.path) || route.path === '/authorize' || route.path.startsWith('/settings/'))
 const chats = useChatList()
+const selectedChatId = computed(() => {
+  if (!route.path.startsWith('/chats/'))
+    return undefined
+  const id = route.params.id as string
+  return chats.value.find(chat => chat.id === id || chat.slug === id)?.id ?? id
+})
 const runs = useMissionRuns({ eager: false })
 const fil = computed(() => filOf(chats.value, state.tasks, runs.value))
 const needsYou = computed(() => fil.value.forYou.length)
@@ -277,11 +285,25 @@ function openShortcuts() {
       :class="{
         'page-fil': filPage,
         'page-tasks': route.path === '/tasks',
-        'page-run': /^\/runs\/./.test(route.path) || route.path.startsWith('/chats'),
+        'page-run': /^\/runs\/./.test(route.path),
+        'flex overflow-hidden': filWorkspace,
         'page-chat': route.path.startsWith('/chats'),
         'page-default': !filPage && !route.path.startsWith('/chats'),
       }"
     >
+      <!-- Keep the Fil's filter, scroll and selection while its reading pane changes. -->
+      <aside
+        v-if="filWorkspace"
+        class="w-88 shrink-0 border-r border-line bg-inset tablet:w-full tablet:border-0 tablet:bg-transparent"
+        :class="{ 'tablet:hidden': reading || route.path.startsWith('/fil/runs/') }"
+        aria-label="Fil"
+      >
+        <FilColumn
+          :chats="chats"
+          :selected="selectedChatId"
+          :selected-run="route.path.startsWith('/fil/runs/') ? route.params.id as string : undefined"
+        />
+      </aside>
       <nav v-if="atelierSection" class="atelier-sections -mx-1 mb-6 flex items-center gap-1 overflow-x-auto px-1 pb-1 [scrollbar-width:none] phone:mb-4" aria-label="Atelier sections">
         <RouterLink to="/atelier" class="grid size-9 shrink-0 place-items-center rounded-full text-muted hover:bg-hover hover:text-ink" aria-label="Atelier overview">
           <Icon :name="Layers" :size="17" />
@@ -355,7 +377,7 @@ function openShortcuts() {
 <style scoped>
 .rail-pill, .dock-pill { transition: transform 0.36s var(--ease-spring); }
 /* Each place rises in as it opens. */
-.page > :deep(*) { animation: page-in 0.32s var(--ease-signal) both; }
+.page:not(.page-fil):not(.page-chat) > :deep(*) { animation: page-in 0.32s var(--ease-signal) both; }
 @keyframes page-in { from { opacity: 0; transform: translateY(6px); } }
 @media (prefers-reduced-motion: reduce) {
   .rail-pill, .dock-pill { transition: none; }
