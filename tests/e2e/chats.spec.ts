@@ -148,9 +148,16 @@ test('verbose tool calls keep their action steps with abbreviated details', asyn
   await page.goto(workspacePath(`/chats/${chat.id}`))
   await authenticateWorkspace(page)
   await expect(page.getByText('Ready for the next step.', { exact: false }).last()).toBeVisible()
-  const actions = page.getByTestId('agent-actions').filter({ hasText: /ran 60 commands/i })
-  await expect(actions).toBeVisible()
-  await actions.locator(':scope > button').click()
+  const actions = page.getByTestId('agent-actions').filter({ hasText: /ran \d+ commands?/i })
+  // The fixture also searches once: all 61 actions remain available in bounded groups.
+  const groupSizes = [30, 30, 1]
+  await expect(actions).toHaveCount(groupSizes.length)
+  for (let index = 0; index < groupSizes.length; index++) {
+    const group = actions.nth(index)
+    await group.locator(':scope > button').click()
+    await expect(group.getByTestId('agent-step')).toHaveCount(groupSizes[index]!)
+  }
+
   const steps = page.getByTestId('agent-step').filter({ hasText: 'fixture verbose output' })
   await expect(steps).toHaveCount(60)
   await steps.last().click()
