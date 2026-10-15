@@ -11,6 +11,8 @@ import android.view.MenuItem
 import android.view.View
 import android.widget.TextView
 import androidx.compose.runtime.*
+import build.cairn.app.diagnostics.PerfOperation
+import build.cairn.app.diagnostics.Performance
 import io.noties.markwon.Markwon
 import kotlinx.coroutines.flow.first
 import org.commonmark.ext.gfm.strikethrough.StrikethroughExtension
@@ -34,30 +36,31 @@ internal class MarkdownBlocks(private val markwon: Markwon) {
             .build()
     private var previous = emptyList<MarkdownBlock>()
 
-    fun render(content: String): List<MarkdownBlock> {
-        val document = markwon.parse(content)
-        val result = mutableListOf<MarkdownBlock>()
-        var node = document.firstChild
-        while (node != null) {
-            val group = Document()
-            var count = 0
-            // Fixed groups keep already displayed boundaries stable while appending.
-            while (node != null && count < 8) {
-                val next = node.next
-                group.appendChild(node)
-                node = next
-                count++
+    fun render(content: String): List<MarkdownBlock> =
+        Performance.measure(PerfOperation.MARKDOWN) {
+            val document = markwon.parse(content)
+            val result = mutableListOf<MarkdownBlock>()
+            var node = document.firstChild
+            while (node != null) {
+                val group = Document()
+                var count = 0
+                // Fixed groups keep already displayed boundaries stable while appending.
+                while (node != null && count < 8) {
+                    val next = node.next
+                    group.appendChild(node)
+                    node = next
+                    count++
+                }
+                val signature = signatures.render(group)
+                val cached = previous.getOrNull(result.size)
+                result.add(
+                    if (cached?.signature == signature) cached
+                    else MarkdownBlock(signature, markwon.render(group))
+                )
             }
-            val signature = signatures.render(group)
-            val cached = previous.getOrNull(result.size)
-            result.add(
-                if (cached?.signature == signature) cached
-                else MarkdownBlock(signature, markwon.render(group))
-            )
+            previous = result
+            result
         }
-        previous = result
-        return result
-    }
 }
 
 /** Binding an unchanged group must not call TextView.setText or request a new text layout. */

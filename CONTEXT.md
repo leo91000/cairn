@@ -6,6 +6,7 @@ Cairn permet de conduire des conversations avec des agents et de retrouver leur 
 
 **Beacon** :
 Le service hébergé par Cairn qui fournit l’interface web et mobile, les comptes Cairn et l’accès à toutes les installations d’un compte. Il ne conserve pas le travail des agents.
+Il peut conserver les diagnostics techniques de l’application, sans contenu des conversations, pour améliorer ses performances.
 
 **Compte Cairn** :
 L’identité d’une personne sur Beacon, définie par une adresse e-mail vérifiée. Le code par e-mail, Google, GitHub et les passkeys ne sont que des moyens de s’y connecter. Cette identité est requise pour accéder à l’interface et à l’API d’une installation. Une délégation externe d’un plugin autorise seulement les opérations explicitement accordées.

@@ -414,7 +414,8 @@ internal fun ChatPage(
         ) {
             follow = it
         }
-    val loadOlder = rememberHistoryPaging(live, listState, positionReady && !gallery)
+    // Neighbors need a real preview, not an unbounded backwards history crawl.
+    val loadOlder = rememberHistoryPaging(live, listState, selected && positionReady && !gallery)
     val active = chat?.run?.active == true
     val running = chat?.run?.status == "running"
     val waitingTasks =

@@ -1,5 +1,7 @@
 package build.cairn.app.data
 
+import build.cairn.app.diagnostics.PerfOperation
+import build.cairn.app.diagnostics.Performance
 import java.io.IOException
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
@@ -266,6 +268,8 @@ fun CairnApi.live(path: String, session: LiveSession = LiveSession()): Flow<Live
         if (snapshot.state != null || snapshot.events.isNotEmpty()) emit(snapshot)
         var failures = 0
         var relayRecovery = false
+        val catchup = Performance.start(PerfOperation.LIVE_CATCHUP)
+        var caughtUp = false
         while (currentCoroutineContext().isActive && generation == streamGeneration.get()) {
             try {
                 val forceRelay = relayRecovery
@@ -284,7 +288,10 @@ fun CairnApi.live(path: String, session: LiveSession = LiveSession()): Flow<Live
                     val replaceBoundary =
                         batch.oldest != null &&
                             (reset || snapshot.oldest == 0L || batch.oldest <= snapshot.oldest)
-                    val events = accumulator.append(batch.events)
+                    val events =
+                        Performance.measure(PerfOperation.LIVE_REDUCE) {
+                            accumulator.append(batch.events)
+                        }
                     snapshot =
                         LiveSnapshot(
                             batch.state ?: snapshot.state,
@@ -303,6 +310,10 @@ fun CairnApi.live(path: String, session: LiveSession = LiveSession()): Flow<Live
                             position = if (reset) null else snapshot.position,
                         )
                     cursor = frame.cursor
+                    if (!batch.more && !caughtUp) {
+                        Performance.finish(catchup)
+                        caughtUp = true
+                    }
                     session.cursor = cursor
                     session.snapshot = snapshot
                     emit(snapshot)
@@ -341,6 +352,8 @@ fun CairnApi.live(path: String, session: LiveSession = LiveSession()): Flow<Live
 
 /** Prepending full snapshots must not replace a newer text revision at a page boundary. */
 internal fun mergeHistory(older: List<RunEvent>, recent: List<RunEvent>): List<RunEvent> {
-    val merged = (older + recent).distinctBy { it.id }.sortedBy { it.id }
-    return LiveAccumulator().append(merged)
+    return Performance.measure(PerfOperation.HISTORY_MERGE) {
+        val merged = (older + recent).distinctBy { it.id }.sortedBy { it.id }
+        LiveAccumulator().append(merged)
+    }
 }

@@ -180,7 +180,7 @@ fun RunScreen(
         ) {
             follow = it
         }
-    val loadOlder = rememberHistoryPaging(live, logState, positionReady && tab == 1)
+    val loadOlder = rememberHistoryPaging(live, logState, selected && positionReady && tab == 1)
     LaunchedEffect(run?.id, live.synced) {
         if (autoTab && run != null && live.synced) {
             autoTab = false

@@ -12,6 +12,8 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.repeatOnLifecycle
 import build.cairn.app.data.*
+import build.cairn.app.diagnostics.PerfOperation
+import build.cairn.app.diagnostics.Performance
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.flow.collectLatest
@@ -459,119 +461,126 @@ internal data class TimelineEntry(
 )
 
 /** Fold updates in place within a turn; keep messages and errors in chronological order. */
-internal fun timelineEntries(events: List<RunEvent>, chat: Boolean = false): List<TimelineEntry> {
-    val folded = mutableListOf<RunEvent>()
-    val positions = mutableMapOf<String, Int>()
-    var legacyTool: Int? = null
-    for (event in events) {
-        if (event.type == "artifact") continue
-        if (event.type == "turn.started") {
-            positions.clear()
-            legacyTool = null
-        }
-        val legacy =
-            (event.type == "item.started" || event.type == "item.completed") &&
-                event.activityData() == null
-        if (legacy && event.type == "item.completed" && legacyTool != null) {
-            val index = legacyTool
-            val original = folded[index]
-            folded[index] =
-                event.copy(
-                    id = original.id,
-                    createdAt = original.createdAt,
-                    payload =
-                        mapOf(
-                            "item" to
-                                buildJsonObject {
-                                    put("type", "saved_output")
-                                    put("text", event.text)
-                                }
-                        ),
-                )
-            legacyTool = null
-            continue
-        }
-        if (legacy && event.type == "item.started") legacyTool = folded.size
-        val item = event.item()
-        val id = item.string("id")
-        if (!event.isMessage() && id.isNotBlank()) {
-            val key = "${item.string("type")}:$id"
-            val index = positions[key]
-            if (index == null) {
-                positions[key] = folded.size
-                folded.add(event)
-            } else folded[index] = event.copy(id = folded[index].id)
-        } else folded.add(event)
-    }
-    val result = mutableListOf<TimelineEntry>()
-    var activity = mutableListOf<RunEvent>()
-    fun flushActivity() {
-        if (activity.isNotEmpty()) {
-            result.add(TimelineEntry("activity:${activity.first().id}", activity, false))
-            activity = mutableListOf()
-        }
-    }
-    val recovered =
-        if (chat)
-            recoveredChatConnections(events, folded.filter { it.isMessage() }.map { it.id }.toSet())
-        else emptySet()
-    var via = ""
-    for (event in folded) {
-        val route = event.activityData()?.get("route") as? JsonObject
-        // An attempt may name the provider of its replies; the next attempt ends that label.
-        val data = event.activityData()
-        if (
-            event.type == "status" &&
-                (data?.get("attempt") as? JsonPrimitive)?.booleanOrNull == true
-        )
-            via = ""
-        if (event.type == "status" && route.string("providerName").isNotBlank()) {
-            via = route.string("providerName")
-            if (chat) continue
-        }
-        if (event.isMessage()) {
-            flushActivity()
-            result.add(
-                TimelineEntry(
-                    "message:${event.displayId ?: event.id}",
-                    listOf(event),
-                    true,
-                    via = if (event.type == "chat.user") "" else via,
-                )
-            )
-        } else {
-            val presentation = if (chat) presentActivity(event) else null
-            if (presentation?.kind == ActivityKind.NOTICE) {
-                val interrupted =
-                    event.type == "status" &&
-                        event.text.lowercase() in listOf("cancelled", "interrupted")
-                if (
-                    event.id !in recovered &&
-                        (presentation.failed || interrupted || presentation.connectionInterrupted())
-                ) {
-                    flushActivity()
-                    result.add(
-                        TimelineEntry("notice:${event.id}", listOf(event), false, notice = true)
+internal fun timelineEntries(events: List<RunEvent>, chat: Boolean = false): List<TimelineEntry> =
+    Performance.measure(PerfOperation.TIMELINE) {
+        val folded = mutableListOf<RunEvent>()
+        val positions = mutableMapOf<String, Int>()
+        var legacyTool: Int? = null
+        for (event in events) {
+            if (event.type == "artifact") continue
+            if (event.type == "turn.started") {
+                positions.clear()
+                legacyTool = null
+            }
+            val legacy =
+                (event.type == "item.started" || event.type == "item.completed") &&
+                    event.activityData() == null
+            if (legacy && event.type == "item.completed" && legacyTool != null) {
+                val index = legacyTool
+                val original = folded[index]
+                folded[index] =
+                    event.copy(
+                        id = original.id,
+                        createdAt = original.createdAt,
+                        payload =
+                            mapOf(
+                                "item" to
+                                    buildJsonObject {
+                                        put("type", "saved_output")
+                                        put("text", event.text)
+                                    }
+                            ),
                     )
-                }
-            } else {
-                // Stable event windows keep newer groups intact when an older page is prepended.
-                val window = (event.id - 1) / MAX_ACTIVITY_GROUP_SIZE
-                val firstWindow =
-                    activity.firstOrNull()?.let { (it.id - 1) / MAX_ACTIVITY_GROUP_SIZE }
-                if (
-                    activity.size == MAX_ACTIVITY_GROUP_SIZE ||
-                        firstWindow != null && firstWindow != window
-                ) {
-                    flushActivity()
-                }
-                activity.add(event)
+                legacyTool = null
+                continue
+            }
+            if (legacy && event.type == "item.started") legacyTool = folded.size
+            val item = event.item()
+            val id = item.string("id")
+            if (!event.isMessage() && id.isNotBlank()) {
+                val key = "${item.string("type")}:$id"
+                val index = positions[key]
+                if (index == null) {
+                    positions[key] = folded.size
+                    folded.add(event)
+                } else folded[index] = event.copy(id = folded[index].id)
+            } else folded.add(event)
+        }
+        val result = mutableListOf<TimelineEntry>()
+        var activity = mutableListOf<RunEvent>()
+        fun flushActivity() {
+            if (activity.isNotEmpty()) {
+                result.add(TimelineEntry("activity:${activity.first().id}", activity, false))
+                activity = mutableListOf()
             }
         }
+        val recovered =
+            if (chat)
+                recoveredChatConnections(
+                    events,
+                    folded.filter { it.isMessage() }.map { it.id }.toSet(),
+                )
+            else emptySet()
+        var via = ""
+        for (event in folded) {
+            val route = event.activityData()?.get("route") as? JsonObject
+            // An attempt may name the provider of its replies; the next attempt ends that label.
+            val data = event.activityData()
+            if (
+                event.type == "status" &&
+                    (data?.get("attempt") as? JsonPrimitive)?.booleanOrNull == true
+            )
+                via = ""
+            if (event.type == "status" && route.string("providerName").isNotBlank()) {
+                via = route.string("providerName")
+                if (chat) continue
+            }
+            if (event.isMessage()) {
+                flushActivity()
+                result.add(
+                    TimelineEntry(
+                        "message:${event.displayId ?: event.id}",
+                        listOf(event),
+                        true,
+                        via = if (event.type == "chat.user") "" else via,
+                    )
+                )
+            } else {
+                val presentation = if (chat) presentActivity(event) else null
+                if (presentation?.kind == ActivityKind.NOTICE) {
+                    val interrupted =
+                        event.type == "status" &&
+                            event.text.lowercase() in listOf("cancelled", "interrupted")
+                    if (
+                        event.id !in recovered &&
+                            (presentation.failed ||
+                                interrupted ||
+                                presentation.connectionInterrupted())
+                    ) {
+                        flushActivity()
+                        result.add(
+                            TimelineEntry("notice:${event.id}", listOf(event), false, notice = true)
+                        )
+                    }
+                } else {
+                    // Stable event windows keep newer groups intact when an older page is
+                    // prepended.
+                    val window = (event.id - 1) / MAX_ACTIVITY_GROUP_SIZE
+                    val firstWindow =
+                        activity.firstOrNull()?.let { (it.id - 1) / MAX_ACTIVITY_GROUP_SIZE }
+                    if (
+                        activity.size == MAX_ACTIVITY_GROUP_SIZE ||
+                            firstWindow != null && firstWindow != window
+                    ) {
+                        flushActivity()
+                    }
+                    activity.add(event)
+                }
+            }
+        }
+        flushActivity()
+        result
     }
-    flushActivity()
-    return result
-}
 
 /**
  * Match the web feed: attach each publication beside its response, keeping versions per message.
