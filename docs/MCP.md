@@ -86,12 +86,13 @@ hour, and refresh tokens after 30 days. Browser sessions are separate credential
 
 | Scope | Tools |
 | --- | --- |
-| `read` | `list_agents`, `list_projects`, `list_tasks`, `list_runs`, `get_run`, `read_run_content`, `list_skills`, `list_mcps` |
-| `manage` | `save_agent`, `update_agent`, `save_project`, `create_task`, `update_task`, `save_skill`, `create_mcp`, `update_mcp`, `test_mcp`, `disconnect_mcp`, `delete_mcp` |
+| `read` | `list_agents`, `list_projects`, `list_tasks`, `list_runs`, `get_run`, `read_run_content`, `list_skills`, `read_skill`, `list_mcps` |
+| `manage` | `save_agent`, `update_agent`, `save_project`, `create_task`, `update_task`, `save_skill`, `edit_skill_files`, `create_mcp`, `update_mcp`, `test_mcp`, `disconnect_mcp`, `delete_mcp` |
 | `run` | `run_task`, `cancel_run` |
 
 `save_agent` and `save_project` create new records. `update_task` replaces the
-existing task configuration; `save_skill` creates or replaces its SKILL.md.
+existing task configuration; `save_skill` creates or replaces its SKILL.md;
+`edit_skill_files` applies a batch of file changes (see [skills](SKILLS.md)).
 `update_agent` preserves omitted top-level fields; an explicit access policy
 replaces the complete policy. MCP connection tools share the UI's validation,
 encrypted credential storage and run-grant enforcement. See

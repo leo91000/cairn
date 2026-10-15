@@ -155,6 +155,12 @@ async fn member_identity_cannot_manage_installation_resources() {
         ("PUT", format!("/api/agents/{agent}/github-token")),
         ("POST", format!("/api/agents/{agent}/avatar/generate")),
         ("PUT", format!("/api/agents/{agent}/avatar")),
+        ("POST", "/api/skills/uploads".to_owned()),
+        ("POST", "/api/skills/global/import".to_owned()),
+        ("POST", "/api/skills/global/review/bundle".to_owned()),
+        ("GET", "/api/skills/global/review/source".to_owned()),
+        ("POST", "/api/skills/global/review/source/update".to_owned()),
+        ("DELETE", "/api/skills/global/review/source".to_owned()),
     ];
 
     for (method, path) in management {

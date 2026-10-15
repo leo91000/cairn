@@ -155,22 +155,67 @@ async fn configure_git(
 }
 
 /// Copies the selected skills into the home and points their snapshot at the guest copy.
-async fn install_skills(home: &Path, skills: &Value) -> Result<Vec<Value>> {
+/// Runs created before frozen bundles copy the live skill directory.
+async fn install_skills(home: &Path, skills: &Value, config: &Config) -> Result<Vec<Value>> {
     let mut installed = Vec::new();
     for (index, skill) in skills.as_array().into_iter().flatten().enumerate() {
         let relative = format!("{index}/{}", text(skill, "name"));
         let target = home.join(".agents/skills").join(&relative);
         private_dir(target.parent().unwrap()).await?;
-        let source = Path::new(text(skill, "path"))
+        let frozen = recorded_bundle(skill, config).await?;
+        let live = Path::new(text(skill, "path"))
             .parent()
             .ok_or_else(|| Error::bad("Invalid selected skill path."))?;
-        copy_tree(source, &target, true).await?;
-        atomic_write(&target.join("SKILL.md"), text(skill, "content").as_bytes()).await?;
+        copy_tree(frozen.as_deref().unwrap_or(live), &target, true).await?;
+        if frozen.is_none() {
+            atomic_write(&target.join("SKILL.md"), text(skill, "content").as_bytes()).await?;
+        }
         let mut skill = skill.clone();
         skill["path"] = format!("{GUEST_SKILLS}/{relative}/SKILL.md").into();
         installed.push(skill);
     }
     Ok(installed)
+}
+
+/// Shared runs receive writable working copies, leaving canonical frozen revisions intact.
+pub(super) async fn frozen_skills(run: &Value, config: &Config) -> Result<Value> {
+    let mut skills = run["snapshot"]["skills"].clone();
+    let root = super::run_directory(run, config).join("skills");
+    match tokio::fs::symlink_metadata(&root).await {
+        Ok(metadata) => super::workspace::remove(&root, metadata.is_dir()).await?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
+    for (index, skill) in skills.as_array_mut().into_iter().flatten().enumerate() {
+        if let Some(source) = recorded_bundle(skill, config).await? {
+            let target = root.join(index.to_string()).join(text(skill, "name"));
+            private_dir(target.parent().unwrap()).await?;
+            copy_tree(&source, &target, true).await?;
+            skill["path"] = target
+                .join("SKILL.md")
+                .to_string_lossy()
+                .into_owned()
+                .into();
+        }
+    }
+    Ok(skills)
+}
+
+/// A live-directory fallback belongs only to snapshots created before bundles.
+async fn recorded_bundle(skill: &Value, config: &Config) -> Result<Option<std::path::PathBuf>> {
+    let Some(value) = skill.get("bundle") else {
+        return Ok(None);
+    };
+    let path = value
+        .as_str()
+        .and_then(|revision| crate::skills::frozen(config, revision))
+        .ok_or_else(|| Error::bad("Invalid frozen skill revision in the run snapshot."))?;
+    if !tokio::fs::try_exists(&path).await? {
+        return Err(Error::not_found(
+            "The frozen skill bundle recorded by this run is missing.",
+        ));
+    }
+    Ok(Some(path))
 }
 
 pub(super) struct HomeOptions<'a> {
@@ -192,5 +237,5 @@ pub(super) async fn prepare_home(
         .await?;
     github_home(home, config, options.github_access, options.github).await?;
     configure_git(home, config, options.github, options.github_access).await?;
-    install_skills(home, &run["snapshot"]["skills"]).await
+    install_skills(home, &run["snapshot"]["skills"], config).await
 }
