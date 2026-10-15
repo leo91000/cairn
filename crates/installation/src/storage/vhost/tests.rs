@@ -236,6 +236,53 @@ fn closing_before_frontend_connects_joins_workers_and_removes_socket() {
 }
 
 #[test]
+fn repeated_backend_teardown_releases_file_descriptors() {
+    // Other storage tests open descriptors concurrently; measure in a fresh process.
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "storage::vhost::tests::backend_descriptor_lifecycle_child",
+            "--ignored",
+            "--nocapture",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+#[ignore = "isolated file descriptor measurement child"]
+fn backend_descriptor_lifecycle_child() {
+    let (_, _, disk, _) = fixture(&[], false);
+    let directory = tempfile::tempdir().unwrap();
+    let socket = directory.path().join("disk.sock");
+    let descriptors = || std::fs::read_dir("/proc/self/fd").unwrap().count();
+    let before = descriptors();
+
+    for cycle in 0..64 {
+        let backend = mount_disk(disk.clone(), &socket, unsafe { libc::geteuid() }).unwrap();
+        if cycle % 2 == 0 {
+            backend.close().unwrap();
+        } else {
+            drop(backend);
+        }
+        assert!(!socket.exists());
+    }
+
+    let after = descriptors();
+    println!("64 backend lifecycles: descriptors before={before}, after={after}");
+    assert_eq!(
+        after, before,
+        "VM block backend teardown leaked descriptors"
+    );
+}
+
+#[test]
 fn queue_worker_panic_is_visible_without_acknowledging_the_write() {
     let (mut backend, vring, _, statuses) = fixture(&[(VIRTIO_BLK_T_OUT, 512)], false);
     backend.disk = Arc::new(FixtureDisk {
