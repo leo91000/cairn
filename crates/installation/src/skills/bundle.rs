@@ -412,42 +412,38 @@ pub async fn copy_dir(source: &Path, target: &Path) -> Result<()> {
 }
 
 /// Atomically exchanges two directories; `false` when the filesystem cannot.
-async fn exchange(a: &Path, b: &Path) -> Result<bool> {
+fn exchange(a: &Path, b: &Path) -> Result<bool> {
     use std::{ffi::CString, os::unix::ffi::OsStrExt};
     let (a, b) = (
         CString::new(a.as_os_str().as_bytes()).map_err(|_| Error::bad("Invalid path."))?,
         CString::new(b.as_os_str().as_bytes()).map_err(|_| Error::bad("Invalid path."))?,
     );
-    tokio::task::spawn_blocking(move || {
-        // SAFETY: both paths are valid NUL-terminated strings for the call.
-        let result = unsafe {
-            libc::syscall(
-                libc::SYS_renameat2,
-                libc::AT_FDCWD,
-                a.as_ptr(),
-                libc::AT_FDCWD,
-                b.as_ptr(),
-                libc::RENAME_EXCHANGE,
-            )
-        };
-        if result == 0 {
-            return Ok(true);
-        }
-        let error = std::io::Error::last_os_error();
-        match error.raw_os_error() {
-            Some(libc::ENOSYS | libc::EINVAL | libc::EOPNOTSUPP) => Ok(false),
-            _ => Err(error.into()),
-        }
-    })
-    .await
-    .map_err(|_| Error::bad("Could not save the skill."))?
+    // SAFETY: both paths are valid NUL-terminated strings for the call.
+    let result = unsafe {
+        libc::syscall(
+            libc::SYS_renameat2,
+            libc::AT_FDCWD,
+            a.as_ptr(),
+            libc::AT_FDCWD,
+            b.as_ptr(),
+            libc::RENAME_EXCHANGE,
+        )
+    };
+    if result == 0 {
+        return Ok(true);
+    }
+    let error = std::io::Error::last_os_error();
+    match error.raw_os_error() {
+        Some(libc::ENOSYS | libc::EINVAL | libc::EOPNOTSUPP) => Ok(false),
+        _ => Err(error.into()),
+    }
 }
 
 /// Replaces `target` with `staging`. Readers see either the old or the new
 /// skill, never a mix.
-async fn swap(staging: &Path, target: &Path, exists: bool) -> Result<()> {
+fn swap(staging: &Path, target: &Path, exists: bool) -> Result<()> {
     if !exists {
-        return fs::rename(staging, target).await.map_err(|error| {
+        return std::fs::rename(staging, target).map_err(|error| {
             if matches!(
                 error.kind(),
                 ErrorKind::AlreadyExists | ErrorKind::DirectoryNotEmpty
@@ -458,8 +454,8 @@ async fn swap(staging: &Path, target: &Path, exists: bool) -> Result<()> {
             }
         });
     }
-    if exchange(staging, target).await? {
-        fs::remove_dir_all(staging).await?;
+    if exchange(staging, target)? {
+        std::fs::remove_dir_all(staging)?;
         return Ok(());
     }
     let previous = staging.with_file_name(format!(
@@ -467,12 +463,12 @@ async fn swap(staging: &Path, target: &Path, exists: bool) -> Result<()> {
         target.file_name().unwrap().to_string_lossy(),
         crate::config::id()
     ));
-    fs::rename(target, &previous).await?;
-    if let Err(error) = fs::rename(staging, target).await {
-        fs::rename(&previous, target).await?;
+    std::fs::rename(target, &previous)?;
+    if let Err(error) = std::fs::rename(staging, target) {
+        std::fs::rename(&previous, target)?;
         return Err(error.into());
     }
-    fs::remove_dir_all(previous).await?;
+    std::fs::remove_dir_all(previous)?;
     Ok(())
 }
 
@@ -496,6 +492,21 @@ pub async fn save(
     skill: &str,
     base: Base<'_>,
     changes: &[Change],
+) -> Result<Described> {
+    save_authorized(root, skill, base, changes, None).await
+}
+
+pub(crate) type Authorization = (
+    crate::store::Store,
+    Box<dyn FnOnce(&crate::store::Db<'_>) -> Result<()> + Send>,
+);
+
+pub(crate) async fn save_authorized(
+    root: &Path,
+    skill: &str,
+    base: Base<'_>,
+    changes: &[Change],
+    authorization: Option<Authorization>,
 ) -> Result<Described> {
     let _save = ACCESS.write().await;
     let directory = root.join(skill);
@@ -538,7 +549,19 @@ pub async fn save(
         prune(&staging).await?;
         validate(&staging, skill, before).await?;
         let described = describe_locked(&staging).await?;
-        swap(&staging, &directory, exists).await?;
+        let prepared = staging.clone();
+        if let Some((store, authorize)) = authorization {
+            store
+                .transaction(move |db| {
+                    authorize(db)?;
+                    swap(&prepared, &directory, exists)
+                })
+                .await?;
+        } else {
+            tokio::task::spawn_blocking(move || swap(&prepared, &directory, exists))
+                .await
+                .map_err(|_| Error::bad("Could not save the skill."))??;
+        }
         Ok::<_, Error>(described)
     }
     .await;

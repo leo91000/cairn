@@ -2,6 +2,9 @@
 
 Date: 2026-10-13.
 
+Updated: 2026-10-14 — installation access also permits dependencies on other
+agents' runs, following [ADR-0036](0036-opt-in-installation-tools-for-agents.md).
+
 An agent repeatedly checking a remote status spends inference and can keep an
 execution alive while no useful work is available. ADR-0037's durable wakeup
 already supports releasing execution and continuing the same conversation.
@@ -9,8 +12,8 @@ Extend it with `cairn_workspace.wait_for` and named, read-only conditions.
 
 The initial conditions are a permitted Cairn run finishing and a GitHub Actions
 workflow run completing for an authorized project, run ID and full commit SHA.
-Run dependencies require the existing installation grant and the same agent's
-resource permissions. GitHub observation uses the agent's configured token or
+Run dependencies require the existing installation grant and may target other
+agents' runs in that installation. GitHub observation uses the agent's configured token or
 its authorized shared connection, with a repository derived from the registered
 project. Credentials are never persisted on the wakeup or returned in results.
 

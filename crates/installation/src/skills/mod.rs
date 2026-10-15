@@ -436,6 +436,16 @@ impl Skills {
 
     /// Writes `SKILL.md`, creating the skill when it does not exist.
     pub async fn save(&self, skill: &str, content: &str, project: Option<&Path>) -> Result<Value> {
+        self.save_authorized(skill, content, project, None).await
+    }
+
+    pub(crate) async fn save_authorized(
+        &self,
+        skill: &str,
+        content: &str,
+        project: Option<&Path>,
+        authorization: Option<bundle::Authorization>,
+    ) -> Result<Value> {
         name(skill)?;
         let parsed = metadata(content)?;
         if parsed.name != skill {
@@ -443,12 +453,24 @@ impl Skills {
                 "Frontmatter name must match the skill directory.",
             ));
         }
-        self.write(
+        let root = self.root(project).await?;
+        let directory = root.join(skill);
+        let revision = match fs::symlink_metadata(&directory).await {
+            Ok(_) => Some(bundle::describe(&directory).await?.revision),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => return Err(error.into()),
+        };
+        let change = Change::Write {
+            path: "SKILL.md".to_owned(),
+            bytes: content.as_bytes().to_vec(),
+            executable: None,
+        };
+        self.apply_authorized(
             skill,
-            "SKILL.md",
-            content.as_bytes().to_vec(),
-            None,
+            revision.as_deref(),
+            &[change],
             project,
+            authorization,
         )
         .await?;
         Ok(serde_json::to_value(parsed)?)
@@ -606,10 +628,22 @@ impl Skills {
         changes: &[Change],
         project: Option<&Path>,
     ) -> Result<bundle::Described> {
+        self.apply_authorized(skill, base, changes, project, None)
+            .await
+    }
+
+    pub(crate) async fn apply_authorized(
+        &self,
+        skill: &str,
+        base: Option<&str>,
+        changes: &[Change],
+        project: Option<&Path>,
+        authorization: Option<bundle::Authorization>,
+    ) -> Result<bundle::Described> {
         name(skill)?;
         let root = self.root(project).await?;
         let base = base.map_or(Base::Create, Base::Edit);
-        bundle::save(&root, skill, base, changes).await
+        bundle::save_authorized(&root, skill, base, changes, authorization).await
     }
 
     /// Replaces every file of an existing skill.
