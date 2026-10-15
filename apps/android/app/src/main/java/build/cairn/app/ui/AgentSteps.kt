@@ -40,6 +40,8 @@ import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 
+internal const val MAX_ACTIVITY_GROUP_SIZE = 30
+
 /** One line of the agent's timeline; consecutive reads fold into a single step. */
 internal data class AgentStep(
     val items: List<ActivityPresentation>,
@@ -112,7 +114,8 @@ internal fun agentSteps(items: List<ActivityPresentation>): List<AgentStep> {
         if (p.kind == ActivityKind.READ && !p.failed && !p.isRunning()) {
             var end = index
             while (
-                end + 1 < items.size &&
+                end - index + 1 < MAX_ACTIVITY_GROUP_SIZE &&
+                    end + 1 < items.size &&
                     items[end + 1].let {
                         it.kind == ActivityKind.READ && !it.failed && !it.isRunning()
                     }

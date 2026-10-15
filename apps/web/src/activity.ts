@@ -2,6 +2,8 @@ import type { RunEvent } from '../../../packages/contracts/contracts'
 import { describeCommand, expectedCommandOutcome } from './activity-command'
 import { outputSummary } from './activity-data'
 
+export const MAX_ACTIVITY_GROUP_SIZE = 30
+
 export interface ActivityCode {
   label: string
   code: string
@@ -29,6 +31,8 @@ export interface ActivityArtifact {
   kind: 'command' | 'read' | 'browse' | 'output' | 'files' | 'search' | 'tool' | 'plan' | 'thinking' | 'notice' | 'subagent'
   id: string
   time: number
+  /** Stable event window: pagination must not repartition already loaded tool groups. */
+  eventWindow?: number
   title: string
   subtitle: string
   status: 'running' | 'done' | 'error' | 'info'
@@ -245,6 +249,7 @@ export function activityEntries(events: RunEvent[], chat = false): ActivityEntry
     const artifact: ActivityArtifact = {
       id,
       time: event.createdAt,
+      eventWindow: Math.floor((event.id - 1) / MAX_ACTIVITY_GROUP_SIZE),
       kind: 'notice',
       title: 'Worker update',
       subtitle: '',
@@ -399,7 +404,7 @@ export function activityEntries(events: RunEvent[], chat = false): ActivityEntry
     const previous = artifacts.get(id)
     if (previous) {
       const durationMs = artifact.kind === 'subagent' ? artifact.durationMs : undefined
-      Object.assign(previous, artifact, { time: previous.time, durationMs: running ? undefined : durationMs ?? Math.max(0, event.createdAt - previous.time) })
+      Object.assign(previous, artifact, { time: previous.time, eventWindow: previous.eventWindow, durationMs: running ? undefined : durationMs ?? Math.max(0, event.createdAt - previous.time) })
       continue
     }
 
@@ -427,7 +432,7 @@ export function activityEntries(events: RunEvent[], chat = false): ActivityEntry
 export function teamEntries(entries: ActivityEntry[]): ActivityEntry[] {
   const result: ActivityEntry[] = []
   for (const entry of entries) {
-    if (entry.kind !== 'group' || !entry.artifacts.some(artifact => artifact.kind === 'subagent')) {
+    if (entry.kind !== 'group') {
       result.push(entry)
       continue
     }
@@ -437,7 +442,7 @@ export function teamEntries(entries: ActivityEntry[]): ActivityEntry[] {
       const team = artifact.kind === 'subagent'
       if (team && last?.kind === 'team')
         last.agents.push(artifact)
-      else if (!team && last?.kind === 'group')
+      else if (!team && last?.kind === 'group' && last.artifacts.length < MAX_ACTIVITY_GROUP_SIZE && last.artifacts[0]!.eventWindow === artifact.eventWindow)
         last.artifacts.push(artifact)
       else
         result.push(last = team ? { kind: 'team', id: `team:${artifact.id}`, agents: [artifact] } : { kind: 'group', id: `group:${artifact.id}`, artifacts: [artifact] })

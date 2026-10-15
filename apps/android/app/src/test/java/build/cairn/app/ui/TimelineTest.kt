@@ -7,6 +7,29 @@ import org.junit.Test
 
 class TimelineTest {
     @Test
+    fun `newer tool groups keep their membership when older pages arrive or tools append`() {
+        val events = (1L..190L).map { event(it, "item.completed", "tool$it") }
+        for (chat in listOf(false, true)) {
+            val loaded = timelineEntries(events.subList(100, 160), chat)
+            val extended = timelineEntries(events, chat)
+            val group = loaded[1]
+            assertEquals(group, extended.find { it.key == group.key })
+        }
+    }
+
+    @Test
+    fun `a thousand tools split into groups of at most thirty after folding updates`() {
+        val events = (1L..1001L).map { event(it, "item.completed", "tool$it") }
+        for (chat in listOf(false, true)) {
+            val rows = timelineEntries(events, chat)
+            assertEquals(34, rows.size)
+            assertTrue(rows.all { it.events.size <= 30 })
+            assertEquals(events.map { it.id }, rows.flatMap { it.events }.map { it.id })
+            assertEquals(rows.size, rows.map { it.key }.distinct().size)
+        }
+    }
+
+    @Test
     fun `chat labels each reply with its attempt's provider until another attempt begins`() {
         fun route(id: Long, provider: String) =
             event(id, "status")

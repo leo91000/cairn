@@ -268,7 +268,7 @@ internal fun recentHistory(value: CachedHistory): CachedHistory {
     var bytes = wireJson.encodeToString(value.state).toByteArray().size + 4096
     for (event in value.events.sortedByDescending { it.id }) {
         val size = wireJson.encodeToString(event).toByteArray().size + 1
-        if (kept.size >= 200 || bytes + size > 3 * 1024 * 1024) break
+        if (bytes + size > 3 * 1024 * 1024) break
         kept.addFirst(event)
         bytes += size
     }

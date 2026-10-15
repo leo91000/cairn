@@ -507,7 +507,7 @@ internal fun timelineEntries(events: List<RunEvent>, chat: Boolean = false): Lis
     var activity = mutableListOf<RunEvent>()
     fun flushActivity() {
         if (activity.isNotEmpty()) {
-            result.add(TimelineEntry("activity:${activity.first().id}", activity.toList(), false))
+            result.add(TimelineEntry("activity:${activity.first().id}", activity, false))
             activity = mutableListOf()
         }
     }
@@ -554,7 +554,19 @@ internal fun timelineEntries(events: List<RunEvent>, chat: Boolean = false): Lis
                         TimelineEntry("notice:${event.id}", listOf(event), false, notice = true)
                     )
                 }
-            } else activity.add(event)
+            } else {
+                // Stable event windows keep newer groups intact when an older page is prepended.
+                val window = (event.id - 1) / MAX_ACTIVITY_GROUP_SIZE
+                val firstWindow =
+                    activity.firstOrNull()?.let { (it.id - 1) / MAX_ACTIVITY_GROUP_SIZE }
+                if (
+                    activity.size == MAX_ACTIVITY_GROUP_SIZE ||
+                        firstWindow != null && firstWindow != window
+                ) {
+                    flushActivity()
+                }
+                activity.add(event)
+            }
         }
     }
     flushActivity()

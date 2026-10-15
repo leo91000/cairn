@@ -32,7 +32,7 @@ for (const kind of ['chat', 'task'] as const) {
       workspace.service.store.event(run.id, 'item.completed', text, { item: { id: `buffer-${i}`, type: 'agent_message', text } })
     }
 
-    // Several API pages collapse into one tool group, leaving no scrollbar.
+    // Reads fold into bounded groups; short output should still prefetch older pages.
     for (let i = 0; i < 250; i++) {
       workspace.service.store.event(run.id, 'item.completed', 'Checked a file', {
         item: {
@@ -56,6 +56,10 @@ for (const kind of ['chat', 'task'] as const) {
     await expect(page.locator('.activity-message').filter({ hasText: 'Buffered message 99:' })).toBeAttached()
     expect(requests.length).toBeGreaterThanOrEqual(2)
     expect(new Set(requests).size).toBe(requests.length)
+    const summaries = await page.getByTestId('agent-actions').allTextContents()
+    const readCounts = summaries.flatMap(text => [...text.matchAll(/Read (\d+) files/g)].map(match => Number(match[1])))
+    expect(readCounts.length).toBeGreaterThan(1)
+    expect(readCounts.every(count => count <= 30)).toBe(true)
     // Loading older pages must keep following the latest output.
     const scroller = page.getByRole('region', { name: 'Activity output' })
     await expect.poll(() => scroller.evaluate(el => el.scrollHeight - el.clientHeight - el.scrollTop)).toBeLessThan(2)
@@ -63,6 +67,58 @@ for (const kind of ['chat', 'task'] as const) {
     await page.screenshot({ path: test.info().outputPath(`${kind}-automatic-history.png`), animations: 'disabled' })
   })
 }
+
+test('an older page preserves expanded newer tools and their open detail sheet', async ({ page, workspace }) => {
+  await useRelayForHttpMocks(page)
+  const run = workspace.service.store.runs().find(run => run.status === 'succeeded' && run.trigger !== 'chat')!
+  for (let i = 0; i < 260; i++) {
+    workspace.service.store.event(run.id, 'item.completed', '', {
+      item: {
+        id: `inspect-${i}`,
+        type: 'command_execution',
+        command: `echo inspect-${i}`,
+        exit_code: 0,
+      },
+    })
+  }
+
+  let release!: () => void
+  const gate = new Promise<void>((resolve) => {
+    release = resolve
+  })
+  let requested = false
+  await page.route('**/history?**', async (route) => {
+    requested = true
+    await gate
+    await route.continue()
+  })
+  try {
+    await page.goto(workspacePath(`${workspace.url}/runs/${run.id}`))
+    await authenticateWorkspace(page)
+    const groups = page.getByTestId('agent-actions')
+    await expect(groups.nth(1)).toBeVisible()
+    const group = groups.nth(1)
+    await group.locator(':scope > button').click()
+    const step = group.getByTestId('agent-step').first()
+    const label = (await step.textContent())!.match(/echo inspect-\d+/)![0]
+    const groupCount = await groups.count()
+    const stepCount = await group.getByTestId('agent-step').count()
+    await step.click()
+    const sheet = page.getByTestId('agent-step-sheet')
+    await expect(sheet).toBeVisible()
+    // A pending automatic page can finish while the reader inspects a tool.
+    await expect.poll(() => requested).toBe(true)
+    release()
+    await expect.poll(() => groups.count()).toBeGreaterThan(groupCount)
+    await expect(sheet).toBeVisible()
+    await expect(sheet).toContainText(label)
+    await expect(page.getByTestId('agent-step')).toHaveCount(stepCount)
+  }
+  finally {
+    release()
+    await page.unrouteAll({ behavior: 'wait' })
+  }
+})
 
 test('automatic history pauses on errors and resumes only after retry', async ({ page, workspace }) => {
   await useRelayForHttpMocks(page)
@@ -263,19 +319,21 @@ test('cached history survives reload before a delayed stream, then clear on logo
   await page.goto(workspacePath(`${workspace.url}/chats/${chat.id}`))
   await authenticateWorkspace(page)
   await expect(page.locator('.activity-message').filter({ hasText: 'Cache persistence proof' }).first()).toBeVisible()
-  const count = () => page.evaluate(() => new Promise<number>((resolve, reject) => {
+  const count = (current = false) => page.evaluate(({ chatId, current }) => new Promise<number>((resolve, reject) => {
     const request = indexedDB.open('cairn-history-v1', 1)
     request.onsuccess = () => {
       const db = request.result
       const tx = db.transaction('entries', 'readonly')
-      const read = tx.objectStore('entries').count()
-      read.onsuccess = () => resolve(read.result)
+      const read = tx.objectStore('entries').getAll()
+      read.onsuccess = () => resolve(current
+        ? read.result.filter(entry => entry.key.endsWith(`/chats/${chatId}/stream`) && JSON.parse(entry.text).cursor > 0).length
+        : read.result.length)
       tx.oncomplete = () => db.close()
     }
 
     request.onerror = () => reject(request.error)
-  }))
-  await expect.poll(count).toBeGreaterThan(0)
+  }), { chatId: chat.id, current })
+  await expect.poll(() => count(true)).toBe(1)
   const requests: string[] = []
   let release!: () => void
   const gate = new Promise<void>((resolve) => {
@@ -307,7 +365,8 @@ test('cached history survives reload before a delayed stream, then clear on logo
 
   await page.getByRole('button', { name: 'Sign out', exact: true }).click()
   await expect(page.getByLabel('Email address')).toBeVisible()
-  await expect.poll(count).toBe(0)
+  // The account redirect can replace the execution context while storage is inspected.
+  await expect(async () => expect(await count()).toBe(0)).toPass()
 })
 
 test('a cached run restores the reading offset while its stream is still connecting', async ({ page, workspace }) => {
@@ -398,6 +457,8 @@ test('a cached run restores the reading offset while its stream is still connect
   await page.keyboard.press('Enter')
   await expect(scroller).toBeFocused()
   await expectFollowing(page)
+  // Finish removing the previous button before starting a fresh reading gesture.
+  await expect(latest).toHaveCount(0)
   // Scrolling up pauses following again; scrolling back to the end resumes it, as on Android.
   await scroller.evaluate(element => element.scrollTop = 300)
   await expect(latest).toBeVisible()
@@ -448,6 +509,29 @@ test('recent history loads older pages without moving the reader and survives a 
   await expect.poll(async () => Math.abs((await anchor.boundingBox())!.y - top)).toBeLessThan(2)
   await page.unrouteAll({ behavior: 'wait' })
   await useRelayForHttpMocks(page)
+  // Read beyond the former 200-event cache window, then persist all loaded pages.
+  await scroller.evaluate(el => el.scrollTop = 0)
+  await expect(page.locator('.activity-message').filter({ hasText: 'Paged line 050' })).toBeAttached()
+  await scroller.evaluate(el => el.scrollTop = 0)
+  await expect(page.locator('.activity-message').filter({ hasText: 'Paged line 000' })).toBeAttached()
+  // The run also has fixture events before line 000: load that unread prefix before
+  // asserting that reopening needs no history requests at all.
+  await expect.poll(async () => {
+    await scroller.evaluate(el => el.scrollTop = 0)
+    return page.evaluate(runId => new Promise<boolean>((resolve) => {
+      const open = indexedDB.open('cairn-history-v1', 1)
+      open.onsuccess = () => {
+        const db = open.result
+        const tx = db.transaction('entries')
+        const request = tx.objectStore('entries').getAll()
+        request.onsuccess = () => resolve(request.result.some((entry) => {
+          const saved = JSON.parse(entry.text)
+          return saved.state.run?.id === runId && saved.events.length >= 350 && saved.hasOlder === false
+        }))
+        tx.oncomplete = () => db.close()
+      }
+    }), run.id)
+  }).toBe(true)
   // Move back to the latest content and let its bounded disk snapshot commit.
   await page.getByRole('button', { name: 'Latest activity', exact: true }).click()
   await expect(page.locator('.activity-message').filter({ hasText: 'Paged line 349' })).toBeVisible()
@@ -460,9 +544,25 @@ test('recent history loads older pages without moving the reader and survives a 
       request.onsuccess = () => resolve(Math.max(0, ...request.result.map(e => JSON.parse(e.text).events.length)))
       tx.oncomplete = () => db.close()
     }
-  }))).toBe(200)
+  }))).toBeGreaterThanOrEqual(350)
+  let repeatedHistoryReads = 0
+  page.on('request', (request) => {
+    if (request.url().includes(`/runs/${run.id}/history?`) || request.url().includes(`/runs/${run.id}/events?`))
+      repeatedHistoryReads++
+  })
   await page.route(`**/api/runs/${run.id}/stream?**`, route => route.abort())
   await page.reload()
   await page.getByRole('button', { name: /^Conversation/ }).click()
   await expect(page.locator('.activity-message').filter({ hasText: 'Paged line 349' })).toBeVisible()
+  await expect(page.locator('.activity-message').filter({ hasText: 'Paged line 000' })).toBeAttached()
+  await scroller.evaluate(el => el.scrollTop = 0)
+  await page.waitForTimeout(750)
+  expect(repeatedHistoryReads).toBe(0)
+  await page.unroute(`**/api/runs/${run.id}/stream?**`)
+  await page.reload()
+  await page.getByRole('button', { name: /^Conversation/ }).click()
+  await expect(page.locator('.activity-message').filter({ hasText: 'Paged line 000' })).toBeAttached()
+  await scroller.evaluate(el => el.scrollTop = 0)
+  await page.waitForTimeout(750)
+  expect(repeatedHistoryReads).toBe(0)
 })

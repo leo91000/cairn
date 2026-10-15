@@ -151,7 +151,7 @@ export function recentHistory(value: CachedHistory): CachedHistory {
   let size = JSON.stringify(value.state).length * 2 + 4096
   const ordered = value.events.toSorted((a, b) => a.id - b.id)
   let start = ordered.length
-  while (start > 0 && value.events.length - start < 200) {
+  while (start > 0) {
     const bytes = JSON.stringify(ordered[start - 1]).length * 2 + 2
     if (size + bytes > 3 * 1024 * 1024)
       break

@@ -21,25 +21,49 @@ class HistoryCacheTest {
         CachedHistory(2, "v1:r:1", LiveState(), listOf(RunEvent(2, 1, "item.completed", "saved")))
 
     @Test
-    fun `recent suffix survives on disk and records its backwards boundary`() = runBlocking {
-        val events = (1L..250L).map { RunEvent(it, it, "chat.user", "Message $it") }
-        val original =
-            CachedHistory(
-                250,
-                "v1:r:1",
-                LiveState(),
-                events,
-                position = ReadingPosition(5, 10, false),
+    fun `previously loaded pages and reading position survive on disk beyond the initial window`() =
+        runBlocking {
+            val events = (1L..1250L).map { RunEvent(it, it, "chat.user", "Message $it") }
+            val original =
+                CachedHistory(
+                    1250,
+                    "v1:r:1",
+                    LiveState(),
+                    events,
+                    position = ReadingPosition(5, 10, false),
+                )
+            val first = cache()
+            first.save("window", original, true)
+            val restored = cache().read("window")!!
+            assertEquals(events.map { it.id }, restored.events.map { it.id })
+            assertEquals(0L, restored.oldest)
+            assertFalse(restored.hasOlder)
+            assertEquals(ReadingPosition(5, 10, false), restored.position)
+            assertEquals(1250L, restored.cursor)
+        }
+
+    @Test
+    fun `the byte budget evicts only the oldest prefix and clears its reading position`() =
+        runBlocking {
+            val events = (1L..4L).map { RunEvent(it, it, "output", "x".repeat(1200 * 1024)) }
+            val first = cache()
+            first.save(
+                "bytes",
+                CachedHistory(
+                    4,
+                    "v1:r:1",
+                    LiveState(),
+                    events,
+                    position = ReadingPosition(5, 10, false),
+                ),
+                true,
             )
-        val first = cache()
-        first.save("window", original, true)
-        val restored = cache().read("window")!!
-        assertEquals((51L..250L).toList(), restored.events.map { it.id })
-        assertEquals(51L, restored.oldest)
-        assertTrue(restored.hasOlder)
-        assertNull(restored.position)
-        assertEquals(250L, restored.cursor)
-    }
+            val restored = cache().read("bytes")!!
+            assertEquals(listOf(3L, 4L), restored.events.map { it.id })
+            assertEquals(3L, restored.oldest)
+            assertTrue(restored.hasOlder)
+            assertNull(restored.position)
+        }
 
     @Test
     fun `disk restores complete snapshots and position across instances and isolates sessions`() =

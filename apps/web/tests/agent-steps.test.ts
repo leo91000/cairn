@@ -106,3 +106,11 @@ describe('agent steps', () => {
     expect(step).toMatchObject({ detail: 'Validation needs attention.', failed: true })
   })
 })
+
+it('splits a thousand consecutive reads into steps of at most thirty calls without losing any', () => {
+  const items = artifacts(Array.from({ length: 1001 }, (_, i) => command(`cat file${i}.ts`, 0)))
+  const steps = agentSteps(items)
+  expect(steps).toHaveLength(34)
+  expect(steps.every(step => step.items.length <= 30)).toBe(true)
+  expect(steps.flatMap(step => step.items)).toEqual(items)
+})

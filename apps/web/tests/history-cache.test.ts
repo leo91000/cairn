@@ -59,16 +59,30 @@ it('rejects a cursor inconsistent with its saved events', async () => {
   expect(await readHistory('s', 'bad')).toBeUndefined()
 })
 
-it('keeps a recent window and a backwards boundary without retaining stale offsets', async () => {
-  const events = Array.from({ length: 250 }, (_, i) => ({ ...record().events[0], id: i + 1 }))
+it('retains previously loaded pages and reading position beyond the initial window', async () => {
+  const events = Array.from({ length: 1250 }, (_, i) => ({ ...record().events[0], id: i + 1 }))
   await writeHistory('s', 'window', {
     ...record(),
-    cursor: 250,
+    cursor: 1250,
     events,
     position: { top: 50, follow: false },
   })
   const saved = await readHistory('s', 'window')
-  expect(saved?.events.map(e => e.id)).toEqual(events.slice(50).map(e => e.id))
-  expect(saved).toMatchObject({ oldest: 51, hasOlder: true, cursor: 250 })
+  expect(saved?.events.map(e => e.id)).toEqual(events.map(e => e.id))
+  expect(saved).toMatchObject({ cursor: 1250 })
+  expect(saved?.position).toEqual({ top: 50, follow: false })
+})
+
+it('bounds cached history by bytes and invalidates offsets only when a prefix is evicted', async () => {
+  const events = Array.from({ length: 4 }, (_, i) => ({ ...record().events[0], id: i + 1, text: 'x'.repeat(600 * 1024) }))
+  await writeHistory('s', 'bytes', {
+    ...record(),
+    cursor: 4,
+    events,
+    position: { top: 50, follow: false },
+  })
+  const saved = await readHistory('s', 'bytes')
+  expect(saved?.events.map(e => e.id)).toEqual([3, 4])
+  expect(saved).toMatchObject({ oldest: 3, hasOlder: true, cursor: 4 })
   expect(saved?.position).toBeUndefined()
 })
