@@ -5,7 +5,8 @@ manager’s inbound `/mcp` endpoint described in [MCP.md](MCP.md).
 
 For access to Cairn itself, enable **Allow access to the current Cairn installation**
 in the agent editor instead of adding a self-connection. This supplies a private,
-run-authorized MCP for missions and run history within the agent's permissions;
+run-authorized MCP with the complete public management catalogue across the
+installation, including other agents' resources and work;
 see [agent access](AGENT-ACCESS.md). External management clients and explicitly
 configured self-connections retain their separate OAuth permissions.
 

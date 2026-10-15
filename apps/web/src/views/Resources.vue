@@ -422,7 +422,7 @@ async function remove() {
               The main agent has access to all registered projects, skills, and shared connections.
             </p>
             <label class="checkbox"><input v-model="form.access.installation" type="checkbox">Allow access to the current Cairn installation</label>
-            <small>Manage missions on behalf of the installation owner, and view or stop runs using this agent.</small>
+            <small>Manage agents, projects, skills, MCP connections, tasks and runs on behalf of the installation owner, across the entire installation.</small>
             <label class="checkbox"><input v-model="allNodes" type="checkbox">All nodes, including future nodes</label>
             <fieldset v-if="!allNodes" class="access-choices">
               <legend>Allowed nodes</legend>

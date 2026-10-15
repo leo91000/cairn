@@ -133,10 +133,7 @@ fn registering(db: &Db<'_>, bearer: &str, input: &Value) -> Result<(Value, Value
     }
     access(db, &run, &input["condition"])?;
     if input["condition"]["type"] == "run_finished" {
-        let target = db
-            .run(text(&input["condition"], "runId"))?
-            .ok_or_else(|| Error::not_found("The target run no longer exists."))?;
-        crate::installation_mcp::authorize_target_run_in(db, bearer, &target)?;
+        crate::installation_mcp::authorize_in(db, bearer)?;
     }
     if input["condition"]["type"] == "run_finished"
         && run_result(db, &input["condition"])?.is_none()
@@ -186,14 +183,8 @@ pub(super) fn access(db: &Db<'_>, run: &Value, condition: &Value) -> Result<()> 
             if condition["runId"] == run["id"] {
                 return Err(Error::bad("A conversation cannot wait for its own run."));
             }
-            let target = db
-                .run(text(condition, "runId"))?
+            db.run(text(condition, "runId"))?
                 .ok_or_else(|| Error::not_found("The target run no longer exists."))?;
-            if !crate::installation_mcp::run_allowed(agent, &target) {
-                return Err(Error::forbidden(
-                    "The target run is outside the agent's permissions.",
-                ));
-            }
         }
         "github_workflow" | "github_pr_checks" => {
             github::project(db, run, condition)?;

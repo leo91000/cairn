@@ -8,6 +8,7 @@ use crate::{
         jsonrpc::{Frame, METHOD_NOT_FOUND, Message},
     },
     service::Service,
+    store::Db,
     validation::text,
 };
 use reqwest::{
@@ -89,6 +90,17 @@ impl Client {
     /// Connects with the stored credentials, refreshing OAuth tokens that expired
     /// or that the server rejects.
     pub async fn connect_server(s: &Service, server: &McpServer) -> Result<Self> {
+        Self::connect_server_authorized(s, server, |_| Ok(())).await
+    }
+
+    async fn connect_server_authorized<F>(
+        s: &Service,
+        server: &McpServer,
+        authorize: F,
+    ) -> Result<Self>
+    where
+        F: Fn(&Db<'_>) -> Result<()> + Clone + Send + Sync + 'static,
+    {
         let refreshable =
             |secrets: &McpSecrets| server.uses_oauth() && !secrets.refresh_token().is_empty();
         let mut secrets = s.mcps.server_secrets(s, &server.id).await?;
@@ -96,12 +108,12 @@ impl Client {
             .token_expires_at
             .is_some_and(|time| time <= crate::config::now());
         if expired && refreshable(&secrets) {
-            crate::mcp_oauth::refresh(s, server).await?;
+            crate::mcp_oauth::refresh_authorized(s, server, authorize.clone()).await?;
             secrets = s.mcps.server_secrets(s, &server.id).await?;
         }
         let first = Self::open(s, server, &secrets).await;
         if first.as_ref().is_err_and(Error::is_unauthorized) && refreshable(&secrets) {
-            crate::mcp_oauth::refresh(s, server).await?;
+            crate::mcp_oauth::refresh_authorized(s, server, authorize.clone()).await?;
             let secrets = s.mcps.server_secrets(s, &server.id).await?;
             return Self::open(s, server, &secrets).await;
         }
@@ -110,7 +122,18 @@ impl Client {
 
     /// Connects, reads the tool catalog and disconnects.
     pub async fn list_tools(s: &Service, server: &McpServer) -> Result<Vec<Value>> {
-        let mut client = Self::connect_server(s, server).await?;
+        Self::list_tools_authorized(s, server, |_| Ok(())).await
+    }
+
+    pub(crate) async fn list_tools_authorized<F>(
+        s: &Service,
+        server: &McpServer,
+        authorize: F,
+    ) -> Result<Vec<Value>>
+    where
+        F: Fn(&Db<'_>) -> Result<()> + Clone + Send + Sync + 'static,
+    {
+        let mut client = Self::connect_server_authorized(s, server, authorize).await?;
         let tools = client.discover().await;
         client.close().await;
         tools
