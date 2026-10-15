@@ -29,7 +29,6 @@ import ChatQuestions from '../components/ChatQuestions.vue'
 import ChatSwitcher from '../components/ChatSwitcher.vue'
 import ConnectionSheet from '../components/ConnectionSheet.vue'
 import ConversationDeletion from '../components/ConversationDeletion.vue'
-import FilColumn from '../components/FilColumn.vue'
 import Icon from '../components/Icon.vue'
 import Modal from '../components/Modal.vue'
 import NodeExecution from '../components/NodeExecution.vue'
@@ -93,7 +92,7 @@ const selectedChatId = computed(() => {
   return key
 })
 const streamPath = computed(() => chatId.value ? `/chats/${chatId.value}/stream` : '/chats/stream')
-const live = useLiveRun(() => streamPath.value, { hold: 1000 })
+const live = useLiveRun(() => streamPath.value, { hold: true })
 const { events, connectionNotice, catchingUp } = live
 // The previous conversation stays visible until the selected one is ready.
 const switching = computed(() => live.shown.value !== streamPath.value)
@@ -626,10 +625,7 @@ function key(event: KeyboardEvent) {
     :return-focus="detailsButton"
     @close="connectionOpen = false"
   />
-  <div class="flex h-full min-h-0">
-    <aside class="w-88 shrink-0 border-r border-line bg-inset tablet:hidden" aria-label="Fil">
-      <FilColumn :chats="chats" :selected="selectedChatId" compact />
-    </aside>
+  <div class="flex h-full min-h-0 min-w-0 flex-1">
     <div class="chat-page flex h-full min-h-0 min-w-0 flex-1 flex-col gap-3 px-6 pb-4 pt-3 phone:gap-0 phone:px-3 phone:pb-2 phone:pt-[env(safe-area-inset-top)]">
       <ChatSwitcher
         v-if="history"
@@ -753,14 +749,13 @@ function key(event: KeyboardEvent) {
       </header>
       <div class="flex min-h-0 flex-1 flex-col">
         <section
-          class="relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden transition-opacity"
-          :class="switching ? 'opacity-60 delay-150' : ''"
+          class="relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden"
           :aria-busy="switching"
           aria-label="Chat workspace"
         >
           <!-- A floating pill, as on Android: connection status never moves the conversation. -->
-          <p v-if="connectionNotice" role="status" class="pointer-events-none absolute top-3 left-1/2 z-10 m-0! -translate-x-1/2 rounded-full border border-line bg-surface/95 px-3 py-1.5 text-xs whitespace-nowrap text-muted shadow-[0_4px_16px_#0000000f] backdrop-blur-sm">
-            {{ connectionNotice }}
+          <p v-if="switching || connectionNotice" role="status" class="pointer-events-none absolute top-3 left-1/2 z-10 m-0! -translate-x-1/2 rounded-full border border-line bg-surface/95 px-3 py-1.5 text-xs whitespace-nowrap text-muted shadow-[0_4px_16px_#0000000f] backdrop-blur-sm">
+            {{ switching ? 'Opening conversation…' : connectionNotice }}
           </p>
           <div v-if="route.params.id && !detail" role="status" class="flex flex-1 items-center justify-center text-sm text-muted">
             Loading conversation…
