@@ -212,7 +212,7 @@ class CairnApi(
             else (body?.toString() ?: "{}").toRequestBody("application/json".toMediaType())
         return exchange(
             builder(path).header("Accept", "application/json").method(method, payload).build(),
-            if (method == "POST" && path == "/projects/github") imports else http,
+            if (method == "POST" && longRequest(path)) imports else http,
         ) {
             checkResponse(it)
             it.body.string()
@@ -230,6 +230,19 @@ class CairnApi(
             wireJson.decodeFromString<ChatAttachment>(response.body.string())
         }
     }
+
+    /** POSTs raw bytes (`application/octet-stream`) and returns the JSON response. */
+    suspend fun postBytes(path: String, bytes: ByteArray): String =
+        exchange(
+            builder(path)
+                .header("Accept", "application/json")
+                .post(bytes.toRequestBody("application/octet-stream".toMediaType()))
+                .build(),
+            transfers,
+        ) { response ->
+            checkResponse(response)
+            response.body.string()
+        }
 
     suspend fun agentPortrait(id: String, revision: String): ByteArray =
         exchange(builder("/agents/${segment(id)}/avatar?v=${segment(revision)}").get().build()) {
@@ -310,6 +323,17 @@ class CairnApi(
             }
         )
     }
+}
+
+/** Imports, skill batches and staged uploads may clone or transfer several megabytes. */
+internal fun longRequest(path: String): Boolean {
+    val route = path.substringBefore('?')
+    return route == "/projects/github" ||
+        route == "/skills/uploads" ||
+        (route.startsWith("/skills/") &&
+            (route.endsWith("/import") ||
+                route.endsWith("/bundle") ||
+                route.endsWith("/source/update")))
 }
 
 internal fun checkResponse(response: Response) {

@@ -69,6 +69,17 @@ export default defineConfig({
     { name: 'journeys-agent-access', testMatch: 'agent-access.spec.ts' },
     { name: 'journeys-skill-mentions', testMatch: 'skill-mentions.spec.ts' },
     { name: 'layout-webkit-skill-mentions', testMatch: 'skill-mentions.spec.ts', use: { browserName: 'webkit', hasTouch: true } },
+    { name: 'journeys-skill-bundles', testMatch: 'skill-bundles.spec.ts' },
+    {
+      name: 'layout-webkit-skill-bundles',
+      testMatch: 'skill-bundles.spec.ts',
+      use: {
+        browserName: 'webkit',
+        isMobile: true,
+        hasTouch: true,
+        viewport: { width: 390, height: 844 },
+      },
+    },
     ...(['chromium', 'webkit'] as const).flatMap(browserName =>
       (['light', 'dark'] as const).map(colorScheme => ({
         name: `layout-${browserName}-${colorScheme}`,

@@ -70,6 +70,8 @@ test('sign in, author skills, schedule work, inspect results, and sign out', asy
       '---\nname: review\ndescription: Review the project carefully\n---\nInspect the project and report checks.',
     )
   await page.getByRole('button', { name: 'Save skill' }).click()
+  await expect(page.getByRole('dialog').getByText('All changes saved')).toBeVisible()
+  await page.getByRole('button', { name: 'Close', exact: true }).click()
   await expect(page.getByRole('dialog')).toHaveCount(0)
   await page.getByRole('link', { name: 'Missions', exact: true }).click()
   await page.getByRole('button', { name: 'New mission', exact: true }).click()
@@ -147,16 +149,18 @@ test('edits supporting files, cancels work, and archives without losing history'
   await page.getByRole('link', { name: 'Atelier', exact: true }).click()
   await page.getByRole('link', { name: 'Skills', exact: true }).click()
   await page.getByRole('button', { name: 'Edit review', exact: true }).click()
-  await page.getByLabel('New supporting file').fill('references/checks.md')
-  await page.getByRole('button', { name: 'Add file', exact: true }).click()
+  await page.getByRole('button', { name: 'New file', exact: true }).click()
+  await page.getByLabel('New file path').fill('references/checks.md')
+  await page.getByRole('button', { name: 'Create file', exact: true }).click()
   await page
     .getByLabel('Supporting file content')
     .fill('# Checks\nRun the test suite and inspect the diff.')
   await page.getByRole('button', { name: 'Save skill' }).click()
+  await expect(page.getByRole('dialog').getByText('All changes saved')).toBeVisible()
+  await page.getByRole('button', { name: 'Close', exact: true }).click()
   await expect(page.getByRole('dialog')).toHaveCount(0)
   await page.getByRole('button', { name: 'Edit review', exact: true }).click()
-  await page.getByRole('combobox', { name: 'Skill file', exact: true }).click()
-  await page.getByRole('option', { name: 'references/checks.md', exact: true }).click()
+  await page.getByRole('button', { name: 'references/checks.md', exact: true }).click()
   await expect(page.getByLabel('Supporting file content')).toHaveValue(
     '# Checks\nRun the test suite and inspect the diff.',
   )

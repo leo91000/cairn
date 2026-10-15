@@ -711,7 +711,9 @@ pub(crate) async fn invoke(
             s.store.read(move |db| run_history(db, &id, after)).await
         }
         "read_run_content" => s.store.read(move |db| read_run_content(db, &args)).await,
-        "list_skills" | "save_skill" => skills_tool(s, name, &args, bearer).await,
+        "list_skills" | "read_skill" | "save_skill" | "edit_skill_files" => {
+            skills_tool(s, name, &args, bearer).await
+        }
         "list_mcps" | "create_mcp" | "update_mcp" | "test_mcp" | "disconnect_mcp"
         | "delete_mcp" => connection_tool(s, name, args, bearer).await,
         _ => Err(Error::not_found("Unknown tool")),
@@ -728,25 +730,52 @@ async fn skills_tool(s: &Service, name: &str, args: &Value, bearer: Option<&str>
         None => None,
     };
     let project = project.as_deref();
-    if name == "list_skills" {
-        let scope = project_id.unwrap_or("global");
-        return Ok(s.skills.list(scope, project).await?.into());
+    let scope = project_id.unwrap_or("global");
+    let skill = text(args, "name");
+    match name {
+        "list_skills" => Ok(s.skills.list(scope, project).await?.into()),
+        "read_skill" => {
+            if let Some(path) = args["path"].as_str() {
+                return s.skills.read(skill, path, project).await;
+            }
+            let mut bundle = s.skills.bundle(scope, skill, project).await?;
+            crate::skills::github::source(s, scope, skill, &mut bundle).await?;
+            Ok(bundle)
+        }
+        "edit_skill_files" => {
+            let (changes, uploads) = s.skills.changes(&args["changes"]).await?;
+            let saved = s
+                .skills
+                .apply_authorized(
+                    skill,
+                    args["base"].as_str(),
+                    &changes,
+                    project,
+                    Some((
+                        s.store.clone(),
+                        Box::new(crate::installation_mcp::management_authorization(bearer)),
+                    )),
+                )
+                .await?;
+            s.skills.discard(&uploads).await;
+            let mut bundle = crate::skills::bundle_response(scope, skill, &saved);
+            crate::skills::github::source(s, scope, skill, &mut bundle).await?;
+            Ok(bundle)
+        }
+        _ => {
+            s.skills
+                .save_authorized(
+                    skill,
+                    text(args, "content"),
+                    project,
+                    Some((
+                        s.store.clone(),
+                        Box::new(crate::installation_mcp::management_authorization(bearer)),
+                    )),
+                )
+                .await
+        }
     }
-    if let Some(bearer) = bearer {
-        return s
-            .skills
-            .save_authorized(
-                &s.store,
-                text(args, "name"),
-                text(args, "content"),
-                project,
-                crate::installation_mcp::management_authorization(Some(bearer)),
-            )
-            .await;
-    }
-    s.skills
-        .save(text(args, "name"), text(args, "content"), project)
-        .await
 }
 
 async fn connection_tool(

@@ -161,7 +161,7 @@ pub fn with_invoked_skills(message: &str, skills: &Value) -> String {
         .collect::<Vec<_>>()
         .join("\n");
     format!(
-        "{message}\n\n<invoked_skills>\nThe user invoked these skills with $name in this message. Apply each one to this request by following its SKILL.md under \"Selected skills\" in your instructions:\n{list}\n</invoked_skills>"
+        "{message}\n\n<invoked_skills>\nThe user invoked these skills with $name in this message. Read each one's SKILL.md, listed under \"Selected skills\" in your instructions, and apply it to this request:\n{list}\n</invoked_skills>"
     )
 }
 

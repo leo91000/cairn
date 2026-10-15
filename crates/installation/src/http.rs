@@ -338,6 +338,8 @@ fn owner_operation(method: &str, path: &str) -> bool {
             ..,
         ] => true,
         ["agents"] | ["agents", _, "avatar"] => !read,
+        // Checking a skill source reads GitHub through the owner's connection.
+        ["skills", _, _, "source", ..] => true,
         ["skills" | "projects", ..] => !read,
         ["agents", ..] => true,
         ["tasks", _] => method == "DELETE",
@@ -363,8 +365,16 @@ impl Input {
             .map_err(|_| Error::bad("Invalid query parameters."))?;
         let path = parts.uri.path();
         let large = path.ends_with("/result") || path.ends_with("/mcp");
+        let skill_batch = parts.method == "POST"
+            && matches!(
+                path.split('/').collect::<Vec<_>>().as_slice(),
+                ["", "api", "skills", _, _, "bundle"]
+            );
         let limit = if path.starts_with("/internal/node-workspace/") && large {
             2_000_000
+        } else if skill_batch {
+            // A folder move can carry hundreds of paths even when all file contents are staged.
+            cairn_protocol::MAX_BODY
         } else {
             150000
         };
@@ -575,6 +585,22 @@ async fn raw_route(app: &App, path: &str, request: Request) -> Result<Route> {
                 }
                 _ => return Ok(Route::Next(request)),
             }
+        }
+        ["", "api", "skills", "uploads"] => {
+            if request.method() != "POST" {
+                return Err(Error::method_not_allowed("Method not allowed."));
+            }
+            let limit = crate::skills::bundle::UPLOAD_BYTES;
+            let bytes = tokio::time::timeout(
+                std::time::Duration::from_secs(60),
+                to_bytes(request.into_body(), limit),
+            )
+            .await
+            .map_err(|_| Error::timeout("Upload timed out."))?
+            .map_err(|_| {
+                Error::too_large(format!("Uploads are limited to {} MiB.", limit >> 20))
+            })?;
+            axum::Json(s.skills.stage(&bytes).await?).into_response()
         }
         ["", "api", "chats", chat, "attachments", id] => {
             let chat = resolve_chat_id(s, chat).await?;
