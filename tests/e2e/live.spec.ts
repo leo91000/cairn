@@ -68,6 +68,58 @@ for (const kind of ['chat', 'task'] as const) {
   })
 }
 
+test('an older page preserves expanded newer tools and their open detail sheet', async ({ page, workspace }) => {
+  await useRelayForHttpMocks(page)
+  const run = workspace.service.store.runs().find(run => run.status === 'succeeded' && run.trigger !== 'chat')!
+  for (let i = 0; i < 260; i++) {
+    workspace.service.store.event(run.id, 'item.completed', '', {
+      item: {
+        id: `inspect-${i}`,
+        type: 'command_execution',
+        command: `echo inspect-${i}`,
+        exit_code: 0,
+      },
+    })
+  }
+
+  let release!: () => void
+  const gate = new Promise<void>((resolve) => {
+    release = resolve
+  })
+  let requested = false
+  await page.route('**/history?**', async (route) => {
+    requested = true
+    await gate
+    await route.continue()
+  })
+  try {
+    await page.goto(workspacePath(`${workspace.url}/runs/${run.id}`))
+    await authenticateWorkspace(page)
+    const groups = page.getByTestId('agent-actions')
+    await expect(groups.nth(1)).toBeVisible()
+    const group = groups.nth(1)
+    await group.locator(':scope > button').click()
+    const step = group.getByTestId('agent-step').first()
+    const label = (await step.textContent())!.match(/echo inspect-\d+/)![0]
+    const groupCount = await groups.count()
+    const stepCount = await group.getByTestId('agent-step').count()
+    await step.click()
+    const sheet = page.getByTestId('agent-step-sheet')
+    await expect(sheet).toBeVisible()
+    // A pending automatic page can finish while the reader inspects a tool.
+    await expect.poll(() => requested).toBe(true)
+    release()
+    await expect.poll(() => groups.count()).toBeGreaterThan(groupCount)
+    await expect(sheet).toBeVisible()
+    await expect(sheet).toContainText(label)
+    await expect(page.getByTestId('agent-step')).toHaveCount(stepCount)
+  }
+  finally {
+    release()
+    await page.unrouteAll({ behavior: 'wait' })
+  }
+})
+
 test('automatic history pauses on errors and resumes only after retry', async ({ page, workspace }) => {
   await useRelayForHttpMocks(page)
   const run = workspace.service.store.runs().find(run => run.status === 'succeeded' && run.trigger !== 'chat')!

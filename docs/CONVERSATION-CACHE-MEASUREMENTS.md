@@ -14,8 +14,9 @@ An evicted prefix remains available from server pagination. Evicting a prefix al
 invalidates its reading position. Logout and existing revision/deletion handling
 still invalidate saved conversations.
 
-Activity groups contain at most 30 folded calls. Updates to one call still replace
-its previous state. Consecutive successful reads remain grouped within that limit;
+Activity groups contain at most 30 folded calls, partitioned by stable event-ID
+windows so older pages do not repartition newer groups. Sparse event IDs can yield
+smaller groups. Updates to one call still replace its previous state. Consecutive successful reads remain grouped within that limit;
 failures, running calls, messages and subagent teams retain their presentation.
 
 ## Reproduce the web measurement

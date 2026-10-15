@@ -507,3 +507,26 @@ it('also caps tool groups in a subagent timeline', () => {
   expect(entries.every(entry => entry.kind === 'group' && entry.artifacts.length <= 30)).toBe(true)
   expect(entries.flatMap(entry => entry.kind === 'group' ? entry.artifacts : [])).toEqual(items)
 })
+
+it.each([false, true])('keeps newer tool groups stable when older pages arrive or tools append (chat=%s)', (chat) => {
+  const events = Array.from({ length: 190 }, (_, i): RunEvent => ({
+    id: i + 1,
+    runId: 'r',
+    createdAt: i,
+    type: 'item.completed',
+    text: '',
+    payload: {
+      item: {
+        id: `t${i + 1}`,
+        type: 'command_execution',
+        command: `echo ${i + 1}`,
+        exit_code: 0,
+      },
+    },
+  }))
+  const loaded = activityEntries(events.slice(100, 160), chat).filter(entry => entry.kind === 'group')
+  const extended = activityEntries(events, chat).filter(entry => entry.kind === 'group')
+  // A full newer group must survive the prepend rather than being repartitioned from index zero.
+  expect(extended.find(entry => entry.id === loaded[1]!.id)?.artifacts.map(item => item.id))
+    .toEqual(loaded[1]!.artifacts.map(item => item.id))
+})
