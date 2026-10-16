@@ -21,9 +21,9 @@ import {
 } from 'vitest'
 import { parse } from 'yaml'
 import {
-  installationRecoveryChanges,
   prepareRecovery,
   verifyInstallation,
+  verifyInstallationCompatibility,
   verifyProof,
 } from '../production-recovery.mjs'
 
@@ -84,7 +84,7 @@ describe('production recovery', () => {
     }
     const record = await prepareRecovery(config, {
       ssh,
-      changedInstallationFiles: async () => [],
+      verifyCompatibility: async () => {},
       now: () => now,
       identifier,
     })
@@ -112,42 +112,51 @@ describe('production recovery', () => {
       ssh,
       now: () => now,
       identifier,
-      changedInstallationFiles: async () => ['crates/installation/src/store.rs'],
+      verifyCompatibility: async () => { throw new Error('prepare a matching stopped installation backup') },
     })).rejects.toThrow('matching stopped installation backup')
   })
 
-  it('detects existing schema and persistent disk format changes against the served commit', async () => {
+  it('checks reviewed data compatibility, including legacy bootstrap and incompatible or unknown baselines', async () => {
     const directory = await mkdtemp(path.join(os.tmpdir(), 'cairn-recovery-git-'))
     directories.push(directory)
     const git = (...args) => execFileSync('git', args, { cwd: directory, encoding: 'utf8' }).trim()
-    git('init', '--quiet')
-    const schemaFiles = [
-      'store.rs',
-      'storage/migration.rs',
-      'nodes/shared_blocks.rs',
-      'nodes/snapshots.rs',
-      'nodes/publication.rs',
-      'object_storage.rs',
-      'models.rs',
-      'accounts/mod.rs',
-      'service.rs',
-    ].map(file => `crates/installation/src/${file}`)
-    const unrelated = 'crates/installation/src/chats.rs'
-    for (const file of [...schemaFiles, unrelated]) {
-      await mkdir(path.dirname(path.join(directory, file)), { recursive: true })
-      await writeFile(path.join(directory, file), 'before\n')
+    const commitAll = () => {
+      git('add', '.')
+      git('-c', 'user.name=Recovery Test', '-c', 'user.email=recovery@example.invalid', 'commit', '--quiet', '-m', 'fixture')
+      return git('rev-parse', 'HEAD')
     }
 
-    git('add', '.')
-    git('-c', 'user.name=Recovery Test', '-c', 'user.email=recovery@example.invalid', 'commit', '--quiet', '-m', 'baseline')
-    const before = git('rev-parse', 'HEAD')
-    for (const file of [...schemaFiles, unrelated])
-      await writeFile(path.join(directory, file), 'after\n')
-    git('add', '.')
-    git('-c', 'user.name=Recovery Test', '-c', 'user.email=recovery@example.invalid', 'commit', '--quiet', '-m', 'candidate')
-    const changed = await installationRecoveryChanges(before, 'HEAD', { cwd: directory })
-    expect(changed.sort()).toEqual(schemaFiles.sort())
-    expect(changed).not.toContain(unrelated)
+    git('init', '--quiet')
+    await writeFile(path.join(directory, 'vault.rs'), 'legacy format\n')
+    const legacy = commitAll()
+    const legacyTree = git('rev-parse', `${legacy}^{tree}`)
+    const file = path.join(directory, 'deploy/installations/data-compatibility.json')
+    await mkdir(path.dirname(file), { recursive: true })
+    const writeContract = async value => writeFile(file, JSON.stringify(value))
+    await writeContract({ schema: 1, epoch: 1, legacyTree })
+    const adoption = commitAll()
+    await expect(verifyInstallationCompatibility(legacy, adoption, { cwd: directory })).resolves.toBeUndefined()
+    await expect(verifyInstallationCompatibility(adoption, legacy, { cwd: directory })).rejects.toThrow('Missing')
+
+    // Ordinary compatible source changes keep the reviewed epoch and deploy automatically.
+    await writeFile(path.join(directory, 'vault.rs'), 'compatible implementation change\n')
+    const compatible = commitAll()
+    await expect(verifyInstallationCompatibility(adoption, compatible, { cwd: directory })).resolves.toBeUndefined()
+    await expect(verifyInstallationCompatibility(compatible, adoption, { cwd: directory })).resolves.toBeUndefined()
+
+    // A break declared in any module's persisted format blocks both upgrade and rollback.
+    await writeContract({ schema: 1, epoch: 2, legacyTree })
+    const incompatible = commitAll()
+    await expect(verifyInstallationCompatibility(compatible, incompatible, { cwd: directory })).rejects.toThrow('matching stopped installation backup')
+    await expect(verifyInstallationCompatibility(incompatible, compatible, { cwd: directory })).rejects.toThrow('matching stopped installation backup')
+    await expect(verifyInstallationCompatibility(legacy, incompatible, { cwd: directory })).rejects.toThrow('Unknown')
+
+    await writeContract({ schema: 1, epoch: 1, legacyTree: '0'.repeat(40) })
+    const unknown = commitAll()
+    await expect(verifyInstallationCompatibility(legacy, unknown, { cwd: directory })).rejects.toThrow('Unknown')
+    await writeContract({ schema: 1, epoch: 0, legacyTree })
+    const invalid = commitAll()
+    await expect(verifyInstallationCompatibility(adoption, invalid, { cwd: directory })).rejects.toThrow('Invalid')
   })
 
   it('waits through an updater replacement and requires the manager, runner, and execution health', async () => {

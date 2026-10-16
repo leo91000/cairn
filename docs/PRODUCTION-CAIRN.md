@@ -25,9 +25,9 @@ Infrastructure changes have their own scope and are not part of a routine releas
    Beacon and installation images from that same evidence. A reused PR image
    can report its tested merge commit while matching the tag's tree.
 2. **Check rollback scope.** Routine releases prepare recovery automatically.
-   The workflow refuses changes to the installation database or storage code
-   without a reviewed rollout and a matching stopped installation backup,
-   including Garage and its identity. A Beacon dump cannot recover these files.
+   The workflow compares the reviewed installation data compatibility epoch.
+   A changed epoch requires a reviewed rollout and a matching stopped installation
+   backup, including Garage and its identity. A Beacon dump cannot recover these files.
    Proxy or other infrastructure changes retain their own qualification; see
    the [reference](PRODUCTION-CAIRN-SETUP.md#persist-a-fixed-traefik-peer-across-recreation).
 3. **Create the tag and release notes.** A pushed version tag starts the container
@@ -62,6 +62,25 @@ Main, PR and manual validation workflows do not deploy production. A version tag
 is the release/deployment path; production jobs are serialized. The hosted web
 application and account service belong to Beacon. Installations keep the agents'
 work and update separately through their existing host supervisor.
+
+## Installation data compatibility
+
+`deploy/installations/data-compatibility.json` declares the installation's reviewed
+data compatibility epoch. During implementation and review, account for every
+changed persistent schema, record, disk manifest, encrypted envelope, checkpoint,
+identity and plugin format, wherever its owner lives. Keep the epoch unchanged
+only when the previous release can read data written by the new release and the
+new release can read existing data. A compatibility break **must increment the
+epoch in the same PR**, with a reviewed migration/rollback plan and a stopped
+backup of the complete installation directory, Garage and private identity.
+
+The automatic job compares the served and candidate source contracts. Equal
+epochs allow routine deployment; missing/invalid metadata or different epochs
+stop before deployment. Initial adoption accepts epoch 1 only when the served
+Git tree matches the recorded reviewed legacy tree. The contract covers all
+persisted data; it relies on source review, rather than inferring compatibility
+from file names. Include the compatibility decision in reviews of format changes.
+Do not advance the recorded legacy tree to bypass an unknown installation state.
 
 ## Installation updates and temporary offline status
 

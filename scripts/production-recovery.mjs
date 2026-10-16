@@ -36,7 +36,7 @@ export function verifyProof(proof, tag, identifier, now = Date.now()) {
 
 export async function prepareRecovery(config, {
   ssh,
-  changedInstallationFiles,
+  verifyCompatibility,
   now = Date.now,
   identifier = randomBytes(16).toString('hex'),
 } = {}) {
@@ -51,11 +51,7 @@ export async function prepareRecovery(config, {
   const record = { ...proof, candidate: { commit: config.commit, beaconImage: config.beaconImage, installationImage: config.installationImage } }
   await writeFile(path.join(config.directory, 'release.json'), `${JSON.stringify(record, null, 2)}\n`, { mode: 0o600, flag: 'wx' })
 
-  // Changes to the installation database or disk format need a matching stopped
-  // installation backup; a Beacon Postgres dump cannot roll them back.
-  const changed = await changedInstallationFiles(proof.previous.commit, config.commit)
-  if (changed.length)
-    throw new Error('Installation schema/storage code changed: prepare a matching stopped installation backup and a reviewed rollout before deployment')
+  await verifyCompatibility(proof.previous.commit, config.commit)
 
   return record
 }
@@ -80,7 +76,7 @@ export async function verifyInstallation(config, {
   throw new Error('The installation did not become healthy on the approved image; inspect its updater before intervening')
 }
 
-export async function installationRecoveryChanges(before, after, { cwd } = {}) {
+export async function verifyInstallationCompatibility(before, after, { cwd } = {}) {
   try {
     await exec('git', ['cat-file', '-e', `${before}^{commit}`], { cwd })
   }
@@ -88,17 +84,35 @@ export async function installationRecoveryChanges(before, after, { cwd } = {}) {
     await exec('git', ['fetch', '--no-tags', 'origin', before], { cwd })
   }
 
-  const paths = [
-    'crates/installation/src/store.rs',
-    'crates/installation/src/storage/',
-    'crates/installation/src/nodes/',
-    'crates/installation/src/object_storage.rs',
-    'crates/installation/src/models.rs',
-    'crates/installation/src/accounts/',
-    'crates/installation/src/service.rs',
-  ]
-  const { stdout } = await exec('git', ['diff', '--name-only', before, after, '--', ...paths], { cwd })
-  return stdout.trim().split('\n').filter(Boolean)
+  const file = 'deploy/installations/data-compatibility.json'
+  const read = async (ref) => {
+    const { stdout: entry } = await exec('git', ['ls-tree', ref, '--', file], { cwd })
+    if (!entry.trim())
+      return null
+    const { stdout } = await exec('git', ['show', `${ref}:${file}`], { cwd })
+    const value = JSON.parse(stdout)
+    if (value.schema !== 1 || !Number.isSafeInteger(value.epoch) || value.epoch < 1
+      || (value.legacyTree !== undefined && !commit.test(value.legacyTree))) {
+      throw new Error('Invalid installation data compatibility contract')
+    }
+
+    return value
+  }
+
+  const candidate = await read(after)
+  if (!candidate)
+    throw new Error('Missing installation data compatibility contract')
+  const previous = await read(before)
+  if (previous) {
+    if (candidate.epoch === previous.epoch)
+      return
+    throw new Error('Installation data compatibility changed: prepare a matching stopped installation backup and a reviewed rollout before deployment')
+  }
+
+  // The first adoption accepts only the reviewed pre-contract release tree.
+  const { stdout: tree } = await exec('git', ['rev-parse', `${before}^{tree}`], { cwd })
+  if (candidate.epoch !== 1 || candidate.legacyTree !== tree.trim())
+    throw new Error('Unknown installation data baseline: prepare a matching stopped installation backup and a reviewed rollout before deployment')
 }
 
 async function withSsh(action) {
@@ -157,7 +171,7 @@ if (import.meta.main) {
       console.log('Installation manager and runner are healthy on the approved image.')
     }
     else if (process.argv[2] === 'prepare') {
-      const record = await withSsh(ssh => prepareRecovery(config, { ssh, changedInstallationFiles: installationRecoveryChanges }))
+      const record = await withSsh(ssh => prepareRecovery(config, { ssh, verifyCompatibility: verifyInstallationCompatibility }))
       if (process.env.GITHUB_OUTPUT)
         await appendFile(process.env.GITHUB_OUTPUT, `backup-id=${record.id}\n`)
       console.log('Postgres backup restored successfully; encrypted recovery artifact downloaded for off-host retention.')

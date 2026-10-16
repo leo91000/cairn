@@ -363,7 +363,7 @@ age --decrypt -i /private/recovery-ssh-key -o beacon.dump beacon.dump.age
 
 Follow the [rollback procedure](PRODUCTION-CAIRN.md#backups-and-rollback) with the
 previous immutable image pair recorded in the same metadata. The workflow stops
-when installation database/storage source changes need a separate stopped backup;
+when installation data compatibility epochs differ and need a separate stopped backup;
 this exception cannot be bypassed by an approval click.
 
 ## Install and claim on the same server
