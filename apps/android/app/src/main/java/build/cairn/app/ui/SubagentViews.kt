@@ -35,6 +35,7 @@ import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.scale
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.clearAndSetSemantics
@@ -278,7 +279,8 @@ private fun SubagentRow(agent: Subagent, active: Boolean, now: Long, open: () ->
                         listOf(agent.type, if (agent.background) "arrière-plan" else "")
                             .filter { it.isNotBlank() }
                             .joinToString(" · ")
-                    if (kind.isNotBlank())
+                    // Phones keep the room for the name; the sheet names the type.
+                    if (kind.isNotBlank() && LocalConfiguration.current.screenWidthDp >= 600)
                         Text(
                             "  $kind",
                             style = MaterialTheme.typography.labelSmall,
