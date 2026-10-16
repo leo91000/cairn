@@ -17,6 +17,7 @@ import { setTimeout } from 'node:timers/promises'
 import { blockDigest } from './block-digest.mjs'
 import { entrypointSmoke } from './runner-entrypoint-smoke.mjs'
 import { prepareStorageOrigin, storageSmoke } from './runner-storage-smoke.mjs'
+import { udpSmoke } from './runner-udp-smoke.mjs'
 
 async function main() {
   const image = process.argv[2] || 'cairn-firecracker:dev'
@@ -28,8 +29,8 @@ async function main() {
   const networkServer = `${name}-peer`
   // The generated installation reaches its manager by name on a private network.
   const installationNetwork = `${name}-installation`
-  // A documentation-only subnet emulates public destinations without Internet access.
-  const publicPeer = '203.0.113.3'
+  // An internal Docker subnet emulates public destinations; it has no external routing.
+  const publicPeer = '93.184.216.3'
   const headers = { authorization: 'Bearer fixture-runner-token' }
   let url
   let auth
@@ -90,8 +91,8 @@ async function main() {
     await writeFile(path.join(source, 'workspace/nested-kvm.c'), await readFile(new URL('./fixtures/nested-kvm.c', import.meta.url)))
     const networkProbe = await readFile(new URL('./fixtures/vm-network.mjs', import.meta.url))
     await writeFile(path.join(source, 'workspace/network-probe.mjs'), networkProbe)
-    docker('network', 'create', '--internal', '--subnet', '203.0.113.0/29', networkName)
-    docker('run', '-d', '--name', networkServer, '--user', '0:0', '-v', `${source}/workspace/network-probe.mjs:/network-probe.mjs:ro`, '--entrypoint', '/usr/local/bin/node', image, '/network-probe.mjs', 'server')
+    docker('network', 'create', '--internal', '--subnet', '93.184.216.0/29', networkName)
+    docker('run', '-d', '--name', networkServer, '--cap-add', 'NET_ADMIN', '--user', '0:0', '-v', `${source}/workspace/network-probe.mjs:/network-probe.mjs:ro`, '--entrypoint', '/usr/local/bin/node', image, '/network-probe.mjs', 'server')
     const privatePeer = docker('inspect', '--format', '{{(index .NetworkSettings.Networks "bridge").IPAddress}}', networkServer)
     docker('network', 'connect', '--ip', publicPeer, networkName, networkServer)
     const fixture = `
@@ -217,8 +218,8 @@ console.log('probe.done');
       })
     })
     await new Promise(resolve => mcp.listen(path.join(source, 'home/cairn-mcp.sock'), resolve))
-    docker('run', '-d', '--name', name, '--user', '0:0', '--read-only', '--cap-drop', 'ALL', ...['SYS_ADMIN', 'NET_ADMIN', 'SYS_CHROOT', 'SETUID', 'SETGID', 'MKNOD', 'CHOWN', 'FOWNER', 'KILL', 'DAC_OVERRIDE'].flatMap(cap => ['--cap-add', cap]), '--security-opt', 'apparmor=unconfined', '--security-opt', 'seccomp=unconfined', '--device', '/dev/kvm', '--device', '/dev/fuse', '--device', '/dev/net/tun', '--sysctl', 'net.ipv4.ip_forward=1', '--sysctl', 'net.ipv6.conf.all.disable_ipv6=1', '--tmpfs', '/run', '--tmpfs', '/tmp', '-v', `${root}/data:/data`, '-v', `${root}/state:/runner-state`, '-p', '127.0.0.1::4311', '--memory', '6g', '--cpus', '3', '-e', 'CONCURRENCY=5', '--entrypoint', '/usr/local/bin/cairn', image, 'runner-broker')
-    docker('network', 'connect', '--ip', '203.0.113.2', networkName, name)
+    docker('run', '-d', '--name', name, '--user', '0:0', '--read-only', '--cap-drop', 'ALL', ...['SYS_ADMIN', 'NET_ADMIN', 'SYS_CHROOT', 'SETUID', 'SETGID', 'MKNOD', 'CHOWN', 'FOWNER', 'KILL', 'DAC_OVERRIDE'].flatMap(cap => ['--cap-add', cap]), '--security-opt', 'apparmor=unconfined', '--security-opt', 'seccomp=unconfined', '--device', '/dev/kvm', '--device', '/dev/fuse', '--device', '/dev/net/tun', '--sysctl', 'net.ipv4.ip_forward=1', '--sysctl', 'net.ipv4.conf.all.rp_filter=0', '--sysctl', 'net.ipv4.conf.default.rp_filter=0', '--sysctl', 'net.ipv6.conf.all.disable_ipv6=1', '--tmpfs', '/run', '--tmpfs', '/tmp', '-v', `${root}/data:/data`, '-v', `${root}/state:/runner-state`, '-p', '127.0.0.1::4311', '--memory', '6g', '--cpus', '3', '-e', 'CONCURRENCY=5', '--entrypoint', '/usr/local/bin/cairn', image, 'runner-broker')
+    docker('network', 'connect', '--ip', '93.184.216.2', networkName, name)
     docker('network', 'create', installationNetwork)
     docker('network', 'connect', '--alias', 'manager', installationNetwork, name)
     // First prove every listener is reachable outside the guest firewall.
@@ -232,6 +233,18 @@ console.log('probe.done');
       managerOrigin: 'http://manager:4310',
     })
     const { storage } = storageFixture
+    await udpSmoke({
+      root,
+      docker,
+      name,
+      networkServer,
+      publicPeer,
+      api,
+      until,
+      storage,
+    })
+    if (process.env.CAIRN_UDP_ONLY === '1')
+      return
     const initialHealth = await (await api('/health')).json()
     assert.equal(initialHealth.sharedResources, true)
     assert.equal(initialHealth.budget.slots, 5)

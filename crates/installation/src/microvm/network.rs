@@ -5,14 +5,20 @@ use std::{process::Stdio, time::Duration};
 use tokio::process::Command;
 
 /// Destinations no guest may reach: the runner, peer VMs, LAN and cloud metadata.
-const PRIVATE_SUBNETS: [&str; 8] = [
+const PRIVATE_SUBNETS: [&str; 14] = [
     "0.0.0.0/8",
     "10.0.0.0/8",
     "100.64.0.0/10",
     "127.0.0.0/8",
     "169.254.0.0/16",
     "172.16.0.0/12",
+    "192.0.0.0/24",
+    "192.0.2.0/24",
+    "192.88.99.0/24",
     "192.168.0.0/16",
+    "198.18.0.0/15",
+    "198.51.100.0/24",
+    "203.0.113.0/24",
     "224.0.0.0/3",
 ];
 
@@ -73,12 +79,21 @@ impl Network {
         [action, "FORWARD", "-i", &self.tap, "-j", &self.chain]
     }
 
-    fn established_rule(&self, action: &'static str) -> [&str; 10] {
+    fn inbound_drop_rule(&self, action: &'static str) -> [&str; 6] {
+        [action, "FORWARD", "-o", &self.tap, "-j", "DROP"]
+    }
+
+    fn established_rule(&self, action: &'static str) -> [&str; 15] {
         [
             action,
             "FORWARD",
             "-o",
             &self.tap,
+            "!",
+            "-i",
+            "cairn+",
+            "-d",
+            &self.guest,
             "-m",
             "conntrack",
             "--ctstate",
@@ -115,35 +130,69 @@ impl Network {
         command("ip", &["link", "set", &self.tap, "up"]).await?;
         iptables(&["-N", &self.chain]).await?;
         iptables(&self.input_rule("-I")).await?;
+        // Install the inbound fence before permitting replies. Do not rely on
+        // the host FORWARD policy (which can be ACCEPT).
+        iptables(&self.inbound_drop_rule("-I")).await?;
+        iptables(&self.established_rule("-I")).await?;
         iptables(&self.forward_rule("-I")).await?;
         iptables(&["-A", &self.chain, "!", "-s", &self.guest, "-j", "DROP"]).await?;
         for subnet in PRIVATE_SUBNETS {
             iptables(&["-A", &self.chain, "-d", subnet, "-j", "DROP"]).await?;
         }
-        // Public TCP includes SSH on custom ports; UDP remains limited to DNS.
-        // Keep both rules after the private-destination and source-address checks.
+        // Public traffic must pass the source and destination fences first.
         iptables(&["-A", &self.chain, "-p", "tcp", "-j", "ACCEPT"]).await?;
         iptables(&[
             "-A",
             &self.chain,
             "-p",
             "udp",
-            "--dport",
-            "53",
+            "-m",
+            "conntrack",
+            "--ctstate",
+            "ESTABLISHED,RELATED",
+            "-j",
+            "ACCEPT",
+        ])
+        .await?;
+        // One bucket per VM, shared by DNS and every other public UDP port.
+        // Unreplied packets remain NEW and conservatively consume tokens too.
+        iptables(&[
+            "-A",
+            &self.chain,
+            "-p",
+            "udp",
+            "-m",
+            "conntrack",
+            "--ctstate",
+            "NEW",
+            "-m",
+            "hashlimit",
+            "--hashlimit-upto",
+            "50/second",
+            "--hashlimit-burst",
+            "100",
+            "--hashlimit-mode",
+            "srcip",
+            "--hashlimit-name",
+            &self.chain,
+            "--hashlimit-htable-max",
+            "1",
+            "--hashlimit-htable-expire",
+            "10000",
             "-j",
             "ACCEPT",
         ])
         .await?;
         iptables(&["-A", &self.chain, "-j", "DROP"]).await?;
-        iptables(&self.established_rule("-I")).await?;
         iptables(&self.masquerade_rule("-A")).await
     }
 
     pub async fn remove(&self) {
-        let rules: [&[&str]; 6] = [
+        let rules: [&[&str]; 7] = [
             &self.input_rule("-D"),
             &self.forward_rule("-D"),
             &self.established_rule("-D"),
+            &self.inbound_drop_rule("-D"),
             &self.masquerade_rule("-D"),
             &["-F", &self.chain],
             &["-X", &self.chain],
