@@ -96,6 +96,8 @@ export interface Manifest {
 export interface PackageVersion {
   version: string
   digest?: string
+  /** The package's Luau files, `main.luau` first. */
+  files?: { path: string, bytes: number }[]
   manifest?: Manifest
   approved?: boolean
   error?: string

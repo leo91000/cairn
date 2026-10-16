@@ -2025,3 +2025,90 @@ async fn plugin_management_is_owner_only_and_mcp_never_returns_secret_reads() {
             .contains("synthetic_discord_token")
     );
 }
+
+#[tokio::test]
+async fn installed_packages_can_be_split_into_modules_and_any_file_change_needs_review() {
+    let (root, s, _) = service().await;
+    let package = |modules: Value| {
+        json!({
+            "manifest": {
+                "id": "splitter", "name": "Splitter", "version": "1.0.0", "apiVersion": 1,
+                "capabilities": [],
+            },
+            "source": "local greet = require('./lib/greet')\nreturn { probe = function(event) return greet.hello(event.name) end }",
+            "modules": modules,
+        })
+    };
+    for invalid in [
+        json!({ "../escape.luau": "return {}" }),
+        json!({ "lib/Greet.luau": "return {}" }),
+        json!({ "lib/greet.luau": 42 }),
+        json!({ "lib/other.luau": "return {}" }),
+        json!({ "lib/greet.luau": "return require('./missing')" }),
+    ] {
+        assert!(
+            registry::install(&s, &package(invalid.clone()))
+                .await
+                .is_err(),
+            "{invalid}"
+        );
+    }
+    let modules = json!({
+        "lib/greet.luau": "local text = require('./text')\nreturn { hello = function(name) return text.upper('hello ') .. name end }",
+        "lib/text.luau": "return { upper = string.upper }",
+    });
+    let installed = registry::install(&s, &package(modules)).await.unwrap();
+    assert_eq!(
+        installed["files"],
+        json!([
+            { "path": "main.luau", "bytes": 106 },
+            { "path": "lib/greet.luau", "bytes": 104 },
+            { "path": "lib/text.luau", "bytes": 31 },
+        ])
+    );
+    let directory = root.path().join("data/plugins/splitter/1.0.0");
+    assert!(directory.join("lib/greet.luau").is_file());
+    registry::approve(&s, "splitter", "1.0.0", text(&installed, "digest"))
+        .await
+        .unwrap();
+    let active = registry::active(&s, "splitter").await.unwrap();
+    assert_eq!(active.source.modules.len(), 2);
+    let result = s
+        .plugins
+        .host
+        .invoke(
+            &worker(),
+            &active.manifest,
+            &active.source,
+            "probe",
+            json!({ "name": "Ada" }),
+            |_, _| async { Err(Denied("forbidden")) },
+        )
+        .await
+        .unwrap();
+    assert_eq!(result, "HELLO Ada");
+
+    // Editing a module, adding one or linking one withdraws the approval.
+    let original = std::fs::read_to_string(directory.join("lib/text.luau")).unwrap();
+    std::fs::write(
+        directory.join("lib/text.luau"),
+        "return { upper = string.lower }",
+    )
+    .unwrap();
+    assert_eq!(
+        registry::active(&s, "splitter").await.err().unwrap().status,
+        403
+    );
+    std::fs::write(directory.join("lib/text.luau"), &original).unwrap();
+    registry::active(&s, "splitter").await.unwrap();
+    std::fs::write(directory.join("extra.luau"), "return {}").unwrap();
+    assert_eq!(
+        registry::active(&s, "splitter").await.err().unwrap().status,
+        403
+    );
+    std::fs::remove_file(directory.join("extra.luau")).unwrap();
+    std::os::unix::fs::symlink(directory.join("main.luau"), directory.join("link.luau")).unwrap();
+    assert!(registry::active(&s, "splitter").await.is_err());
+    std::fs::remove_file(directory.join("link.luau")).unwrap();
+    registry::active(&s, "splitter").await.unwrap();
+}

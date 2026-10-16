@@ -130,10 +130,15 @@ data class PluginManifest(
             ?: if (count == 1) "Instance" else "Instances"
 }
 
+/** One Luau file of a package, for review. */
+@Serializable data class PluginFile(val path: String = "", val bytes: Int = 0)
+
 @Serializable
 data class PluginVersion(
     val version: String = "",
     val digest: String? = null,
+    /** The package's Luau files, `main.luau` first. */
+    val files: List<PluginFile>? = null,
     val manifest: PluginManifest? = null,
     val approved: Boolean? = null,
     val error: String? = null,

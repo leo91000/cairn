@@ -1,5 +1,7 @@
 -- Authoring reference for plugin API v2 (v1 packages keep working). Runtime globals
--- are host-owned and frozen.
+-- are host-owned and frozen. A package can be split into modules: `require("./lib/x")`
+-- loads lib/x.luau (or lib/x/init.luau) relative to the requiring file, once per worker,
+-- from the package's own files only.
 -- A package's main.luau returns a table of handlers keyed by event name:
 --   message           what an allowed person wrote, admitted { id, author, …context, …body }
 --                     with cairn.inbound.accept (or another `kind`, e.g. interaction)

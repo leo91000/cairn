@@ -117,18 +117,31 @@ const soon = [
   { id: 'linear', name: 'Linear', detail: 'Turn issues into missions' },
 ]
 
-/** Reads a package folder (manifest.json and main.luau) and installs it inactive. */
+/** A chosen file's path inside the package: its folder's own name is dropped. */
+function packagePath(file: File) {
+  const path = file.webkitRelativePath || file.name
+  return path.includes('/') ? path.slice(path.indexOf('/') + 1) : path
+}
+
+/** Reads a package (manifest.json, main.luau and its modules) and installs it inactive. */
 async function install() {
   busy.value = true
   error.value = ''
   try {
-    const manifest = files.value.find(file => file.name === 'manifest.json')
-    const source = files.value.find(file => file.name === 'main.luau')
+    const manifest = files.value.find(file => packagePath(file) === 'manifest.json')
+    const source = files.value.find(file => packagePath(file) === 'main.luau')
     if (!manifest || !source)
-      throw new Error('Choose the package’s manifest.json and main.luau.')
+      throw new Error('Choose the package’s manifest.json and main.luau, or its folder.')
+    const modules: Record<string, string> = {}
+    for (const file of files.value) {
+      const path = packagePath(file)
+      if (path.endsWith('.luau') && path !== 'main.luau')
+        modules[path] = await file.text()
+    }
+
     const installed = await api<{ manifest: { id: string, name: string } }>('/plugins/packages', {
       method: 'POST',
-      body: JSON.stringify({ manifest: JSON.parse(await manifest.text()), source: await source.text() }),
+      body: JSON.stringify({ manifest: JSON.parse(await manifest.text()), source: await source.text(), modules }),
     })
     installing.value = false
     files.value = []
@@ -271,7 +284,7 @@ async function install() {
           {{ error }}
         </UiAlert>
         <p class="text-xs leading-relaxed text-muted">
-          Choose the package’s <code>manifest.json</code> and <code>main.luau</code>. It is saved on this installation but stays inactive until you review and approve what it can do.
+          Choose the package’s <code>manifest.json</code>, <code>main.luau</code> and its other <code>.luau</code> files, or its whole folder. It is saved on this installation but stays inactive until you review and approve what it can do.
         </p>
         <label class="text-xs font-semibold">
           Package files
@@ -283,9 +296,18 @@ async function install() {
             @change="files = [...(($event.target as HTMLInputElement).files ?? [])]"
           >
         </label>
+        <label class="text-xs font-semibold">
+          Or the package folder
+          <input
+            type="file"
+            webkitdirectory
+            aria-label="Package folder"
+            @change="files = [...(($event.target as HTMLInputElement).files ?? [])]"
+          >
+        </label>
         <ul v-if="files.length" class="grid gap-1 text-2xs text-muted">
-          <li v-for="file in files" :key="file.name">
-            {{ file.name }} · {{ Math.ceil(file.size / 1024) }} KB
+          <li v-for="file in files" :key="packagePath(file)">
+            {{ packagePath(file) }} · {{ Math.ceil(file.size / 1024) }} KB
           </li>
         </ul>
         <div class="flex justify-end gap-2.5">

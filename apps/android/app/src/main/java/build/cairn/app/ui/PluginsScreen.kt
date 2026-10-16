@@ -1488,8 +1488,21 @@ private fun PluginReview(
                                 ". Rien n’est accordé par défaut."
                         )
                     Note(
-                        "Le script s’exécute dans le bac à sable Luau de Cairn : ni fichiers, ni processus, ni autre accès réseau de lui-même. Toute modification sur disque demande une nouvelle validation."
+                        "Le script s’exécute dans le bac à sable Luau de Cairn : ni fichiers, ni processus, ni autre accès réseau de lui-même. Toute modification d’un de ses fichiers sur disque demande une nouvelle validation."
                     )
+                    version
+                        ?.files
+                        ?.takeIf { it.isNotEmpty() }
+                        ?.let { files ->
+                            Text(
+                                files.joinToString("\n") {
+                                    "${it.path} · ${maxOf(1, (it.bytes + 1023) / 1024)} Ko"
+                                },
+                                Modifier.testTag("plugin-files"),
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
                 }
             }
         }

@@ -151,8 +151,13 @@ async function uninstall() {
           <Icon :name="KeyRound" :size="13" class="mt-px" /><span>Agents you authorize on an instance get {{ manifest.commands?.length ?? 0 }} command{{ manifest.commands?.length === 1 ? '' : 's' }} and {{ manifest.tools?.length ?? 0 }} tool{{ manifest.tools?.length === 1 ? '' : 's' }}<template v-if="manifest.instructions">, and instructions in their prompt</template>. Nothing is granted by default.</span>
         </p>
         <p class="mt-1.5 flex items-start gap-2 text-2xs leading-relaxed text-muted">
-          <Icon :name="ShieldCheck" :size="13" class="mt-px" />The script runs in Cairn’s Luau sandbox: no files, processes or other network access of its own. Editing it on disk requires a new approval.
+          <Icon :name="ShieldCheck" :size="13" class="mt-px" />The script runs in Cairn’s Luau sandbox: no files, processes or other network access of its own. Editing any of its files on disk requires a new approval.
         </p>
+        <ul v-if="version?.files?.length" class="mt-2 grid gap-0.5 font-mono text-3xs text-muted" aria-label="Package files">
+          <li v-for="file in version.files" :key="file.path">
+            {{ file.path }} · {{ Math.max(1, Math.ceil(file.bytes / 1024)) }} KB
+          </li>
+        </ul>
       </section>
     </div>
     <footer class="modal-actions sticky bottom-0 flex items-center justify-between gap-2.5 border-t border-line bg-surface px-6.5 py-4.5 phone:flex-wrap phone:px-5 phone:py-4">

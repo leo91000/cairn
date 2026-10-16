@@ -1,30 +1,31 @@
 //! Package registry. Bundled packages ship inside the binary. Installed packages live
 //! in `<data>/plugins/<id>/<version>/` and run only once the owner approves that exact
-//! manifest and source; any later change on disk needs a new approval.
+//! manifest and every Luau file; any later change on disk needs a new approval.
 use crate::{
     config::now,
     error::{Error, Result},
     service::Service,
     validation::text,
 };
-use cairn_plugin_api::{CAPABILITIES, MAX_SOURCE_BYTES, Manifest};
-use serde_json::{Value, json};
-use std::path::{Path, PathBuf};
+use cairn_plugin_api::{
+    CAPABILITIES, MAX_MODULES, MAX_SOURCE_BYTES, Manifest, Sources, module_path,
+};
+use serde_json::{Map, Value, json};
+use std::{
+    collections::BTreeMap,
+    path::{Path, PathBuf},
+};
 
 const KIND: &str = "plugin-packages";
 
-const BUILTIN: &[(&str, &str, &str)] = &[
-    (
-        "onepassword",
-        include_str!("../../../../plugins/onepassword/manifest.json"),
-        include_str!("../../../../plugins/onepassword/main.luau"),
-    ),
-    (
-        "discord",
-        include_str!("../../../../plugins/discord/manifest.json"),
-        include_str!("../../../../plugins/discord/main.luau"),
-    ),
-];
+/// `plugins/<id>/`: manifest and Luau files, embedded by `build.rs`.
+type Bundled = (
+    &'static str,
+    &'static str,
+    &'static [(&'static str, &'static str)],
+);
+
+const BUILTIN: &[Bundled] = include!(concat!(env!("OUT_DIR"), "/bundled_plugins.rs"));
 
 /// Path segments of the management API; never usable as package IDs.
 const RESERVED: &[&str] = &["packages"];
@@ -32,25 +33,39 @@ const RESERVED: &[&str] = &["packages"];
 #[derive(Clone)]
 pub struct Package {
     pub manifest: Manifest,
-    pub source: String,
+    pub source: Sources,
     pub builtin: bool,
     pub digest: String,
 }
 
-fn digest(manifest: &Manifest, source: &str) -> Result<String> {
+/// What the owner approves: the manifest and every Luau file. Single-file packages
+/// keep their earlier digest; split ones use a distinct, unambiguous encoding.
+fn digest(manifest: &Manifest, source: &Sources) -> Result<String> {
+    let manifest = serde_json::to_string(manifest)?;
+    if source.modules.is_empty() {
+        return Ok(crate::auth::hex_digest(&format!(
+            "{manifest}\n{}",
+            source.main
+        )));
+    }
+    let files = source.files().collect::<BTreeMap<_, _>>();
     Ok(crate::auth::hex_digest(&format!(
-        "{}\n{source}",
-        serde_json::to_string(manifest)?
+        "cairn-package-v2\n{manifest}\n{}",
+        serde_json::to_string(&files)?
     )))
 }
 
-fn package(manifest: &str, source: &str, builtin: bool) -> Result<Package> {
+fn package(manifest: &str, source: Sources, builtin: bool) -> Result<Package> {
     let manifest: Manifest =
         serde_json::from_str(manifest).map_err(|_| Error::bad("Invalid plugin manifest."))?;
     manifest.validate().map_err(Error::bad)?;
-    if source.len() > MAX_SOURCE_BYTES {
-        return Err(Error::too_large("Plugin source is too large."));
-    }
+    source.validate().map_err(|message| {
+        if source.size() > MAX_SOURCE_BYTES {
+            Error::too_large(message)
+        } else {
+            Error::bad(message)
+        }
+    })?;
     if !builtin
         && (RESERVED.contains(&manifest.id.as_str())
             || BUILTIN.iter().any(|(id, _, _)| *id == manifest.id))
@@ -58,9 +73,9 @@ fn package(manifest: &str, source: &str, builtin: bool) -> Result<Package> {
         return Err(Error::bad("This plugin ID belongs to a built-in plugin."));
     }
     Ok(Package {
-        digest: digest(&manifest, source)?,
+        digest: digest(&manifest, &source)?,
         manifest,
-        source: source.to_owned(),
+        source,
         builtin,
     })
 }
@@ -69,7 +84,29 @@ pub fn builtin(id: &str) -> Option<Package> {
     BUILTIN
         .iter()
         .find(|(name, _, _)| *name == id)
-        .map(|(_, manifest, source)| package(manifest, source, true).expect("bundled plugin"))
+        .map(|(_, manifest, files)| {
+            let mut source = Sources::default();
+            for (path, text) in *files {
+                if *path == "main.luau" {
+                    source.main = (*text).to_owned();
+                } else {
+                    source
+                        .modules
+                        .insert((*path).to_owned(), (*text).to_owned());
+                }
+            }
+            package(manifest, source, true).expect("bundled plugin")
+        })
+}
+
+/// Files of a package as the owner reviews them: path and size, `main.luau` first.
+pub fn files(source: &Sources) -> Value {
+    json!(
+        source
+            .files()
+            .map(|(path, text)| json!({ "path": path, "bytes": text.len() }))
+            .collect::<Vec<_>>()
+    )
 }
 
 fn root(s: &Service) -> PathBuf {
@@ -105,14 +142,55 @@ fn read_version(s: &Service, id: &str, version: &str) -> Result<Package> {
         return Err(Error::not_found("Plugin version not found."));
     }
     let manifest = read_limited(&directory.join("manifest.json"), 65_536)?;
-    let source = read_limited(&directory.join("main.luau"), MAX_SOURCE_BYTES as u64)?;
-    let package = package(&manifest, &source, false)?;
+    let mut source = Sources {
+        main: read_limited(&directory.join("main.luau"), MAX_SOURCE_BYTES as u64)?,
+        modules: BTreeMap::new(),
+    };
+    read_modules(&directory, "", &mut source)?;
+    let package = package(&manifest, source, false)?;
     if package.manifest.id != id || package.manifest.version != version {
         return Err(Error::bad(
             "Plugin folder names must match the manifest ID and version.",
         ));
     }
     Ok(package)
+}
+
+/// Every other `.luau` file of an installed version, as a module. Links, odd names
+/// and oversized packages are refused rather than skipped.
+fn read_modules(directory: &Path, prefix: &str, source: &mut Sources) -> Result<()> {
+    let invalid = || Error::bad("Plugin files must be like lib/name.luau, without links.");
+    let mut entries = std::fs::read_dir(directory)?
+        .collect::<std::io::Result<Vec<_>>>()?
+        .into_iter()
+        .map(|entry| entry.path())
+        .collect::<Vec<_>>();
+    entries.sort();
+    for path in entries {
+        let name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or_else(invalid)?;
+        let relative = format!("{prefix}{name}");
+        let metadata = std::fs::symlink_metadata(&path)?;
+        if metadata.is_dir() {
+            if prefix.matches('/').count() >= 3 {
+                return Err(invalid());
+            }
+            read_modules(&path, &format!("{relative}/"), source)?;
+        } else if relative == "main.luau" || !name.ends_with(".luau") {
+            continue;
+        } else if !metadata.is_file() || !module_path(&relative) {
+            return Err(invalid());
+        } else {
+            if source.modules.len() >= MAX_MODULES {
+                return Err(Error::bad("Plugin package has too many files."));
+            }
+            let text = read_limited(&path, MAX_SOURCE_BYTES as u64)?;
+            source.modules.insert(relative, text);
+        }
+    }
+    Ok(())
 }
 
 fn entries(path: &Path) -> Vec<String> {
@@ -160,6 +238,7 @@ fn summary(package: &Package) -> Value {
         "version": package.manifest.version,
         "digest": package.digest,
         "manifest": package.manifest,
+        "files": files(&package.source),
     })
 }
 
@@ -228,10 +307,27 @@ pub async fn catalog(s: &Service) -> Result<Value> {
     }))
 }
 
-/// Writes an uploaded package version to disk. It stays inactive until approved.
+/// Writes an uploaded package version to disk: `{ manifest, source, modules? }` where
+/// `modules` maps paths such as `lib/rest.luau` to their text. It stays inactive until
+/// approved.
 pub async fn install(s: &Service, input: &Value) -> Result<Value> {
     let manifest = serde_json::to_string(&input["manifest"])?;
-    let source = text(input, "source");
+    let empty = Map::new();
+    let modules = match &input["modules"] {
+        Value::Null => &empty,
+        Value::Object(modules) => modules,
+        _ => return Err(Error::bad("Package modules must map file paths to text.")),
+    };
+    let mut source = Sources {
+        main: text(input, "source").to_owned(),
+        modules: BTreeMap::new(),
+    };
+    for (path, text) in modules {
+        let text = text
+            .as_str()
+            .ok_or_else(|| Error::bad("Package modules must map file paths to text."))?;
+        source.modules.insert(path.clone(), text.to_owned());
+    }
     let package = package(&manifest, source, false)?;
     if !segment(&package.manifest.version) {
         return Err(Error::bad("Use a simple version such as 1.2.0."));
@@ -240,10 +336,10 @@ pub async fn install(s: &Service, input: &Value) -> Result<Value> {
     let session = s
         .plugins
         .host
-        .start(&s.plugins.executable()?, &package.manifest, source)
+        .start(&s.plugins.executable()?, &package.manifest, &package.source)
         .await
         .map_err(|_| {
-            Error::bad("The plugin source did not load. It must return a table of handlers.")
+            Error::bad("The plugin source did not load. main.luau must return a table of handlers, and every require must name a package file.")
         })?;
     session.stop().await;
     let directory = root(s)
@@ -264,7 +360,13 @@ pub async fn install(s: &Service, input: &Value) -> Result<Value> {
         staging.path().join("manifest.json"),
         serde_json::to_vec_pretty(&package.manifest)?,
     )?;
-    std::fs::write(staging.path().join("main.luau"), source)?;
+    for (path, text) in package.source.files() {
+        let target = staging.path().join(path);
+        if let Some(parent) = target.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(target, text)?;
+    }
     std::fs::rename(staging.keep(), &directory)?;
     let id = package.manifest.id.clone();
     let version = package.manifest.version.clone();

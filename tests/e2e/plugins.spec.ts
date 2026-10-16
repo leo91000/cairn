@@ -189,7 +189,9 @@ test('installed packages wait for review and connect through a generated form', 
       required: true,
     }],
   }
-  const source = 'return { start = function(event) cairn.storage.set("started", true) end }'
+  // Split into a module, loaded with require.
+  const source = 'local notes = require("./notes")\nreturn { start = function(event) cairn.storage.set("started", notes.started) end }'
+  const module = 'return { started = true }'
   await page.goto(workspacePath('/plugins'))
   await signIn(page)
   await page.getByRole('button', { name: 'Install package' }).click()
@@ -197,12 +199,14 @@ test('installed packages wait for review and connect through a generated form', 
   await install.getByLabel('Package files').setInputFiles([
     { name: 'manifest.json', mimeType: 'application/json', buffer: Buffer.from(JSON.stringify(manifest)) },
     { name: 'main.luau', mimeType: 'text/plain', buffer: Buffer.from(source) },
+    { name: 'notes.luau', mimeType: 'text/plain', buffer: Buffer.from(module) },
   ])
   await install.getByRole('button', { name: 'Install', exact: true }).click()
 
   const review = page.getByRole('dialog', { name: 'Review Team notes' })
   await expect(review.getByText('Storage', { exact: true })).toBeVisible()
   await expect(review.getByText('Timers', { exact: true })).toBeVisible()
+  await expect(review.getByRole('list', { name: 'Package files' })).toContainText('notes.luau')
   await review.getByRole('button', { name: 'Approve and activate' }).click()
   await expect(review).not.toBeVisible()
   await page.getByRole('link', { name: 'Team notes · Set up' }).click()

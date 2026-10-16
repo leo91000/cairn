@@ -1,9 +1,10 @@
 //! A source-only Luau interpreter. Run in a dedicated process, never in the manager.
-use cairn_plugin_api::{API_VERSION, Frame, MAX_FRAME_BYTES, MAX_SOURCE_BYTES};
+use cairn_plugin_api::{API_VERSION, Frame, MAX_FRAME_BYTES, Sources};
 use mlua::{Lua, LuaSerdeExt, VmState, serde::SerializeOptions};
 use serde_json::Value;
 use std::{
     cell::{Cell, RefCell},
+    collections::{HashMap, HashSet},
     io::{BufRead, Read, Write},
     rc::Rc,
     time::{Duration, Instant},
@@ -95,11 +96,72 @@ pub enum Failed {
     Error(mlua::Error),
 }
 
+/// The package's files and the modules already loaded, for `require`.
+struct Modules {
+    sources: Sources,
+    loaded: RefCell<HashMap<String, mlua::Value>>,
+    loading: RefCell<HashSet<String>>,
+}
+
+/// Each file runs in its own environment over the frozen globals, with a `require`
+/// that resolves relative to that file and reads only the package's files.
+fn environment(lua: &Lua, modules: &Rc<Modules>, path: &str) -> mlua::Result<mlua::Table> {
+    let env = lua.create_table()?;
+    let meta = lua.create_table()?;
+    meta.set("__index", lua.globals())?;
+    env.set_metatable(Some(meta))?;
+    let (modules, from) = (modules.clone(), path.to_owned());
+    env.set(
+        "require",
+        lua.create_function(move |lua, request: String| require(lua, &modules, &from, &request))?,
+    )?;
+    Ok(env)
+}
+
+fn evaluate(
+    lua: &Lua,
+    modules: &Rc<Modules>,
+    path: &str,
+    source: &str,
+) -> mlua::Result<mlua::Value> {
+    lua.load(source)
+        .set_mode(mlua::chunk::ChunkMode::Text)
+        .set_name(format!("plugin/{path}"))
+        .set_environment(environment(lua, modules, path)?)
+        .eval()
+}
+
+/// Loads a module once; later calls return the same value. Cycles are refused.
+fn require(
+    lua: &Lua,
+    modules: &Rc<Modules>,
+    from: &str,
+    request: &str,
+) -> mlua::Result<mlua::Value> {
+    let path = cairn_plugin_api::resolve(&modules.sources, from, request)
+        .ok_or_else(|| mlua::Error::runtime(format!("module not found: {request}")))?;
+    if let Some(value) = modules.loaded.borrow().get(&path) {
+        return Ok(value.clone());
+    }
+    if !modules.loading.borrow_mut().insert(path.clone()) {
+        return Err(mlua::Error::runtime(format!("cyclic require: {path}")));
+    }
+    let source = modules.sources.modules[&path].clone();
+    let result = evaluate(lua, modules, &path, &source);
+    modules.loading.borrow_mut().remove(&path);
+    let value = result?;
+    modules.loaded.borrow_mut().insert(path, value.clone());
+    Ok(value)
+}
+
 impl Runtime {
+    /// A single-file package.
     pub fn load(source: &str, budget: Duration) -> mlua::Result<Self> {
-        if source.len() > MAX_SOURCE_BYTES {
-            return Err(mlua::Error::runtime("Plugin source is too large."));
-        }
+        Self::load_package(Sources::from(source), budget)
+    }
+
+    pub fn load_package(sources: Sources, budget: Duration) -> mlua::Result<Self> {
+        sources.validate().map_err(mlua::Error::runtime)?;
         let lua = Lua::new();
         lua.set_memory_limit(16 * 1024 * 1024)?;
         let deadline = Rc::new(Cell::new(Instant::now() + budget));
@@ -165,16 +227,26 @@ impl Runtime {
         )?;
         lua.globals().set("cairn", api)?;
         lua.load(PRELUDE).set_name("prelude").exec()?;
-        // Diagnostics and environment mutation never become another output channel.
-        for name in ["print", "warn", "getfenv", "setfenv"] {
+        // Diagnostics and environment mutation never become another output channel, and
+        // modules come only from the package, never from the disk.
+        for name in ["print", "warn", "getfenv", "setfenv", "require"] {
             lua.globals().set(name, mlua::Value::Nil)?;
         }
         lua.sandbox(true)?;
-        let handlers: mlua::Table = lua
-            .load(source)
-            .set_mode(mlua::chunk::ChunkMode::Text)
-            .set_name("plugin")
-            .eval()?;
+        let main = sources.main.clone();
+        let modules = Rc::new(Modules {
+            sources,
+            loaded: RefCell::default(),
+            loading: RefCell::default(),
+        });
+        let handlers = match evaluate(&lua, &modules, "main.luau", &main)? {
+            mlua::Value::Table(handlers) => handlers,
+            _ => {
+                return Err(mlua::Error::runtime(
+                    "main.luau must return a table of handlers.",
+                ));
+            }
+        };
         Ok(Self {
             lua,
             handlers,
@@ -272,6 +344,7 @@ pub fn worker() -> Result<(), String> {
     let Some(Frame::Load {
         api_version,
         source,
+        modules,
         deadline_ms,
     }) = read_frame(&mut std::io::stdin().lock())?
     else {
@@ -282,7 +355,11 @@ pub fn worker() -> Result<(), String> {
         return Err("Plugin API version is incompatible.".into());
     }
     let budget = Duration::from_millis(deadline_ms.clamp(10, 120_000));
-    let Ok(runtime) = Runtime::load(&source, budget) else {
+    let sources = Sources {
+        main: source,
+        modules,
+    };
+    let Ok(runtime) = Runtime::load_package(sources, budget) else {
         write_frame(&mut std::io::stdout().lock(), &Frame::Failure)?;
         return Err("Plugin package failed to load.".into());
     };
@@ -308,6 +385,96 @@ mod tests {
 
     fn load(source: &str) -> Runtime {
         Runtime::load(source, Duration::from_secs(5)).unwrap_or_else(|_| panic!("load"))
+    }
+
+    /// The bundled Discord package, with its modules.
+    fn discord() -> Runtime {
+        package(
+            include_str!("../../../plugins/discord/main.luau"),
+            &[
+                (
+                    "gateway.luau",
+                    include_str!("../../../plugins/discord/gateway.luau"),
+                ),
+                (
+                    "setup.luau",
+                    include_str!("../../../plugins/discord/setup.luau"),
+                ),
+                (
+                    "conversation.luau",
+                    include_str!("../../../plugins/discord/conversation.luau"),
+                ),
+                (
+                    "lib/discord.luau",
+                    include_str!("../../../plugins/discord/lib/discord.luau"),
+                ),
+                (
+                    "lib/text.luau",
+                    include_str!("../../../plugins/discord/lib/text.luau"),
+                ),
+                (
+                    "lib/permissions.luau",
+                    include_str!("../../../plugins/discord/lib/permissions.luau"),
+                ),
+            ],
+        )
+        .unwrap_or_else(|_| panic!("load"))
+    }
+
+    fn package(main: &str, modules: &[(&str, &str)]) -> mlua::Result<Runtime> {
+        Runtime::load_package(
+            Sources {
+                main: main.to_owned(),
+                modules: modules
+                    .iter()
+                    .map(|(path, source)| ((*path).to_owned(), (*source).to_owned()))
+                    .collect(),
+            },
+            Duration::from_secs(5),
+        )
+    }
+
+    #[test]
+    fn packages_split_into_modules_loaded_once_from_their_own_files() {
+        let runtime = package(
+            "local counter = require('./lib/counter')\n\
+             local again = require('./lib/counter')\n\
+             leaked = 'main'\n\
+             return { probe = function() return {\n\
+               same = counter == again, next = counter.next(), label = require('./lib/label').text,\n\
+               isolated = require('./lib/label').leaked, main = leaked } end }",
+            &[
+                ("lib/counter.luau", "local count = 0\nreturn { next = function() count += 1; return count end }"),
+                ("lib/label.luau", "local util = require('../util')\nleaked = 'label'\nreturn { text = util.upper('ok'), leaked = leaked }"),
+                ("util.luau", "return { upper = string.upper }"),
+            ],
+        )
+        .unwrap_or_else(|_| panic!("load"));
+        let output = runtime
+            .dispatch("probe", Value::Null, |_, _| {
+                Err(CallError::Denied("denied".into()))
+            })
+            .unwrap();
+        assert_eq!(
+            output,
+            json!({ "same": true, "next": 1, "label": "OK", "isolated": "label", "main": "main" })
+        );
+        for (main, modules) in [
+            (
+                "return require('./a')",
+                vec![
+                    ("a.luau", "return require('./b')"),
+                    ("b.luau", "return require('./a')"),
+                ],
+            ),
+            ("return require('./missing')", vec![]),
+            ("return require('../outside')", vec![]),
+            ("return require('lib')", vec![("lib.luau", "return {}")]),
+            ("return require('@std/fs')", vec![]),
+            ("return require('./a')", vec![("a.luau", "return 1")]),
+        ] {
+            assert!(package(main, &modules).is_err(), "{main}");
+        }
     }
 
     #[test]
@@ -425,7 +592,7 @@ mod tests {
 
     #[test]
     fn discord_unicode_titles_and_upload_budgets_are_bounded() {
-        let runtime = load(include_str!("../../../plugins/discord/main.luau"));
+        let runtime = discord();
         let title = format!("{} support", "😀".repeat(60));
         runtime
             .dispatch(
@@ -480,7 +647,7 @@ mod tests {
 
     #[test]
     fn concurrent_questions_in_a_channel_keep_independent_answers() {
-        let runtime = load(include_str!("../../../plugins/discord/main.luau"));
+        let runtime = discord();
         let state = Rc::new(RefCell::new(
             std::collections::BTreeMap::<String, Value>::new(),
         ));

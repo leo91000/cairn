@@ -5,11 +5,13 @@ use serde_json::Value;
 mod arguments;
 mod form;
 mod settings;
+mod sources;
 mod view;
 
 pub use arguments::{parse_arguments, usage};
 pub use form::validate_form_result;
 pub use settings::validate_settings_schema;
+pub use sources::{MAX_MODULES, MAX_SOURCE_BYTES, Sources, module_path, resolve};
 pub use view::{validate_action_result, validate_view};
 
 /// Worker protocol version, and the newest manifest version this host understands.
@@ -17,7 +19,6 @@ pub const API_VERSION: u32 = 2;
 /// Prefix of a host error carrying a package's `cairn.fail` message.
 pub const REJECTED: &str = "rejected: ";
 pub const MAX_FRAME_BYTES: usize = 1_048_576;
-pub const MAX_SOURCE_BYTES: usize = 262_144;
 
 /// Host capabilities a package may request, with the sentence the owner approves.
 pub const CAPABILITIES: &[(&str, &str)] = &[
@@ -524,7 +525,11 @@ pub enum Frame {
     /// Host → worker, once: compile the package and return its handler table.
     Load {
         api_version: u32,
+        /// `main.luau`.
         source: String,
+        /// The package's other files, loaded on `require`.
+        #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+        modules: std::collections::BTreeMap<String, String>,
         deadline_ms: u64,
     },
     /// Worker → host: the package loaded and exposes handlers.

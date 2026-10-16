@@ -1,6 +1,7 @@
 # Installation plugins
 
-A plugin is a package: a `manifest.json` and a `main.luau`. Cairn runs each package
+A plugin is a package: a `manifest.json`, a `main.luau` and, optionally, other Luau
+modules it loads with `require`. Cairn runs each package
 in its own long-lived `cairn plugin-worker` process and reaches it only through
 events; the package reaches Cairn only through host capabilities its manifest
 declares and the owner approved. Plugin code never receives `Service`, SQLite, the
@@ -30,7 +31,7 @@ crates/installation/src/plugins/
   work.rs               Admission, access requests, event queue, replies
   cli.rs                `cairn plugin <plugin> <command> …` inside conversations
   legacy.rs             Moves pre-v2 1Password accounts into instances
-plugins/                Bundled packages (1Password, Discord)
+plugins/                Bundled packages (1Password, Discord), embedded by installation's build.rs
 packages/plugin-types/  Luau declarations for package authors
 apps/web/src/           Catalogue, review, generic plugin page, form and view renderers
 ```
@@ -43,9 +44,36 @@ supplies the callback that turns an approved capability call into an effect.
 
 Bundled packages are embedded in the binary and always active. Installed packages
 live in `<data>/plugins/<id>/<version>/`, either uploaded from Atelier → Plugins
-(“Install package”) or copied there by the owner. A version runs only after the
-owner approves it. Approval records a digest of the exact manifest and source, so
-any later edit on disk withdraws the package until it is approved again. A new
+(“Install package”: the files, or the whole folder) or copied there by the owner. A
+version runs only after the owner approves it. Approval records a digest of the exact
+manifest and every Luau file, so any later edit on disk, an added module or a link
+withdraws the package until it is approved again.
+
+### Files and modules
+
+```text
+plugins/discord/
+  manifest.json
+  main.luau             returns the handler table, nothing else
+  gateway.luau          socket: the Gateway session
+  setup.luau            form, test and view
+  conversation.luau     message, interaction, progress, question, reply…
+  lib/discord.luau      REST calls, reactions, identities
+  lib/text.luau         mention removal, UTF-16 lengths, chunks
+  lib/permissions.luau  Discord's permission resolution
+```
+
+`main.luau` is the entry point and returns the table of handlers. Other `.luau` files
+are modules: `require("./gateway")` or `require("../lib/text")` resolves relative to
+the requiring file, Luau style, to `name.luau` or `name/init.luau` inside the package.
+Each module runs once per worker, in its own environment over the frozen globals, and
+returns a value (usually a table); cycles, paths above the package and anything else
+(`@aliases`, the disk) are refused. Names are lowercase segments (`a-z`, `0-9`, `-`,
+`_`), four levels at most; a package has at most 64 modules and 384 KB of Luau in
+total. Workers receive every file when they start; nothing is read from disk at run
+time. Each worker of an instance (transport, events, one-shot handlers) loads its own
+copy, so module state is never shared between them. Small packages can stay in one
+`main.luau`, like 1Password. A new
 version waits for approval while the previous one keeps running, and the owner can
 switch back to any earlier approved version. Installed packages can't reuse
 built-in IDs, and nothing is reserved to built-in packages: 1Password is an
