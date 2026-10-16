@@ -25,6 +25,7 @@ abstract class PluginsCases {
 
     protected open fun capture(name: String) {}
 
+    /** The built-in Discord package as its manifest declares it: nothing native left. */
     private val discord =
         PluginEntry(
             id = "discord",
@@ -37,9 +38,48 @@ abstract class PluginsCases {
                     version = "1.0.0",
                     capabilities =
                         listOf(
-                            "transport.discord",
+                            "socket",
+                            "inbound",
                             "conversations.submit",
                             "conversations.control",
+                            "http",
+                            "storage",
+                        ),
+                    instances = PluginInstances("Bot", "Bots"),
+                    credential = PluginCredential("Bot token", "authorization"),
+                    instanceForm = true,
+                    instanceView = true,
+                    instanceTest = true,
+                    settings =
+                        listOf(
+                            PluginSetting(
+                                key = "guildId",
+                                title = "Server",
+                                type = "select",
+                                required = true,
+                                dynamic = true,
+                                refresh = true,
+                            ),
+                            PluginSetting(
+                                key = "channelId",
+                                title = "Channel",
+                                type = "select",
+                                required = true,
+                                dynamic = true,
+                                refresh = true,
+                            ),
+                            PluginSetting(
+                                key = "messageContent",
+                                title = "Read replies without a mention",
+                                type = "boolean",
+                            ),
+                            PluginSetting(key = "guildName", title = "Server name", hidden = true),
+                            PluginSetting(
+                                key = "channelName",
+                                title = "Channel name",
+                                hidden = true,
+                            ),
+                            PluginSetting(key = "botName", title = "Bot name", hidden = true),
                         ),
                 ),
         )
@@ -133,8 +173,19 @@ abstract class PluginsCases {
                 },
             accessMode = "requests",
             agentId = "helper",
-            status = PluginStatus("connected"),
+            status = PluginStatus("connected", "Signed in as Cairn Bot"),
             requests = listOf(PluginRequest(id = "r", userId = "300", name = "Sarah")),
+            activity =
+                listOf(
+                    PluginActivity(
+                        id = "a",
+                        chatId = "chat",
+                        userId = "301",
+                        name = "Léa",
+                        preview = "Fix the deploy",
+                        status = "replied",
+                    )
+                ),
         )
 
     @Test
@@ -232,7 +283,7 @@ abstract class PluginsCases {
     }
 
     @Test
-    fun discordRequestsAndPauseAreManagedNatively() {
+    fun discordBotsAreGenericDelegatingInstances() {
         MockWebServer().use { server ->
             val actions = CopyOnWriteArrayList<Pair<String, String>>()
             server.dispatcher = dispatcher { path, body ->
@@ -246,7 +297,12 @@ abstract class PluginsCases {
             compose.waitUntil(30000) {
                 compose.onAllNodesWithText("Approuver").fetchSemanticsNodes().isNotEmpty()
             }
-            compose.onNodeWithText("#support").assertIsDisplayed()
+            // The package's own words and panel; the delegation is generic.
+            compose.onNodeWithText("Signed in as Cairn Bot").assertIsDisplayed()
+            compose.waitUntil(10000) {
+                compose.onAllNodesWithText("#support").fetchSemanticsNodes().isNotEmpty()
+            }
+            compose.onNodeWithText("« Fix the deploy »").assertExists()
             capture("plugin-discord")
             compose.onNodeWithText("Approuver").performScrollTo().performClick()
             compose.waitUntil(10000) { actions.isNotEmpty() }
@@ -297,13 +353,15 @@ abstract class PluginsCases {
             compose.onNodeWithText("Enregistrer").assertIsNotEnabled()
             compose.onNodeWithText("Team").performTextInput("core")
             compose.onNodeWithText("Limit").performTextInput("3")
-            compose.onNodeWithText("Choisir…").performScrollTo().performClick()
-            compose.onNodeWithText("Helper").performClick()
+            compose.onNodeWithText("Helper").performScrollTo().performClick()
             capture("plugin-instance-editor")
-            compose
-                .onNodeWithText("Identifiants des personnes")
-                .performScrollTo()
-                .performTextInput("300, 301")
+            for (person in listOf("300", "301")) {
+                compose
+                    .onNodeWithText("Identifiant d’une personne")
+                    .performScrollTo()
+                    .performTextInput(person)
+                compose.onNodeWithText("Ajouter").performClick()
+            }
             compose.onNodeWithText("Enregistrer").performClick()
             compose.waitUntil(10000) { saved.isNotEmpty() }
             val payload = wireJson.parseToJsonElement(saved.single()).jsonObject
@@ -324,6 +382,146 @@ abstract class PluginsCases {
             )
             assertFalse(payload.containsKey("token"))
         }
+    }
+
+    @Test
+    fun discordBotIsSetUpThroughItsPackageForm() {
+        MockWebServer().use { server ->
+            val forms = CopyOnWriteArrayList<JsonObject>()
+            val saved = CopyOnWriteArrayList<String>()
+            server.dispatcher = dispatcher { path, body ->
+                when {
+                    path.endsWith("/plugins/discord/form") -> {
+                        val request = wireJson.parseToJsonElement(body).jsonObject
+                        forms += request
+                        discordForm(request)
+                    }
+                    path.endsWith("/plugins/discord/connections") -> {
+                        saved += body
+                        "{}"
+                    }
+                    else -> null
+                }
+            }
+            server.start()
+            show(server) { vm, state -> PluginScreen(vm, state, "discord") {} }
+            compose.waitUntil(30000) {
+                compose.onAllNodesWithText("Ajouter · Bot").fetchSemanticsNodes().isNotEmpty()
+            }
+            compose.onNodeWithText("Ajouter · Bot").performClick()
+            compose.waitUntil(10000) {
+                compose.onAllNodesWithText("Create the bot").fetchSemanticsNodes().isNotEmpty()
+            }
+            compose.onNodeWithText("Nom").performTextInput("#support on Acme")
+            compose.onNodeWithText("Bot token").performTextInput("synthetic_android_token")
+            // The bot's card behind the editor also says who it is: wait for the form's own words.
+            compose.waitUntil(10000) {
+                compose
+                    .onAllNodesWithText("Bot account · in 1 server")
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
+            }
+            // The package checked the typed token; the token goes to the installation only.
+            assertTrue(
+                forms.toString(),
+                forms.any {
+                    it["changed"]?.jsonPrimitive?.content == "credential" &&
+                        it["token"]?.jsonPrimitive?.content == "synthetic_android_token"
+                },
+            )
+            compose.onNodeWithText("Acme HQ").performScrollTo().performClick()
+            compose.waitUntil(10000) {
+                compose.onAllNodesWithText("#help").fetchSemanticsNodes().isNotEmpty()
+            }
+            compose.onNodeWithText("The bot can’t read this channel").assertExists()
+            compose.onNodeWithText("#help").performScrollTo().performClick()
+            // The bot's card behind the editor names the same agent.
+            compose.onNode(hasText("Helper") and hasClickAction()).performScrollTo().performClick()
+            capture("plugin-discord-setup")
+            compose.waitUntil(10000) {
+                compose
+                    .onAllNodes(hasText("Enregistrer") and isEnabled())
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
+            }
+            compose.onNodeWithText("Enregistrer").performClick()
+            compose.waitUntil(10000) { saved.isNotEmpty() }
+            val payload = wireJson.parseToJsonElement(saved.single()).jsonObject
+            assertEquals("synthetic_android_token", payload["token"]?.jsonPrimitive?.content)
+            assertEquals(
+                buildJsonObject {
+                    put("guildId", "100")
+                    put("channelId", "200")
+                    put("messageContent", false)
+                    put("guildName", "Acme HQ")
+                    put("channelName", "help")
+                    put("botName", "Cairn Bot")
+                },
+                payload["settings"],
+            )
+            assertEquals("requests", payload["accessMode"]?.jsonPrimitive?.content)
+            assertEquals("helper", payload["agentId"]?.jsonPrimitive?.content)
+            // The token is only ever sent to the installation, never echoed back in settings.
+            assertFalse(payload["settings"].toString().contains("synthetic_android_token"))
+        }
+    }
+
+    /** The Discord package's `form` handler, as a fixture. */
+    private fun discordForm(request: JsonObject): String {
+        val settings = request["settings"]?.jsonObject.orEmpty()
+        val signedIn = request["token"] != null || request["instance"] != null
+        if (!signedIn)
+            return buildJsonObject {
+                putJsonArray("view") {
+                    addJsonObject {
+                        put("type", "alert")
+                        put("tone", "info")
+                        put("title", "Create the bot")
+                        put("text", "Paste the token.")
+                    }
+                }
+            }
+                .toString()
+        val guild = settings["guildId"]?.jsonPrimitive?.content == "100"
+        val channel = guild && settings["channelId"]?.jsonPrimitive?.content == "200"
+        return buildJsonObject {
+            putJsonObject("options") {
+                putJsonArray("guildId") {
+                    addJsonObject {
+                        put("value", "100")
+                        put("label", "Acme HQ")
+                    }
+                }
+                if (guild)
+                    putJsonArray("channelId") {
+                        addJsonObject {
+                            put("value", "200")
+                            put("label", "#help")
+                            put("description", "Can reply")
+                        }
+                        addJsonObject {
+                            put("value", "201")
+                            put("label", "#leadership")
+                            put("description", "The bot can’t read this channel")
+                            put("disabled", true)
+                        }
+                    }
+            }
+            putJsonObject("values") {
+                put("botName", "Cairn Bot")
+                if (guild) put("guildName", "Acme HQ")
+                if (channel) put("channelName", "help")
+            }
+            putJsonArray("view") {
+                addJsonObject {
+                    put("type", "alert")
+                    put("tone", "success")
+                    put("title", "Signed in as Cairn Bot")
+                    put("text", "Bot account · in 1 server")
+                }
+            }
+        }
+            .toString()
     }
 
     @Test
@@ -445,6 +643,8 @@ abstract class PluginsCases {
                                     connections = listOf(bot, account),
                                 )
                             )
+                        "/api/installations/fixture/api/plugins/discord/connections/bot/view" ->
+                            """{"view":[{"type":"facts","items":[{"label":"Channel","value":"#support"},{"label":"Server","value":"Acme"}]}]}"""
                         "/api/installations/fixture/api/plugins/onepassword/connections/op1/view" ->
                             """{"view":[{"type":"section","title":"Vaults","children":[{"type":"actions","children":[{"type":"button","label":"Show vaults","action":"vaults"}]}]}]}"""
                         "/api/installations/fixture/api/overview",

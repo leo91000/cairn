@@ -24,6 +24,7 @@ import {
   capabilityLabels,
   connectionState,
   contributions,
+  delegates,
   instanceNoun,
   needsWorker,
 } from '../plugins'
@@ -94,7 +95,7 @@ function card(entry: PluginEntry): Card {
   return {
     entry,
     to: `/plugins/${entry.id}`,
-    capabilities: entry.id === 'discord' ? [...capabilities, [Users, 'External people']] : capabilities,
+    capabilities: delegates(entry.manifest) ? [...capabilities, [Users, 'External people']] : capabilities,
     status: entry.status === 'update'
       ? { label: 'Update to review', tone: 'warn' }
       : !connections.length
@@ -251,7 +252,7 @@ async function install() {
       <span class="grid size-10 shrink-0 place-items-center rounded-xl bg-soft text-accent"><Icon :name="Puzzle" :size="20" /></span>
       <span class="min-w-0 flex-1">
         <span class="block text-[13px] font-semibold">Write your own</span>
-        <span class="mt-0.5 block text-2xs text-muted">A plugin is a manifest.json and a main.luau. Start from the Discord plugin source.</span>
+        <span class="mt-0.5 block text-2xs text-muted">A plugin is a manifest.json and a main.luau: its connection, forms, panels and commands. Start from the Discord or 1Password source.</span>
       </span>
       <span class="inline-flex shrink-0 items-center gap-1 text-xs font-semibold text-accent phone:hidden">Read the guide<Icon :name="ArrowUpRight" :size="13" /></span>
     </a>

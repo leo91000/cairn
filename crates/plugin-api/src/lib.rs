@@ -3,10 +3,12 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 mod arguments;
+mod form;
 mod settings;
 mod view;
 
 pub use arguments::{parse_arguments, usage};
+pub use form::validate_form_result;
 pub use settings::validate_settings_schema;
 pub use view::{validate_action_result, validate_view};
 
@@ -34,8 +36,12 @@ pub const CAPABILITIES: &[(&str, &str)] = &[
     ),
     ("timers", "Schedule its own events"),
     (
-        "transport.discord",
-        "Receive mentions of a Discord bot through Cairn's Gateway connection",
+        "socket",
+        "Keep a WebSocket open to the hosts listed by the package, with the connection's credential when asked",
+    ),
+    (
+        "inbound",
+        "Hand messages it receives to Cairn, which keeps only those from people you allow",
     ),
     (
         "exec",
@@ -54,6 +60,8 @@ pub fn capability(method: &str) -> Option<&'static str> {
             "conversations.control"
         }
         "exec.run" => "exec",
+        "socket.connect" | "socket.send" | "socket.close" | "socket.every" => "socket",
+        "inbound.accept" => "inbound",
         _ => return None,
     };
     CAPABILITIES
@@ -176,7 +184,8 @@ pub struct Manifest {
     pub description: String,
     pub api_version: u32,
     pub capabilities: Vec<String>,
-    /// Exact hostnames reachable through the `http` capability, always over HTTPS.
+    /// Hostnames reachable through `http` (HTTPS) and `socket` (WSS). `*.example.com`
+    /// covers every subdomain of `example.com`, not the domain itself.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub hosts: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -205,6 +214,10 @@ pub struct Manifest {
     /// The script's `test` handler checks an instance.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub instance_test: bool,
+    /// The script's `form` handler fills dynamic choices, derived values, errors and
+    /// guidance while the owner edits an instance, and checks it before it is saved.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub instance_form: bool,
 }
 
 pub(crate) fn slug(value: &str, max: usize) -> bool {
@@ -231,6 +244,7 @@ pub fn pattern(source: &str) -> Option<regex::Regex> {
 }
 
 fn hostname(value: &str) -> bool {
+    let value = value.strip_prefix("*.").unwrap_or(value);
     value.len() <= 253
         && value.split('.').count() >= 2
         && value.split('.').all(|label| {
@@ -298,8 +312,9 @@ impl Manifest {
         if self.hosts.len() > 10 || !self.hosts.iter().all(|host| hostname(host)) {
             return Err("Plugin manifest lists invalid hosts.");
         }
-        if self.hosts.is_empty() == self.permits_capability("http") {
-            return Err("Plugin manifest must list hosts exactly when it requests http.");
+        let network = self.permits_capability("http") || self.permits_capability("socket");
+        if self.hosts.is_empty() == network {
+            return Err("Plugin manifest must list hosts exactly when it requests http or socket.");
         }
         if let Some(credential) = &self.credential
             && (credential.label.trim().is_empty()
@@ -357,6 +372,7 @@ impl Manifest {
             || !self.instructions.is_empty()
             || self.instance_view
             || self.instance_test
+            || self.instance_form
             || self.settings.iter().any(|field| {
                 !matches!(
                     field["type"].as_str(),
@@ -440,15 +456,33 @@ impl Manifest {
     }
 
     /// A host method is allowed only through a capability the manifest requests.
+    /// Packages that bring their own connection (`socket` or `inbound`) also report its
+    /// state with `instance.status`.
     pub fn permits(&self, method: &str) -> bool {
+        if method == "instance.status" {
+            return self.permits_capability("socket") || self.permits_capability("inbound");
+        }
         capability(method).is_some_and(|capability| self.permits_capability(capability))
     }
 
-    /// Packages that react to people, transports or timers keep a worker per instance.
-    /// Others only run for commands, tools, views, actions and tests.
+    /// Whether a hostname is listed, exactly or under a `*.` wildcard.
+    pub fn allows_host(&self, host: &str) -> bool {
+        self.hosts
+            .iter()
+            .any(|allowed| match allowed.strip_prefix("*.") {
+                Some(domain) => host
+                    .strip_suffix(domain)
+                    .is_some_and(|sub| sub.len() > 1 && sub.ends_with('.')),
+                None => allowed == host,
+            })
+    }
+
+    /// Packages that react to people, connections or timers keep a worker per instance.
+    /// Others only run for commands, tools, views, actions, forms and tests.
     pub fn needs_worker(&self) -> bool {
         [
-            "transport.discord",
+            "socket",
+            "inbound",
             "conversations.submit",
             "conversations.control",
             "timers",
@@ -572,5 +606,35 @@ mod tests {
         assert!(!manifest.permits("storage"));
         assert!(!manifest.permits("native.execute"));
         assert!(!manifest.permits("conversations.cancel"));
+        assert!(!manifest.permits("instance.status"));
+    }
+
+    #[test]
+    fn sockets_need_hosts_and_wildcards_cover_subdomains_only() {
+        let manifest: Manifest = serde_json::from_value(json!({
+            "id": "chat", "name": "Chat", "version": "1", "apiVersion": 2,
+            "capabilities": ["socket", "inbound"],
+            "hosts": ["*.chat.example", "api.example.com"]
+        }))
+        .unwrap();
+        manifest.validate().unwrap();
+        assert!(manifest.permits("socket.send") && manifest.permits("inbound.accept"));
+        assert!(manifest.permits("instance.status") && manifest.needs_worker());
+        assert!(manifest.allows_host("gateway.chat.example"));
+        assert!(manifest.allows_host("a.b.chat.example"));
+        assert!(!manifest.allows_host("chat.example"));
+        assert!(!manifest.allows_host("evilchat.example"));
+        assert!(manifest.allows_host("api.example.com"));
+        assert!(!manifest.allows_host("x.api.example.com"));
+        let mut hostless = serde_json::to_value(&manifest).unwrap();
+        hostless["hosts"] = json!([]);
+        let hostless: Manifest = serde_json::from_value(hostless).unwrap();
+        assert!(hostless.validate().is_err());
+        for host in ["*", "*.com.", "**.example.com", "*example.com"] {
+            let mut invalid = serde_json::to_value(&manifest).unwrap();
+            invalid["hosts"] = json!([host]);
+            let invalid: Manifest = serde_json::from_value(invalid).unwrap();
+            assert!(invalid.validate().is_err(), "{host}");
+        }
     }
 }

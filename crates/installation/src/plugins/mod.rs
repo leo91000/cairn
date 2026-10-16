@@ -5,13 +5,14 @@ pub mod agents;
 pub mod capabilities;
 pub mod cli;
 pub mod connections;
-pub mod discord;
+pub mod forms;
 pub mod legacy;
 pub mod panels;
 pub mod programs;
 pub mod registry;
 pub mod runtime;
 pub mod scope;
+pub mod socket;
 pub mod work;
 
 use crate::{
@@ -40,6 +41,7 @@ pub struct Plugins {
     /// Plugin HTTP never follows redirects, so credentials can't leave declared hosts.
     pub http: reqwest::Client,
     test_origin: Mutex<Option<String>>,
+    socket_origin: Mutex<Option<String>>,
     worker: Mutex<Option<std::path::PathBuf>>,
     programs: Mutex<HashMap<(String, String), PathBuf>>,
 }
@@ -54,6 +56,7 @@ impl Default for Plugins {
                 .build()
                 .expect("plugin HTTP client"),
             test_origin: Mutex::new(None),
+            socket_origin: Mutex::new(None),
             worker: Mutex::new(None),
             programs: Mutex::new(HashMap::new()),
         }
@@ -69,6 +72,16 @@ impl Plugins {
 
     pub(crate) fn test_origin(&self) -> Option<String> {
         self.test_origin.lock().unwrap().clone()
+    }
+
+    /// Tests only: open plugin sockets for declared hosts on a local server (`ws://…`).
+    #[doc(hidden)]
+    pub fn route_sockets_to(&self, origin: Option<String>) {
+        *self.socket_origin.lock().unwrap() = origin;
+    }
+
+    pub(crate) fn socket_origin(&self) -> Option<String> {
+        self.socket_origin.lock().unwrap().clone()
     }
 
     /// Tests only: integration tests run from a test binary, not `cairn`.
@@ -182,13 +195,7 @@ pub async fn routes(s: &Arc<Service>, input: &Input) -> Result<Value> {
             registry::activate(s, id, &version()).await
         }
         ("DELETE", ["plugins", "packages", id]) => registry::uninstall(s, id).await,
-        ("POST", ["plugins", id, "discover"]) => {
-            let package = registry::active(s, id).await?;
-            if !package.manifest.permits_capability("transport.discord") {
-                return Err(Error::not_found("This plugin has no setup discovery."));
-            }
-            discord::discover(s, id, body).await
-        }
+        ("POST", ["plugins", id, "form"]) => forms::form(s, id, body).await,
         ("POST", ["plugins", id, "connections"]) => connections::save(s, id, body, None).await,
         ("PUT", ["plugins", id, "connections", connection]) => {
             connections::get(s, id, connection).await?;
@@ -201,12 +208,7 @@ pub async fn routes(s: &Arc<Service>, input: &Input) -> Result<Value> {
             connections::set_enabled(s, id, connection, body).await
         }
         ("POST", ["plugins", id, "connections", connection, "test"]) => {
-            let package = registry::active(s, id).await?;
-            if !package.manifest.permits_capability("transport.discord") {
-                return panels::test(s, id, connection).await;
-            }
-            let connection = connections::get(s, id, connection).await?;
-            discord::test(s, &connection).await
+            panels::test(s, id, connection).await
         }
         ("GET", ["plugins", id, "connections", connection, "view"]) => {
             panels::view(s, id, connection).await

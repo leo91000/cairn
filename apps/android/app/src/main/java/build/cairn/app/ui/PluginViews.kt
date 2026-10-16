@@ -113,7 +113,7 @@ internal fun PluginPanel(vm: CairnViewModel, state: Workspace, path: String, nam
 }
 
 @Composable
-private fun PluginViewNodes(
+internal fun PluginViewNodes(
     nodes: JsonArray,
     busy: Boolean,
     press: (JsonObject) -> Unit,

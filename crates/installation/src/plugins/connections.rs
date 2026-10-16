@@ -1,6 +1,6 @@
 //! Configured plugin connections: an owner delegation (agent, project, people, quota)
 //! plus plugin settings declared by the manifest. Identical for every plugin.
-use super::{discord, registry};
+use super::{forms, registry};
 use crate::{
     config::{id, now},
     error::{Error, Result},
@@ -81,6 +81,31 @@ pub struct Connection {
 }
 
 impl Connection {
+    /// An instance being edited, before it is saved: only its plugin, settings and the
+    /// names of its secrets.
+    pub fn draft(id: &str, plugin_id: &str, settings: Value, secret_keys: Vec<String>) -> Self {
+        Self {
+            id: id.to_owned(),
+            plugin_id: plugin_id.to_owned(),
+            name: String::new(),
+            enabled: false,
+            revision: String::new(),
+            settings,
+            agent_id: String::new(),
+            project_id: None,
+            granted_access: Value::Null,
+            owner_access_id: None,
+            access_mode: AccessMode::Allowlist,
+            user_ids: Vec::new(),
+            people: Vec::new(),
+            max_messages_per_hour: 0,
+            max_per_person_per_hour: per_person(),
+            agent_ids: Vec::new(),
+            secret_keys,
+            updated_at: now(),
+        }
+    }
+
     /// Whether this person may use the connection right now.
     pub fn allows(&self, person: &str) -> bool {
         self.access_mode == AccessMode::Everyone || self.user_ids.iter().any(|id| id == person)
@@ -192,11 +217,22 @@ pub(crate) async fn credential(s: &Service, connection: &Connection) -> Result<O
 }
 
 pub(crate) async fn status(s: &Service, connection: &Connection, state: &str) {
+    status_with(s, connection, state, None).await;
+}
+
+/// The instance's live state with an optional message for the owner, e.g. who the
+/// package is signed in as, or why it stopped.
+pub(crate) async fn status_with(
+    s: &Service,
+    connection: &Connection,
+    state: &str,
+    message: Option<&str>,
+) {
     let _ = s
         .store
         .set(
             &format!("plugin-status:{}", connection.id),
-            json!({ "state": state, "updatedAt": now() }),
+            json!({ "state": state, "message": message, "updatedAt": now() }),
             None,
         )
         .await;
@@ -226,9 +262,13 @@ pub fn settings(manifest: &Manifest, input: &Value) -> Result<Value> {
         .filter(|field| field["type"] != "secret")
     {
         let key = text(field, "key").to_owned();
+        // An empty choice is no choice, e.g. a dynamic channel reset by the package.
+        let empty = |value: &&Value| {
+            value.is_null() || (text(field, "type") == "select" && value.as_str() == Some(""))
+        };
         let value = input
             .get(&key)
-            .filter(|value| !value.is_null())
+            .filter(|value| !empty(value))
             .or_else(|| field.get("default").filter(|value| !value.is_null()));
         let Some(value) = value else {
             if field["required"] == true {
@@ -248,7 +288,7 @@ fn matches_pattern(field: &Value, value: &str) -> bool {
 }
 
 /// One checked value. Messages name the field, never the submitted value.
-fn setting(field: &Value, value: &Value) -> Result<Value> {
+pub(crate) fn setting(field: &Value, value: &Value) -> Result<Value> {
     let title = text(field, "title");
     let invalid = || Error::bad(format!("{title} is too long or invalid."));
     let kind = text(field, "type");
@@ -302,6 +342,33 @@ fn setting(field: &Value, value: &Value) -> Result<Value> {
                 .as_bool()
                 .ok_or_else(|| Error::bad(format!("{title} must be on or off.")))?
         ),
+        // Dynamic choices come from the package's form; the package checks them on save.
+        "select" | "multiselect" if field["dynamic"] == true => {
+            let max = field["maxLength"].as_u64().unwrap_or(200).min(10_000) as usize;
+            let valid = |choice: &Value| {
+                choice.as_str().is_some_and(|choice| {
+                    !choice.is_empty()
+                        && choice.chars().count() <= max
+                        && !choice.chars().any(char::is_control)
+                        && matches_pattern(field, choice)
+                })
+            };
+            if kind == "select" {
+                if !valid(value) {
+                    return Err(Error::bad(format!("Choose {title}.")));
+                }
+                value.clone()
+            } else {
+                let choices = value
+                    .as_array()
+                    .filter(|choices| choices.len() <= 100 && choices.iter().all(valid))
+                    .ok_or_else(|| Error::bad(format!("Choose {title}.")))?;
+                if field["required"] == true && choices.is_empty() {
+                    return Err(Error::bad(format!("Choose {title}.")));
+                }
+                json!(choices)
+            }
+        }
         "select" | "multiselect" => {
             let allowed = |choice: &str| {
                 field["options"]
@@ -452,16 +519,13 @@ pub async fn save(
     existing: Option<&str>,
 ) -> Result<Value> {
     let package = registry::active(s, plugin_id).await?;
-    let manifest = package.manifest;
+    let manifest = package.manifest.clone();
     let owner = crate::relay::task_author_policy(s).await?;
     let name = text(input, "name").trim();
     if name.is_empty() || name.chars().count() > 100 {
         return Err(Error::bad("Enter a connection name."));
     }
-    let settings = settings(&manifest, &input["settings"])?;
-    if manifest.permits_capability("transport.discord") {
-        discord::validate_scope(&settings)?;
-    }
+    let mut settings = settings(&manifest, &input["settings"])?;
     let delegates = manifest.permits_capability("conversations.submit");
     let agent_id = if delegates {
         text(input, "agentId")
@@ -549,6 +613,22 @@ pub async fn save(
     };
     let secret_fields = secrets(&manifest, &input["secrets"], &saved)?;
     let secret_keys = secret_fields.keys().cloned().collect::<Vec<_>>();
+    if manifest.instance_form {
+        let credential = match (token.is_empty(), existing) {
+            (false, _) => Some(token.to_owned()),
+            (true, Some(id)) => s
+                .vault
+                .get(&credential_key(id))
+                .await?
+                .map(|value| text(&value, "token").to_owned()),
+            (true, None) => None,
+        };
+        let draft = forms::Draft {
+            credential,
+            secrets: secret_fields.clone(),
+        };
+        settings = forms::submit(s, &package, &connection_id, settings, draft).await?;
+    }
     let encrypted_secrets = if manifest.secret_settings().next().is_some() {
         Some(s.vault.encrypt(
             &secrets_key(&connection_id),

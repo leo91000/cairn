@@ -136,9 +136,17 @@ _Avoid_ : connexion (réservé aux comptes des agents de code et à GitHub)
 
 **Contribution d’un plugin** :
 Ce qu’un package déclare dans son manifeste et que Cairn affiche et contrôle : le
-formulaire d’une instance, les commandes et outils donnés aux agents autorisés, leurs
-instructions, le panneau d’une instance et son test. Le code du package ne fait que
-répondre ; il ne reçoit jamais les secrets.
+formulaire d’une instance (que le package peut compléter pendant la saisie), les
+commandes et outils donnés aux agents autorisés, leurs instructions, le panneau d’une
+instance et son test. Le code du package ne fait que répondre ; il ne reçoit jamais les
+secrets.
+
+**Transport d’un plugin** :
+La connexion qu’un package entretient lui-même avec un service externe, par exemple la
+Gateway de Discord : un worker dédié par instance pilote un socket que Cairn ouvre vers
+les hôtes déclarés, et remet à Cairn ce que les personnes écrivent. Cairn applique les
+règles d’admission de l’instance avant de garder quoi que ce soit.
+_Avoid_ : transport natif
 
 **Programme déclaré** :
 Un exécutable du serveur qu’un package liste dans son manifeste et que le propriétaire

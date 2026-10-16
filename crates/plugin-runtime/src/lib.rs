@@ -41,6 +41,20 @@ cairn.conversations = {
 cairn.exec = {
     run = function(request) return call("exec.run", request) end,
 }
+cairn.socket = {
+    connect = function(request) call("socket.connect", request) end,
+    send = function(text, options)
+        call("socket.send", { text = text, auth = options and options.auth })
+    end,
+    close = function(code) call("socket.close", { code = code }) end,
+    every = function(ms, first) call("socket.every", { ms = ms, first = first }) end,
+}
+cairn.inbound = {
+    accept = function(message) return call("inbound.accept", message) end,
+}
+cairn.instance = {
+    status = function(state, message) call("instance.status", { state = state, message = message }) end,
+}
 "#;
 
 /// Longest message a package may show through `cairn.fail`.

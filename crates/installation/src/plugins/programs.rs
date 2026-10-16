@@ -1,6 +1,6 @@
 //! `exec`: programs a package declares and the owner approved, run on the installation
 //! without a shell. Secrets reach the program only through its environment.
-use super::{capabilities::Context, connections::secret_values};
+use super::capabilities::{self, Context};
 use crate::{
     error::{Error, Result},
     service::Service,
@@ -103,7 +103,7 @@ pub async fn run(s: &Service, context: &Context, args: &Value) -> Result<Value> 
                         .and_then(Value::as_str)
                         .ok_or_else(|| Error::bad("Invalid program environment variable."))?;
                     if secrets.is_none() {
-                        secrets = Some(secret_values(s, &context.connection.id).await?);
+                        secrets = Some(capabilities::secrets(s, context).await?);
                     }
                     secrets
                         .as_ref()

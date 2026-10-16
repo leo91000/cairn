@@ -1,23 +1,30 @@
 import type { Agent } from '../../../packages/contracts/contracts'
 import type { IconName } from './icons'
 import {
-  Bot,
-  BrandDiscord,
   BrandLinear,
-  BrandOnePassword,
   BrandSlack,
   BrandTelegram,
+  Cable,
   CirclePause,
   Clock,
   Cpu,
   Globe,
   HardDrive,
+  Inbox,
   KeyRound,
   LayoutPanelTop,
   MessageSquare,
   Terminal,
   Wrench,
 } from './icons'
+
+export interface FieldOption {
+  value: string
+  label: string
+  /** Shown under the choice, e.g. why it can't be picked. */
+  description?: string
+  disabled?: boolean
+}
 
 /** One field of a declarative plugin form (instance settings or a view's form). */
 export interface SettingField {
@@ -33,8 +40,20 @@ export interface SettingField {
   minimum?: number
   maximum?: number
   pattern?: string
-  options?: { value: string, label: string }[]
+  options?: FieldOption[]
+  /** Choices come from the package's form handler while the owner edits. */
+  dynamic?: boolean
+  /** Changing this field asks the package's form handler again. */
+  refresh?: boolean
   default?: unknown
+}
+
+/** What a package's `form` handler returns while the owner edits an instance. */
+export interface FormResult {
+  options: Record<string, FieldOption[]>
+  values: Record<string, unknown>
+  errors: Record<string, string>
+  view: any[]
 }
 
 export interface PluginArgument {
@@ -71,6 +90,7 @@ export interface Manifest {
   instructions?: string
   instanceView?: boolean
   instanceTest?: boolean
+  instanceForm?: boolean
 }
 
 export interface PackageVersion {
@@ -137,36 +157,17 @@ export interface PluginConnection {
   agentId: string
   projectId: string | null
   maxMessagesPerHour: number
-  status: { state: string }
+  /** Live state, with the package's own message (e.g. who it is signed in as). */
+  status: { state: string, message?: string | null }
   usage: { hour: number }
   requests: AccessRequest[]
   activity: Activity[]
 }
 
-export interface Discovery {
-  bot: Label & { username: string }
-  applicationId: string
-  inviteUrl: string
-  guilds: Label[]
-  channels?: (Label & { canRead: boolean, canReply: boolean, canThread?: boolean })[]
-  users?: Label[]
-}
-
-/** Discord connections keep their scope and labels in plugin settings. */
-export type DiscordConnection = PluginConnection & {
-  settings: {
-    guildId: string
-    guildName?: string
-    channelId: string
-    channelName?: string
-    botId?: string
-    botName?: string
-  }
-}
-
 /** How each host capability reads in the catalogue. */
 export const capabilityLabels: Record<string, [IconName, string]> = {
-  'transport.discord': [Bot, 'Discord bot'],
+  'socket': [Cable, 'Live connection'],
+  'inbound': [Inbox, 'Receives messages'],
   'conversations.submit': [MessageSquare, 'Conversations'],
   'conversations.control': [CirclePause, 'Answer and stop'],
   'http': [Globe, 'Web requests'],
@@ -187,18 +188,21 @@ export function contributions(manifest: Manifest | null | undefined): [IconName,
   ]
 }
 
-/** Packages that react to people, transports or timers keep a worker running. */
+/** Packages that react to people, connections or timers keep a worker running. */
 export function needsWorker(manifest: Manifest | null | undefined) {
-  return ['transport.discord', 'conversations.submit', 'conversations.control', 'timers']
+  return ['socket', 'inbound', 'conversations.submit', 'conversations.control', 'timers']
     .some(name => manifest?.capabilities.includes(name))
+}
+
+/** Packages whose instances let people outside Cairn talk to an agent. */
+export function delegates(manifest: Manifest | null | undefined) {
+  return manifest?.capabilities.includes('conversations.submit') ?? false
 }
 
 /** "Service account" / "Service accounts", or the generic wording. */
 export function instanceNoun(manifest: Manifest | null | undefined, count = 1) {
   if (manifest?.instances)
     return count === 1 ? manifest.instances.singular : manifest.instances.plural
-  if (manifest?.capabilities.includes('transport.discord'))
-    return count === 1 ? 'Bot' : 'Bots'
   return count === 1 ? 'Instance' : 'Instances'
 }
 
@@ -211,9 +215,8 @@ export function commandUsage(plugin: string, command: PluginCommand) {
   return ['cairn plugin', plugin, command.name, ...parts].join(' ')
 }
 
-export const brands: Record<string, { icon: IconName, color: string }> = {
-  discord: { icon: BrandDiscord, color: '#5865F2' },
-  onepassword: { icon: BrandOnePassword, color: '#1A285F' },
+/** Marks of plugins announced in the catalogue, not available yet. Packages bring their own. */
+export const upcoming: Record<string, { icon: IconName, color: string }> = {
   slack: { icon: BrandSlack, color: '#4A154B' },
   telegram: { icon: BrandTelegram, color: '#26A5E4' },
   linear: { icon: BrandLinear, color: '#5E6AD2' },

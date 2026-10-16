@@ -12,11 +12,14 @@ use crate::{
 };
 use cairn_plugin_host::Denied;
 use serde_json::{Value, json};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 pub enum Scope {
     /// The owner, through one instance: views, actions and tests.
     Instance(Box<Connection>),
+    /// The owner editing an instance, before it is saved: its form. Only `http` and
+    /// `exec`, with the draft's credential and secrets.
+    Draft(Box<Connection>, Arc<super::forms::Draft>),
     /// A run's agent, through the enabled instances it is granted: commands and tools.
     Agent {
         agent_id: String,
@@ -28,7 +31,9 @@ impl Scope {
     /// What the script receives about the instances it may use. Never secret values.
     pub fn instances(&self) -> Vec<Value> {
         match self {
-            Scope::Instance(connection) => vec![summary(connection)],
+            Scope::Instance(connection) | Scope::Draft(connection, _) => {
+                vec![summary(connection)]
+            }
             Scope::Agent { instances, .. } => instances.iter().map(summary).collect(),
         }
     }
@@ -48,7 +53,14 @@ pub fn summary(connection: &Connection) -> Value {
 /// it enabled and still granting the agent.
 async fn current(s: &Service, scope: &Scope, args: &Value) -> Result<Connection> {
     let requested = args["instance"].as_str();
+    if let Scope::Draft(connection, _) = scope {
+        if requested.is_some_and(|id| id != connection.id) {
+            return Err(Error::forbidden("Another instance is not available here."));
+        }
+        return Ok((**connection).clone());
+    }
     let expected = match scope {
+        Scope::Draft(..) => unreachable!(),
         Scope::Instance(connection) => {
             if requested.is_some_and(|id| id != connection.id) {
                 return Err(Error::forbidden("Another instance is not available here."));
@@ -72,7 +84,7 @@ async fn current(s: &Service, scope: &Scope, args: &Value) -> Result<Connection>
     let connection: Connection = serde_json::from_value(value)?;
     let unchanged = connection.revision == expected.revision;
     let granted = match scope {
-        Scope::Instance(_) => true,
+        Scope::Instance(_) | Scope::Draft(..) => true,
         Scope::Agent { agent_id, .. } => connection.grants(agent_id),
     };
     if !unchanged || !granted {
@@ -92,14 +104,28 @@ pub async fn call(
     args: &Value,
 ) -> Result<Value> {
     let connection = current(s, scope, args).await?;
+    let draft = match scope {
+        Scope::Draft(_, draft) => Some(draft.clone()),
+        _ => None,
+    };
+    if draft.is_some() && !matches!(method, "http.request" | "exec.run") {
+        return Err(Error::forbidden(
+            "An instance being edited can only use http and exec.",
+        ));
+    }
     let context = Context {
         connection,
         manifest: package.manifest.clone(),
         event: Value::Null,
+        link: None,
+        draft,
     };
-    if method.starts_with("conversations.") {
+    if ["conversations.", "inbound.", "instance.", "socket."]
+        .iter()
+        .any(|family| method.starts_with(family))
+    {
         return Err(Error::forbidden(
-            "Conversations are only available while handling people's messages.",
+            "Conversations and connections belong to the instance's worker.",
         ));
     }
     let result = capabilities::effect(s, &context, method, args.clone()).await?;

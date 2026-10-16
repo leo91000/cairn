@@ -55,6 +55,7 @@ export const Pause = 'i-lucide-pause' as const
 export const Pencil = 'i-lucide-pencil' as const
 export const Play = 'i-lucide-play' as const
 export const Cpu = 'i-lucide-cpu' as const
+export const Cable = 'i-lucide-cable' as const
 export const Plug = 'i-lucide-plug' as const
 export const Plus = 'i-lucide-plus' as const
 export const RefreshCw = 'i-lucide-refresh-cw' as const

@@ -10,7 +10,14 @@ import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonPrimitive
 
-@Serializable data class PluginOption(val value: String = "", val label: String = "")
+@Serializable
+data class PluginOption(
+    val value: String = "",
+    val label: String = "",
+    /** Shown under the choice, e.g. why it can't be picked. */
+    val description: String = "",
+    val disabled: Boolean = false,
+)
 
 /** One field of a declarative plugin form: instance settings or a view's form. */
 @Serializable
@@ -28,7 +35,20 @@ data class PluginSetting(
     val minimum: Double? = null,
     val maximum: Double? = null,
     val options: List<PluginOption> = emptyList(),
+    /** Choices come from the package's form handler while the owner edits. */
+    val dynamic: Boolean = false,
+    /** Changing this field asks the package's form handler again. */
+    val refresh: Boolean = false,
     val default: JsonElement? = null,
+)
+
+/** What a package's `form` handler returns while the owner edits an instance. */
+@Serializable
+data class PluginForm(
+    val options: Map<String, List<PluginOption>> = emptyMap(),
+    val values: JsonObject = JsonObject(emptyMap()),
+    val errors: Map<String, String> = emptyMap(),
+    val view: JsonArray = JsonArray(emptyList()),
 )
 
 @Serializable data class PluginCredential(val label: String = "", val header: String = "")
@@ -92,25 +112,22 @@ data class PluginManifest(
     val instructions: String = "",
     val instanceView: Boolean = false,
     val instanceTest: Boolean = false,
+    val instanceForm: Boolean = false,
 ) {
     /** Instances answer external people through a dedicated agent. */
     val delegates
         get() = "conversations.submit" in capabilities
 
-    val discord
-        get() = "transport.discord" in capabilities
-
-    /** Packages that react to people, transports or timers keep a worker running. */
+    /** Packages that react to people, connections or timers keep a worker running. */
     val needsWorker
         get() =
-            listOf("transport.discord", "conversations.submit", "conversations.control", "timers")
+            listOf("socket", "inbound", "conversations.submit", "conversations.control", "timers")
                 .any { it in capabilities }
 
     /** The package's own name for one or several instances, e.g. "Service account". */
     fun noun(count: Int = 1): String =
         instances?.let { if (count == 1) it.singular else it.plural }
-            ?: if (discord) (if (count == 1) "Bot" else "Bots")
-            else if (count == 1) "Instance" else "Instances"
+            ?: if (count == 1) "Instance" else "Instances"
 }
 
 @Serializable
@@ -160,7 +177,9 @@ data class PluginActivity(
     val createdAt: Long = 0,
 )
 
-@Serializable data class PluginStatus(val state: String = "disconnected")
+/** Live state, with the package's own message (e.g. who it is signed in as). */
+@Serializable
+data class PluginStatus(val state: String = "disconnected", val message: String? = null)
 
 @Serializable data class PluginUsage(val hour: Int = 0)
 
@@ -286,7 +305,8 @@ fun PluginEntry.summary(connections: List<PluginConnection>): PluginSummary {
 /** How each host capability reads in the catalogue. */
 fun capabilityLabel(name: String) =
     when (name) {
-        "transport.discord" -> "Bot Discord"
+        "socket" -> "Connexion permanente"
+        "inbound" -> "Reçoit des messages"
         "conversations.submit" -> "Conversations"
         "conversations.control" -> "Répondre et arrêter"
         "http" -> "Requêtes web"
@@ -309,6 +329,20 @@ fun PluginManifest.contributions(): List<String> = buildList {
  */
 fun Agent.eligibleForPlugins() =
     !access.installation && access.projects != null && access.projects.size <= 1
+
+/**
+ * Why an agent can't answer anyone who reaches an instance, or null when it can. Mirrors the
+ * server: read-only sandbox, one project at most, no installation, GitHub, MCP or plugin grants.
+ */
+fun Agent.publicProblem(connections: List<PluginConnection>): String? =
+    when {
+        !eligibleForPlugins() -> "Trop large"
+        access.sandbox != "read-only" -> "Pas en lecture seule"
+        access.github -> "A GitHub"
+        access.mcps == null || access.mcps.isNotEmpty() -> "A des MCP"
+        connections.any { id in it.agentIds } -> "A des plugins"
+        else -> null
+    }
 
 /**
  * Form values as the server expects them: numbers as numbers, blanks omitted. Multiple choices are
@@ -355,8 +389,8 @@ private fun number(value: Double) =
 
 data class PluginAbility(val allowed: Boolean, val text: String, val warn: Boolean = false)
 
-/** What a Discord bot lets people do, in the order the web lists it. */
-fun PluginConnection.discordAbilities(
+/** What people reaching an instance can make its agent do, in the order the web lists it. */
+fun PluginConnection.abilities(
     agent: Agent?,
     project: String?,
     plugins: List<String>,
@@ -365,28 +399,14 @@ fun PluginConnection.discordAbilities(
         add(
             PluginAbility(
                 true,
-                "Tout le monde dans le canal peut faire travailler l’agent (lecture seule)",
+                "Tout le monde peut faire travailler l’agent (lecture seule)",
                 warn = true,
             )
         )
-    if (flag("everyMessage"))
-        add(PluginAbility(true, "Répondre à chaque message, en silence quand rien n’est utile"))
     add(PluginAbility(true, "Démarrer des conversations avec ${agent?.name ?: "son agent"}"))
     add(
         if (project != null) PluginAbility(true, "Lire et modifier $project")
         else PluginAbility(false, "Ouvrir un projet")
-    )
-    add(
-        PluginAbility(
-            true,
-            "Répondre dans #${setting("channelName") ?: setting("channelId").orEmpty()} et ses fils uniquement",
-        )
-    )
-    add(
-        PluginAbility(
-            true,
-            "Laisser les personnes autorisées répondre à ses questions et l’arrêter depuis Discord",
-        )
     )
     add(
         if (plugins.isNotEmpty())

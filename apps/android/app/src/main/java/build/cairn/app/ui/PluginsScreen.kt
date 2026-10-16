@@ -40,7 +40,7 @@ import androidx.compose.ui.window.DialogProperties
 import build.cairn.app.data.*
 import kotlinx.serialization.json.*
 
-/** The installation's web page for steps that stay on the web: package uploads, bot setup. */
+/** The installation's web page for steps that stay on the web: package uploads. */
 internal fun webPage(api: CairnApi, path: String): String =
     api.origin
         .newBuilder()
@@ -265,32 +265,25 @@ private fun PluginInstances(
                 reviewing = true
             }
             if (entry.active != null)
-                if (manifest.discord)
-                    SignalButton("Ajouter un bot", icon = CairnIcons.External, height = 40.dp) {
-                        runCatching { browse(context, webPage(vm.api, "/plugins/discord/new")) }
-                    }
-                else
-                    SignalButton(
-                        if (manifest.instances != null) "Ajouter · ${manifest.noun()}"
-                        else "Ajouter une instance",
-                        icon = CairnIcons.Plus,
-                        height = 40.dp,
-                    ) {
-                        vm.clearMessage()
-                        editing =
-                            PluginConnection(
-                                name = if (manifest.instances == null) manifest.name else ""
-                            )
-                    }
+                SignalButton(
+                    if (manifest.instances != null) "Ajouter · ${manifest.noun()}"
+                    else "Ajouter une instance",
+                    icon = CairnIcons.Plus,
+                    height = 40.dp,
+                ) {
+                    vm.clearMessage()
+                    editing =
+                        PluginConnection(
+                            name = if (manifest.instances == null) manifest.name else "",
+                            accessMode = "requests",
+                        )
+                }
         }
         if (instances.isEmpty() && entry.active != null)
             Empty(
-                if (manifest.discord) "Aucun bot"
-                else if (manifest.instances != null) "${manifest.noun(2)} : aucun"
+                if (manifest.instances != null) "${manifest.noun(2)} : aucun"
                 else "Aucune instance",
-                if (manifest.discord)
-                    "La création d’un bot (jeton, serveur, canal, accès) se fait sur le web. Vous le gérez ensuite ici."
-                else "Ajoutez-en un pour commencer à utiliser ce plugin.",
+                "Ajoutez-en un pour commencer à utiliser ce plugin.",
             )
         instances.forEach { connection ->
             InstanceCard(
@@ -302,14 +295,7 @@ private fun PluginInstances(
                 openChat = openChat,
                 edit = {
                     vm.clearMessage()
-                    if (manifest.discord)
-                        runCatching {
-                            browse(
-                                context,
-                                webPage(vm.api, "/plugins/discord/${segment(connection.id)}/edit"),
-                            )
-                        }
-                    else editing = connection
+                    editing = connection
                 },
                 remove = {
                     vm.clearMessage()
@@ -332,20 +318,24 @@ private fun PluginInstances(
         }
     editing?.let { initial ->
         manifest?.let {
-            InstanceEditor(vm, state, id, it, initial, close = { editing = null }) {
+            InstanceEditor(
+                vm,
+                state,
+                id,
+                it,
+                initial,
+                catalog?.connections.orEmpty(),
+                close = { editing = null },
+            ) {
                 editing = null
                 load()
             }
         }
     }
     removing?.let { connection ->
-        val bot = manifest?.discord == true
         Confirm(
-            if (bot) "Retirer ${connection.name} ?" else "Supprimer ${connection.name} ?",
-            if (bot)
-                "Le bot cesse de recevoir du travail et de livrer ses réponses, et son jeton est supprimé. Les conversations restent dans Cairn."
-            else
-                "L’instance s’arrête ; son identifiant, ses valeurs enregistrées et ses minuteurs sont supprimés. Les conversations restent dans Cairn.",
+            "Supprimer ${connection.name} ?",
+            "L’instance s’arrête ; son identifiant, ses valeurs enregistrées et ses minuteurs sont supprimés. Les conversations restent dans Cairn.",
             state.busy,
             state.error,
             dismiss = { removing = null },
@@ -368,7 +358,7 @@ private fun InstanceCard(
     state: Workspace,
     manifest: PluginManifest,
     connection: PluginConnection,
-    /** Other plugins the delegated agent is authorized on, for Discord's summary. */
+    /** Other plugins the delegated agent is authorized on, for what it can do. */
     grants: List<String>,
     openChat: (String) -> Unit,
     edit: () -> Unit,
@@ -396,21 +386,26 @@ private fun InstanceCard(
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
                     )
-                    if (manifest.discord)
-                        Text(
-                            connection.setting("botName")?.let { "Connecté en tant que $it" }
-                                ?: "Bot Discord",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
+                    // The package's own words, e.g. who it is signed in as.
+                    connection.status.message
+                        ?.takeIf { it.isNotBlank() && connection.status.state != "needs_review" }
+                        ?.let {
+                            Text(
+                                it,
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
                 }
                 ToneChip(badge)
             }
             if (connection.enabled && connection.status.state == "needs_review")
                 Text(
-                    if (manifest.discord)
-                        "Discord ou Cairn a arrêté ce bot. Le jeton a peut-être été réinitialisé ou l’accès de l’agent a changé. Modifiez la configuration sur le web pour la vérifier."
-                    else "Cairn a arrêté cette instance. Modifiez-la pour la vérifier.",
+                    connection.status.message
+                        ?.takeIf { it.isNotBlank() }
+                        ?.let {
+                            "$it Modifiez l’instance pour la vérifier."
+                        } ?: "Cairn a arrêté cette instance. Modifiez-la pour la vérifier.",
                     Modifier.clip(RoundedCornerShape(12.dp))
                         .background(signal.attentionSoft)
                         .padding(12.dp),
@@ -455,24 +450,17 @@ private fun InstanceCard(
                     }
                 }
             }
-            if (manifest.discord)
-                Fact(
-                    "Écoute dans",
-                    "#${connection.setting("channelName") ?: connection.setting("channelId").orEmpty()}",
-                    connection.setting("guildName") ?: "Serveur Discord",
-                )
-            else
-                manifest.settings
-                    .filter { !it.hidden }
-                    .forEach { field ->
-                        if (field.type == "secret")
-                            Fact(
-                                field.title,
-                                if (field.key in connection.secretKeys) "Enregistré"
-                                else "Non défini",
-                            )
-                        else Fact(field.title, connection.display(field.key))
-                    }
+            // Packages with their own panel describe the instance there; secrets show as set.
+            manifest.settings
+                .filter { !it.hidden && (!manifest.instanceView || it.type == "secret") }
+                .forEach { field ->
+                    if (field.type == "secret")
+                        Fact(
+                            field.title,
+                            if (field.key in connection.secretKeys) "Enregistré" else "Non défini",
+                        )
+                    else Fact(field.title, connection.display(field.key))
+                }
             if (manifest.agentAccess != null) {
                 val names =
                     connection.agentIds.map { id ->
@@ -526,7 +514,7 @@ private fun InstanceCard(
                 if (connection.userIds.isEmpty() && connection.accessMode != "everyone")
                     Text(
                         if (connection.accessMode == "requests")
-                            "Personne pour l’instant. Mentionnez le bot et approuvez votre propre demande ici."
+                            "Personne pour l’instant. Écrivez-lui et approuvez votre propre demande ici."
                         else "Personne pour l’instant.",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -550,13 +538,13 @@ private fun InstanceCard(
                     }
                 }
             }
-            if (manifest.discord) {
-                Eyebrow("Ce que ce bot peut faire")
-                connection.discordAbilities(agent, project?.name, grants).forEach { Ability(it) }
+            if (manifest.delegates) {
+                Eyebrow("Ce qu’on peut lui faire faire")
+                connection.abilities(agent, project?.name, grants).forEach { Ability(it) }
                 Eyebrow("Activité récente")
                 if (connection.activity.isEmpty())
                     Text(
-                        "Rien pour l’instant. Mentionnez @${connection.setting("botName") ?: "le bot"} dans #${connection.setting("channelName") ?: connection.setting("channelId").orEmpty()} pour l’essayer.",
+                        "Rien pour l’instant.",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
@@ -567,7 +555,7 @@ private fun InstanceCard(
             if (manifest.instanceView) PluginPanel(vm, state, path, connection.name)
             HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
             Toggle(
-                if (manifest.discord) "Accepter les nouveaux messages" else "Active",
+                if (manifest.delegates) "Accepter les nouveaux messages" else "Active",
                 connection.enabled,
             ) { enabled ->
                 if (!state.busy)
@@ -581,21 +569,7 @@ private fun InstanceCard(
                     }
             }
             FlowRow(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                if (manifest.discord)
-                    TextButton(
-                        onClick = {
-                            vm.perform {
-                                val result = api.send<JsonObject>("POST", "$path/test")
-                                notify(
-                                    "Jeton valide · connecté en tant que ${result["name"]?.jsonPrimitive?.contentOrNull ?: connection.name}"
-                                )
-                            }
-                        },
-                        enabled = !state.busy,
-                    ) {
-                        Text("Tester")
-                    }
-                else if (manifest.instanceTest)
+                if (manifest.instanceTest)
                     TextButton(
                         onClick = {
                             vm.perform {
@@ -611,14 +585,9 @@ private fun InstanceCard(
                     ) {
                         Text("Tester")
                     }
-                TextButton(onClick = edit, enabled = !state.busy) {
-                    Text(if (manifest.discord) "Modifier sur le web" else "Modifier")
-                }
+                TextButton(onClick = edit, enabled = !state.busy) { Text("Modifier") }
                 TextButton(onClick = remove, enabled = !state.busy) {
-                    Text(
-                        if (manifest.discord) "Retirer le bot" else "Supprimer",
-                        color = MaterialTheme.colorScheme.error,
-                    )
+                    Text("Supprimer", color = MaterialTheme.colorScheme.error)
                 }
             }
         }
@@ -672,8 +641,9 @@ private fun ActivityRow(connection: PluginConnection, item: PluginActivity, open
 }
 
 /**
- * Generic instance settings: the manifest's fields (secrets never prefilled), the agents granted
- * the package's commands and tools, then the delegation for conversation plugins.
+ * Generic instance settings: the manifest's fields (secrets never prefilled), completed by the
+ * package's own form handler when it has one, the agents granted the package's commands and tools,
+ * then the delegation for conversation plugins.
  */
 @Composable
 private fun InstanceEditor(
@@ -682,22 +652,23 @@ private fun InstanceEditor(
     pluginId: String,
     manifest: PluginManifest,
     initial: PluginConnection,
+    connections: List<PluginConnection>,
     close: () -> Unit,
     saved: suspend () -> Unit,
 ) {
     val creating = initial.id.isBlank()
     val fields = manifest.settings.filter { !it.hidden }
+    // Hidden settings are the package's own (e.g. names it derives); editing keeps them.
+    val stored = manifest.settings.filter { it.type != "secret" }
     var name by remember(initial.id) { mutableStateOf(initial.name) }
     // Deliberately not saveable: never persist a credential in saved instance state.
     var token by remember(initial.id) { mutableStateOf("") }
     var values by
         remember(initial.id) {
             mutableStateOf(
-                fields
-                    .filter { it.type != "secret" }
-                    .associate { field ->
-                        field.key to formValue(field, initial.settings[field.key])
-                    }
+                stored.associate { field ->
+                    field.key to formValue(field, initial.settings[field.key])
+                }
             )
         }
     // Same rule for secret fields: typed in, sent once, never kept.
@@ -705,16 +676,80 @@ private fun InstanceEditor(
     var granted by remember(initial.id) { mutableStateOf(initial.agentIds) }
     var agentId by remember(initial.id) { mutableStateOf(initial.agentId) }
     var accessMode by remember(initial.id) { mutableStateOf(initial.accessMode) }
-    var userIds by remember(initial.id) { mutableStateOf(initial.userIds.joinToString(", ")) }
+    var people by
+        remember(initial.id) {
+            mutableStateOf(
+                initial.userIds.map { id ->
+                    PluginLabel(id, initial.people.find { it.id == id }?.name.orEmpty())
+                }
+            )
+        }
+    var person by remember(initial.id) { mutableStateOf("") }
     var perHour by remember(initial.id) { mutableStateOf(initial.maxMessagesPerHour.toString()) }
+    var perPerson by
+        remember(initial.id) { mutableStateOf((initial.maxPerPersonPerHour ?: 5).toString()) }
     var enabled by remember(initial.id) { mutableStateOf(initial.enabled) }
-    val agents = state.agents.filter { it.eligibleForPlugins() }
+    var completion by remember(initial.id) { mutableStateOf<PluginForm?>(null) }
+    // Each change asks the package again; a newer question cancels the older one.
+    var asking by remember(initial.id) { mutableStateOf(0 to (null as String?)) }
+    val others = connections.filter { it.id != initial.id }
+    fun problem(agent: Agent): String? =
+        if (accessMode == "everyone") agent.publicProblem(others)
+        else if (agent.eligibleForPlugins()) null else "Trop large"
+    fun refresh(key: String?) {
+        asking = (asking.first + 1) to key
+    }
+    if (manifest.instanceForm)
+        LaunchedEffect(initial.id, asking) {
+            if (asking.second != null) kotlinx.coroutines.delay(400)
+            runCatching {
+                vm.api.send<PluginForm>(
+                    "POST",
+                    "/plugins/${segment(pluginId)}/form",
+                    buildJsonObject {
+                        if (!creating) put("instance", initial.id)
+                        put("settings", pluginSettings(stored, values))
+                        put(
+                            "secrets",
+                            JsonObject(
+                                secrets
+                                    .filterValues { it.isNotBlank() }
+                                    .mapValues { JsonPrimitive(it.value.trim()) }
+                            ),
+                        )
+                        if (token.isNotBlank()) put("token", token.trim())
+                        asking.second?.let { put("changed", it) }
+                    },
+                )
+            }
+                .onSuccess { form ->
+                    values =
+                        values +
+                            form.values.mapValues { (key, value) ->
+                                formValue(
+                                    stored.find { it.key == key } ?: PluginSetting(key = key),
+                                    value,
+                                )
+                            }
+                    completion = form
+                }
+                .onFailure { error ->
+                    if (error is kotlinx.coroutines.CancellationException) throw error
+                    completion =
+                        PluginForm(
+                            options = completion?.options.orEmpty(),
+                            errors =
+                                mapOf("form" to (error.message ?: "Le plugin n’a pas répondu.")),
+                        )
+                }
+        }
     val missingSecret = fields.any {
         it.type == "secret" &&
             it.required &&
             it.key !in initial.secretKeys &&
             secrets[it.key].isNullOrBlank()
     }
+    val agent = state.agents.find { it.id == agentId }
     Editor(
         if (creating) "Nouveau · ${manifest.noun()}" else "Modifier ${initial.name}",
         state.busy,
@@ -729,11 +764,9 @@ private fun InstanceEditor(
                         it.type !in setOf("boolean", "secret", "multiselect") &&
                         values[it.key].isNullOrBlank()
                 } &&
-                (!manifest.delegates || agentId.isNotBlank()),
+                (!manifest.delegates || (agent != null && problem(agent) == null)),
         save = {
             vm.perform {
-                val ids = userIds.split(Regex("[\\s,]+")).filter { it.isNotBlank() }
-                val agent = state.agents.find { it.id == agentId }
                 api.request(
                     if (creating) "POST" else "PUT",
                     "/plugins/${segment(pluginId)}/connections" +
@@ -741,7 +774,7 @@ private fun InstanceEditor(
                     buildJsonObject {
                         put("name", name.trim())
                         if (token.isNotBlank()) put("token", token.trim())
-                        put("settings", pluginSettings(fields, values))
+                        put("settings", pluginSettings(stored, values))
                         // Blank secret fields keep what is saved.
                         put(
                             "secrets",
@@ -761,25 +794,20 @@ private fun InstanceEditor(
                                     ?: JsonNull,
                             )
                             put("accessMode", accessMode)
-                            put("userIds", JsonArray(ids.map(::JsonPrimitive)))
+                            put("userIds", JsonArray(people.map { JsonPrimitive(it.id) }))
                             put(
                                 "people",
                                 JsonArray(
-                                    ids.map { user ->
+                                    people.map { label ->
                                         buildJsonObject {
-                                            put("id", user)
-                                            put(
-                                                "name",
-                                                initial.people
-                                                    .find { it.id == user }
-                                                    ?.name
-                                                    .orEmpty(),
-                                            )
+                                            put("id", label.id)
+                                            put("name", label.name)
                                         }
                                     }
                                 ),
                             )
                             put("maxMessagesPerHour", perHour.toIntOrNull() ?: 20)
+                            put("maxPerPersonPerHour", perPerson.toIntOrNull() ?: 5)
                         }
                         put("enabled", enabled)
                     },
@@ -791,26 +819,49 @@ private fun InstanceEditor(
             }
         },
     ) {
+        completion?.errors?.get("form")?.let { FormError(it) }
         Field("Nom", name, { name = it }, enabled = !state.busy)
         manifest.credential?.let { credential ->
+            val problem = completion?.errors?.get("credential")
             OutlinedTextField(
                 token,
-                { token = it },
+                {
+                    token = it
+                    if (manifest.instanceForm) refresh("credential")
+                },
                 Modifier.fillMaxWidth(),
-                label = { Text(credential.label) },
+                label = {
+                    Text(
+                        if (creating) credential.label
+                        else "Nouveau ${credential.label.lowercase()} (facultatif)"
+                    )
+                },
                 singleLine = true,
                 visualTransformation = PasswordVisualTransformation(),
                 keyboardOptions = InputKeyboards.Password,
                 enabled = !state.busy,
+                isError = problem != null,
                 placeholder =
                     if (creating) null else ({ Text("Enregistré · laissez vide pour le garder") }),
                 supportingText = {
                     Text(
-                        "Chiffré. Cairn l’ajoute aux requêtes de ce plugin ; le plugin ne le voit jamais."
+                        problem
+                            ?: "Chiffré. Cairn l’ajoute aux requêtes de ce plugin ; le plugin ne le voit jamais."
                     )
                 },
             )
         }
+        completion
+            ?.view
+            ?.takeIf { it.isNotEmpty() }
+            ?.let { view ->
+                Column(
+                    Modifier.testTag("plugin-form-view"),
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    PluginViewNodes(view, state.busy, press = {}, act = { _, _, _ -> })
+                }
+            }
         PluginFields(
             fields,
             values,
@@ -819,6 +870,9 @@ private fun InstanceEditor(
             { key, value -> secrets = secrets + (key to value) },
             saved = initial.secretKeys,
             enabled = !state.busy,
+            options = completion?.options.orEmpty(),
+            errors = completion?.errors.orEmpty(),
+            refresh = ::refresh,
         )
         manifest.agentAccess?.let { access ->
             Text("Agents autorisés", style = MaterialTheme.typography.titleMedium)
@@ -836,26 +890,87 @@ private fun InstanceEditor(
             }
         }
         if (manifest.delegates) {
-            Choice("Agent", agentId, agents.map { it.id to it.name }) { agentId = it }
-            if (agents.isEmpty())
-                Text(
-                    "Aucun agent dédié : il faut un agent limité à un projet au plus, sans accès à l’installation.",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
             Choice(
-                "Qui peut l’utiliser",
+                "Qui peut lui parler",
                 accessMode,
                 listOf(
                     "requests" to "Valider les personnes à leur demande",
-                    "allowlist" to "Seulement les personnes listées",
-                    "everyone" to
-                        "Tout le monde (agent en lecture seule sans GitHub, MCP ni plugin)",
+                    "allowlist" to "Seulement les personnes que j’ajoute",
+                    "everyone" to "Tout le monde",
                 ),
             ) {
                 accessMode = it
             }
-            Field("Identifiants des personnes", userIds, { userIds = it }, enabled = !state.busy)
+            if (accessMode == "everyone")
+                Text(
+                    "Il faut un agent en lecture seule, limité à un projet, sans GitHub, MCP ni plugin.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            Text("Personnes autorisées", style = MaterialTheme.typography.labelLarge)
+            people.forEach { label ->
+                val shown = label.name.ifBlank { "Personne" }
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    AgentAvatar(label.name.ifBlank { label.id }, label.id, 28.dp)
+                    Spacer(Modifier.width(10.dp))
+                    Column(Modifier.weight(1f)) {
+                        Text(shown, style = MaterialTheme.typography.bodyMedium, maxLines = 1)
+                        Text(
+                            label.id,
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                    ActionIcon("Retirer $shown", CairnIcons.Close, enabled = !state.busy) {
+                        people = people.filter { it.id != label.id }
+                    }
+                }
+            }
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Box(Modifier.weight(1f)) {
+                    Field(
+                        "Identifiant d’une personne",
+                        person,
+                        { person = it.trim() },
+                        enabled = !state.busy,
+                    )
+                }
+                Spacer(Modifier.width(8.dp))
+                TextButton(
+                    onClick = {
+                        if (people.none { it.id == person }) {
+                            val known =
+                                connections
+                                    .flatMap { it.requests }
+                                    .find { it.userId == person }
+                                    ?.name
+                                    .orEmpty()
+                            people = people + PluginLabel(person, known)
+                        }
+                        person = ""
+                    },
+                    enabled = person.isNotBlank() && !state.busy,
+                ) {
+                    Text("Ajouter")
+                }
+            }
+            ChoiceList(
+                "Répond en tant que",
+                agentId,
+                state.agents
+                    .sortedBy { problem(it) != null }
+                    .map { agent ->
+                        PluginOption(
+                            agent.id,
+                            agent.name,
+                            problem(agent).orEmpty(),
+                            disabled = problem(agent) != null,
+                        )
+                    },
+                enabled = !state.busy,
+            ) {
+                agentId = it
+            }
             Field(
                 "Messages par heure",
                 perHour,
@@ -863,14 +978,105 @@ private fun InstanceEditor(
                 enabled = !state.busy,
                 keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
             )
+            if (accessMode == "everyone")
+                Field(
+                    "Messages par personne et par heure",
+                    perPerson,
+                    { perPerson = it.filter(Char::isDigit).take(2) },
+                    enabled = !state.busy,
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                )
         }
         Toggle("Active", enabled) { if (!state.busy) enabled = it }
     }
 }
 
+@Composable
+private fun FormError(text: String) {
+    Text(
+        text,
+        Modifier.fillMaxWidth()
+            .clip(RoundedCornerShape(12.dp))
+            .background(signal.attentionSoft)
+            .padding(12.dp),
+        style = MaterialTheme.typography.bodySmall,
+        color = signal.attention,
+    )
+}
+
+/** Choices that explain themselves, e.g. why one can't be picked: one row each. */
+@Composable
+internal fun ChoiceList(
+    label: String,
+    selected: String,
+    options: List<PluginOption>,
+    enabled: Boolean = true,
+    onChange: (String) -> Unit,
+) {
+    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        Text(label, style = MaterialTheme.typography.labelLarge)
+        if (options.isEmpty())
+            Text(
+                "Rien à choisir pour l’instant.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        options.forEach { option ->
+            val chosen = option.value == selected
+            Surface(
+                onClick = { onChange(option.value) },
+                enabled = enabled && !option.disabled,
+                shape = RoundedCornerShape(12.dp),
+                color =
+                    if (chosen) MaterialTheme.colorScheme.primaryContainer
+                    else MaterialTheme.colorScheme.surface,
+                border =
+                    androidx.compose.foundation.BorderStroke(
+                        1.dp,
+                        if (chosen) MaterialTheme.colorScheme.primary
+                        else MaterialTheme.colorScheme.outlineVariant,
+                    ),
+                modifier =
+                    Modifier.fillMaxWidth().semantics {
+                        contentDescription =
+                            option.label +
+                                if (option.description.isNotBlank()) " · ${option.description}"
+                                else ""
+                    },
+            ) {
+                Row(
+                    Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    RadioButton(chosen, null, enabled = enabled && !option.disabled)
+                    Spacer(Modifier.width(8.dp))
+                    Column(Modifier.weight(1f)) {
+                        Text(
+                            option.label,
+                            style = MaterialTheme.typography.bodyMedium,
+                            color =
+                                if (option.disabled) MaterialTheme.colorScheme.onSurfaceVariant
+                                else MaterialTheme.colorScheme.onSurface,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                        if (option.description.isNotBlank())
+                            Text(
+                                option.description,
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                    }
+                }
+            }
+        }
+    }
+}
+
 /**
  * A package's declarative fields. Secret values live in their own map and are never prefilled: a
- * saved secret only shows as a placeholder and stays when left blank.
+ * saved secret only shows as a placeholder and stays when left blank. Dynamic choices and errors
+ * come from the package's form handler; fields marked `refresh` ask it again when they change.
  */
 @Composable
 internal fun PluginFields(
@@ -881,11 +1087,19 @@ internal fun PluginFields(
     changeSecret: (String, String) -> Unit,
     saved: List<String> = emptyList(),
     enabled: Boolean = true,
+    options: Map<String, List<PluginOption>> = emptyMap(),
+    errors: Map<String, String> = emptyMap(),
+    refresh: (String) -> Unit = {},
 ) {
     var section = ""
     fields
         .filter { !it.hidden }
         .forEach { field ->
+            fun update(value: String) {
+                change(field.key, value)
+                if (field.refresh) refresh(field.key)
+            }
+            val choices = (if (field.dynamic) options[field.key] else null) ?: field.options
             if (field.section.isNotBlank() && field.section != section) {
                 section = field.section
                 Eyebrow(field.section, Modifier.padding(top = 4.dp))
@@ -893,28 +1107,34 @@ internal fun PluginFields(
             when (field.type) {
                 "boolean" ->
                     Toggle(field.title, values[field.key] == "true") {
-                        if (enabled) change(field.key, it.toString())
+                        if (enabled) update(it.toString())
                     }
                 "select" ->
-                    Choice(
-                        field.title,
-                        values[field.key].orEmpty(),
-                        field.options.map { it.value to it.label },
-                    ) {
-                        change(field.key, it)
-                    }
+                    // Dynamic and self-explaining choices read better as a list.
+                    if (field.dynamic || choices.any { it.description.isNotBlank() || it.disabled })
+                        ChoiceList(field.title, values[field.key].orEmpty(), choices, enabled) {
+                            update(it)
+                        }
+                    else
+                        Choice(
+                            field.title,
+                            values[field.key].orEmpty(),
+                            choices.map { it.value to it.label },
+                        ) {
+                            update(it)
+                        }
                 "multiselect" -> {
                     val chosen =
                         multiselect(values[field.key].orEmpty()).mapNotNull {
                             it.jsonPrimitive.contentOrNull
                         }
                     Text(field.title, style = MaterialTheme.typography.labelLarge)
-                    field.options.forEach { option ->
+                    choices.forEach { option ->
                         Toggle(option.label, option.value in chosen) { checked ->
-                            if (enabled) {
+                            if (enabled && !option.disabled) {
                                 val next =
                                     if (checked) chosen + option.value else chosen - option.value
-                                change(field.key, JsonArray(next.map(::JsonPrimitive)).toString())
+                                update(JsonArray(next.map(::JsonPrimitive)).toString())
                             }
                         }
                     }
@@ -922,13 +1142,17 @@ internal fun PluginFields(
                 "secret" ->
                     OutlinedTextField(
                         secrets[field.key].orEmpty(),
-                        { changeSecret(field.key, it) },
+                        {
+                            changeSecret(field.key, it)
+                            if (field.refresh) refresh(field.key)
+                        },
                         Modifier.fillMaxWidth(),
                         label = { Text(field.title) },
                         singleLine = true,
                         visualTransformation = PasswordVisualTransformation(),
                         keyboardOptions = InputKeyboards.Password,
                         enabled = enabled,
+                        isError = field.key in errors,
                         placeholder = {
                             Text(
                                 if (field.key in saved) "Enregistré · laissez vide pour le garder"
@@ -940,7 +1164,7 @@ internal fun PluginFields(
                     Field(
                         field.title,
                         values[field.key].orEmpty(),
-                        { change(field.key, it) },
+                        { update(it) },
                         lines = if (field.type == "text") 4 else 1,
                         enabled = enabled,
                         keyboardOptions =
@@ -951,12 +1175,15 @@ internal fun PluginFields(
                             },
                     )
             }
-            if (field.description.isNotBlank() && field.type !in setOf("boolean"))
+            val note = errors[field.key] ?: field.description.takeIf { it.isNotBlank() }
+            if (note != null)
                 Text(
-                    field.description,
+                    note,
                     Modifier.padding(start = 4.dp),
                     style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    color =
+                        if (field.key in errors) MaterialTheme.colorScheme.error
+                        else MaterialTheme.colorScheme.onSurfaceVariant,
                 )
         }
 }
@@ -1431,7 +1658,7 @@ internal fun ToneChip(badge: PluginBadge) {
 /** The plugin's brand on its colour, or a puzzle piece for packages without one. */
 @Composable
 internal fun PluginMark(id: String, size: Dp, brand: PluginBrand? = null) {
-    // A package's own mark first, then the bundled ones, then a puzzle piece.
+    // The mark the package declares, or a puzzle piece.
     val declared =
         remember(brand) {
             brand?.let { mark ->
@@ -1446,13 +1673,7 @@ internal fun PluginMark(id: String, size: Dp, brand: PluginBrand? = null) {
                 color?.let { (path ?: PuzzleMark) to it }
             }
         }
-    val known =
-        declared
-            ?: when (id) {
-                "discord" -> DiscordMark to Color(0xFF5865F2)
-                "onepassword" -> OnePasswordMark to Color(0xFF1A285F)
-                else -> null
-            }
+    val known = declared
     Box(
         Modifier.size(size)
             .clip(RoundedCornerShape(size * 0.29f))
@@ -1472,20 +1693,6 @@ private fun filledMark(name: String, path: String) =
     ImageVector.Builder(name, 24.dp, 24.dp, 24f, 24f)
         .addPath(addPathNodes(path), fill = SolidColor(Color.Black))
         .build()
-
-private val DiscordMark by lazy {
-    filledMark(
-        "Discord",
-        "M20.317 4.37a19.8 19.8 0 0 0-4.885-1.515a.074.074 0 0 0-.079.037c-.21.375-.444.864-.608 1.25a18.3 18.3 0 0 0-5.487 0a13 13 0 0 0-.617-1.25a.08.08 0 0 0-.079-.037A19.7 19.7 0 0 0 3.677 4.37a.1.1 0 0 0-.032.027C.533 9.046-.32 13.58.099 18.057a.08.08 0 0 0 .031.057a19.9 19.9 0 0 0 5.993 3.03a.08.08 0 0 0 .084-.028a14 14 0 0 0 1.226-1.994a.076.076 0 0 0-.041-.106a13 13 0 0 1-1.872-.892a.077.077 0 0 1-.008-.128a10 10 0 0 0 .372-.292a.07.07 0 0 1 .077-.01c3.928 1.793 8.18 1.793 12.062 0a.07.07 0 0 1 .078.01q.181.149.373.292a.077.077 0 0 1-.006.127a12.3 12.3 0 0 1-1.873.892a.077.077 0 0 0-.041.107c.36.698.772 1.362 1.225 1.993a.08.08 0 0 0 .084.028a19.8 19.8 0 0 0 6.002-3.03a.08.08 0 0 0 .032-.054c.5-5.177-.838-9.674-3.549-13.66a.06.06 0 0 0-.031-.03M8.02 15.33c-1.182 0-2.157-1.085-2.157-2.419c0-1.333.956-2.419 2.157-2.419c1.21 0 2.176 1.096 2.157 2.42c0 1.333-.956 2.418-2.157 2.418m7.975 0c-1.183 0-2.157-1.085-2.157-2.419c0-1.333.955-2.419 2.157-2.419c1.21 0 2.176 1.096 2.157 2.42c0 1.333-.946 2.418-2.157 2.418",
-    )
-}
-
-private val OnePasswordMark by lazy {
-    filledMark(
-        "1Password",
-        "M12 0c6.627 0 12 5.373 12 12c0 6.628-5.373 12-12 12S0 18.628 0 12C0 5.373 5.373 0 12 0m-.893 4.86c-.485 0-.727.001-.913.095a.87.87 0 0 0-.378.379c-.094.185-.095.428-.095.912v2.747c0 .12 0 .182.016.238q.02.075.065.138a1 1 0 0 0 .175.162l.695.564c.113.092.17.139.19.194a.22.22 0 0 1 0 .15c-.02.056-.077.102-.19.194l-.695.564a1 1 0 0 0-.175.162a.4.4 0 0 0-.065.138a1 1 0 0 0-.016.238v6.019c0 .485 0 .728.095.913a.87.87 0 0 0 .378.378c.186.094.428.094.913.094h1.786c.485 0 .727 0 .913-.094a.87.87 0 0 0 .378-.378c.095-.185.095-.428.095-.913v-2.747c0-.12 0-.182-.016-.238a.4.4 0 0 0-.065-.138a1 1 0 0 0-.175-.162l-.695-.564c-.113-.092-.17-.138-.191-.193a.22.22 0 0 1 0-.152c.02-.055.078-.1.19-.193l.696-.564a1 1 0 0 0 .175-.162a.4.4 0 0 0 .065-.138a1 1 0 0 0 .016-.238V6.246c0-.484 0-.727-.095-.912a.87.87 0 0 0-.378-.379c-.186-.094-.428-.094-.913-.094Z",
-    )
-}
 
 private val PuzzleMark by lazy {
     ImageVector.Builder("Puzzle", 24.dp, 24.dp, 24f, 24f)

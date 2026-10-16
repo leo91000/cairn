@@ -51,9 +51,11 @@ fn valid_default(field: &Value, kind: &str, choices: Option<&[&str]>) -> bool {
         "string" | "text" | "url" => value.as_str().is_some_and(|text| text.len() <= 2000),
         "number" => value.as_f64().is_some_and(f64::is_finite),
         "boolean" => value.is_boolean(),
+        "select" if field["dynamic"] == true => false,
         "select" => value
             .as_str()
             .is_some_and(|text| choices.is_some_and(|choices| choices.contains(&text))),
+        "multiselect" if field["dynamic"] == true => false,
         "multiselect" => value.as_array().is_some_and(|items| {
             items.iter().all(|item| {
                 item.as_str()
@@ -85,10 +87,14 @@ pub fn validate_settings_schema(settings: &[Value]) -> Result<(), &'static str> 
             return Err("Plugin manifest has an invalid setting.");
         }
         let choices = options(field);
-        let needs_options = matches!(kind, "select" | "multiselect");
-        let flags_ok = ["required", "hidden"]
+        let choice = matches!(kind, "select" | "multiselect");
+        // Dynamic choices come from the package's `form` handler while the owner edits.
+        let dynamic = field["dynamic"] == true;
+        let needs_options = choice && !dynamic;
+        let flags_ok = ["required", "hidden", "dynamic", "refresh"]
             .iter()
-            .all(|flag| field.get(*flag).is_none_or(|value| value.is_boolean()));
+            .all(|flag| field.get(*flag).is_none_or(|value| value.is_boolean()))
+            && (!dynamic || choice);
         let limits_ok = ["maxLength", "minimum", "maximum"].iter().all(|limit| {
             field
                 .get(*limit)
@@ -99,13 +105,13 @@ pub fn validate_settings_schema(settings: &[Value]) -> Result<(), &'static str> 
         let pattern_ok = match field.get("pattern") {
             None | Some(Value::Null) => true,
             Some(Value::String(source)) => {
-                matches!(kind, "string" | "text" | "secret" | "url")
+                (matches!(kind, "string" | "text" | "secret" | "url") || dynamic)
                     && super::pattern(source).is_some()
             }
             Some(_) => false,
         };
-        if needs_options != field.get("options").is_some()
-            || (needs_options && choices.is_none())
+        if (needs_options || !dynamic) && needs_options != field.get("options").is_some()
+            || (field.get("options").is_some() && choices.is_none())
             || !flags_ok
             || !limits_ok
             || !pattern_ok

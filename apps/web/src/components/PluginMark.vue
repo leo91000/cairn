@@ -1,12 +1,12 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 import { Puzzle } from '../icons'
-import { brands } from '../plugins'
+import { upcoming } from '../plugins'
 import Icon from './Icon.vue'
 
-// A package's own brand when its manifest declares one, then known brands, then a puzzle.
+// The brand a package's manifest declares; announced plugins use theirs; otherwise a puzzle.
 const props = withDefaults(defineProps<{ plugin: string, size?: number, brand?: { color: string, path?: string } }>(), { size: 44 })
-const color = computed(() => props.brand?.color ?? brands[props.plugin]?.color)
+const color = computed(() => props.brand?.color ?? upcoming[props.plugin]?.color)
 </script>
 
 <template>
@@ -23,6 +23,6 @@ const color = computed(() => props.brand?.color ?? brands[props.plugin]?.color)
       :height="Math.round(size * 0.52)"
       fill="currentColor"
     ><path :d="brand.path" /></svg>
-    <Icon v-else :name="brands[plugin]?.icon ?? Puzzle" :size="Math.round(size * 0.52)" />
+    <Icon v-else :name="upcoming[plugin]?.icon ?? Puzzle" :size="Math.round(size * 0.52)" />
   </span>
 </template>

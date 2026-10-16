@@ -6,6 +6,10 @@ events; the package reaches Cairn only through host capabilities its manifest
 declares and the owner approved. Plugin code never receives `Service`, SQLite, the
 vault key or a connection's credential, and identities always come from the host.
 
+Cairn has no code specific to a plugin. Discord's Gateway session, its setup form,
+its panel and its test are Luau, like 1Password's commands and tools: a package
+written outside this repository can do everything the bundled ones do.
+
 ## Code layout
 
 ```text
@@ -15,19 +19,20 @@ crates/plugin-runtime/  Luau sandbox, handler table, prelude (cairn.storage, htt
 crates/installation/src/plugins/
   registry.rs           Bundled and installed packages, approvals, versions
   connections.rs        Generic instances: settings, secrets, agent grants, delegation
-  runtime.rs            One supervisor per instance that needs a worker: transport, pump
-  capabilities.rs       storage, http, timers, exec and conversations for scripts
+  runtime.rs            One supervisor per instance that needs a worker: socket, pump
+  socket.rs             `socket`: a package's own WebSocket, driven by its transport worker
+  forms.rs              `instanceForm`: the package completes the owner's instance form
+  capabilities.rs       storage, http, timers, exec, inbound and conversations for scripts
   scope.rs              One-shot handlers: who acts, which instances, rechecks
   agents.rs             Commands, Cairn MCP tools and prompt instructions for agents
   panels.rs             Declarative views, actions and tests for the owner
   programs.rs           `exec`: declared programs without a shell
   work.rs               Admission, access requests, event queue, replies
-  discord/              Native Gateway transport and setup discovery only
   cli.rs                `cairn plugin <plugin> <command> …` inside conversations
   legacy.rs             Moves pre-v2 1Password accounts into instances
 plugins/                Bundled packages (1Password, Discord)
 packages/plugin-types/  Luau declarations for package authors
-apps/web/src/           Catalogue, review, generic plugin page and renderer, Discord pages
+apps/web/src/           Catalogue, review, generic plugin page, form and view renderers
 ```
 
 Dependencies point one way: `installation → plugin-host → plugin-api ← plugin-runtime`.
@@ -50,14 +55,17 @@ A manifest declares (fields marked v2 need `"apiVersion": 2`; version 1 manifest
 keep loading):
 
 - `capabilities`: `conversations.submit`, `conversations.control`, `storage`, `http`,
-  `timers`, `transport.discord` and `exec` (v2);
-- `hosts`: the exact HTTPS hostnames `http` may reach;
+  `timers`, and in v2 `exec`, `socket` and `inbound`;
+- `hosts`: the hostnames `http` (HTTPS) and `socket` (WSS) may reach. `*.example.com`
+  covers every subdomain of `example.com`, not the domain itself;
 - `credential`: how Cairn adds an instance's token to authorized requests
   (header and prefix); the script only sets `auth = true`;
 - `settings`: the instance form, in order (`key`, `title`, `type`, `required`,
   `hidden`, `description`, `placeholder`, `section`, `default`, `maxLength`,
-  `minimum`, `maximum`, `pattern`, `options`). Types: `string`, `number`, `boolean`,
-  and in v2 `text`, `url`, `select`, `multiselect` (with `options`) and `secret`;
+  `minimum`, `maximum`, `pattern`, `options`, and in v2 `dynamic` and `refresh`).
+  Types: `string`, `number`, `boolean`, and in v2 `text`, `url`, `select`,
+  `multiselect` (with `options`, or `dynamic: true` for choices the package's form
+  handler provides) and `secret`;
 - `instances` (v2): `{ singular, plural }`, how the interfaces name an instance;
 - `brand` (v2): `{ color: "#rrggbb", path }`, the package's mark (an SVG path on a
   24×24 grid);
@@ -65,8 +73,8 @@ keep loading):
   package may run;
 - `agentAccess` (v2): `{ description }`; the owner grants agents per instance and
   only granted agents get the package's commands, tools and instructions;
-- `commands`, `tools`, `instructions` (v2, need `agentAccess`), `instanceView` and
-  `instanceTest` (v2): see [Contributions](#contributions-api-v2).
+- `commands`, `tools`, `instructions` (v2, need `agentAccess`), `instanceView`,
+  `instanceTest` and `instanceForm` (v2): see [Contributions](#contributions-api-v2).
 
 ## Connections and delegation
 
@@ -82,16 +90,18 @@ with a read-only sandbox and no installation, GitHub, MCP or 1Password access
 per-person hourly limit, and lets only listed people or a conversation's starter
 answer for it or stop it. The
 connection is bound to the owner's current access and the agent's recorded policy.
+The web and Android render this delegation, the people allowed and pending requests,
+hourly usage and recent activity for every package with `conversations.submit`.
 Routes are generic: `/api/plugins/{id}/connections[/{connection}]` with `enabled`,
-`test` and `people/{user}/{approve|deny|remove}` actions, and
+`test` and `people/{user}/{approve|deny|remove}` actions, `/api/plugins/{id}/form`, and
 `/api/plugins/packages[/{id}/approve|activate]` for the registry. Approval includes
 the digest displayed during review; changes require reviewing again.
 
 ## Runtime
 
-For each enabled instance of a package that reacts to people, transports or timers,
-a supervisor starts the package's worker, its native transport if it declares one,
-and a pump. The worker loads the source once and keeps
+For each enabled instance of a package that reacts to people, connections or timers,
+a supervisor starts the package's worker, a second worker driving its socket if it
+declares `socket`, and a pump. Each worker loads the source once and keeps
 its Luau state between events. Handlers run one at a time under a 35-second deadline
 and a 16 MiB memory limit; a stuck or misbehaving worker is killed and restarted with
 backoff. Workers inherit no environment, run in a private temporary directory, never
@@ -102,8 +112,9 @@ Events, all durable until handled (retried up to five times):
 | Event | When | Payload |
 |---|---|---|
 | `start` | each time the worker starts | `{ connectionId, settings }` |
-| `message` | an allowed person wrote through the transport | `{ id, author, content, attachments, … }` |
-| `interaction` | an allowed person pressed a button | `{ id, author, customId, … }` |
+| `socket` | in the transport worker: started, opened, a message, a tick, closed | `{ type, … }`, see [Sockets](#sockets-and-inbound-messages) |
+| `message` (or another kind) | the package admitted something an allowed person wrote | `{ id, author, …context, …body }` |
+| `interaction` | an allowed person pressed a button (Discord's admitted kind) | `{ id, author, customId, … }` |
 | `access_requested` | someone new asked (approval mode) | `{ id, author, … }`, never content |
 | `progress` | every ~8 s while the agent works | `{ deliveryId, conversation, state, step, reply }` |
 | `question` | the agent asks a question (once each) | `{ deliveryId, conversation, question, reply }` |
@@ -145,6 +156,47 @@ Refused calls raise a short error code (`forbidden`, `invalid`, `rate_limited`,
 `packages/plugin-types/cairn.luau` for the full typed reference, and
 `plugins/discord/main.luau` for a complete package.
 
+### Sockets and inbound messages
+
+A package that keeps its own connection, such as a chat platform's gateway, declares
+`socket`. Cairn then starts a transport worker for each enabled instance and sends its
+`socket` handler one event at a time:
+
+| `type` | When | Fields |
+|---|---|---|
+| `start` | the transport worker started | `instance`, `settings` |
+| `open` | a requested connection opened | — |
+| `message` | a text frame arrived (1 MB at most) | `text` |
+| `tick` | the interval set with `every` elapsed | — |
+| `close` | the server closed or the connection failed | `code?`, `reason`, `error?` |
+
+- `cairn.socket.connect{ url, auth? }`: WSS to a declared host, default port, no
+  credentials in the URL. Reconnections slow down (1 s doubling to 60 s) until the
+  package reports `connected`. `auth` adds the instance's credential or a secret to
+  the handshake headers, like `http`.
+- `cairn.socket.send(text, { auth = true | { secret } }?)`: with `auth`, the host
+  replaces `{{secret}}` in the text with the JSON-escaped secret; the script never sees
+  it (Discord's Identify and Resume carry the token this way).
+- `cairn.socket.close(code?)` (1000 or 3000–4999) and `cairn.socket.every(ms, first?)`
+  (100 ms to an hour, `0` stops; ticks stop when the connection closes).
+- `cairn.instance.status(state, message?)`: `connecting` or `connected`, with a short
+  message the owner sees (for example who the bot is signed in as).
+- `cairn.fail(message)` in the transport worker stops the connection until the owner
+  reviews the instance and shows the message, for example after an invalid token.
+
+Commands apply in order once the handler returns. Frames, ticks and connection
+changes run in the transport worker, separate from the worker handling queued events,
+so a slow reply never delays a heartbeat or a three-second acknowledgement.
+
+`cairn.inbound.accept{ kind?, id, author: { id, name }, context?, body? }` (capability
+`inbound`) hands Cairn something a person wrote, from the transport worker or from a
+timer that polls an API. Cairn applies the instance's admission rules before keeping
+anything: people who aren't allowed are dropped without a trace, approval mode
+records a request without content, IDs deduplicate for 30 days, and at most 50 events
+wait per instance. Accepted messages reach the package's `kind` handler (`message` by
+default) with `context` and `body` merged under the host's `id` and `author`, and may
+start conversations for that person. Returns whether it was queued.
+
 Separate processes, capability checks and Luau's sandbox are dogfood boundaries,
 not yet a marketplace guarantee: a public catalogue still needs signed packages,
 OS-level isolation of workers and an update policy. No Codex plugin catalog is
@@ -164,6 +216,7 @@ capability gate as long-lived workers).
 | Prompt instructions | `instructions` | — | — |
 | Instance panel | `instanceView: true` | `view`, `action` | `{ instance }`, `{ action, payload, values, instance }` |
 | Instance test | `instanceTest: true` | `test` | `{ instance }` |
+| Instance form | `instanceForm: true` | `form` | `{ values, credential, secrets, instance, changed, submit }` |
 
 - **Commands** run as `cairn plugin <plugin> <command> …` in conversations.
   Arguments are flags (`{ name, flag: "--vault" }`) or positional values
@@ -191,6 +244,18 @@ capability gate as long-lived workers).
   `submit: { label, action }`). Tones are `neutral`, `info`, `success`, `warning`
   and `danger`. Anything else, or more than 300 components or 64 KB, is refused. An
   `action` returns `{ notice?, tone?, view? }`; a new `view` replaces the panel.
+- **Instance forms** let the package complete the owner's form while they type. The
+  `form` handler runs when the editor opens, when the credential changes and when a
+  field marked `refresh` changes, with the values so far, whether a credential is
+  present, the names of the secrets present and the name of the field that changed.
+  `http` and `exec` use the draft's own credential and secrets, before anything is
+  saved; nothing else is available. It returns `{ options?, values?, errors?, view? }`:
+  choices for `dynamic` fields (`{ value, label, description?, disabled? }`, 200 at
+  most), derived values for declared settings (hidden ones included, never secrets),
+  errors by setting, `credential` or `form`, and a view shown above the fields. On
+  save it runs once more with `submit = true`: its values are applied and checked
+  again, and any error refuses the save with its message. Dynamic choices are checked
+  as text (`pattern`, `maxLength`) by Cairn and by the package itself.
 - A script may call `cairn.fail(message)` to stop with a message for the person
   (300 characters at most). Any other error stays in the worker.
 
@@ -207,12 +272,13 @@ Capabilities for v2 packages:
   adds a secret field to one header of a declared host.
 - `cairn.json.decode(text)` and `cairn.json.encode(value)` convert JSON.
 
-Instance routes add `GET …/connections/{id}/view`, `POST …/connections/{id}/actions`
-and the generic `POST …/connections/{id}/test`. Secret fields are saved with
+Instance routes add `GET …/connections/{id}/view`, `POST …/connections/{id}/actions`,
+the generic `POST …/connections/{id}/test` and `POST /api/plugins/{id}/form`
+(`{ instance?, settings, secrets?, token?, changed? }`). Secret fields are saved with
 `secrets: { key: value }`; an empty or missing value keeps the saved one and the API
 only returns their names (`secretKeys`). Grants are saved as `agentIds`. Instances of
-packages that need no worker (no transport, conversations or timers) start nothing
-and show as ready while enabled.
+packages that need no worker (no socket, inbound messages, conversations or timers)
+start nothing and show as ready while enabled.
 
 ## 1Password
 
@@ -243,36 +309,40 @@ channel. VMs still running the previous binary keep working for 1Password: the h
 accepts their earlier command frame. Non-VM development commands do not acquire a
 new manager network route.
 
-## Discord setup and live test
+## Discord
 
-Atelier → Plugins lists bundled plugins. Discord opens a page per bot (status,
-channel, allowed people, answering agent, hourly usage, recent exchanges and what the
-bot can do) and a four-step setup:
+The bundled Discord package (`plugins/discord/`) is an ordinary v2 package: a bot is
+an instance with a credential, its Gateway session is Luau over `socket` and
+`inbound`, and its setup, panel and test are its `form`, `view` and `test` handlers.
+Atelier → Plugins → Discord shows each bot like any delegating instance: status and
+who it is signed in as, allowed people and requests, answering agent, hourly usage,
+recent activity, what its agent can do, and its panel (server, channel, mode).
 
-1. **Create the bot.** Create an application in the Discord Developer Portal, reset
-   the bot token and paste it into the private field; never send it in chat. Cairn
-   checks it immediately and shows the bot's name.
-2. **Choose a channel.** The generated invite link requests only View Channel, Send
-   Messages and Read Message History. After inviting the bot, pick the server and the
-   channel; channels where the bot can't read or reply are disabled. No
-   administrator permission or Message Content privileged intent is needed: the bot
-   responds only to explicit mentions in that channel.
-3. **Choose people.** Either approve people as they ask (recommended) or allow only
-   listed Discord user IDs. In approval mode, the first mention from someone new gets
-   a one-time “waiting for approval” reply and a request on the bot's page; nothing
-   they wrote is stored. Denied requests stay silent. The owner can approve their own
-   first mention instead of looking up IDs.
-4. **Agent & limits.** Only agents restricted to one project at most, with
-   installation access disabled, can be selected; the bot works in that agent's
-   project. Set the name and per-hour message limit, review the summary and activate.
+Adding a bot, on the web or Android:
 
-The Discord package splits native and scripted work. Rust keeps the Gateway
-connection (heartbeat, resume, reconnects), tracks threads under the configured
-channel, acknowledges button presses within Discord's three-second limit, and
-delivers only messages for the bot: mentions in the channel or its threads, plus,
-when the owner enables Message Content in both the Developer Portal and the setup,
-replies in those threads or to the bot without a mention. Setup discovery is native
-too. The Luau script does the rest:
+1. **Token.** Create an application in the Discord Developer Portal, reset the bot
+   token and paste it into the private field; never send it in chat. The form handler
+   checks it right away and shows the bot's name and an invite link.
+2. **Server and channel.** The invite requests only what the bot needs (below). The
+   form lists the servers the bot was invited to, then the channels with Discord's
+   permission resolution: channels where the bot can't read or reply are disabled,
+   and channels without thread permissions say replies stay in the channel.
+3. **Reading.** By default the bot sees mentions only, which needs no privileged
+   intent. “Read replies without a mention” (Message Content, enabled in the Portal
+   too) also delivers replies in its threads or to the bot; “Answer every message in
+   the channel” turns it on.
+4. **People, agent and limits**, like every delegating plugin: approve people as they
+   ask (recommended), only listed Discord user IDs, or anyone with a read-only agent;
+   an agent restricted to one project at most without installation access; an hourly
+   limit.
+
+The transport worker identifies (or resumes) with the bot token injected by the host,
+sends heartbeats and reconnects when Discord asks, when acknowledgements stop or when
+the connection drops; an invalid token or disallowed intents stop the bot until it is
+reviewed. It tracks threads under the configured channel, acknowledges button presses
+within Discord's three-second limit and admits only messages for the bot: mentions in
+the channel or its threads, plus, with Message Content, replies in those threads or to
+the bot. The event worker does the rest:
 
 - reacts 👀 on receipt and opens a thread named after the request, so each
   conversation lives in its own thread (it stays in the channel if the bot can't
@@ -285,20 +355,19 @@ too. The Luau script does the rest:
   the turn's deliverables as files (up to 10 MB each, otherwise noted as available
   in Cairn), then marks the request ✅, ❌ or ⏹;
 - answers access requests once, using storage to remember who was told;
-- with “Answer every message in the channel” (needs Message Content), treats every
-  new message in the channel as a request. Messages that don't mention the bot are
-  handled quietly: the agent is told it may answer exactly `NO_REPLY`, in which case
-  nothing is posted; otherwise the thread opens only when the answer, a question or
-  progress needs to be shown.
+- with “Answer every message in the channel”, treats every new message in the channel
+  as a request. Messages that don't mention the bot are handled quietly: the agent is
+  told it may answer exactly `NO_REPLY`, in which case nothing is posted; otherwise
+  the thread opens only when the answer, a question or progress needs to be shown.
 
 The bot needs View Channel, Send Messages, Read Message History, Add Reactions,
 Attach Files, Create Public Threads and Send Messages in Threads; the generated
 invite requests exactly these.
 
-Setup discovery (bot identity, servers, channels and permission resolution, user
-names) runs on the installation with the pasted or saved token; the token is never
-returned to the browser. Names are display labels only; authorization always uses IDs.
-Discord avatars are not loaded, keeping the browser off Discord's CDN.
+The form handler runs on the installation with the pasted or saved token; the token is
+never returned to the browser or the script. Names are display labels only;
+authorization always uses IDs. Discord avatars are not loaded, keeping the browser off
+Discord's CDN.
 
 Live test: activate the bot, wait for Online, mention it from an approved person and
 confirm a shared Cairn conversation appears and its final answer returns to Discord.
@@ -319,9 +388,10 @@ reviews and saves it again. Delegations are bound to the owner's current install
 access; authority unavailability postpones admission and delivery.
 
 A bot runs independently of conversation VMs while the installation worker is enabled.
-The adapter maintains Gateway heartbeat, ACK checks, resumable sessions and reconnect
-backoff. It uses guild and guild-message intents, ignores bots/webhooks, and checks
-server/channel/user grants before persisting message content. People approved,
+Its transport worker keeps Gateway heartbeats, acknowledgement checks and resumable
+sessions; the host paces reconnections. It uses guild and guild-message intents,
+ignores bots and webhooks, and Cairn checks people's grants before keeping message
+content. People approved,
 denied or removed on the bot's page apply to the next message without restarting the
 Gateway session. Accepted messages enter the connection's durable event queue and
 deduplicate for 30 days. Submission and conversation binding are
@@ -344,14 +414,17 @@ Synthetic tests cover manifest validation, worker sandboxing, persistent script
 state, refused-call codes, capability denial, memory limits, per-event deadlines,
 API incompatibility, owner-only management, encrypted credentials, MCP secret-read
 denial, live grants, ingress deduplication, rate limits, changed agent access,
-final-answer correlation, Gateway heartbeats/resume state, channel permission
-resolution, access requests and approvals. The real Discord script runs end to end
-against a mock Discord API (mention handling, chunked replies, rate-limit retries
-with stable nonces, disabled mentions, one-time notices). Registry tests cover
+final-answer correlation, access requests and approvals. The real Discord package runs
+end to end against a mock Discord API and a local Gateway: Identify with the injected
+token, heartbeats with the last sequence, replay deduplication, Resume after a
+reconnect request, an invalid token stopping the bot, the setup form's permission
+resolution, invite link and errors, socket host checks, mention handling, chunked
+replies, rate-limit retries with stable nonces, disabled mentions and one-time
+notices. Registry tests cover
 upload validation, approval, tamper detection, updates, rollback, uninstall and an
 installed package using timers, storage and credentialed HTTP limited to declared
-hosts without following redirects. Browser journeys cover the guided Discord setup,
-people management, and installing, approving, connecting and uninstalling a package,
-on desktop and mobile.
+hosts without following redirects. Browser journeys cover setting up a Discord bot
+through its package form, people management, and installing, approving, connecting
+and uninstalling a package, on desktop and mobile.
 These are local fixture tests, not evidence of a real Discord connection or a
 production deployment.

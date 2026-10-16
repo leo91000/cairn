@@ -12,7 +12,7 @@ use cairn_installation::{
     plugins::{
         capabilities,
         connections::{self, Connection},
-        discord, registry, runtime, work,
+        registry, runtime, socket, work,
     },
     service::Service,
     validation::text,
@@ -89,15 +89,80 @@ fn message(id: &str, author: &str, content: &str) -> Value {
     })
 }
 
+/// Feeds one Gateway dispatch to the Discord package's transport worker, after READY
+/// and the given threads under the channel, as Discord would. Returns whether a
+/// person's message was queued for the package (access requests are not).
+async fn gateway(
+    s: &Service,
+    connection: &Connection,
+    threads: &[&str],
+    name: &str,
+    data: Value,
+) -> cairn_installation::error::Result<bool> {
+    let mut session = session(s, "discord").await;
+    let (link, _commands) = socket::Link::channel();
+    let mut frames = vec![(
+        "READY",
+        json!({ "session_id": "synthetic_session", "user": { "id": "400", "username": "Cairn", "bot": true } }),
+    )];
+    for thread in threads {
+        frames.push((
+            "THREAD_CREATE",
+            json!({ "id": thread, "guild_id": "100", "parent_id": "200" }),
+        ));
+    }
+    frames.push((name, data));
+    let start = json!({ "type": "start", "settings": connection.settings });
+    let result = async {
+        socket::deliver(s, connection, &mut session, &link, start).await?;
+        let personal = || async {
+            let events = s.store.list(work::EVENTS).await?;
+            cairn_installation::error::Result::Ok(
+                events
+                    .iter()
+                    .filter(|event| event["authorId"].is_string())
+                    .count(),
+            )
+        };
+        let mut queued = false;
+        for (sequence, (name, data)) in frames.into_iter().enumerate() {
+            let before = personal().await?;
+            let frame = json!({ "op": 0, "s": sequence + 1, "t": name, "d": data });
+            let event = json!({ "type": "message", "text": frame.to_string() });
+            socket::deliver(s, connection, &mut session, &link, event).await?;
+            queued = personal().await? > before;
+        }
+        Ok(queued)
+    }
+    .await;
+    session.stop().await;
+    result
+}
+
 async fn accept(
     s: &Service,
     connection: &Connection,
     value: Value,
 ) -> cairn_installation::error::Result<bool> {
-    match discord::inbound(connection, "400", &std::collections::HashSet::new(), &value) {
-        Some(inbound) => work::accept(s, connection, inbound).await,
-        None => Ok(false),
-    }
+    gateway(s, connection, &[], "MESSAGE_CREATE", value).await
+}
+
+async fn accept_in(
+    s: &Service,
+    connection: &Connection,
+    threads: &[&str],
+    value: Value,
+) -> cairn_installation::error::Result<bool> {
+    gateway(s, connection, threads, "MESSAGE_CREATE", value).await
+}
+
+async fn interact(
+    s: &Service,
+    connection: &Connection,
+    threads: &[&str],
+    value: Value,
+) -> cairn_installation::error::Result<bool> {
+    gateway(s, connection, threads, "INTERACTION_CREATE", value).await
 }
 
 /// What a handler acts for: here, the Discord package handling `event`.
@@ -106,6 +171,8 @@ fn context(connection: &Connection, event: &Value) -> capabilities::Context {
         connection: connection.clone(),
         manifest: registry::builtin("discord").unwrap().manifest,
         event: event.clone(),
+        link: None,
+        draft: None,
     }
 }
 
@@ -500,15 +567,14 @@ async fn discord_script_runs_a_conversation_in_a_thread_end_to_end() {
     let custom = text(&buttons[1], "custom_id").to_owned();
 
     // A button press is acknowledged by the transport and answers the agent.
-    let mut threads = std::collections::HashSet::new();
-    threads.insert("500".to_owned());
+    let threads = ["500"];
     let click = json!({
         "id": "800", "token": "synthetic_interaction", "type": 3, "guild_id": "100", "channel_id": "500",
         "member": { "user": { "id": "300", "username": "sarah" } },
         "message": { "id": "9002", "author": { "id": "400" } },
         "data": { "custom_id": custom },
     });
-    discord::interact(&s, &connection, "400", &threads, &click)
+    interact(&s, &connection, &threads, click.clone())
         .await
         .unwrap();
     assert_eq!(
@@ -635,13 +701,9 @@ async fn discord_script_runs_a_conversation_in_a_thread_end_to_end() {
     let mut follow = message("501", "300", "<@400> also check staging");
     follow["channel_id"] = json!("500");
     assert!(
-        work::accept(
-            &s,
-            &connection,
-            discord::inbound(&connection, "400", &threads, &follow).unwrap()
-        )
-        .await
-        .unwrap()
+        accept_in(&s, &connection, &threads, follow.clone())
+            .await
+            .unwrap()
     );
     runtime::pump(&s, &connection, &mut session).await.unwrap();
     assert_eq!(
@@ -651,13 +713,9 @@ async fn discord_script_runs_a_conversation_in_a_thread_end_to_end() {
     );
     let mut stop = message("502", "300", "<@400> stop");
     stop["channel_id"] = json!("500");
-    work::accept(
-        &s,
-        &connection,
-        discord::inbound(&connection, "400", &threads, &stop).unwrap(),
-    )
-    .await
-    .unwrap();
+    accept_in(&s, &connection, &threads, stop.clone())
+        .await
+        .unwrap();
     runtime::pump(&s, &connection, &mut session).await.unwrap();
     assert_eq!(s.get("chats", &chat).await.unwrap()["paused"], true);
     assert_eq!(
@@ -743,17 +801,17 @@ async fn public_support_channels_need_a_limited_agent_and_stay_quiet_when_nothin
         .await
         .is_err()
     );
+    // Answering every message needs Message Content: the package turns it on.
     let missing = json!({ "guildId": "100", "channelId": "200", "everyMessage": true });
-    assert!(
-        connections::save(
-            &s,
-            "discord",
-            &input(&support, missing),
-            Some(&connection.id)
-        )
-        .await
-        .is_err()
-    );
+    let saved = connections::save(
+        &s,
+        "discord",
+        &input(&support, missing),
+        Some(&connection.id),
+    )
+    .await
+    .unwrap();
+    assert_eq!(saved["settings"]["messageContent"], true);
     let saved = connections::save(
         &s,
         "discord",
@@ -847,8 +905,7 @@ async fn public_support_channels_need_a_limited_agent_and_stay_quiet_when_nothin
     );
 
     // Only whoever started a conversation can stop it.
-    let mut threads = std::collections::HashSet::new();
-    threads.insert("601".to_owned());
+    let threads = ["601"];
     let stop = |id: &str, author: &str| {
         let mut value = message(id, author, "<@400> stop");
         value["channel_id"] = json!("601");
@@ -857,8 +914,9 @@ async fn public_support_channels_need_a_limited_agent_and_stay_quiet_when_nothin
     let binding = s.store.list(connections::KIND).await.unwrap();
     assert_eq!(binding[0]["accessMode"], "everyone");
     for (id, author) in [("603", "302"), ("604", "301")] {
-        let inbound = discord::inbound(&connection, "400", &threads, &stop(id, author)).unwrap();
-        work::accept(&s, &connection, inbound).await.unwrap();
+        accept_in(&s, &connection, &threads, stop(id, author))
+            .await
+            .unwrap();
         runtime::pump(&s, &connection, &mut session).await.unwrap();
     }
     assert_eq!(
@@ -1326,8 +1384,7 @@ async fn public_question_partial_answers_require_the_starters_authority() {
         connection.id,
         cairn_installation::auth::hex_digest(&format!("question:520:{question}"))
     );
-    let mut threads = std::collections::HashSet::new();
-    threads.insert("520".into());
+    let threads = ["520"];
     // A stranger's button cannot poison the first field.
     let click = json!({
         "id": "801", "token": "synthetic_interaction", "type": 3, "guild_id": "100", "channel_id": "520",
@@ -1335,7 +1392,7 @@ async fn public_question_partial_answers_require_the_starters_authority() {
         "message": { "id": "9002", "author": { "id": "400" } },
         "data": { "custom_id": format!("a:{question}:0:1") },
     });
-    discord::interact(&s, &connection, "400", &threads, &click)
+    interact(&s, &connection, &threads, click.clone())
         .await
         .unwrap();
     runtime::pump(&s, &connection, &mut session).await.unwrap();
@@ -1351,13 +1408,9 @@ async fn public_question_partial_answers_require_the_starters_authority() {
     ] {
         let mut value = message(id, author, answer);
         value["channel_id"] = json!("520");
-        work::accept(
-            &s,
-            &connection,
-            discord::inbound(&connection, "400", &threads, &value).unwrap(),
-        )
-        .await
-        .unwrap();
+        accept_in(&s, &connection, &threads, value.clone())
+            .await
+            .unwrap();
         runtime::pump(&s, &connection, &mut session).await.unwrap();
     }
     let queued = s
@@ -1516,7 +1569,7 @@ async fn channel_fallback_questions_retry_and_controls_route_to_the_right_conver
         .unwrap();
     assert_eq!(pending["status"], "answering");
     // Stop buttons include the explicit conversation even without a shared thread.
-    discord::interact(&s, &connection, "400", &std::collections::HashSet::new(), &json!({
+    interact(&s, &connection, &[], json!({
         "id": "802", "token": "synthetic_interaction", "type": 3, "guild_id": "100", "channel_id": "200",
         "member": { "user": { "id": "300", "username": "sarah" } },
         "message": { "id": "9002", "author": { "id": "400" } },
