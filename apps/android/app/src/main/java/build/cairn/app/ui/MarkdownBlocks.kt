@@ -7,6 +7,7 @@ import android.text.Spannable
 import android.text.SpannableStringBuilder
 import android.text.Spanned
 import android.text.method.LinkMovementMethod
+import android.text.style.ClickableSpan
 import android.text.style.LeadingMarginSpan
 import android.view.ActionMode
 import android.view.Menu
@@ -20,8 +21,9 @@ import build.cairn.app.diagnostics.Performance
 import io.noties.markwon.Markwon
 import io.noties.markwon.core.spans.BulletListItemSpan
 import io.noties.markwon.core.spans.OrderedListItemSpan
-import io.noties.markwon.ext.tables.TableAwareMovementMethod
+import io.noties.markwon.ext.tables.TableRowSpan
 import io.noties.markwon.ext.tables.TableSpan
+import io.noties.markwon.ext.tables.TableTheme
 import kotlinx.coroutines.flow.first
 import org.commonmark.ext.gfm.strikethrough.StrikethroughExtension
 import org.commonmark.ext.gfm.tables.TableBlock
@@ -159,8 +161,7 @@ internal class MarkdownTextView(context: Context, copyText: (() -> String)? = nu
                     buffer: Spannable,
                     event: MotionEvent,
                 ): Boolean =
-                    TableAwareMovementMethod.handleTableRowTouchEvent(widget, buffer, event) ||
-                        super.onTouchEvent(widget, buffer, event)
+                    tableLink(widget, buffer, event) || super.onTouchEvent(widget, buffer, event)
             }
         if (copyText != null)
             customSelectionActionModeCallback =
@@ -185,6 +186,49 @@ internal class MarkdownTextView(context: Context, copyText: (() -> String)? = nu
 
                     override fun onDestroyActionMode(mode: ActionMode) = Unit
                 }
+    }
+
+    /** Markwon's table hit test omits the leading margin and the cell's drawing offsets. */
+    private fun tableLink(widget: TextView, buffer: Spannable, event: MotionEvent): Boolean {
+        if (event.action != MotionEvent.ACTION_UP) return false
+        val layout = widget.layout ?: return false
+        val y = event.y - widget.totalPaddingTop + widget.scrollY
+        if (y < 0 || y >= layout.height) return false
+        val line = layout.getLineForVertical(y.toInt())
+        val row =
+            buffer
+                .getSpans(
+                    layout.getLineStart(line),
+                    layout.getLineEnd(line),
+                    TableRowSpan::class.java,
+                )
+                .firstOrNull() ?: return false
+        // Cell layouts are created on the first draw, which may still be pending.
+        val width = runCatching { row.cellWidth() }.getOrDefault(0)
+        if (width <= 0) return false
+        val x =
+            event.x - widget.totalPaddingLeft + widget.scrollX -
+                layout.getPrimaryHorizontal(buffer.getSpanStart(row))
+        if (x < 0) return false
+        val cell = row.findLayoutForHorizontalOffset(x.toInt()) ?: return false
+        val padding = TableTheme.create(context).tableCellPadding()
+        val rowHeight =
+            (0 until (bound?.tableColumns ?: 0)).maxOfOrNull {
+                row.findLayoutForHorizontalOffset(it * width)!!.height
+            } ?: return false
+        // TableRowSpan draws each cell after this additional quarter of the row's spare height.
+        val spare = (layout.getLineBottom(line) - layout.getLineTop(line) - rowHeight) / 4
+        val cellY = y - layout.getLineTop(line) - padding - spare
+        val cellX = x % width - padding
+        if (cellY < 0 || cellY >= cell.height) return false
+        val cellLine = cell.getLineForVertical(cellY.toInt())
+        if (cellX < cell.getLineLeft(cellLine) || cellX > cell.getLineRight(cellLine)) return false
+        val offset = cell.getOffsetForHorizontal(cellLine, cellX)
+        val text = cell.text as? Spanned ?: return false
+        val link =
+            text.getSpans(offset, offset, ClickableSpan::class.java).firstOrNull() ?: return false
+        link.onClick(widget)
+        return true
     }
 
     fun bind(markwon: Markwon, block: MarkdownBlock) {

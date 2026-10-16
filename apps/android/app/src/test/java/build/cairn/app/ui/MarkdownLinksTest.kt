@@ -13,6 +13,7 @@ import io.noties.markwon.Markwon
 import io.noties.markwon.MarkwonConfiguration
 import io.noties.markwon.ext.tables.TablePlugin
 import io.noties.markwon.ext.tables.TableRowSpan
+import io.noties.markwon.ext.tables.TableTheme
 import org.junit.Assert.*
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -25,8 +26,13 @@ import org.robolectric.annotation.GraphicsMode
 @Config(sdk = [36])
 @GraphicsMode(GraphicsMode.Mode.NATIVE)
 class MarkdownLinksTest {
-    @Test
-    fun `first tap opens a link inside a table cell`() {
+    @Test fun `first tap opens a link inside a table cell`() = tableLink("")
+
+    @Test fun `first tap opens a short link inside a quoted table`() = tableLink("> ")
+
+    @Test fun `first tap opens a short link inside a listed table`() = tableLink("    ")
+
+    private fun tableLink(nesting: String) {
         Robolectric.buildActivity(Activity::class.java).setup().use { controller ->
             val activity = controller.get()
             val opened = mutableListOf<String>()
@@ -49,9 +55,12 @@ class MarkdownLinksTest {
                 markwon,
                 MarkdownBlocks(markwon)
                     .render(
-                        "| Name | Reference |\n| --- | --- |\n| One | [Documentation](https://example.com) |"
+                        (if (nesting == "    ") "1. List item\n\n" else "") +
+                            "| Name | Reference |\n| --- | --- |\n| One | prefix [X](https://example.com) suffix more plain words |"
+                                .lineSequence()
+                                .joinToString("\n") { nesting + it }
                     )
-                    .single(),
+                    .single { it.tableColumns > 0 },
             )
             val bitmap = Bitmap.createBitmap(800, 500, Bitmap.Config.ARGB_8888)
             repeat(3) {
@@ -70,8 +79,19 @@ class MarkdownLinksTest {
                 }
             val line = view.layout.getLineForOffset(text.getSpanStart(row))
             val cell = row.findLayoutForHorizontalOffset(row.cellWidth() + 1)!!
-            val x = row.cellWidth() + cell.getPrimaryHorizontal(3)
-            val y = view.layout.getLineTop(line) + cell.getLineBottom(0) / 2f
+            val content = cell.text as Spanned
+            val link = content.getSpans(0, content.length, ClickableSpan::class.java).single()
+            val padding = TableTheme.create(activity).tableCellPadding()
+            val rowHeight = maxOf(row.findLayoutForHorizontalOffset(1)!!.height, cell.height)
+            val extra =
+                (view.layout.getLineBottom(line) - view.layout.getLineTop(line) - rowHeight) / 4
+            val x =
+                view.layout.getPrimaryHorizontal(text.getSpanStart(row)) +
+                    row.cellWidth() +
+                    padding +
+                    (cell.getPrimaryHorizontal(content.getSpanStart(link)) +
+                        cell.getPrimaryHorizontal(content.getSpanEnd(link))) / 2f
+            val y = view.layout.getLineTop(line) + padding + extra + cell.getLineBottom(0) / 2f
             val time = SystemClock.uptimeMillis()
             for ((action, delay) in
                 listOf(MotionEvent.ACTION_DOWN to 0, MotionEvent.ACTION_UP to 50)) {
