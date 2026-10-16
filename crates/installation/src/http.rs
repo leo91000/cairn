@@ -38,7 +38,13 @@ enum RateLimitSubject {
     Account(String),
 }
 
-type RateLimits = HashMap<(RateLimitSubject, String), (i64, u32)>;
+struct RateLimitWindow {
+    expires: i64,
+    requests: u32,
+    reported: bool,
+}
+
+type RateLimits = HashMap<(RateLimitSubject, String), RateLimitWindow>;
 
 pub async fn router(service: Arc<Service>) -> Result<Router> {
     let maintenance = secret(&service.config.data_dir, "maintenance-token").await?;
@@ -127,7 +133,13 @@ async fn security(State(app): State<App>, mut request: Request, next: Next) -> R
         );
     let head = request.method() == "HEAD";
     let outcome = (|| {
-        check_security(&app, request.headers(), &path, &subject)?;
+        check_security(
+            &app,
+            request.headers(),
+            request.method().as_str(),
+            &path,
+            &subject,
+        )?;
         authenticate_installation(&request)
     })();
     let mut response = match outcome {
@@ -199,12 +211,18 @@ fn is_node_traffic(path: &str) -> bool {
         || path.starts_with("/internal/node-workspace/")
 }
 
-/// Requests per minute shared by every path of a Cairn account or machine peer: `(bucket, limit)`.
-fn general_limit(path: &str) -> (&'static str, u32) {
+/// Requests per minute shared across paths, with separate account reads and writes.
+fn general_limit(subject: &RateLimitSubject, method: &str, path: &str) -> (&'static str, u32) {
     if is_node_traffic(path) {
         ("nodes", 100_000)
     } else if path.starts_with("/mcp-gateway/") {
         ("", 600)
+    } else if matches!(subject, RateLimitSubject::Account(_)) {
+        if matches!(method, "GET" | "HEAD") {
+            ("reads", 300)
+        } else {
+            ("writes", 300)
+        }
     } else {
         ("", 300)
     }
@@ -214,26 +232,43 @@ fn too_many_requests() -> Error {
     Error::too_many_requests("Too many requests. Try again later.")
 }
 
-fn rate_limit(app: &App, subject: &RateLimitSubject, path: &str) -> Result<()> {
+fn rate_limit(app: &App, subject: &RateLimitSubject, method: &str, path: &str) -> Result<()> {
     let mut limits = app.limits.lock().unwrap();
     // Expiration also bounds memory used by unauthenticated clients.
     if limits.len() > 10000 {
-        limits.retain(|_, (expires, _)| *expires > now());
+        limits.retain(|_, window| window.expires > now());
         if limits.len() > 10000 {
             return Err(too_many_requests());
         }
     }
-    let (bucket, max) = general_limit(path);
+    let (bucket, max) = general_limit(subject, method, path);
     let buckets = std::iter::once((bucket, max, 60_000));
     for (key, max, window) in buckets {
         let entry = limits
             .entry((subject.clone(), key.to_owned()))
-            .or_insert((now() + window, 0));
-        if entry.0 <= now() {
-            *entry = (now() + window, 0);
+            .or_insert(RateLimitWindow {
+                expires: now() + window,
+                requests: 0,
+                reported: false,
+            });
+        if entry.expires <= now() {
+            *entry = RateLimitWindow {
+                expires: now() + window,
+                requests: 0,
+                reported: false,
+            };
         }
-        entry.1 += 1;
-        if entry.1 > max {
+        entry.requests = entry.requests.saturating_add(1);
+        if entry.requests > max {
+            if !entry.reported {
+                entry.reported = true;
+                tracing::warn!(
+                    bucket,
+                    limit = max,
+                    authenticated = matches!(subject, RateLimitSubject::Account(_)),
+                    "Installation HTTP rate limit exceeded"
+                );
+            }
             return Err(too_many_requests());
         }
     }
@@ -248,6 +283,7 @@ fn development_origin(origin: &str) -> bool {
 fn check_security(
     app: &App,
     headers: &HeaderMap,
+    method: &str,
     path: &str,
     subject: &RateLimitSubject,
 ) -> Result<()> {
@@ -277,7 +313,7 @@ fn check_security(
     {
         return Err(Error::forbidden("Unexpected origin."));
     }
-    rate_limit(app, subject, path)?;
+    rate_limit(app, subject, method, path)?;
     Ok(())
 }
 
