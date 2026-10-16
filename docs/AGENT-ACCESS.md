@@ -5,7 +5,7 @@ registered projects, available skills, and shared connections, including future
 additions. Its model, instructions, timeout, and execution mode are editable;
 its resource access cannot be reduced and it cannot be deleted.
 1Password service accounts are an explicit exception: even Main needs a grant
-under **Connections → 1Password**. Those grants can be revoked live; see
+under **Plugins → 1Password**. Those grants can be revoked live; see
 [1Password access](ONEPASSWORD.md).
 
 **Allow access to the current Cairn installation** is also opt-in, including for

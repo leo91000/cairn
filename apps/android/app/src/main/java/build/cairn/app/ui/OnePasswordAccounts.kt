@@ -1,26 +1,15 @@
 package build.cairn.app.ui
 
-import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import build.cairn.app.data.*
-import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.*
-
-@Serializable
-data class OnePasswordAccount(
-    val id: String = "",
-    val name: String = "",
-    val enabled: Boolean = true,
-    val agentIds: List<String> = emptyList(),
-)
 
 @Composable
 fun OnePasswordAccounts(vm: CairnViewModel, state: Workspace) {
@@ -45,17 +34,8 @@ fun OnePasswordAccounts(vm: CairnViewModel, state: Workspace) {
     }
     Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically) {
-            Box(
-                Modifier.size(36.dp)
-                    .clip(RoundedCornerShape(11.dp))
-                    .background(MaterialTheme.colorScheme.surfaceVariant),
-                contentAlignment = Alignment.Center,
-            ) {
-                Icon(CairnIcons.Key, null, Modifier.size(18.dp))
-            }
-            Spacer(Modifier.width(12.dp))
             Column(Modifier.weight(1f)) {
-                Text("1Password", style = MaterialTheme.typography.titleSmall)
+                Text("Comptes de service", style = MaterialTheme.typography.titleMedium)
                 val agents =
                     accounts
                         .filter { it.enabled }
@@ -84,6 +64,12 @@ fun OnePasswordAccounts(vm: CairnViewModel, state: Workspace) {
                 Text("Ajouter")
             }
         }
+        if (loaded && accounts.isEmpty())
+            Text(
+                "Créez dans 1Password un compte de service en lecture sur les coffres utiles à vos agents, puis ajoutez son token ici.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
         if (!loaded && error != null)
             TextButton(onClick = { vm.perform { load() } }, enabled = !state.busy) {
                 Text("Réessayer 1Password")

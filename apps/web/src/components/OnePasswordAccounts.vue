@@ -2,7 +2,6 @@
 import { computed, onMounted, ref } from 'vue'
 import { api, notify } from '../api'
 import {
-  BrandOnePassword,
   CheckCircle2,
   Pencil,
   Plus,
@@ -100,14 +99,13 @@ onMounted(() => action(load))
 </script>
 
 <template>
-  <section aria-label="1Password accounts" class="grid gap-3 border-b border-line px-4.5 py-4 last:border-0 phone:px-4">
-    <div class="flex items-center gap-3">
-      <span class="grid size-[38px] shrink-0 place-items-center rounded-[30%] bg-hover text-ink"><Icon :name="BrandOnePassword" :size="19" /></span>
+  <section aria-label="1Password accounts" class="grid min-w-0 grid-cols-[minmax(0,1fr)] gap-3 rounded-2xl border border-line bg-surface p-5 phone:p-4">
+    <div class="flex flex-wrap items-center gap-3">
       <div class="min-w-0 flex-1">
-        <h3 class="text-sm font-semibold">
-          1Password
-        </h3>
-        <p class="truncate text-xs text-muted">
+        <h2 class="text-[15px]! font-bold">
+          Service accounts
+        </h2>
+        <p class="text-xs text-muted">
           {{ !loaded ? 'Loading…' : accounts.length ? `${accounts.length} service ${accounts.length === 1 ? 'account' : 'accounts'} · shared with ${sharedWith} ${sharedWith === 1 ? 'agent' : 'agents'}` : 'No 1Password service accounts yet.' }}
         </p>
       </div>
@@ -115,6 +113,9 @@ onMounted(() => action(load))
         <Icon :name="Plus" :size="14" />Add service account
       </UiButton>
     </div>
+    <p v-if="loaded && !accounts.length" class="rounded-xl border border-dashed border-line px-4 py-5 text-center text-xs leading-relaxed text-muted">
+      Create a service account in 1Password with read access to the vaults your agents need, then add its token here.
+    </p>
     <UiAlert v-if="error && !open && !removing">
       {{ error }}
     </UiAlert>

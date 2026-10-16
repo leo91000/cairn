@@ -20,7 +20,9 @@ import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
 import kotlinx.serialization.json.putJsonArray
 
-/** The accounts coding agents run on, grouped by coding agent, then the tools agents reach. */
+/**
+ * The accounts coding agents run on, grouped by coding agent, then the GitHub identity they use.
+ */
 @Composable
 fun ConnectionsScreen(vm: CairnViewModel, state: Workspace, openRun: (String) -> Unit = {}) {
     var view by remember { mutableStateOf<AccountsView?>(null) }
@@ -63,7 +65,7 @@ fun ConnectionsScreen(vm: CairnViewModel, state: Workspace, openRun: (String) ->
     ) {
         ScreenTitle(
             "Connexions",
-            "Les comptes de vos agents et leurs outils.",
+            "Les comptes de vos agents et leur identité GitHub.",
             Modifier.padding(start = 4.dp, bottom = 10.dp),
         ) {
             RoundAction(
@@ -133,11 +135,9 @@ fun ConnectionsScreen(vm: CairnViewModel, state: Workspace, openRun: (String) ->
                     opened = it.id
                 }
             }
-        Eyebrow("Outils", Modifier.padding(start = 4.dp, top = 14.dp))
+        Eyebrow("GitHub", Modifier.padding(start = 4.dp, top = 14.dp))
         SignalCard(Modifier.fillMaxWidth(), padding = PaddingValues(0.dp)) {
             GithubConnection(vm, state)
-            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
-            OnePasswordAccounts(vm, state)
         }
     }
     accounts

@@ -115,7 +115,7 @@ async function save() {
     form.value.token = ''
     editing.value = undefined
     await load()
-    notify('Connection saved')
+    notify('Instance saved')
   })
 }
 
@@ -182,7 +182,7 @@ onBeforeUnmount(() => {
             <Icon :name="ShieldCheck" :size="15" />Access and versions
           </UiButton>
           <UiButton v-if="entry.active" variant="primary" @click="edit(null)">
-            <Icon :name="Plus" :size="15" />Add connection
+            <Icon :name="Plus" :size="15" />Add instance
           </UiButton>
         </div>
       </div>
@@ -196,14 +196,14 @@ onBeforeUnmount(() => {
       </div>
       <div v-if="entry.status !== 'active'" class="mt-5 flex items-center gap-3 rounded-2xl bg-warning-surface px-4 py-3 text-xs text-warning" role="status">
         <Icon :name="TriangleAlert" :size="17" />
-        <span class="flex-1">{{ entry.status === 'update' ? 'A new version is waiting for your review.' : 'Review and approve this plugin before connecting it.' }}</span>
+        <span class="flex-1">{{ entry.status === 'update' ? 'A new version is waiting for your review.' : 'Review and approve this plugin before adding an instance.' }}</span>
         <UiButton size="small" class="bg-surface" @click="reviewing = true">
           Review
         </UiButton>
       </div>
 
       <p v-if="loaded && !connections.length && entry.active" class="mt-6 rounded-2xl border border-dashed border-line p-6 text-center text-sm text-muted">
-        No connections yet.
+        No instances yet. Add one to start using this plugin.
       </p>
       <article
         v-for="connection in connections"
@@ -307,7 +307,7 @@ onBeforeUnmount(() => {
       @changed="load"
     />
 
-    <Modal v-if="editing !== undefined && manifest" :title="editing ? `Edit ${editing.name}` : `Connect ${manifest.name}`" @close="editing = undefined">
+    <Modal v-if="editing !== undefined && manifest" :title="editing ? `Edit ${editing.name}` : `New ${manifest.name} instance`" @close="editing = undefined">
       <form class="grid gap-5 px-6.5 py-6 phone:p-5" @submit.prevent="save">
         <UiAlert v-if="error">
           {{ error }}
@@ -377,7 +377,7 @@ onBeforeUnmount(() => {
             Cancel
           </UiButton>
           <UiButton type="submit" variant="primary" :disabled="busy">
-            Save connection
+            Save instance
           </UiButton>
         </div>
       </form>
@@ -385,7 +385,7 @@ onBeforeUnmount(() => {
     <Modal v-if="removing" :title="`Delete ${removing.name}?`" @close="removing = undefined">
       <div class="px-6.5 py-6 phone:p-5">
         <p class="text-sm text-muted">
-          The connection stops, and its credential, stored values and timers are deleted. Conversations stay in Cairn.
+          The instance stops, and its credential, stored values and timers are deleted. Conversations stay in Cairn.
         </p>
       </div>
       <footer class="modal-actions sticky bottom-0 flex justify-end gap-2.5 border-t border-line bg-surface px-6.5 py-4.5">
@@ -393,7 +393,7 @@ onBeforeUnmount(() => {
           Cancel
         </UiButton>
         <UiButton variant="danger" :disabled="busy" @click="remove">
-          Delete connection
+          Delete instance
         </UiButton>
       </footer>
     </Modal>

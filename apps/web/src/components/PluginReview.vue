@@ -138,7 +138,7 @@ async function uninstall() {
           <Icon :name="Globe" :size="13" class="mt-px" />Can reach only {{ manifest.hosts.join(', ') }}, over HTTPS, without following redirects.
         </p>
         <p v-if="manifest.credential" class="mt-1.5 flex items-start gap-2 text-2xs leading-relaxed text-muted">
-          <Icon :name="KeyRound" :size="13" class="mt-px" />Each connection’s {{ manifest.credential.label }} is added by Cairn to its requests ({{ manifest.credential.header }} header). The plugin never sees it.
+          <Icon :name="KeyRound" :size="13" class="mt-px" />Each instance’s {{ manifest.credential.label }} is added by Cairn to its requests ({{ manifest.credential.header }} header). The plugin never sees it.
         </p>
         <p class="mt-1.5 flex items-start gap-2 text-2xs leading-relaxed text-muted">
           <Icon :name="ShieldCheck" :size="13" class="mt-px" />Runs in Cairn’s Luau sandbox: no files, processes or other network access. Editing it on disk requires a new approval.

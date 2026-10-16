@@ -10,6 +10,20 @@ test('1Password accounts keep tokens private and persist explicit agent grants',
   test.setTimeout(90000)
   await page.goto(workspacePath('/connections'))
   await authenticateWorkspace(page)
+  // 1Password lives with the plugins only: Connections keeps coding agent accounts and GitHub.
+  await expect(page.getByRole('heading', { name: 'Coding agents' })).toBeVisible()
+  await expect(page.getByRole('region', { name: '1Password accounts' })).toHaveCount(0)
+  await page.goto(workspacePath('/plugins'))
+  await page.getByRole('link', { name: '1Password · Set up' }).click()
+  await expect(page).toHaveURL(workspacePath('/plugins/onepassword'))
+  await expect(page.getByRole('heading', { name: '1Password', exact: true })).toBeVisible()
+  await expect(page.getByRole('heading', { name: 'How agents use it' })).toBeVisible()
+  for (const width of [1440, 390]) {
+    await page.setViewportSize({ width, height: 844 })
+    await expectSingleScroll(page)
+    await page.screenshot({ path: testInfo.outputPath(`onepassword-plugin-${width}.png`), fullPage: true, animations: 'disabled' })
+  }
+
   const panel = page.getByRole('region', { name: '1Password accounts' })
   await panel.getByRole('button', { name: 'Add service account' }).click()
   let dialog = page.getByRole('dialog')

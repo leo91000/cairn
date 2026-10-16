@@ -24,6 +24,7 @@ export function workspaceRouter(base = '/') {
       { path: '/plugins/discord', component: () => import('./views/PluginDiscord.vue') },
       { path: '/plugins/discord/new', component: () => import('./views/DiscordSetup.vue') },
       { path: '/plugins/discord/:id/edit', component: () => import('./views/DiscordSetup.vue') },
+      { path: '/plugins/onepassword', component: () => import('./views/PluginOnePassword.vue') },
       { path: '/plugins/:id', component: () => import('./views/PluginGeneric.vue') },
       { path: '/mcps', component: () => import('./views/Mcps.vue') },
       { path: '/mcps/callback', component: () => import('./views/McpCallback.vue') },

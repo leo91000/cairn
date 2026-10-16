@@ -74,7 +74,7 @@ function card(entry: PluginEntry): Card {
     const agents = new Set(accounts.value.flatMap(account => account.agentIds))
     return {
       entry,
-      to: '/connections',
+      to: '/plugins/onepassword',
       capabilities: [[Terminal, 'CLI tool'], ...capabilities, [ShieldCheck, 'Per-agent grants']],
       status: accounts.value.length
         ? { label: `${accounts.value.length} account${accounts.value.length > 1 ? 's' : ''}`, tone: 'ok' }
@@ -97,7 +97,7 @@ function card(entry: PluginEntry): Card {
   }
 
   const online = connections.filter(connection => connectionState(connection).tone === 'ok').length
-  const noun = entry.manifest?.capabilities.includes('transport.discord') ? 'bot' : 'connection'
+  const noun = entry.manifest?.capabilities.includes('transport.discord') ? 'bot' : 'instance'
   return {
     entry,
     to: `/plugins/${entry.id}`,

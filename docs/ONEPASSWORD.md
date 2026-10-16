@@ -1,6 +1,6 @@
 # 1Password service accounts
 
-In **Connections → 1Password** on web or Android, add a name and an `ops_…`
+In **Atelier → Plugins → 1Password** on web or Android, add a name and an `ops_…`
 service account token. Select the agents allowed to use it, then save and test
 the connection. Every account starts with **no authorized agents**, including
 Main agent. Multiple accounts can have independent agent lists.
