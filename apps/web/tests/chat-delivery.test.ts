@@ -49,11 +49,7 @@ describe('chat delivery presentation', () => {
       createdAt: 1,
       wakeAt: 420001,
     }
-    expect(chatSleepNotice(detail)?.message).toContain('Wait for CI · Automatic resume from')
-    expect(chatSleepNotice(detail)?.account).toBeNull()
-    detail.wakeup.condition = { type: 'run_finished', runId: 'target' }
-    expect(chatSleepNotice(detail)?.message).toContain('when a result is available or the wait deadline')
-    expect(chatSleepNotice(detail)?.message).not.toContain('Automatic resume from')
+    expect(chatSleepNotice(detail)).toEqual({ account: null, message: 'Wait for CI', wakeup: detail.wakeup })
     expect(chatDelivery(detail, []).sending).toEqual([])
     for (const status of ['running', 'queued', 'failed'] as const)
       expect(chatSleepNotice({ ...detail, run: { ...detail.run!, status } })).toBeNull()

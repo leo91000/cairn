@@ -69,6 +69,7 @@ internal enum class AvatarBadge {
     ATTENTION,
     /** Finished work the user has not read yet. */
     DONE,
+    WAITING,
 }
 
 @Composable
@@ -95,7 +96,26 @@ internal fun AgentAvatar(
                 )
             }
         }
-        if (badge != null)
+        if (badge == AvatarBadge.WAITING)
+            Box(
+                Modifier.align(Alignment.BottomEnd)
+                    .offset(3.dp, 3.dp)
+                    .size(17.dp)
+                    .clip(CircleShape)
+                    .background(MaterialTheme.colorScheme.background)
+                    .padding(2.dp)
+                    .clip(CircleShape)
+                    .background(MaterialTheme.colorScheme.primary),
+                contentAlignment = Alignment.Center,
+            ) {
+                Icon(
+                    CairnIcons.Hourglass,
+                    null,
+                    Modifier.size(9.dp),
+                    tint = MaterialTheme.colorScheme.onPrimary,
+                )
+            }
+        else if (badge != null)
             Box(
                 Modifier.align(Alignment.BottomEnd)
                     .offset(3.dp, 3.dp)
@@ -106,7 +126,8 @@ internal fun AgentAvatar(
                     .clip(CircleShape)
                     .background(
                         when (badge) {
-                            AvatarBadge.LIVE -> MaterialTheme.colorScheme.primary
+                            AvatarBadge.LIVE,
+                            AvatarBadge.WAITING -> MaterialTheme.colorScheme.primary
                             AvatarBadge.ATTENTION -> signal.attention
                             AvatarBadge.DONE -> signal.success
                         }

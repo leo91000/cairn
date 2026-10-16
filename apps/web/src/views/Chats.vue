@@ -21,6 +21,7 @@ import { MAIN_AGENT_ID } from '../../../../packages/contracts/constants'
 import { api, state } from '../api'
 import { chatDelivery, chatSleepNotice, chatWaitNotice } from '../chat-delivery'
 import { chatList as chats, publishChats } from '../chat-list'
+import { waitStatus } from '../chat-wait'
 import ActivityFeed from '../components/ActivityFeed.vue'
 import AgentAvatar from '../components/AgentAvatar.vue'
 import AssistantPicker from '../components/AssistantPicker.vue'
@@ -254,9 +255,25 @@ const active = computed(() => !!detail.value?.run && ['queued', 'running'].inclu
 const suspended = computed(() => isExclusivelySuspended(detail.value?.run))
 const retryNotice = useRetryNotice(() => detail.value?.run)
 const sleepNotice = computed(() => chatSleepNotice(detail.value))
+// The scheduled wait shows as a card in the conversation; these notices explain a run that cannot start.
 const waitNotice = computed(() => retryNotice.value
   ? { account: null, message: retryNotice.value }
-  : chatWaitNotice(detail.value?.run) ?? sleepNotice.value)
+  : chatWaitNotice(detail.value?.run))
+const waitNow = ref(Date.now())
+let waitClock: ReturnType<typeof setInterval> | undefined
+watch(() => !!sleepNotice.value, (waiting) => {
+  clearInterval(waitClock)
+  waitNow.value = Date.now()
+  if (waiting)
+    waitClock = setInterval(() => waitNow.value = Date.now(), 1000)
+}, { immediate: true })
+onBeforeUnmount(() => clearInterval(waitClock))
+const sleepStatus = computed(() => {
+  const wakeup = sleepNotice.value?.wakeup
+  if (!wakeup)
+    return null
+  return waitStatus(wakeup, waitNow.value)
+})
 const backgroundTasks = computed(() => detail.value?.run?.status === 'running' ? backgroundWait(events.value)?.tasks.length ?? 0 : 0)
 const chatStatus = computed(() => {
   const status = detail.value?.run?.status
@@ -277,8 +294,8 @@ const chatStatus = computed(() => {
     return 'Working'
   }
 
-  if (sleepNotice.value)
-    return detail.value?.wakeup?.condition ? 'Waiting for a result' : 'Scheduled wait'
+  if (sleepStatus.value)
+    return sleepStatus.value
   return 'Ready'
 })
 const outgoing = ref<ChatMessage | null>(null)
@@ -823,6 +840,7 @@ function key(event: KeyboardEvent) {
             :outcome="detail?.run?.status === 'succeeded' ? detail.run.outcome : null"
             :sending="delivery.sending"
             :events="events"
+            :wakeup="detail ? { wakeup: detail.wakeup ?? null, paused: detail.paused } : undefined"
             :active="detail?.run?.status === 'running'"
             :suspended="suspended"
             :agent-id="detail?.agentId || selectedAgent?.id"
@@ -839,6 +857,7 @@ function key(event: KeyboardEvent) {
             chat
             @load="live.loadOlder"
             @position="live.savePosition"
+            @pause-wait="action('pause', { paused: true })"
           />
           <div v-if="!inactive" class="mx-auto w-full max-w-205 shrink-0 px-5 pb-1 pt-3 phone:px-0 phone:pt-2">
             <ChatQuestions
@@ -865,15 +884,6 @@ function key(event: KeyboardEvent) {
               <p class="wrap-anywhere">
                 {{ waitNotice.message }}
               </p>
-              <UiButton
-                v-if="sleepNotice"
-                size="small"
-                class="mt-2"
-                :disabled="busy"
-                @click="action('pause', { paused: true })"
-              >
-                Pause wait
-              </UiButton>
               <RouterLink v-if="waitNotice.account && state.installationRole === 'owner'" to="/connections" class="mt-2 inline-flex font-semibold text-accent underline">
                 Open Connections
               </RouterLink>
@@ -980,7 +990,7 @@ function key(event: KeyboardEvent) {
                   v-model="draft"
                   :skills="skills"
                   aria-label="Message"
-                  :placeholder="responding ? 'Add a follow-up…' : skills.length ? 'Message your agent… Type $ for skills' : 'Message your agent…'"
+                  :placeholder="responding ? 'Add a follow-up…' : sleepNotice ? 'Reply now — this cancels the wait' : skills.length ? 'Message your agent… Type $ for skills' : 'Message your agent…'"
                   rows="2"
                   maxlength="50000"
                   @keydown="key"

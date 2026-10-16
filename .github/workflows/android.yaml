@@ -173,6 +173,8 @@ jobs:
           name: cairn-android-device-${{ matrix.shard }}
           path: device-results/
           retention-days: 14
+          # A rerun must replace failed results instead of leaving duplicate named artifacts.
+          overwrite: true
 
   device-report:
     needs: [resolve, device]
@@ -199,6 +201,7 @@ jobs:
           path: device-test-timings.json
           if-no-files-found: ignore
           retention-days: 14
+          overwrite: true
 
   release:
     needs: resolve

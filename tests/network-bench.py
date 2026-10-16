@@ -307,8 +307,8 @@ def main():
         parser.error("Another network bench is active; run scenarios sequentially")
     if "198.18.103.0/30" in run("ip", "route", "show"):
         parser.error("Another network bench is active; run scenarios sequentially")
-    try:
-        with tempfile.TemporaryDirectory(prefix="cairn-network-") as directory:
+    with tempfile.TemporaryDirectory(prefix="cairn-network-") as directory:
+        try:
             binary = str(Path(directory) / "network-client")
             network.directory = Path(directory)
             run("rustc", "--edition=2024", "crates/installation/examples/network_client.rs", "-o", binary)
@@ -368,8 +368,9 @@ def main():
                     android(network, Path(directory), args, report)
                 else:
                     browser(network, binary, Path(directory), args, report)
-    finally:
-        network.close()
+        finally:
+            # Processes can still write here until they and their namespaces have stopped.
+            network.close()
 
 
 def android(network, directory, args, report):

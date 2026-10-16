@@ -10,6 +10,7 @@ import {
 } from 'vue'
 import { useRouter } from 'vue-router'
 import { api, notify, state } from '../api'
+import { timeLeft } from '../chat-wait'
 import {
   Check,
   CheckCheck,
@@ -31,7 +32,7 @@ import AgentAvatar from './AgentAvatar.vue'
 import Icon from './Icon.vue'
 import InstallationHeader from './InstallationHeader.vue'
 
-// The Fil: what needs the user, live work and recent conversations. J/K move the selection,
+// The Fil: what needs the user, live work, waiting and recent conversations. J/K move the selection,
 // Enter opens it, E marks finished work as read and / filters, as in a mail client.
 const props = withDefaults(defineProps<{
   chats: ChatView[]
@@ -62,7 +63,7 @@ const readingNow = (item: FilItem) => isUnread(item) && opened(item) && item.key
 const forYou = computed(() => {
   const items = fil.value.forYou.filter(item => !readingNow(item))
   const kept = lingering.value
-  if (!kept || [...items, ...fil.value.live].some(item => item.key === kept.key))
+  if (!kept || [...items, ...fil.value.live, ...fil.value.waiting].some(item => item.key === kept.key))
     return items
   const firstUnread = items.findIndex(isUnread)
   const at = firstUnread < 0 ? items.length : firstUnread
@@ -84,6 +85,7 @@ function matches(item: FilItem) {
 const sections = computed(() => [
   { key: 'for-you', label: 'For you', items: forYou.value.filter(matches) },
   { key: 'live', label: 'Live', items: fil.value.live.filter(matches) },
+  { key: 'waiting', label: 'Waiting', items: fil.value.waiting.filter(matches) },
   { key: 'recent', label: 'Recent', items: recent.value.filter(matches) },
 ])
 const flat = computed(() => sections.value.flatMap(section => section.items))
@@ -91,11 +93,13 @@ const summary = computed(() => {
   const need = fil.value.forYou.filter(item => !isUnread(item)).length
   const working = fil.value.live.filter(item => item.kind === 'running').length
   const suspended = fil.value.live.filter(item => item.kind === 'suspended').length
+  const waiting = fil.value.waiting.length
   return [
     need ? `${need} need${need === 1 ? 's' : ''} you` : unread.value.length ? '' : 'Nothing needs you',
     unread.value.length ? `${unread.value.length} to read` : '',
     working ? `${working} working` : '',
     suspended ? `${suspended} suspended` : '',
+    waiting ? `${waiting} waiting` : '',
   ].filter(Boolean).join(' · ')
 })
 watch(() => props.selected, (id) => {
@@ -113,7 +117,7 @@ function current(item: FilItem) {
 }
 
 function badge(item: FilItem) {
-  return item.kind === 'question' ? 'question' : item.kind === 'failed' || item.kind === 'failed-mission' ? 'failed' : item.kind === 'unread' ? 'done' : item.kind === 'queued' ? 'queued' : item.kind === 'paused' || item.kind === 'suspended' ? 'paused' : null
+  return item.kind === 'question' ? 'question' : item.kind === 'failed' || item.kind === 'failed-mission' ? 'failed' : item.kind === 'unread' ? 'done' : item.kind === 'queued' ? 'queued' : item.kind === 'waiting' ? 'waiting' : item.kind === 'paused' || item.kind === 'suspended' ? 'paused' : null
 }
 
 const labels: Partial<Record<FilItem['kind'], string>> = {
@@ -372,6 +376,10 @@ onBeforeUnmount(() => document.removeEventListener('keydown', key))
                       <span class="shrink-0 font-semibold text-muted">Queued</span>
                       <span class="ml-1.5 truncate text-subtle">· {{ item.subtitle }}</span>
                     </template>
+                    <template v-else-if="item.kind === 'waiting'">
+                      <span class="truncate font-medium text-accent">{{ item.subtitle }}</span>
+                      <span v-if="item.project" class="ml-1.5 truncate text-subtle">· {{ item.project }}</span>
+                    </template>
                     <template v-else-if="item.kind === 'suspended'">
                       <span class="truncate font-medium text-muted">{{ item.subtitle }}</span>
                     </template>
@@ -381,7 +389,12 @@ onBeforeUnmount(() => document.removeEventListener('keydown', key))
                     </template>
                   </span>
                 </span>
-                <span class="shrink-0 self-start pt-0.5 text-[11px] tabular-nums" :class="item.kind === 'running' ? 'font-semibold text-accent' : 'text-subtle'">{{ shortAge(item.at, now) }}</span>
+                <span
+                  v-if="item.kind === 'waiting'"
+                  class="shrink-0 self-start pt-0.5 text-[11px] font-semibold tabular-nums text-accent"
+                  :title="item.condition ? 'Resumes when the result arrives, at the latest by its deadline' : 'Resumes then'"
+                >{{ item.condition ? '≤ ' : '' }}{{ timeLeft(item.wakeAt! - now) }}</span>
+                <span v-else class="shrink-0 self-start pt-0.5 text-[11px] tabular-nums" :class="item.kind === 'running' ? 'font-semibold text-accent' : 'text-subtle'">{{ shortAge(item.at, now) }}</span>
               </button>
             </template>
           </TransitionGroup>

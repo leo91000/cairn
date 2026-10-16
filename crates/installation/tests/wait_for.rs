@@ -398,8 +398,16 @@ async fn transient_github_errors_preserve_the_wait_and_never_expose_cli_output()
     wait_for::github::poll_once(&f.s).await.unwrap();
     let failed = f.s.chat_detail(&f.chat).await.unwrap();
     assert!(failed["wakeup"].is_object());
+    assert!(failed["wakeup"]["lastError"].is_string());
     assert!(!failed.to_string().contains("fixture-secret"));
     assert_eq!(f.tick().await["run"]["status"], "succeeded");
+    // GitHub answers again, without a result yet: the conversation no longer reports an outage.
+    f.github_state("in_progress", None, 0);
+    f.next_poll().await;
+    wait_for::github::poll_once(&f.s).await.unwrap();
+    let recovered = f.s.chat_detail(&f.chat).await.unwrap();
+    assert!(recovered["wakeup"].is_object());
+    assert!(recovered["wakeup"].get("lastError").is_none());
     f.github_state("completed", Some("success"), 0);
     f.next_poll().await;
     wait_for::github::poll_once(&f.s).await.unwrap();
