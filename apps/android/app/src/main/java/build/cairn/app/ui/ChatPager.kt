@@ -39,7 +39,7 @@ fun ChatScreen(
     openConnections: () -> Unit = {},
     openSettings: () -> Unit = {},
 ) {
-    val conversations = rememberLive(vm, state, "/chats/stream")
+    val conversations = rememberFilConversations(vm, state)
     if (id == null) {
         ChatPage(
             vm,
@@ -86,7 +86,7 @@ fun FilRunScreen(
     openConnections: () -> Unit = {},
     openSettings: () -> Unit = {},
 ) {
-    val conversations = rememberLive(vm, state, "/chats/stream")
+    val conversations = rememberFilConversations(vm, state)
     FilPager(
         vm,
         state,
@@ -103,14 +103,15 @@ fun FilRunScreen(
 }
 
 /**
- * The pages a swipe moves through, in the Fil's order. A page that leaves the Fil while open, such
- * as a mission that just finished, keeps its place; one opened from elsewhere stays alone.
+ * The pages a swipe moves through, in the Fil's order. Once opened, the current page keeps its
+ * position while read acknowledgements reorder the feed; one opened from elsewhere stays alone.
  */
 internal fun pagerKeys(fil: List<String>, keys: List<String>, page: Int): List<String> {
     val current = keys[page]
     return when {
+        keys.size > 1 ->
+            (fil - current).toMutableList().apply { add(page.coerceAtMost(size), current) }
         current in fil -> fil
-        keys.size > 1 -> fil.toMutableList().apply { add(page.coerceAtMost(size), current) }
         else -> listOf(current)
     }
 }

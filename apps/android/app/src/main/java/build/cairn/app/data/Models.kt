@@ -158,6 +158,10 @@ data class Run(
     val outcome: TaskOutcome? = null,
     val chatExecution: ChatExecution? = null,
     val error: String? = null,
+    /** A mission run that finished after this account last opened its mission. */
+    val unread: Boolean = false,
+    /** The opening of the agent's final message, while unread. */
+    val preview: String? = null,
     val nodeId: String? = null,
     val nodeState: String? = null,
     val resources: NodeResources? = null,

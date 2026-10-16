@@ -19,6 +19,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.colorResource
 import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.heading
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
@@ -34,6 +35,9 @@ internal enum class FeedKind {
     RECONNECT,
     FAILED_TASK,
     REVIEW_TASK,
+    /** Finished work the user has not read yet. */
+    UNREAD_CHAT,
+    UNREAD_TASK,
     RUNNING_CHAT,
     RUNNING_TASK,
     CHAT,
@@ -53,7 +57,17 @@ internal data class FeedItem(
     val taskId: String? = null,
     /** The agent is running now (not queued): the row animates. */
     val working: Boolean = false,
-)
+    /** The opening of the agent's final message, for finished work not read yet. */
+    val preview: String? = null,
+) {
+    val unread
+        get() = kind == FeedKind.UNREAD_CHAT || kind == FeedKind.UNREAD_TASK
+
+    /** What reading this item marks, with the end of the work it reads. */
+    val read
+        get() =
+            if (kind == FeedKind.UNREAD_TASK) "task:$taskId" to stamp else "chat:$chatId" to stamp
+}
 
 internal data class Feed(
     val forYou: List<FeedItem>,
@@ -62,6 +76,10 @@ internal data class Feed(
 ) {
     val empty
         get() = forYou.isEmpty() && running.isEmpty() && recent.isEmpty()
+
+    /** Finished work waiting to be read, below what needs an answer or a decision. */
+    val unread
+        get() = forYou.filter { it.unread }
 }
 
 private fun context(agent: String, project: String?) =
@@ -69,10 +87,19 @@ private fun context(agent: String, project: String?) =
 
 /**
  * One home for conversations and missions, grouped by what they ask of the user: things that need
- * an answer or a decision, work in progress, then everything else by recency.
+ * an answer or a decision, then finished work not read yet, work in progress, then everything else
+ * by recency. [read] holds marks taken on this device before the server's lists reflect them.
  */
-internal fun buildFeed(chats: List<Chat>, activity: List<Run>, tasks: List<Task>): Feed {
+internal fun buildFeed(
+    chats: List<Chat>,
+    activity: List<Run>,
+    tasks: List<Task>,
+    read: Map<String, Long> = emptyMap(),
+): Feed {
+    fun unreadNow(key: String, finishedAt: Long?) =
+        (read[key] ?: Long.MIN_VALUE) < (finishedAt ?: 0)
     val forYou = mutableListOf<FeedItem>()
+    val toRead = mutableListOf<FeedItem>()
     val running = mutableListOf<FeedItem>()
     val recent = mutableListOf<FeedItem>()
     chats
@@ -122,6 +149,10 @@ internal fun buildFeed(chats: List<Chat>, activity: List<Run>, tasks: List<Task>
                                 else context(agent, chat.projectName),
                             )
                             .copy(working = chat.status == "running" && !chat.exclusiveSuspended)
+                chat.unread && !chat.paused && unreadNow("chat:${chat.id}", chat.finishedAt) ->
+                    toRead +=
+                        item(FeedKind.UNREAD_CHAT, context(agent, chat.projectName))
+                            .copy(stamp = chat.finishedAt ?: chat.updatedAt, preview = chat.preview)
                 else ->
                     recent +=
                         item(
@@ -177,17 +208,38 @@ internal fun buildFeed(chats: List<Chat>, activity: List<Run>, tasks: List<Task>
                     run.outcome != null &&
                     run.outcome.status != "completed" ->
                     forYou += item(FeedKind.REVIEW_TASK, outcomeLabel(run.outcome))
+                run.status == "succeeded" &&
+                    run.unread &&
+                    unreadNow("task:${run.taskId}", run.finishedAt) ->
+                    toRead +=
+                        item(FeedKind.UNREAD_TASK, "Mission · $agent").copy(preview = run.preview)
             }
         }
-    return Feed(forYou, running.sortedBy { it.startedAt ?: Long.MAX_VALUE }, recent)
+    return Feed(
+        forYou + toRead.sortedByDescending { it.stamp },
+        running.sortedBy { it.startedAt ?: Long.MAX_VALUE },
+        recent,
+    )
 }
 
 /** The Fil in reading order, one key per item: what a swipe between pages moves through. */
 internal fun Feed.keys() = (forYou + running + recent).map { it.key }
 
+/** The shell and its pages share one conversation stream and one mission poll. */
+internal data class FilSnapshot(val conversations: LiveSnapshot, val activity: List<Run>?)
+
+internal val LocalFilSnapshot = compositionLocalOf<FilSnapshot?> { null }
+
+@Composable
+internal fun rememberFilConversations(vm: CairnViewModel, state: Workspace): LiveSnapshot =
+    LocalFilSnapshot.current?.conversations ?: rememberLive(vm, state, "/chats/stream")
+
 /** The latest run of each mission, polled while the Fil or its pager shows; null until loaded. */
 @Composable
 internal fun rememberFilActivity(vm: CairnViewModel): List<Run>? {
+    LocalFilSnapshot.current?.let {
+        return it.activity
+    }
     var activity by remember { mutableStateOf<List<Run>?>(null) }
     Poll("fil-activity", 5000) {
         try {
@@ -205,10 +257,12 @@ internal fun feedSummary(feed: Feed): String {
         parts +=
             if (feed.running.size == 1) "1 agent au travail"
             else "${feed.running.size} agents au travail"
-    if (feed.forYou.isNotEmpty())
+    val need = feed.forYou.size - feed.unread.size
+    if (need > 0) parts += if (need == 1) "1 élément pour vous" else "$need éléments pour vous"
+    if (feed.unread.isNotEmpty())
         parts +=
-            if (feed.forYou.size == 1) "1 élément pour vous"
-            else "${feed.forYou.size} éléments pour vous"
+            if (feed.unread.size == 1) "1 résultat à lire"
+            else "${feed.unread.size} résultats à lire"
     return parts.joinToString(" · ").ifBlank { "Tout est calme." }
 }
 
@@ -226,7 +280,7 @@ fun FilScreen(
     openAccount: () -> Unit = {},
     openSettings: () -> Unit = openAccount,
 ) {
-    val live = rememberLive(vm, state, "/chats/stream")
+    val live = rememberFilConversations(vm, state)
     var connection by rememberSaveable { mutableStateOf(false) }
     if (connection)
         ConnectionSheet(vm, state, close = { connection = false }, openSettings = openSettings)
@@ -240,8 +294,7 @@ fun FilScreen(
     }
     val trash = rememberConversationTrash(vm)
     val chats = live.state?.chats?.filter { it.id !in trash.hidden }
-    val feed =
-        remember(chats, activity, state.tasks) { buildFeed(chats.orEmpty(), activity, state.tasks) }
+    val feed = buildFeed(chats.orEmpty(), activity, state.tasks, vm.localReads)
     fun retry(item: FeedItem) {
         val task = item.taskId ?: return
         vm.perform { openRun(api.send<Run>("POST", "/tasks/${segment(task)}/run").id) }
@@ -289,13 +342,40 @@ fun FilScreen(
                     )
                 }
             }
-        section("Pour vous", feed.forYou) { item ->
+        val unread = feed.unread
+        section(
+            "Pour vous",
+            feed.forYou,
+            action =
+                if (unread.isEmpty()) null
+                else {
+                    {
+                        SignalButton(
+                            "Tout lire",
+                            Modifier.testTag("read-all"),
+                            icon = CairnIcons.Check,
+                            container = Color.Transparent,
+                            content = MaterialTheme.colorScheme.onSurfaceVariant,
+                            height = 32.dp,
+                        ) {
+                            vm.markRead(unread.map { it.read })
+                        }
+                    }
+                },
+        ) { item ->
             FeedRow(
                 item,
                 { open(item) },
                 onDelete = item.chatId?.let { id -> { trash.trash(id) } },
             ) {
-                ForYouAction(item, now, !state.busy, { open(item) }, { retry(item) })
+                ForYouAction(
+                    item,
+                    now,
+                    !state.busy,
+                    { open(item) },
+                    { retry(item) },
+                    { vm.markRead(listOf(item.read)) },
+                )
             }
         }
         section("En cours", feed.running) { item ->
@@ -326,19 +406,26 @@ fun FilScreen(
 private fun androidx.compose.foundation.lazy.LazyListScope.section(
     label: String,
     items: List<FeedItem>,
+    action: (@Composable () -> Unit)? = null,
     row: @Composable (FeedItem) -> Unit,
 ) {
     if (items.isEmpty()) return
     item(key = "section:$label") {
-        Eyebrow(
-            label,
-            Modifier.padding(start = 20.dp, top = 24.dp, bottom = 4.dp).semantics { heading() },
-        )
+        Row(
+            Modifier.widthIn(max = 760.dp)
+                .fillMaxWidth()
+                .padding(start = 20.dp, end = 12.dp, top = 24.dp, bottom = 4.dp)
+                .heightIn(min = 32.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Eyebrow(label, Modifier.weight(1f).semantics { heading() })
+            action?.invoke()
+        }
     }
     items(items, key = { it.key }) { Box(Modifier.animateItem()) { row(it) } }
 }
 
-/** The one action a "for you" row offers: answer, reconnect, retry, or just its time. */
+/** The one action a "for you" row offers: answer, reconnect, retry, mark read, or its time. */
 @Composable
 private fun ForYouAction(
     item: FeedItem,
@@ -346,8 +433,17 @@ private fun ForYouAction(
     enabled: Boolean,
     open: () -> Unit,
     retry: () -> Unit,
+    markRead: () -> Unit,
 ) {
-    if (item.kind == FeedKind.QUESTION) SignalButton("Répondre", height = 36.dp, onClick = open)
+    if (item.unread)
+        RoundAction(
+            "Marquer ${item.title} comme lu",
+            CairnIcons.Check,
+            size = 38.dp,
+            onClick = markRead,
+        )
+    else if (item.kind == FeedKind.QUESTION)
+        SignalButton("Répondre", height = 36.dp, onClick = open)
     else if (item.kind == FeedKind.RECONNECT)
         SignalButton("Connexions", height = 36.dp, onClick = open)
     else if (item.kind == FeedKind.FAILED_TASK)
@@ -421,10 +517,22 @@ private fun FeedRow(
             FeedKind.FAILED_TASK,
             FeedKind.REVIEW_TASK,
             FeedKind.RECONNECT -> AvatarBadge.ATTENTION
+            FeedKind.UNREAD_CHAT,
+            FeedKind.UNREAD_TASK -> AvatarBadge.DONE
             FeedKind.CHAT -> null
         }
     SwipeToTrashRow(enabled = onDelete != null, onTrash = { onDelete?.invoke() }) { swipe ->
-        Surface(onClick = onClick, color = Color.Transparent, modifier = swipe.fillMaxWidth()) {
+        // Unread work keeps a faint wash of the accent until it is read.
+        Surface(
+            onClick = onClick,
+            color =
+                if (item.unread) MaterialTheme.colorScheme.primary.copy(alpha = 0.06f)
+                else Color.Transparent,
+            modifier =
+                swipe
+                    .fillMaxWidth()
+                    .then(if (item.unread) Modifier.testTag("unread") else Modifier),
+        ) {
             Row(
                 Modifier.widthIn(max = 760.dp)
                     .heightIn(min = 72.dp)
@@ -435,6 +543,7 @@ private fun FeedRow(
                 else AgentAvatar(item.agent, item.agentKey, 44.dp, badge)
                 Spacer(Modifier.width(14.dp))
                 Column(Modifier.weight(1f)) {
+                    if (item.unread) UnreadLabel(item)
                     Text(
                         item.title,
                         style = MaterialTheme.typography.titleMedium,
@@ -447,10 +556,10 @@ private fun FeedRow(
                     ) {
                         if (item.working) WorkingLabel("En cours", Modifier.padding(end = 6.dp))
                         Text(
-                            item.subtitle,
+                            item.preview ?: item.subtitle,
                             style = MaterialTheme.typography.bodyMedium,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            maxLines = 1,
+                            maxLines = if (item.preview != null) 2 else 1,
                             overflow = TextOverflow.Ellipsis,
                         )
                     }
@@ -459,5 +568,28 @@ private fun FeedRow(
                 trailing()
             }
         }
+    }
+}
+
+/** "Terminé" with the unread dot, above the title of finished work not read yet. */
+@Composable
+private fun UnreadLabel(item: FeedItem) {
+    Row(Modifier.padding(bottom = 2.dp), verticalAlignment = Alignment.CenterVertically) {
+        Box(
+            Modifier.size(8.dp)
+                .background(
+                    MaterialTheme.colorScheme.primary,
+                    androidx.compose.foundation.shape.CircleShape,
+                )
+                .semantics { contentDescription = "Non lu" }
+        )
+        Spacer(Modifier.width(6.dp))
+        Text(
+            if (item.kind == FeedKind.UNREAD_TASK) "Mission terminée · ${shortStamp(item.stamp)}"
+            else "Terminé · ${shortStamp(item.stamp)}",
+            style = MaterialTheme.typography.labelMedium,
+            fontWeight = FontWeight.SemiBold,
+            color = MaterialTheme.colorScheme.primary,
+        )
     }
 }

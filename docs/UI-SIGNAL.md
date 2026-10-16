@@ -6,7 +6,7 @@ accent and motion that only means an agent is working.
 ## Places
 
 - **Fil** (`/`): what needs you (questions, failed conversations, failed missions,
-  missions blocked or waiting for input), live work (running and queued
+  missions blocked or waiting for input, then finished work you have not read), live work (running and queued
   conversations and missions) and recent conversations. `apps/web/src/signal.ts` groups
   them; only the latest run of each mission counts and chat runs stay with their
   conversation. On wide screens the Fil stays beside the open conversation, like a
@@ -30,12 +30,35 @@ back to it.
 | ⌘K / Ctrl+K | Search and commands: conversations, missions (open or run now), agents, projects, skills, places, theme |
 | C | New conversation |
 | G then F / M / A | Fil / Missions / Atelier |
-| J / K, Enter, / | Move in the Fil, open, filter |
+| J / K, Enter, E, / | Move in the Fil, open, mark finished work as read, filter |
 | R, Esc | Reply in the open conversation, leave the field |
 | Enter, Shift+Enter, Alt+Enter | Send or queue, new line, steer |
 | ? | Shortcut sheet |
 
 Single keys never fire while typing or while a dialog is open (`apps/web/src/shortcuts.ts`).
+
+## Unread work
+
+A conversation turn or a mission run that succeeded stays **unread** for each Cairn account until
+that account opens it. It waits in For you, below what needs an answer, as a card with an accent
+edge, an unread dot, a « Finished » or « Mission finished » label and the opening of the agent's
+final message. « Read » opens it; « Mark as read », E on the selection and « Mark all read » in the
+For you header clear it without opening. The rail badge stays coral while something needs an
+answer and turns to the accent when work only waits to be read.
+
+Read marks live on the installation, per account (`crates/installation/src/reads.rs`): opening work
+on the phone clears it on the web, and each member reads on their own. `POST /api/reads` records
+`{ key: "chat:<id>" | "task:<id>", finishedAt }` items for the completion actually displayed,
+with monotonic marks. Older string-key requests remain accepted. Bulk actions use batches of at most
+200 items. Reading an older mission run leaves newer work unread. The conversation list, its live stream and `/api/tasks/activity`
+carry `unread` and `preview` for the caller. An account's first read starts its history, so earlier
+work is not unread. Failed, stopped and paused work is never unread, nor are plugin
+conversations, which answer in their own channel; a turn that finishes while its conversation is
+open and visible is read as it happens. Finished work opened from For you stays
+there, read, until the user moves on, then joins Recent. Android shows the same rows in « Pour
+vous », with « Tout lire », and reads the page settled in the Fil pager while the app is in the
+foreground, after its output has loaded and caught up with the server. Local optimistic marks
+are cleared when the account or installation changes.
 
 ## Motion
 
@@ -60,8 +83,10 @@ Single keys never fire while typing or while a dialog is open (`apps/web/src/sho
 
 ## Evidence
 
-`apps/web/tests/signal.test.ts` covers grouping, working steps, elapsed times and the
-identity colours shared with Android. `tests/e2e/signal.spec.ts` drives the real
+`apps/web/tests/signal.test.ts` covers grouping, unread work, working steps, elapsed times and the
+identity colours shared with Android. `crates/installation/tests/reads.rs` covers read marks per
+account, previews and the live list. `tests/e2e/unread.spec.ts` reads finished work on the desktop
+and the phone; `FilUnreadJourneyTest` covers the Android Fil. `tests/e2e/signal.spec.ts` drives the real
 server: Fil sections and badges, J/Enter, G chords, the shortcut sheet, the
 palette running a mission, the conversation beside the Fil with its live step,
 R/Escape/C, and the phone dock with full-screen reading.

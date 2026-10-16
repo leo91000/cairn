@@ -7,6 +7,8 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.Badge
+import androidx.compose.material3.BadgedBox
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
@@ -65,6 +67,8 @@ internal fun initial(name: String): String =
 internal enum class AvatarBadge {
     LIVE,
     ATTENTION,
+    /** Finished work the user has not read yet. */
+    DONE,
 }
 
 @Composable
@@ -101,8 +105,11 @@ internal fun AgentAvatar(
                     .padding(3.dp)
                     .clip(CircleShape)
                     .background(
-                        if (badge == AvatarBadge.LIVE) MaterialTheme.colorScheme.primary
-                        else signal.attention
+                        when (badge) {
+                            AvatarBadge.LIVE -> MaterialTheme.colorScheme.primary
+                            AvatarBadge.ATTENTION -> signal.attention
+                            AvatarBadge.DONE -> signal.success
+                        }
                     )
             )
     }
@@ -438,6 +445,42 @@ internal val DockItems =
         DockItem("atelier", "Atelier", CairnIcons.Grid),
     )
 
+internal data class FilAttention(val needsYou: Int = 0, val toRead: Int = 0) {
+    val count
+        get() = needsYou.takeIf { it > 0 } ?: toRead
+
+    val label
+        get() =
+            listOfNotNull(
+                    "$needsYou pour vous".takeIf { needsYou > 0 },
+                    "$toRead à lire".takeIf { toRead > 0 },
+                )
+                .joinToString(" · ")
+}
+
+internal fun filAttention(feed: Feed) =
+    FilAttention(feed.forYou.size - feed.unread.size, feed.unread.size)
+
+@Composable
+internal fun FilNavigationBadge(attention: FilAttention, content: @Composable () -> Unit) {
+    BadgedBox(
+        badge = {
+            if (attention.count > 0)
+                Badge(
+                    modifier = Modifier.semantics { contentDescription = attention.label },
+                    containerColor =
+                        if (attention.needsYou > 0) signal.attention
+                        else MaterialTheme.colorScheme.primary,
+                    contentColor = MaterialTheme.colorScheme.onPrimary,
+                ) {
+                    Text(attention.count.toString())
+                }
+        }
+    ) {
+        content()
+    }
+}
+
 /** Floating ink dock with the three destinations and the always-available "new" action. */
 @Composable
 internal fun CairnDock(
@@ -445,6 +488,7 @@ internal fun CairnDock(
     navigate: (String) -> Unit,
     create: () -> Unit,
     modifier: Modifier = Modifier,
+    attention: FilAttention = FilAttention(),
 ) {
     Row(
         modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp),
@@ -473,12 +517,14 @@ internal fun CairnDock(
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
                     // Label once: the icon names the tab until the selected tab shows its text.
-                    Icon(
-                        item.icon,
-                        if (on) null else item.label,
-                        Modifier.size(22.dp),
-                        tint = if (on) MaterialTheme.colorScheme.onPrimary else signal.onDock,
-                    )
+                    FilNavigationBadge(if (item.route == "fil") attention else FilAttention()) {
+                        Icon(
+                            item.icon,
+                            if (on) null else item.label,
+                            Modifier.size(22.dp),
+                            tint = if (on) MaterialTheme.colorScheme.onPrimary else signal.onDock,
+                        )
+                    }
                     if (on) {
                         Spacer(Modifier.width(8.dp))
                         Text(

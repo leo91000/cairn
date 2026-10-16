@@ -23,6 +23,7 @@ export const shortcutGroups: Array<{ title: string, items: Array<{ keys: string[
       { keys: ['J'], label: 'Next item' },
       { keys: ['K'], label: 'Previous item' },
       { keys: ['Enter'], label: 'Open the selected item' },
+      { keys: ['E'], label: 'Mark the selected finished work as read' },
       { keys: ['/'], label: 'Filter the Fil' },
     ],
   },

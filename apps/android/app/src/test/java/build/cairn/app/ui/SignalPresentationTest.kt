@@ -165,6 +165,57 @@ class SignalPresentationTest {
     }
 
     @Test
+    fun `finished work not read yet waits in For you below what needs an answer`() {
+        val chats =
+            listOf(
+                Chat(
+                    "done",
+                    "Notes de version",
+                    agentName = "Rédacteur",
+                    status = "succeeded",
+                    finishedAt = 40,
+                    updatedAt = 30,
+                    unread = true,
+                    preview = "J'ai publié les notes.",
+                ),
+                Chat("read", "Relecture", status = "succeeded", finishedAt = 50, updatedAt = 50),
+                Chat("question", "Choisir", pendingQuestions = 1, updatedAt = 1),
+            )
+        val activity =
+            listOf(
+                Run(
+                    "digest-1",
+                    taskId = "d",
+                    status = "succeeded",
+                    finishedAt = 60,
+                    unread = true,
+                    preview = "Trois sujets aujourd'hui.",
+                )
+            )
+        val feed = buildFeed(chats, activity, listOf(Task("d", "Veille")))
+        assertEquals(
+            listOf(
+                FeedKind.QUESTION to "Choisir",
+                FeedKind.UNREAD_TASK to "Veille",
+                FeedKind.UNREAD_CHAT to "Notes de version",
+            ),
+            feed.forYou.map { it.kind to it.title },
+        )
+        assertEquals(listOf("task:d" to 60L, "chat:done" to 40L), feed.unread.map { it.read })
+        assertEquals("J'ai publié les notes.", feed.forYou.last().preview)
+        assertEquals(listOf("read"), feed.recent.map { it.chatId })
+        assertEquals(
+            "1 élément pour vous · 2 résultats à lire",
+            feedSummary(feed),
+        )
+        // Read on this device, before the server's lists catch up; a later turn is new again.
+        val read = buildFeed(chats, activity, emptyList(), mapOf("chat:done" to 40L))
+        assertEquals(setOf("read", "done"), read.recent.mapNotNull { it.chatId }.toSet())
+        val later = buildFeed(chats, activity, emptyList(), mapOf("chat:done" to 39L))
+        assertTrue(later.forYou.any { it.chatId == "done" && it.unread })
+    }
+
+    @Test
     fun `swipes move through conversations and missions in the order of the Fil`() {
         val chats =
             listOf(
@@ -188,6 +239,44 @@ class SignalPresentationTest {
         assertEquals(fil, pagerKeys(finished, fil, 2))
         // A page opened from outside the Fil does not swipe into it.
         assertEquals(listOf("run:elsewhere"), pagerKeys(fil, listOf("run:elsewhere"), 0))
+    }
+
+    @Test
+    fun `read acknowledgement keeps the open conversation before the next unread page`() {
+        val chats =
+            listOf(
+                Chat("a", "First result", unread = true, finishedAt = 30, updatedAt = 30),
+                Chat("b", "Second result", unread = true, finishedAt = 20, updatedAt = 20),
+                Chat("c", "Recent", updatedAt = 10),
+            )
+        val before = buildFeed(chats, emptyList(), emptyList()).keys()
+        val after =
+            buildFeed(
+                    chats.map { if (it.id == "a") it.copy(unread = false) else it },
+                    emptyList(),
+                    emptyList(),
+                )
+                .keys()
+        assertEquals(listOf("chat:b", "chat:a", "chat:c"), after)
+        val held = pagerKeys(after, before, 0)
+        assertEquals(listOf("chat:a", "chat:b", "chat:c"), held)
+        assertEquals("chat:b", held[1])
+    }
+
+    @Test
+    fun `navigation badge distinguishes action from reading and clears optimistic reads`() {
+        val chats =
+            listOf(
+                Chat("a", "Result", unread = true, finishedAt = 30),
+                Chat("b", "Question", pendingQuestions = 1),
+            )
+        assertEquals(FilAttention(1, 1), filAttention(buildFeed(chats, emptyList(), emptyList())))
+        assertEquals(1, FilAttention(1, 4).count)
+        assertEquals(4, FilAttention(0, 4).count)
+        assertEquals(
+            FilAttention(1, 0),
+            filAttention(buildFeed(chats, emptyList(), emptyList(), mapOf("chat:a" to 30L))),
+        )
     }
 
     @Test
