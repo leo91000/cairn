@@ -333,8 +333,8 @@ fn owner_operation(method: &str, path: &str) -> bool {
         // Storage configuration lives under nodes; credentials also include
         // MCP connection flows and per-agent GitHub tokens below.
         [
-            "nodes" | "accounts" | "onepassword" | "plugins" | "mcps" | "connections" | "settings"
-            | "audit" | "github" | "agent-avatars",
+            "nodes" | "accounts" | "plugins" | "mcps" | "connections" | "settings" | "audit"
+            | "github" | "agent-avatars",
             ..,
         ] => true,
         ["agents"] | ["agents", _, "avatar"] => !read,

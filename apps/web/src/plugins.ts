@@ -9,22 +9,47 @@ import {
   BrandTelegram,
   CirclePause,
   Clock,
+  Cpu,
   Globe,
   HardDrive,
   KeyRound,
+  LayoutPanelTop,
   MessageSquare,
+  Terminal,
+  Wrench,
 } from './icons'
 
+/** One field of a declarative plugin form (instance settings or a view's form). */
 export interface SettingField {
   key: string
   title: string
-  type: 'string' | 'number' | 'boolean'
+  type: 'string' | 'text' | 'number' | 'boolean' | 'secret' | 'select' | 'multiselect' | 'url'
   description?: string
+  placeholder?: string
+  section?: string
   required?: boolean
   hidden?: boolean
   maxLength?: number
   minimum?: number
   maximum?: number
+  pattern?: string
+  options?: { value: string, label: string }[]
+  default?: unknown
+}
+
+export interface PluginArgument {
+  name: string
+  flag?: string
+  positional?: boolean
+  required?: boolean
+  description?: string
+}
+
+export interface PluginCommand {
+  name: string
+  description?: string
+  output?: 'json' | 'text' | 'secret'
+  arguments?: PluginArgument[]
 }
 
 export interface Manifest {
@@ -37,6 +62,15 @@ export interface Manifest {
   hosts?: string[]
   credential?: { label: string, header: string, prefix?: string }
   settings?: SettingField[]
+  instances?: { singular: string, plural: string }
+  brand?: { color: string, path?: string }
+  programs?: { name: string, path: string, description?: string }[]
+  agentAccess?: { description?: string }
+  commands?: PluginCommand[]
+  tools?: { name: string, description: string }[]
+  instructions?: string
+  instanceView?: boolean
+  instanceTest?: boolean
 }
 
 export interface PackageVersion {
@@ -92,6 +126,10 @@ export interface PluginConnection {
   name: string
   enabled: boolean
   settings: Record<string, any>
+  /** Agents granted the package's commands and tools on this instance. */
+  agentIds?: string[]
+  /** Secret fields saved in the vault; values never reach the browser. */
+  secretKeys?: string[]
   userIds: string[]
   people: Label[]
   accessMode: 'allowlist' | 'requests' | 'everyone'
@@ -134,7 +172,43 @@ export const capabilityLabels: Record<string, [IconName, string]> = {
   'http': [Globe, 'Web requests'],
   'storage': [HardDrive, 'Storage'],
   'timers': [Clock, 'Timers'],
-  'onepassword.read': [KeyRound, 'Secrets'],
+  'exec': [Cpu, 'Runs programs'],
+}
+
+/** What a package gives agents, for catalogue chips. */
+export function contributions(manifest: Manifest | null | undefined): [IconName, string][] {
+  if (!manifest)
+    return []
+  return [
+    ...(manifest.commands?.length ? [[Terminal, 'CLI commands'] as [IconName, string]] : []),
+    ...(manifest.tools?.length ? [[Wrench, 'Agent tools'] as [IconName, string]] : []),
+    ...(manifest.agentAccess ? [[KeyRound, 'Per-agent grants'] as [IconName, string]] : []),
+    ...(manifest.instanceView ? [[LayoutPanelTop, 'Dashboard'] as [IconName, string]] : []),
+  ]
+}
+
+/** Packages that react to people, transports or timers keep a worker running. */
+export function needsWorker(manifest: Manifest | null | undefined) {
+  return ['transport.discord', 'conversations.submit', 'conversations.control', 'timers']
+    .some(name => manifest?.capabilities.includes(name))
+}
+
+/** "Service account" / "Service accounts", or the generic wording. */
+export function instanceNoun(manifest: Manifest | null | undefined, count = 1) {
+  if (manifest?.instances)
+    return count === 1 ? manifest.instances.singular : manifest.instances.plural
+  if (manifest?.capabilities.includes('transport.discord'))
+    return count === 1 ? 'Bot' : 'Bots'
+  return count === 1 ? 'Instance' : 'Instances'
+}
+
+/** Command-line usage, as agents type it. */
+export function commandUsage(plugin: string, command: PluginCommand) {
+  const parts = (command.arguments ?? []).map((argument) => {
+    const part = argument.flag ? `${argument.flag} <${argument.name}>` : `<${argument.name}>`
+    return argument.required ? part : `[${part}]`
+  })
+  return ['cairn plugin', plugin, command.name, ...parts].join(' ')
 }
 
 export const brands: Record<string, { icon: IconName, color: string }> = {
@@ -149,6 +223,7 @@ export function connectionState(connection: PluginConnection) {
   if (!connection.enabled)
     return { label: 'Paused', tone: 'muted' } as const
   return ({
+    ready: { label: 'Ready', tone: 'ok' },
     connected: { label: 'Online', tone: 'ok' },
     connecting: { label: 'Connecting…', tone: 'muted' },
     needs_review: { label: 'Needs review', tone: 'coral' },
@@ -166,9 +241,9 @@ export function eligibleAgent(agent: Agent) {
 
 /**
  * Why an agent can't serve anyone in a channel, or '' when it can. Mirrors the server:
- * read-only sandbox, one project at most, no installation, GitHub, MCP or 1Password.
+ * read-only sandbox, one project at most, no installation, GitHub, MCP or plugin grants.
  */
-export function publicProblem(agent: Agent, onepassword: { agentIds: string[] }[]) {
+export function publicProblem(agent: Agent, connections: Pick<PluginConnection, 'agentIds'>[]) {
   if (!eligibleAgent(agent))
     return 'Too broad'
   if (agent.access.sandbox !== 'read-only')
@@ -177,7 +252,7 @@ export function publicProblem(agent: Agent, onepassword: { agentIds: string[] }[
     return 'Has GitHub'
   if (!Array.isArray(agent.access.mcps) || agent.access.mcps.length)
     return 'Has MCPs'
-  if (onepassword.some(account => account.agentIds.includes(agent.id)))
-    return 'Has 1Password'
+  if (connections.some(connection => connection.agentIds?.includes(agent.id)))
+    return 'Has plugin access'
   return ''
 }

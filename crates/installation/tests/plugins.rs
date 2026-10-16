@@ -227,16 +227,54 @@ async fn worker_sessions_enforce_capabilities_deadlines_and_keep_state() {
             &worker(),
             &onepassword.manifest,
             &onepassword.source,
-            json!({ "operation": "read" }),
+            "command",
+            json!({
+                "command": "read",
+                "arguments": { "account": "a1", "reference": "op://vault/item/field" },
+                "instances": [{ "id": "a1", "name": "Production" }],
+            }),
             |method, input| async move {
-                assert_eq!(method, "onepassword.read");
-                assert_eq!(input["operation"], "read");
-                Ok(json!({ "value": "synthetic_secret" }))
+                // The script names the secret; the host injects its value into `op`.
+                assert_eq!(method, "exec.run");
+                assert_eq!(input["program"], "op");
+                assert_eq!(input["instance"], "a1");
+                assert_eq!(
+                    input["env"]["OP_SERVICE_ACCOUNT_TOKEN"],
+                    json!({ "secret": "token" })
+                );
+                assert_eq!(
+                    input["args"],
+                    json!(["read", "--no-newline", "op://vault/item/field"])
+                );
+                Ok(json!({ "status": 0, "stdout": "synthetic_secret", "stderr": "" }))
             },
         )
         .await
         .unwrap();
-    assert_eq!(value["value"], "synthetic_secret");
+    assert_eq!(value, "synthetic_secret");
+    // A package's own message reaches people; other script errors never do.
+    let error = host
+        .invoke(
+            &worker(),
+            &onepassword.manifest,
+            &onepassword.source,
+            "command",
+            json!({
+                "command": "vaults",
+                "arguments": { "account": "a2" },
+                "instances": [{ "id": "a1", "name": "Production" }],
+            }),
+            |_, _| async { unreachable!() },
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(
+        error,
+        format!(
+            "{}This 1Password account is not authorized.",
+            cairn_plugin_api::REJECTED
+        )
+    );
 
     let calls = AtomicUsize::new(0);
     let error = host
@@ -244,6 +282,7 @@ async fn worker_sessions_enforce_capabilities_deadlines_and_keep_state() {
             &worker(),
             &onepassword.manifest,
             "return { command = function(input) return cairn.call('native.execute', input) end }",
+            "command",
             Value::Null,
             |_, _| {
                 calls.fetch_add(1, Ordering::SeqCst);
@@ -259,6 +298,7 @@ async fn worker_sessions_enforce_capabilities_deadlines_and_keep_state() {
             &worker(),
             &onepassword.manifest,
             "return { command = function(input) error(input.secret) end }",
+            "command",
             json!({ "secret": "synthetic_secret" }),
             |_, _| async { unreachable!() },
         )
@@ -838,11 +878,18 @@ async fn public_support_channels_need_a_limited_agent_and_stay_quiet_when_nothin
         1
     );
 
-    // Granting the agent 1Password later suspends the public connection.
-    s.store
-        .put("onepassword", json!({ "id": cairn_installation::config::id(), "name": "Prod", "agentIds": [support["id"]] }))
-        .await
-        .unwrap();
+    // Granting the agent a plugin such as 1Password later suspends the public connection.
+    connections::save(
+        &s,
+        "onepassword",
+        &json!({
+            "name": "Prod", "enabled": true,
+            "secrets": { "token": "ops_fixture" }, "agentIds": [support["id"]],
+        }),
+        None,
+    )
+    .await
+    .unwrap();
     assert_eq!(
         accept(&s, &connection, chatter("605", "303", "hello?"))
             .await

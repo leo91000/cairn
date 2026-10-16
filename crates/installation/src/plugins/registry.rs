@@ -7,7 +7,7 @@ use crate::{
     service::Service,
     validation::text,
 };
-use cairn_plugin_api::{BUILTIN_ONLY, CAPABILITIES, MAX_SOURCE_BYTES, Manifest};
+use cairn_plugin_api::{CAPABILITIES, MAX_SOURCE_BYTES, Manifest};
 use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
 
@@ -56,16 +56,6 @@ fn package(manifest: &str, source: &str, builtin: bool) -> Result<Package> {
             || BUILTIN.iter().any(|(id, _, _)| *id == manifest.id))
     {
         return Err(Error::bad("This plugin ID belongs to a built-in plugin."));
-    }
-    if !builtin
-        && manifest
-            .capabilities
-            .iter()
-            .any(|capability| BUILTIN_ONLY.contains(&capability.as_str()))
-    {
-        return Err(Error::bad(
-            "Only built-in plugins may read 1Password secrets.",
-        ));
     }
     Ok(Package {
         digest: digest(&manifest, source)?,

@@ -43,20 +43,29 @@ pub async fn call(
         let expected = context.connection.clone();
         s.store.read(move |db| authorize(db, &expected)).await?;
         match method {
-            "storage.get" | "storage.set" | "storage.delete" | "storage.list" => {
-                storage(s, &context.connection, method, &args).await
-            }
-            "http.request" => http(s, context, &args).await,
-            "timers.after" | "timers.cancel" => timers(s, &context.connection, method, &args).await,
             "conversations.submit" => super::work::submit(s, context, &args).await,
             "conversations.check" => super::work::check(s, context, &args).await,
             "conversations.answer" => super::work::answer(s, context, &args).await,
             "conversations.cancel" => super::work::cancel(s, context, &args).await,
-            _ => Err(Error::forbidden("Unknown plugin capability.")),
+            _ => effect(s, context, method, args).await,
         }
     }
     .await;
     result.map_err(|error| Denied(code(&error)))
+}
+
+/// Capabilities that act for an instance rather than for a person: shared by
+/// long-lived workers and one-shot handlers once their scope is authorized.
+pub async fn effect(s: &Service, context: &Context, method: &str, args: Value) -> Result<Value> {
+    match method {
+        "storage.get" | "storage.set" | "storage.delete" | "storage.list" => {
+            storage(s, &context.connection, method, &args).await
+        }
+        "http.request" => http(s, context, &args).await,
+        "timers.after" | "timers.cancel" => timers(s, &context.connection, method, &args).await,
+        "exec.run" => super::programs::run(s, context, &args).await,
+        _ => Err(Error::forbidden("Unknown plugin capability.")),
+    }
 }
 
 fn key(args: &Value) -> Result<String> {
@@ -279,6 +288,37 @@ async fn http(s: &Service, context: &Context, args: &Value) -> Result<Value> {
             .await?
             .ok_or_else(|| Error::forbidden("This connection has no credential."))?;
         request = request.header(rule.header.as_str(), format!("{}{secret}", rule.prefix));
+    } else if let Some(rule) = args["auth"].as_object() {
+        // A secret field, injected by the host into one header of a declared host.
+        let header = rule
+            .get("header")
+            .and_then(Value::as_str)
+            .unwrap_or("authorization");
+        let prefix = rule.get("prefix").and_then(Value::as_str).unwrap_or("");
+        let valid_header = !header.is_empty()
+            && header.len() <= 40
+            && header
+                .bytes()
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == b'-')
+            && !matches!(
+                header,
+                "host" | "content-length" | "transfer-encoding" | "cookie"
+            );
+        if !valid_header
+            || prefix.len() > 20
+            || !prefix
+                .bytes()
+                .all(|c| c.is_ascii_alphanumeric() || c == b' ')
+        {
+            return Err(invalid("Invalid credential header."));
+        }
+        let key = rule.get("secret").and_then(Value::as_str).unwrap_or("");
+        let secrets = super::connections::secret_values(s, &context.connection.id).await?;
+        let secret = secrets
+            .get(key)
+            .and_then(Value::as_str)
+            .ok_or_else(|| Error::forbidden("This instance has no such secret."))?;
+        request = request.header(header, format!("{prefix}{secret}"));
     }
     let response = request
         .send()

@@ -17,14 +17,18 @@ import {
   Plus,
   Puzzle,
   ShieldCheck,
-  Terminal,
   Upload,
   Users,
 } from '../icons'
-import { capabilityLabels, connectionState } from '../plugins'
+import {
+  capabilityLabels,
+  connectionState,
+  contributions,
+  instanceNoun,
+  needsWorker,
+} from '../plugins'
 
 const catalog = ref<Catalog>({ packages: [], capabilities: [], connections: [] })
-const accounts = ref<{ enabled: boolean, agentIds: string[] }[]>([])
 const loaded = ref(false)
 const error = ref('')
 const reviewing = ref<PluginEntry>()
@@ -34,9 +38,7 @@ const busy = ref(false)
 const guide = 'https://github.com/leo91000/cairn/blob/main/docs/PLUGINS.md'
 
 async function load() {
-  const [plugins, onepassword] = await Promise.all([api<Catalog>('/plugins'), api('/onepassword')])
-  catalog.value = plugins
-  accounts.value = onepassword
+  catalog.value = await api<Catalog>('/plugins')
   loaded.value = true
 }
 
@@ -69,21 +71,10 @@ const tones = {
 function card(entry: PluginEntry): Card {
   const connections = catalog.value.connections.filter(item => item.pluginId === entry.id)
   const requests = connections.reduce((count, connection) => count + connection.requests.length, 0)
-  const capabilities = (entry.manifest?.capabilities ?? []).map(name => capabilityLabels[name] ?? [ShieldCheck, name] as [IconName, string])
-  if (entry.id === 'onepassword') {
-    const agents = new Set(accounts.value.flatMap(account => account.agentIds))
-    return {
-      entry,
-      to: '/plugins/onepassword',
-      capabilities: [[Terminal, 'CLI tool'], ...capabilities, [ShieldCheck, 'Per-agent grants']],
-      status: accounts.value.length
-        ? { label: `${accounts.value.length} account${accounts.value.length > 1 ? 's' : ''}`, tone: 'ok' }
-        : { label: 'Not set up', tone: 'muted' },
-      meta: accounts.value.length ? `${agents.size} agent${agents.size === 1 ? '' : 's'} authorized` : 'Add a service account',
-      requests: 0,
-      action: accounts.value.length ? 'Manage' : 'Set up',
-    }
-  }
+  const capabilities = [
+    ...(entry.manifest?.capabilities ?? []).map(name => capabilityLabels[name] ?? [ShieldCheck, name] as [IconName, string]),
+    ...contributions(entry.manifest),
+  ]
 
   if (entry.status === 'needs_approval' || entry.status === 'invalid') {
     return {
@@ -97,7 +88,9 @@ function card(entry: PluginEntry): Card {
   }
 
   const online = connections.filter(connection => connectionState(connection).tone === 'ok').length
-  const noun = entry.manifest?.capabilities.includes('transport.discord') ? 'bot' : 'instance'
+  const noun = instanceNoun(entry.manifest, connections.length).toLowerCase()
+  const agents = new Set(connections.flatMap(connection => connection.agentIds ?? [])).size
+  const granted = entry.manifest?.agentAccess ? ` · ${agents} agent${agents === 1 ? '' : 's'} authorized` : ''
   return {
     entry,
     to: `/plugins/${entry.id}`,
@@ -107,9 +100,9 @@ function card(entry: PluginEntry): Card {
       : !connections.length
           ? { label: 'Not set up', tone: 'muted' }
           : online
-            ? { label: `${online} online`, tone: 'ok' }
+            ? { label: `${online} ${needsWorker(entry.manifest) ? 'online' : 'ready'}`, tone: 'ok' }
             : connectionState(connections[0]),
-    meta: connections.length ? `${connections.length} ${noun}${connections.length > 1 ? 's' : ''}` : `Version ${entry.active}`,
+    meta: connections.length ? `${connections.length} ${noun}${granted}` : `Version ${entry.active}`,
     requests,
     action: connections.length ? 'Manage' : 'Set up',
   }
@@ -198,7 +191,7 @@ async function install() {
           @click="item.to ? undefined : reviewing = item.entry"
         >
           <span class="flex items-start gap-3">
-            <PluginMark :plugin="item.entry.id" :size="46" />
+            <PluginMark :plugin="item.entry.id" :brand="item.entry.manifest?.brand" :size="46" />
             <span class="min-w-0 flex-1">
               <span class="flex items-center gap-2">
                 <span class="truncate text-[15px] font-bold tracking-[-0.01em]">{{ item.entry.manifest?.name ?? item.entry.id }}</span>

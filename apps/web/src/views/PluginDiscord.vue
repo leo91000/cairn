@@ -40,7 +40,7 @@ import {
 
 const manifest = ref<Manifest | null>()
 const connections = ref<DiscordConnection[]>([])
-const onepassword = ref<{ name: string, agentIds: string[] }[]>([])
+const catalog = ref<Catalog>({ packages: [], capabilities: [], connections: [] })
 const loaded = ref(false)
 const busy = ref(false)
 const error = ref('')
@@ -50,10 +50,9 @@ let timer: ReturnType<typeof setInterval> | undefined
 const primary = twMerge(buttonBase, buttonVariants.primary, buttonSizes.default)
 
 async function load() {
-  const [catalog, accounts] = await Promise.all([api<Catalog>('/plugins'), api('/onepassword')])
-  manifest.value = catalog.packages.find(item => item.id === 'discord')?.manifest
-  connections.value = catalog.connections.filter(item => item.pluginId === 'discord') as DiscordConnection[]
-  onepassword.value = accounts
+  catalog.value = await api<Catalog>('/plugins')
+  manifest.value = catalog.value.packages.find(item => item.id === 'discord')?.manifest
+  connections.value = catalog.value.connections.filter(item => item.pluginId === 'discord') as DiscordConnection[]
   loaded.value = true
 }
 
@@ -76,7 +75,10 @@ const project = (connection: DiscordConnection) => state.projects.find(item => i
 
 function abilities(connection: DiscordConnection) {
   const access = agent(connection)?.access
-  const secrets = onepassword.value.filter(account => account.agentIds.includes(connection.agentId))
+  // Other plugins (such as 1Password) this bot's agent is authorized on.
+  const plugins = catalog.value.connections
+    .filter(item => item.agentIds?.includes(connection.agentId))
+    .map(item => `${catalog.value.packages.find(entry => entry.id === item.pluginId)?.manifest?.name ?? item.pluginId} · ${item.name}`)
   return [
     ...(connection.accessMode === 'everyone' ? [{ allowed: true, warn: true, text: 'Anyone in the channel can make the agent work (read-only)' }] : []),
     ...(connection.settings.everyMessage ? [{ allowed: true, text: 'Answer every message, staying silent when nothing is needed' }] : []),
@@ -86,9 +88,9 @@ function abilities(connection: DiscordConnection) {
       : { allowed: false, text: 'Open any project' },
     { allowed: true, text: `Reply in #${connection.settings.channelName || connection.settings.channelId} and its threads only` },
     { allowed: true, text: 'Let allowed people answer its questions and stop it from Discord' },
-    secrets.length
-      ? { allowed: true, warn: true, text: `Use 1Password: ${secrets.map(account => account.name).join(', ')}` }
-      : { allowed: false, text: 'Read 1Password secrets' },
+    plugins.length
+      ? { allowed: true, warn: true, text: `Use plugins: ${plugins.join(', ')}` }
+      : { allowed: false, text: 'Use plugins such as 1Password' },
     ...(access?.github ? [{ allowed: true, warn: true, text: 'Use GitHub as you' }] : []),
     { allowed: false, text: 'Manage the installation' },
     { allowed: false, text: 'See other conversations' },

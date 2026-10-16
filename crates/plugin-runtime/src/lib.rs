@@ -38,7 +38,13 @@ cairn.conversations = {
     answer = function(answer) return call("conversations.answer", answer) end,
     cancel = function(target) return call("conversations.cancel", target) end,
 }
+cairn.exec = {
+    run = function(request) return call("exec.run", request) end,
+}
 "#;
+
+/// Longest message a package may show through `cairn.fail`.
+const MAX_FAILURE: usize = 300;
 
 /// JSON `null` becomes Lua `nil`, so `if value then` behaves as plugin authors expect.
 fn options() -> SerializeOptions {
@@ -64,6 +70,15 @@ pub struct Runtime {
     bridge: Bridge,
     deadline: Rc<Cell<Instant>>,
     budget: Duration,
+    failure: Rc<RefCell<Option<String>>>,
+}
+
+/// Why a handler did not return a value.
+pub enum Failed {
+    /// The package called `cairn.fail(message)`: a message meant for the person.
+    Rejected(String),
+    /// Any other error. Details stay in the worker.
+    Error(mlua::Error),
 }
 
 impl Runtime {
@@ -100,6 +115,40 @@ impl Runtime {
             })?,
         )?;
         api.set("array_metatable", lua.array_metatable())?;
+        let json = lua.create_table()?;
+        json.set(
+            "decode",
+            lua.create_function(|lua, text: mlua::LuaString| {
+                if text.as_bytes().len() > MAX_FRAME_BYTES {
+                    return Err(mlua::Error::runtime("invalid"));
+                }
+                let value: Value = serde_json::from_slice(&text.as_bytes())
+                    .map_err(|_| mlua::Error::runtime("invalid"))?;
+                lua.to_value_with(&value, options())
+            })?,
+        )?;
+        json.set(
+            "encode",
+            lua.create_function(|lua, value: mlua::Value| {
+                let value: Value = lua.from_value(value)?;
+                serde_json::to_string(&value).map_err(|_| mlua::Error::runtime("invalid"))
+            })?,
+        )?;
+        api.set("json", json)?;
+        let failure = Rc::new(RefCell::new(None::<String>));
+        let failed = failure.clone();
+        api.set(
+            "fail",
+            lua.create_function(move |_, message: String| -> mlua::Result<()> {
+                let message = message
+                    .chars()
+                    .filter(|c| !c.is_control())
+                    .take(MAX_FAILURE)
+                    .collect::<String>();
+                *failed.borrow_mut() = Some(message);
+                Err(mlua::Error::runtime("failed"))
+            })?,
+        )?;
         lua.globals().set("cairn", api)?;
         lua.load(PRELUDE).set_name("prelude").exec()?;
         // Diagnostics and environment mutation never become another output channel.
@@ -118,6 +167,7 @@ impl Runtime {
             bridge,
             deadline,
             budget,
+            failure,
         })
     }
 
@@ -126,14 +176,34 @@ impl Runtime {
     where
         F: FnMut(&str, Value) -> Result<Value, CallError> + 'static,
     {
+        self.run(event, payload, call)
+            .map_err(|failed| match failed {
+                Failed::Rejected(message) => mlua::Error::runtime(message),
+                Failed::Error(error) => error,
+            })
+    }
+
+    /// Like [`Runtime::dispatch`], telling a package's `cairn.fail` apart from errors.
+    pub fn run<F>(&self, event: &str, payload: Value, call: F) -> Result<Value, Failed>
+    where
+        F: FnMut(&str, Value) -> Result<Value, CallError> + 'static,
+    {
         *self.bridge.borrow_mut() = Box::new(call);
         self.deadline.set(Instant::now() + self.budget);
-        let handler: Option<mlua::Function> = self.handlers.get(event)?;
-        let Some(handler) = handler else {
-            return Ok(Value::Null);
-        };
-        let output = handler.call::<mlua::Value>(self.lua.to_value_with(&payload, options())?)?;
-        self.lua.from_value(output)
+        self.failure.borrow_mut().take();
+        let result = (|| {
+            let handler: Option<mlua::Function> = self.handlers.get(event)?;
+            let Some(handler) = handler else {
+                return Ok(Value::Null);
+            };
+            let output =
+                handler.call::<mlua::Value>(self.lua.to_value_with(&payload, options())?)?;
+            self.lua.from_value(output)
+        })();
+        result.map_err(|error| match self.failure.borrow_mut().take() {
+            Some(message) => Failed::Rejected(message),
+            None => Failed::Error(error),
+        })
     }
 }
 
@@ -208,9 +278,10 @@ pub fn worker() -> Result<(), String> {
         let Some(Frame::Event { name, payload }) = frame else {
             return Ok(());
         };
-        let frame = match runtime.dispatch(&name, payload, host_call) {
+        let frame = match runtime.run(&name, payload, host_call) {
             Ok(value) => Frame::Done { value },
-            Err(_) => Frame::Failure,
+            Err(Failed::Rejected(message)) => Frame::Rejected { message },
+            Err(Failed::Error(_)) => Frame::Failure,
         };
         write_frame(&mut std::io::stdout().lock(), &frame)?;
     }

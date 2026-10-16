@@ -5,6 +5,7 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.material3.Surface
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.semantics.SemanticsProperties
 import androidx.compose.ui.test.*
 import androidx.compose.ui.test.junit4.v2.createComposeRule
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -61,6 +62,64 @@ abstract class PluginsCases {
                         ),
                 ),
         )
+    /** The built-in 1Password package as API v2 declares it, trimmed to what screens read. */
+    private val onePassword =
+        PluginEntry(
+            id = "onepassword",
+            builtin = true,
+            active = "1.0.0",
+            manifest =
+                PluginManifest(
+                    id = "onepassword",
+                    name = "1Password",
+                    version = "1.0.0",
+                    capabilities = listOf("exec"),
+                    instances = PluginInstances("Service account", "Service accounts"),
+                    programs = listOf(PluginProgram("op", "/usr/local/bin/op")),
+                    settings =
+                        listOf(
+                            PluginSetting(
+                                key = "token",
+                                title = "Service account token",
+                                type = "secret",
+                                required = true,
+                            )
+                        ),
+                    agentAccess = PluginAgentAccess("Off by default."),
+                    commands =
+                        listOf(
+                            PluginCommand(
+                                name = "read",
+                                output = "secret",
+                                arguments =
+                                    listOf(
+                                        PluginArgument(
+                                            "account",
+                                            flag = "--account",
+                                            required = true,
+                                        ),
+                                        PluginArgument(
+                                            "reference",
+                                            positional = true,
+                                            required = true,
+                                        ),
+                                    ),
+                            )
+                        ),
+                    tools = listOf(PluginTool("onepassword", "Metadata")),
+                    instanceView = true,
+                    instanceTest = true,
+                ),
+        )
+    private val account =
+        PluginConnection(
+            id = "op1",
+            pluginId = "onepassword",
+            name = "Production",
+            agentIds = listOf(MAIN_AGENT_ID),
+            secretKeys = listOf("token"),
+            status = PluginStatus("ready"),
+        )
     private val bot =
         PluginConnection(
             id = "bot",
@@ -83,38 +142,60 @@ abstract class PluginsCases {
         val catalog = listOf(bot, bot.copy(id = "paused", enabled = false))
         assertEquals(
             PluginSummary(PluginBadge("1 en ligne", PluginTone.OK), "2 bots", 2),
-            discord.summary(catalog, emptyList()),
+            discord.summary(catalog),
         )
+        // Instances without a worker are ready; agent grants are counted once.
         assertEquals(
             PluginSummary(
-                PluginBadge("À configurer", PluginTone.MUTED),
-                "Ajoutez un compte de service",
+                PluginBadge("1 prêt", PluginTone.OK),
+                "1 service account · 1 agent autorisé",
                 0,
             ),
-            PluginEntry(id = "onepassword").summary(catalog, emptyList()),
+            onePassword.summary(listOf(account)),
         )
         assertEquals(
-            "2 comptes",
-            PluginEntry(id = "onepassword")
-                .summary(
-                    emptyList(),
-                    listOf(
-                        OnePasswordAccount(agentIds = listOf("a")),
-                        OnePasswordAccount(agentIds = listOf("a")),
-                    ),
-                )
-                .badge
-                .label,
+            PluginSummary(PluginBadge("À configurer", PluginTone.MUTED), "Version 1.0.0", 0),
+            onePassword.summary(emptyList()),
         )
         assertEquals(
             PluginBadge("À approuver", PluginTone.WARNING),
-            notes.copy(status = "needs_approval").summary(emptyList(), emptyList()).badge,
+            notes.copy(status = "needs_approval").summary(emptyList()).badge,
+        )
+        assertEquals(
+            "cairn plugin onepassword read --account <account> <reference>",
+            onePassword.manifest!!.commands.single().usage("onepassword"),
         )
         assertEquals(PluginBadge("En pause", PluginTone.MUTED), bot.copy(enabled = false).state())
         assertEquals(
             PluginBadge("À vérifier", PluginTone.ATTENTION),
             bot.copy(status = PluginStatus("needs_review")).state(),
         )
+    }
+
+    @Test
+    fun formsKeepChoicesAndNeverSendSecretsAsSettings() {
+        val fields =
+            listOf(
+                PluginSetting(key = "token", title = "Token", type = "secret"),
+                PluginSetting(
+                    key = "region",
+                    title = "Region",
+                    type = "select",
+                    options = listOf(PluginOption("eu", "Europe")),
+                ),
+                PluginSetting(key = "scopes", title = "Scopes", type = "multiselect"),
+            )
+        assertEquals(
+            buildJsonObject {
+                put("region", "eu")
+                put("scopes", JsonArray(listOf(JsonPrimitive("read"))))
+            },
+            pluginSettings(
+                fields,
+                mapOf("token" to "secret", "region" to "eu", "scopes" to "[\"read\"]"),
+            ),
+        )
+        assertEquals("[]", formValue(fields[2], null))
     }
 
     @Test
@@ -246,23 +327,81 @@ abstract class PluginsCases {
     }
 
     @Test
-    fun onePasswordScreenShowsServiceAccountsAndCliUse() {
+    fun onePasswordIsAGenericPluginWithItsPanelAndAgentUsage() {
         MockWebServer().use { server ->
-            server.dispatcher = dispatcher { _, _ -> null }
+            val actions = CopyOnWriteArrayList<String>()
+            server.dispatcher = dispatcher { path, body ->
+                if (path.endsWith("/connections/op1/actions")) {
+                    actions += body
+                    """{"view":[{"type":"list","items":[{"title":"Production vault"}]}]}"""
+                } else null
+            }
+            server.start()
+            show(server) { vm, state -> PluginScreen(vm, state, "onepassword") {} }
+            compose.waitUntil(30000) {
+                compose.onAllNodesWithText("Show vaults").fetchSemanticsNodes().isNotEmpty()
+            }
+            compose.onNodeWithText("Enregistré").assertExists()
+            compose.onNodeWithText("Agents autorisés : Cairn").assertExists()
+            capture("plugin-onepassword")
+            compose.onNodeWithText("Show vaults").performScrollTo().performClick()
+            compose.waitUntil(30000) {
+                compose.onAllNodesWithText("Production vault").fetchSemanticsNodes().isNotEmpty()
+            }
+            assertEquals(
+                "vaults",
+                wireJson
+                    .parseToJsonElement(actions.single())
+                    .jsonObject["action"]
+                    ?.jsonPrimitive
+                    ?.content,
+            )
+            compose.onNodeWithTag("plugin-agent-usage").performScrollTo()
+            compose
+                .onNodeWithText("cairn plugin onepassword read --account <account> <reference>")
+                .assertExists()
+            compose.onNodeWithText("/usr/local/bin/op").assertExists()
+            capture("plugin-onepassword-agents")
+        }
+    }
+
+    @Test
+    fun serviceAccountsSendTheirTokenOnceWithExplicitGrants() {
+        MockWebServer().use { server ->
+            val saved = CopyOnWriteArrayList<String>()
+            server.dispatcher = dispatcher { path, body ->
+                if (path.endsWith("/plugins/onepassword/connections")) {
+                    saved += body
+                    "{}"
+                } else null
+            }
             server.start()
             show(server) { vm, state -> PluginScreen(vm, state, "onepassword") {} }
             compose.waitUntil(30000) {
                 compose
-                    .onAllNodesWithText("Aucun compte de service")
+                    .onAllNodesWithText("Ajouter · Service account")
                     .fetchSemanticsNodes()
                     .isNotEmpty()
             }
-            compose.onNodeWithText("Comptes de service").assertIsDisplayed()
+            compose.onNodeWithText("Ajouter · Service account").performClick()
+            compose.onNodeWithText("Enregistrer").assertIsNotEnabled()
+            compose.onNodeWithText("Nom").performTextInput("Staging")
+            compose.onNodeWithText("Service account token").performTextInput("ops_android_fixture")
             compose
-                .onNodeWithText("Comment les agents l’utilisent")
-                .performScrollTo()
+                .onNode(SemanticsMatcher.keyIsDefined(SemanticsProperties.Password))
                 .assertExists()
-            capture("plugin-onepassword")
+            compose.onNodeWithText("Helper").performScrollTo().performClick()
+            capture("plugin-instance-editor")
+            compose.onNodeWithText("Enregistrer").performClick()
+            compose.waitUntil(10000) { saved.isNotEmpty() }
+            val payload = wireJson.parseToJsonElement(saved.single()).jsonObject
+            assertEquals("Staging", payload["name"]?.jsonPrimitive?.content)
+            assertEquals(
+                buildJsonObject { put("token", "ops_android_fixture") },
+                payload["secrets"],
+            )
+            assertEquals(JsonArray(listOf(JsonPrimitive("helper"))), payload["agentIds"])
+            assertEquals(JsonObject(emptyMap()), payload["settings"])
         }
     }
 
@@ -299,23 +438,15 @@ abstract class PluginsCases {
                                 PluginCatalog(
                                     packages =
                                         listOf(
-                                            PluginEntry(
-                                                id = "onepassword",
-                                                builtin = true,
-                                                active = "0.2.0",
-                                                manifest =
-                                                    PluginManifest(
-                                                        id = "onepassword",
-                                                        name = "1Password",
-                                                        version = "0.2.0",
-                                                    ),
-                                            ),
+                                            onePassword,
                                             discord,
                                             notes,
                                         ),
-                                    connections = listOf(bot),
+                                    connections = listOf(bot, account),
                                 )
                             )
+                        "/api/installations/fixture/api/plugins/onepassword/connections/op1/view" ->
+                            """{"view":[{"type":"section","title":"Vaults","children":[{"type":"actions","children":[{"type":"button","label":"Show vaults","action":"vaults"}]}]}]}"""
                         "/api/installations/fixture/api/overview",
                         "/api/installations/fixture/api/codex/models" -> "{}"
                         else -> "[]"

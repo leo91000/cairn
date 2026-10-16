@@ -61,7 +61,8 @@ const accessMode = ref<'requests' | 'allowlist' | 'everyone'>('requests')
 const messageContent = ref(false)
 const everyMessage = ref(false)
 const perPerson = ref(5)
-const onepassword = ref<{ agentIds: string[] }[]>([])
+// Plugin instances whose grants make an agent unfit for anyone in a channel.
+const grants = ref<{ agentIds?: string[] }[]>([])
 const people = ref<Label[]>([])
 const addition = ref('')
 const agentId = ref('')
@@ -72,7 +73,7 @@ const enabled = ref(true)
 const guild = computed(() => discovery.value?.guilds.find(item => item.id === guildId.value))
 const channel = computed(() => discovery.value?.channels?.find(item => item.id === channelId.value))
 // Anyone in the channel needs a strictly limited agent; others a dedicated one.
-const problem = (item: (typeof state.agents)[number]) => accessMode.value === 'everyone' ? publicProblem(item, onepassword.value) : eligibleAgent(item) ? '' : 'Too broad'
+const problem = (item: (typeof state.agents)[number]) => accessMode.value === 'everyone' ? publicProblem(item, grants.value) : eligibleAgent(item) ? '' : 'Too broad'
 const agents = computed(() => [...state.agents].sort((a, b) => Number(!problem(b)) - Number(!problem(a))))
 const agent = computed(() => state.agents.find(item => item.id === agentId.value))
 const project = computed(() => state.projects.find(item => item.id === agent.value?.access.projects?.[0]))
@@ -187,11 +188,13 @@ async function save() {
 }
 
 onMounted(async () => {
-  onepassword.value = await api('/onepassword').catch(() => [])
+  const catalog = await api('/plugins').catch(() => null)
+  grants.value = catalog?.connections ?? []
   if (!editing.value)
     return
   try {
-    const catalog = await api('/plugins')
+    if (!catalog)
+      throw new Error('Plugins are unavailable.')
     const existing = catalog.connections.find((item: DiscordConnection) => item.id === editing.value) as DiscordConnection | undefined
     if (!existing) {
       error.value = 'This bot no longer exists.'
@@ -468,7 +471,7 @@ const radio = 'size-4.5 shrink-0 accent-[var(--color-accent)]'
                   :class="twMerge(radio, 'mt-0.5')"
                 >
                 <span><span class="flex items-center gap-2 text-xs font-semibold">Anyone in the channel<span class="rounded-full bg-warning-surface px-2 py-px text-3xs text-warning">Public</span></span>
-                  <span class="mt-1 block text-2xs leading-relaxed text-muted">For a public support channel. Anyone can make the agent work, so it must be read-only, with no GitHub, MCP or 1Password access and one project at most. Each person gets their own hourly limit, and only they (or people you list) can stop their conversation.</span></span>
+                  <span class="mt-1 block text-2xs leading-relaxed text-muted">For a public support channel. Anyone can make the agent work, so it must be read-only, with no GitHub, MCP or plugin access (such as 1Password) and one project at most. Each person gets their own hourly limit, and only they (or people you list) can stop their conversation.</span></span>
               </label>
             </fieldset>
             <label :class="twMerge(option, 'mt-2.5 items-start')">
@@ -531,7 +534,7 @@ const radio = 'size-4.5 shrink-0 accent-[var(--color-accent)]'
             </h2>
             <p class="mt-1.5 text-[13px] leading-relaxed text-muted">
               {{ accessMode === 'everyone'
-                ? 'Anyone can reach this agent, so it must be read-only, with no GitHub, MCP or 1Password access and one project at most.'
+                ? 'Anyone can reach this agent, so it must be read-only, with no GitHub, MCP or plugin access (such as 1Password) and one project at most.'
                 : 'Pick a dedicated agent. Only agents limited to one project at most, without installation access, are eligible.' }}
             </p>
             <fieldset class="mt-4.5 grid gap-2.5">

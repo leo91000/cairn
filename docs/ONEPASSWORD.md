@@ -1,9 +1,11 @@
 # 1Password service accounts
 
-In **Atelier → Plugins → 1Password** on web or Android, add a name and an `ops_…`
-service account token. Select the agents allowed to use it, then save and test
-the connection. Every account starts with **no authorized agents**, including
-Main agent. Multiple accounts can have independent agent lists.
+1Password is an ordinary plugin package (see [plugins](PLUGINS.md#1password)). In
+**Atelier → Plugins → 1Password** on web or Android, add a service account with a
+name and an `ops_…` token. Select the agents allowed to use it, then save and test
+it. Every account starts with **no authorized agents**, including Main agent.
+Multiple accounts can have independent agent lists. Each account's panel lists the
+vaults it can read on demand.
 
 Editing with an empty token keeps the existing credential. Enter a new token to
 rotate it. Disable the account, uncheck an agent, or delete the account to revoke
@@ -12,18 +14,18 @@ checked again before its result is returned. Secrets previously retrieved by an
 agent cannot be recalled. Grants are live and do not depend on a run snapshot.
 
 The workspace `onepassword` tool supports `accounts`, `vaults`, `items` (with a
-vault name or ID), `fields` (with a vault and item, returns references without
-values), and `read` (with an `op://vault/item/field` reference). It offers
-read access only. Create the service account in 1Password with access to only the
+vault name or ID) and `fields` (with a vault and item, returns references without
+values). Secrets are read only with `cairn plugin onepassword read --account ID
+op://vault/item/field`, piped into the consuming command. Everything is read-only. Create the service account in 1Password with access to only the
 intended vaults. The service account's permissions remain the upper bound of access.
 Tool results containing secrets enter the authorized agent's context and may be
 stored in run history; avoid asking
 agents to print secrets in messages, logs or artifacts.
 
-Agent instructions advertise the integration automatically in isolated tasks and
-chats. Agents discover their current grants with `accounts` when credentials are
-needed; the CLI runs on the server, not as an authenticated CLI in the task VM.
-The same guidance is included in the tool description.
+The package's instructions are added to isolated tasks and chats whose agent is
+granted at least one enabled account. Agents discover their current grants with
+`accounts` when credentials are needed; the CLI runs on the server, not as an
+authenticated CLI in the task VM.
 
 Passkeys cannot be retrieved or used through this integration. If a sign-in
 requires one, agents must stop and ask the user to enable TOTP on that website
@@ -33,12 +35,15 @@ settings or bypassing the passkey requirement. If TOTP is unavailable, they ask
 how to proceed; unattended tasks report the required user action. Passwords,
 TOTP seeds and recovery codes must not be requested in chat.
 
-Tokens are encrypted using the application's existing AES-GCM credential vault.
-They are never returned by the management API, copied into a run/VM environment,
-or included in audit records. Back up `mcp-encryption-key` together with the
-application database. The manager invokes the pinned official CLI with an isolated
-environment, a temporary home, disabled cache, fixed read-only arguments and a
-30-second timeout. CLI error output is not exposed. Docker includes CLI 2.39.0;
+Tokens are secret instance fields, encrypted using the application's existing
+AES-GCM credential vault. They are never returned by the management API, given to
+the package's script, copied into a run/VM environment, or included in audit
+records. Back up `mcp-encryption-key` together with the application database. The
+manager runs the pinned official CLI as the package's declared program: an empty
+environment with only the token and a disabled cache, a temporary home, the
+package's fixed read-only arguments and a 30-second timeout. CLI error output is not
+exposed. Accounts saved before plugin API v2 were moved into instances with the same
+IDs, grants and tokens. Docker includes CLI 2.39.0;
 local development needs the CLI at `/usr/local/bin/op`.
 
 The connection test checks that the saved token can list its vaults. Saving does

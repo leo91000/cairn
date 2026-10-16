@@ -14,15 +14,20 @@ crates/plugin-host/     Worker processes: sessions, per-event deadlines, capabil
 crates/plugin-runtime/  Luau sandbox, handler table, prelude (cairn.storage, http, …)
 crates/installation/src/plugins/
   registry.rs           Bundled and installed packages, approvals, versions
-  connections.rs        Generic connections: delegation + manifest-declared settings
-  runtime.rs            One supervisor per connection: worker, transport, event pump
-  capabilities.rs       storage, http, timers, conversations.submit for scripts
+  connections.rs        Generic instances: settings, secrets, agent grants, delegation
+  runtime.rs            One supervisor per instance that needs a worker: transport, pump
+  capabilities.rs       storage, http, timers, exec and conversations for scripts
+  scope.rs              One-shot handlers: who acts, which instances, rechecks
+  agents.rs             Commands, Cairn MCP tools and prompt instructions for agents
+  panels.rs             Declarative views, actions and tests for the owner
+  programs.rs           `exec`: declared programs without a shell
   work.rs               Admission, access requests, event queue, replies
   discord/              Native Gateway transport and setup discovery only
-  cli.rs                `cairn plugin onepassword …` inside conversations
+  cli.rs                `cairn plugin <plugin> <command> …` inside conversations
+  legacy.rs             Moves pre-v2 1Password accounts into instances
 plugins/                Bundled packages (1Password, Discord)
 packages/plugin-types/  Luau declarations for package authors
-apps/web/src/           Catalogue, review, generic plugin page, Discord pages
+apps/web/src/           Catalogue, review, generic plugin page and renderer, Discord pages
 ```
 
 Dependencies point one way: `installation → plugin-host → plugin-api ← plugin-runtime`.
@@ -37,20 +42,31 @@ live in `<data>/plugins/<id>/<version>/`, either uploaded from Atelier → Plugi
 owner approves it. Approval records a digest of the exact manifest and source, so
 any later edit on disk withdraws the package until it is approved again. A new
 version waits for approval while the previous one keeps running, and the owner can
-switch back to any earlier approved version. Only bundled packages may request
-`onepassword.read`, and installed packages can't reuse built-in IDs. Uninstalling
-requires removing the package's connections first.
+switch back to any earlier approved version. Installed packages can't reuse
+built-in IDs, and nothing is reserved to built-in packages: 1Password is an
+ordinary package. Uninstalling requires removing the package's instances first.
 
-A manifest declares:
+A manifest declares (fields marked v2 need `"apiVersion": 2`; version 1 manifests
+keep loading):
 
-- `capabilities`: `conversations.submit`, `conversations.control`, `storage`, `http`, `timers`,
-  `transport.discord`, and (built-in only) `onepassword.read`;
+- `capabilities`: `conversations.submit`, `conversations.control`, `storage`, `http`,
+  `timers`, `transport.discord` and `exec` (v2);
 - `hosts`: the exact HTTPS hostnames `http` may reach;
-- `credential`: how Cairn adds a connection's secret to authorized requests
+- `credential`: how Cairn adds an instance's token to authorized requests
   (header and prefix); the script only sets `auth = true`;
-- `settings`: an ordered list of connection fields Cairn renders and validates
-  (`key`, `title`, `type` string/number/boolean, `required`, `hidden`, `maxLength`,
-  `minimum`, `maximum`, `description`).
+- `settings`: the instance form, in order (`key`, `title`, `type`, `required`,
+  `hidden`, `description`, `placeholder`, `section`, `default`, `maxLength`,
+  `minimum`, `maximum`, `pattern`, `options`). Types: `string`, `number`, `boolean`,
+  and in v2 `text`, `url`, `select`, `multiselect` (with `options`) and `secret`;
+- `instances` (v2): `{ singular, plural }`, how the interfaces name an instance;
+- `brand` (v2): `{ color: "#rrggbb", path }`, the package's mark (an SVG path on a
+  24×24 grid);
+- `programs` (v2, with `exec`): `[{ name, path, description }]`, absolute paths the
+  package may run;
+- `agentAccess` (v2): `{ description }`; the owner grants agents per instance and
+  only granted agents get the package's commands, tools and instructions;
+- `commands`, `tools`, `instructions` (v2, need `agentAccess`), `instanceView` and
+  `instanceTest` (v2): see [Contributions](#contributions-api-v2).
 
 ## Connections and delegation
 
@@ -73,8 +89,9 @@ the digest displayed during review; changes require reviewing again.
 
 ## Runtime
 
-For each enabled connection a supervisor starts the package's worker, its native
-transport if it declares one, and a pump. The worker loads the source once and keeps
+For each enabled instance of a package that reacts to people, transports or timers,
+a supervisor starts the package's worker, its native transport if it declares one,
+and a pump. The worker loads the source once and keeps
 its Luau state between events. Handlers run one at a time under a 35-second deadline
 and a 16 MiB memory limit; a stuck or misbehaving worker is killed and restarted with
 backoff. Workers inherit no environment, run in a private temporary directory, never
@@ -92,7 +109,7 @@ Events, all durable until handled (retried up to five times):
 | `question` | the agent asks a question (once each) | `{ deliveryId, conversation, question, reply }` |
 | `reply` | the agent's final answer is ready | `{ deliveryId, conversation, text, status, files, reply, state }` |
 | `timer` | a timer scheduled by the package fired | `{ id, name, payload }` |
-| `command` | a run-scoped CLI command (1Password) | command arguments |
+| `command`, `tool`, `view`, `action`, `test` | one-shot handlers (API v2) | see [Contributions](#contributions-api-v2) |
 
 A `reply` handler may return `{ retryAfter = seconds, state = … }` to be called again
 later, for example after a platform rate limit. Capabilities exposed to scripts:
@@ -133,11 +150,78 @@ not yet a marketplace guarantee: a public catalogue still needs signed packages,
 OS-level isolation of workers and an update policy. No Codex plugin catalog is
 enabled or downloaded.
 
-## 1Password CLI
+## Contributions (API v2)
 
-Existing encrypted accounts, owner configuration and live agent grants are retained.
-Metadata remains available through the MCP tool. Secret reads are rejected there;
-use the run-local CLI and consume stdout inside a pipe or script:
+A v2 package ships a whole integration without changing Cairn. The manifest says
+what it adds; Cairn renders it on the web and Android, authorizes every call and
+runs the script's handler in a one-shot worker (same deadline, memory limit and
+capability gate as long-lived workers).
+
+| Contribution | Manifest | Handler | Receives |
+|---|---|---|---|
+| Command | `commands: [{ name, description, output, arguments }]` | `command` | `{ command, arguments, agent, instances }` |
+| Agent tool | `tools: [{ name, description, inputSchema }]` | `tool` | `{ tool, input, agent, instances }` |
+| Prompt instructions | `instructions` | — | — |
+| Instance panel | `instanceView: true` | `view`, `action` | `{ instance }`, `{ action, payload, values, instance }` |
+| Instance test | `instanceTest: true` | `test` | `{ instance }` |
+
+- **Commands** run as `cairn plugin <plugin> <command> …` in conversations.
+  Arguments are flags (`{ name, flag: "--vault" }`) or positional values
+  (`{ name, positional: true }`), optionally `required`, with a `pattern` the whole
+  value must match and a `maxLength`. Cairn parses them; unknown, repeated or
+  malformed values never reach the script. `output` is `json` (default), `text`, or
+  `secret`: a secret is written to stdout exactly, for a pipe, and is never stored.
+- **Tools** are listed by the run's Cairn MCP server; input is checked against
+  `inputSchema` first. A tool name is the plugin ID or starts with `<id>_`, and never
+  replaces one of Cairn's own tools. Tools can't return secret output.
+- **Instructions** are added to the prompt of isolated runs whose agent is granted.
+- Commands, tools and instructions exist only for agents the owner granted on an
+  enabled instance (`agentAccess`). Nothing is granted by default, including Main
+  agent. Each capability call rereads the instance and the grant; after a program or
+  an HTTP request, a revoked grant or a changed instance discards the result.
+  `instances` lists what the agent may use: `{ id, name, enabled, settings, secrets }`
+  (secret field names only). Name one with `instance = id` in capability calls when
+  there are several.
+- **Views** are a list of components: `section` (`title`, `description`,
+  `children`), `text`, `alert` (`tone`, `title`, `text`), `badge`, `facts`
+  (`items: [{ label, value }]`), `list` (`items: [{ title, subtitle, badge, actions }]`,
+  `empty`), `progress` (`value`, `max`, `label`), `code`, `link` (HTTPS `url`),
+  `button` (`label`, `action`, `payload`, `style` primary/default/danger, `confirm`),
+  `actions` (a row of buttons) and `form` (`fields` like `settings`, `values`,
+  `submit: { label, action }`). Tones are `neutral`, `info`, `success`, `warning`
+  and `danger`. Anything else, or more than 300 components or 64 KB, is refused. An
+  `action` returns `{ notice?, tone?, view? }`; a new `view` replaces the panel.
+- A script may call `cairn.fail(message)` to stop with a message for the person
+  (300 characters at most). Any other error stays in the worker.
+
+Capabilities for v2 packages:
+
+- `cairn.exec.run{ program, args?, env?, stdin?, timeout?, instance? }` (capability
+  `exec`) runs a declared program without a shell, with an empty environment and a
+  private temporary home, 64 arguments, 256 KB of input, 1 MB of output and 30 seconds
+  at most. `env` values are text or `{ secret = "<setting key>" }`: the host injects the
+  instance's secret, which the script never sees. `LD_*`, `DYLD_*` and `HOME` can't be
+  set. Returns `{ status, stdout, stderr }`. Programs run outside the Luau sandbox with
+  whatever files and network they can reach: the review screen names each path.
+- `cairn.http.request{ …, auth = { secret = "<setting key>", header?, prefix? } }`
+  adds a secret field to one header of a declared host.
+- `cairn.json.decode(text)` and `cairn.json.encode(value)` convert JSON.
+
+Instance routes add `GET …/connections/{id}/view`, `POST …/connections/{id}/actions`
+and the generic `POST …/connections/{id}/test`. Secret fields are saved with
+`secrets: { key: value }`; an empty or missing value keeps the saved one and the API
+only returns their names (`secretKeys`). Grants are saved as `agentIds`. Instances of
+packages that need no worker (no transport, conversations or timers) start nothing
+and show as ready while enabled.
+
+## 1Password
+
+The bundled 1Password package is an ordinary v2 package (`plugins/onepassword/`):
+service accounts are instances with a secret token and agent grants, `op` is a
+declared program, and its commands, `onepassword` tool, instructions, panel and test
+are declared in its manifest. Accounts saved before v2 move into instances at
+startup with the same IDs, grants and tokens. Metadata is available through the tool;
+secret reads only through the CLI, consumed inside a pipe or script:
 
 ```sh
 cairn plugin onepassword accounts
@@ -148,15 +232,16 @@ cairn plugin onepassword read --account ACCOUNT_ID op://vault/item/password |
 
 The CLI uses the same private VM channel and run grant, including remote nodes.
 It never authenticates `op` inside the conversation VM. The service-account token
-stays in the installation; `op` runs with its existing isolated environment,
-read-only argument validation and post-I/O grant/rotation checks. Secret stdout has
-no added newline and is not persisted by the plugin host. Do not run a bare read,
+stays in the installation; `op` runs with the declared program rules above, the
+package's fixed read-only arguments and the post-I/O grant/rotation check. Secret
+stdout has no added newline and is not persisted by the plugin host. Do not run a bare read,
 enable shell tracing or print the captured value: the ordinary command tool still
 records its output. Already delivered secrets cannot be revoked.
 
 The CLI expects an active conversation VM with the current Cairn binary and guest
-channel. Existing old VM images need the current binary/channel before using it;
-non-VM development commands do not acquire a new manager network route.
+channel. VMs still running the previous binary keep working for 1Password: the host
+accepts their earlier command frame. Non-VM development commands do not acquire a
+new manager network route.
 
 ## Discord setup and live test
 

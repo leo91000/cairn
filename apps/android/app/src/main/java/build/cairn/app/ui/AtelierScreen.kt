@@ -89,13 +89,11 @@ fun AtelierScreen(vm: CairnViewModel, state: Workspace, navigate: (String) -> Un
         return
     }
     var accounts by remember { mutableStateOf<AccountsView?>(null) }
-    var onePassword by remember { mutableStateOf<List<OnePasswordAccount>?>(null) }
     var plugins by remember { mutableStateOf<PluginCatalog?>(null) }
     var loaded by remember { mutableStateOf(false) }
     var signingOut by remember { mutableStateOf(false) }
     Poll("atelier", 30_000) {
         accounts = optional(vm) { vm.api.get<AccountsView>("/accounts") }
-        onePassword = optional(vm) { vm.api.get<List<OnePasswordAccount>>("/onepassword") }
         plugins = optional(vm) { vm.api.get<PluginCatalog>("/plugins") }
         loaded = true
     }
@@ -288,10 +286,10 @@ fun AtelierScreen(vm: CairnViewModel, state: Workspace, navigate: (String) -> Un
                     )
                 else ->
                     catalog.packages.forEach { entry ->
-                        val summary = entry.summary(catalog.connections, onePassword.orEmpty())
+                        val summary = entry.summary(catalog.connections)
                         Spacer(Modifier.height(12.dp))
                         Row(verticalAlignment = Alignment.CenterVertically) {
-                            PluginMark(entry.id, 24.dp)
+                            PluginMark(entry.id, 24.dp, entry.manifest?.brand)
                             Spacer(Modifier.width(10.dp))
                             Text(
                                 entry.name,

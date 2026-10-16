@@ -52,12 +52,10 @@ internal fun webPage(api: CairnApi, path: String): String =
 @Composable
 fun PluginsScreen(vm: CairnViewModel, state: Workspace, open: (String) -> Unit) {
     var catalog by remember { mutableStateOf<PluginCatalog?>(null) }
-    var onePassword by remember { mutableStateOf<List<OnePasswordAccount>>(emptyList()) }
     val context = LocalContext.current
     Poll("plugins", 10_000) {
         try {
             catalog = vm.api.get("/plugins")
-            onePassword = vm.api.get("/onepassword")
         } catch (e: Exception) {
             vm.report(e)
         }
@@ -80,7 +78,7 @@ fun PluginsScreen(vm: CairnViewModel, state: Workspace, open: (String) -> Unit) 
         if (current == null) LinearProgressIndicator(Modifier.fillMaxWidth())
         else
             current.packages.forEach { entry ->
-                PluginCard(entry, entry.summary(current.connections, onePassword)) {
+                PluginCard(entry, entry.summary(current.connections)) {
                     vm.clearMessage()
                     open(entry.id)
                 }
@@ -111,7 +109,7 @@ fun PluginsScreen(vm: CairnViewModel, state: Workspace, open: (String) -> Unit) 
 private fun PluginCard(entry: PluginEntry, summary: PluginSummary, open: () -> Unit) {
     SignalCard(Modifier.fillMaxWidth().testTag("plugin-${entry.id}"), onClick = open) {
         Row(verticalAlignment = Alignment.Top) {
-            PluginMark(entry.id, 44.dp)
+            PluginMark(entry.id, 44.dp, entry.manifest?.brand)
             Spacer(Modifier.width(12.dp))
             Column(Modifier.weight(1f)) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
@@ -169,93 +167,10 @@ private fun PluginCard(entry: PluginEntry, summary: PluginSummary, open: () -> U
     }
 }
 
-/** One plugin: 1Password has its own screen, every other plugin lists its instances. */
+/** One plugin: its instances, what it gives agents, and its review. */
 @Composable
-fun PluginScreen(vm: CairnViewModel, state: Workspace, id: String, openChat: (String) -> Unit) {
-    if (id == "onepassword") OnePasswordScreen(vm, state)
-    else PluginInstances(vm, state, id, openChat)
-}
-
-@Composable
-private fun OnePasswordScreen(vm: CairnViewModel, state: Workspace) {
-    var manifest by remember { mutableStateOf<PluginManifest?>(null) }
-    LaunchedEffect(Unit) {
-        manifest =
-            runCatching { vm.api.get<PluginCatalog>("/plugins") }
-                .getOrNull()
-                ?.packages
-                ?.find { it.id == "onepassword" }
-                ?.manifest
-    }
-    Column(
-        Modifier.fillMaxSize()
-            .verticalScroll(rememberScrollState())
-            .testTag("plugin-onepassword-screen")
-            .padding(horizontal = 16.dp)
-            .padding(top = 4.dp, bottom = 32.dp),
-        verticalArrangement = Arrangement.spacedBy(12.dp),
-    ) {
-        PluginHeader(
-            "onepassword",
-            "1Password",
-            builtin = true,
-            version = manifest?.version,
-            description =
-                manifest?.description
-                    ?: "Les agents envoient les secrets directement dans leurs commandes. Les valeurs n’apparaissent jamais dans la conversation.",
-            capabilities = listOf("Outil CLI", "Secrets", "Accès par agent"),
-        )
-        SignalCard(Modifier.fillMaxWidth(), padding = PaddingValues(0.dp)) {
-            OnePasswordAccounts(vm, state)
-        }
-        SignalCard(Modifier.fillMaxWidth()) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Icon(
-                    CairnIcons.Terminal,
-                    null,
-                    Modifier.size(18.dp),
-                    tint = MaterialTheme.colorScheme.primary,
-                )
-                Spacer(Modifier.width(8.dp))
-                Text("Comment les agents l’utilisent", style = MaterialTheme.typography.titleSmall)
-            }
-            Text(
-                "Un agent autorisé lit un secret avec la CLI Cairn et l’envoie dans la commande qui en a besoin :",
-                Modifier.padding(top = 6.dp, bottom = 10.dp),
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-            Surface(
-                shape = RoundedCornerShape(12.dp),
-                color = MaterialTheme.colorScheme.surfaceVariant,
-                modifier = Modifier.fillMaxWidth(),
-            ) {
-                Box(Modifier.padding(12.dp)) {
-                    Code(
-                        "cairn plugin onepassword accounts\n" +
-                            "cairn plugin onepassword read \\\n" +
-                            "  --account ACCOUNT_ID \\\n" +
-                            "  op://vault/item/field \\\n" +
-                            "  | docker login --password-stdin …"
-                    )
-                }
-            }
-            Spacer(Modifier.height(10.dp))
-            Ability(
-                PluginAbility(
-                    true,
-                    "Les valeurs vont dans la commande, jamais dans la conversation.",
-                )
-            )
-            Ability(
-                PluginAbility(
-                    true,
-                    "Les tokens restent chiffrés sur l’installation. Les agents n’ont qu’un accès en lecture.",
-                )
-            )
-        }
-    }
-}
+fun PluginScreen(vm: CairnViewModel, state: Workspace, id: String, openChat: (String) -> Unit) =
+    PluginInstances(vm, state, id, openChat)
 
 @Composable
 private fun PluginInstances(
@@ -265,16 +180,12 @@ private fun PluginInstances(
     openChat: (String) -> Unit,
 ) {
     var catalog by remember { mutableStateOf<PluginCatalog?>(null) }
-    var onePassword by remember { mutableStateOf<List<OnePasswordAccount>>(emptyList()) }
     var editing by remember { mutableStateOf<PluginConnection?>(null) }
     var removing by remember { mutableStateOf<PluginConnection?>(null) }
     var reviewing by remember { mutableStateOf(false) }
     val context = LocalContext.current
     suspend fun load() {
-        val next = vm.api.get<PluginCatalog>("/plugins")
-        if (next.packages.find { it.id == id }?.manifest?.discord == true)
-            onePassword = vm.api.get("/onepassword")
-        catalog = next
+        catalog = vm.api.get<PluginCatalog>("/plugins")
     }
     Poll("plugin-$id", 5000) {
         if (editing == null && !reviewing && !state.busy)
@@ -314,7 +225,8 @@ private fun PluginInstances(
             entry.builtin,
             entry.active ?: manifest.version,
             manifest.description,
-            manifest.capabilities.map(::capabilityLabel),
+            manifest.capabilities.map(::capabilityLabel) + manifest.contributions(),
+            manifest.brand,
         )
         if (entry.status != "active")
             Surface(
@@ -358,17 +270,27 @@ private fun PluginInstances(
                         runCatching { browse(context, webPage(vm.api, "/plugins/discord/new")) }
                     }
                 else
-                    SignalButton("Ajouter une instance", icon = CairnIcons.Plus, height = 40.dp) {
+                    SignalButton(
+                        if (manifest.instances != null) "Ajouter · ${manifest.noun()}"
+                        else "Ajouter une instance",
+                        icon = CairnIcons.Plus,
+                        height = 40.dp,
+                    ) {
                         vm.clearMessage()
-                        editing = PluginConnection(name = manifest.name)
+                        editing =
+                            PluginConnection(
+                                name = if (manifest.instances == null) manifest.name else ""
+                            )
                     }
         }
         if (instances.isEmpty() && entry.active != null)
             Empty(
-                if (manifest.discord) "Aucun bot" else "Aucune instance",
+                if (manifest.discord) "Aucun bot"
+                else if (manifest.instances != null) "${manifest.noun(2)} : aucun"
+                else "Aucune instance",
                 if (manifest.discord)
                     "La création d’un bot (jeton, serveur, canal, accès) se fait sur le web. Vous le gérez ensuite ici."
-                else "Ajoutez une instance pour commencer à utiliser ce plugin.",
+                else "Ajoutez-en un pour commencer à utiliser ce plugin.",
             )
         instances.forEach { connection ->
             InstanceCard(
@@ -376,7 +298,7 @@ private fun PluginInstances(
                 state,
                 manifest,
                 connection,
-                onePassword,
+                catalog?.grantsOf(connection.agentId).orEmpty(),
                 openChat = openChat,
                 edit = {
                     vm.clearMessage()
@@ -396,6 +318,7 @@ private fun PluginInstances(
                 changed = { load() },
             )
         }
+        if (manifest.agentAccess != null) AgentUsage(manifest)
     }
     if (reviewing && entry != null)
         PluginReview(
@@ -445,7 +368,8 @@ private fun InstanceCard(
     state: Workspace,
     manifest: PluginManifest,
     connection: PluginConnection,
-    onePassword: List<OnePasswordAccount>,
+    /** Other plugins the delegated agent is authorized on, for Discord's summary. */
+    grants: List<String>,
     openChat: (String) -> Unit,
     edit: () -> Unit,
     remove: () -> Unit,
@@ -541,8 +465,26 @@ private fun InstanceCard(
                 manifest.settings
                     .filter { !it.hidden }
                     .forEach { field ->
-                        Fact(field.title, connection.setting(field.key) ?: "—")
+                        if (field.type == "secret")
+                            Fact(
+                                field.title,
+                                if (field.key in connection.secretKeys) "Enregistré"
+                                else "Non défini",
+                            )
+                        else Fact(field.title, connection.display(field.key))
                     }
+            if (manifest.agentAccess != null) {
+                val names =
+                    connection.agentIds.map { id ->
+                        state.agents.find { it.id == id }?.name ?: "Agent supprimé"
+                    }
+                Text(
+                    if (names.isEmpty()) "Aucun agent ne peut l’utiliser pour l’instant."
+                    else "Agents autorisés : ${names.joinToString(", ")}",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
             if (manifest.delegates) {
                 Fact(
                     "Répond en tant que",
@@ -610,13 +552,7 @@ private fun InstanceCard(
             }
             if (manifest.discord) {
                 Eyebrow("Ce que ce bot peut faire")
-                connection
-                    .discordAbilities(
-                        agent,
-                        project?.name,
-                        onePassword.filter { connection.agentId in it.agentIds }.map { it.name },
-                    )
-                    .forEach { Ability(it) }
+                connection.discordAbilities(agent, project?.name, grants).forEach { Ability(it) }
                 Eyebrow("Activité récente")
                 if (connection.activity.isEmpty())
                     Text(
@@ -628,6 +564,7 @@ private fun InstanceCard(
                     ActivityRow(connection, item) { openChat(item.chatId) }
                 }
             }
+            if (manifest.instanceView) PluginPanel(vm, state, path, connection.name)
             HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
             Toggle(
                 if (manifest.discord) "Accepter les nouveaux messages" else "Active",
@@ -651,6 +588,22 @@ private fun InstanceCard(
                                 val result = api.send<JsonObject>("POST", "$path/test")
                                 notify(
                                     "Jeton valide · connecté en tant que ${result["name"]?.jsonPrimitive?.contentOrNull ?: connection.name}"
+                                )
+                            }
+                        },
+                        enabled = !state.busy,
+                    ) {
+                        Text("Tester")
+                    }
+                else if (manifest.instanceTest)
+                    TextButton(
+                        onClick = {
+                            vm.perform {
+                                val result = api.send<JsonObject>("POST", "$path/test")
+                                val message =
+                                    result["message"]?.jsonPrimitive?.contentOrNull.orEmpty()
+                                notify(
+                                    "${connection.name} : ${message.ifBlank { "ça fonctionne" }}"
                                 )
                             }
                         },
@@ -719,7 +672,8 @@ private fun ActivityRow(connection: PluginConnection, item: PluginActivity, open
 }
 
 /**
- * Generic instance settings: the manifest's fields, then the delegation for conversation plugins.
+ * Generic instance settings: the manifest's fields (secrets never prefilled), the agents granted
+ * the package's commands and tools, then the delegation for conversation plugins.
  */
 @Composable
 private fun InstanceEditor(
@@ -739,31 +693,41 @@ private fun InstanceEditor(
     var values by
         remember(initial.id) {
             mutableStateOf(
-                fields.associate { field ->
-                    field.key to
-                        when (field.type) {
-                            "boolean" -> initial.flag(field.key).toString()
-                            else -> initial.setting(field.key).orEmpty()
-                        }
-                }
+                fields
+                    .filter { it.type != "secret" }
+                    .associate { field ->
+                        field.key to formValue(field, initial.settings[field.key])
+                    }
             )
         }
+    // Same rule for secret fields: typed in, sent once, never kept.
+    var secrets by remember(initial.id) { mutableStateOf(mapOf<String, String>()) }
+    var granted by remember(initial.id) { mutableStateOf(initial.agentIds) }
     var agentId by remember(initial.id) { mutableStateOf(initial.agentId) }
     var accessMode by remember(initial.id) { mutableStateOf(initial.accessMode) }
     var userIds by remember(initial.id) { mutableStateOf(initial.userIds.joinToString(", ")) }
     var perHour by remember(initial.id) { mutableStateOf(initial.maxMessagesPerHour.toString()) }
     var enabled by remember(initial.id) { mutableStateOf(initial.enabled) }
     val agents = state.agents.filter { it.eligibleForPlugins() }
+    val missingSecret = fields.any {
+        it.type == "secret" &&
+            it.required &&
+            it.key !in initial.secretKeys &&
+            secrets[it.key].isNullOrBlank()
+    }
     Editor(
-        if (creating) "Nouvelle instance ${manifest.name}" else "Modifier ${initial.name}",
+        if (creating) "Nouveau · ${manifest.noun()}" else "Modifier ${initial.name}",
         state.busy,
         state.error,
         close = close,
         valid =
             name.isNotBlank() &&
                 (!creating || manifest.credential == null || token.isNotBlank()) &&
+                !missingSecret &&
                 fields.none {
-                    it.required && it.type != "boolean" && values[it.key].isNullOrBlank()
+                    it.required &&
+                        it.type !in setOf("boolean", "secret", "multiselect") &&
+                        values[it.key].isNullOrBlank()
                 } &&
                 (!manifest.delegates || agentId.isNotBlank()),
         save = {
@@ -778,6 +742,17 @@ private fun InstanceEditor(
                         put("name", name.trim())
                         if (token.isNotBlank()) put("token", token.trim())
                         put("settings", pluginSettings(fields, values))
+                        // Blank secret fields keep what is saved.
+                        put(
+                            "secrets",
+                            JsonObject(
+                                secrets
+                                    .filterValues { it.isNotBlank() }
+                                    .mapValues { JsonPrimitive(it.value.trim()) }
+                            ),
+                        )
+                        if (manifest.agentAccess != null)
+                            put("agentIds", JsonArray(granted.map(::JsonPrimitive)))
                         if (manifest.delegates) {
                             put("agentId", agentId)
                             put(
@@ -810,7 +785,8 @@ private fun InstanceEditor(
                     },
                 )
                 token = ""
-                notify("Instance enregistrée")
+                secrets = emptyMap()
+                notify("${manifest.noun()} enregistré")
                 saved()
             }
         },
@@ -835,31 +811,29 @@ private fun InstanceEditor(
                 },
             )
         }
-        fields.forEach { field ->
-            if (field.type == "boolean")
-                Toggle(field.title, values[field.key] == "true") {
-                    if (!state.busy) values = values + (field.key to it.toString())
+        PluginFields(
+            fields,
+            values,
+            { key, value -> values = values + (key to value) },
+            secrets,
+            { key, value -> secrets = secrets + (key to value) },
+            saved = initial.secretKeys,
+            enabled = !state.busy,
+        )
+        manifest.agentAccess?.let { access ->
+            Text("Agents autorisés", style = MaterialTheme.typography.titleMedium)
+            if (access.description.isNotBlank())
+                Text(
+                    access.description,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            state.agents.forEach { agent ->
+                Toggle(agent.name, agent.id in granted) { allowed ->
+                    if (!state.busy)
+                        granted = if (allowed) granted + agent.id else granted - agent.id
                 }
-            else
-                Column {
-                    Field(
-                        field.title,
-                        values[field.key].orEmpty(),
-                        { values = values + (field.key to it) },
-                        enabled = !state.busy,
-                        keyboardOptions =
-                            if (field.type == "number")
-                                KeyboardOptions(keyboardType = KeyboardType.Number)
-                            else InputKeyboards.Sentences,
-                    )
-                    if (field.description.isNotBlank())
-                        Text(
-                            field.description,
-                            Modifier.padding(start = 4.dp, top = 4.dp),
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
-                }
+            }
         }
         if (manifest.delegates) {
             Choice("Agent", agentId, agents.map { it.id to it.name }) { agentId = it }
@@ -876,7 +850,7 @@ private fun InstanceEditor(
                     "requests" to "Valider les personnes à leur demande",
                     "allowlist" to "Seulement les personnes listées",
                     "everyone" to
-                        "Tout le monde (agent en lecture seule sans GitHub, MCP ni 1Password)",
+                        "Tout le monde (agent en lecture seule sans GitHub, MCP ni plugin)",
                 ),
             ) {
                 accessMode = it
@@ -891,6 +865,153 @@ private fun InstanceEditor(
             )
         }
         Toggle("Active", enabled) { if (!state.busy) enabled = it }
+    }
+}
+
+/**
+ * A package's declarative fields. Secret values live in their own map and are never prefilled: a
+ * saved secret only shows as a placeholder and stays when left blank.
+ */
+@Composable
+internal fun PluginFields(
+    fields: List<PluginSetting>,
+    values: Map<String, String>,
+    change: (String, String) -> Unit,
+    secrets: Map<String, String>,
+    changeSecret: (String, String) -> Unit,
+    saved: List<String> = emptyList(),
+    enabled: Boolean = true,
+) {
+    var section = ""
+    fields
+        .filter { !it.hidden }
+        .forEach { field ->
+            if (field.section.isNotBlank() && field.section != section) {
+                section = field.section
+                Eyebrow(field.section, Modifier.padding(top = 4.dp))
+            }
+            when (field.type) {
+                "boolean" ->
+                    Toggle(field.title, values[field.key] == "true") {
+                        if (enabled) change(field.key, it.toString())
+                    }
+                "select" ->
+                    Choice(
+                        field.title,
+                        values[field.key].orEmpty(),
+                        field.options.map { it.value to it.label },
+                    ) {
+                        change(field.key, it)
+                    }
+                "multiselect" -> {
+                    val chosen =
+                        multiselect(values[field.key].orEmpty()).mapNotNull {
+                            it.jsonPrimitive.contentOrNull
+                        }
+                    Text(field.title, style = MaterialTheme.typography.labelLarge)
+                    field.options.forEach { option ->
+                        Toggle(option.label, option.value in chosen) { checked ->
+                            if (enabled) {
+                                val next =
+                                    if (checked) chosen + option.value else chosen - option.value
+                                change(field.key, JsonArray(next.map(::JsonPrimitive)).toString())
+                            }
+                        }
+                    }
+                }
+                "secret" ->
+                    OutlinedTextField(
+                        secrets[field.key].orEmpty(),
+                        { changeSecret(field.key, it) },
+                        Modifier.fillMaxWidth(),
+                        label = { Text(field.title) },
+                        singleLine = true,
+                        visualTransformation = PasswordVisualTransformation(),
+                        keyboardOptions = InputKeyboards.Password,
+                        enabled = enabled,
+                        placeholder = {
+                            Text(
+                                if (field.key in saved) "Enregistré · laissez vide pour le garder"
+                                else field.placeholder
+                            )
+                        },
+                    )
+                else ->
+                    Field(
+                        field.title,
+                        values[field.key].orEmpty(),
+                        { change(field.key, it) },
+                        lines = if (field.type == "text") 4 else 1,
+                        enabled = enabled,
+                        keyboardOptions =
+                            when (field.type) {
+                                "number" -> KeyboardOptions(keyboardType = KeyboardType.Number)
+                                "url" -> KeyboardOptions(keyboardType = KeyboardType.Uri)
+                                else -> InputKeyboards.Sentences
+                            },
+                    )
+            }
+            if (field.description.isNotBlank() && field.type !in setOf("boolean"))
+                Text(
+                    field.description,
+                    Modifier.padding(start = 4.dp),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+        }
+}
+
+/** What agents get from a package: its declared commands, tools and programs. */
+@Composable
+private fun AgentUsage(manifest: PluginManifest) {
+    SignalCard(Modifier.fillMaxWidth().testTag("plugin-agent-usage")) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Icon(
+                CairnIcons.Terminal,
+                null,
+                Modifier.size(18.dp),
+                tint = MaterialTheme.colorScheme.primary,
+            )
+            Spacer(Modifier.width(8.dp))
+            Text("Utilisation par les agents", style = MaterialTheme.typography.titleSmall)
+        }
+        Text(
+            "Seuls les agents autorisés sur une instance active y ont accès, dans leurs conversations.",
+            Modifier.padding(top = 6.dp, bottom = 4.dp),
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        if (manifest.commands.isNotEmpty()) {
+            Eyebrow("Commandes", Modifier.padding(top = 8.dp, bottom = 6.dp))
+            manifest.commands.forEach { command ->
+                Surface(
+                    shape = RoundedCornerShape(12.dp),
+                    color = MaterialTheme.colorScheme.surfaceVariant,
+                    modifier = Modifier.fillMaxWidth().padding(bottom = 4.dp),
+                ) {
+                    Box(Modifier.padding(10.dp)) { Code(command.usage(manifest.id)) }
+                }
+                if (command.description.isNotBlank())
+                    Note(
+                        command.description +
+                            if (command.output == "secret")
+                                " La valeur va seulement dans la sortie de la commande, jamais dans la conversation."
+                            else ""
+                    )
+                Spacer(Modifier.height(6.dp))
+            }
+        }
+        if (manifest.tools.isNotEmpty()) {
+            Eyebrow("Outils", Modifier.padding(top = 8.dp, bottom = 4.dp))
+            manifest.tools.forEach { Code(it.name) }
+        }
+        if (manifest.programs.isNotEmpty()) {
+            Eyebrow("Programmes", Modifier.padding(top = 10.dp, bottom = 4.dp))
+            manifest.programs.forEach { program ->
+                Code(program.path)
+                if (program.description.isNotBlank()) Note(program.description)
+            }
+        }
     }
 }
 
@@ -1117,8 +1238,30 @@ private fun PluginReview(
                             "Cairn ajoute le ${it.label} de chaque instance à ses requêtes (en-tête ${it.header}). Le plugin ne le voit jamais."
                         )
                     }
+                    manifest.programs.forEach { program ->
+                        Text(
+                            "Exécute ${program.path} sur ce serveur, hors du bac à sable Luau, avec les fichiers et le réseau que ce programme peut atteindre." +
+                                program.description
+                                    .takeIf { it.isNotBlank() }
+                                    ?.let { " $it" }
+                                    .orEmpty(),
+                            Modifier.clip(RoundedCornerShape(12.dp))
+                                .background(signal.warningSoft)
+                                .padding(10.dp),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = signal.warning,
+                        )
+                    }
+                    if (manifest.agentAccess != null)
+                        Note(
+                            "Les agents autorisés sur une instance obtiennent ${manifest.commands.size} commande(s) et ${manifest.tools.size} outil(s)" +
+                                (if (manifest.instructions.isNotBlank())
+                                    ", et des instructions dans leur prompt"
+                                else "") +
+                                ". Rien n’est accordé par défaut."
+                        )
                     Note(
-                        "S’exécute dans le bac à sable Luau de Cairn : ni fichiers, ni processus, ni autre accès réseau. Toute modification sur disque demande une nouvelle validation."
+                        "Le script s’exécute dans le bac à sable Luau de Cairn : ni fichiers, ni processus, ni autre accès réseau de lui-même. Toute modification sur disque demande une nouvelle validation."
                     )
                 }
             }
@@ -1142,10 +1285,11 @@ private fun PluginHeader(
     version: String?,
     description: String,
     capabilities: List<String>,
+    brand: PluginBrand? = null,
 ) {
     Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically) {
-            PluginMark(id, 56.dp)
+            PluginMark(id, 56.dp, brand)
             Spacer(Modifier.width(14.dp))
             Column {
                 Text(name, style = MaterialTheme.typography.headlineMedium)
@@ -1286,24 +1430,40 @@ internal fun ToneChip(badge: PluginBadge) {
 
 /** The plugin's brand on its colour, or a puzzle piece for packages without one. */
 @Composable
-internal fun PluginMark(id: String, size: Dp) {
-    val brand =
-        when (id) {
-            "discord" -> DiscordMark to Color(0xFF5865F2)
-            "onepassword" -> OnePasswordMark to Color(0xFF1A285F)
-            else -> null
+internal fun PluginMark(id: String, size: Dp, brand: PluginBrand? = null) {
+    // A package's own mark first, then the bundled ones, then a puzzle piece.
+    val declared =
+        remember(brand) {
+            brand?.let { mark ->
+                val color = runCatching {
+                    Color(android.graphics.Color.parseColor(mark.color))
+                }
+                    .getOrNull()
+                val path =
+                    mark.path
+                        .takeIf { it.isNotBlank() }
+                        ?.let { runCatching { filledMark(id, it) }.getOrNull() }
+                color?.let { (path ?: PuzzleMark) to it }
+            }
         }
+    val known =
+        declared
+            ?: when (id) {
+                "discord" -> DiscordMark to Color(0xFF5865F2)
+                "onepassword" -> OnePasswordMark to Color(0xFF1A285F)
+                else -> null
+            }
     Box(
         Modifier.size(size)
             .clip(RoundedCornerShape(size * 0.29f))
-            .background(brand?.second ?: MaterialTheme.colorScheme.primaryContainer),
+            .background(known?.second ?: MaterialTheme.colorScheme.primaryContainer),
         contentAlignment = Alignment.Center,
     ) {
         Icon(
-            brand?.first ?: PuzzleMark,
+            known?.first ?: PuzzleMark,
             null,
             Modifier.size(size * 0.52f),
-            tint = if (brand != null) Color.White else MaterialTheme.colorScheme.primary,
+            tint = if (known != null) Color.White else MaterialTheme.colorScheme.primary,
         )
     }
 }

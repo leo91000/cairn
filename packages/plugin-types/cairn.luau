@@ -1,4 +1,5 @@
--- Authoring reference for plugin API v1. Runtime globals are host-owned and frozen.
+-- Authoring reference for plugin API v2 (v1 packages keep working). Runtime globals
+-- are host-owned and frozen.
 -- A package's main.luau returns a table of handlers keyed by event name:
 --   message           a message from an allowed person      { id, author, content, attachments, … }
 --   interaction       a button an allowed person pressed     { id, author, customId, … }
@@ -10,7 +11,16 @@
 --                     return { retryAfter = seconds, state = … } to be called again later
 --   timer             a timer scheduled with cairn.timers    { id, name, payload }
 --   start             when Cairn starts the worker           { connectionId, settings }
---   command           a run-scoped CLI command (built-in plugins only)
+-- One-shot handlers (API v2), each in a fresh worker:
+--   command           `cairn plugin <id> <command> …`        { command, arguments, agent, instances }
+--                     return text for `text`/`secret` commands, any JSON otherwise
+--   tool              a call of a declared Cairn MCP tool    { tool, input, agent, instances }
+--   view              the owner opens an instance's panel    { instance } -> { Component }
+--   action            a button or form in that panel         { action, payload, values, instance }
+--                     return { notice?, tone?, view? }
+--   test              the owner tests an instance            { instance } -> { ok, message? }
+-- `instances` are those the agent is granted: { id, name, enabled, settings, secrets }
+-- (secret field names only). Pass `instance = id` to capability calls when several.
 -- Each handler runs to completion under a deadline and a 16 MB memory limit.
 -- Refused host calls raise an error whose message is a short code such as
 -- "forbidden", "invalid", "rate_limited" or "unavailable"; use pcall to handle them.
@@ -33,9 +43,28 @@ export type HttpRequest = {
         jsonField: string?, -- default "payload_json"
         files: { { artifact: string, field: string? } }?, -- field default "files[n]"
     }?,
-    -- Adds the connection's credential using the manifest's "credential" rule.
-    auth: boolean?,
+    -- true adds the instance's credential using the manifest's "credential" rule; a
+    -- table adds a secret field to one header. The script never sees the value.
+    auth: (boolean | { secret: string, header: string?, prefix: string? })?,
+    -- The instance to act for, in commands and tools granted several.
+    instance: string?,
 }
+
+-- capability "exec": a program declared in the manifest's "programs", without a shell.
+export type ExecRequest = {
+    program: string,
+    args: { string }?,
+    -- Text, or { secret = "<setting key>" } injected by the host.
+    env: { [string]: string | { secret: string } }?,
+    stdin: string?,
+    timeout: number?, -- seconds, 30 at most
+    instance: string?,
+}
+
+export type ExecResult = { status: number, stdout: string, stderr: string }
+
+-- A view component (API v2). Tones: "neutral" | "info" | "success" | "warning" | "danger".
+export type Component = { type: string, [string]: Json }
 
 export type HttpResponse = {
     status: number,
@@ -57,6 +86,11 @@ export type Cairn = {
     },
     -- capability "http".
     http: { request: (request: HttpRequest) -> HttpResponse },
+    -- capability "exec" (API v2).
+    exec: { run: (request: ExecRequest) -> ExecResult },
+    json: { decode: (text: string) -> Json, encode: (value: Json) -> string },
+    -- Stops the handler with a message for the person (300 characters at most).
+    fail: (message: string) -> never,
     -- capability "timers": 1 second to 7 days, at most 100 per connection.
     timers: {
         after: (seconds: number, name: string, payload: Json?) -> string,
