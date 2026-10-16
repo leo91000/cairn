@@ -169,7 +169,12 @@ export function filOf(chats: ChatView[], tasks: Task[], runs: RunListItem[], rea
   const newest = (a: FilItem, b: FilItem) => b.at - a.at
   // What asks for an answer or a decision stays above what only waits to be read.
   const urgency = (a: FilItem, b: FilItem) => Number(isUnread(a)) - Number(isUnread(b)) || newest(a, b)
-  return { forYou: forYou.sort(urgency), live: live.sort(newest), waiting: waiting.sort((a, b) => a.wakeAt! - b.wakeAt!), recent: recent.sort(newest) }
+  return {
+    forYou: forYou.sort(urgency),
+    live: live.sort(newest),
+    waiting: waiting.sort((a, b) => a.wakeAt! - b.wakeAt!),
+    recent: recent.sort(newest),
+  }
 }
 
 /**

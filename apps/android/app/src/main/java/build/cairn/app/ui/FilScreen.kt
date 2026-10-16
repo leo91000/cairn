@@ -94,8 +94,8 @@ private fun context(agent: String, project: String?) =
 
 /**
  * One home for conversations and missions, grouped by what they ask of the user: things that need
- * an answer or decision, finished work not read yet, work in progress, waiting conversations,
- * then everything else by recency. [read] holds local marks until the server reflects them.
+ * an answer or decision, finished work not read yet, work in progress, waiting conversations, then
+ * everything else by recency. [read] holds local marks until the server reflects them.
  */
 internal fun buildFeed(
     chats: List<Chat>,

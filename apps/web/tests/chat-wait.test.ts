@@ -214,7 +214,7 @@ describe('scheduled waits', () => {
 
   it('lists waiting conversations apart, soonest first, unless paused', () => {
     const fil = filOf([
-      chat('later', { wakeup: wakeup({ wakeAt: 9000, condition: checks }) }),
+      chat('later', { unread: true, finishedAt: 1, wakeup: wakeup({ wakeAt: 9000, condition: checks }) }),
       chat('sooner', { wakeup: wakeup({ wakeAt: 5000 }) }),
       chat('paused', { paused: true, wakeup: wakeup() }),
       chat('done'),
@@ -225,5 +225,6 @@ describe('scheduled waits', () => {
     ])
     expect(fil.recent.map(item => [item.title, item.kind])).toEqual([['paused', 'paused'], ['done', 'recent']])
     expect(fil.live).toEqual([])
+    expect(fil.forYou).toEqual([])
   })
 })

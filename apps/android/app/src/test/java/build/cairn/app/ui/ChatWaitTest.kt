@@ -264,6 +264,8 @@ class ChatWaitTest {
                         status = "succeeded",
                         run = done,
                         updatedAt = 3,
+                        unread = true,
+                        finishedAt = 1,
                         wakeup = wakeup(checks, 9000),
                     ),
                     Chat(
@@ -285,6 +287,7 @@ class ChatWaitTest {
                 emptyList(),
             )
         assertEquals(listOf("chat:sooner", "chat:later"), feed.waiting.map { it.key })
+        assertTrue(feed.forYou.isEmpty())
         assertEquals("Checks PR #193", feed.waiting[1].subtitle)
         assertTrue(feed.waiting[1].condition)
         assertEquals(listOf("chat:paused"), feed.recent.map { it.key })

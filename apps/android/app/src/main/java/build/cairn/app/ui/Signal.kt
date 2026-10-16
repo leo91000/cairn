@@ -126,7 +126,8 @@ internal fun AgentAvatar(
                     .clip(CircleShape)
                     .background(
                         when (badge) {
-                            AvatarBadge.LIVE -> MaterialTheme.colorScheme.primary
+                            AvatarBadge.LIVE,
+                            AvatarBadge.WAITING -> MaterialTheme.colorScheme.primary
                             AvatarBadge.ATTENTION -> signal.attention
                             AvatarBadge.DONE -> signal.success
                         }
