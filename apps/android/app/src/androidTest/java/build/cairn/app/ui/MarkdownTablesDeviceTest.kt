@@ -10,5 +10,9 @@ import org.junit.runner.RunWith
 class MarkdownTablesDeviceTest {
     @get:Rule val compose = createComposeRule()
 
+    @Test fun quotedColumns() = MarkdownTableCases(compose).readableColumns("quote")
+
+    @Test fun listedColumns() = MarkdownTableCases(compose).readableColumns("list")
+
     @Test fun readableColumns() = MarkdownTableCases(compose).readableColumns()
 }

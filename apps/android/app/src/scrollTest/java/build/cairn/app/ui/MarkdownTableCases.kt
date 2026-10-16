@@ -18,7 +18,7 @@ import org.junit.Assert.*
 
 /** The same native rendering assertions run in Robolectric and on an Android device. */
 internal class MarkdownTableCases(private val compose: ComposeContentTestRule) {
-    fun readableColumns() {
+    fun readableColumns(nesting: String = "") {
         val columns = (1..12).joinToString(" | ") { "Column $it" }
         val values = (1..12).joinToString(" | ") { "Value $it" }
         val text =
@@ -36,10 +36,18 @@ internal class MarkdownTableCases(private val compose: ComposeContentTestRule) {
             | $values |
         """
                 .trimIndent()
+        val markdown =
+            when (nesting) {
+                "quote" -> text.lines().joinToString("\n") { "> $it" }
+                "list" ->
+                    "1. ${text.lineSequence().first()}\n" +
+                        text.lines().drop(1).joinToString("\n") { "   $it" }
+                else -> text
+            }
         compose.setContent {
             CairnTheme("dark") {
                 Surface(Modifier.width(320.dp).fillMaxHeight()) {
-                    Column(Modifier.verticalScroll(rememberScrollState())) { Markdown(text) }
+                    Column(Modifier.verticalScroll(rememberScrollState())) { Markdown(markdown) }
                 }
             }
         }

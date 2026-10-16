@@ -14,5 +14,9 @@ import org.robolectric.annotation.GraphicsMode
 class MarkdownTablesTest {
     @get:Rule val compose = createComposeRule()
 
+    @Test fun quotedColumns() = MarkdownTableCases(compose).readableColumns("quote")
+
+    @Test fun listedColumns() = MarkdownTableCases(compose).readableColumns("list")
+
     @Test fun readableColumns() = MarkdownTableCases(compose).readableColumns()
 }
