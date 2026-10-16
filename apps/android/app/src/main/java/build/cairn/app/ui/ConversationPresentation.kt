@@ -74,8 +74,11 @@ internal fun conversationState(
             run == "queued" -> "En attente"
             chatSleepNotice(chat) != null -> {
                 val wakeup = chat.wakeup!!
-                if (wakeup.condition != null) "En attente · ${waitCountdown(wakeup, now)}"
-                else "Reprise ${waitCountdown(wakeup, now)}"
+                when {
+                    wakeup.wakeAt <= now -> waitCountdown(wakeup, now)
+                    wakeup.condition != null -> "En attente · ${waitCountdown(wakeup, now)}"
+                    else -> "Reprise ${waitCountdown(wakeup, now)}"
+                }
             }
             run in listOf("failed", "interrupted") -> "${statusLabel(run)} · $identity"
             else -> identity

@@ -79,6 +79,10 @@ class ConversationPresentationTest {
             )
         assertEquals(chat.wakeup, chatSleepNotice(chat))
         assertEquals("Reprise dans 7 min", conversationState(chat, "Agent", null, now = 1).status)
+        assertEquals(
+            "Reprise imminente",
+            conversationState(chat, "Agent", null, now = 420001).status,
+        )
         assertTrue(chatDelivery(chat, emptyList()).sending.isEmpty())
         assertNull(chatSleepNotice(chat.copy(paused = true)))
         assertNull(chatSleepNotice(chat.copy(lifecycle = "trash")))

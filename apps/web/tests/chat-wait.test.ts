@@ -6,6 +6,7 @@ import {
   timeLeft,
   waitCountdown,
   waitOutcome,
+  waitStatus,
   waitTarget,
 } from '../src/chat-wait'
 import { filOf } from '../src/signal'
@@ -98,6 +99,10 @@ describe('scheduled waits', () => {
     expect(waitCountdown(wakeup(), 600_000)).toBe('in 20 min')
     expect(waitCountdown(wakeup({ condition: checks }), 600_000)).toBe('up to 20 min')
     expect(waitCountdown(wakeup(), 2_000_000)).toBe('Resuming soon')
+    expect(waitStatus(wakeup(), 600_000)).toBe('Resumes in 20 min')
+    expect(waitStatus(wakeup({ condition: checks }), 600_000)).toBe('Waiting · up to 20 min')
+    expect(waitStatus(wakeup(), 1_800_000)).toBe('Resuming soon')
+    expect(waitStatus(wakeup({ condition: checks }), 2_000_000)).toBe('Resuming soon')
   })
 
   it('says how the wait ended', () => {

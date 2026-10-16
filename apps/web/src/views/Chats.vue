@@ -21,7 +21,7 @@ import { MAIN_AGENT_ID } from '../../../../packages/contracts/constants'
 import { api, state } from '../api'
 import { chatDelivery, chatSleepNotice, chatWaitNotice } from '../chat-delivery'
 import { chatList as chats, publishChats } from '../chat-list'
-import { waitCountdown } from '../chat-wait'
+import { waitStatus } from '../chat-wait'
 import ActivityFeed from '../components/ActivityFeed.vue'
 import AgentAvatar from '../components/AgentAvatar.vue'
 import AssistantPicker from '../components/AssistantPicker.vue'
@@ -272,8 +272,7 @@ const sleepStatus = computed(() => {
   const wakeup = sleepNotice.value?.wakeup
   if (!wakeup)
     return null
-  const countdown = waitCountdown(wakeup, waitNow.value)
-  return wakeup.condition ? `Waiting · ${countdown}` : `Resumes ${countdown}`
+  return waitStatus(wakeup, waitNow.value)
 })
 const backgroundTasks = computed(() => detail.value?.run?.status === 'running' ? backgroundWait(events.value)?.tasks.length ?? 0 : 0)
 const chatStatus = computed(() => {

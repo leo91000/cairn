@@ -109,6 +109,14 @@ export function waitCountdown(wakeup: Pick<ChatWakeup, 'condition' | 'wakeAt'>, 
   return wakeup.condition ? `up to ${timeLeft(left)}` : `in ${timeLeft(left)}`
 }
 
+/** Complete header label, including the overdue phrase returned by the countdown. */
+export function waitStatus(wakeup: Pick<ChatWakeup, 'condition' | 'wakeAt'>, now = Date.now()) {
+  const countdown = waitCountdown(wakeup, now)
+  if (wakeup.wakeAt <= now)
+    return countdown
+  return wakeup.condition ? `Waiting · ${countdown}` : `Resumes ${countdown}`
+}
+
 /** What Cairn observed when a wait ended; `null` after a plain timer. */
 export function waitOutcome(observation: Record<string, unknown> | null | undefined): WaitOutcome {
   const state = observation?.state
