@@ -183,6 +183,8 @@ impl Network {
             "ACCEPT",
         ])
         .await?;
+        // Keep UDP refusals separately observable from other denied protocols.
+        iptables(&["-A", &self.chain, "-p", "udp", "-j", "DROP"]).await?;
         iptables(&["-A", &self.chain, "-j", "DROP"]).await?;
         iptables(&self.masquerade_rule("-A")).await
     }
