@@ -105,6 +105,49 @@ abstract class BackgroundWaitCases {
             compose.onNodeWithContentDescription("Arrêter").assertExists()
         }
 
+    @Test
+    fun resolvedWaitHonorsPauseAndCancellationUntilItResumes() {
+        val wakeup =
+            ChatWakeup(
+                "wait",
+                "message",
+                "Attendre les checks",
+                60,
+                1,
+                60001,
+                condition =
+                    buildJsonObject {
+                        put("type", "github_pr_checks")
+                        put("prNumber", 1)
+                    },
+            )
+        val observation = buildJsonObject {
+            put("state", "completed")
+            put("type", "github_pr_checks")
+            put("conclusion", "success")
+        }
+        val resolved = ActivityWait(wakeup, observation, observed = true)
+        var wait by mutableStateOf(resolved)
+        var live by mutableStateOf(LiveWait(wakeup, paused = false))
+        compose.setContent {
+            CairnTheme { CompositionLocalProvider(LocalLiveWait provides live) { WaitCard(wait) } }
+        }
+        compose.onNodeWithText("Reprise selon la capacité disponible").assertExists()
+        compose.runOnIdle { live = live.copy(paused = true) }
+        compose.onNodeWithText("Attente en pause").assertExists()
+        compose.onNodeWithText("Reprise selon la capacité disponible").assertDoesNotExist()
+        compose.runOnIdle { live = LiveWait(null, paused = false) }
+        compose.onNodeWithText("Attente annulée").assertExists()
+        compose.runOnIdle { wait = resolved.copy(ended = "message") }
+        compose.onNodeWithText("Attente annulée par votre message").assertExists()
+        compose.runOnIdle { wait = resolved.copy(ended = "replaced") }
+        compose.onNodeWithText("Remplacée par une nouvelle attente").assertExists()
+        compose.runOnIdle { wait = resolved.copy(resumedAt = 1000) }
+        compose.onNodeWithText("Checks requis réussis").assertExists()
+        compose.runOnIdle { wait = ActivityWait(null, observation, observed = true) }
+        compose.onNodeWithText("Le résultat était déjà disponible").assertExists()
+    }
+
     private fun conversation(
         status: String,
         sleeping: Boolean = false,

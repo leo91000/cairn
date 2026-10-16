@@ -303,9 +303,17 @@ internal fun WaitCard(wait: ActivityWait) {
         if (wakeup != null && wait.resumedAt != null)
             "Attente de ${waited(wait.resumedAt - wakeup.createdAt)}"
         else ""
+    // An observed condition may still be cancelled or paused before the wakeup launches.
+    val interrupted =
+        wait.resumedAt == null &&
+            wakeup != null &&
+            (wait.ended != null || (live != null && (!current || live.paused)))
     val view =
         when {
-            wait.finished && wakeup?.condition == null && wait.observation == null ->
+            wait.finished &&
+                !interrupted &&
+                wakeup?.condition == null &&
+                wait.observation == null ->
                 WaitView(
                     WaitTone.NEUTRAL,
                     false,
@@ -313,7 +321,7 @@ internal fun WaitCard(wait: ActivityWait) {
                     "Reprise à l’heure prévue",
                     duration(),
                 )
-            wait.finished -> {
+            wait.finished && !interrupted -> {
                 val outcome = waitOutcome(wait.observation)
                 val icon =
                     when (outcome.tone) {

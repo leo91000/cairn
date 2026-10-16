@@ -70,7 +70,11 @@ const view = computed<{
   detail: string
 }>(() => {
   const reason = wakeup.value?.reason ?? ''
-  if (finished.value) {
+  // An observed condition may still be cancelled or paused before the wakeup launches.
+  const interrupted = !props.wait.resumedAt && !!wakeup.value && (
+    !!props.wait.ended || (props.live && (!current.value || props.live.paused))
+  )
+  if (finished.value && !interrupted) {
     if (!wakeup.value?.condition && !props.wait.observation) {
       return {
         tone: 'neutral',
