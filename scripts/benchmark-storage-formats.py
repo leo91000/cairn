@@ -809,7 +809,10 @@ def main():
     for corpus in corpora:
         if not re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9_-]{0,79}", corpus["label"]):
             parser.error("Corpus label must be a short filename-safe identifier")
-        for generation in corpus["generations"]:
+        known_disks = set()
+        generations = [*corpus["generations"], corpus.get("trim_generations", [])]
+        for generation_index, generation in enumerate(generations):
+            is_discard = generation_index == len(corpus["generations"])
             seen = set()
             for entry in generation:
                 disk = entry["disk"]
@@ -821,7 +824,10 @@ def main():
                     )
                 if disk in seen:
                     parser.error("A generation must contain only one state per disk")
+                if is_discard and disk not in known_disks:
+                    parser.error("Discard must reference an existing disk owner")
                 seen.add(disk)
+            known_disks.update(seen)
     report = {
         "schema": 2,
         "baseline": "current-v2",

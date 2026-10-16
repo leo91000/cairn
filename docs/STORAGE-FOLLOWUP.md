@@ -199,6 +199,9 @@ References: [ext4 journal recovery](https://www.kernel.org/doc/html/latest/files
 ## Reference results: 2026-10-16
 
 Three repeated trials used identical verified input bytes and benchmark source.
+The reference source is commit `637bed84`. The current encoding and timed
+read/write logic are unchanged; additional descriptor validation runs before
+measurement and rejects unsafe, duplicate or unknown discard owners.
 The production sample contains 54 regions from nine disks (216 MiB per phase),
 with four regions changing over 504–508 seconds. This is a small cache-biased
 sample, not an estimate of the whole installation. Complete journal/bitmap

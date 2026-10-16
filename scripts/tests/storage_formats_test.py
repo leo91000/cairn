@@ -5,10 +5,14 @@ uv run --with cryptography==46.0.3 --with fastcdc==1.7.0 --with zstandard==0.25.
 """
 
 import importlib.util
+import io
+import json
 import sys
 import tempfile
 import unittest
+from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
+from unittest.mock import patch
 
 from cryptography.exceptions import InvalidTag
 
@@ -36,6 +40,84 @@ class StorageEfficiencyTests(unittest.TestCase):
 
     def store(self, policy):
         return bench.Store(self.root / policy.name, policy)
+
+    def test_cli_rejects_unsafe_duplicate_or_unknown_discard_owners(self):
+        source = self.image("safe.bin", b"x" * 8192)
+        entry = {"disk": "safe", "path": str(source)}
+        victim = self.root / "escaped.metadata"
+        victim.write_bytes(b"preserve-me")
+        invalid = [
+            [{**entry, "disk": "../../../escaped"}],
+            [{**entry, "disk": "index"}],
+            [{**entry, "disk": "unknown-owner"}],
+            [entry, entry],
+        ]
+        for number, discard in enumerate(invalid):
+            with self.subTest(discard=discard):
+                descriptor = self.root / f"corpus-{number}.json"
+                descriptor.write_text(
+                    json.dumps(
+                        {
+                            "label": "safe",
+                            "generations": [[entry]],
+                            "trim_generations": discard,
+                        }
+                    )
+                )
+                output = self.root / f"results-{number}"
+                argv = [
+                    "benchmark-storage-formats.py",
+                    "--output",
+                    str(output),
+                    "--corpus",
+                    str(descriptor),
+                    "--policies",
+                    "current-v2",
+                ]
+                with (
+                    patch.object(sys, "argv", argv),
+                    redirect_stderr(io.StringIO()),
+                    redirect_stdout(io.StringIO()),
+                    self.assertRaises(SystemExit) as stopped,
+                ):
+                    bench.main()
+                self.assertEqual(stopped.exception.code, 2)
+                self.assertEqual(victim.read_bytes(), b"preserve-me")
+                self.assertFalse((output / "results.json").exists())
+
+    def test_cli_discard_subset_keeps_shared_bytes_owned_by_other_disks(self):
+        shared = self.image("shared.bin", bench.noise("shared-cli", 8192))
+        trimmed = self.image("trimmed.bin", bytes(8192))
+        descriptor = self.root / "valid-corpus.json"
+        descriptor.write_text(
+            json.dumps(
+                {
+                    "label": "subset",
+                    "generations": [
+                        [{"disk": disk, "path": str(shared)} for disk in ("a", "b")]
+                    ],
+                    "trim_generations": [{"disk": "a", "path": str(trimmed)}],
+                }
+            )
+        )
+        output = self.root / "valid-results"
+        argv = [
+            "benchmark-storage-formats.py",
+            "--output",
+            str(output),
+            "--corpus",
+            str(descriptor),
+            "--policies",
+            "current-v2",
+        ]
+        with patch.object(sys, "argv", argv), redirect_stdout(io.StringIO()):
+            bench.main()
+        result = json.loads((output / "results.json").read_text())["corpora"][0][
+            "results"
+        ][0]
+        self.assertEqual(result["trim"]["data_bytes"], result["data_bytes"])
+        self.assertEqual(result["trim"]["unique_chunks"], 1)
+        self.assertEqual(len(result["owner_deletion_bytes"]), 2)
 
     def test_current_v2_data_overhead_and_identical_probe_workload(self):
         data = bench.noise("raw-overhead", 128 * bench.KIB + 317)
