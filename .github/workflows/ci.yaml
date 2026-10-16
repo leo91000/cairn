@@ -631,6 +631,8 @@ jobs:
       - uses: ./.github/actions/setup-pnpm
         with:
           install: false
+      - name: Install encrypted backup test dependency
+        run: sudo apt-get update && sudo apt-get install -y age
       - name: Smoke-test the exact beacon image with disposable Postgres
         env:
           IMAGE_DIGEST: ${{ steps.build.outputs.digest }}
@@ -794,7 +796,7 @@ jobs:
         env:
           COOLIFY_URL: ${{ vars.COOLIFY_URL }}
           COOLIFY_SERVICE_UUID: ${{ vars.COOLIFY_SERVICE_UUID }}
-          COOLIFY_TOKEN: ${{ secrets.COOLIFY_TOKEN }}
+          COOLIFY_TOKEN: ${{ secrets.CAIRN_RELEASE_COOLIFY_TOKEN }}
           CAIRN_BEACON_ORIGIN: ${{ vars.CAIRN_BEACON_ORIGIN }}
           DEPLOY_IMAGE: ghcr.io/${{ github.repository_owner }}/cairn-beacon@${{ needs.resolve.outputs.beacon-digest || needs.beacon-image.outputs.digest }}
           DEPLOY_INSTALLATION_IMAGE: ghcr.io/${{ github.repository_owner }}/cairn@${{ needs.resolve.outputs.digest || needs.image.outputs.digest }}

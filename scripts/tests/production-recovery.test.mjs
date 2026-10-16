@@ -126,6 +126,7 @@ describe('production recovery', () => {
     expect(upload).toBeGreaterThan(prepare)
     expect(deploy).toBeGreaterThan(upload)
     expect(verify).toBeGreaterThan(deploy)
+    expect(steps[deploy].env.COOLIFY_TOKEN).toContain('secrets.CAIRN_RELEASE_COOLIFY_TOKEN')
     expect(steps[upload].with['if-no-files-found']).toBe('error')
     expect(workflow.jobs.deploy.if).toContain('startsWith(github.ref, \'refs/tags/v\')')
     expect(workflow.jobs.deploy.concurrency['cancel-in-progress']).toBe(false)

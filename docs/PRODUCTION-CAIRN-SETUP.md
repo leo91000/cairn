@@ -287,7 +287,7 @@ Configure GitHub's **production** environment:
 
 | Setting | Kind | Value |
 | --- | --- | --- |
-| `COOLIFY_TOKEN` | Secret | Dedicated API token with read, read:sensitive, write and deploy abilities |
+| `CAIRN_RELEASE_COOLIFY_TOKEN` | Secret | Dedicated API token with read, read:sensitive, write and deploy abilities |
 | `COOLIFY_URL` | Variable | Existing Coolify HTTPS origin |
 | `COOLIFY_SERVICE_UUID` | Variable | **New beacon Compose service** UUID |
 | `CAIRN_BEACON_ORIGIN` | Variable | `https://cairn.build` |
@@ -301,6 +301,11 @@ release refs. Routine stable tags deploy automatically, without required
 reviewers, after encrypted recovery preparation and off-host upload succeed.
 Enable this only after the host helper, SSH identity and new workflow are installed;
 approve any older pending release separately after its own recovery preparation.
+Use a fresh `CAIRN_RELEASE_COOLIFY_TOKEN` credential for this workflow, then remove
+the old environment secret `COOLIFY_TOKEN` before removing required reviewers.
+Historical workflows lack the recovery steps and must no longer have a usable
+deployment credential when rerun. Keep the new token in the operator password
+manager as well as the production environment secret.
 Remove the obsolete `CAIRN_PUBLIC_URL` deployment variable; the CLI no longer
 deploys a standalone public manager. Main/PR builds never deploy.
 A tag promotes both tested digests, updates `CAIRN_BEACON_IMAGE` and
