@@ -30,6 +30,8 @@ export interface ActivitySubagent {
 export interface ActivityArtifact {
   kind: 'command' | 'read' | 'browse' | 'output' | 'files' | 'search' | 'tool' | 'plan' | 'thinking' | 'notice' | 'subagent'
   id: string
+  /** Persisted events folded into this activity, independent of loaded turn boundaries. */
+  sourceIds?: string[]
   time: number
   title: string
   subtitle: string
@@ -246,6 +248,7 @@ export function activityEntries(events: RunEvent[], chat = false, groups = new A
     const running = !failed && (status === 'in_progress' || event.type.endsWith('.started')) && event.type.startsWith('item.')
     const artifact: ActivityArtifact = {
       id,
+      sourceIds: [`${event.runId}:${event.id}`],
       time: event.createdAt,
       kind: 'notice',
       title: 'Worker update',
@@ -401,7 +404,8 @@ export function activityEntries(events: RunEvent[], chat = false, groups = new A
     const previous = artifacts.get(id)
     if (previous) {
       const durationMs = artifact.kind === 'subagent' ? artifact.durationMs : undefined
-      Object.assign(previous, artifact, { time: previous.time, durationMs: running ? undefined : durationMs ?? Math.max(0, event.createdAt - previous.time) })
+      const sourceIds = [...previous.sourceIds ?? [], ...artifact.sourceIds ?? []]
+      Object.assign(previous, artifact, { sourceIds, time: previous.time, durationMs: running ? undefined : durationMs ?? Math.max(0, event.createdAt - previous.time) })
       continue
     }
 
@@ -432,28 +436,36 @@ export function teamEntries(entries: ActivityEntry[], groups = new ActivityGroup
 
 /** Preserve full visible groups across pagination, without counting hidden events or global IDs. */
 export class ActivityGroups {
-  private fullPositions = new Map<string, number>()
+  private fullPositions = new Map<string, { position: number, group: string }>()
 
   entries(entries: ActivityEntry[]): ActivityEntry[] {
     const result: ActivityEntry[] = []
-    const nextPositions = new Map<string, number>()
+    const nextPositions = new Map<string, { position: number, group: string }>()
+    const identities = (artifact: ActivityArtifact) => artifact.sourceIds ?? [artifact.id]
+    const previous = (artifact: ActivityArtifact) => identities(artifact).map(id => this.fullPositions.get(id)).find(Boolean)
     const appendTools = (artifacts: ActivityArtifact[]) => {
-      const anchor = artifacts.findIndex(item => this.fullPositions.has(item.id))
-      const offset = anchor < 0 ? 0 : this.fullPositions.get(artifacts[anchor]!.id)! - anchor
+      // Folding an older start can reorder the oldest activity around a notice.
+      // Anchor from the newest full group so that boundary cannot shift newer groups.
+      const anchor = artifacts.findLastIndex(item => previous(item))
+      const offset = anchor < 0 ? 0 : previous(artifacts[anchor]!)!.position - anchor
       let group: Extract<ActivityEntry, { kind: 'group' }> | undefined
       let previousWindow: number | undefined
       for (const [index, artifact] of artifacts.entries()) {
         const window = Math.floor((offset + index) / MAX_ACTIVITY_GROUP_SIZE)
         if (!group || window !== previousWindow) {
-          group = { kind: 'group', id: `group:${artifact.id}`, artifacts: [] }
+          const saved = previous(artifact)
+          const id = saved?.position === 0 ? saved.group : `group:${identities(artifact)[0]}`
+          group = { kind: 'group', id, artifacts: [] }
           result.push(group)
           previousWindow = window
         }
 
         group.artifacts.push(artifact)
         if (group.artifacts.length === MAX_ACTIVITY_GROUP_SIZE) {
-          for (const [position, item] of group.artifacts.entries())
-            nextPositions.set(item.id, position)
+          for (const [position, item] of group.artifacts.entries()) {
+            for (const id of identities(item))
+              nextPositions.set(id, { position, group: group.id })
+          }
         }
       }
     }

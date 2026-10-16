@@ -116,6 +116,7 @@ for (const kind of ['chat', 'task'] as const) {
 test('an older page preserves expanded newer tools and their open detail sheet', async ({ page, workspace }) => {
   await useRelayForHttpMocks(page)
   const run = workspace.service.store.runs().find(run => run.status === 'succeeded' && run.trigger !== 'chat')!
+  workspace.service.store.event(run.id, 'turn.started', '')
   for (let i = 0; i < 260; i++) {
     workspace.service.store.event(run.id, 'item.completed', '', {
       item: {

@@ -332,8 +332,8 @@ private fun StatusPill(content: @Composable RowScope.() -> Unit) {
  */
 internal class TimelineKeys {
     private var history: String? = null
-    private var owners = mapOf<String, String>()
-    private var fullPositions = mapOf<String, Int>()
+    private var owners = mapOf<Long, String>()
+    private var fullPositions = mapOf<Long, Int>()
 
     fun stabilize(history: String?, input: List<TimelineEntry>): List<TimelineEntry> {
         if (history != this.history) {
@@ -345,20 +345,19 @@ internal class TimelineKeys {
         val used =
             entries.filter { !it.key.startsWith("activity:") }.mapTo(mutableSetOf()) { it.key }
         val keys = arrayOfNulls<String>(entries.size)
-        // Event ids are unique; item ids only help when a folded update replaced the known event.
-        for (identity in
-            listOf<(RunEvent) -> String?>({ "event:${it.id}" }, { it.itemIdentity() })) {
-            entries.forEachIndexed { index, entry ->
-                if (keys[index] == null && entry.key.startsWith("activity:"))
-                    entry.events
-                        .firstNotNullOfOrNull { event ->
-                            identity(event)?.let(owners::get)?.takeIf { it !in used }
+        // Match any persisted event folded into the activity, including older starts.
+        entries.forEachIndexed { index, entry ->
+            if (entry.key.startsWith("activity:"))
+                entry.events
+                    .firstNotNullOfOrNull { event ->
+                        entry.sources(event).firstNotNullOfOrNull {
+                            owners[it]?.takeIf { key -> key !in used }
                         }
-                        ?.let {
-                            keys[index] = it
-                            used.add(it)
-                        }
-            }
+                    }
+                    ?.let {
+                        keys[index] = it
+                        used.add(it)
+                    }
         }
         val result = entries.mapIndexed { index, entry ->
             val key =
@@ -371,8 +370,7 @@ internal class TimelineKeys {
         owners = buildMap {
             for (entry in result) if (entry.key.startsWith("activity:"))
                 for (event in entry.events) {
-                    put("event:${event.id}", entry.key)
-                    event.itemIdentity()?.let { put(it, entry.key) }
+                    for (id in entry.sources(event)) put(id, entry.key)
                 }
         }
         return result
@@ -381,22 +379,32 @@ internal class TimelineKeys {
     /** Keep full visible groups intact when older pages arrive or new tools append. */
     private fun regroup(entries: List<TimelineEntry>): List<TimelineEntry> {
         val result = mutableListOf<TimelineEntry>()
-        val nextPositions = mutableMapOf<String, Int>()
+        val nextPositions = mutableMapOf<Long, Int>()
         val activity = mutableListOf<RunEvent>()
-        fun identity(event: RunEvent) = event.itemIdentity() ?: "event:${event.id}"
+        val sources = mutableMapOf<Long, List<Long>>()
+        fun identities(event: RunEvent) = sources[event.id] ?: listOf(event.id)
+        fun previous(event: RunEvent) = identities(event).firstNotNullOfOrNull(fullPositions::get)
         fun flush() {
             if (activity.isEmpty()) return
-            val anchor = activity.indexOfFirst { identity(it) in fullPositions }
-            val offset =
-                if (anchor < 0) 0 else fullPositions.getValue(identity(activity[anchor])) - anchor
+            // Older starts may move the oldest tool around a notice; anchor from the end.
+            val anchor = activity.indexOfLast { previous(it) != null }
+            val offset = if (anchor < 0) 0 else checkNotNull(previous(activity[anchor])) - anchor
             var group = mutableListOf<RunEvent>()
             var previousWindow: Int? = null
             fun append() {
                 if (group.isEmpty()) return
-                result.add(TimelineEntry("activity:${group.first().id}", group.toList(), false))
+                result.add(
+                    TimelineEntry(
+                        "activity:${group.first().id}",
+                        group.toList(),
+                        false,
+                        sourceIds = group.associate { it.id to identities(it) },
+                    )
+                )
                 if (group.size == MAX_ACTIVITY_GROUP_SIZE) {
-                    for ((position, event) in group.withIndex()) nextPositions[identity(event)] =
-                        position
+                    for ((position, event) in group.withIndex()) {
+                        for (id in identities(event)) nextPositions[id] = position
+                    }
                 }
                 group = mutableListOf()
             }
@@ -410,8 +418,10 @@ internal class TimelineKeys {
             activity.clear()
         }
         for (entry in entries) {
-            if (entry.key.startsWith("activity:")) activity.addAll(entry.events)
-            else {
+            if (entry.key.startsWith("activity:")) {
+                activity.addAll(entry.events)
+                sources.putAll(entry.sourceIds)
+            } else {
                 flush()
                 result.add(entry)
             }
@@ -422,8 +432,8 @@ internal class TimelineKeys {
         return result
     }
 
-    private fun RunEvent.itemIdentity(): String? =
-        item().string("id").takeIf { it.isNotBlank() }?.let { "item:${item().string("type")}:$it" }
+    private fun TimelineEntry.sources(event: RunEvent): List<Long> =
+        sourceIds[event.id] ?: listOf(event.id)
 }
 
 /** Restore once the feed exists; background resumes retain the existing list state. */
@@ -505,12 +515,15 @@ internal data class TimelineEntry(
     val notice: Boolean = false,
     /** The model provider that wrote this reply, when the engine chose among several. */
     val via: String = "",
+    /** Persisted events folded into each activity; item IDs may repeat in later turns. */
+    val sourceIds: Map<Long, List<Long>> = emptyMap(),
 )
 
 /** Fold updates in place within a turn; keep messages and errors in chronological order. */
 internal fun timelineEntries(events: List<RunEvent>, chat: Boolean = false): List<TimelineEntry> =
     Performance.measure(PerfOperation.TIMELINE) {
         val folded = mutableListOf<RunEvent>()
+        val sources = mutableListOf<MutableList<Long>>()
         val positions = mutableMapOf<String, Int>()
         var legacyTool: Int? = null
         for (event in events) {
@@ -525,6 +538,7 @@ internal fun timelineEntries(events: List<RunEvent>, chat: Boolean = false): Lis
             if (legacy && event.type == "item.completed" && legacyTool != null) {
                 val index = legacyTool
                 val original = folded[index]
+                sources[index].add(event.id)
                 folded[index] =
                     event.copy(
                         id = original.id,
@@ -550,14 +564,30 @@ internal fun timelineEntries(events: List<RunEvent>, chat: Boolean = false): Lis
                 if (index == null) {
                     positions[key] = folded.size
                     folded.add(event)
-                } else folded[index] = event.copy(id = folded[index].id)
-            } else folded.add(event)
+                    sources.add(mutableListOf(event.id))
+                } else {
+                    folded[index] = event.copy(id = folded[index].id)
+                    sources[index].add(event.id)
+                }
+            } else {
+                folded.add(event)
+                sources.add(mutableListOf(event.id))
+            }
         }
+        val sourceIds =
+            folded.mapIndexed { index, event -> event.id to sources[index].toList() }.toMap()
         val result = mutableListOf<TimelineEntry>()
         var activity = mutableListOf<RunEvent>()
         fun flushActivity() {
             if (activity.isNotEmpty()) {
-                result.add(TimelineEntry("activity:${activity.first().id}", activity, false))
+                result.add(
+                    TimelineEntry(
+                        "activity:${activity.first().id}",
+                        activity,
+                        false,
+                        sourceIds = activity.associate { it.id to sourceIds.getValue(it.id) },
+                    )
+                )
                 activity = mutableListOf()
             }
         }

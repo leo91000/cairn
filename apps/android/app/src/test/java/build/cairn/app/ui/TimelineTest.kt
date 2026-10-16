@@ -36,6 +36,48 @@ class TimelineTest {
     }
 
     @Test
+    fun `full groups remain stable when tool ids repeat in later turns`() {
+        val events =
+            (0L..29L).map { event(it + 1, "item.completed", "tool$it") } +
+                listOf(event(31, "chat.user"), event(32, "turn.started")) +
+                (0L..29L).map { event(it + 33, "item.completed", "tool${it - 5}") }
+        val keys = TimelineKeys()
+        val first = keys.stabilize("h", timelineEntries(events, chat = true))
+        assertEquals(listOf(30, 1, 30), first.map { it.events.size })
+        assertEquals(first, keys.stabilize("h", timelineEntries(events, chat = true)))
+    }
+
+    @Test
+    fun `folded older starts preserve full group membership and key`() {
+        val older = (0L..29L).map { event(it + 1, "item.started", "tool$it") }
+        val loaded = (0L..59L).map { event(it + 100, "item.completed", "tool$it") }
+        val keys = TimelineKeys()
+        val first = keys.stabilize("h", timelineEntries(loaded, chat = true))
+        val extended = keys.stabilize("h", timelineEntries(older + loaded, chat = true))
+        assertEquals(first.map { it.key }, extended.map { it.key })
+        assertEquals(listOf(30, 30), extended.map { it.events.size })
+        assertEquals(
+            first.map { entry -> entry.events.map { it.item().string("id") } },
+            extended.map { entry -> entry.events.map { it.item().string("id") } },
+        )
+    }
+
+    @Test
+    fun `an older start moving before a notice preserves newer full groups`() {
+        val tools = (0L..89L).map { event(it + 3, "item.completed", "tool$it") }
+        val notice = event(2, "diagnostic")
+        val start = event(1, "item.started", "tool0")
+        val keys = TimelineKeys()
+        val first = keys.stabilize("h", timelineEntries(listOf(notice) + tools))
+        val extended = keys.stabilize("h", timelineEntries(listOf(start, notice) + tools))
+        for (group in first.subList(1, 3)) assertEquals(
+            group,
+            extended.find { it.key == group.key },
+        )
+        assertEquals(extended.size, extended.map { it.key }.distinct().size)
+    }
+
+    @Test
     fun `a thousand tools split into groups of at most thirty after folding updates`() {
         val events = (1L..1001L).map { event(it, "item.completed", "tool$it") }
         for (chat in listOf(false, true)) {

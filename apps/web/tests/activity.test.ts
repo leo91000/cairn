@@ -571,10 +571,84 @@ it.each([false, true])('keeps newer tool groups stable when older pages arrive o
   }))
   const groups = new ActivityGroups()
   const loaded = activityEntries(events.slice(100, 160), chat, groups).filter(entry => entry.kind === 'group')
-  const extended = activityEntries(events, chat, groups).filter(entry => entry.kind === 'group')
+  const turn: RunEvent = {
+    id: 0,
+    runId: 'r',
+    createdAt: 0,
+    type: 'turn.started',
+    text: '',
+  }
+  const extended = activityEntries([turn, ...events], chat, groups).filter(entry => entry.kind === 'group')
   // A full newer group must survive the prepend rather than being repartitioned from index zero.
-  expect(extended.find(entry => entry.id === loaded[1]!.id)?.artifacts.map(item => item.id))
-    .toEqual(loaded[1]!.artifacts.map(item => item.id))
+  expect(extended.find(entry => entry.id === loaded[1]!.id)?.artifacts.map(item => item.command))
+    .toEqual(loaded[1]!.artifacts.map(item => item.command))
+})
+
+it('preserves full groups through folded older starts and reused tool IDs across turns', () => {
+  const tool = (id: number, item: string, type = 'item.completed'): RunEvent => ({
+    id,
+    runId: 'r',
+    createdAt: id,
+    type,
+    text: '',
+    payload: {
+      item: {
+        id: item,
+        type: 'command_execution',
+        command: `echo ${id}`,
+        exit_code: 0,
+      },
+    },
+  })
+  const older = Array.from({ length: 30 }, (_, i) => tool(i + 1, `tool${i}`, 'item.started'))
+  const first = Array.from({ length: 30 }, (_, i) => tool(i + 100, `tool${i}`))
+  const second = Array.from({ length: 30 }, (_, i) => tool(i + 200, `tool${i - 5}`))
+  const turn: RunEvent = {
+    id: 199,
+    runId: 'r',
+    createdAt: 199,
+    type: 'turn.started',
+    text: '',
+  }
+  const groups = new ActivityGroups()
+  const loaded = activityEntries(first, true, groups).filter(entry => entry.kind === 'group')
+  const extended = activityEntries([...older, ...first, turn, ...second], true, groups).filter(entry => entry.kind === 'group')
+  expect(extended.map(entry => entry.artifacts.length)).toEqual([30, 30])
+  expect(extended[0]!.id).toBe(loaded[0]!.id)
+  expect(extended[0]!.artifacts.map(item => item.command)).toEqual(loaded[0]!.artifacts.map(item => item.command))
+  expect(activityEntries([...older, ...first, turn, ...second], true, groups)).toEqual(extended)
+})
+
+it('keeps newer full groups stable when an older start moves a tool before a notice', () => {
+  const tools: RunEvent[] = Array.from({ length: 90 }, (_, i) => ({
+    id: i + 3,
+    runId: 'r',
+    createdAt: i + 3,
+    type: 'item.completed',
+    text: '',
+    payload: {
+      item: {
+        id: `tool${i}`,
+        type: 'command_execution',
+        command: `echo ${i}`,
+        exit_code: 0,
+      },
+    },
+  }))
+  const notice: RunEvent = {
+    id: 2,
+    runId: 'r',
+    createdAt: 2,
+    type: 'diagnostic',
+    text: 'heartbeat',
+  }
+  const start = { ...tools[0]!, id: 1, type: 'item.started' }
+  const groups = new ActivityGroups()
+  const loaded = activityEntries([notice, ...tools], false, groups).filter(entry => entry.kind === 'group')
+  const extended = activityEntries([start, notice, ...tools], false, groups).filter(entry => entry.kind === 'group')
+  for (const group of loaded.slice(1, 3))
+    expect(extended.find(entry => entry.id === group.id)?.artifacts.map(item => item.command)).toEqual(group.artifacts.map(item => item.command))
+  expect(new Set(extended.map(entry => entry.id)).size).toBe(extended.length)
 })
 
 it('lets partial groups grow while preserving message boundaries', () => {
