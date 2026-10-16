@@ -413,6 +413,22 @@ def previous_sample(directory):
     return max(valid, key=lambda v: (v.get("sequence", 0), v["observedAt"]), default={})
 
 
+def repair_segment_tail(path):
+    fd = os.open(path, os.O_RDWR | os.O_NOFOLLOW | os.O_NONBLOCK)
+    try:
+        metadata = os.fstat(fd)
+        if not stat.S_ISREG(metadata.st_mode):
+            raise ValueError("Observation segment must be a regular file")
+        size = metadata.st_size
+        if size and os.pread(fd, 1, size - 1) != b"\n":
+            tail = os.pread(fd, min(size, 65536), max(0, size - 65536))
+            boundary = tail.rfind(b"\n")
+            os.ftruncate(fd, max(0, size - len(tail) + boundary + 1))
+            os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
 def append_sample(
     directory,
     sample,
@@ -435,6 +451,10 @@ def append_sample(
         for p in directory.glob("*.jsonl")
         if re.fullmatch(r"\d{4}-\d{2}-\d{2}\.\d{4}\.jsonl", p.name)
     )
+    # Repair before choosing a new date/size segment. Also recover closed tails
+    # left by earlier collectors, rather than keeping malformed JSONL history.
+    for segment in segments:
+        repair_segment_tail(segment)
     prefix = now.strftime("%Y-%m-%d")
     today = [p for p in segments if p.name.startswith(prefix + ".")]
     path = today[-1] if today else directory / (prefix + ".0000.jsonl")
@@ -451,12 +471,6 @@ def append_sample(
     try:
         if not stat.S_ISREG(os.fstat(fd).st_mode):
             raise ValueError("Observation destination must be a regular file")
-        size = os.fstat(fd).st_size
-        if size:
-            tail = os.pread(fd, min(size, 65536), max(0, size - 65536))
-            if not tail.endswith(b"\n"):
-                boundary = tail.rfind(b"\n")
-                os.ftruncate(fd, max(0, size - len(tail) + boundary + 1))
         remaining = memoryview(encoded)
         while remaining:
             remaining = remaining[os.write(fd, remaining) :]

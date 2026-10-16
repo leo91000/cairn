@@ -322,6 +322,58 @@ class ObserverTests(unittest.TestCase):
             self.assertEqual(json.loads((root / "state.json").read_text()), {"n": 2})
             self.assertEqual(path.stat().st_mode & 0o777, 0o600)
 
+    def test_rollover_repairs_torn_size_and_daily_segments(self):
+        for boundary in ("size", "day"):
+            with (
+                self.subTest(boundary=boundary),
+                tempfile.TemporaryDirectory() as temporary,
+            ):
+                root = Path(temporary)
+                now = dt.datetime(2026, 10, 16, tzinfo=dt.timezone.utc)
+                records = [{"n": n, "padding": "x" * 30} for n in (1, 2, 3)]
+                for record in records[:2]:
+                    observer.append_sample(
+                        root, record, now=now, segment_bytes=125, max_bytes=1000
+                    )
+                previous = next(root.glob("*.jsonl"))
+                with previous.open("ab") as stream:
+                    stream.write(b'{"partial":')
+                if boundary == "day":
+                    now += dt.timedelta(days=1)
+                observer.append_sample(
+                    root, records[2], now=now, segment_bytes=125, max_bytes=1000
+                )
+                segments = sorted(root.glob("*.jsonl"))
+                self.assertEqual(len(segments), 2)
+                self.assertTrue(
+                    all(path.read_bytes().endswith(b"\n") for path in segments)
+                )
+                self.assertEqual(
+                    [
+                        json.loads(line)
+                        for path in segments
+                        for line in path.read_text().splitlines()
+                    ],
+                    records,
+                )
+
+                # Earlier collector versions may have already left a closed
+                # segment torn. Upgrade recovery must also repair that tail.
+                with previous.open("ab") as stream:
+                    stream.write(b'{"older-partial":')
+                observer.append_sample(
+                    root, {"n": 4}, now=now, segment_bytes=125, max_bytes=1000
+                )
+                self.assertTrue(previous.read_bytes().endswith(b"\n"))
+                self.assertEqual(
+                    [
+                        json.loads(line)
+                        for path in sorted(root.glob("*.jsonl"))
+                        for line in path.read_text().splitlines()
+                    ],
+                    records + [{"n": 4}],
+                )
+
     def test_daily_retention_and_byte_quota_remove_only_own_closed_segments(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

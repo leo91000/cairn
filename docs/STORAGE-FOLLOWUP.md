@@ -54,7 +54,8 @@ or make the slow-operation buckets into precise latency percentiles.
 
 The append is synced before atomically replacing and syncing `state.json`.
 Recovery uses the last valid sequenced JSONL record if the process died between
-those steps; a torn final line is repaired on the next append. This preserves
+those steps; torn final lines in retained segments are repaired before choosing
+the next append destination, including date and size rollover. This preserves
 measurement continuity across collector crashes, manager restarts and ordinary
 container updates. Missing observations and epoch boundaries remain visible.
 
