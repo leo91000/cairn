@@ -7,11 +7,11 @@ plugins {
 
 spotless {
     kotlin {
-        target("app/src/**/*.kt")
+        target("app/src/**/*.kt", "release-smoke/src/**/*.kt")
         ktfmt("0.64").kotlinlangStyle()
     }
     kotlinGradle {
-        target("*.gradle.kts", "app/*.gradle.kts")
+        target("*.gradle.kts", "app/*.gradle.kts", "release-smoke/*.gradle.kts")
         ktfmt("0.64").kotlinlangStyle()
     }
 }
