@@ -287,15 +287,28 @@ Configure GitHub's **production** environment:
 
 | Setting | Kind | Value |
 | --- | --- | --- |
-| `COOLIFY_TOKEN` | Secret | Dedicated API token with read, read:sensitive, write and deploy abilities |
+| `CAIRN_RELEASE_COOLIFY_TOKEN` | Secret | Dedicated API token with read, read:sensitive, write and deploy abilities |
 | `COOLIFY_URL` | Variable | Existing Coolify HTTPS origin |
 | `COOLIFY_SERVICE_UUID` | Variable | **New beacon Compose service** UUID |
 | `CAIRN_BEACON_ORIGIN` | Variable | `https://cairn.build` |
+| `CAIRN_RELEASE_SSH_KEY` | Secret | Dedicated key restricted to the root-owned release helper |
+| `CAIRN_RELEASE_SSH_HOST` | Variable | Installation/Beacon host name or address |
+| `CAIRN_RELEASE_SSH_USER` | Variable | Host account carrying the forced-command key |
+| `CAIRN_RELEASE_SSH_KNOWN_HOSTS` | Variable | Verified SSH host key entry; never discover it during deployment |
 
-Protect this environment with Léo as required reviewer so a future `v*` tag
-cannot deploy without approval. Remove the obsolete `CAIRN_PUBLIC_URL` deployment
-variable; the CLI no longer deploys a standalone public manager. Main/PR builds
-never deploy. A tag promotes both tested digests, updates `CAIRN_BEACON_IMAGE` and
+Keep the environment's deployment branch/tag policy restricted to the intended
+release refs. Routine stable tags deploy automatically, without required
+reviewers, after encrypted recovery preparation and off-host upload succeed.
+Enable this only after the host helper, SSH identity and new workflow are installed;
+approve any older pending release separately after its own recovery preparation.
+Use a fresh `CAIRN_RELEASE_COOLIFY_TOKEN` credential for this workflow, then remove
+the old environment secret `COOLIFY_TOKEN` before removing required reviewers.
+Historical workflows lack the recovery steps and must no longer have a usable
+deployment credential when rerun. Keep the new token in the operator password
+manager as well as the production environment secret.
+Remove the obsolete `CAIRN_PUBLIC_URL` deployment variable; the CLI no longer
+deploys a standalone public manager. Main/PR builds never deploy.
+A tag promotes both tested digests, updates `CAIRN_BEACON_IMAGE` and
 `CAIRN_INSTALLATION_IMAGE` through the bulk endpoint, reads both literal values
 back, and repairs partial updates before restart. Failed repair restores the
 previous pair without restart; if even restoration fails, freeze all manual
@@ -304,6 +317,54 @@ then verifies both
 its build identity and approved installation release. No automatic beacon
 rollback is attempted after a failed rollout; use the
 [rollback procedure](PRODUCTION-CAIRN.md#backups-and-rollback).
+
+### Automatic recovery host
+
+The host needs Python 3, systemd, Docker and `age` (Ubuntu package `age`). Install
+`deploy/beacon/release-backup.py` and `deploy/beacon/postgres-backup.sh` as
+root-owned files under `/opt/cairn-release/`. The CI identity must not be able to
+modify them or their configuration. Create `/etc/cairn-release-backup.json`, mode
+0600, with this host's actual Compose project and recovery recipient:
+
+```json
+{
+  "project": "actual-beacon-compose-project",
+  "installation_project": "cairn-installation",
+  "origin": "https://cairn.build",
+  "directory": "/var/backups/cairn/releases",
+  "helper": "/opt/cairn-release/postgres-backup.sh",
+  "recipient": "/etc/cairn-release-backup-recipient.pub"
+}
+```
+
+Create the backup directory as root, mode 0700. The recipient is the operator's
+recovery SSH public key, not the separate CI SSH public key. Retain its matching
+private key for the lifetime of the backups, including after key rotation.
+Authorize the CI key with this forced command and all SSH forwarding disabled:
+
+```text
+restrict,command="sudo -n --preserve-env=SSH_ORIGINAL_COMMAND /usr/bin/python3 /opt/cairn-release/release-backup.py" ssh-ed25519 <dedicated-CI-public-key>
+```
+
+The host account needs passwordless permission for that exact root-owned helper.
+The helper accepts only `prepare <stable-tag> <random-id>`, `download <id>` and
+`verify <immutable-digest>`. It cannot open a shell or download plaintext dumps.
+Preparation runs under systemd, with an exclusive lock, timeout and final Beacon
+recovery even if the SSH client disconnects. It refuses to resume an old Beacon
+beside a replacement. Normal installation updates remain owned by their supervisor.
+
+Download a `production-recovery-<tag>-<id>` artifact from its Actions run. Verify
+the encrypted file's SHA-256 against `release.json`, then decrypt privately:
+
+```sh
+umask 077
+age --decrypt -i /private/recovery-ssh-key -o beacon.dump beacon.dump.age
+```
+
+Follow the [rollback procedure](PRODUCTION-CAIRN.md#backups-and-rollback) with the
+previous immutable image pair recorded in the same metadata. The workflow stops
+when installation data compatibility epochs differ and need a separate stopped backup;
+this exception cannot be bypassed by an approval click.
 
 ## Install and claim on the same server
 

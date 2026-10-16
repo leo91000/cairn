@@ -6,6 +6,8 @@
   a reference: encoded bytes, cold/warm read latency, write latency, CPU, workload
   and host conditions. See [object compression measurements](docs/STORAGE-COMPRESSION.md).
   Distinguish local measurements from production network latency.
+- For persisted-format changes or releases, follow the reviewed compatibility
+  contract in [production releases](docs/PRODUCTION-CAIRN.md#installation-data-compatibility).
 - Separate logical steps with blank lines. Give complex expressions descriptive
   intermediate names when that makes the flow easier to follow. Avoid arbitrary
   function-size limits or extracting helpers solely to reduce line counts.
