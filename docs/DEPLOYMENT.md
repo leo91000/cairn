@@ -4,7 +4,9 @@ For routine releases to **https://cairn.build**, follow the
 [production release runbook](PRODUCTION-CAIRN.md). For provisioning or changing
 the same Coolify/Traefik server, use the
 [configuration reference](PRODUCTION-CAIRN-SETUP.md).
-Deployment requires Léo’s explicit go-ahead.
+Creating an authorized stable release tag starts production preparation and
+deployment automatically. Routine releases require no additional approval click;
+failed recovery preparation or validation prevents deployment.
 
 For the beacon installation flow (one machine, integrated S3, no
 incoming ports), see [One-command installation](INSTALLATION.md).

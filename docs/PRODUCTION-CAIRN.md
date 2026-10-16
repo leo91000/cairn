@@ -10,9 +10,9 @@ migration, DNS setup, provider registration or installation claim.
   qualification, old public manager retirement and naming cutover.
 
 A documentation or implementation task alone does not authorize a release or
-production change. Follow the scope Léo authorized for the current release and
-the configured GitHub production approval. Infrastructure changes have their
-own scope; a routine application release uses the existing configuration.
+production change. Creating an authorized stable release tag starts the automatic
+production pipeline; routine releases do not require another approval click.
+Infrastructure changes have their own scope and are not part of a routine release.
 
 <a id="8-manual-release-checklist-required-before-approving-a-tag-deployment"></a>
 
@@ -24,14 +24,12 @@ own scope; a routine application release uses the existing configuration.
    immutable image digests, the tested commit, run ID and CLI versions. Take the
    Beacon and installation images from that same evidence. A reused PR image
    can report its tested merge commit while matching the tag's tree.
-2. **Prepare recovery.** Privately record the current Beacon digest, approved
-   installation digest and health identity. Follow [backups and rollback](#backups-and-rollback):
-   before each Beacon upgrade, take the Postgres backup, test its restore on
-   isolated Postgres 17, encrypt it and retain a copy off-host. Check installation
-   schema rollback compatibility; an incompatible change requires a matching
-   stopped backup of the whole installation, including Garage and its identity.
-   Check the proxy still uses its persisted exact trusted address; configuration
-   details are in the [reference](PRODUCTION-CAIRN-SETUP.md#persist-a-fixed-traefik-peer-across-recreation).
+2. **Check rollback scope.** Routine releases prepare recovery automatically.
+   The workflow refuses changes to the installation database or storage code
+   without a reviewed rollout and a matching stopped installation backup,
+   including Garage and its identity. A Beacon dump cannot recover these files.
+   Proxy or other infrastructure changes retain their own qualification; see
+   the [reference](PRODUCTION-CAIRN-SETUP.md#persist-a-fixed-traefik-peer-across-recreation).
 3. **Create the tag and release notes.** A pushed version tag starts the container
    and Android workflows. They reuse compatible validation evidence or run fresh
    checks; a tag can wait for validation already running on main. For Android,
@@ -39,18 +37,22 @@ own scope; a routine application release uses the existing configuration.
    a draft release if needed. The Android workflow signs the validated APK,
    attaches it and its update manifest, then publishes the release atomically.
    Leave the draft unpublished until that workflow completes.
-4. **Approve deployment after preparation succeeds.** The tag's production job
-   requires the existing environment approval. The workflow promotes the tested
-   image pair and deploys Beacon through Coolify. A failed backup, restore check
-   or required validation keeps deployment unapproved. The initial #105/#113
-   migration checklist is historical; qualifying a changed feature or network
-   path is part of that change's own validation.
+4. **Follow automatic production preparation and deployment.** The production
+   job uses a restricted SSH command to record the previous image pair and health,
+   stop Beacon briefly, back up Postgres and resume Beacon even on preparation
+   failure. It tests the dump on an isolated Postgres 17, encrypts it to the
+   operator's recovery key and uploads only the encrypted dump and its metadata
+   as a `production-recovery-<tag>-<id>` Actions artifact (90-day retention).
+   Only after off-host upload succeeds does it deploy the validated image pair
+   through Coolify. Backup, restore, download, upload or validation failures stop
+   deployment automatically. The initial #105/#113 migration is historical.
 5. **Verify the served release.** Check `/health` for the expected tested commit
    and runtime identity, and `/install/release` for the paired immutable
    installation digest. The deployment workflow verifies both, with up to ten
-   minutes for readiness. Check authenticated access, installation reconnection
-   and conversation access. Stop further releases and use the recovery procedure
-   if the rollout fails.
+   minutes for readiness. The workflow also waits for the installation's manager
+   and runner to adopt the approved image and for execution readiness to return.
+   Check authenticated access and conversation behavior when qualifying a changed
+   feature. Stop further releases and use the recovery procedure if rollout fails.
 6. **Verify Android publication when applicable.** Confirm the release contains
    `cairn-android.apk` and `android-update.json`, the APK version/hash match the
    manifest, and its signature preserves the stable update channel. See
