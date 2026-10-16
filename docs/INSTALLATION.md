@@ -1,8 +1,9 @@
 # One-command installation
 
 For an installation sharing the beacon `https://cairn.build` production server,
-follow the [same-server runbook](PRODUCTION-CAIRN.md). Reserve memory/disk for the
-beacon process, Postgres and proxy before assigning installation VM budgets.
+follow the [same-server configuration guide](PRODUCTION-CAIRN-SETUP.md). Reserve
+memory/disk for the beacon process, Postgres and proxy before assigning
+installation VM budgets.
 
 Sign in to the Beacon and choose **Add an installation**. Copy the
 complete `curl … | sudo bash` command onto a trusted Linux x86-64 machine. Its

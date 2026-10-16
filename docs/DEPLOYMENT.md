@@ -1,13 +1,23 @@
 # Deployment and recovery
 
-For the production target **https://cairn.build** and a fresh installation on the
-same Coolify/Traefik server, follow [the production runbook](PRODUCTION-CAIRN.md).
+For routine releases to **https://cairn.build**, follow the
+[production release runbook](PRODUCTION-CAIRN.md). For provisioning or changing
+the same Coolify/Traefik server, use the
+[configuration reference](PRODUCTION-CAIRN-SETUP.md).
 Deployment requires Léo’s explicit go-ahead.
 
 For the beacon installation flow (one machine, integrated S3, no
 incoming ports), see [One-command installation](INSTALLATION.md).
 
-## Required migration to Beacon
+<a id="required-migration-to-beacon"></a>
+
+## Historical access migration to Beacon (v0.53)
+
+This section concerns the old standalone manager's transition to Beacon. An
+installation already using Beacon does not repeat it during ordinary releases.
+The [v0.53 archive](archive/CAIRN-V0.53-MIGRATION.md) records the initial launch;
+current claim and credential recovery are documented in
+[installation access](INSTALLATION-RELAY.md).
 
 This release removes the installation's browser login and application hosting.
 Administrator passwords, `SETUP_TOKEN`, local browser sessions and CSRF tokens no
@@ -33,7 +43,7 @@ and route account/access mutations, installation API requests and relay
 WebSockets to it. Revocation notifications are process-local; multiple beacon
 replicas are unsupported even with sticky installation routing. See
 [beacon process limits](BEACON.md#configuration) and
-[ADR-0032](adr/0032-single-beacon-relay-process.md) for this explicit restriction
+[ADR-0032](adr/0032-single-official-relay-process.md) for this explicit restriction
 of spec #43 and the tolerance of persisted revocation checks.
 
 For an existing installation, preserve all volumes, add `CAIRN_BEACON_ORIGIN`
@@ -301,8 +311,9 @@ own HTTPS origin. Additional nodes still need a direct private route to port 431
 ### Deploy version tags through GitHub Actions
 
 The production workflow targets the **beacon Compose service**, never the old
-public installation manager. The full [cairn.build runbook](PRODUCTION-CAIRN.md)
-lists environment setup, DNS, Resend, OAuth, co-location and rollback steps.
+public installation manager. The [release runbook](PRODUCTION-CAIRN.md) covers
+release checks, backups and rollback. The [configuration reference](PRODUCTION-CAIRN-SETUP.md)
+covers environment setup, DNS, Resend, OAuth and co-location.
 
 Main and same-repository PRs build both installation and beacon images. All
 existing quality, browser, network and installation/VM smoke checks remain
@@ -335,7 +346,7 @@ verify the pair. Only beacon is restarted. It waits up to ten minutes for
 report the tested merge commit with the released tree. Existing installations
 update through their host timer; the check does not wait for every installation.
 A failed beacon rollout needs operator rollback of the previous digest and
-matching Postgres backup; see [rollback](PRODUCTION-CAIRN.md#7-backups-and-rollback).
+matching Postgres backup; see [rollback](PRODUCTION-CAIRN.md#backups-and-rollback).
 
 Retained VM disks keep their original guest OS and tools. Only approve an
 installation image if the previous release can still read its database, or
