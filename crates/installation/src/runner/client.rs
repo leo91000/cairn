@@ -8,6 +8,7 @@ use crate::{
 };
 use base64::{Engine, engine::general_purpose::STANDARD};
 use futures_util::StreamExt;
+use reqwest::StatusCode;
 use serde_json::{Value, json};
 use std::time::Duration;
 use tokio::io::{AsyncWriteExt, BufReader};
@@ -21,6 +22,28 @@ struct Controller {
     http: reqwest::Client,
     url: String,
     token: String,
+}
+
+/// Older controllers report admission pressure as a plain 503 error. Normalize
+/// only their known capacity refusals into the manager's existing wait contract.
+fn startup_rejection(status: StatusCode, reason: Option<&str>) -> String {
+    let mut message = format!("VM controller rejected startup (HTTP {status}).");
+    if let Some(reason) = reason {
+        message.push(' ');
+        message.push_str(reason);
+    }
+    let capacity = status == StatusCode::SERVICE_UNAVAILABLE
+        && matches!(
+            reason,
+            Some("All VM slots are occupied." | "Shared node resources are under pressure.")
+        );
+    if capacity {
+        return format!(
+            "{} can accept this execution right now. {message}",
+            crate::nodes::placement::NO_CAPACITY,
+        );
+    }
+    message
 }
 
 impl Controller {
@@ -45,12 +68,7 @@ impl Controller {
             }
 
             let error = serde_json::from_slice::<Value>(&body).unwrap_or_default();
-            let mut message = format!("VM controller rejected startup (HTTP {status}).");
-            if let Some(reason) = error["error"].as_str() {
-                message.push(' ');
-                message.push_str(reason);
-            }
-
+            let message = startup_rejection(status, error["error"].as_str());
             let message = run_output::redact(&message, std::slice::from_ref(&self.token));
 
             // Only an explicit rejection proves that the native agent never started.

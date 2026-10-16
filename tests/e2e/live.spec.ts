@@ -57,6 +57,79 @@ test('chat groups visible calls despite diagnostics, updates and global event ID
   ])
 })
 
+test('markdown tables wrap prose and keep wide columns reachable within the conversation', async ({ page, workspace }) => {
+  await useRelayForHttpMocks(page)
+  const run = workspace.service.store.runs().find(run => run.status === 'succeeded' && run.trigger !== 'chat')!
+  const description = 'Missing or running required checks keep waiting; required failure wakes the agent. Optional checks do not block. Push a new commit or close the PR and the old wait should report that change.'
+  const longPath = `https://example.test/${'long-path-segment/'.repeat(20)}`
+  const columns = Array.from({ length: 12 }, (_, i) => `Column ${i + 1}`)
+  const text = [
+    '| Feature | What to verify |',
+    '| --- | --- |',
+    `| Waiting for required PR checks | ${description} |`,
+    `| Long link and code | [Reference](${longPath}) and \`${longPath}\` |`,
+    '',
+    'The paragraph after the table stays readable.',
+    '',
+    `| ${columns.join(' | ')} |`,
+    `| ${columns.map(() => '---').join(' | ')} |`,
+    `| ${columns.map((_, i) => `Value ${i + 1}`).join(' | ')} |`,
+  ].join('\n')
+  workspace.service.store.event(run.id, 'item.completed', text, { item: { id: 'table-layout', type: 'agent_message', text } })
+  await page.goto(workspacePath(`${workspace.url}/runs/${run.id}`))
+  await authenticateWorkspace(page)
+  const message = page.locator('.activity-message').filter({ hasText: 'The paragraph after the table stays readable.' })
+  await expect(message.getByRole('table')).toHaveCount(2)
+
+  for (const width of [1488, 390, 320]) {
+    await page.setViewportSize({ width, height: 900 })
+    const proseTable = message.getByRole('table').first()
+    const layout = await proseTable.evaluate((table) => {
+      const markdown = table.closest('.markdown')!
+      const cell = table.querySelector('tbody tr td:last-child')!
+      const range = document.createRange()
+      range.selectNodeContents(cell)
+      return {
+        tableWidth: table.getBoundingClientRect().width,
+        messageWidth: markdown.clientWidth,
+        messageOverflow: markdown.scrollWidth - markdown.clientWidth,
+        textLines: range.getClientRects().length,
+        cellFont: getComputedStyle(cell).fontSize,
+        messageFont: getComputedStyle(markdown).fontSize,
+      }
+    })
+    expect(layout.tableWidth).toBeLessThanOrEqual(layout.messageWidth + 1)
+    expect(layout.messageOverflow).toBeLessThanOrEqual(1)
+    expect(layout.textLines).toBeGreaterThan(1)
+    expect(layout.cellFont).toBe(layout.messageFont)
+    const output = page.getByRole('region', { name: 'Activity output' })
+    expect(await output.evaluate(el => el.scrollWidth - el.clientWidth)).toBeLessThanOrEqual(1)
+    expect(await page.evaluate(() => document.documentElement.scrollWidth - innerWidth)).toBeLessThanOrEqual(1)
+    await expect(message.getByRole('link', { name: 'Reference', exact: true })).toHaveAttribute('href', longPath)
+
+    if (width === 320) {
+      const wideTable = message.getByRole('table').last()
+      const headerLines = await wideTable.getByRole('columnheader').first().evaluate((cell) => {
+        const range = document.createRange()
+        range.selectNodeContents(cell)
+        return range.getClientRects().length
+      })
+      expect(headerLines).toBeLessThanOrEqual(2)
+      const scroll = await wideTable.evaluate((table) => {
+        const container = table.parentElement!
+        container.scrollLeft = container.scrollWidth
+        return { left: container.scrollLeft, overflow: container.scrollWidth - container.clientWidth }
+      })
+      expect(scroll.overflow).toBeGreaterThan(0)
+      expect(scroll.left).toBeGreaterThan(0)
+      await expect(wideTable.getByRole('cell', { name: 'Value 12', exact: true })).toBeInViewport()
+    }
+
+    await message.scrollIntoViewIfNeeded()
+    await page.screenshot({ path: test.info().outputPath(`markdown-tables-${width}.png`), animations: 'disabled' })
+  }
+})
+
 for (const kind of ['chat', 'task'] as const) {
   test(`${kind} automatically fills folded history without a click or scroll`, async ({ page, workspace }) => {
     await useRelayForHttpMocks(page)

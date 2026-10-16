@@ -141,6 +141,21 @@ fun RunScreen(
 ) {
     val live = rememberLive(vm, state, "/runs/${segment(id)}/stream", streaming = selected)
     val run = live.state?.run
+    var tab by rememberSaveable(id) { mutableIntStateOf(1) }
+    // Only acknowledge output that is displayed, including a mission finishing while it is open.
+    ReadWhileOpen(
+        vm,
+        run?.takeIf {
+                selected &&
+                    (tab == 1 || tab == 0) &&
+                    live.synced &&
+                    !live.catchingUp &&
+                    it.trigger != "chat" &&
+                    it.status == "succeeded"
+            }
+            ?.finishedAt
+            ?.let { "task:${run.taskId}" to it },
+    )
     val events = live.events
     val more = live.catchingUp
     val timelineKeys = remember(id) { TimelineKeys() }
@@ -161,7 +176,6 @@ fun RunScreen(
         if (selected) focusMode(fullscreen)
         onDispose { if (selected) focusMode(false) }
     }
-    var tab by rememberSaveable(id) { mutableIntStateOf(1) }
     var autoTab by rememberSaveable(id) { mutableStateOf(true) }
     var follow by rememberSaveable(id) { mutableStateOf(true) }
     var confirm by rememberSaveable(id) { mutableStateOf<String?>(null) }

@@ -256,8 +256,12 @@ retains its reconnect backoff and history cache.
 ## Shared-installation limits
 
 Installation HTTP rate limits use the trusted Cairn account identity for relayed
-requests (300 requests per minute per account), while machine traffic retains
-its existing peer-based limits. Browser headers cannot select an identity or
+requests (300 reads and 300 writes per minute per account). GET and HEAD share
+the read budget across all paths; the other methods share the write budget, so
+pagination and refresh cannot consume the message-submission allowance. The
+first refusal in each bucket/window emits a diagnostic with the bucket, limit
+and subject type, without request content or account identifiers. Machine traffic
+retains its existing peer-based limits. Browser headers cannot select an identity or
 quota. Installation rename requests are limited separately at the beacon
 account level.
 

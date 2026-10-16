@@ -155,6 +155,8 @@ fn view(db: &Db<'_>, mut chat: Value) -> Result<Value> {
     chat["suspendedByExclusive"] = run
         .as_ref()
         .map_or(Value::Null, |run| run["suspendedByExclusive"].clone());
+    // When the agent's latest turn ended, for what the Fil shows as unread.
+    chat["finishedAt"] = run.map_or(Value::Null, |run| run["finishedAt"].clone());
     Ok(chat)
 }
 

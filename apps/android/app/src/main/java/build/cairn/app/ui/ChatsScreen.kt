@@ -329,6 +329,14 @@ internal fun ChatPage(
         if (id == null) conversations
         else rememberLive(vm, state, "/chats/${segment(id)}/stream", streaming = selected)
     val chat = live.state?.chat?.takeIf { it.id == id }
+    ReadWhileOpen(
+        vm,
+        chat
+            ?.run
+            ?.takeIf { selected && live.synced && !live.catchingUp && it.status == "succeeded" }
+            ?.finishedAt
+            ?.let { "chat:${chat.id}" to it },
+    )
     var createdId by rememberSaveable(id) { mutableStateOf<String?>(null) }
     var agent by rememberSaveable(id) { mutableStateOf(initialAgent) }
     var project by rememberSaveable(id) { mutableStateOf(initialProject) }
