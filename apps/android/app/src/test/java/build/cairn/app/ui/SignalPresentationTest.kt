@@ -242,6 +242,44 @@ class SignalPresentationTest {
     }
 
     @Test
+    fun `read acknowledgement keeps the open conversation before the next unread page`() {
+        val chats =
+            listOf(
+                Chat("a", "First result", unread = true, finishedAt = 30, updatedAt = 30),
+                Chat("b", "Second result", unread = true, finishedAt = 20, updatedAt = 20),
+                Chat("c", "Recent", updatedAt = 10),
+            )
+        val before = buildFeed(chats, emptyList(), emptyList()).keys()
+        val after =
+            buildFeed(
+                    chats.map { if (it.id == "a") it.copy(unread = false) else it },
+                    emptyList(),
+                    emptyList(),
+                )
+                .keys()
+        assertEquals(listOf("chat:b", "chat:a", "chat:c"), after)
+        val held = pagerKeys(after, before, 0)
+        assertEquals(listOf("chat:a", "chat:b", "chat:c"), held)
+        assertEquals("chat:b", held[1])
+    }
+
+    @Test
+    fun `navigation badge distinguishes action from reading and clears optimistic reads`() {
+        val chats =
+            listOf(
+                Chat("a", "Result", unread = true, finishedAt = 30),
+                Chat("b", "Question", pendingQuestions = 1),
+            )
+        assertEquals(FilAttention(1, 1), filAttention(buildFeed(chats, emptyList(), emptyList())))
+        assertEquals(1, FilAttention(1, 4).count)
+        assertEquals(4, FilAttention(0, 4).count)
+        assertEquals(
+            FilAttention(1, 0),
+            filAttention(buildFeed(chats, emptyList(), emptyList(), mapOf("chat:a" to 30L))),
+        )
+    }
+
+    @Test
     fun `summary and greeting describe the feed`() {
         assertEquals("Tout est calme.", feedSummary(Feed(emptyList(), emptyList(), emptyList())))
         val item = FeedItem("k", FeedKind.CHAT, "t", "s", "a", "a")

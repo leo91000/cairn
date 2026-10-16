@@ -291,6 +291,16 @@ private fun WorkspaceApp(
     var focusedContent by remember(route) { mutableStateOf(false) }
     val focused = focusedContent || focusedRoute(route)
     val selected = dockSelection(route)
+    val conversations = rememberFilConversations(vm, state)
+    val activity = rememberFilActivity(vm)
+    val feed =
+        buildFeed(
+            conversations.state?.chats.orEmpty().filter { it.lifecycle == "active" },
+            activity.orEmpty(),
+            state.tasks,
+            vm.localReads,
+        )
+    val attention = filAttention(feed)
     fun navigate(target: String) {
         nav.navigate(target) {
             popUpTo("fil") { saveState = true }
@@ -304,6 +314,7 @@ private fun WorkspaceApp(
         LocalPerformanceScreen provides { detailScreen = it },
         LocalSnackbar provides snackbar,
         LocalAgentPortraits provides rememberAgentPortraits(vm, state),
+        LocalFilSnapshot provides FilSnapshot(conversations, activity),
     ) {
         BoxWithConstraints(
             Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)
@@ -332,7 +343,13 @@ private fun WorkspaceApp(
                             NavigationRailItem(
                                 selected == d.route,
                                 { navigate(d.route) },
-                                icon = { Icon(d.icon, d.label) },
+                                icon = {
+                                    FilNavigationBadge(
+                                        if (d.route == "fil") attention else FilAttention()
+                                    ) {
+                                        Icon(d.icon, d.label)
+                                    }
+                                },
                                 label = { Text(d.label) },
                                 colors =
                                     NavigationRailItemDefaults.colors(
@@ -377,6 +394,7 @@ private fun WorkspaceApp(
                                 ::navigate,
                                 ::create,
                                 Modifier.navigationBarsPadding(),
+                                attention,
                             )
                     },
                 ) { padding ->

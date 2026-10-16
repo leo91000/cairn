@@ -225,9 +225,21 @@ internal fun buildFeed(
 /** The Fil in reading order, one key per item: what a swipe between pages moves through. */
 internal fun Feed.keys() = (forYou + running + recent).map { it.key }
 
+/** The shell and its pages share one conversation stream and one mission poll. */
+internal data class FilSnapshot(val conversations: LiveSnapshot, val activity: List<Run>?)
+
+internal val LocalFilSnapshot = compositionLocalOf<FilSnapshot?> { null }
+
+@Composable
+internal fun rememberFilConversations(vm: CairnViewModel, state: Workspace): LiveSnapshot =
+    LocalFilSnapshot.current?.conversations ?: rememberLive(vm, state, "/chats/stream")
+
 /** The latest run of each mission, polled while the Fil or its pager shows; null until loaded. */
 @Composable
 internal fun rememberFilActivity(vm: CairnViewModel): List<Run>? {
+    LocalFilSnapshot.current?.let {
+        return it.activity
+    }
     var activity by remember { mutableStateOf<List<Run>?>(null) }
     Poll("fil-activity", 5000) {
         try {
@@ -268,7 +280,7 @@ fun FilScreen(
     openAccount: () -> Unit = {},
     openSettings: () -> Unit = openAccount,
 ) {
-    val live = rememberLive(vm, state, "/chats/stream")
+    val live = rememberFilConversations(vm, state)
     var connection by rememberSaveable { mutableStateOf(false) }
     if (connection)
         ConnectionSheet(vm, state, close = { connection = false }, openSettings = openSettings)
