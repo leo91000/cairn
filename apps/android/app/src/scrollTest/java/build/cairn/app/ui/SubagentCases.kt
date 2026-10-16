@@ -7,6 +7,8 @@ import androidx.compose.ui.test.junit4.v2.createComposeRule
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.test.core.app.ApplicationProvider
 import build.cairn.app.data.*
+import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicReference
 import kotlinx.coroutines.flow.first
 import kotlinx.serialization.json.*
 import okhttp3.mockwebserver.*
@@ -46,9 +48,34 @@ abstract class SubagentCases {
         compose.waitUntil(5000) {
             compose.onAllNodesWithTag("subagent-sheet").fetchSemanticsNodes().isEmpty()
         }
+
+        compose.onNodeWithContentDescription("Options de la conversation").performClick()
+        compose.onNodeWithText("Plein écran").performClick()
+        compose.onNodeWithTag("subagent-bar").assertDoesNotExist()
+        compose.onNodeWithTag("agent-working").assertIsDisplayed()
+        compose.onNodeWithContentDescription("Quitter le plein écran").performClick()
+        compose.onNodeWithTag("subagent-bar").assertIsDisplayed()
+        compose.onNodeWithTag("agent-working").assertDoesNotExist()
     }
 
-    private fun conversation(check: () -> Unit) {
+    @Test
+    fun workingIndicatorFollowsStatusOnlyUpdates() =
+        conversation(withSubagents = false) { update ->
+            compose.onNodeWithTag("agent-working").assertIsDisplayed()
+            update("queued")
+            compose.waitUntil(10000) {
+                compose.onAllNodesWithTag("agent-working").fetchSemanticsNodes().isEmpty()
+            }
+            update("running")
+            compose.waitUntil(10000) {
+                compose.onAllNodesWithTag("agent-working").fetchSemanticsNodes().isNotEmpty()
+            }
+        }
+
+    private fun conversation(
+        withSubagents: Boolean = true,
+        check: ((String) -> Unit) -> Unit,
+    ) {
         MockWebServer().use { server ->
             val now = System.currentTimeMillis()
             val chat =
@@ -74,7 +101,7 @@ abstract class SubagentCases {
                     put("prompt", prompt)
                     put("status", "in_progress")
                 }
-            val events =
+            val subagentEvents =
                 listOf(
                     event(
                         "chat.user",
@@ -105,16 +132,28 @@ abstract class SubagentCases {
                         put("parent_id", "Webhooks")
                     },
                 )
-            val batch =
-                wireJson.encodeToString(LiveBatch(events, LiveState(chat = chat), true, false))
+            val events = if (withSubagents) subagentEvents else emptyList()
+            val current = AtomicReference(chat)
+            val initial = AtomicBoolean(true)
             server.dispatcher =
                 object : Dispatcher() {
                     override fun dispatch(request: RecordedRequest): MockResponse {
                         val path = request.path!!.substringBefore('?')
-                        if (path == "/api/installations/fixture/api/chats/chat/stream")
+                        if (path == "/api/installations/fixture/api/chats/chat/stream") {
+                            val first = initial.getAndSet(false)
+                            val batch =
+                                wireJson.encodeToString(
+                                    LiveBatch(
+                                        if (first) events else emptyList(),
+                                        LiveState(chat = current.get()),
+                                        first,
+                                        false,
+                                    )
+                                )
                             return MockResponse()
                                 .setHeader("Content-Type", "text/event-stream")
                                 .setBody("event: batch\nid: 1\ndata: $batch\n\n")
+                        }
 
                         val body =
                             when (path) {
@@ -153,10 +192,11 @@ abstract class SubagentCases {
                 }
             }
             compose.waitUntil(20000) {
-                compose.onAllNodesWithTag("subagent-bar").fetchSemanticsNodes().isNotEmpty()
+                val tag = if (withSubagents) "subagent-bar" else "agent-working"
+                compose.onAllNodesWithTag(tag).fetchSemanticsNodes().isNotEmpty()
             }
             try {
-                check()
+                check { status -> current.set(chat.copy(run = chat.run!!.copy(status = status))) }
             } finally {
                 vm.api.closeStreams()
             }

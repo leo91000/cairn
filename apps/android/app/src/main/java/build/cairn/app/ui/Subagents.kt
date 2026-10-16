@@ -158,7 +158,6 @@ internal fun subagentTimeline(events: List<RunEvent>): SubagentTimeline {
     val builders = linkedMapOf<String, SubagentBuilder>()
     val captured = mutableSetOf<Long>()
     val anchors = linkedMapOf<Long, SubagentBuilder>()
-    var turn = 0
     for (event in events) {
         if (event.type == "artifact" || event.type == "chat.user") continue
 
@@ -169,7 +168,6 @@ internal fun subagentTimeline(events: List<RunEvent>): SubagentTimeline {
         if (ended)
             for ((key, builder) in builders) if (key.startsWith("${event.runId}:"))
                 builder.stop(event.createdAt)
-        if (event.type == "turn.started") turn++
 
         val item = event.item()
         val type = item.string("type")
@@ -186,7 +184,7 @@ internal fun subagentTimeline(events: List<RunEvent>): SubagentTimeline {
             val key = agentKey(event, itemId)
             val builder =
                 builders.getOrPut(key) {
-                    SubagentBuilder("$turn:$key", event.createdAt).also {
+                    SubagentBuilder(key, event.createdAt).also {
                         if (parent != null) parent.steps[it.id] = it else anchors[event.id] = it
                     }
                 }
@@ -289,6 +287,32 @@ internal fun List<Subagent>.withNestedTeams(): List<List<Subagent>> =
 
 internal fun subagentTeams(timeline: List<TimelineEntry>): List<List<Subagent>> =
     timeline.filter { it.agents.isNotEmpty() }.flatMap { it.agents.withNestedTeams() }
+
+/** Preserve a team's identity through any already loaded member, including an older prefix. */
+internal class SubagentTeamKeys {
+    private var owners = mapOf<String, String>()
+
+    fun stabilize(teams: List<List<Subagent>>): List<String> {
+        val used = mutableSetOf<String>()
+
+        val identities = teams.map { members ->
+            val previous = members.firstNotNullOfOrNull { owners[it.id]?.takeIf { it !in used } }
+            val base = previous ?: members.first().id
+            var identity = base
+            var suffix = 1
+            while (!used.add(identity)) identity = "$base:${suffix++}"
+            identity
+        }
+
+        owners = buildMap {
+            teams.zip(identities).forEach { (members, identity) ->
+                members.forEach { put(it.id, identity) }
+            }
+        }
+
+        return identities
+    }
+}
 
 /** Current-request agents and any earlier children still working in the same execution. */
 internal fun currentSubagents(timeline: List<TimelineEntry>): List<Subagent> {

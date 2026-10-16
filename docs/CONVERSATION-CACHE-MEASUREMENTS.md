@@ -73,3 +73,36 @@ claim of faster local decoding.
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
 | Reference (200-event suffix) | 200 | 111,346 | 0.687 ms | 0.120 ms | 1.984 ms | 220 ms |
 | Loaded pages within byte budget | 1,250 | 691,823 | 2.695 ms | 0.069 ms | 1.596 ms | 500 ms |
+
+## Android subagent run identities
+
+Android now retains each event's `runId`, so subagent items from separate runs
+remain distinct. The JSON field is additive, the cache version and encryption
+remain unchanged, and older clients ignore the field. New clients decode old
+records but do not restore a snapshot containing events without run identities:
+they start the stream at cursor zero and reload a recent server snapshot. This
+one-time refresh also discards the legacy local reading position and loaded-page
+boundary; older pages remain available through server pagination. Installation
+data formats and their compatibility epoch are unchanged.
+
+The Android measurement above now also compares 1,250 events with empty run IDs
+against the same events with a 36-character run ID. This reference uses the current
+serializer in both cases and isolates the ID value's cost; the new field name is
+already present in the empty-ID reference. A populated ID adds 36 bytes per event
+against that reference, or 47 bytes against the former JSON that omitted `runId`.
+
+Measured on 2026-10-16 on the shared Linux x86-64 development VM: Intel Xeon
+2.80 GHz, 7 logical CPUs, 19,006 MiB RAM, JDK 21.0.12+101 LTS, Robolectric 4.17,
+SDK 35, with Gradle validation active. The workload, five warmup writes, 30
+samples per phase, identity sealing, warm OS cache and CPU accounting are the
+same as above. These are local file-cache costs, excluding Android Keystore and
+production network latency.
+
+| Run IDs | Retained events | Encoded bytes | Write median | Warm read median | Cold read median | Process CPU |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Empty (reference) | 1,250 | 705,573 | 53.105 ms | 1.604 ms | 35.913 ms | 6,460 ms |
+| 36-character ID | 1,250 | 750,573 | 41.312 ms | 0.604 ms | 24.459 ms | 4,090 ms |
+
+The populated values add 45,000 bytes (6.4%) against the empty-ID reference.
+The populated-ID phase runs last, so its lower measured latency/CPU reflects
+JIT, caching and shared-host variation; it does not demonstrate a speedup.

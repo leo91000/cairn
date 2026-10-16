@@ -142,18 +142,19 @@ private fun StatePill(state: SubagentState) {
 
 /**
  * The subagents the agent started together: who works, on what, and for how long. Each row opens
- * the subagent's full activity. The card folds once every subagent has finished.
+ * the subagent's full activity. The card folds once every subagent has finished. [identity] stays
+ * stable when pagination reveals earlier teammates.
  */
 @Composable
-internal fun SubagentTeam(agents: List<Subagent>, active: Boolean) {
+internal fun SubagentTeam(agents: List<Subagent>, active: Boolean, identity: String) {
     val host = LocalOpenSubagent.current
     // Outside a hosting screen, the team hosts the activity of its own subagents.
-    var opened by rememberSaveable(agents.first().id) { mutableStateOf<String?>(null) }
+    var opened by rememberSaveable(identity) { mutableStateOf<String?>(null) }
     val open = host ?: { id: String -> opened = id }
     val states = agents.map { it.state(active) }
     val running = states.count { it == SubagentState.RUNNING }
     val failed = states.count { it == SubagentState.FAILED }
-    var toggled by rememberSaveable(agents.first().id) { mutableStateOf<Boolean?>(null) }
+    var toggled by rememberSaveable(identity) { mutableStateOf<Boolean?>(null) }
     val expanded = toggled ?: (running > 0 || failed > 0)
     val now = rememberNow(running > 0)
     Surface(
@@ -578,6 +579,11 @@ internal fun SubagentSheet(
                 // The subagent's own steps between its delegations, in their order.
                 val runs = remember(agent.steps) { stepRuns(agent.steps) }
                 val steps = remember(runs) { runs.mapNotNull { it.actions }.flatten() }
+                val teamKeys = remember(selected) { SubagentTeamKeys() }
+                val teamIdentities =
+                    remember(runs, teamKeys) {
+                        teamKeys.stabilize(runs.filter { it.agents.isNotEmpty() }.map { it.agents })
+                    }
                 if (agent.steps.isEmpty())
                     Text(
                         if (state == SubagentState.RUNNING) "Aucune étape pour l’instant."
@@ -588,15 +594,19 @@ internal fun SubagentSheet(
                 else
                     Column(Modifier.testTag("subagent-steps")) {
                         var position = 0
+                        var teamPosition = 0
                         runs.forEach { run ->
                             val actions = run.actions
-                            if (actions == null)
-                                CompositionLocalProvider(LocalOpenSubagent provides select) {
-                                    Box(Modifier.padding(vertical = 6.dp)) {
-                                        SubagentTeam(run.agents, active)
+                            if (actions == null) {
+                                val identity = teamIdentities[teamPosition++]
+                                key(identity) {
+                                    CompositionLocalProvider(LocalOpenSubagent provides select) {
+                                        Box(Modifier.padding(vertical = 6.dp)) {
+                                            SubagentTeam(run.agents, active, identity)
+                                        }
                                     }
                                 }
-                            else {
+                            } else {
                                 val start = position
                                 actions.forEachIndexed { index, step ->
                                     StepRow(step, last = index == actions.lastIndex) {

@@ -328,20 +328,31 @@ private fun StatusPill(content: @Composable RowScope.() -> Unit) {
 
 /**
  * A page that ends inside the oldest activity group extends it, and its first event (the natural
- * key) changes. Reuse the key the group already had, so the list keeps anchoring on that row.
+ * key) changes. Teams can also gain an earlier member. Reuse the key the group already had, so the
+ * list keeps anchoring on that row.
  */
 internal class TimelineKeys {
     private var history: String? = null
     private var owners = mapOf<Long, String>()
     private var fullPositions = mapOf<Long, Int>()
+    private var teamKeys = SubagentTeamKeys()
 
     fun stabilize(history: String?, input: List<TimelineEntry>): List<TimelineEntry> {
         if (history != this.history) {
             this.history = history
             owners = emptyMap()
             fullPositions = emptyMap()
+            teamKeys = SubagentTeamKeys()
         }
-        val entries = regroup(input)
+        val identities =
+            teamKeys.stabilize(input.filter { it.agents.isNotEmpty() }.map { it.agents }).iterator()
+        val entries =
+            regroup(
+                input.map { entry ->
+                    if (entry.agents.isEmpty()) entry
+                    else entry.copy(key = "team:${identities.next()}")
+                }
+            )
         val used =
             entries.filter { !it.key.startsWith("activity:") }.mapTo(mutableSetOf()) { it.key }
         val keys = arrayOfNulls<String>(entries.size)
@@ -746,7 +757,7 @@ internal fun TimelineRow(
     active: Boolean = false,
 ) {
     if (entry.files.isNotEmpty()) ArtifactStrip(vm, entry.files)
-    else if (entry.agents.isNotEmpty()) SubagentTeam(entry.agents, active)
+    else if (entry.agents.isNotEmpty()) SubagentTeam(entry.agents, active, identity = entry.key)
     else if (entry.message)
         CompositionLocalProvider(LocalMarkdownRendering provides rendering) {
             EventRow(

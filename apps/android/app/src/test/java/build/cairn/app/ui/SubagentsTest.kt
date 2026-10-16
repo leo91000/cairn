@@ -440,6 +440,67 @@ class SubagentsTest {
     }
 
     @Test
+    fun `loading older turns preserves subagent identities and team keys`() {
+        val older = listOf(turn("turn.started"))
+        val recent =
+            listOf(
+                turn("turn.started"),
+                subagent("item.started", "Review"),
+                subagent("item.started", "Nested") { put("parent_id", "Review") },
+            )
+        val keys = TimelineKeys()
+        val first = keys.stabilize("h", timelineEntries(recent, chat = true))
+        val paged = keys.stabilize("h", timelineEntries(older + recent, chat = true))
+
+        assertEquals(
+            subagentTeams(first).flatten().map { it.id },
+            subagentTeams(paged).flatten().map { it.id },
+        )
+        assertEquals(
+            first.filter { it.agents.isNotEmpty() }.map { it.key },
+            paged.filter { it.agents.isNotEmpty() }.map { it.key },
+        )
+    }
+
+    @Test
+    fun `loading an earlier teammate preserves the team key until history resets`() {
+        val older = listOf(message("older", "Earlier reply"), subagent("item.started", "Earlier"))
+        val recent = listOf(subagent("item.started", "Review"))
+        val keys = TimelineKeys()
+        val first = keys.stabilize("h", timelineEntries(recent, chat = true)).single()
+        val paged =
+            keys.stabilize("h", timelineEntries(older + recent, chat = true)).single {
+                it.agents.isNotEmpty()
+            }
+
+        assertEquals(first.key, paged.key)
+        assertEquals(listOf("Earlier", "Review"), paged.agents.map { it.name })
+        val reset =
+            keys.stabilize("new-history", timelineEntries(older + recent, chat = true)).single {
+                it.agents.isNotEmpty()
+            }
+        assertFalse(first.key == reset.key)
+    }
+
+    @Test
+    fun `teams that split after pagination retain distinct identities`() {
+        val (earlier, recent) =
+            teams(
+                    listOf(
+                        subagent("item.started", "Earlier"),
+                        subagent("item.started", "Review"),
+                    )
+                )
+                .single()
+        val keys = SubagentTeamKeys()
+        val first = keys.stabilize(listOf(listOf(recent))).single()
+        assertEquals(first, keys.stabilize(listOf(listOf(earlier, recent))).single())
+        val split = keys.stabilize(listOf(listOf(earlier), listOf(recent)))
+        assertEquals(2, split.distinct().size)
+        assertEquals(split, keys.stabilize(listOf(listOf(earlier), listOf(recent))))
+    }
+
+    @Test
     fun `initials and details read like the web`() {
         assertEquals("CR", subagentInitials("Code review"))
         assertEquals("EX", subagentInitials("explore"))

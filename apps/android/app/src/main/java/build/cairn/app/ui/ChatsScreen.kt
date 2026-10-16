@@ -436,10 +436,12 @@ internal fun ChatPage(
     val openSubagent = remember { { agent: String -> openedSubagent = agent } }
     val subagentTeams = remember(timeline) { subagentTeams(timeline) }
     val currentSubagents = remember(timeline) { currentSubagents(timeline) }
-    val subagentBar = currentSubagents.any { it.state(active) == SubagentState.RUNNING }
+    val subagentBar =
+        !fullscreen && currentSubagents.any { it.state(active) == SubagentState.RUNNING }
     val working =
         remember(
             live.events,
+            running,
             waitingTasks,
             currentSubagents,
             chat?.agentName,
@@ -1144,8 +1146,7 @@ internal fun ChatPage(
                                 }
                             }
                         }
-                        if (subagentBar && !fullscreen)
-                            SubagentBar(currentSubagents, active, openSubagent)
+                        if (subagentBar) SubagentBar(currentSubagents, active, openSubagent)
                         openedSubagent?.let { selected ->
                             SubagentSheet(
                                 subagentTeams,
