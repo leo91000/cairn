@@ -10,10 +10,11 @@ import {
   nextTick,
   onBeforeUnmount,
   ref,
+  shallowRef,
   watch,
 } from 'vue'
 import { latestArtifacts } from '../../../../packages/contracts/artifacts'
-import { activityEntries } from '../activity'
+import { activityEntries, ActivityGroups } from '../activity'
 import { deliveryEntries } from '../deliverables'
 import { ArrowDown, Maximize2, Minimize2 } from '../icons'
 import { exclusiveSuspensionLabel } from '../run-status'
@@ -58,8 +59,12 @@ const props = defineProps<{
 }>()
 const emit = defineEmits<{ load: [], position: [value: ReadingPosition, key?: string] }>()
 const skillNames = computed(() => new Set(props.skills ?? []))
+const activityGroups = shallowRef(new ActivityGroups())
+watch([() => props.cacheKey, () => props.chat, () => props.events[0]?.runId], () => {
+  activityGroups.value = new ActivityGroups()
+}, { flush: 'sync' })
 const entries = computed(() => {
-  const entries = activityEntries(props.events, props.chat)
+  const entries = activityEntries(props.events, props.chat, activityGroups.value)
   const acknowledged = new Set(props.events.filter(event => event.type === 'chat.user').map(event => event.payload?.messageId))
   for (const { message, label } of props.sending ?? []) {
     if (!acknowledged.has(message.id)) {
