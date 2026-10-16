@@ -17,7 +17,7 @@ export function identityColor(key: string) {
 
 export const initial = (name: string) => name.trim().match(/[\p{L}\p{N}]/u)?.[0]?.toUpperCase() ?? '?'
 
-export type FilKind = 'question' | 'failed' | 'failed-mission' | 'review' | 'running' | 'queued' | 'paused' | 'suspended' | 'recent'
+export type FilKind = 'question' | 'failed' | 'failed-mission' | 'review' | 'unread' | 'running' | 'queued' | 'paused' | 'suspended' | 'recent'
 export interface FilItem {
   key: string
   kind: FilKind
@@ -28,6 +28,8 @@ export interface FilItem {
   project: string | null
   at: number
   to: string
+  /** The opening of the agent's final message, for finished work not read yet. */
+  preview?: string
   chatId?: string
   taskId?: string
   runId?: string
@@ -39,12 +41,17 @@ export const filRunPath = (runId: string) => `/fil/runs/${runId}`
 
 const outcomeLabels = { blocked: 'Blocked', needs_input: 'Needs your input' } as const
 
+/** Finished work waiting to be read, as opposed to what needs an answer or a decision. */
+export const isUnread = (item: FilItem) => item.kind === 'unread'
+
 /**
- * What needs the user first (questions, failures, missions to review), then live work,
- * then recent conversations. Only the latest run of each mission counts, and chat runs
- * belong to their conversation.
+ * What needs the user first (questions, failures, missions to review, then finished work they
+ * have not read), then live work, then recent conversations. Only the latest run of each mission
+ * counts, and chat runs belong to their conversation. `read` holds marks taken on this page
+ * before the server's lists reflect them, by the finish time that was read.
  */
-export function filOf(chats: ChatView[], tasks: Task[], runs: RunListItem[]): Fil {
+export function filOf(chats: ChatView[], tasks: Task[], runs: RunListItem[], read: Record<string, number> = {}): Fil {
+  const unreadNow = (key: string, finishedAt: number | null | undefined) => !(read[key] >= (finishedAt ?? 0))
   const forYou: FilItem[] = []
   const live: FilItem[] = []
   const recent: FilItem[] = []
@@ -61,20 +68,36 @@ export function filOf(chats: ChatView[], tasks: Task[], runs: RunListItem[]): Fi
       to: chatPath(chat),
       chatId: chat.id,
     }
-    if (chat.pendingQuestions > 0)
+    if (chat.pendingQuestions > 0) {
       forYou.push({ ...base, kind: 'question', subtitle: chat.pendingQuestions > 1 ? `${chat.pendingQuestions} questions need your answer` : 'Needs your answer' })
-    else if (chat.status === 'failed' || chat.status === 'interrupted')
+    }
+    else if (chat.status === 'failed' || chat.status === 'interrupted') {
       forYou.push({ ...base, kind: 'failed', subtitle: chat.status === 'failed' ? 'Failed' : 'Interrupted' })
-    else if (chat.paused)
+    }
+    else if (chat.paused) {
       recent.push({ ...base, kind: 'paused', subtitle: 'Paused' })
-    else if (isExclusivelySuspended(chat))
+    }
+    else if (isExclusivelySuspended(chat)) {
       live.push({ ...base, kind: 'suspended', subtitle: exclusiveSuspensionLabel })
-    else if (chat.status === 'running')
+    }
+    else if (chat.status === 'running') {
       live.push({ ...base, kind: 'running', subtitle: 'Working' })
-    else if (chat.status === 'queued')
+    }
+    else if (chat.status === 'queued') {
       live.push({ ...base, kind: 'queued', subtitle: 'Waiting for a runner' })
-    else
+    }
+    else if (chat.unread && unreadNow(base.key, chat.finishedAt)) {
+      forYou.push({
+        ...base,
+        kind: 'unread',
+        at: chat.finishedAt ?? chat.updatedAt,
+        subtitle: 'Finished',
+        preview: chat.preview || undefined,
+      })
+    }
+    else {
       recent.push({ ...base, kind: 'recent', subtitle: [chat.agentName, chat.projectName].filter(Boolean).join(' · ') })
+    }
   }
 
   const latest = new Map<string, RunListItem>()
@@ -101,18 +124,32 @@ export function filOf(chats: ChatView[], tasks: Task[], runs: RunListItem[]): Fi
       taskId: task.id,
       runId: run.id,
     }
-    if (isExclusivelySuspended(run))
+    if (isExclusivelySuspended(run)) {
       live.push({ ...base, kind: 'suspended', subtitle: exclusiveSuspensionLabel })
-    else if (run.status === 'running' || run.status === 'queued')
+    }
+    else if (run.status === 'running' || run.status === 'queued') {
       live.push({ ...base, kind: run.status === 'running' ? 'running' : 'queued', subtitle: run.status === 'running' ? 'Mission running' : 'Mission waiting for a runner' })
-    else if (run.status === 'failed' || run.status === 'interrupted')
+    }
+    else if (run.status === 'failed' || run.status === 'interrupted') {
       forYou.push({ ...base, kind: 'failed-mission', subtitle: run.error?.split('\n')[0] || (run.status === 'failed' ? 'Mission failed' : 'Mission interrupted') })
-    else if (run.status === 'succeeded' && run.outcome && run.outcome.status !== 'completed')
+    }
+    else if (run.status === 'succeeded' && run.outcome && run.outcome.status !== 'completed') {
       forYou.push({ ...base, kind: 'review', subtitle: `${outcomeLabels[run.outcome.status]} · ${run.outcome.reason}` })
+    }
+    else if (run.status === 'succeeded' && run.unread && unreadNow(base.key, run.finishedAt)) {
+      forYou.push({
+        ...base,
+        kind: 'unread',
+        subtitle: 'Mission finished',
+        preview: run.preview || undefined,
+      })
+    }
   }
 
   const newest = (a: FilItem, b: FilItem) => b.at - a.at
-  return { forYou: forYou.sort(newest), live: live.sort(newest), recent: recent.sort(newest) }
+  // What asks for an answer or a decision stays above what only waits to be read.
+  const urgency = (a: FilItem, b: FilItem) => Number(isUnread(a)) - Number(isUnread(b)) || newest(a, b)
+  return { forYou: forYou.sort(urgency), live: live.sort(newest), recent: recent.sort(newest) }
 }
 
 /**

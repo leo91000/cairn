@@ -148,6 +148,22 @@
   to { box-shadow: 0 0 0 7px transparent; }
 }
 
+/* Finished work not read yet: a dot that pops in once and a faint wash of the accent on its card.
+   Read in place, the dot folds away before the card moves to Recent. */
+.unread-dot {
+  flex: none; width: 8px; height: 8px; border-radius: 99px; background: var(--color-accent);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--color-accent) 18%, transparent);
+  animation: unread-pop 0.5s var(--ease-spring) both;
+  transition: width 0.3s var(--ease-signal), margin 0.3s var(--ease-signal), opacity 0.25s linear, transform 0.3s var(--ease-signal);
+}
+.unread-dot-read { width: 0; margin-right: -8px; opacity: 0; transform: scale(0.2); box-shadow: none; }
+@keyframes unread-pop {
+  from { transform: scale(0); }
+  70% { transform: scale(1.25); }
+  to { transform: scale(1); }
+}
+.fil-unread { background-image: linear-gradient(100deg, color-mix(in srgb, var(--color-accent) 7%, transparent), transparent 60%); }
+
 /* Shared transitions. */
 .fil-row-move, .fil-row-enter-active, .fil-row-leave-active { transition: transform 0.42s var(--ease-signal), opacity 0.3s var(--ease-signal); }
 .fil-row-enter-from { opacity: 0; transform: translateY(-10px) scale(0.98); }
@@ -161,10 +177,10 @@
 .signal-veil-enter-from, .signal-veil-leave-to { opacity: 0; }
 
 @media (prefers-reduced-motion: reduce) {
-  .souffle-halo::after, .souffle-halo > .souffle-core, .veille-ring::before, .veille-dot, .working-wave > i, .live-dot, .avatar-orbit, .avatar-orbit::before { animation: none; }
+  .souffle-halo::after, .souffle-halo > .souffle-core, .veille-ring::before, .veille-dot, .working-wave > i, .live-dot, .unread-dot, .avatar-orbit, .avatar-orbit::before { animation: none; }
   .souffle-sweep { color: var(--color-ink); background: none; }
   .avatar-orbit { background: none; }
   .avatar-orbit::before { opacity: 0.35; }
-  .lift, .press, .fil-row-move, .fil-row-enter-active, .fil-row-leave-active, .signal-pop-enter-active, .signal-pop-leave-active { transition: none; }
+  .lift, .press, .unread-dot, .fil-row-move, .fil-row-enter-active, .fil-row-leave-active, .signal-pop-enter-active, .signal-pop-leave-active { transition: none; }
   .lift:hover { transform: none; }
 }

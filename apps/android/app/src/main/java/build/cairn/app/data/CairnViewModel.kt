@@ -16,8 +16,10 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.add
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
+import kotlinx.serialization.json.putJsonArray
 
 fun body(vararg pairs: Pair<String, String>) = buildJsonObject {
     pairs.forEach { put(it.first, it.second) }
@@ -160,6 +162,7 @@ constructor(
             connection?.clearSession()
             accountConnection?.clearSession()
             connection = null
+            clearReads()
             routeCollection?.cancel()
             schedule(getApplication(), false)
             mutable.update {
@@ -193,6 +196,62 @@ constructor(
                         if (refreshError is ApiException && refreshError.status == 401)
                             report(refreshError)
                     }
+                }
+            }
+        }
+    }
+
+    /**
+     * Fil items read on this device, by the end of the agent's work that was read, until the
+     * server's lists catch up. Keeping the finish time lets a later turn show as unread again.
+     */
+    val localReads = androidx.compose.runtime.mutableStateMapOf<String, Long>()
+    private var readsGeneration = 0
+
+    private fun clearReads() {
+        readsGeneration++
+        localReads.clear()
+    }
+
+    /** Marks finished work (`chat:<id>` or `task:<id>` with its finish time) as read everywhere. */
+    fun markRead(items: List<Pair<String, Long>>) {
+        val target = connection ?: return
+        if (!state.value.session.authenticated || state.value.signingOut) return
+        val unread = items.filter { (key, at) -> (localReads[key] ?: Long.MIN_VALUE) < at }
+        if (unread.isEmpty()) return
+        val generation = readsGeneration
+        viewModelScope.launch {
+            for (batch in unread.chunked(200)) {
+                if (generation != readsGeneration || connection !== target) return@launch
+                val previous = batch.map { (key, _) -> key to localReads[key] }
+                batch.forEach { (key, at) -> localReads[key] = maxOf(localReads[key] ?: 0, at) }
+                try {
+                    target.request(
+                        "POST",
+                        "/reads",
+                        buildJsonObject {
+                            putJsonArray("items") {
+                                batch.forEach { (key, at) ->
+                                    add(
+                                        buildJsonObject {
+                                            put("key", key)
+                                            put("finishedAt", at)
+                                        }
+                                    )
+                                }
+                            }
+                        },
+                    )
+                } catch (e: Exception) {
+                    if (e is CancellationException) throw e
+                    if (generation != readsGeneration || connection !== target) return@launch
+                    previous.forEachIndexed { index, (key, at) ->
+                        if (localReads[key] == batch[index].second) {
+                            if (at == null) localReads.remove(key) else localReads[key] = at
+                        }
+                    }
+                    report(e)
+                    return@launch
                 }
             }
         }
@@ -256,6 +315,7 @@ constructor(
                 files.clear()
                 next.clearSession()
                 connection = null
+                clearReads()
                 routeCollection?.cancel()
                 schedule(getApplication(), false)
                 mutable.update {
@@ -393,6 +453,7 @@ constructor(
         if (installation != null) openInstallation(session, installation)
         else {
             connection?.closeStreams()
+            clearReads()
             clearDrafts()
             schedule(getApplication(), notifications.enabled.first())
 
@@ -423,6 +484,7 @@ constructor(
 
         try {
             previous?.closeStreams()
+            clearReads()
             clearDrafts()
 
             val accountId = checkNotNull(session.account).id
@@ -499,6 +561,7 @@ constructor(
     }
 
     suspend fun logout() {
+        clearReads()
         clearDrafts()
         emailChallenge = null
         mutable.update { it.copy(signingOut = true) }
