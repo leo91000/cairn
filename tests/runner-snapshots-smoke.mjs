@@ -35,7 +35,7 @@ async function main() {
   const name = `cairn-snapshots-${randomUUID().slice(0, 8)}`
   const peer = `${name}-peer`
   const network = `${name}-public`
-  const endpoint = 'http://203.0.113.3:8080'
+  const endpoint = 'http://93.184.216.3:8080'
   const devices = readFileSync('/proc/devices', 'utf8')
   const charMajor = Number(devices.match(/(?:^|\n)\s*(\d+) ublk-char(?:\n|$)/)?.[1])
   const blockMajor = Number(devices.split('Block devices:')[1]?.match(/(?:^|\n)\s*(\d+) (?:ublk|blkext)(?:\n|$)/)?.[1])
@@ -106,13 +106,13 @@ async function main() {
     }))
     await copyFile(new URL('./fixtures/snapshot-model.mjs', import.meta.url), path.join(root, 'peer.mjs'))
     await copyFile(new URL('./fixtures/snapshot-memory.mjs', import.meta.url), path.join(root, 'data/memory.mjs'))
-    docker('network', 'create', '--internal', '--subnet', '203.0.113.0/29', network)
+    docker('network', 'create', '--internal', '--subnet', '93.184.216.0/29', network)
     docker('run', '-d', '--name', peer, '-v', `${root}/peer.mjs:/peer.mjs:ro`, '--entrypoint', 'node', imageId, '/peer.mjs')
-    docker('network', 'connect', '--ip', '203.0.113.3', network, peer)
+    docker('network', 'connect', '--ip', '93.184.216.3', network, peer)
     // SYS_PTRACE is observer-only: it permits smaps inspection of other UIDs.
     const capabilities = ['SYS_RESOURCE', 'SYS_PTRACE', 'SYS_ADMIN', 'NET_ADMIN', 'SYS_CHROOT', 'SETUID', 'SETGID', 'MKNOD', 'CHOWN', 'FOWNER', 'KILL', 'DAC_OVERRIDE']
     docker('run', '-d', '--name', name, '--user', '0:0', '--no-healthcheck', '--read-only', '--cap-drop', 'ALL', ...capabilities.flatMap(value => ['--cap-add', value]), '--security-opt', 'apparmor=unconfined', '--security-opt', 'seccomp=unconfined', '--device', '/dev/kvm', '--device', '/dev/fuse', '--device', '/dev/ublk-control', '--device-cgroup-rule', `c ${charMajor}:* rwm`, '--device-cgroup-rule', `b ${blockMajor}:* rwm`, '--device', '/dev/net/tun', '--sysctl', 'net.ipv4.ip_forward=1', '--sysctl', 'net.ipv6.conf.all.disable_ipv6=1', '--tmpfs', '/run', '--tmpfs', '/tmp', '-v', `${root}/data:/data`, '-v', `${root}/state:/runner-state`, '-p', '127.0.0.1::4311', '--memory', `${memoryGiB}g`, '--cpus', `${cpuQuota}`, '-e', `CONCURRENCY=${slots}`, '-e', `APP_RUNTIME_ID=snapshots-test-${imageId.slice(7)}`, '-e', 'CAIRN_READY_VM_POOL=true', '-e', `CAIRN_READY_VM_POOL_SIZE=${poolSize}`, '-e', 'CAIRN_BLOCK_TRANSPORT=ublk', '-e', 'CAIRN_DISK_LAYOUT=paired-ext4-v1', '-e', `CAIRN_VM_SNAPSHOTS=${snapshots}`, '-e', 'RUST_LOG=warn,cairn_performance=info', '--entrypoint', '/usr/local/bin/cairn', imageId, 'runner-broker')
-    docker('network', 'connect', '--ip', '203.0.113.2', network, name)
+    docker('network', 'connect', '--ip', '93.184.216.2', network, name)
     await reconnect()
     const fixture = await prepareStorageOrigin({
       root,
