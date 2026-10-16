@@ -15,13 +15,15 @@ import { renderToString } from 'vue/server-renderer'
 const server = await createServer({
   configFile: false,
   plugins: [vue()],
+  // This SSR fixture does not need client dependency discovery or prebundling.
+  optimizeDeps: { noDiscovery: true },
   server: { middlewareMode: true, watch: null },
   appType: 'custom',
 })
 let card: Component
 beforeAll(async () => {
   card = (await server.ssrLoadModule('/apps/web/src/components/ChatWaitCard.vue')).default
-})
+}, 30_000)
 afterAll(() => server.close())
 
 const wakeup: ChatWakeup = {
