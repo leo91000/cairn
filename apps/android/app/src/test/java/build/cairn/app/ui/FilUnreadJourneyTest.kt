@@ -406,4 +406,98 @@ class FilUnreadJourneyTest {
             }
         }
     }
+
+    @Test
+    fun `a mission finishing on files stays unread until its result is shown`() {
+        val release = java.util.concurrent.CountDownLatch(1)
+        val requests = java.util.concurrent.atomic.AtomicInteger()
+        val reads = Collections.synchronizedList(mutableListOf<String>())
+        val finished = activity.first().copy(summary = "Output waiting to be read")
+        MockWebServer().use { server ->
+            server.dispatcher =
+                object : Dispatcher() {
+                    override fun dispatch(request: RecordedRequest): MockResponse {
+                        val path = request.path!!.substringBefore('?')
+                        if (path.endsWith("/runs/notes-run/stream")) {
+                            if (requests.getAndIncrement() == 0) {
+                                val initial =
+                                    LiveBatch(
+                                        emptyList(),
+                                        LiveState(
+                                            run =
+                                                finished.copy(status = "running", finishedAt = null)
+                                        ),
+                                        true,
+                                        false,
+                                    )
+                                return MockResponse()
+                                    .setHeader("Content-Type", "text/event-stream")
+                                    .setBody(
+                                        "event: batch\nid: 1\ndata: ${wireJson.encodeToString(initial)}\n\n"
+                                    )
+                            }
+                            check(release.await(20, TimeUnit.SECONDS))
+                            return stream(LiveState(run = finished))
+                        }
+                        val response =
+                            when {
+                                path == "/api/account/session" -> beaconAccountFixture("fixture")
+                                path == "/api/installations" -> beaconInstallationsFixture()
+                                path.endsWith("/reads") -> {
+                                    reads += request.body.readUtf8()
+                                    "{\"read\":1}"
+                                }
+                                path.endsWith("/overview") || path.endsWith("/models") -> "{}"
+                                else -> "[]"
+                            }
+                        return MockResponse()
+                            .setHeader("Content-Type", "application/json")
+                            .setBody(response)
+                    }
+                }
+            val vm =
+                CairnViewModel(
+                    ApplicationProvider.getApplicationContext<Application>(),
+                    MemoryVault(),
+                    beaconOrigin = "",
+                )
+            compose.setContent {
+                val state by vm.state.collectAsState()
+                LaunchedEffect(Unit) {
+                    vm.state.first { it.ready }
+                    vm.connect(server.url("/").toString())
+                }
+                CairnTheme {
+                    if (state.installation != null) RunScreen(vm, state, "notes-run", openRun = {})
+                }
+            }
+            try {
+                compose.waitUntil(20000) {
+                    compose.onAllNodesWithText("Fichiers").fetchSemanticsNodes().isNotEmpty()
+                }
+                compose.onNodeWithText("Fichiers").performClick()
+                release.countDown()
+                compose.waitUntil(20000) {
+                    compose
+                        .onAllNodesWithText("Terminée", substring = true)
+                        .fetchSemanticsNodes()
+                        .isNotEmpty()
+                }
+                compose.waitForIdle()
+                assertEquals(0, reads.size)
+                compose.onNodeWithText("Résultat").performClick()
+                compose.waitUntil(20000) {
+                    compose.onAllNodes(isRoot()).fetchSemanticsNodes()
+                    reads.isNotEmpty()
+                }
+                assertEquals(
+                    "{\"items\":[{\"key\":\"task:notes\",\"finishedAt\":${finished.finishedAt}}]}",
+                    reads.single(),
+                )
+            } finally {
+                release.countDown()
+                vm.api.closeStreams()
+            }
+        }
+    }
 }

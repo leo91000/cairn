@@ -52,8 +52,6 @@ const live = useLiveRun(() => `/runs/${props.runId}/stream`)
 const { events, connectionNotice, catchingUp: loading } = live
 const run = computed(() => live.snapshot.value?.run ?? undefined)
 const suspended = computed(() => isExclusivelySuspended(run.value))
-// Opening a finished mission run reads its mission in the Fil, on every device.
-useReadWhileOpen(() => live.synced.value && !loading.value && run.value?.trigger !== 'chat' && run.value?.status === 'succeeded' && run.value.finishedAt ? { key: `task:${run.value.taskId}`, at: run.value.finishedAt } : null)
 const retryNotice = useRetryNotice(() => run.value)
 const waitNotice = computed(() => retryNotice.value ?? run.value?.accountWaitReason)
 const deliverables = computed(() => live.snapshot.value?.artifacts ?? [])
@@ -61,6 +59,8 @@ const artifactViewer = ref<string | null>(null)
 const error = ref('')
 // As on Android, a run opens on its conversation.
 const tab = ref('events')
+// Only acknowledge output that is displayed, including a mission finishing while it is open.
+useReadWhileOpen(() => ['events', 'result'].includes(tab.value) && live.synced.value && !loading.value && run.value?.trigger !== 'chat' && run.value?.status === 'succeeded' && run.value.finishedAt ? { key: `task:${run.value.taskId}`, at: run.value.finishedAt } : null)
 const confirm = ref(false)
 const confirmCleanup = ref(false)
 const active = computed(

@@ -123,3 +123,23 @@ test('finished work waits in For you until it is read, on the desktop and the ph
   await expect(rail.getByRole('link', { name: 'Fil', exact: true })).toHaveAttribute('aria-description', '1 need you')
   await capture(page, testInfo, 'unread-cleared-desktop-dark')
 })
+
+test('a mission finishing outside its output tabs stays unread until the output is shown', async ({ page, workspace }) => {
+  test.setTimeout(90000)
+  const { done } = await seed(workspace)
+  workspace.service.store.updateRun(done.id, { status: 'running', finishedAt: null })
+  await useRelayForHttpMocks(page)
+  await page.goto(workspacePath(`/runs/${done.id}`))
+  await authenticateWorkspace(page)
+  await page.getByRole('button', { name: /^Files/ }).click()
+  workspace.service.store.updateRun(done.id, { status: 'succeeded', finishedAt: Date.now(), summary: 'Output waiting to be read' })
+  workspace.service.store.event(done.id, 'run.completed', 'Mission completed')
+  const unread = async () => (await workspace.api('/api/tasks/activity')).find((run: { id: string }) => run.id === done.id)?.unread
+  await expect(page.getByText('Execution finished', { exact: true }).first()).toBeVisible()
+  expect(await unread()).toBe(true)
+  await page.getByRole('button', { name: 'Mission brief', exact: true }).click()
+  expect(await unread()).toBe(true)
+  await page.getByRole('button', { name: 'Result', exact: true }).click()
+  await expect(page.getByText('Output waiting to be read', { exact: true })).toBeVisible()
+  await expect.poll(unread).toBe(false)
+})
