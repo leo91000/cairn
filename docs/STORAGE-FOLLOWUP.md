@@ -44,6 +44,8 @@ stored in the observations.
 
 Each record identifies the container/start epoch. Counter resets suppress
 invalid deltas; cumulative maxima and in-flight gauges are never subtracted.
+Snapshots older than the current container start are excluded, including
+checkpoints from earlier collectors: Docker retains logs across container restarts.
 The manager CPU interval uses the actual `cairn serve` process's start ticks,
 and excludes intervals shorter than thirty seconds. CPU includes all manager
 work and must not be described as compression-only CPU. Worker timings are wall
@@ -79,8 +81,10 @@ sudo python3 scripts/sample-storage-cache.py \
 The source supports both legacy `disks` and physical `environments` paths. It
 rejects symlinked cache/source paths, bounds copied bytes and skips regions that
 became unavailable. The second capture uses the first selection; only regions
-available at both phases enter the experiment. Labels are anonymous. Sampling
-prioritizes recently changed manifests and then systematically spaced cached
+available at both phases enter the experiment. Labels are anonymous. The sampler
+skips disks whose journals disappeared and reports the number skipped. If no
+selected region remains available, it fails without publishing an empty phase.
+Sampling prioritizes recently changed manifests and then systematically spaced cached
 regions. It is cache-biased and excludes uncached data, so it is not a random
 estimate of the installation's entire storage or future workloads.
 

@@ -124,7 +124,16 @@ def clean_metrics(value):
     return result
 
 
-def latest_metrics(text):
+def parse_timestamp(value):
+    if not isinstance(value, str):
+        raise ValueError("Timestamp must be a string")
+    parsed = dt.datetime.fromisoformat(value.replace("Z", "+00:00"))
+    if parsed.tzinfo is None:
+        raise ValueError("Timestamp must include its timezone")
+    return parsed
+
+
+def latest_metrics(text, not_before=None):
     latest = None
     for raw in (text or "").splitlines():
         line = ANSI.sub("", raw).strip()
@@ -132,7 +141,9 @@ def latest_metrics(text):
             continue
         timestamp, _, payload = line.partition(" ")
         try:
-            dt.datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+            observed = parse_timestamp(timestamp)
+            if not_before is not None and observed < not_before:
+                continue
             if payload.startswith("{"):
                 fields = json.loads(payload).get("fields", {})
                 if fields.get("operation") != "s3_totals":
@@ -190,7 +201,7 @@ def collect(root, manager, garage, bucket, previous):
     now = dt.datetime.now(UTC)
     sample = {
         "schema": 1,
-        "collectorVersion": 2,
+        "collectorVersion": 3,
         "observedAt": now.isoformat(),
         "errors": [],
         "hostLoad": list(os.getloadavg()),
@@ -206,11 +217,13 @@ def collect(root, manager, garage, bucket, previous):
         ["docker", "inspect", "--format", template, manager], limit=65536
     )
     container_ref = manager
+    epoch_started = None
     if metadata:
         try:
             value = json.loads(metadata)
             value = value[0] if isinstance(value, list) else value
             container_ref = value["Id"]
+            epoch_started = parse_timestamp(value["State"]["StartedAt"])
             sample["manager"] = {
                 "container": value["Id"][:12],
                 "startedAt": value["State"]["StartedAt"],
@@ -227,6 +240,12 @@ def collect(root, manager, garage, bucket, previous):
         sample["manager"].get(k) == previous.get("manager", {}).get(k)
         for k in ("container", "startedAt")
     )
+    valid_baseline = False
+    if same_epoch and previous.get("metrics"):
+        try:
+            valid_baseline = parse_timestamp(previous["metricsAt"]) >= epoch_started
+        except (KeyError, ValueError):
+            pass
     logs = command(
         [
             "docker",
@@ -240,10 +259,12 @@ def collect(root, manager, garage, bucket, previous):
         ],
         merge_stderr=True,
     )
-    latest = latest_metrics(logs)
+    # Docker retains a container's logs across restarts. Neither a log snapshot
+    # nor a checkpoint written by an older collector may cross this epoch.
+    latest = latest_metrics(logs, not_before=epoch_started) if epoch_started else None
     if latest:
         sample["metricsAt"], sample["metrics"] = latest
-    elif same_epoch and previous.get("metrics"):
+    elif valid_baseline:
         sample["metricsAt"], sample["metrics"] = (
             previous["metricsAt"],
             previous["metrics"],
@@ -259,8 +280,7 @@ def collect(root, manager, garage, bucket, previous):
         sample["metricsAgeSeconds"] = max(0, round(age, 3))
     sample["counterEpochChanged"] = bool(previous) and not same_epoch
     if (
-        same_epoch
-        and previous.get("metrics")
+        valid_baseline
         and sample.get("metrics")
         and sample.get("metricsAt") != previous.get("metricsAt")
     ):

@@ -283,7 +283,10 @@ def main():
             or (directory / "cache").is_symlink()
         ):
             raise ValueError("Selection escaped source root")
-        value, generation = manifest(directory)
+        try:
+            value, generation = manifest(directory)
+        except (OSError, sqlite3.Error):
+            continue
         reader = Reader(directory, value, args.output, budget)
         sampled = []
         for index in selection["sampleIndices"]:
@@ -294,6 +297,8 @@ def main():
                 break
             except (OSError, ValueError):
                 pass
+        if not sampled:
+            continue
         metadata = None
         if number < args.metadata_disks:
             try:
@@ -311,6 +316,8 @@ def main():
                 "ext4": metadata,
             }
         )
+    if not captured:
+        parser.error("No selected published cache regions remain available")
     destination.write_text(
         json.dumps(
             {"schema": 1, "phase": args.phase, "private": True, "disks": captured},
@@ -322,6 +329,7 @@ def main():
             {
                 "phase": args.phase,
                 "disks": len(captured),
+                "skippedDisks": len(selected) - len(captured),
                 "sampledRegions": sum(len(d["sampleIndices"]) for d in captured),
                 "journalCompleteDisks": sum(
                     bool(d["ext4"] and d["ext4"].get("journalComplete"))

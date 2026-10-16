@@ -38,14 +38,92 @@ def metrics(count=3):
 
 
 class ObserverTests(unittest.TestCase):
-    def test_fresh_counter_window_and_reset_are_explicit(self):
+    def test_same_container_restart_rejects_old_logs_and_old_checkpoint(self):
+        started = "2026-10-16T10:01:00.000000000Z"
         metadata = {
             "Id": "a" * 64,
-            "State": {"StartedAt": "same", "Status": "running"},
+            "State": {"StartedAt": started, "Status": "running"},
             "Config": {"Image": "image"},
         }
         previous = {
-            "manager": {"container": "a" * 12, "startedAt": "same"},
+            "collectorVersion": 2,
+            "manager": {"container": "a" * 12, "startedAt": "2026-10-16T09:00:00Z"},
+            "metrics": metrics(100),
+            "metricsAt": "2026-10-16T10:00:00Z",
+            "observedAt": "2026-10-16T10:00:00+00:00",
+        }
+        snapshot = '2026-10-16T10:00:00Z operation="s3_totals" metrics=' + json.dumps(
+            metrics(100)
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+
+            def fake(args, **kwargs):
+                if args[1] == "inspect":
+                    return json.dumps(metadata)
+                return snapshot if args[1] == "logs" else ""
+
+            with (
+                patch.object(observer, "command", side_effect=fake),
+                patch.object(observer, "manager_cpu", return_value=None),
+            ):
+                waiting = observer.collect(
+                    Path(temporary), "manager", "garage", "bucket", previous
+                )
+                self.assertTrue(waiting["counterEpochChanged"])
+                self.assertNotIn("metrics", waiting)
+
+                snapshot = (
+                    '2026-10-16T10:07:00Z operation="s3_totals" metrics='
+                    + json.dumps(metrics(105))
+                )
+                baseline = observer.collect(
+                    Path(temporary), "manager", "garage", "bucket", waiting
+                )
+                self.assertEqual(
+                    baseline["metrics"]["blockCodec"]["encode"]["count"], 105
+                )
+                self.assertNotIn("metricDelta", baseline)
+
+                # A checkpoint from collector v2 may already associate an old
+                # snapshot with the restarted container. It is invalid too.
+                contaminated = {**previous, "manager": baseline["manager"]}
+                snapshot = ""
+                stale = observer.collect(
+                    Path(temporary), "manager", "garage", "bucket", contaminated
+                )
+                self.assertNotIn("metrics", stale)
+                snapshot = (
+                    '2026-10-16T10:07:00Z operation="s3_totals" metrics='
+                    + json.dumps(metrics(105))
+                )
+                recovered = observer.collect(
+                    Path(temporary), "manager", "garage", "bucket", contaminated
+                )
+                self.assertNotIn("metricDelta", recovered)
+
+                snapshot = (
+                    '2026-10-16T10:10:00Z operation="s3_totals" metrics='
+                    + json.dumps(metrics(110))
+                )
+                current = observer.collect(
+                    Path(temporary), "manager", "garage", "bucket", baseline
+                )
+                self.assertEqual(
+                    current["metricDelta"]["blockCodec"]["encode"]["count"], 5
+                )
+                self.assertEqual(
+                    current["metricDeltaWindow"],
+                    {"from": "2026-10-16T10:07:00Z", "to": "2026-10-16T10:10:00Z"},
+                )
+
+    def test_fresh_counter_window_and_reset_are_explicit(self):
+        metadata = {
+            "Id": "a" * 64,
+            "State": {"StartedAt": "2019-01-01T00:00:00Z", "Status": "running"},
+            "Config": {"Image": "image"},
+        }
+        previous = {
+            "manager": {"container": "a" * 12, "startedAt": "2019-01-01T00:00:00Z"},
             "metrics": metrics(3),
             "metricsAt": "2026-10-16T10:00:00Z",
             "observedAt": "2026-10-16T10:00:00+00:00",
@@ -153,12 +231,12 @@ class ObserverTests(unittest.TestCase):
         metadata = [
             {
                 "Id": "a" * 64,
-                "State": {"StartedAt": "new", "Status": "running"},
+                "State": {"StartedAt": "2026-10-16T00:01:00Z", "Status": "running"},
                 "Config": {"Image": "image"},
             }
         ]
         old = {
-            "manager": {"container": "a" * 12, "startedAt": "old"},
+            "manager": {"container": "a" * 12, "startedAt": "2026-10-15T00:00:00Z"},
             "metrics": metrics(99),
             "metricsAt": "2026-10-16T00:00:00Z",
         }
@@ -182,7 +260,7 @@ class ObserverTests(unittest.TestCase):
         now = dt.datetime.now(dt.timezone.utc)
         old_time = (now - dt.timedelta(seconds=300)).isoformat()
         previous = {
-            "manager": {"container": "a" * 12, "startedAt": "same"},
+            "manager": {"container": "a" * 12, "startedAt": "2019-01-01T00:00:00Z"},
             "metrics": metrics(),
             "metricsAt": "2020-01-01T00:00:00Z",
             "observedAt": old_time,
@@ -191,7 +269,7 @@ class ObserverTests(unittest.TestCase):
         metadata = [
             {
                 "Id": "a" * 64,
-                "State": {"StartedAt": "same", "Status": "running"},
+                "State": {"StartedAt": "2019-01-01T00:00:00Z", "Status": "running"},
                 "Config": {"Image": "image"},
             }
         ]

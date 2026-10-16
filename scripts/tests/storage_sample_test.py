@@ -5,11 +5,15 @@ uv run --python 3.11 --with blake3==1.0.8 python scripts/tests/storage_sample_te
 
 import hashlib
 import importlib.util
+import io
 import json
 import os
+import sqlite3
 import subprocess
+import sys
 import tempfile
 import unittest
+from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest.mock import patch
 
@@ -30,6 +34,97 @@ prepare = module("sample_prepare", "prepare-storage-sample.py")
 
 
 class SampleTests(unittest.TestCase):
+    def test_second_phase_preserves_available_disks_after_journal_disappears(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "source"
+            live = source / "environments/live/lazy"
+            cache = live / "cache"
+            cache.mkdir(parents=True)
+            data = b"live" * 1024
+            identity = hashlib.sha256(data).hexdigest()
+            (cache / identity).write_bytes(data)
+            with sqlite3.connect(live / "journal-v2.sqlite") as db:
+                db.execute(
+                    "CREATE TABLE state (id INTEGER, manifest TEXT, generation INTEGER)"
+                )
+                db.execute(
+                    "INSERT INTO state VALUES (1, ?, 1)",
+                    (json.dumps({"size": len(data), "blocks": [{"hash": identity}]}),),
+                )
+            output = root / "sample"
+            output.mkdir()
+            selection = [
+                {
+                    "label": "disk-00",
+                    "directory": str(source / "environments/deleted/lazy"),
+                    "sampleIndices": [0],
+                },
+                {"label": "disk-01", "directory": str(live), "sampleIndices": [0]},
+            ]
+            (output / "selection.private.json").write_text(json.dumps(selection))
+            argv = [
+                "sample-storage-cache.py",
+                "--root",
+                str(source),
+                "--output",
+                str(output),
+                "--phase",
+                "second",
+                "--metadata-disks",
+                "0",
+            ]
+            captured_stdout = io.StringIO()
+            with patch.object(sys, "argv", argv), redirect_stdout(captured_stdout):
+                sampler.main()
+            captured = json.loads((output / "second.private.json").read_text())
+            self.assertEqual([disk["label"] for disk in captured["disks"]], ["disk-01"])
+            self.assertEqual(captured["disks"][0]["sampleIndices"], [0])
+            self.assertEqual(json.loads(captured_stdout.getvalue())["skippedDisks"], 1)
+
+    def test_second_phase_fails_clearly_if_all_selected_disks_disappear(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "source"
+            source.mkdir()
+            output = root / "sample"
+            output.mkdir()
+            (output / "selection.private.json").write_text(
+                json.dumps(
+                    [
+                        {
+                            "label": "disk-00",
+                            "directory": str(source / "environments/deleted/lazy"),
+                            "sampleIndices": [0],
+                        }
+                    ]
+                )
+            )
+            argv = [
+                "sample-storage-cache.py",
+                "--root",
+                str(source),
+                "--output",
+                str(output),
+                "--phase",
+                "second",
+                "--metadata-disks",
+                "0",
+            ]
+            errors = io.StringIO()
+            with (
+                patch.object(sys, "argv", argv),
+                redirect_stderr(errors),
+                self.assertRaises(SystemExit) as stopped,
+            ):
+                sampler.main()
+            self.assertEqual(stopped.exception.code, 2)
+            self.assertIn(
+                "No selected published cache regions remain available",
+                errors.getvalue(),
+            )
+            self.assertFalse((output / "second.private.json").exists())
+
     def test_discard_cohort_keeps_unknown_owners(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
