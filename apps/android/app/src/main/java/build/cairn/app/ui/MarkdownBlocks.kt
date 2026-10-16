@@ -3,25 +3,30 @@ package build.cairn.app.ui
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
+import android.text.Spannable
 import android.text.Spanned
 import android.text.method.LinkMovementMethod
 import android.view.ActionMode
 import android.view.Menu
 import android.view.MenuItem
+import android.view.MotionEvent
 import android.view.View
 import android.widget.TextView
 import androidx.compose.runtime.*
 import build.cairn.app.diagnostics.PerfOperation
 import build.cairn.app.diagnostics.Performance
 import io.noties.markwon.Markwon
+import io.noties.markwon.ext.tables.TableAwareMovementMethod
 import kotlinx.coroutines.flow.first
 import org.commonmark.ext.gfm.strikethrough.StrikethroughExtension
+import org.commonmark.ext.gfm.tables.TableBlock
+import org.commonmark.ext.gfm.tables.TableCell
 import org.commonmark.ext.gfm.tables.TablesExtension
 import org.commonmark.node.Document
 import org.commonmark.renderer.html.HtmlRenderer
 
 /** A rendered group is immutable and shared with the UI until its parsed content changes. */
-internal class MarkdownBlock(val signature: String, val text: Spanned)
+internal class MarkdownBlock(val signature: String, val text: Spanned, val tableColumns: Int = 0)
 
 /**
  * Parse the full document so references, unfinished fences and lists stay correct. Render small
@@ -42,20 +47,31 @@ internal class MarkdownBlocks(private val markwon: Markwon) {
             val result = mutableListOf<MarkdownBlock>()
             var node = document.firstChild
             while (node != null) {
+                val table = node as? TableBlock
+                var cell = table?.firstChild
+                while (cell != null && cell !is TableCell) cell = cell.firstChild
+                var columns = 0
+                while (cell != null) {
+                    columns++
+                    cell = cell.next
+                }
                 val group = Document()
                 var count = 0
                 // Fixed groups keep already displayed boundaries stable while appending.
                 while (node != null && count < 8) {
+                    // Tables scroll on their own; surrounding prose keeps the message width.
+                    if (count > 0 && node is TableBlock) break
                     val next = node.next
                     group.appendChild(node)
                     node = next
                     count++
+                    if (table != null) break
                 }
                 val signature = signatures.render(group)
                 val cached = previous.getOrNull(result.size)
                 result.add(
                     if (cached?.signature == signature) cached
-                    else MarkdownBlock(signature, markwon.render(group))
+                    else MarkdownBlock(signature, markwon.render(group), columns)
                 )
             }
             previous = result
@@ -75,7 +91,16 @@ internal class MarkdownTextView(context: Context, copyText: (() -> String)? = nu
         setTextIsSelectable(true)
         // Selectable text installs ArrowKeyMovementMethod, so Markwon's default
         // (only installed when movementMethod is null) never handles link taps.
-        movementMethod = LinkMovementMethod.getInstance()
+        movementMethod =
+            object : LinkMovementMethod() {
+                override fun onTouchEvent(
+                    widget: TextView,
+                    buffer: Spannable,
+                    event: MotionEvent,
+                ): Boolean =
+                    TableAwareMovementMethod.handleTableRowTouchEvent(widget, buffer, event) ||
+                        super.onTouchEvent(widget, buffer, event)
+            }
         if (copyText != null)
             customSelectionActionModeCallback =
                 object : ActionMode.Callback {
