@@ -1,11 +1,14 @@
 import { Buffer } from 'node:buffer'
+import { execFileSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { readFileSync } from 'node:fs'
 import {
+  mkdir,
   mkdtemp,
   readFile,
   rm,
   stat,
+  writeFile,
 } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
@@ -17,7 +20,12 @@ import {
   vi,
 } from 'vitest'
 import { parse } from 'yaml'
-import { prepareRecovery, verifyInstallation, verifyProof } from '../production-recovery.mjs'
+import {
+  installationRecoveryChanges,
+  prepareRecovery,
+  verifyInstallation,
+  verifyProof,
+} from '../production-recovery.mjs'
 
 const identifier = 'a'.repeat(32)
 const ciphertext = Buffer.from('synthetic age ciphertext')
@@ -106,6 +114,36 @@ describe('production recovery', () => {
       identifier,
       changedInstallationFiles: async () => ['crates/installation/src/store.rs'],
     })).rejects.toThrow('matching stopped installation backup')
+  })
+
+  it('detects changes in every existing schema/migration entrypoint against the served commit', async () => {
+    const directory = await mkdtemp(path.join(os.tmpdir(), 'cairn-recovery-git-'))
+    directories.push(directory)
+    const git = (...args) => execFileSync('git', args, { cwd: directory, encoding: 'utf8' }).trim()
+    git('init', '--quiet')
+    const schemaFiles = [
+      'store.rs',
+      'storage/migration.rs',
+      'nodes/shared_blocks.rs',
+      'accounts/mod.rs',
+      'service.rs',
+    ].map(file => `crates/installation/src/${file}`)
+    const unrelated = 'crates/installation/src/chats.rs'
+    for (const file of [...schemaFiles, unrelated]) {
+      await mkdir(path.dirname(path.join(directory, file)), { recursive: true })
+      await writeFile(path.join(directory, file), 'before\n')
+    }
+
+    git('add', '.')
+    git('-c', 'user.name=Recovery Test', '-c', 'user.email=recovery@example.invalid', 'commit', '--quiet', '-m', 'baseline')
+    const before = git('rev-parse', 'HEAD')
+    for (const file of [...schemaFiles, unrelated])
+      await writeFile(path.join(directory, file), 'after\n')
+    git('add', '.')
+    git('-c', 'user.name=Recovery Test', '-c', 'user.email=recovery@example.invalid', 'commit', '--quiet', '-m', 'candidate')
+    const changed = await installationRecoveryChanges(before, 'HEAD', { cwd: directory })
+    expect(changed.sort()).toEqual(schemaFiles.sort())
+    expect(changed).not.toContain(unrelated)
   })
 
   it('waits through an updater replacement and requires the manager, runner, and execution health', async () => {

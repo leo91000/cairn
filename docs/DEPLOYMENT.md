@@ -331,9 +331,13 @@ minutes; if validation is still pending, retry after it completes. No second
 build starts at that deadline. Production deployment jobs remain serialized.
 Main, PR and manual workflows never deploy.
 
-The GitHub `production` environment requires the secret `COOLIFY_TOKEN` and
-variables `COOLIFY_URL`, `COOLIFY_SERVICE_UUID` (**new Beacon UUID**)
-and `CAIRN_BEACON_ORIGIN=https://cairn.build`. Require Léo’s environment approval.
+The GitHub `production` environment uses `CAIRN_RELEASE_COOLIFY_TOKEN`, a
+restricted release SSH identity and pinned host key, and the Coolify/Beacon
+variables listed in the [production setup](PRODUCTION-CAIRN-SETUP.md#automatic-recovery-host).
+Follow that setup's credential transition before removing required reviewers;
+the legacy `COOLIFY_TOKEN` environment secret must be deleted so historical
+workflows cannot bypass recovery. Routine stable releases then deploy automatically
+after backup, isolated restore and encrypted off-host retention succeed.
 The obsolete `CAIRN_PUBLIC_URL` and standalone-manager deployment target are no
 longer used by the CLI. The script refuses a manager/runner Compose target.
 

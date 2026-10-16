@@ -80,6 +80,25 @@ export async function verifyInstallation(config, {
   throw new Error('The installation did not become healthy on the approved image; inspect its updater before intervening')
 }
 
+export async function installationRecoveryChanges(before, after, { cwd } = {}) {
+  try {
+    await exec('git', ['cat-file', '-e', `${before}^{commit}`], { cwd })
+  }
+  catch {
+    await exec('git', ['fetch', '--no-tags', 'origin', before], { cwd })
+  }
+
+  const paths = [
+    'crates/installation/src/store.rs',
+    'crates/installation/src/storage/',
+    'crates/installation/src/nodes/shared_blocks.rs',
+    'crates/installation/src/accounts/',
+    'crates/installation/src/service.rs',
+  ]
+  const { stdout } = await exec('git', ['diff', '--name-only', before, after, '--', ...paths], { cwd })
+  return stdout.trim().split('\n').filter(Boolean)
+}
+
 async function withSsh(action) {
   const host = process.env.CAIRN_RELEASE_SSH_HOST
   const user = process.env.CAIRN_RELEASE_SSH_USER
@@ -136,19 +155,7 @@ if (import.meta.main) {
       console.log('Installation manager and runner are healthy on the approved image.')
     }
     else if (process.argv[2] === 'prepare') {
-      const changedInstallationFiles = async (before, after) => {
-        try {
-          await exec('git', ['cat-file', '-e', `${before}^{commit}`])
-        }
-        catch {
-          await exec('git', ['fetch', '--no-tags', 'origin', before])
-        }
-
-        const { stdout } = await exec('git', ['diff', '--name-only', before, after, '--', 'crates/installation/src/store.rs', 'crates/installation/src/storage/'])
-        return stdout.trim().split('\n').filter(Boolean)
-      }
-
-      const record = await withSsh(ssh => prepareRecovery(config, { ssh, changedInstallationFiles }))
+      const record = await withSsh(ssh => prepareRecovery(config, { ssh, changedInstallationFiles: installationRecoveryChanges }))
       if (process.env.GITHUB_OUTPUT)
         await appendFile(process.env.GITHUB_OUTPUT, `backup-id=${record.id}\n`)
       console.log('Postgres backup restored successfully; encrypted recovery artifact downloaded for off-host retention.')
