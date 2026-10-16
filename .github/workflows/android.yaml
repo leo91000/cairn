@@ -7,6 +7,11 @@ on:
     tags: ['v*']
     paths: ['apps/android/**', '.github/actions/setup-pnpm/**', '.github/actions/setup-android-emulator/**', .github/workflows/android.yaml, 'scripts/android-*.mjs', scripts/resolve-android-release.mjs, 'scripts/tests/android-*.test.mjs', tests/android-runner-smoke.mjs, tests/runner-storage-smoke.mjs]
   workflow_dispatch:
+    inputs:
+      stability-repetitions:
+        description: Additional trials of the three issue 175 device journeys (0 disables measurement, 1–20 runs every trial without retries)
+        default: '0'
+        type: string
 env:
   CAIRN_BEACON_ORIGIN: ${{ vars.CAIRN_BEACON_ORIGIN }}
   CAIRN_ANDROID_FIREBASE_APP_ID: ${{ vars.CAIRN_ANDROID_FIREBASE_APP_ID }}
@@ -148,6 +153,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           SKIP_ON_PULL_REQUEST: ${{ github.event_name == 'pull_request' && 'build.cairn.app.ui.RobolectricTwin' || '' }}
+          STABILITY_REPETITIONS: ${{ matrix.shard == 1 && inputs.stability-repetitions || '0' }}
         with:
           api-level: 36
           arch: x86_64
@@ -160,6 +166,7 @@ jobs:
           script: |
             node scripts/android-device-tests.mjs fetch cairn-android-debug --output apks
             node scripts/android-device-tests.mjs run --apk apks/debug/app-debug.apk --test-apk apks/androidTest/debug/app-debug-androidTest.apk --output device-results/shard-${{ matrix.shard }} --shard ${{ matrix.shard }}/${{ strategy.job-total }} --timings apps/android/device-test-timings.json --not-class build.cairn.app.data.DirectTransportDeviceTest ${SKIP_ON_PULL_REQUEST:+--not-annotation "$SKIP_ON_PULL_REQUEST"}
+            node scripts/android-compose-stability.mjs "$STABILITY_REPETITIONS" device-results/stability
       - uses: actions/upload-artifact@v7.0.1
         if: always()
         with:

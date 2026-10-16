@@ -9,6 +9,7 @@ import androidx.compose.ui.semantics.getOrNull
 import androidx.compose.ui.test.*
 import androidx.compose.ui.test.junit4.StateRestorationTester
 import androidx.compose.ui.test.junit4.v2.createComposeRule
+import androidx.lifecycle.ViewModelStore
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.test.core.app.ApplicationProvider
 import build.cairn.app.data.*
@@ -35,6 +36,7 @@ abstract class ChatSwipeCases {
         get() = compose.onNodeWithTag("conversation-history")
 
     private lateinit var vm: CairnViewModel
+    private var expectedPages = 1
     private val historyRequests = java.util.concurrent.CopyOnWriteArrayList<String>()
     private val telemetryReports = java.util.concurrent.CopyOnWriteArrayList<String>()
 
@@ -245,16 +247,22 @@ abstract class ChatSwipeCases {
         Assert.assertEquals(expected.sorted(), open())
     }
 
+    @Test fun notificationReopensItsRequestedChatAfterSwipingAwayFromIt() = notificationJourney()
+
     @Test
-    fun notificationReopensItsRequestedChatAfterSwipingAwayFromIt() = withChats {
-        open("Chat récent")
-        history.performTouchInput { swipeLeft() }
-        waitForChat("Chat intermédiaire")
-        compose.runOnIdle { incomingChat = "recent" }
-        waitForChat("Chat récent")
-        compose.onNodeWithContentDescription("Retour").performClick()
-        compose.onNodeWithTag("fil").assertExists()
-    }
+    fun notificationReopensItsChatAfterSlowNeighborLoading() =
+        notificationJourney(slowActivity = true)
+
+    private fun notificationJourney(slowActivity: Boolean = false) =
+        withChats(slowActivity = slowActivity) {
+            open("Chat récent")
+            history.performTouchInput { swipeLeft() }
+            waitForChat("Chat intermédiaire")
+            compose.runOnIdle { incomingChat = "recent" }
+            waitForChat("Chat récent")
+            compose.onNodeWithContentDescription("Retour").performClick()
+            compose.onNodeWithTag("fil").assertExists()
+        }
 
     @Test
     fun singleAndNewConversationsDoNotNavigate() =
@@ -290,7 +298,16 @@ abstract class ChatSwipeCases {
                     ?.config
                     ?.getOrNull(SemanticsProperties.VerticalScrollAxisRange)
                     ?.value()
-                    ?.let { it > 0f } == true
+                    ?.let { it > 0f } == true &&
+                // History can be ready before the Fil's activity response supplies the
+                // pager's neighbors. Swiping a one-page pager is intentionally a no-op.
+                compose
+                    .onAllNodesWithTag("conversation-pager")
+                    .fetchSemanticsNodes()
+                    .singleOrNull()
+                    ?.config
+                    ?.getOrNull(SemanticsProperties.CollectionInfo)
+                    ?.columnCount == expectedPages
         }
         compose.waitForIdle()
     }
@@ -303,7 +320,12 @@ abstract class ChatSwipeCases {
         waitForChat(name)
     }
 
-    private fun withChats(single: Boolean = false, paginated: Boolean = false, test: () -> Unit) {
+    private fun withChats(
+        single: Boolean = false,
+        paginated: Boolean = false,
+        slowActivity: Boolean = false,
+        test: () -> Unit,
+    ) {
         MockWebServer().use { server ->
             val agent = Agent(MAIN_AGENT_ID, "Agent principal")
             val chats =
@@ -314,6 +336,7 @@ abstract class ChatSwipeCases {
                         Chat("recent", "Chat récent", updatedAt = 300),
                         Chat("middle", "Chat intermédiaire", updatedAt = 200),
                     )
+            expectedPages = chats.size
             server.dispatcher =
                 object : Dispatcher() {
                     override fun dispatch(request: RecordedRequest): MockResponse {
@@ -397,7 +420,10 @@ abstract class ChatSwipeCases {
                                 "/api/installations/fixture/api/overview" -> "{}"
                                 else -> "[]"
                             }
-                        return MockResponse().setBody(body)
+                        return MockResponse().setBody(body).apply {
+                            if (slowActivity && path.endsWith("/tasks/activity"))
+                                setBodyDelay(750, TimeUnit.MILLISECONDS)
+                        }
                     }
                 }
             server.start()
@@ -415,26 +441,32 @@ abstract class ChatSwipeCases {
                     beaconOrigin = "",
                 )
             this.vm = vm
-            restoration.setContent {
-                val state by vm.state.collectAsStateWithLifecycle()
-                LaunchedEffect(Unit) {
-                    vm.state.first { it.ready }
-                    vm.connect(server.url("/").toString())
-                }
-                CairnTheme {
-                    CairnApp(
-                        vm = vm,
-                        targetChat = incomingChat,
-                        targetCacheScope =
-                            if (state.installation != null) vm.api.cacheScope else "",
-                        consumedTarget = { incomingChat = "" },
-                    )
-                }
-            }
+            val models = ViewModelStore().apply { put("fixture", vm) }
+            var mounted by mutableStateOf(true)
             try {
+                restoration.setContent {
+                    if (mounted) {
+                        val state by vm.state.collectAsStateWithLifecycle()
+                        LaunchedEffect(Unit) {
+                            vm.state.first { it.ready }
+                            vm.connect(server.url("/").toString())
+                        }
+                        CairnTheme {
+                            CairnApp(
+                                vm = vm,
+                                targetChat = incomingChat,
+                                targetCacheScope =
+                                    if (state.installation != null) vm.api.cacheScope else "",
+                                consumedTarget = { incomingChat = "" },
+                            )
+                        }
+                    }
+                }
                 test()
             } finally {
-                vm.api.closeStreams()
+                compose.runOnIdle { mounted = false }
+                compose.waitForIdle()
+                compose.runOnIdle { models.clear() }
             }
         }
     }
