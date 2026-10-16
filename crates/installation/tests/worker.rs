@@ -1658,6 +1658,163 @@ async fn refused_local_budget_keeps_presence_and_exposes_the_reason() {
 }
 
 #[tokio::test]
+async fn controller_capacity_rejection_waits_and_retries_without_an_agent_session() {
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+    for (status, reason, capacity, deferred_fence) in [
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "All VM slots are occupied.",
+            true,
+            true,
+        ),
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Shared node resources are under pressure.",
+            true,
+            false,
+        ),
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Temporary admission failure.",
+            false,
+            false,
+        ),
+        (
+            StatusCode::FORBIDDEN,
+            "All VM slots are occupied.",
+            false,
+            false,
+        ),
+    ] {
+        let mut fixture = Fixture::new().await;
+        fixture.stop(false).await;
+        let controller = Arc::new(Controller {
+            data: fixture.service.config.data_dir.clone(),
+            plans: tokio::sync::Mutex::new(Vec::new()),
+            failures: 0,
+            slots: 4,
+            hold: AtomicBool::new(false),
+        });
+        let busy = Arc::new(AtomicBool::new(true));
+        let rejections = Arc::new(AtomicUsize::new(0));
+        let fence_blocked = Arc::new(AtomicBool::new(deferred_fence));
+        let reject = busy.clone();
+        let count = rejections.clone();
+        let fence = fence_blocked.clone();
+        let app = Router::new()
+            .fallback(any(
+                move |state: State<Arc<Controller>>, request: Request| {
+                    let busy = reject.clone();
+                    let rejections = count.clone();
+                    let fence_blocked = fence.clone();
+                    async move {
+                        let path = request.uri().path();
+                        if request.method() == "DELETE" && fence_blocked.load(Ordering::SeqCst) {
+                            return StatusCode::SERVICE_UNAVAILABLE.into_response();
+                        }
+                        let starting = request.method() == "POST"
+                            && path.starts_with("/runs/")
+                            && path.trim_matches('/').split('/').count() == 2;
+                        if starting && busy.load(Ordering::SeqCst) {
+                            rejections.fetch_add(1, Ordering::SeqCst);
+                            return (status, Json(json!({ "error": reason }))).into_response();
+                        }
+                        serve_controller(state, request).await
+                    }
+                },
+            ))
+            .with_state(controller.clone());
+        let (listener, address) = common::bind().await;
+        common::reconfigure(&mut fixture.service, |config| {
+            config.runner_url = format!("http://{address}");
+        })
+        .await;
+        let server = common::serve(listener, app);
+        let s = fixture.service.clone();
+        let home = s.config.home.join(".codex");
+        tokio::fs::create_dir_all(&home).await.unwrap();
+        tokio::fs::write(home.join("auth.json"), "{}")
+            .await
+            .unwrap();
+        tokio::fs::write(
+            s.config.data_dir.join("storage-s3.json"),
+            json!({ "bucket": "fixture-storage", "endpoint": "https://127.0.0.1:1" }).to_string(),
+        )
+        .await
+        .unwrap();
+        let run = fixture.enqueue("Wait for an available VM slot").await;
+        let run_id = text(&run, "id");
+        fixture.start().await;
+        let waiting = fixture
+            .until(run_id, |run| {
+                finished(run)
+                    || (run["status"] == RunStatus::Queued
+                        && (text(run, "accountWaitReason").starts_with("Waiting for capacity.")
+                            || (deferred_fence
+                                && run["accountWaitReason"]
+                                    == "Waiting for the previous VM to stop.")))
+            })
+            .await;
+        if !capacity {
+            assert_eq!(waiting["status"], RunStatus::Failed, "{waiting}");
+            fixture.stop(false).await;
+            server.abort();
+            continue;
+        }
+        assert_eq!(waiting["status"], RunStatus::Queued, "{waiting}");
+        assert!(waiting["sessionId"].is_null());
+        assert!(waiting["error"].is_null());
+        assert!(waiting["finishedAt"].is_null());
+        assert!(waiting["retry"].is_null());
+        assert_eq!(fixture.checkpoint(run_id).await["launched"], false);
+        if deferred_fence {
+            tokio::time::sleep(Duration::from_millis(1200)).await;
+            assert_eq!(
+                rejections.load(Ordering::SeqCst),
+                1,
+                "No relaunch before fencing"
+            );
+            assert!(fixture.checkpoint(run_id).await["settled"].is_null());
+            fence_blocked.store(false, Ordering::SeqCst);
+        }
+        let waiting = fixture
+            .until(run_id, |run| {
+                finished(run) || text(run, "accountWaitReason").starts_with("Waiting for capacity.")
+            })
+            .await;
+        assert_eq!(waiting["status"], RunStatus::Queued, "{waiting}");
+        assert!(text(&waiting, "accountWaitReason").contains(reason));
+        let workspace = text(&waiting, "workspace").to_owned();
+        let marker = Path::new(&workspace).join("preserved.txt");
+        std::fs::write(&marker, "preserved while waiting").unwrap();
+
+        // Capacity waits survive a manager restart and never consume the bounded
+        // recovery budget intended for interrupted native agent sessions.
+        fixture.stop(false).await;
+        fixture.start().await;
+        eventually(
+            Duration::from_secs(20),
+            Duration::from_millis(30),
+            async || (rejections.load(Ordering::SeqCst) >= 5).then_some(()),
+        )
+        .await;
+        assert!(controller.plans.lock().await.is_empty());
+        busy.store(false, Ordering::SeqCst);
+        let completed = fixture.until_finished(run_id).await;
+        assert_eq!(completed["status"], RunStatus::Succeeded, "{completed}");
+        assert_eq!(completed["workspace"], workspace);
+        assert_eq!(
+            std::fs::read_to_string(marker).unwrap(),
+            "preserved while waiting"
+        );
+        assert_eq!(controller.plans.lock().await.len(), 1);
+        fixture.stop(false).await;
+        server.abort();
+    }
+}
+
+#[tokio::test]
 async fn failed_provider_startup_can_retry_without_replaying_an_uncertain_launch() {
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
