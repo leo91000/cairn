@@ -401,27 +401,16 @@ internal fun ChatPage(
     }
     val timelineKeys = remember(id) { TimelineKeys() }
     val history =
-        remember(live.events, live.state?.artifacts) {
+        remember(live.events, live.state?.artifacts, chat?.wakeup?.id, chat?.wakeup?.observation) {
             deliveryTimeline(
-                timelineKeys.stabilize(live.history, timelineEntries(live.events, chat = true)),
+                timelineKeys.stabilize(
+                    live.history,
+                    timelineEntries(live.events, chat = true, pendingWakeup = chat?.wakeup),
+                ),
                 live.state?.artifacts.orEmpty(),
             )
         }
-    // The pending wait's scheduling may be in an older page: its card still ends the conversation.
-    val pendingWakeup = chat?.wakeup
-    val timeline =
-        remember(history, pendingWakeup?.id) {
-            if (pendingWakeup == null || history.any { it.wait?.wakeup?.id == pendingWakeup.id })
-                history
-            else
-                history +
-                    TimelineEntry(
-                        "wait:${pendingWakeup.id}",
-                        emptyList(),
-                        false,
-                        wait = ActivityWait(pendingWakeup),
-                    )
-        }
+    val timeline = history
     var asking by remember { mutableStateOf<ChatQuestion?>(null) }
     var stopping by remember { mutableStateOf(false) }
     var removing by remember { mutableStateOf<ChatMessage?>(null) }

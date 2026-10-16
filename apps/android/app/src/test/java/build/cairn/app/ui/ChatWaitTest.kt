@@ -124,6 +124,90 @@ class ChatWaitTest {
     }
 
     @Test
+    fun `paginated ready and resumption events share one card`() {
+        val observation = buildJsonObject {
+            put("state", "completed")
+            put("type", "github_pr_checks")
+            put("conclusion", "success")
+        }
+        val scheduled = wakeup(checks).copy(observation = observation)
+        val ready = event("chat.wait_ready", observation).copy(text = "Wait condition resolved")
+        val entries =
+            timelineEntries(listOf(ready, event("chat.wakeup", scheduled.json())), chat = true)
+        assertEquals(listOf("wait:wake"), entries.map { it.key })
+        assertEquals(observation, entries.single().wait?.observation)
+        assertNotNull(entries.single().wait?.resumedAt)
+        val scheduleOnly = event("chat.wait", wakeup(checks).json())
+        assertEquals(
+            observation,
+            timelineEntries(listOf(scheduleOnly), chat = true, pendingWakeup = scheduled)
+                .single()
+                .wait
+                ?.observation,
+        )
+        val pending = timelineEntries(listOf(ready), chat = true, pendingWakeup = scheduled)
+        assertEquals(listOf("wait:wake"), pending.map { it.key })
+        assertEquals(observation, pending.single().wait?.observation)
+        assertTrue(
+            timelineEntries(emptyList(), chat = true, pendingWakeup = scheduled)
+                .single()
+                .wait!!
+                .finished
+        )
+    }
+
+    @Test
+    fun `an immediately completed replacement does not resolve the previous wait`() {
+        val observation = buildJsonObject {
+            put("state", "completed")
+            put("type", "github_workflow")
+            put("runId", 99)
+            put("conclusion", "success")
+        }
+        val entries =
+            timelineEntries(
+                listOf(
+                    event("chat.wait", wakeup(checks).json()),
+                    event("chat.wait_ready", observation)
+                        .copy(text = "Wait condition already completed"),
+                ),
+                chat = true,
+            )
+        assertEquals(2, entries.size)
+        assertEquals("replaced", entries[0].wait?.ended)
+        assertNull(entries[0].wait?.observation)
+        assertNull(entries[1].wait?.wakeup)
+        assertEquals(observation, entries[1].wait?.observation)
+    }
+
+    @Test
+    fun `older resolved waits do not complete a later pending replacement`() {
+        val observation = buildJsonObject {
+            put("state", "completed")
+            put("type", "github_pr_checks")
+            put("conclusion", "success")
+        }
+        val ready = event("chat.wait_ready", observation).copy(text = "Wait condition resolved")
+        val later = wakeup(checks).copy(id = "later", createdAt = ready.createdAt + 1)
+        val entries =
+            timelineEntries(
+                    listOf(
+                        ready,
+                        event("chat.user", buildJsonObject { put("text", "Another task") }),
+                        event("chat.wait", later.json()),
+                    ),
+                    chat = true,
+                    pendingWakeup = later,
+                )
+                .filter { it.wait != null }
+        assertEquals(2, entries.size)
+        assertNull(entries[0].wait?.wakeup)
+        assertEquals(observation, entries[0].wait?.observation)
+        assertEquals("wait:later", entries[1].key)
+        assertNull(entries[1].wait?.observation)
+    }
+
+    @Test
     fun `keeps a failed wait call among the tools and recognises every provider's name`() {
         val entries =
             timelineEntries(

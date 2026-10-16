@@ -136,7 +136,7 @@ const collaborationTitles: Record<string, string> = {
 }
 
 /** Keep tool updates in their original position and fold actions between messages. */
-export function activityEntries(events: RunEvent[], chat = false, groups = new ActivityGroups()): ActivityEntry[] {
+export function activityEntries(events: RunEvent[], chat = false, groups = new ActivityGroups(), pendingWakeup?: ChatWakeup | null): ActivityEntry[] {
   const entries: ActivityEntry[] = []
   const artifacts = new Map<string, ActivityArtifact>()
   const messages = new Map<string, Extract<ActivityEntry, { kind: 'message' }>>()
@@ -169,7 +169,7 @@ export function activityEntries(events: RunEvent[], chat = false, groups = new A
   // The wait still pending, by its wakeup ID, so that its result and resumption complete it.
   const waits = new Map<string, ActivityWait>()
   let openWait: ActivityWait | undefined
-  for (const event of events) {
+  for (const [eventIndex, event] of events.entries()) {
     if (event.type === 'artifact')
       continue
     if (event.type === 'chat.sleep' || event.type === 'chat.wait') {
@@ -191,15 +191,45 @@ export function activityEntries(events: RunEvent[], chat = false, groups = new A
 
     // The condition completed: right away (the agent never waited) or while the conversation waited.
     if (event.type === 'chat.wait_ready') {
-      if (openWait?.wakeup?.condition) {
-        openWait.observation = record(event.payload)
+      const observation = record(event.payload)
+      const immediate = event.text === 'Wait condition already completed'
+      if (immediate && openWait) {
+        openWait.ended = 'replaced'
+        openWait = undefined
+      }
+
+      // A later resumption or the live snapshot
+      // identifies the resolved wait when its scheduling is outside the loaded page.
+      const following = events.slice(eventIndex + 1)
+      const boundary = following.findIndex(next => ['chat.user', 'chat.wait', 'chat.sleep'].includes(next.type))
+      const continuation = boundary < 0 ? following : following.slice(0, boundary)
+      const resumed = continuation.find(next => next.type === 'chat.wakeup'
+        && JSON.stringify(next.payload?.observation) === JSON.stringify(observation))
+      const open = openWait?.wakeup?.condition ? openWait.wakeup : undefined
+      const legacy = resumed?.payload as unknown as ChatWakeup | undefined
+      const pending = pendingWakeup?.condition && pendingWakeup.createdAt <= event.createdAt ? pendingWakeup : undefined
+      const target = immediate ? undefined : open ?? legacy ?? pending
+      let wait = target?.id ? waits.get(target.id) : undefined
+      if (!wait && target?.id) {
+        wait = { wakeup: target }
+        waits.set(target.id, wait)
+        entries.push({
+          kind: 'wait',
+          id: `wait:${target.id}`,
+          time: event.createdAt,
+          wait,
+        })
+      }
+
+      if (wait) {
+        wait.observation = observation
       }
       else {
         entries.push({
           kind: 'wait',
           id: `wait-ready:${event.id}`,
           time: event.createdAt,
-          wait: { wakeup: null, observation: record(event.payload) },
+          wait: { wakeup: null, observation },
         })
       }
 
@@ -212,6 +242,8 @@ export function activityEntries(events: RunEvent[], chat = false, groups = new A
       // Its scheduling may be in an older page of the history.
       if (!wait) {
         wait = { wakeup }
+        if (wakeup.id)
+          waits.set(wakeup.id, wait)
         entries.push({
           kind: 'wait',
           id: `wait:${wakeup.id || event.id}`,
@@ -519,6 +551,18 @@ export function activityEntries(events: RunEvent[], chat = false, groups = new A
       entries.push({ kind: 'group', id: `group:${id}`, artifacts: [artifact] })
     if (legacy && event.type === 'item.started')
       legacyTool = Object.assign(artifact, { kind: 'output' as const, title: 'Recorded step', historical: true })
+  }
+
+  const knownWait = pendingWakeup && waits.get(pendingWakeup.id)
+  if (knownWait && pendingWakeup?.observation && knownWait.observation === undefined)
+    knownWait.observation = pendingWakeup.observation
+  if (pendingWakeup && !knownWait) {
+    entries.push({
+      kind: 'wait',
+      id: `wait:${pendingWakeup.id}`,
+      time: pendingWakeup.createdAt,
+      wait: { wakeup: pendingWakeup, ...(pendingWakeup.observation ? { observation: pendingWakeup.observation } : {}) },
+    })
   }
 
   return teamEntries(chat ? chatEntries(entries) : entries, groups)

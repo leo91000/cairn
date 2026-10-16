@@ -143,6 +143,54 @@ describe('scheduled waits', () => {
     }])
   })
 
+  it('folds paginated ready and resumption events into the same card', () => {
+    const observation = { state: 'completed', type: 'github_pr_checks', conclusion: 'success' }
+    const scheduled = wakeup({ condition: checks, observation })
+    const ready = { ...event('chat.wait_ready', observation), text: 'Wait condition resolved' }
+    const entries = activityEntries([ready, event('chat.wakeup', scheduled as unknown as Record<string, unknown>)], true)
+    expect(entries).toHaveLength(1)
+    expect(entries[0]).toMatchObject({ id: 'wait:wake', wait: { wakeup: scheduled, observation, resumedAt: expect.any(Number) } })
+    const pending = activityEntries([ready], true, undefined, scheduled)
+    expect(pending).toHaveLength(1)
+    expect(pending[0]).toMatchObject({ id: 'wait:wake', wait: { observation } })
+    expect(activityEntries([], true, undefined, scheduled)[0]).toMatchObject({ wait: { observation } })
+    const scheduleOnly = event('chat.wait', wakeup({ condition: checks }) as unknown as Record<string, unknown>)
+    expect(activityEntries([scheduleOnly], true, undefined, scheduled)).toMatchObject([{ id: 'wait:wake', wait: { observation } }])
+  })
+
+  it('keeps an immediately completed replacement separate from the previous condition', () => {
+    const scheduled = wakeup({ condition: checks })
+    const observation = {
+      state: 'completed',
+      type: 'github_workflow',
+      runId: 99,
+      conclusion: 'success',
+    }
+    const entries = activityEntries([
+      event('chat.wait', scheduled as unknown as Record<string, unknown>),
+      { ...event('chat.wait_ready', observation), text: 'Wait condition already completed' },
+    ], true)
+    expect(entries).toHaveLength(2)
+    expect(entries[0]).toMatchObject({ id: 'wait:wake', wait: { ended: 'replaced' } })
+    expect(entries[0]).not.toHaveProperty('wait.observation')
+    expect(entries[1]).toMatchObject({ wait: { wakeup: null, observation } })
+  })
+
+  it('does not attach an older resolved wait to a later pending replacement', () => {
+    const observation = { state: 'completed', type: 'github_pr_checks', conclusion: 'success' }
+    const ready = { ...event('chat.wait_ready', observation), text: 'Wait condition resolved' }
+    const later = wakeup({ id: 'later', condition: checks, createdAt: ready.createdAt + 1 })
+    const entries = activityEntries([
+      ready,
+      event('chat.user', { text: 'Another task' }),
+      event('chat.wait', later as unknown as Record<string, unknown>),
+    ], true, undefined, later).filter(entry => entry.kind === 'wait')
+    expect(entries).toHaveLength(2)
+    expect(entries[0]).toMatchObject({ wait: { wakeup: null, observation } })
+    expect(entries[1]).toMatchObject({ id: 'wait:later', wait: { wakeup: later } })
+    expect(entries[1]).not.toHaveProperty('wait.observation')
+  })
+
   it('keeps a failed wait call among the tools and recognises every provider’s name', () => {
     const entries = activityEntries([
       toolCall('mcp__cairn_workspace__sleep', 'Claude Code'),

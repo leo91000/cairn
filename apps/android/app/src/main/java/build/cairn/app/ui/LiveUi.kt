@@ -522,7 +522,11 @@ internal data class TimelineEntry(
 )
 
 /** Fold updates in place within a turn; keep messages and errors in chronological order. */
-internal fun timelineEntries(events: List<RunEvent>, chat: Boolean = false): List<TimelineEntry> =
+internal fun timelineEntries(
+    events: List<RunEvent>,
+    chat: Boolean = false,
+    pendingWakeup: ChatWakeup? = null,
+): List<TimelineEntry> =
     Performance.measure(PerfOperation.TIMELINE) {
         val folded = mutableListOf<RunEvent>()
         val sources = mutableListOf<MutableList<Long>>()
@@ -607,7 +611,7 @@ internal fun timelineEntries(events: List<RunEvent>, chat: Boolean = false): Lis
         fun updateWait(index: Int, change: (ActivityWait) -> ActivityWait) {
             result[index] = result[index].copy(wait = change(result[index].wait!!))
         }
-        for (event in folded) {
+        for ((eventIndex, event) in folded.withIndex()) {
             when (event.type) {
                 "chat.sleep",
                 "chat.wait" -> {
@@ -630,7 +634,43 @@ internal fun timelineEntries(events: List<RunEvent>, chat: Boolean = false): Lis
                 // The condition completed: right away (the agent never waited) or while it waited.
                 "chat.wait_ready" -> {
                     val observation = event.payload?.let(::JsonObject)
-                    val pending = openWait?.takeIf { result[it].wait?.wakeup?.condition != null }
+                    val immediate = event.text == "Wait condition already completed"
+                    if (immediate) {
+                        openWait?.let { index -> updateWait(index) { it.copy(ended = "replaced") } }
+                        openWait = null
+                    }
+                    // The resumption or live snapshot identifies a wait scheduled outside history.
+                    val resumed =
+                        folded
+                            .drop(eventIndex + 1)
+                            .takeWhile {
+                                it.type !in listOf("chat.user", "chat.wait", "chat.sleep")
+                            }
+                            .firstOrNull {
+                                it.type == "chat.wakeup" &&
+                                    it.payload?.get("observation") == observation
+                            }
+                            ?.wakeupPayload()
+                    val open =
+                        openWait?.let { result[it].wait?.wakeup }?.takeIf { it.condition != null }
+                    val live = pendingWakeup?.takeIf {
+                        it.condition != null && it.createdAt <= event.createdAt
+                    }
+                    val target = if (immediate) null else open ?: resumed ?: live
+                    var pending = target?.id?.let(waits::get)
+                    if (pending == null && target != null) {
+                        flushActivity()
+                        pending = result.size
+                        waits[target.id] = pending
+                        result.add(
+                            TimelineEntry(
+                                "wait:${target.id}",
+                                listOf(event),
+                                false,
+                                wait = ActivityWait(target),
+                            )
+                        )
+                    }
                     if (pending != null)
                         updateWait(pending) { it.copy(observation = observation, observed = true) }
                     else {
@@ -661,6 +701,7 @@ internal fun timelineEntries(events: List<RunEvent>, chat: Boolean = false): Lis
                                         wait = ActivityWait(wakeup),
                                     )
                                 )
+                                wakeup?.id?.let { waits[it] = result.lastIndex }
                                 result.lastIndex
                             }
                     updateWait(index) {
@@ -731,6 +772,28 @@ internal fun timelineEntries(events: List<RunEvent>, chat: Boolean = false): Lis
             }
         }
         flushActivity()
+        val knownWait = pendingWakeup?.id?.let(waits::get)
+        if (knownWait != null && pendingWakeup.observation != null) {
+            updateWait(knownWait) {
+                if (it.observed) it
+                else it.copy(observation = pendingWakeup.observation, observed = true)
+            }
+        }
+        if (pendingWakeup != null && knownWait == null) {
+            result.add(
+                TimelineEntry(
+                    "wait:${pendingWakeup.id}",
+                    emptyList(),
+                    false,
+                    wait =
+                        ActivityWait(
+                            pendingWakeup,
+                            pendingWakeup.observation,
+                            observed = pendingWakeup.observation != null,
+                        ),
+                )
+            )
+        }
         result
     }
 

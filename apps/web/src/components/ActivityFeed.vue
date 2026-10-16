@@ -70,20 +70,10 @@ watch([() => props.cacheKey, () => props.chat, () => props.events[0]?.runId], ()
 // Keeps its identity while the wakeup does, so a new conversation snapshot does not rebuild the feed.
 const pendingWakeup = computed<ChatWakeup | null>((previous) => {
   const next = props.wakeup?.wakeup ?? null
-  return previous && next?.id === previous.id ? previous : next
+  return previous && next?.id === previous.id && JSON.stringify(next.observation) === JSON.stringify(previous.observation) ? previous : next
 })
 const entries = computed(() => {
-  const entries = activityEntries(props.events, props.chat, activityGroups.value)
-  // The pending wait's scheduling may be in an older page: its card still ends the conversation.
-  const pending = pendingWakeup.value
-  if (pending && !entries.some(entry => entry.kind === 'wait' && entry.wait.wakeup?.id === pending.id)) {
-    entries.push({
-      kind: 'wait',
-      id: `wait:${pending.id}`,
-      time: pending.createdAt,
-      wait: { wakeup: pending },
-    })
-  }
+  const entries = activityEntries(props.events, props.chat, activityGroups.value, pendingWakeup.value)
 
   const acknowledged = new Set(props.events.filter(event => event.type === 'chat.user').map(event => event.payload?.messageId))
   for (const { message, label } of props.sending ?? []) {
