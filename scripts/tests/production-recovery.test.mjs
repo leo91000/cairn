@@ -116,7 +116,7 @@ describe('production recovery', () => {
     })).rejects.toThrow('matching stopped installation backup')
   })
 
-  it('detects changes in every existing schema/migration entrypoint against the served commit', async () => {
+  it('detects existing schema and persistent disk format changes against the served commit', async () => {
     const directory = await mkdtemp(path.join(os.tmpdir(), 'cairn-recovery-git-'))
     directories.push(directory)
     const git = (...args) => execFileSync('git', args, { cwd: directory, encoding: 'utf8' }).trim()
@@ -125,6 +125,10 @@ describe('production recovery', () => {
       'store.rs',
       'storage/migration.rs',
       'nodes/shared_blocks.rs',
+      'nodes/snapshots.rs',
+      'nodes/publication.rs',
+      'object_storage.rs',
+      'models.rs',
       'accounts/mod.rs',
       'service.rs',
     ].map(file => `crates/installation/src/${file}`)

@@ -91,7 +91,9 @@ export async function installationRecoveryChanges(before, after, { cwd } = {}) {
   const paths = [
     'crates/installation/src/store.rs',
     'crates/installation/src/storage/',
-    'crates/installation/src/nodes/shared_blocks.rs',
+    'crates/installation/src/nodes/',
+    'crates/installation/src/object_storage.rs',
+    'crates/installation/src/models.rs',
     'crates/installation/src/accounts/',
     'crates/installation/src/service.rs',
   ]
