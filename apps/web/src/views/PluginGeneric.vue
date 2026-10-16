@@ -213,6 +213,8 @@ async function complete(changed?: string) {
 
 function typed() {
   clearTimeout(typing)
+  // Saving waits for the package's answer about the new credential.
+  completing.value = true
   typing = setTimeout(() => void complete('credential'), 500)
 }
 
@@ -225,6 +227,9 @@ function addPerson() {
 }
 
 async function save() {
+  // The package's derived values must be in the form before it is saved.
+  if (completing.value)
+    return
   await action(async () => {
     const agent = state.agents.find(item => item.id === form.value.agentId)
     const body = {
@@ -734,7 +739,7 @@ onBeforeUnmount(() => {
           <UiButton :disabled="busy" @click="closeEditor">
             Cancel
           </UiButton>
-          <UiButton type="submit" variant="primary" :disabled="busy">
+          <UiButton type="submit" variant="primary" :disabled="busy || completing">
             Save {{ singular.toLowerCase() }}
           </UiButton>
         </div>

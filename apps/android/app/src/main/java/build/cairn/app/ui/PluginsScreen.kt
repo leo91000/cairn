@@ -690,6 +690,8 @@ private fun InstanceEditor(
         remember(initial.id) { mutableStateOf((initial.maxPerPersonPerHour ?: 5).toString()) }
     var enabled by remember(initial.id) { mutableStateOf(initial.enabled) }
     var completion by remember(initial.id) { mutableStateOf<PluginForm?>(null) }
+    // While the package answers, its derived values aren't in the form yet: no saving.
+    var completing by remember(initial.id) { mutableStateOf(manifest.instanceForm) }
     // Each change asks the package again; a newer question cancels the older one.
     var asking by remember(initial.id) { mutableStateOf(0 to (null as String?)) }
     val others = connections.filter { it.id != initial.id }
@@ -701,6 +703,7 @@ private fun InstanceEditor(
     }
     if (manifest.instanceForm)
         LaunchedEffect(initial.id, asking) {
+            completing = true
             if (asking.second != null) kotlinx.coroutines.delay(400)
             runCatching {
                 vm.api.send<PluginForm>(
@@ -732,6 +735,7 @@ private fun InstanceEditor(
                                 )
                             }
                     completion = form
+                    completing = false
                 }
                 .onFailure { error ->
                     if (error is kotlinx.coroutines.CancellationException) throw error
@@ -741,6 +745,7 @@ private fun InstanceEditor(
                             errors =
                                 mapOf("form" to (error.message ?: "Le plugin n’a pas répondu.")),
                         )
+                    completing = false
                 }
         }
     val missingSecret = fields.any {
@@ -764,7 +769,8 @@ private fun InstanceEditor(
                         it.type !in setOf("boolean", "secret", "multiselect") &&
                         values[it.key].isNullOrBlank()
                 } &&
-                (!manifest.delegates || (agent != null && problem(agent) == null)),
+                (!manifest.delegates || (agent != null && problem(agent) == null)) &&
+                !completing,
         save = {
             vm.perform {
                 api.request(
