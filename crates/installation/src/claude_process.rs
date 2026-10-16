@@ -611,6 +611,18 @@ impl Turn<'_> {
                 "completed"
             };
             item["status"] = status.into();
+
+            if item["tool"] == "TaskStop" && block["is_error"] != true {
+                // TaskStop can finish without replaying a task-notification
+                // turn. Its successful result settles that notification wait.
+                let arguments = &item["arguments"];
+                let task = arguments["task_id"]
+                    .as_str()
+                    .or_else(|| arguments["shell_id"].as_str())
+                    .unwrap_or_default();
+                self.awaiting_background.remove(task);
+            }
+
             let content = &block["content"];
             // The raw spawn error includes environment exports, which can contain
             // secrets. Persist only the recovery message.

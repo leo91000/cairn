@@ -701,6 +701,46 @@ async fn run_events(c: &Config, p: Value) -> Vec<Value> {
 }
 
 #[tokio::test]
+async fn stopped_background_tasks_do_not_wait_for_a_notification_that_never_arrives() {
+    for prompt in [
+        "fixture:stopped-background",
+        "fixture:stopped-background snapshot-first",
+        "fixture:stopped-background legacy-id",
+    ] {
+        let root = TempDir::new().unwrap();
+        let c = setup(&root);
+        let events = run_events(&c, plan(&root, prompt)).await;
+        assert!(events.iter().any(|event| event["type"] == "turn.waiting"));
+        assert_eq!(
+            std::fs::read_to_string(root.path().join("result.md")).unwrap(),
+            "Stopped all background work"
+        );
+        let receipt: Value = serde_json::from_slice(
+            &std::fs::read(root.path().join("result.claude-receipt.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(receipt["delivered"], json!(["original"]));
+        assert_eq!(receipt["text"], "Stopped all background work");
+    }
+}
+
+#[tokio::test]
+async fn failed_stops_and_unrelated_results_still_wait_for_background_followups() {
+    for prompt in [
+        "fixture:stopped-background failed-stop",
+        "fixture:stopped-background unrelated-tool",
+    ] {
+        let root = TempDir::new().unwrap();
+        let c = setup(&root);
+        run_events(&c, plan(&root, prompt)).await;
+        assert_eq!(
+            std::fs::read_to_string(root.path().join("result.md")).unwrap(),
+            "Background followup handled"
+        );
+    }
+}
+
+#[tokio::test]
 async fn background_work_and_its_followup_finish_before_the_run_completes() {
     let root = TempDir::new().unwrap();
     let c = setup(&root);
