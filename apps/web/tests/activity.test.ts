@@ -2,7 +2,7 @@ import type { RunEvent } from '../../../packages/contracts/contracts'
 import { describe, expect, it } from 'vitest'
 import sample from '../../../tests/fixtures/activity-events.json'
 import { redactPayload } from '../../../tests/fixtures/legacy/server/worker.ts'
-import { activityEntries, teamEntries } from '../src/activity'
+import { activityEntries, ActivityGroups, teamEntries } from '../src/activity'
 
 const events: RunEvent[] = sample.map((payload, index) => ({
   id: index + 1,
@@ -499,6 +499,51 @@ it.each([false, true])('caps activity groups at thirty tools after folding updat
   expect(new Set(entries.map(entry => entry.id)).size).toBe(entries.length)
 })
 
+it('counts visible tools rather than diagnostic events or gaps in global event IDs', () => {
+  const events: RunEvent[] = []
+  for (let i = 0; i < 65; i++) {
+    const id = 1000 + i * 100
+    const item = { id: `tool-${i}`, type: 'command_execution', command: 'echo ok' }
+    events.push(
+      {
+        id,
+        runId: 'r',
+        createdAt: id,
+        type: 'item.started',
+        text: '',
+        payload: { item: { ...item, status: 'in_progress' } },
+      },
+      {
+        id: id + 1,
+        runId: 'r',
+        createdAt: id + 1,
+        type: 'diagnostic',
+        text: 'heartbeat',
+      },
+      {
+        id: id + 2,
+        runId: 'r',
+        createdAt: id + 2,
+        type: 'item.updated',
+        text: '',
+        payload: { item },
+      },
+      {
+        id: id + 3,
+        runId: 'r',
+        createdAt: id + 3,
+        type: 'item.completed',
+        text: '',
+        payload: { item: { ...item, exit_code: 0 } },
+      },
+    )
+  }
+
+  const groups = activityEntries(events, true).filter(entry => entry.kind === 'group')
+  expect(groups.map(group => group.artifacts.length)).toEqual([30, 30, 5])
+  expect(groups.flatMap(group => group.artifacts).every(item => item.kind === 'command')).toBe(true)
+})
+
 it('also caps tool groups in a subagent timeline', () => {
   const artifact = activityEntries(events).flatMap(entry => entry.kind === 'group' ? entry.artifacts : [])[0]!
   const items = Array.from({ length: 1001 }, (_, i) => ({ ...artifact, kind: 'command' as const, id: `nested-${i}` }))
@@ -509,7 +554,7 @@ it('also caps tool groups in a subagent timeline', () => {
 })
 
 it.each([false, true])('keeps newer tool groups stable when older pages arrive or tools append (chat=%s)', (chat) => {
-  const events = Array.from({ length: 190 }, (_, i): RunEvent => ({
+  const events = Array.from({ length: 191 }, (_, i): RunEvent => ({
     id: i + 1,
     runId: 'r',
     createdAt: i,
@@ -524,9 +569,56 @@ it.each([false, true])('keeps newer tool groups stable when older pages arrive o
       },
     },
   }))
-  const loaded = activityEntries(events.slice(100, 160), chat).filter(entry => entry.kind === 'group')
-  const extended = activityEntries(events, chat).filter(entry => entry.kind === 'group')
+  const groups = new ActivityGroups()
+  const loaded = activityEntries(events.slice(100, 160), chat, groups).filter(entry => entry.kind === 'group')
+  const extended = activityEntries(events, chat, groups).filter(entry => entry.kind === 'group')
   // A full newer group must survive the prepend rather than being repartitioned from index zero.
   expect(extended.find(entry => entry.id === loaded[1]!.id)?.artifacts.map(item => item.id))
     .toEqual(loaded[1]!.artifacts.map(item => item.id))
+})
+
+it('lets partial groups grow while preserving message boundaries', () => {
+  const groups = new ActivityGroups()
+  const tools = Array.from({ length: 12 }, (_, i): RunEvent => ({
+    id: i * 100 + 1,
+    runId: 'r',
+    createdAt: i,
+    type: 'item.completed',
+    text: '',
+    payload: {
+      item: {
+        id: `tool-${i}`,
+        type: 'command_execution',
+        command: 'echo ok',
+        exit_code: 0,
+      },
+    },
+  }))
+  activityEntries(tools.slice(5, 10), true, groups)
+  const extended = activityEntries(tools, true, groups)
+  expect(extended).toHaveLength(1)
+  expect(extended[0]!.kind === 'group' && extended[0].artifacts).toHaveLength(12)
+
+  const message: RunEvent = {
+    id: 1200,
+    runId: 'r',
+    createdAt: 1200,
+    type: 'chat.user',
+    text: 'Continue',
+    payload: { messageId: 'next-message' },
+  }
+  const next = {
+    ...tools[0]!,
+    id: 1300,
+    payload: {
+      item: {
+        id: 'next-tool',
+        type: 'command_execution',
+        command: 'echo ok',
+        exit_code: 0,
+      },
+    },
+  }
+  const entries = activityEntries([...tools, message, next], true, groups)
+  expect(entries.map(entry => entry.kind)).toEqual(['group', 'message', 'group'])
 })

@@ -31,8 +31,6 @@ export interface ActivityArtifact {
   kind: 'command' | 'read' | 'browse' | 'output' | 'files' | 'search' | 'tool' | 'plan' | 'thinking' | 'notice' | 'subagent'
   id: string
   time: number
-  /** Stable event window: pagination must not repartition already loaded tool groups. */
-  eventWindow?: number
   title: string
   subtitle: string
   status: 'running' | 'done' | 'error' | 'info'
@@ -109,7 +107,7 @@ const collaborationTitles: Record<string, string> = {
 }
 
 /** Keep tool updates in their original position and fold actions between messages. */
-export function activityEntries(events: RunEvent[], chat = false): ActivityEntry[] {
+export function activityEntries(events: RunEvent[], chat = false, groups = new ActivityGroups()): ActivityEntry[] {
   const entries: ActivityEntry[] = []
   const artifacts = new Map<string, ActivityArtifact>()
   const messages = new Map<string, Extract<ActivityEntry, { kind: 'message' }>>()
@@ -249,7 +247,6 @@ export function activityEntries(events: RunEvent[], chat = false): ActivityEntry
     const artifact: ActivityArtifact = {
       id,
       time: event.createdAt,
-      eventWindow: Math.floor((event.id - 1) / MAX_ACTIVITY_GROUP_SIZE),
       kind: 'notice',
       title: 'Worker update',
       subtitle: '',
@@ -404,7 +401,7 @@ export function activityEntries(events: RunEvent[], chat = false): ActivityEntry
     const previous = artifacts.get(id)
     if (previous) {
       const durationMs = artifact.kind === 'subagent' ? artifact.durationMs : undefined
-      Object.assign(previous, artifact, { time: previous.time, eventWindow: previous.eventWindow, durationMs: running ? undefined : durationMs ?? Math.max(0, event.createdAt - previous.time) })
+      Object.assign(previous, artifact, { time: previous.time, durationMs: running ? undefined : durationMs ?? Math.max(0, event.createdAt - previous.time) })
       continue
     }
 
@@ -425,31 +422,74 @@ export function activityEntries(events: RunEvent[], chat = false): ActivityEntry
       legacyTool = Object.assign(artifact, { kind: 'output' as const, title: 'Recorded step', historical: true })
   }
 
-  return teamEntries(chat ? chatEntries(entries) : entries)
+  return teamEntries(chat ? chatEntries(entries) : entries, groups)
 }
 
 /** Subagents started one after another work as a team, shown apart from the agent's own steps. */
-export function teamEntries(entries: ActivityEntry[]): ActivityEntry[] {
-  const result: ActivityEntry[] = []
-  for (const entry of entries) {
-    if (entry.kind !== 'group') {
-      result.push(entry)
-      continue
+export function teamEntries(entries: ActivityEntry[], groups = new ActivityGroups()): ActivityEntry[] {
+  return groups.entries(entries)
+}
+
+/** Preserve full visible groups across pagination, without counting hidden events or global IDs. */
+export class ActivityGroups {
+  private fullPositions = new Map<string, number>()
+
+  entries(entries: ActivityEntry[]): ActivityEntry[] {
+    const result: ActivityEntry[] = []
+    const nextPositions = new Map<string, number>()
+    const appendTools = (artifacts: ActivityArtifact[]) => {
+      const anchor = artifacts.findIndex(item => this.fullPositions.has(item.id))
+      const offset = anchor < 0 ? 0 : this.fullPositions.get(artifacts[anchor]!.id)! - anchor
+      let group: Extract<ActivityEntry, { kind: 'group' }> | undefined
+      let previousWindow: number | undefined
+      for (const [index, artifact] of artifacts.entries()) {
+        const window = Math.floor((offset + index) / MAX_ACTIVITY_GROUP_SIZE)
+        if (!group || window !== previousWindow) {
+          group = { kind: 'group', id: `group:${artifact.id}`, artifacts: [] }
+          result.push(group)
+          previousWindow = window
+        }
+
+        group.artifacts.push(artifact)
+        if (group.artifacts.length === MAX_ACTIVITY_GROUP_SIZE) {
+          for (const [position, item] of group.artifacts.entries())
+            nextPositions.set(item.id, position)
+        }
+      }
     }
 
-    let last: ActivityEntry | undefined
-    for (const artifact of entry.artifacts) {
-      const team = artifact.kind === 'subagent'
-      if (team && last?.kind === 'team')
-        last.agents.push(artifact)
-      else if (!team && last?.kind === 'group' && last.artifacts.length < MAX_ACTIVITY_GROUP_SIZE && last.artifacts[0]!.eventWindow === artifact.eventWindow)
-        last.artifacts.push(artifact)
-      else
-        result.push(last = team ? { kind: 'team', id: `team:${artifact.id}`, agents: [artifact] } : { kind: 'group', id: `group:${artifact.id}`, artifacts: [artifact] })
+    for (const entry of entries) {
+      if (entry.kind !== 'group') {
+        result.push(entry)
+        continue
+      }
+
+      let tools: ActivityArtifact[] = []
+      let team: Extract<ActivityEntry, { kind: 'team' }> | undefined
+      for (const artifact of entry.artifacts) {
+        if (artifact.kind !== 'subagent') {
+          tools.push(artifact)
+          team = undefined
+          continue
+        }
+
+        appendTools(tools)
+        tools = []
+        if (!team) {
+          team = { kind: 'team', id: `team:${artifact.id}`, agents: [] }
+          result.push(team)
+        }
+
+        team.agents.push(artifact)
+      }
+
+      appendTools(tools)
     }
+
+    // Bound the cache to the currently loaded timeline. Partial edge groups may still grow.
+    this.fullPositions = nextPositions
+    return result
   }
-
-  return result
 }
 
 /** Hide lifecycle bookkeeping in chat without removing persisted diagnostics. */

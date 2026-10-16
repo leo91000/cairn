@@ -333,12 +333,15 @@ private fun StatusPill(content: @Composable RowScope.() -> Unit) {
 internal class TimelineKeys {
     private var history: String? = null
     private var owners = mapOf<String, String>()
+    private var fullPositions = mapOf<String, Int>()
 
-    fun stabilize(history: String?, entries: List<TimelineEntry>): List<TimelineEntry> {
+    fun stabilize(history: String?, input: List<TimelineEntry>): List<TimelineEntry> {
         if (history != this.history) {
             this.history = history
             owners = emptyMap()
+            fullPositions = emptyMap()
         }
+        val entries = regroup(input)
         val used =
             entries.filter { !it.key.startsWith("activity:") }.mapTo(mutableSetOf()) { it.key }
         val keys = arrayOfNulls<String>(entries.size)
@@ -372,6 +375,50 @@ internal class TimelineKeys {
                     event.itemIdentity()?.let { put(it, entry.key) }
                 }
         }
+        return result
+    }
+
+    /** Keep full visible groups intact when older pages arrive or new tools append. */
+    private fun regroup(entries: List<TimelineEntry>): List<TimelineEntry> {
+        val result = mutableListOf<TimelineEntry>()
+        val nextPositions = mutableMapOf<String, Int>()
+        val activity = mutableListOf<RunEvent>()
+        fun identity(event: RunEvent) = event.itemIdentity() ?: "event:${event.id}"
+        fun flush() {
+            if (activity.isEmpty()) return
+            val anchor = activity.indexOfFirst { identity(it) in fullPositions }
+            val offset =
+                if (anchor < 0) 0 else fullPositions.getValue(identity(activity[anchor])) - anchor
+            var group = mutableListOf<RunEvent>()
+            var previousWindow: Int? = null
+            fun append() {
+                if (group.isEmpty()) return
+                result.add(TimelineEntry("activity:${group.first().id}", group.toList(), false))
+                if (group.size == MAX_ACTIVITY_GROUP_SIZE) {
+                    for ((position, event) in group.withIndex()) nextPositions[identity(event)] =
+                        position
+                }
+                group = mutableListOf()
+            }
+            for ((index, event) in activity.withIndex()) {
+                val window = Math.floorDiv(offset + index, MAX_ACTIVITY_GROUP_SIZE)
+                if (previousWindow != null && previousWindow != window) append()
+                group.add(event)
+                previousWindow = window
+            }
+            append()
+            activity.clear()
+        }
+        for (entry in entries) {
+            if (entry.key.startsWith("activity:")) activity.addAll(entry.events)
+            else {
+                flush()
+                result.add(entry)
+            }
+        }
+        flush()
+        // Retain only anchors in the loaded timeline. Partial edge groups can still grow.
+        fullPositions = nextPositions
         return result
     }
 
@@ -563,15 +610,7 @@ internal fun timelineEntries(events: List<RunEvent>, chat: Boolean = false): Lis
                         )
                     }
                 } else {
-                    // Stable event windows keep newer groups intact when an older page is
-                    // prepended.
-                    val window = (event.id - 1) / MAX_ACTIVITY_GROUP_SIZE
-                    val firstWindow =
-                        activity.firstOrNull()?.let { (it.id - 1) / MAX_ACTIVITY_GROUP_SIZE }
-                    if (
-                        activity.size == MAX_ACTIVITY_GROUP_SIZE ||
-                            firstWindow != null && firstWindow != window
-                    ) {
+                    if (activity.size == MAX_ACTIVITY_GROUP_SIZE) {
                         flushActivity()
                     }
                     activity.add(event)

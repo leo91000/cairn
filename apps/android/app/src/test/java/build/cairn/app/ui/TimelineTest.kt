@@ -7,11 +7,29 @@ import org.junit.Test
 
 class TimelineTest {
     @Test
+    fun `chat counts folded visible tools despite diagnostics and gaps in global event ids`() {
+        val events =
+            (0L..64L).flatMap { index ->
+                val id = 1000L + index * 100L
+                listOf(
+                    event(id, "item.started", "tool$index"),
+                    event(id + 1, "diagnostic").copy(text = "heartbeat"),
+                    event(id + 2, "item.updated", "tool$index"),
+                    event(id + 3, "item.completed", "tool$index", status = "completed"),
+                )
+            }
+        val groups = timelineEntries(events, chat = true)
+        assertEquals(listOf(30, 30, 5), groups.map { it.events.size })
+        assertEquals(65, groups.flatMap { it.events }.size)
+    }
+
+    @Test
     fun `newer tool groups keep their membership when older pages arrive or tools append`() {
-        val events = (1L..190L).map { event(it, "item.completed", "tool$it") }
+        val events = (1L..191L).map { event(it, "item.completed", "tool$it") }
         for (chat in listOf(false, true)) {
-            val loaded = timelineEntries(events.subList(100, 160), chat)
-            val extended = timelineEntries(events, chat)
+            val keys = TimelineKeys()
+            val loaded = keys.stabilize("h", timelineEntries(events.subList(100, 160), chat))
+            val extended = keys.stabilize("h", timelineEntries(events, chat))
             val group = loaded[1]
             assertEquals(group, extended.find { it.key == group.key })
         }
