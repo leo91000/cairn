@@ -1752,8 +1752,8 @@ async fn controller_capacity_rejection_waits_and_retries_without_an_agent_sessio
                     || (run["status"] == RunStatus::Queued
                         && (text(run, "accountWaitReason").starts_with("Waiting for capacity.")
                             || (deferred_fence
-                                && run["accountWaitReason"]
-                                    == "Waiting for the previous VM to stop.")))
+                                && rejections.load(Ordering::SeqCst) > 0
+                                && run["recoveryPending"] == true)))
             })
             .await;
         if !capacity {
