@@ -1,3 +1,4 @@
+import type { ChatWakeup } from '../../../packages/contracts/chats'
 import type { RunEvent } from '../../../packages/contracts/contracts'
 import { describeCommand, expectedCommandOutcome } from './activity-command'
 import { outputSummary } from './activity-data'
@@ -64,6 +65,32 @@ export type ActivityEntry
   | { kind: 'group', id: string, artifacts: ActivityArtifact[] }
   | { kind: 'team', id: string, agents: ActivityArtifact[] }
   | { kind: 'notice', id: string, artifact: ActivityArtifact }
+  | {
+    kind: 'wait'
+    id: string
+    time: number
+    wait: ActivityWait
+  }
+
+/** A durable wait the agent scheduled with `sleep` or `wait_for`, then how it ended. */
+export interface ActivityWait {
+  /** Absent when the condition had already completed and the agent never waited. */
+  wakeup: ChatWakeup | null
+  /** What Cairn observed once the condition completed or the deadline passed. */
+  observation?: Record<string, unknown> | null
+  /** When the conversation resumed. */
+  resumedAt?: number
+  /** A message from the user, or another wait, ended it first. */
+  ended?: 'message' | 'replaced'
+}
+
+// Codex names the workspace server; Claude and OpenCode prefix the tool with it.
+const workspaceWaitTool = /^(?:mcp__)?cairn_workspace(?:__|_|\.)(?:sleep|wait_for)$/
+
+function isWaitTool(item: Record<string, unknown>) {
+  const tool = text(item.tool)
+  return workspaceWaitTool.test(tool) || (text(item.server) === 'cairn_workspace' && ['sleep', 'wait_for'].includes(tool))
+}
 
 function record(value: unknown): Record<string, unknown> {
   return value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {}
@@ -139,10 +166,74 @@ export function activityEntries(events: RunEvent[], chat = false, groups = new A
   let turn = 0
   let via: string | undefined
   let legacyTool: ActivityArtifact | undefined
+  // The wait still pending, by its wakeup ID, so that its result and resumption complete it.
+  const waits = new Map<string, ActivityWait>()
+  let openWait: ActivityWait | undefined
   for (const event of events) {
     if (event.type === 'artifact')
       continue
+    if (event.type === 'chat.sleep' || event.type === 'chat.wait') {
+      const wakeup = record(event.payload) as unknown as ChatWakeup
+      if (!wakeup.id || waits.has(wakeup.id))
+        continue
+      if (openWait)
+        openWait.ended = 'replaced'
+      openWait = { wakeup }
+      waits.set(wakeup.id, openWait)
+      entries.push({
+        kind: 'wait',
+        id: `wait:${wakeup.id}`,
+        time: event.createdAt,
+        wait: openWait,
+      })
+      continue
+    }
+
+    // The condition completed: right away (the agent never waited) or while the conversation waited.
+    if (event.type === 'chat.wait_ready') {
+      if (openWait?.wakeup?.condition) {
+        openWait.observation = record(event.payload)
+      }
+      else {
+        entries.push({
+          kind: 'wait',
+          id: `wait-ready:${event.id}`,
+          time: event.createdAt,
+          wait: { wakeup: null, observation: record(event.payload) },
+        })
+      }
+
+      continue
+    }
+
+    if (event.type === 'chat.wakeup') {
+      const wakeup = record(event.payload) as unknown as ChatWakeup
+      let wait = wakeup.id ? waits.get(wakeup.id) : undefined
+      // Its scheduling may be in an older page of the history.
+      if (!wait) {
+        wait = { wakeup }
+        entries.push({
+          kind: 'wait',
+          id: `wait:${wakeup.id || event.id}`,
+          time: event.createdAt,
+          wait,
+        })
+      }
+
+      wait.observation = wakeup.observation ?? wait.observation ?? null
+      wait.resumedAt = event.createdAt
+      if (wait === openWait)
+        openWait = undefined
+      continue
+    }
+
     if (event.type === 'chat.user') {
+      // A new message cancels the pending wakeup.
+      if (openWait) {
+        openWait.ended = 'message'
+        openWait = undefined
+      }
+
       entries.push({
         kind: 'message',
         role: 'user',
@@ -400,6 +491,10 @@ export function activityEntries(events: RunEvent[], chat = false, groups = new A
       artifact.attention = true
       connectionNotices.push(artifact)
     }
+
+    // A scheduled wait shows as its own card; only a call that failed stays among the tools.
+    if (type === 'mcp_tool_call' && isWaitTool(item) && artifact.status !== 'error')
+      continue
 
     const previous = artifacts.get(id)
     if (previous) {

@@ -60,8 +60,11 @@ class ConversationPresentationTest {
                         condition = condition,
                     ),
             )
-        assertTrue(chatSleepNotice(chat)!!.message.contains("au résultat ou à l’échéance"))
-        assertEquals("Attente d’un résultat", conversationState(chat, "Agent", null).status)
+        assertEquals(chat.wakeup, chatSleepNotice(chat))
+        assertEquals(
+            "En attente · 7 min max",
+            conversationState(chat, "Agent", null, now = 1).status,
+        )
         assertTrue(chatDelivery(chat, emptyList()).sending.isEmpty())
         assertNull(chatSleepNotice(chat.copy(paused = true)))
     }
@@ -74,10 +77,8 @@ class ConversationPresentationTest {
                 run = Run("run", status = "succeeded"),
                 wakeup = ChatWakeup("wake", "one", "Attendre la CI", 420, 1, 420001),
             )
-        assertTrue(
-            chatSleepNotice(chat)!!.message.startsWith("Attendre la CI · Reprise automatique")
-        )
-        assertEquals("Attente planifiée", conversationState(chat, "Agent", null).status)
+        assertEquals(chat.wakeup, chatSleepNotice(chat))
+        assertEquals("Reprise dans 7 min", conversationState(chat, "Agent", null, now = 1).status)
         assertTrue(chatDelivery(chat, emptyList()).sending.isEmpty())
         assertNull(chatSleepNotice(chat.copy(paused = true)))
         assertNull(chatSleepNotice(chat.copy(lifecycle = "trash")))

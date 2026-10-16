@@ -517,6 +517,8 @@ internal data class TimelineEntry(
     val via: String = "",
     /** Persisted events folded into each activity; item IDs may repeat in later turns. */
     val sourceIds: Map<Long, List<Long>> = emptyMap(),
+    /** A scheduled wait, shown as one card from its scheduling to its resumption. */
+    val wait: ActivityWait? = null,
 )
 
 /** Fold updates in place within a turn; keep messages and errors in chronological order. */
@@ -599,7 +601,88 @@ internal fun timelineEntries(events: List<RunEvent>, chat: Boolean = false): Lis
                 )
             else emptySet()
         var via = ""
+        // The wait still pending, by its wakeup ID, so that its result and resumption complete it.
+        val waits = mutableMapOf<String, Int>()
+        var openWait: Int? = null
+        fun updateWait(index: Int, change: (ActivityWait) -> ActivityWait) {
+            result[index] = result[index].copy(wait = change(result[index].wait!!))
+        }
         for (event in folded) {
+            when (event.type) {
+                "chat.sleep",
+                "chat.wait" -> {
+                    val wakeup = event.wakeupPayload() ?: continue
+                    if (wakeup.id in waits) continue
+                    openWait?.let { index -> updateWait(index) { it.copy(ended = "replaced") } }
+                    flushActivity()
+                    openWait = result.size
+                    waits[wakeup.id] = result.size
+                    result.add(
+                        TimelineEntry(
+                            "wait:${wakeup.id}",
+                            listOf(event),
+                            false,
+                            wait = ActivityWait(wakeup),
+                        )
+                    )
+                    continue
+                }
+                // The condition completed: right away (the agent never waited) or while it waited.
+                "chat.wait_ready" -> {
+                    val observation = event.payload?.let(::JsonObject)
+                    val pending = openWait?.takeIf { result[it].wait?.wakeup?.condition != null }
+                    if (pending != null)
+                        updateWait(pending) { it.copy(observation = observation, observed = true) }
+                    else {
+                        flushActivity()
+                        result.add(
+                            TimelineEntry(
+                                "wait-ready:${event.id}",
+                                listOf(event),
+                                false,
+                                wait = ActivityWait(null, observation, observed = true),
+                            )
+                        )
+                    }
+                    continue
+                }
+                "chat.wakeup" -> {
+                    val wakeup = event.wakeupPayload()
+                    // Its scheduling may be in an older page of the history.
+                    val index =
+                        wakeup?.id?.let(waits::get)
+                            ?: run {
+                                flushActivity()
+                                result.add(
+                                    TimelineEntry(
+                                        "wait:${wakeup?.id ?: event.id}",
+                                        listOf(event),
+                                        false,
+                                        wait = ActivityWait(wakeup),
+                                    )
+                                )
+                                result.lastIndex
+                            }
+                    updateWait(index) {
+                        it.copy(
+                            observation = wakeup?.observation ?: it.observation,
+                            observed = true,
+                            resumedAt = event.createdAt,
+                        )
+                    }
+                    if (index == openWait) openWait = null
+                    continue
+                }
+                // A new message cancels the pending wakeup.
+                "chat.user" -> {
+                    openWait?.let { index -> updateWait(index) { it.copy(ended = "message") } }
+                    openWait = null
+                }
+            }
+            val waitTool =
+                event.item().let { it.string("type") == "mcp_tool_call" && isWaitTool(it) }
+            // The wait shows as its own card; only a call that failed stays among the tools.
+            if (waitTool && !presentActivity(event).failed) continue
             val route = event.activityData()?.get("route") as? JsonObject
             // An attempt may name the provider of its replies; the next attempt ends that label.
             val data = event.activityData()
@@ -718,6 +801,7 @@ internal fun TimelineRow(
                 if (entry.via.isBlank()) agent else "$agent · via ${entry.via}",
             )
         }
+    else if (entry.wait != null) WaitCard(entry.wait)
     else if (entry.notice) ChatNotice(presentActivity(entry.events.single()))
     else {
         val presentations = remember(entry.events) { entry.events.map(::presentActivity) }

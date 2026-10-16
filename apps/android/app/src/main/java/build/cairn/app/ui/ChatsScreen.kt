@@ -261,6 +261,9 @@ internal fun ConversationList(
                                                                         "failed",
                                                                         "interrupted",
                                                                     ) -> statusLabel(chat.status)
+                                                                chat.wakeup != null &&
+                                                                    chat.status == "succeeded" ->
+                                                                    waitTarget(chat.wakeup).short
                                                                 else ->
                                                                     listOfNotNull(
                                                                             chat.agentName.ifBlank {
@@ -397,12 +400,27 @@ internal fun ChatPage(
         }
     }
     val timelineKeys = remember(id) { TimelineKeys() }
-    val timeline =
+    val history =
         remember(live.events, live.state?.artifacts) {
             deliveryTimeline(
                 timelineKeys.stabilize(live.history, timelineEntries(live.events, chat = true)),
                 live.state?.artifacts.orEmpty(),
             )
+        }
+    // The pending wait's scheduling may be in an older page: its card still ends the conversation.
+    val pendingWakeup = chat?.wakeup
+    val timeline =
+        remember(history, pendingWakeup?.id) {
+            if (pendingWakeup == null || history.any { it.wait?.wakeup?.id == pendingWakeup.id })
+                history
+            else
+                history +
+                    TimelineEntry(
+                        "wait:${pendingWakeup.id}",
+                        emptyList(),
+                        false,
+                        wait = ActivityWait(pendingWakeup),
+                    )
         }
     var asking by remember { mutableStateOf<ChatQuestion?>(null) }
     var stopping by remember { mutableStateOf(false) }
@@ -634,6 +652,8 @@ internal fun ChatPage(
         ArtifactLinkHost(vm, live.state?.artifacts.orEmpty()) {
             Column(Modifier.fillMaxSize()) {
                 if (!fullscreen) {
+                    val wakeup = chatSleepNotice(chat)
+                    val now = if (wakeup != null) rememberNow(wakeup.id) else 0L
                     val conversation =
                         conversationState(
                             chat,
@@ -641,6 +661,7 @@ internal fun ChatPage(
                             waitingTasks,
                             state.installation?.name,
                             newChat = id == null,
+                            now = now,
                         )
                     ConversationHeader(
                         title =
@@ -866,7 +887,8 @@ internal fun ChatPage(
                                 val now = rememberNow(waitingTasks.since)
                                 "${waitingStep(waitingTasks).title} · ${elapsed(waitingTasks.since, now)}"
                             } else if (active) "L’agent travaille…"
-                            else if (chatSleepNotice(chat) != null) "Attente planifiée"
+                            else if (chatSleepNotice(chat) != null)
+                                conversationState(chat, agentName, null).status
                             else if (chat?.run?.status in listOf("failed", "interrupted"))
                                 statusLabel(chat?.run?.status.orEmpty())
                             else "Prêt"
@@ -893,7 +915,7 @@ internal fun ChatPage(
                         )
                         ActionIcon("Masquer l’erreur", CairnIcons.Close) { errorDismissed = true }
                     }
-                (chatWaitNotice(chat?.run) ?: chatSleepNotice(chat))?.let {
+                chatWaitNotice(chat?.run)?.let {
                     ChatWaitingNotice(it, openConnections, state.isOwner)
                 }
                 if (gallery) {
@@ -1043,13 +1065,22 @@ internal fun ChatPage(
                                             )
                                         }
                                     items(timeline, key = { it.key }) {
-                                        TimelineRow(
-                                            vm,
-                                            it,
-                                            chat?.agentName ?: "Cairn",
-                                            rendering,
-                                            hideRunning = chat?.run?.status == "running",
-                                        )
+                                        CompositionLocalProvider(
+                                            LocalLiveWait provides
+                                                chat?.let {
+                                                    LiveWait(it.wakeup, it.paused) {
+                                                        if (!state.busy) togglePause(it)
+                                                    }
+                                                }
+                                        ) {
+                                            TimelineRow(
+                                                vm,
+                                                it,
+                                                chat?.agentName ?: "Cairn",
+                                                rendering,
+                                                hideRunning = chat?.run?.status == "running",
+                                            )
+                                        }
                                     }
                                     if (!active && delivery.sending.isEmpty() && !live.catchingUp)
                                         chat?.run?.outcome?.let { outcome ->
@@ -1297,6 +1328,8 @@ internal fun ChatPage(
                                                         if (chat?.paused == true)
                                                             "Ajouter à la file…"
                                                         else if (active) "Ajouter un message…"
+                                                        else if (chatSleepNotice(chat) != null)
+                                                            "Répondre maintenant annule l’attente"
                                                         else if (skillOptions.isNotEmpty())
                                                             "Votre message… $ pour les skills"
                                                         else "Votre message…",

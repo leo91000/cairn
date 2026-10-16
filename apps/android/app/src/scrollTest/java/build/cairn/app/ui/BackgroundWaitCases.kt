@@ -77,10 +77,15 @@ abstract class BackgroundWaitCases {
     @Test
     fun scheduledSleepDisplaysAutomaticResumeWithoutWorkingIndicator() =
         conversation("succeeded", sleeping = true) {
-            compose.onNodeWithText("Attente planifiée", useUnmergedTree = true).assertExists()
             compose
-                .onNodeWithText("Attendre la CI · Reprise automatique", substring = true)
-                .assertIsDisplayed()
+                .onNodeWithText("Reprise dans 7 min", substring = true, useUnmergedTree = true)
+                .assertExists()
+            // The scheduling is outside the loaded history: the pending wait still has its card.
+            compose.onNodeWithTag("chat-wait").assertIsDisplayed()
+            compose.onNodeWithText("Reprise à ", substring = true).assertIsDisplayed()
+            compose.onNodeWithText("dans 7 min").assertIsDisplayed()
+            compose.onNodeWithText("Mettre en pause").assertIsDisplayed()
+            compose.onNodeWithText("Répondre maintenant annule l’attente").assertExists()
             compose.onAllNodesWithTag("agent-working").assertCountEquals(0)
             compose.onAllNodesWithTag("agent-waiting").assertCountEquals(0)
             compose.onNodeWithContentDescription("Arrêter").assertExists()
@@ -89,10 +94,12 @@ abstract class BackgroundWaitCases {
     @Test
     fun conditionWaitShowsResultAndDeadlineWithoutWorkingIndicator() =
         conversation("succeeded", conditional = true) {
-            compose.onNodeWithText("Attente d’un résultat", useUnmergedTree = true).assertExists()
             compose
-                .onNodeWithText("au résultat ou à l’échéance", substring = true)
-                .assertIsDisplayed()
+                .onNodeWithText("En attente · 7 min max", substring = true, useUnmergedTree = true)
+                .assertExists()
+            compose.onNodeWithTag("chat-wait").assertIsDisplayed()
+            compose.onNodeWithText("Attente de la fin d’une autre exécution").assertIsDisplayed()
+            compose.onNodeWithText("7 min max").assertIsDisplayed()
             compose.onAllNodesWithTag("agent-working").assertCountEquals(0)
             compose.onAllNodesWithTag("agent-waiting").assertCountEquals(0)
             compose.onNodeWithContentDescription("Arrêter").assertExists()

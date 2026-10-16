@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import type { Deliverable } from '../../../../packages/contracts/artifacts'
+import type { ChatWakeup } from '../../../../packages/contracts/chats'
 import type { RunEvent, TaskOutcome } from '../../../../packages/contracts/contracts'
 import type { ActivityEntry } from '../activity'
 import type { SendingMessage } from '../chat-delivery'
@@ -29,6 +30,7 @@ import ArtifactViewer from './ArtifactViewer.vue'
 import ChatAttachments from './ChatAttachments.vue'
 import ChatNotice from './ChatNotice.vue'
 import ChatOutcome from './ChatOutcome.vue'
+import ChatWaitCard from './ChatWaitCard.vue'
 import Icon from './Icon.vue'
 import SubagentTeam from './SubagentTeam.vue'
 import UiButton from './UiButton.vue'
@@ -56,15 +58,33 @@ const props = defineProps<{
   skills?: string[]
   /** The page shows the current subagents beside the composer, so the feed need not. */
   subagentBar?: boolean
+  /** The conversation's pending wakeup, which keeps its wait card live. */
+  wakeup?: { wakeup: ChatWakeup | null, paused: boolean }
 }>()
-const emit = defineEmits<{ load: [], position: [value: ReadingPosition, key?: string] }>()
+const emit = defineEmits<{ load: [], position: [value: ReadingPosition, key?: string], pauseWait: [] }>()
 const skillNames = computed(() => new Set(props.skills ?? []))
 const activityGroups = shallowRef(new ActivityGroups())
 watch([() => props.cacheKey, () => props.chat, () => props.events[0]?.runId], () => {
   activityGroups.value = new ActivityGroups()
 }, { flush: 'sync' })
+// Keeps its identity while the wakeup does, so a new conversation snapshot does not rebuild the feed.
+const pendingWakeup = computed<ChatWakeup | null>((previous) => {
+  const next = props.wakeup?.wakeup ?? null
+  return previous && next?.id === previous.id ? previous : next
+})
 const entries = computed(() => {
   const entries = activityEntries(props.events, props.chat, activityGroups.value)
+  // The pending wait's scheduling may be in an older page: its card still ends the conversation.
+  const pending = pendingWakeup.value
+  if (pending && !entries.some(entry => entry.kind === 'wait' && entry.wait.wakeup?.id === pending.id)) {
+    entries.push({
+      kind: 'wait',
+      id: `wait:${pending.id}`,
+      time: pending.createdAt,
+      wait: { wakeup: pending },
+    })
+  }
+
   const acknowledged = new Set(props.events.filter(event => event.type === 'chat.user').map(event => event.payload?.messageId))
   for (const { message, label } of props.sending ?? []) {
     if (!acknowledged.has(message.id)) {
@@ -375,6 +395,12 @@ defineExpose({
                 </article>
                 <ChatNotice v-else-if="entry.kind === 'notice'" :notice="entry.artifact" />
                 <SubagentTeam v-else-if="entry.kind === 'team'" :agents="entry.agents" :active="active" />
+                <ChatWaitCard
+                  v-else-if="entry.kind === 'wait'"
+                  :wait="entry.wait"
+                  :live="wakeup"
+                  @pause="emit('pauseWait')"
+                />
                 <AgentActions
                   v-else
                   :artifacts="entry.artifacts"
