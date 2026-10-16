@@ -276,6 +276,73 @@ else {
       return
     }
 
+    if (prompt.includes('fixture:stopped-background')) {
+      const snapshotFirst = prompt.includes('snapshot-first')
+      const failedStop = prompt.includes('failed-stop')
+      const unrelatedTool = prompt.includes('unrelated-tool')
+      const tasks = ['first', 'second', 'third'].map(task_id => ({
+        task_id,
+        task_type: 'local_bash',
+        description: `Wait for ${task_id}`,
+      }))
+      out({ type: 'system', subtype: 'background_tasks_changed', tasks })
+      complete('Waiting for background work', false, correlation)
+      setTimeout(() => {
+        for (const [index, task] of tasks.entries()) {
+          const id = `stop-${task.task_id}`
+          const last = index === tasks.length - 1
+          const args = prompt.includes('legacy-id') ? { shell_id: task.task_id } : { task_id: task.task_id }
+          out({
+            type: 'assistant',
+            message: {
+              id,
+              content: [{
+                type: 'tool_use',
+                id,
+                name: last && unrelatedTool ? 'Read' : 'TaskStop',
+                input: args,
+              }],
+            },
+          })
+          // A failed stop can race with the task finishing naturally. Its
+          // follow-up still needs to run after the next foreground result.
+          const snapshot = { type: 'system', subtype: 'background_tasks_changed', tasks: tasks.slice(index + 1) }
+          if (snapshotFirst)
+            out(snapshot)
+          const stopFailed = last && failedStop
+          out({
+            type: 'user',
+            message: {
+              role: 'user',
+              content: [{
+                type: 'tool_result',
+                tool_use_id: id,
+                is_error: stopFailed,
+                content: JSON.stringify({ message: stopFailed ? 'Task already finished' : `Successfully stopped task: ${task.task_id}`, task_id: task.task_id, task_type: task.task_type }),
+              }],
+            },
+          })
+          if (!snapshotFirst)
+            out(snapshot)
+        }
+
+        // TaskStop does not replay a task-notification user message for these tasks.
+        complete('Stopped all background work', false, correlation)
+        if (failedStop || unrelatedTool) {
+          setTimeout(() => {
+            out({
+              type: 'user',
+              uuid: 'notification',
+              origin: { kind: 'task-notification' },
+              message: { role: 'user', content: [] },
+            })
+            complete('Background followup handled', false, { origin: { kind: 'task-notification' } })
+          }, 200)
+        }
+      }, 100)
+      return
+    }
+
     if (prompt.includes('fixture:background')) {
       const ambient = prompt.includes('fixture:background-ambient')
       // A slow build leaves time to observe the idle agent waiting for it.

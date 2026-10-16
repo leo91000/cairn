@@ -686,6 +686,11 @@ pub(crate) async fn invoke(
             s.agent_authorized(agent, Some(id), authorize).await
         }
         "update_task" => s.task(args["task"].clone(), Some(text(&args, "id"))).await,
+        "delete_agent" => {
+            s.remove_authorized("agents", text(&args, "id"), authorize)
+                .await?;
+            Ok(json!({ "deleted": true }))
+        }
         "run_task" => s.enqueue(text(&args, "taskId"), "mcp", None).await,
         "cancel_run" => {
             s.worker.cancel(s, text(&args, "runId")).await?;

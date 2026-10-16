@@ -1,6 +1,7 @@
 package build.cairn.app.ui
 
 import android.app.Application
+import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.material3.Surface
 import androidx.compose.runtime.*
@@ -29,6 +30,44 @@ import org.junit.runner.RunWith
 @RunWith(AndroidJUnit4::class)
 class HistoryScrollDeviceTest {
     @get:Rule val compose = createComposeRule()
+
+    @Test
+    fun toolGroupsCountCompletedCallsRatherThanHiddenEvents() {
+        val events =
+            (0L..64L).flatMap { index ->
+                val id = 1000L + index * 100L
+                val item = buildJsonObject {
+                    put("id", "tool-$index")
+                    put("type", "command_execution")
+                    put("command", "echo ok")
+                    put("status", "completed")
+                    put("exit_code", 0)
+                }
+                listOf(
+                    RunEvent(id, id, "item.started", "", mapOf("item" to item)),
+                    RunEvent(id + 1, id + 1, "diagnostic", "heartbeat"),
+                    RunEvent(id + 2, id + 2, "item.completed", "", mapOf("item" to item)),
+                )
+            }
+        val entries = TimelineKeys().stabilize("grouping", timelineEntries(events, chat = true))
+        compose.setContent {
+            CairnTheme("dark") {
+                Column {
+                    for (entry in entries) {
+                        AgentActions(
+                            entry.key,
+                            entry.events.map(::presentActivity),
+                            hideRunning = false,
+                        )
+                    }
+                }
+            }
+        }
+        compose.onAllNodesWithTag("agent-actions").assertCountEquals(3)
+        compose.onAllNodesWithText("A lancé 30 commandes").assertCountEquals(2)
+        compose.onNodeWithText("A lancé 5 commandes").assertIsDisplayed()
+    }
+
     private val turns = 60
     private val history = "v1:long:1"
 

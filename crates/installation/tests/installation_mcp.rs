@@ -169,7 +169,13 @@ async fn installation_tools_schedule_inspect_update_run_and_cancel_missions() {
         .unwrap();
     let (_, catalog) = request(&s, token, "tools/list", json!({})).await;
     let tools = catalog["result"]["tools"].as_array().unwrap();
-    for name in ["create_task", "list_tasks", "get_run", "run_task"] {
+    for name in [
+        "create_task",
+        "list_tasks",
+        "get_run",
+        "run_task",
+        "delete_agent",
+    ] {
         assert!(tools.iter().any(|tool| tool["name"] == name));
     }
     let public: Value = serde_json::from_str(include_str!("../schemas/mcp-tools.json")).unwrap();
@@ -185,6 +191,12 @@ async fn installation_tools_schedule_inspect_update_run_and_cancel_missions() {
         .collect();
     assert_eq!(installed_names, public_names);
     assert!(tools.iter().all(|tool| tool.get("_meta").is_none()));
+    let deletion = tools
+        .iter()
+        .find(|tool| tool["name"] == "delete_agent")
+        .unwrap();
+    assert_eq!(deletion["annotations"]["destructiveHint"], true);
+    assert_eq!(deletion["annotations"]["readOnlyHint"], false);
 
     let created = call(
         &s,
@@ -247,6 +259,174 @@ async fn installation_tools_schedule_inspect_update_run_and_cancel_missions() {
     )
     .await;
     assert_eq!(result(&chunk)["runId"], run["id"]);
+}
+
+#[tokio::test]
+async fn delete_agent_removes_an_unused_profile_and_preserves_completed_history() {
+    let root = TempDir::new().unwrap();
+    let s = service(&root).await;
+    let main = enabled_main(&s).await;
+    let (_, configuration) = active_run(&s, &main).await;
+    let agent = s
+        .agent(json!({ "name": "Retired maintainer" }), None)
+        .await
+        .unwrap();
+    let id = agent["id"].as_str().unwrap();
+    let (run, _) = active_run(&s, &agent).await;
+    s.store
+        .patch_run(
+            run["id"].as_str().unwrap(),
+            json!({ "status": RunStatus::Succeeded }),
+        )
+        .await
+        .unwrap();
+    s.remove("tasks", run["taskId"].as_str().unwrap())
+        .await
+        .unwrap();
+    s.store
+        .transaction({
+            let id = id.to_owned();
+            move |db| {
+                db.set(
+                    &format!("agent-github:{id}"),
+                    &json!({ "token": "fixture-only" }),
+                    None,
+                )?;
+                db.set(
+                    &format!("agent-avatar:{id}"),
+                    &json!({ "status": "ready" }),
+                    None,
+                )?;
+                db.put(
+                    "onepassword",
+                    &json!({
+                        "id": "fixture-account",
+                        "agentIds": [id, MAIN_AGENT_ID],
+                    }),
+                )?;
+                Ok(())
+            }
+        })
+        .await
+        .unwrap();
+
+    let deleted = call(&s, &configuration, "delete_agent", json!({ "id": id })).await;
+    assert_eq!(result(&deleted)["deleted"], true);
+    assert!(s.store.get("agents", id).await.unwrap().is_none());
+    for key in ["agent-github", "agent-avatar"] {
+        assert!(s.store.kv(&format!("{key}:{id}")).await.unwrap().is_none());
+    }
+    assert_eq!(
+        s.store
+            .get("onepassword", "fixture-account")
+            .await
+            .unwrap()
+            .unwrap()["agentIds"],
+        json!([MAIN_AGENT_ID])
+    );
+    assert_eq!(
+        s.store.run(run["id"].as_str().unwrap()).await.unwrap()["snapshot"]["agent"]["id"],
+        id
+    );
+    let missing = call(&s, &configuration, "delete_agent", json!({ "id": id })).await;
+    assert_eq!(missing["result"]["isError"], true);
+}
+
+#[tokio::test]
+async fn delete_agent_rejects_main_task_references_and_active_work() {
+    let root = TempDir::new().unwrap();
+    let s = service(&root).await;
+    let main = enabled_main(&s).await;
+    let (_, configuration) = active_run(&s, &main).await;
+    let main_delete = call(
+        &s,
+        &configuration,
+        "delete_agent",
+        json!({ "id": MAIN_AGENT_ID }),
+    )
+    .await;
+    assert_eq!(main_delete["result"]["isError"], true);
+    assert_eq!(
+        main_delete["result"]["content"][0]["text"],
+        "The main agent cannot be removed."
+    );
+
+    let agent = s
+        .agent(json!({ "name": "Assigned maintainer" }), None)
+        .await
+        .unwrap();
+    let id = agent["id"].as_str().unwrap();
+    let task = s
+        .task(
+            json!({
+                "name": "Archived maintenance",
+                "prompt": "Maintain",
+                "agentId": id,
+                "archived": true,
+            }),
+            None,
+        )
+        .await
+        .unwrap();
+    let assigned = call(&s, &configuration, "delete_agent", json!({ "id": id })).await;
+    assert_eq!(assigned["result"]["isError"], true);
+    assert_eq!(
+        assigned["result"]["content"][0]["text"],
+        "This item is used by a task. Update or remove that task first."
+    );
+    s.remove("tasks", task["id"].as_str().unwrap())
+        .await
+        .unwrap();
+
+    let (run, _) = active_run(&s, &agent).await;
+    let task_id = run["taskId"].as_str().unwrap();
+    let mut task = s.get("tasks", task_id).await.unwrap();
+    task["agentId"] = MAIN_AGENT_ID.into();
+    s.task(task, Some(task_id)).await.unwrap();
+    let busy = call(&s, &configuration, "delete_agent", json!({ "id": id })).await;
+    assert_eq!(busy["result"]["isError"], true);
+    assert_eq!(
+        busy["result"]["content"][0]["text"],
+        "This item has active work. Cancel or wait for the run first."
+    );
+    assert!(s.store.get("agents", id).await.unwrap().is_some());
+}
+
+#[tokio::test]
+async fn delete_agent_cannot_use_a_revoked_installation_grant() {
+    let root = TempDir::new().unwrap();
+    let s = service(&root).await;
+    let main = enabled_main(&s).await;
+    let (run, configuration) = active_run(&s, &main).await;
+    let agent = s
+        .agent(json!({ "name": "Keep this profile" }), None)
+        .await
+        .unwrap();
+    s.mcps
+        .revoke_run(&s, run["id"].as_str().unwrap())
+        .await
+        .unwrap();
+    let token = configuration["env"]["CAIRN_MCP_RUN_TOKEN"]
+        .as_str()
+        .unwrap();
+    let (status, _) = request(
+        &s,
+        token,
+        "tools/call",
+        json!({
+            "name": "delete_agent",
+            "arguments": { "id": agent["id"] },
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert!(
+        s.store
+            .get("agents", agent["id"].as_str().unwrap())
+            .await
+            .unwrap()
+            .is_some()
+    );
 }
 
 #[tokio::test]

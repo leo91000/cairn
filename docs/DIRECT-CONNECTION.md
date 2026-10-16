@@ -236,7 +236,7 @@ the beacon Compose definition; Traefik routes HTTPS only.
   that window, the alias is omitted for this negotiation; ordinary candidates
   keep working, the existing 30 s handshake limit applies and HTTPS relay
   remains available. See the
-  [production runbook](PRODUCTION-CAIRN.md#stun-and-direct-installation-connectivity-101).
+  [production configuration](PRODUCTION-CAIRN-SETUP.md#stun-and-direct-installation-connectivity).
 - An unset or empty `CAIRN_DIRECT_STUN_URLS` uses the authenticated beacon STUN
   source. An empty override logs this choice explicitly; it does not disable direct.
 - Invalid configuration disables the direct peer and logs a fixed reason naming

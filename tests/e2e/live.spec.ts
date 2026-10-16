@@ -1,4 +1,5 @@
 import type { BrowserContext, Page } from '@playwright/test'
+import type { RunEvent } from '../../packages/contracts/contracts'
 import { randomUUID } from 'node:crypto'
 import {
   signIn as authenticateWorkspace,
@@ -11,6 +12,50 @@ import {
   useRelayForHttpMocks,
   workspacePath,
 } from './fixtures'
+
+test('chat groups visible calls despite diagnostics, updates and global event ID gaps', async ({ page, workspace }) => {
+  const original = workspace.service.store.runs().find(run => run.status === 'succeeded')!
+  const run = workspace.service.store.addRun({
+    ...original,
+    id: randomUUID(),
+    taskId: randomUUID(),
+    trigger: 'grouping-fixture',
+  })
+  const chat = await workspace.api('/api/chats', 'POST', {})
+  workspace.service.store.put('chats', { ...chat, runId: run.id, title: 'Visible tool groups' })
+  for (let i = 0; i < 65; i++) {
+    const item = { id: `group-tool-${i}`, type: 'command_execution', command: `echo grouping-${i}` }
+    workspace.service.store.event(run.id, 'item.started', '', { item: { ...item, status: 'in_progress' } })
+    workspace.service.store.event(run.id, 'diagnostic', 'heartbeat')
+    workspace.service.store.event(original.id, 'diagnostic', 'Other conversation')
+    workspace.service.store.event(run.id, 'item.updated', '', { item })
+    workspace.service.store.event(run.id, 'item.completed', '', { item: { ...item, exit_code: 0 } })
+  }
+
+  // Keep this test about grouping rather than paging; paging has a separate modal/anchor test.
+  const events = workspace.service.store.events(run.id, 0, 500) as RunEvent[]
+  await useRelayForHttpMocks(page)
+  await page.route(`**/chats/${chat.id}/stream*`, route => route.fulfill({
+    contentType: 'text/event-stream',
+    body: `event: batch\ndata: ${JSON.stringify({
+      events,
+      state: { run, chat },
+      reset: true,
+      more: false,
+      history: `grouping:${run.id}`,
+      hasOlder: false,
+    })}\n\n`,
+  }))
+  await page.goto(workspacePath(`${workspace.url}/chats/${chat.id}`))
+  await authenticateWorkspace(page)
+  const groups = page.getByTestId('agent-actions')
+  await expect(groups).toHaveCount(3)
+  expect(await groups.allTextContents()).toEqual([
+    expect.stringContaining('Ran 30 commands'),
+    expect.stringContaining('Ran 30 commands'),
+    expect.stringContaining('Ran 5 commands'),
+  ])
+})
 
 for (const kind of ['chat', 'task'] as const) {
   test(`${kind} automatically fills folded history without a click or scroll`, async ({ page, workspace }) => {
@@ -71,6 +116,7 @@ for (const kind of ['chat', 'task'] as const) {
 test('an older page preserves expanded newer tools and their open detail sheet', async ({ page, workspace }) => {
   await useRelayForHttpMocks(page)
   const run = workspace.service.store.runs().find(run => run.status === 'succeeded' && run.trigger !== 'chat')!
+  workspace.service.store.event(run.id, 'turn.started', '')
   for (let i = 0; i < 260; i++) {
     workspace.service.store.event(run.id, 'item.completed', '', {
       item: {

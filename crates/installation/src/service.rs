@@ -326,9 +326,22 @@ impl Service {
     }
 
     pub async fn remove(&self, kind: &str, id: &str) -> Result<()> {
+        self.remove_authorized(kind, id, |_| Ok(())).await
+    }
+
+    pub(crate) async fn remove_authorized<F>(
+        &self,
+        kind: &str,
+        id: &str,
+        authorize: F,
+    ) -> Result<()>
+    where
+        F: FnOnce(&Db<'_>) -> Result<()> + Send + 'static,
+    {
         let (kind, id) = (kind.to_owned(), id.to_owned());
         self.store
             .transaction(move |db| {
+                authorize(db)?;
                 required(db.get(&kind, &id)?, "Record not found")?;
                 ensure_removable(db, &kind, &id)?;
                 if kind == "agents" {
