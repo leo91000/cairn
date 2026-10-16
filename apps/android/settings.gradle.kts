@@ -16,4 +16,4 @@ dependencyResolutionManagement {
 
 rootProject.name = "CairnAndroid"
 
-include(":app")
+include(":app", ":release-smoke")
