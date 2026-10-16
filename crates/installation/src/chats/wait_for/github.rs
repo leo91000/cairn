@@ -249,6 +249,9 @@ pub async fn poll_once(s: &Service) -> Result<()> {
                     db.event(text(&run, "id"), "chat.wait_ready", "Wait condition resolved", Some(&result))?;
                 } else if observed.is_err() {
                     chat["wakeup"]["lastError"] = "GitHub is temporarily unavailable; retrying until the wait deadline.".into();
+                } else if let Some(wakeup) = chat["wakeup"].as_object_mut() {
+                    // A successful check means GitHub answers again.
+                    wakeup.remove("lastError");
                 }
                 chat["wakeup"]["nextCheckAt"] = (now() + POLL_MS).into();
                 chat["updatedAt"] = now().into();

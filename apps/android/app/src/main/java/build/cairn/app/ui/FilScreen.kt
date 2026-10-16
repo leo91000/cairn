@@ -40,6 +40,7 @@ internal enum class FeedKind {
     UNREAD_TASK,
     RUNNING_CHAT,
     RUNNING_TASK,
+    WAITING_CHAT,
     CHAT,
 }
 
@@ -57,6 +58,10 @@ internal data class FeedItem(
     val taskId: String? = null,
     /** The agent is running now (not queued): the row animates. */
     val working: Boolean = false,
+    /** A waiting conversation's deadline: when it resumes, or at the latest for a condition. */
+    val wakeAt: Long? = null,
+    /** It waits for a condition, so it may resume before [wakeAt]. */
+    val condition: Boolean = false,
     /** The opening of the agent's final message, for finished work not read yet. */
     val preview: String? = null,
 ) {
@@ -73,9 +78,11 @@ internal data class Feed(
     val forYou: List<FeedItem>,
     val running: List<FeedItem>,
     val recent: List<FeedItem>,
+    /** Conversations that resume on their own, soonest first. */
+    val waiting: List<FeedItem> = emptyList(),
 ) {
     val empty
-        get() = forYou.isEmpty() && running.isEmpty() && recent.isEmpty()
+        get() = forYou.isEmpty() && running.isEmpty() && waiting.isEmpty() && recent.isEmpty()
 
     /** Finished work waiting to be read, below what needs an answer or a decision. */
     val unread
@@ -87,8 +94,8 @@ private fun context(agent: String, project: String?) =
 
 /**
  * One home for conversations and missions, grouped by what they ask of the user: things that need
- * an answer or a decision, then finished work not read yet, work in progress, then everything else
- * by recency. [read] holds marks taken on this device before the server's lists reflect them.
+ * an answer or decision, finished work not read yet, work in progress, waiting conversations, then
+ * everything else by recency. [read] holds local marks until the server reflects them.
  */
 internal fun buildFeed(
     chats: List<Chat>,
@@ -101,6 +108,7 @@ internal fun buildFeed(
     val forYou = mutableListOf<FeedItem>()
     val toRead = mutableListOf<FeedItem>()
     val running = mutableListOf<FeedItem>()
+    val waiting = mutableListOf<FeedItem>()
     val recent = mutableListOf<FeedItem>()
     chats
         .sortedByDescending { it.updatedAt }
@@ -149,6 +157,13 @@ internal fun buildFeed(
                                 else context(agent, chat.projectName),
                             )
                             .copy(working = chat.status == "running" && !chat.exclusiveSuspended)
+                !chat.paused && chat.wakeup != null && chat.status == "succeeded" ->
+                    waiting +=
+                        item(FeedKind.WAITING_CHAT, waitTarget(chat.wakeup).short)
+                            .copy(
+                                wakeAt = chat.wakeup.wakeAt,
+                                condition = chat.wakeup.condition != null,
+                            )
                 chat.unread && !chat.paused && unreadNow("chat:${chat.id}", chat.finishedAt) ->
                     toRead +=
                         item(FeedKind.UNREAD_CHAT, context(agent, chat.projectName))
@@ -219,11 +234,12 @@ internal fun buildFeed(
         forYou + toRead.sortedByDescending { it.stamp },
         running.sortedBy { it.startedAt ?: Long.MAX_VALUE },
         recent,
+        waiting.sortedBy { it.wakeAt },
     )
 }
 
 /** The Fil in reading order, one key per item: what a swipe between pages moves through. */
-internal fun Feed.keys() = (forYou + running + recent).map { it.key }
+internal fun Feed.keys() = (forYou + running + waiting + recent).map { it.key }
 
 /** The shell and its pages share one conversation stream and one mission poll. */
 internal data class FilSnapshot(val conversations: LiveSnapshot, val activity: List<Run>?)
@@ -263,6 +279,7 @@ internal fun feedSummary(feed: Feed): String {
         parts +=
             if (feed.unread.size == 1) "1 résultat à lire"
             else "${feed.unread.size} résultats à lire"
+    if (feed.waiting.isNotEmpty()) parts += "${feed.waiting.size} en attente"
     return parts.joinToString(" · ").ifBlank { "Tout est calme." }
 }
 
@@ -388,6 +405,20 @@ fun FilScreen(
                     elapsed(item.startedAt, now),
                     style = MaterialTheme.typography.labelLarge,
                     fontWeight = FontWeight.SemiBold,
+                )
+            }
+        }
+        section("En attente", feed.waiting) { item ->
+            FeedRow(
+                item,
+                { open(item) },
+                onDelete = item.chatId?.let { id -> { trash.trash(id) } },
+            ) {
+                Text(
+                    (if (item.condition) "≤ " else "") + timeLeft((item.wakeAt ?: now) - now),
+                    style = MaterialTheme.typography.labelLarge,
+                    fontWeight = FontWeight.SemiBold,
+                    color = MaterialTheme.colorScheme.primary,
                 )
             }
         }
@@ -519,6 +550,7 @@ private fun FeedRow(
             FeedKind.RECONNECT -> AvatarBadge.ATTENTION
             FeedKind.UNREAD_CHAT,
             FeedKind.UNREAD_TASK -> AvatarBadge.DONE
+            FeedKind.WAITING_CHAT -> AvatarBadge.WAITING
             FeedKind.CHAT -> null
         }
     SwipeToTrashRow(enabled = onDelete != null, onTrash = { onDelete?.invoke() }) { swipe ->

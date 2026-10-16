@@ -4,6 +4,7 @@ import { apiResourceUrl, state } from '../api'
 import {
   Check,
   Clock,
+  Hourglass,
   MessageCircleQuestion,
   Pause,
   X,
@@ -19,7 +20,7 @@ const props = withDefaults(defineProps<{
   identity?: string
   size?: number
   working?: boolean
-  badge?: 'question' | 'failed' | 'done' | 'paused' | 'queued' | null
+  badge?: 'question' | 'failed' | 'done' | 'paused' | 'queued' | 'waiting' | null
 }>(), {
   identity: '',
   size: 36,
@@ -50,9 +51,9 @@ const radius = computed(() => Math.round(props.size * 0.3))
     <span
       v-if="badge"
       class="absolute -bottom-1 -right-1 grid size-[15px] place-items-center rounded-full ring-2 ring-surface"
-      :class="badge === 'question' || badge === 'failed' ? 'bg-coral text-white' : badge === 'done' ? 'bg-success text-white' : 'bg-muted text-surface'"
+      :class="badge === 'question' || badge === 'failed' ? 'bg-coral text-white' : badge === 'done' ? 'bg-success text-white' : badge === 'waiting' ? 'bg-accent text-surface' : 'bg-muted text-surface'"
     >
-      <Icon :name="badge === 'question' ? MessageCircleQuestion : badge === 'failed' ? X : badge === 'done' ? Check : badge === 'paused' ? Pause : Clock" :size="badge === 'question' || badge === 'failed' || badge === 'done' ? 10 : 9" />
+      <Icon :name="badge === 'question' ? MessageCircleQuestion : badge === 'failed' ? X : badge === 'done' ? Check : badge === 'paused' ? Pause : badge === 'waiting' ? Hourglass : Clock" :size="badge === 'question' || badge === 'failed' || badge === 'done' ? 10 : 9" />
     </span>
   </span>
 </template>

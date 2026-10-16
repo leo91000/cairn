@@ -25,28 +25,38 @@ test('a durable scheduled wait survives restart and resumes without a user messa
     wakeAt: Date.now() + 420000,
   }
   workspace.service.store.put('chats', { ...workspace.service.store.get('chats', chat.id)!, wakeup })
+  workspace.service.store.event(detail.run.id, 'chat.sleep', wakeup.reason, wakeup)
   await workspace.restart()
   await page.goto(workspacePath(`/chats/${chat.id}`))
   await authenticateWorkspace(page)
-  const notice = page.getByRole('status').filter({ hasText: 'Wait for CI · Automatic resume from' })
-  await expect(notice).toBeVisible()
-  await expect(page.getByText('Scheduled wait', { exact: true }).first()).toBeVisible()
+  // One card in the conversation tells what it waits for, why and how long.
+  const card = page.locator('.chat-wait')
+  await expect(card).toHaveCount(1)
+  await expect(card).toContainText(/Resumes at .+Wait for CI.*in \d+ min/)
+  await expect(page.getByText(/^Resumes in \d+ min$/).first()).toBeVisible()
   await expect(page.getByRole('button', { name: 'Cancel scheduled wait', exact: true })).toBeVisible()
+  await expect(page.getByRole('textbox', { name: 'Message' })).toHaveAttribute('placeholder', 'Reply now — this cancels the wait')
+  // The Fil lists it apart, until it resumes.
+  const waiting = page.getByRole('region', { name: 'Waiting', exact: true })
+  await expect(waiting.locator(`[data-fil-key="chat:${chat.id}"]`)).toContainText(/Resumes at .+\d min/)
   await expect(page.locator('.agent-waiting')).toHaveCount(0)
   for (const width of [1280, 390]) {
     await page.setViewportSize({ width, height: 844 })
-    await expect(notice).toBeVisible()
+    await expect(card).toBeVisible()
     await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth - innerWidth)).toBeLessThanOrEqual(1)
   }
 
   await page.getByRole('button', { name: 'Pause wait', exact: true }).click()
   await expect.poll(async () => (await workspace.api(`/api/chats/${chat.id}`)).paused).toBe(true)
+  await expect(card).toContainText('Wait paused')
   workspace.service.store.put('chats', { ...workspace.service.store.get('chats', chat.id)!, wakeup: { ...wakeup, wakeAt: Date.now() } })
   await expect(page.getByRole('button', { name: 'Resume', exact: true })).toBeVisible()
   expect((await workspace.api(`/api/chats/${chat.id}`)).run.status).toBe('succeeded')
   await page.getByRole('button', { name: 'Resume', exact: true }).click()
   await expect.poll(async () => (await workspace.api(`/api/chats/${chat.id}`)).run?.summary).toContain('Cairn resumed this conversation')
-  await expect(notice).toHaveCount(0)
+  await expect(card).toContainText('Resumed as scheduled')
+  await expect(card.getByRole('button', { name: 'Pause wait' })).toHaveCount(0)
+  await expect(waiting).toHaveCount(0)
   const resumed = await workspace.api(`/api/chats/${chat.id}`)
   expect(resumed.run.id).toBe(detail.run.id)
   expect(resumed.run.sessionId).toBe(detail.run.sessionId)
@@ -74,11 +84,13 @@ test('stopping a scheduled wait cancels its wakeup and pauses the conversation',
   })
   await page.goto(workspacePath(`/chats/${chat.id}`))
   await authenticateWorkspace(page)
-  await expect(page.getByRole('status').filter({ hasText: 'Wait for review' })).toBeVisible()
+  // Its scheduling is outside the loaded history: the pending wait still has its card.
+  const card = page.locator('.chat-wait')
+  await expect(card).toContainText(/Resumes at .+Wait for review/)
   await page.getByRole('button', { name: 'Cancel scheduled wait', exact: true }).click()
   await expect.poll(async () => (await workspace.api(`/api/chats/${chat.id}`)).paused).toBe(true)
   expect((await workspace.api(`/api/chats/${chat.id}`)).wakeup).toBeNull()
-  await expect(page.getByRole('status').filter({ hasText: 'Wait for review' })).toHaveCount(0)
+  await expect(card).toHaveCount(0)
 })
 
 test('a durable condition wait follows a dependency across restart and queue pause', async ({ page, workspace }) => {
@@ -111,10 +123,9 @@ test('a durable condition wait follows a dependency across restart and queue pau
     await workspace.restart()
     await page.goto(workspacePath(`/chats/${chat.id}`))
     await authenticateWorkspace(page)
-    const notice = page.getByRole('status').filter({ hasText: 'Join dependency · Automatic resume when a result is available' })
-    await expect(notice).toBeVisible()
-    await expect(page.getByText('Waiting for a result', { exact: true }).first()).toBeVisible()
-    await expect(notice).toContainText('wait deadline')
+    await expect(page.locator('.chat-wait')).toContainText(/Waiting for another run to finish.*Join dependency.*up to \d+ min/)
+    await expect(page.getByText(/^Waiting · up to \d+ min$/).first()).toBeVisible()
+    await expect(page.getByRole('region', { name: 'Waiting', exact: true }).locator(`[data-fil-key="chat:${chat.id}"]`)).toContainText('Another run')
     await expect(page.locator('.agent-waiting')).toHaveCount(0)
     for (const width of [1280, 390]) {
       await page.setViewportSize({ width, height: 844 })

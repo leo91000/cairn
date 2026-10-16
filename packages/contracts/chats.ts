@@ -40,6 +40,9 @@ export interface ChatWakeup {
     headSha: string
   }
   observation?: Record<string, unknown> | null
+  /** GitHub conditions: when Cairn checks again, and why its last check failed. */
+  nextCheckAt?: number
+  lastError?: string
   id: string
   messageId: string
   reason: string
