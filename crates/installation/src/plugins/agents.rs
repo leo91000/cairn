@@ -75,38 +75,15 @@ pub async fn with_instructions(s: &Service, run: &Value) -> Value {
     run
 }
 
-/// Command-line words, from `{ args: [...] }` or the earlier
-/// `{ arguments: { operation, accountId, vault, item, reference } }` CLI frame.
-fn words(input: &Value, command: &cairn_plugin_api::Command) -> Result<Vec<String>> {
-    if let Some(args) = input["args"].as_array() {
-        return args
-            .iter()
-            .map(|word| word.as_str().map(str::to_owned))
-            .collect::<Option<Vec<_>>>()
-            .ok_or_else(|| Error::bad("Command arguments must be text."));
-    }
-    let legacy = &input["arguments"];
-    let mut words = Vec::new();
-    for (key, name) in [
-        ("accountId", "account"),
-        ("vault", "vault"),
-        ("item", "item"),
-        ("reference", "reference"),
-    ] {
-        let Some(value) = legacy[key].as_str() else {
-            continue;
-        };
-        let argument = command
-            .arguments
-            .iter()
-            .find(|argument| argument.name == name)
-            .ok_or_else(|| Error::bad("Unknown plugin command argument."))?;
-        if let Some(flag) = &argument.flag {
-            words.push(flag.clone());
-        }
-        words.push(value.to_owned());
-    }
-    Ok(words)
+/// Command-line words from `{ args: [...] }`.
+fn words(input: &Value) -> Result<Vec<String>> {
+    input["args"]
+        .as_array()
+        .map_or(&[][..], Vec::as_slice)
+        .iter()
+        .map(|word| word.as_str().map(str::to_owned))
+        .collect::<Option<Vec<_>>>()
+        .ok_or_else(|| Error::bad("Command arguments must be text."))
 }
 
 /// Runs `cairn plugin <plugin> <command> …` for the run holding `bearer`.
@@ -118,10 +95,7 @@ pub async fn command(s: &Service, bearer: &str, input: &Value) -> Result<Value> 
     let package = registry::active(s, plugin)
         .await
         .map_err(|_| unavailable())?;
-    let name = input["command"]
-        .as_str()
-        .or_else(|| input["arguments"]["operation"].as_str())
-        .unwrap_or("");
+    let name = text(input, "command");
     let Some(command) = package.manifest.command(name) else {
         let available = package
             .manifest
@@ -137,7 +111,7 @@ pub async fn command(s: &Service, bearer: &str, input: &Value) -> Result<Value> 
             available.join(" | ")
         )));
     };
-    let values = parse_arguments(command, &words(input, command)?).map_err(Error::bad)?;
+    let values = parse_arguments(command, &words(input)?).map_err(Error::bad)?;
     let instances = granted(s, &agent_id, Some(plugin))
         .await?
         .into_iter()

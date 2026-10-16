@@ -59,11 +59,12 @@ in Cairn for now. Inbound webhooks, long-lived sockets for scripts and a plugin-
 page outside instances are not part of v2. (Sockets, inbound messages and package
 forms were added by ADR-0045, which removed Discord's native code.)
 
-API v1 manifests keep loading, and approval digests of v1 packages do not change.
+Only API v2 manifests load; v1 packages must be updated (ADR-0046 also changed how
+approvals are computed, so installed packages are reviewed again).
 Instances that delegate nothing to external people are no longer bound to the owner
 who created them; external delegation still is. ADR-0038's capability model, approval digests,
 external delegation and owner-only management are unchanged; this ADR supersedes its
 statement that arbitrary native execution is deferred, for declared programs only.
 
-See [plugin implementation](../PLUGINS.md#contributions-api-v2) for the manifest
+See [plugin implementation](../PLUGINS.md#contributions) for the manifest
 reference.

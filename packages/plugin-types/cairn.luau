@@ -1,4 +1,4 @@
--- Authoring reference for plugin API v2 (v1 packages keep working). Runtime globals
+-- Authoring reference for plugin API v2 (`"apiVersion": 2`). Runtime globals
 -- are host-owned and frozen. A package can be split into modules: `require("./lib/x")`
 -- loads lib/x.luau (or lib/x/init.luau) relative to the requiring file, once per worker,
 -- from the package's own files only.
@@ -16,7 +16,7 @@
 --   socket            capability "socket", in the transport worker: { type = "start", instance,
 --                     settings } | { type = "open" } | { type = "message", text } |
 --                     { type = "tick" } | { type = "close", code?, reason, error? }
--- One-shot handlers (API v2), each in a fresh worker:
+-- One-shot handlers, each in a fresh worker:
 --   command           `cairn plugin <id> <command> …`        { command, arguments, agent, instances }
 --                     return text for `text`/`secret` commands, any JSON otherwise
 --   tool              a call of a declared Cairn MCP tool    { tool, input, agent, instances }
@@ -71,7 +71,7 @@ export type ExecRequest = {
 
 export type ExecResult = { status: number, stdout: string, stderr: string }
 
--- A view component (API v2). Tones: "neutral" | "info" | "success" | "warning" | "danger".
+-- A view component. Tones: "neutral" | "info" | "success" | "warning" | "danger".
 export type Component = { type: string, [string]: Json }
 
 export type FieldOption = { value: string, label: string, description: string?, disabled: boolean? }
@@ -114,9 +114,9 @@ export type Cairn = {
     },
     -- capability "http".
     http: { request: (request: HttpRequest) -> HttpResponse },
-    -- capability "exec" (API v2).
+    -- capability "exec".
     exec: { run: (request: ExecRequest) -> ExecResult },
-    -- capability "socket" (API v2), in the transport worker only. WSS to declared hosts;
+    -- capability "socket", in the transport worker only. WSS to declared hosts;
     -- `{{secret}}` in sent text becomes the credential (auth = true) or a secret field.
     -- Commands apply once the handler returns.
     socket: {

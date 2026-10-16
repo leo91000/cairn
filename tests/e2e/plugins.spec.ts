@@ -180,7 +180,7 @@ test('installed packages wait for review and connect through a generated form', 
     name: 'Team notes',
     version: '1.0.0',
     description: 'Keeps a note for each team.',
-    apiVersion: 1,
+    apiVersion: 2,
     capabilities: ['storage', 'timers'],
     settings: [{
       key: 'team',

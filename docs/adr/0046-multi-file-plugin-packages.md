@@ -13,9 +13,9 @@ require-by-string, to `path.luau` or `path/init.luau` inside the package.
   only. The disk is never read, and the global `require` provided by the Luau runtime
   is removed. Each file runs once per worker in its own environment over the frozen
   globals; cycles and paths above the package are refused.
-- Approval covers the manifest and every Luau file. Single-file packages keep their
-  previous digest; split packages use a distinct encoding of all files, so an edited,
-  added or linked file withdraws the approval.
+- Approval covers the manifest and every Luau file, by path, so an edited, added or
+  linked file withdraws the approval. Packages approved before this change are
+  reviewed again; there is no compatibility path for older digests or API v1.
 - Limits: lowercase path segments, four levels, 64 modules and 384 KB of Luau per
   package, which keeps load frames under the 1 MB frame limit.
 - Bundled packages are embedded by a build script that includes every file of

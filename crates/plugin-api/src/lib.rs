@@ -14,7 +14,7 @@ pub use settings::validate_settings_schema;
 pub use sources::{MAX_MODULES, MAX_SOURCE_BYTES, Sources, module_path, resolve};
 pub use view::{validate_action_result, validate_view};
 
-/// Worker protocol version, and the newest manifest version this host understands.
+/// Worker protocol and manifest version. Manifests must declare exactly this one.
 pub const API_VERSION: u32 = 2;
 /// Prefix of a host error carrying a package's `cairn.fail` message.
 pub const REJECTED: &str = "rejected: ";
@@ -284,7 +284,7 @@ fn tool_name(value: &str, plugin: &str) -> bool {
 
 impl Manifest {
     pub fn validate(&self) -> Result<(), &'static str> {
-        if !(1..=API_VERSION).contains(&self.api_version) {
+        if self.api_version != API_VERSION {
             return Err("Plugin API version is incompatible.");
         }
         if !slug(&self.id, 80)
@@ -330,9 +330,6 @@ impl Manifest {
             return Err("Plugin manifest has an invalid credential rule.");
         }
         validate_settings_schema(&self.settings)?;
-        if self.api_version < 2 && self.uses_v2() {
-            return Err("These plugin manifest fields need apiVersion 2.");
-        }
         if let Some(instances) = &self.instances
             && [&instances.singular, &instances.plural]
                 .iter()
@@ -361,25 +358,6 @@ impl Manifest {
         }
         self.validate_programs()?;
         self.validate_agent_interface()
-    }
-
-    fn uses_v2(&self) -> bool {
-        self.instances.is_some()
-            || self.brand.is_some()
-            || !self.programs.is_empty()
-            || self.agent_access.is_some()
-            || !self.commands.is_empty()
-            || !self.tools.is_empty()
-            || !self.instructions.is_empty()
-            || self.instance_view
-            || self.instance_test
-            || self.instance_form
-            || self.settings.iter().any(|field| {
-                !matches!(
-                    field["type"].as_str(),
-                    Some("string" | "number" | "boolean")
-                )
-            })
     }
 
     fn validate_programs(&self) -> Result<(), &'static str> {
@@ -567,7 +545,7 @@ mod tests {
             "id": "example",
             "name": "Example",
             "version": "1.0.0",
-            "apiVersion": 1,
+            "apiVersion": 2,
             "capabilities": ["http", "storage"],
             "hosts": ["api.example.com"],
             "credential": { "label": "API key", "header": "authorization", "prefix": "Bearer " },
@@ -575,6 +553,8 @@ mod tests {
         });
         assert!(manifest(base.clone()).is_ok());
         for (key, value) in [
+            ("apiVersion", json!(1)),
+            ("apiVersion", json!(3)),
             ("capabilities", json!(["shell"])),
             ("capabilities", json!(["http", "http"])),
             ("hosts", json!(["https://api.example.com"])),
@@ -602,7 +582,7 @@ mod tests {
     #[test]
     fn methods_map_to_their_capability() {
         let manifest: Manifest = serde_json::from_value(json!({
-            "id": "example", "name": "Example", "version": "1", "apiVersion": 1,
+            "id": "example", "name": "Example", "version": "1", "apiVersion": 2,
             "capabilities": ["storage"]
         }))
         .unwrap();

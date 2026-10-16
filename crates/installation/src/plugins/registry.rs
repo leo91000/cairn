@@ -38,19 +38,12 @@ pub struct Package {
     pub digest: String,
 }
 
-/// What the owner approves: the manifest and every Luau file. Single-file packages
-/// keep their earlier digest; split ones use a distinct, unambiguous encoding.
+/// What the owner approves: the manifest and every Luau file, by path.
 fn digest(manifest: &Manifest, source: &Sources) -> Result<String> {
-    let manifest = serde_json::to_string(manifest)?;
-    if source.modules.is_empty() {
-        return Ok(crate::auth::hex_digest(&format!(
-            "{manifest}\n{}",
-            source.main
-        )));
-    }
     let files = source.files().collect::<BTreeMap<_, _>>();
     Ok(crate::auth::hex_digest(&format!(
-        "cairn-package-v2\n{manifest}\n{}",
+        "cairn-package\n{}\n{}",
+        serde_json::to_string(manifest)?,
         serde_json::to_string(&files)?
     )))
 }

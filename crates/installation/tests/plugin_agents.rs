@@ -163,15 +163,12 @@ async fn service_accounts_are_instances_with_encrypted_tokens_and_live_grants() 
         fields["value"]["fields"][0]["reference"],
         "op://vault/item/password"
     );
-    // The previous CLI frame still works for VMs running an older binary.
-    let legacy_frame = json!({
+    // Only the current CLI frame is understood.
+    let earlier_frame = json!({
         "plugin": "onepassword",
         "arguments": { "operation": "read", "accountId": account, "reference": "op://vault/item/password" },
     });
-    assert_eq!(
-        run(&f, legacy_frame).await.unwrap()["value"],
-        "secret-with-no-newline"
-    );
+    assert_eq!(run(&f, earlier_frame).await, Err(400));
 
     update["enabled"] = json!(false);
     save(s, update.clone(), Some(&account)).await;

@@ -381,7 +381,7 @@ async fn worker_sessions_enforce_capabilities_deadlines_and_keep_state() {
     );
 
     let manifest: Manifest = serde_json::from_value(json!({
-        "id": "probe", "name": "Probe", "version": "1", "apiVersion": 1, "capabilities": ["storage"]
+        "id": "probe", "name": "Probe", "version": "1", "apiVersion": 2, "capabilities": ["storage"]
     }))
     .unwrap();
     let mut session = host
@@ -1762,7 +1762,7 @@ fn pinger(version: &str, capabilities: &[&str]) -> Value {
             "name": "Pinger",
             "version": version,
             "description": "Pings a status API.",
-            "apiVersion": 1,
+            "apiVersion": 2,
             "capabilities": capabilities,
             "hosts": ["api.example.com"],
             "credential": { "label": "API key", "header": "x-api-key" },
@@ -1789,8 +1789,8 @@ async fn installed_packages_need_approval_and_reach_only_declared_hosts() {
     let (mock, server) = mock(&s).await;
     for invalid in [
         json!({ "manifest": pinger("1.0.0", &["onepassword.read"])["manifest"], "source": "return {}" }),
-        json!({ "manifest": { "id": "discord", "name": "Fake", "version": "1", "apiVersion": 1, "capabilities": [] }, "source": "return {}" }),
-        json!({ "manifest": { "id": "broken", "name": "Broken", "version": "1", "apiVersion": 1, "capabilities": [] }, "source": "return function() end" }),
+        json!({ "manifest": { "id": "discord", "name": "Fake", "version": "1", "apiVersion": 2, "capabilities": [] }, "source": "return {}" }),
+        json!({ "manifest": { "id": "broken", "name": "Broken", "version": "1", "apiVersion": 2, "capabilities": [] }, "source": "return function() end" }),
     ] {
         assert!(registry::install(&s, &invalid).await.is_err());
     }
@@ -2032,7 +2032,7 @@ async fn installed_packages_can_be_split_into_modules_and_any_file_change_needs_
     let package = |modules: Value| {
         json!({
             "manifest": {
-                "id": "splitter", "name": "Splitter", "version": "1.0.0", "apiVersion": 1,
+                "id": "splitter", "name": "Splitter", "version": "1.0.0", "apiVersion": 2,
                 "capabilities": [],
             },
             "source": "local greet = require('./lib/greet')\nreturn { probe = function(event) return greet.hello(event.name) end }",
