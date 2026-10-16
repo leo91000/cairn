@@ -378,6 +378,7 @@ fun RunScreen(
                                         current.snapshot.agent.name.ifBlank { "Cairn" },
                                         rendering,
                                         hideRunning = current.status == "running",
+                                        active = current.active,
                                     )
                                 }
                                 if (!current.active)

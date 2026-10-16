@@ -422,6 +422,28 @@ internal fun ChatPage(
         remember(live.events, running) {
             if (running) backgroundWait(live.events) else null
         }
+    // A subagent's full activity opens in a sheet. The current request's subagents stay in sight
+    // above the composer while one of them works.
+    var openedSubagent by rememberSaveable(id) { mutableStateOf<String?>(null) }
+    val openSubagent = remember { { agent: String -> openedSubagent = agent } }
+    val subagentTeams = remember(timeline) { subagentTeams(timeline) }
+    val currentSubagents = remember(timeline) { currentSubagents(timeline) }
+    val subagentBar = currentSubagents.any { it.state(active) == SubagentState.RUNNING }
+    val working =
+        remember(
+            live.events,
+            waitingTasks,
+            currentSubagents,
+            chat?.agentName,
+            chat?.run?.startedAt,
+        ) {
+            if (!running) null
+            else
+                waitingTasks?.let {
+                    waitingStep(it)
+                        .copy(subagents = waitingForSubagents(live.events, currentSubagents))
+                } ?: workingStep(live.events, chat?.agentName.orEmpty(), chat?.run?.startedAt)
+        }
     val error = conversationError(chat)
     var errorDismissed by
         remember(error, chat?.id, chat?.run?.id, chat?.run?.finishedAt) { mutableStateOf(false) }
@@ -1035,13 +1057,18 @@ internal fun ChatPage(
                                             )
                                         }
                                     items(timeline, key = { it.key }) {
-                                        TimelineRow(
-                                            vm,
-                                            it,
-                                            chat?.agentName ?: "Cairn",
-                                            rendering,
-                                            hideRunning = chat?.run?.status == "running",
-                                        )
+                                        CompositionLocalProvider(
+                                            LocalOpenSubagent provides openSubagent
+                                        ) {
+                                            TimelineRow(
+                                                vm,
+                                                it,
+                                                chat?.agentName ?: "Cairn",
+                                                rendering,
+                                                hideRunning = chat?.run?.status == "running",
+                                                active = active,
+                                            )
+                                        }
                                     }
                                     if (!active && delivery.sending.isEmpty() && !live.catchingUp)
                                         chat?.run?.outcome?.let { outcome ->
@@ -1088,24 +1115,13 @@ internal fun ChatPage(
                                                 color = signal.warning,
                                             )
                                         }
-                                    else if (chat?.run?.status == "running" && !live.catchingUp)
-                                        item(key = "agent-working") {
-                                            WorkingIndicator(
-                                                remember(
-                                                    live.events,
-                                                    waitingTasks,
-                                                    chat.agentName,
-                                                    chat.run.startedAt,
-                                                ) {
-                                                    waitingTasks?.let(::waitingStep)
-                                                        ?: workingStep(
-                                                            live.events,
-                                                            chat.agentName,
-                                                            chat.run.startedAt,
-                                                        )
-                                                }
-                                            )
-                                        }
+                                    else if (
+                                        working != null &&
+                                            !live.catchingUp &&
+                                            // The bar already shows the subagents it waits for.
+                                            !(subagentBar && working.subagents)
+                                    )
+                                        item(key = "agent-working") { WorkingIndicator(working) }
                                 }
                                 HistoryStatus(
                                     live,
@@ -1118,6 +1134,18 @@ internal fun ChatPage(
                                 HistoryBottomButton(listState, follow, "Derniers messages") {
                                     follow = true
                                 }
+                            }
+                        }
+                        if (subagentBar && !fullscreen)
+                            SubagentBar(currentSubagents, active, openSubagent)
+                        openedSubagent?.let { selected ->
+                            SubagentSheet(
+                                subagentTeams,
+                                selected,
+                                active,
+                                openSubagent,
+                            ) {
+                                openedSubagent = null
                             }
                         }
                         if (questions.isNotEmpty())
