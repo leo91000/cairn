@@ -85,6 +85,37 @@ impl Worker {
         Ok(result)
     }
 
+    /// An old process must finish preparation and stopping before another author
+    /// can reuse its workspace with a fresh native session.
+    pub(crate) async fn request_new_turn_authorized<F>(
+        &self,
+        s: &Service,
+        run: &str,
+        chat: &str,
+        authorize: F,
+    ) -> Result<bool>
+    where
+        F: FnOnce(&Db<'_>) -> Result<()> + Send + 'static,
+    {
+        let preparation = self.run_preparation_lock(run).await;
+        let Ok(_preparation) = preparation.try_lock_owned() else {
+            return Ok(false);
+        };
+        let Ok(active) = self.active.try_lock() else {
+            return Ok(false);
+        };
+        if active.contains_key(run) {
+            return Ok(false);
+        }
+        let (run, chat) = (run.to_owned(), chat.to_owned());
+        s.store
+            .transaction(move |db| {
+                authorize(db)?;
+                crate::chats::request_next_turn_in(db, &chat, &run)
+            })
+            .await
+    }
+
     pub async fn cleanup(&self, s: &Service, id: &str) -> Result<Value> {
         let active = self.active.lock().await;
         let run = s.store.run(id).await?;
@@ -309,7 +340,15 @@ async fn pause_chat(s: &Service, input: &crate::http::Input, id: &str) -> Result
     crate::conversation_lifecycle::require_active(&chat)?;
     if !paused && let Some(run_id) = chat["runId"].as_str() {
         let run = s.store.run(run_id).await?;
+        let queued_new_turn = s
+            .store
+            .read({
+                let (chat, run) = (chat.clone(), run.clone());
+                move |db| crate::plugins::turns::pending(db, &chat, &run)
+            })
+            .await?;
         if RunStatus::of(&run).is_some_and(RunStatus::is_resumable)
+            && !queued_new_turn
             && chat["cancelledByDeletion"] != true
             && chat["sessionRestartRequested"] != true
         {
@@ -317,12 +356,12 @@ async fn pause_chat(s: &Service, input: &crate::http::Input, id: &str) -> Result
         }
     }
     s.store.delete(&format!("chat-error:{id}")).await?;
-    s.chat_pause(id, paused).await
+    s.chat_pause_by_user(id, paused).await
 }
 
 async fn stop_chat(s: &Service, id: &str) -> Result<Value> {
     let chat = s.get("chats", id).await?;
-    s.chat_pause(id, true).await?;
+    s.chat_pause_by_user(id, true).await?;
     s.chat_cancel_sleep(id).await?;
     if let Some(run_id) = chat["runId"].as_str()
         && RunStatus::of(&s.store.run(run_id).await?).is_some_and(RunStatus::is_active)

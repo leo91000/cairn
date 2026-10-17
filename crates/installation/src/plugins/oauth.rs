@@ -230,6 +230,18 @@ fn persist(db: &Db<'_>, key: &str, encrypted: &Value, personal: bool) -> Result<
     db.set(&stored_key(key), encrypted, None)
 }
 
+/// Release the credential before reserving its revocation generation. An existing
+/// token must remain disconnectable at capacity, even if its old generation expired.
+fn disconnect_authorization(db: &Db<'_>, key: &str) -> Result<()> {
+    let connected = db.kv(&stored_key(key))?.is_some();
+    let pending = db.kv(&epoch_key(key))?.is_some();
+    db.delete(&stored_key(key))?;
+    if connected || pending {
+        fence(db, key, &json!(id()), Some(now() + TTL))?;
+    }
+    Ok(())
+}
+
 fn expired() -> Error {
     Error::conflict(EXPIRED)
 }
@@ -521,7 +533,12 @@ async fn begin(
                 if pending.external.is_some() || pending.epoch.is_none() {
                     pending.epoch = Some(json!(id()));
                 }
-                fence(db, &auth_key, pending.epoch.as_ref().unwrap(), Some(pending.expires_at))?;
+                let expires = if db.kv(&stored_key(&auth_key))?.is_some() {
+                    None
+                } else {
+                    Some(pending.expires_at)
+                };
+                fence(db, &auth_key, pending.epoch.as_ref().unwrap(), expires)?;
             }
             if let Some(person) = &pending.external {
                 let index = external::flow_key(&pending.resource, &pending.provider, &person.subject);
@@ -1069,9 +1086,6 @@ pub async fn revoke(
                 return Err(expired());
             }
             if actor.is_some() {
-                // A per-person generation fences code exchanges without changing
-                // the shared resource or anyone else's authorization.
-                fence(db, &key, &json!(id()), Some(now() + TTL))?;
                 if let Some(value) = db.kv(&stored_key(&key))? {
                     let authorization: Authorization =
                         serde_json::from_value(vault.decrypt(&key, &value)?)?;
@@ -1084,7 +1098,7 @@ pub async fn revoke(
                         )?;
                     }
                 }
-                return db.delete(&stored_key(&key));
+                return disconnect_authorization(db, &key);
             }
             // Also invalidate exchanges that have already consumed their pending
             // state but have not yet returned from the provider.

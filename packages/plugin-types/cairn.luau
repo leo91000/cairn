@@ -217,6 +217,9 @@ export type Cairn = {
             text: string,
             thread: string?,
             shared: boolean?,
+            -- Resource-routed messages only: queue an independent turn. If the
+            -- preceding turn stops, do not replay its prompt or native session.
+            newTurn: boolean?,
             files: { { url: string, name: string? } }?,
             reply: Json?,
         }) -> { chatId: string, messageId: string },

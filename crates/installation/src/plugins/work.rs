@@ -443,6 +443,14 @@ pub async fn submit(s: &Service, context: &Context, args: &Value) -> Result<Valu
     let content = text(args, "text").trim().to_owned();
     let thread = text(args, "thread").to_owned();
     let shared = args["shared"] == true;
+    let new_turn = args["newTurn"] == true;
+    if args.get("newTurn").is_some_and(|value| !value.is_boolean())
+        || (new_turn && expected.routing.is_none())
+    {
+        return Err(Error::bad(
+            "A new turn requires a boolean option and resource-routed admission.",
+        ));
+    }
     let reply = args.get("reply").cloned().unwrap_or(Value::Null);
     if content.len() > 50_000
         || thread.chars().count() > 200
@@ -539,6 +547,8 @@ pub async fn submit(s: &Service, context: &Context, args: &Value) -> Result<Valu
         let run = s.store.run(run_id).await?;
         if crate::run_status::RunStatus::of(&run)
             .is_some_and(crate::run_status::RunStatus::is_resumable)
+            && !new_turn
+            && chat["pausedByUser"] != true
             && chat["cancelledByDeletion"] != true
             && chat["sessionRestartRequested"] != true
         {
@@ -586,7 +596,7 @@ pub async fn submit(s: &Service, context: &Context, args: &Value) -> Result<Valu
             let mut chat = db.get("chats", &chat_id)?
                 .ok_or_else(|| Error::not_found("Conversation no longer exists."))?;
             crate::conversation_lifecycle::require_active(&chat)?;
-            chat["paused"] = json!(false);
+            chat["paused"] = json!(chat["pausedByUser"] == true);
             db.put("chats", &chat)?;
             let counters = limits(db, &connection, &author)?;
             let message_id = id();
@@ -598,6 +608,11 @@ pub async fn submit(s: &Service, context: &Context, args: &Value) -> Result<Valu
                 &chat_id,
                 message,
             )?;
+            if new_turn {
+                let key = super::turns::key(&chat_id, &message_id);
+                let binding = binding(&connection, &author, &thread, shared);
+                db.set(&key, &json!({ "binding": binding }), None)?;
+            }
             counters.increment(db)?;
             let receipt = json!({ "chatId": chat_id, "messageId": queued["id"] });
             db.set(&dedupe, &receipt, Some(now() + 30 * 86_400_000))?;
@@ -846,7 +861,12 @@ pub async fn cancel(s: &Service, context: &Context, args: &Value) -> Result<Valu
                 if detail["runId"] != expected_run {
                     return Err(Error::conflict("The conversation's execution changed."));
                 }
-                detail["paused"] = json!(true);
+                let run = db
+                    .run(&expected_run)?
+                    .ok_or_else(|| Error::not_found("Execution no longer exists."))?;
+                let keep_paused =
+                    detail["paused"] == true || !super::turns::pending(db, &detail, &run)?;
+                detail["paused"] = json!(keep_paused);
                 db.put("chats", &detail)?;
                 Ok(())
             })
@@ -893,6 +913,22 @@ fn turn(db: &Db<'_>, connection: &Connection, delivery: &Value) -> Result<Turn> 
         .ok_or_else(|| Error::not_found("Conversation no longer exists."))?;
     if !crate::conversation_lifecycle::is_active(&chat) {
         return Err(Error::forbidden("Conversation is no longer active."));
+    }
+    if let Some(ended) = db.kv(&super::turns::abandoned_key(
+        text(&chat, "id"),
+        text(delivery, "id"),
+    ))? {
+        return Ok(Turn::Stopped {
+            failed: ended["failed"] == true,
+        });
+    }
+    // An independent queued request has not started yet. The preceding run's
+    // terminal status must not cancel its future reply delivery.
+    if db
+        .kv(&super::turns::key(text(&chat, "id"), text(delivery, "id")))?
+        .is_some()
+    {
+        return Ok(Turn::Waiting);
     }
     let run_id = text(&chat, "runId").to_owned();
     if run_id.is_empty() {

@@ -119,9 +119,11 @@ describe('real worker subprocess lifecycle', () => {
     const first = await ctx.service.enqueue(ctx.task.id)
     const second = await ctx.service.enqueue(other.id)
     await ctx.worker.tick()
+    // The supervisor handle exists before its agent starts. Cancel only after
+    // the fixture's own start event, so this tests a running process.
     await expect
-      .poll(() => !!ctx.worker.active.get(first.id)?.child)
-      .toBe(true)
+      .poll(() => ctx.service.store.run(first.id)?.sessionId, { timeout: 6000 })
+      .toBe('fixture-session')
     expect(ctx.service.store.run(second.id)?.status).toBe('queued')
     ctx.worker.cancel(first.id)
     expect((await finished(first.id)).status).toBe('cancelled')

@@ -796,6 +796,211 @@ fn member_request(method: &str, path: &str, body: Value, account: &str) -> axum:
 }
 
 #[tokio::test]
+async fn authorization_capacity_preserves_connections_and_allows_idempotent_disconnect() {
+    let (_root, s, instance, resource, _path, app) = configured_fixture(false, true).await;
+    let mut app = app;
+    let original = registry::active(&s, "example").await.unwrap();
+    let mut manifest = serde_json::to_value(&original.manifest).unwrap();
+    manifest["version"] = json!("2");
+    let provider = manifest["oauth"][0].clone();
+    let names: Vec<_> = (0..8).map(|index| format!("personal-{index}")).collect();
+    manifest["oauth"] = json!(
+        names
+            .iter()
+            .map(|name| {
+                let mut declared = provider.clone();
+                declared["name"] = json!(name);
+                declared
+            })
+            .collect::<Vec<_>>()
+    );
+    let package = registry::install(
+        &s,
+        &json!({
+            "manifest": manifest,
+            "source": original.source.main,
+        }),
+    )
+    .await
+    .unwrap();
+    registry::approve(&s, "example", "2", text(&package, "digest"))
+        .await
+        .unwrap();
+    let upstream = axum::Router::new().route(
+        "/token",
+        axum::routing::post(|| async {
+            axum::Json(json!({
+                "access_token": "capacity-credential-fixture",
+                "scope": "messages:read",
+                "team": { "id": "T111" },
+                "authed_user": { "id": "U111" },
+            }))
+        }),
+    );
+    let (origin, server) = common::serve_locally(upstream).await;
+    s.plugins.route_http_to(Some(origin));
+    let prefix = format!("/api/plugins/example/connections/{instance}/resources/workspace");
+    let mut connected = Vec::new();
+    // Each personal authorization retains a credential and its revocation state.
+    // Exercise the production capacity through owner HTTP, without reading storage.
+    for index in 0..128 {
+        // Recreate the HTTP server between batches. OAuth capacity must survive
+        // restarts independently of the server's per-minute request limit.
+        if index > 0 && index % 16 == 0 {
+            app = cairn_installation::http::router(s.clone()).await.unwrap();
+        }
+        let resource = if index == 0 {
+            resource.clone()
+        } else {
+            let created = common::send(
+                &app,
+                request(
+                    "POST",
+                    &prefix,
+                    json!({
+                        "name": format!("Workspace {index}"),
+                        "settings": { "externalId": "T111" },
+                    }),
+                    Some("fixture-owner"),
+                ),
+            )
+            .await;
+            assert_eq!(created.status(), StatusCode::OK);
+            text(&common::read_json(created).await, "id").to_owned()
+        };
+        for name in &names {
+            let path = format!("{prefix}/{resource}/oauth/{name}");
+            let started = begin(&app, &path).await;
+            let callback = format!(
+                "/api/plugin-oauth/{instance}/callback?state={}&code=fixture",
+                text(&started, "state")
+            );
+            assert_eq!(
+                common::send(&app, request("GET", &callback, Value::Null, None))
+                    .await
+                    .status(),
+                StatusCode::OK
+            );
+            let finished = common::send(
+                &app,
+                request(
+                    "POST",
+                    &format!("{path}/finish"),
+                    json!({
+                        "state": started["state"],
+                    }),
+                    Some("fixture-owner"),
+                ),
+            )
+            .await;
+            assert_eq!(
+                finished.status(),
+                StatusCode::OK,
+                "{}",
+                common::read_text(finished).await
+            );
+            connected.push(path);
+        }
+    }
+    let unused = common::send(
+        &app,
+        request(
+            "POST",
+            &prefix,
+            json!({
+                "name": "Unused workspace",
+                "settings": { "externalId": "T111" },
+            }),
+            Some("fixture-owner"),
+        ),
+    )
+    .await;
+    assert_eq!(unused.status(), StatusCode::OK);
+    let unused = format!(
+        "{prefix}/{}/oauth/personal-0",
+        text(&common::read_json(unused).await, "id")
+    );
+    let full = common::send(
+        &app,
+        request(
+            "POST",
+            &unused,
+            json!({
+                "scopes": ["messages:read"],
+            }),
+            Some("fixture-owner"),
+        ),
+    )
+    .await;
+    assert_eq!(full.status(), StatusCode::TOO_MANY_REQUESTS);
+    let unchanged = common::read_json(
+        common::send(
+            &app,
+            request("GET", &connected[0], Value::Null, Some("fixture-owner")),
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(unchanged["status"], "authorized");
+
+    let disconnected = common::send(
+        &app,
+        request("DELETE", &unused, Value::Null, Some("fixture-owner")),
+    )
+    .await;
+    assert_eq!(
+        disconnected.status(),
+        StatusCode::OK,
+        "an already disconnected person could not disconnect at capacity"
+    );
+    for path in connected.iter().take(2) {
+        let disconnected = common::send(
+            &app,
+            request("DELETE", path, Value::Null, Some("fixture-owner")),
+        )
+        .await;
+        assert_eq!(disconnected.status(), StatusCode::OK);
+        let status = common::read_json(
+            common::send(
+                &app,
+                request("GET", path, Value::Null, Some("fixture-owner")),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(status["status"], "disconnected");
+    }
+    let started = begin(&app, &unused).await;
+    let callback = format!(
+        "/api/plugin-oauth/{instance}/callback?state={}&code=fixture",
+        text(&started, "state")
+    );
+    assert_eq!(
+        common::send(&app, request("GET", &callback, Value::Null, None))
+            .await
+            .status(),
+        StatusCode::OK
+    );
+    assert_eq!(
+        common::send(
+            &app,
+            request(
+                "POST",
+                &format!("{unused}/finish"),
+                json!({
+                    "state": started["state"],
+                }),
+                Some("fixture-owner")
+            )
+        )
+        .await
+        .status(),
+        StatusCode::OK
+    );
+    server.abort();
+}
+
+#[tokio::test]
 async fn pending_consent_is_bounded_and_a_completed_exchange_releases_its_slot() {
     let (_root, s, instance, _resource, path, app) = configured_fixture(false, true).await;
     let mut first = Value::Null;

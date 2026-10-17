@@ -36,10 +36,17 @@ async fn fixture() -> (TempDir, Arc<Service>, String, String, axum::Router) {
 async fn configured_fixture(
     public_origin: Option<&str>,
 ) -> (TempDir, Arc<Service>, String, String, axum::Router) {
+    configured_fixture_with_runner(public_origin, "http://runner:4311").await
+}
+
+async fn configured_fixture_with_runner(
+    public_origin: Option<&str>,
+    runner: &str,
+) -> (TempDir, Arc<Service>, String, String, axum::Router) {
     let root = TempDir::new().unwrap();
     std::fs::create_dir_all(root.path().join("home")).unwrap();
     let mut config = common::config(root.path());
-    config.runner_url = "http://runner:4311".into();
+    config.runner_url = runner.to_owned();
     let s = Service::new(config).await.unwrap();
     common::relay_fixture::claimed(&s).await.unwrap();
     s.plugins
@@ -164,10 +171,23 @@ async fn configured_fixture(
                 return {status = 200, body = cairn.json.encode(result)}
             end,
             message = function(event)
-                return cairn.conversations.submit({text = event.text, thread = event.context.thread, shared = true,
-                    reply = {resource = event.resource, route = event.route, channel = event.context.channel}})
+                return cairn.conversations.submit({text = event.text, thread = event.context.thread, shared = true, newTurn = event.newTurn,
+                    reply = {resource = event.resource, route = event.route, channel = event.context.channel, trace = event.trace}})
+            end,
+            reply = function(event)
+                if event.reply.trace then
+                    return cairn.http.request({url = 'https://api.example.test/reply-result', method = 'POST', json = event})
+                end
             end,
             interaction = function(event)
+                if event.stopDelay then
+                    local result = {}
+                    if event.stopDelay ~= 'wait' then
+                        result = cairn.conversations.cancel({conversation = event.chat, delivery = event.delivery})
+                    end
+                    cairn.http.request({url = 'https://api.example.test/stop-barrier'})
+                    return result
+                end
                 if event.oauth then
                     local ok, result = pcall(function()
                         local args = {resource = event.resource, provider = 'personal'}
@@ -2164,4 +2184,1050 @@ async fn repeated_question_ids_are_delivered_for_their_own_shared_turn() {
     }
     session.stop().await;
     server.abort();
+}
+
+#[tokio::test]
+async fn a_queued_new_turn_can_follow_a_stopped_author_without_inheriting_their_identity() {
+    let (_root, s, instance, resource, app) = fixture().await;
+    let (results, mut received) = tokio::sync::mpsc::unbounded_channel();
+    let upstream = axum::Router::new()
+        .route("/token", axum::routing::post(|axum::Form(form): axum::Form<std::collections::HashMap<String, String>>| async move {
+            let (token, subject) = match form["code"].as_str() {
+                "alice" => ("alice-turn-fixture", "U111"),
+                "bob" => ("bob-turn-fixture", "U222"),
+                _ => panic!("unexpected fixture consent"),
+            };
+            axum::Json(json!({
+                "access_token": token,
+                "scope": "messages:read",
+                "team": { "id": "T111" },
+                "authed_user": { "id": subject },
+            }))
+        }))
+        .route("/messages", axum::routing::get(|headers: axum::http::HeaderMap| async move {
+            let subject = match headers["authorization"].to_str().unwrap() {
+                "Bearer alice-turn-fixture" => "U111",
+                "Bearer bob-turn-fixture" => "U222",
+                _ => panic!("unexpected requester credential"),
+            };
+            axum::Json(json!({ "subject": subject }))
+        }))
+        .route("/oauth-result", axum::routing::post(move |axum::Json(value): axum::Json<Value>| {
+            results.send(value).unwrap();
+            async { axum::Json(json!({ "ok": true })) }
+        }));
+    let (origin, server) = common::serve_locally(upstream).await;
+    s.plugins.route_http_to(Some(origin));
+    let agent = s
+        .agent(
+            json!({
+                "name": "Scoped",
+                "access": { "projects": [], "installation": false, "github": false },
+            }),
+            None,
+        )
+        .await
+        .unwrap();
+    create_route(
+        &app,
+        &instance,
+        &resource,
+        json!({
+            "name": "Channel",
+            "enabled": true,
+            "match": { "channel": "C1" },
+            "agentId": agent["id"],
+            "userIds": ["U111", "U222"],
+        }),
+    )
+    .await;
+    let grants =
+        format!("/api/plugins/router/connections/{instance}/resources/workspace/{resource}/grants");
+    assert_eq!(
+        common::send(
+            &app,
+            owner_request(
+                "POST",
+                &grants,
+                json!({
+                    "agentId": agent["id"],
+                    "profile": "read",
+                })
+            )
+        )
+        .await
+        .status(),
+        StatusCode::OK
+    );
+    let package = registry::active(&s, "router").await.unwrap();
+    let connection = connections::get(&s, "router", &instance).await.unwrap();
+    let mut session = s
+        .plugins
+        .host
+        .start(
+            &PathBuf::from(env!("CARGO_BIN_EXE_cairn")),
+            &package.manifest,
+            &package.source,
+        )
+        .await
+        .unwrap();
+    for (person, code) in [("U111", "alice"), ("U222", "bob")] {
+        let action = |method: &str| {
+            json!({
+                "id": cairn_installation::config::id(),
+                "kind": "interaction",
+                "resource": resource,
+                "author": { "id": person },
+                "context": { "channel": "C1", "thread": "thread" },
+                "body": { "oauth": method },
+            })
+        };
+        let started = oauth_action(
+            &s,
+            &app,
+            &connection,
+            &mut session,
+            action("start"),
+            &mut received,
+        )
+        .await;
+        let url = url::Url::parse(text(&started, "url")).unwrap();
+        let state = url
+            .query_pairs()
+            .find(|(key, _)| key == "state")
+            .unwrap()
+            .1
+            .into_owned();
+        let callback = format!("/api/plugin-oauth/{instance}/callback?state={state}&code={code}");
+        assert_eq!(
+            common::send(
+                &app,
+                common::request("GET", &callback)
+                    .body(Body::empty())
+                    .unwrap()
+            )
+            .await
+            .status(),
+            StatusCode::OK
+        );
+        let finished = oauth_action(
+            &s,
+            &app,
+            &connection,
+            &mut session,
+            action("finish"),
+            &mut received,
+        )
+        .await;
+        assert_eq!(finished["status"], "authorized");
+    }
+    let message = |id: &str, person: &str, fresh: bool| {
+        json!({
+            "id": id,
+            "resource": resource,
+            "author": { "id": person },
+            "context": { "channel": "C1", "thread": "thread" },
+            "body": { "text": format!("Request from {person}"), "newTurn": fresh },
+        })
+    };
+    assert_eq!(
+        deliver(&app, &instance, message("old-request", "U111", false))
+            .await
+            .1["status"],
+        "accepted"
+    );
+    runtime::pump(&s, &connection, &mut session).await.unwrap();
+    s.chat_tick(&std::collections::HashSet::new())
+        .await
+        .unwrap();
+    let chat = s.chat_list().await.unwrap()[0].clone();
+    let run = s.chat_detail(text(&chat, "id")).await.unwrap()["run"].clone();
+    let run_id = text(&run, "id");
+    let old_delivery = run["chatExecution"]["messageId"].clone();
+    s.store
+        .patch_run(
+            run_id,
+            json!({
+                "status": "running",
+                "isolated": true,
+                "sessionId": "old-native-session",
+            }),
+        )
+        .await
+        .unwrap();
+    let run = s.store.run(run_id).await.unwrap();
+    let configuration = s.mcps.run_configuration(&s, &run).await.unwrap();
+    let old_bearer = text(&configuration["env"], "CAIRN_MCP_RUN_TOKEN");
+    assert_eq!(
+        agents::call_tool(
+            &s,
+            old_bearer,
+            "router_read",
+            &json!({ "resource": resource })
+        )
+        .await
+        .unwrap()
+        .unwrap()["subject"],
+        "U111"
+    );
+
+    let question = "c".repeat(64);
+    s.question_receive(
+        run_id,
+        json!({
+            "id": question,
+            "blocking": false,
+            "fields": [{ "id": "choice", "title": "Continue?", "options": [] }],
+        }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        deliver(
+            &app,
+            &instance,
+            json!({
+                "id": "answer-before-stop",
+                "kind": "interaction",
+                "resource": resource,
+                "author": { "id": "U111" },
+                "context": { "channel": "C1", "thread": "thread" },
+                "body": { "chat": chat["id"], "delivery": old_delivery, "question": question },
+            }),
+        )
+        .await
+        .1["status"],
+        "accepted"
+    );
+    runtime::pump(&s, &connection, &mut session).await.unwrap();
+    let answered = s.chat_detail(text(&chat, "id")).await.unwrap();
+    assert_eq!(answered["questions"][0]["status"], "answering");
+    let pending_answer = answered["questions"][0]["messageId"].clone();
+
+    assert_eq!(
+        deliver(&app, &instance, message("new-request", "U222", true))
+            .await
+            .1["status"],
+        "accepted"
+    );
+    runtime::pump(&s, &connection, &mut session).await.unwrap();
+    assert_eq!(
+        s.store.run(run_id).await.unwrap()["chatExecution"]["messageId"],
+        old_delivery
+    );
+    // Model a saved, settled workspace; this test does not launch an agent VM.
+    s.store
+        .set(
+            &format!("run-checkpoint:{run_id}"),
+            json!({
+                "completed": true,
+                "launched": true,
+            }),
+            None,
+        )
+        .await
+        .unwrap();
+    let stop = |id: &str, person: &str, delivery: &Value| {
+        json!({
+            "id": id,
+            "kind": "interaction",
+            "resource": resource,
+            "author": { "id": person },
+            "context": { "channel": "C1", "thread": "thread" },
+            "body": { "chat": chat["id"], "delivery": delivery },
+        })
+    };
+    assert_eq!(
+        deliver(&app, &instance, stop("stop-old", "U111", &old_delivery))
+            .await
+            .1["status"],
+        "accepted"
+    );
+    runtime::pump(&s, &connection, &mut session).await.unwrap();
+    let overview = common::send(&app, owner_request("GET", "/api/plugins", Value::Null)).await;
+    assert_eq!(overview.status(), StatusCode::OK);
+    let overview = common::read_json(overview).await;
+    let activity = &overview["connections"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["id"] == instance)
+        .unwrap()["activity"];
+    assert_eq!(
+        activity
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|entry| entry["userId"] == "U222")
+            .unwrap()["status"],
+        "working",
+        "the queued request's delivery was cancelled with its predecessor"
+    );
+    s.chat_tick(&std::collections::HashSet::new())
+        .await
+        .unwrap();
+    let next = s.chat_detail(text(&chat, "id")).await.unwrap();
+    assert_eq!(
+        next["run"]["chatExecution"]["text"], "Request from U222",
+        "the queued requester could not start a new turn after the earlier author stopped"
+    );
+    assert_eq!(next["run"]["id"], run["id"]);
+    assert!(
+        next["run"]["sessionId"].is_null(),
+        "the old native session was resumed for a different requester"
+    );
+    assert_eq!(s.chat_list().await.unwrap().len(), 1);
+    assert_eq!(next["questions"][0]["status"], "cancelled");
+    assert!(
+        next["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|message| { message["id"] == pending_answer && message["status"] == "cancelled" }),
+        "an old answer was retained for the next requester's session"
+    );
+    assert!(
+        next["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|message| message["id"] == old_delivery && message["status"] == "cancelled")
+    );
+    s.store
+        .patch_run(run_id, json!({ "status": "running" }))
+        .await
+        .unwrap();
+    let current = s.store.run(run_id).await.unwrap();
+    let configuration = s.mcps.run_configuration(&s, &current).await.unwrap();
+    let bearer = text(&configuration["env"], "CAIRN_MCP_RUN_TOKEN");
+    assert!(
+        agents::call_tool(
+            &s,
+            old_bearer,
+            "router_read",
+            &json!({ "resource": resource })
+        )
+        .await
+        .is_err()
+    );
+    assert_eq!(
+        agents::call_tool(&s, bearer, "router_read", &json!({ "resource": resource }))
+            .await
+            .unwrap()
+            .unwrap()["subject"],
+        "U222"
+    );
+    assert_eq!(
+        deliver(&app, &instance, stop("stale-stop", "U111", &old_delivery))
+            .await
+            .1["status"],
+        "accepted"
+    );
+    runtime::pump(&s, &connection, &mut session).await.unwrap();
+    assert_eq!(s.store.run(run_id).await.unwrap()["status"], "running");
+    assert_eq!(
+        deliver(&app, &instance, message("new-request", "U222", true))
+            .await
+            .1["status"],
+        "duplicate"
+    );
+    session.stop().await;
+    server.abort();
+}
+
+#[tokio::test]
+async fn pending_new_turns_respect_owner_pause_revocation_and_workspace_settlement() {
+    for scenario in [
+        "owner-pause",
+        "owner-pause-before-enqueue",
+        "revoked-person",
+        "unsettled-workspace",
+    ] {
+        let (_root, s, instance, resource, app) = fixture().await;
+        let agent = s
+            .agent(
+                json!({
+                    "name": "Scoped",
+                    "access": { "projects": [], "installation": false, "github": false },
+                }),
+                None,
+            )
+            .await
+            .unwrap();
+        let route = create_route(
+            &app,
+            &instance,
+            &resource,
+            json!({
+                "name": "Channel",
+                "enabled": true,
+                "match": { "channel": "C1" },
+                "agentId": agent["id"],
+                "userIds": ["alice", "bob"],
+            }),
+        )
+        .await;
+        let package = registry::active(&s, "router").await.unwrap();
+        let connection = connections::get(&s, "router", &instance).await.unwrap();
+        let mut session = s
+            .plugins
+            .host
+            .start(
+                &PathBuf::from(env!("CARGO_BIN_EXE_cairn")),
+                &package.manifest,
+                &package.source,
+            )
+            .await
+            .unwrap();
+        let message = |person: &str, fresh: bool| {
+            json!({
+                "id": format!("request-{person}"),
+                "resource": resource,
+                "author": { "id": person },
+                "context": { "channel": "C1", "thread": "thread" },
+                "body": { "text": format!("Request from {person}"), "newTurn": fresh },
+            })
+        };
+        assert_eq!(
+            deliver(&app, &instance, message("alice", false)).await.1["status"],
+            "accepted"
+        );
+        runtime::pump(&s, &connection, &mut session).await.unwrap();
+        s.chat_tick(&std::collections::HashSet::new())
+            .await
+            .unwrap();
+        let chat = s.chat_list().await.unwrap()[0].clone();
+        let run = s.chat_detail(text(&chat, "id")).await.unwrap()["run"].clone();
+        let run_id = text(&run, "id");
+        s.store
+            .patch_run(run_id, json!({ "status": "running", "isolated": true }))
+            .await
+            .unwrap();
+        s.store
+            .set(
+                &format!("run-checkpoint:{run_id}"),
+                json!({
+                    "completed": scenario != "unsettled-workspace",
+                    "launched": true,
+                }),
+                None,
+            )
+            .await
+            .unwrap();
+        if scenario == "owner-pause-before-enqueue" {
+            let paused = common::send(
+                &app,
+                owner_request(
+                    "POST",
+                    &format!("/api/chats/{}/pause", text(&chat, "id")),
+                    json!({ "paused": true }),
+                ),
+            )
+            .await;
+            assert_eq!(paused.status(), StatusCode::OK);
+        }
+        assert_eq!(
+            deliver(&app, &instance, message("bob", true)).await.1["status"],
+            "accepted"
+        );
+        runtime::pump(&s, &connection, &mut session).await.unwrap();
+        if scenario == "owner-pause" {
+            let paused = common::send(
+                &app,
+                owner_request(
+                    "POST",
+                    &format!("/api/chats/{}/pause", text(&chat, "id")),
+                    json!({ "paused": true }),
+                ),
+            )
+            .await;
+            assert_eq!(paused.status(), StatusCode::OK);
+        } else if scenario == "revoked-person" {
+            let path = format!(
+                "/api/plugins/router/connections/{instance}/resources/workspace/{resource}/routes/{}/people/bob",
+                text(&route, "id")
+            );
+            let removed = common::send(
+                &app,
+                owner_request("POST", &path, json!({ "action": "remove" })),
+            )
+            .await;
+            assert_eq!(removed.status(), StatusCode::OK);
+        }
+        assert_eq!(
+            deliver(
+                &app,
+                &instance,
+                json!({
+                    "id": "stop-alice",
+                    "kind": "interaction",
+                    "resource": resource,
+                    "author": { "id": "alice" },
+                    "context": { "channel": "C1", "thread": "thread" },
+                    "body": { "chat": chat["id"], "delivery": run["chatExecution"]["messageId"] },
+                })
+            )
+            .await
+            .1["status"],
+            "accepted"
+        );
+        runtime::pump(&s, &connection, &mut session).await.unwrap();
+        if scenario == "unsettled-workspace" {
+            s.store
+                .patch_run(run_id, json!({ "recoveryPending": true }))
+                .await
+                .unwrap();
+        }
+        s.chat_tick(&std::collections::HashSet::new())
+            .await
+            .unwrap();
+        let stopped = s.chat_detail(text(&chat, "id")).await.unwrap();
+        assert_eq!(
+            stopped["run"]["chatExecution"]["messageId"], run["chatExecution"]["messageId"],
+            "advanced despite {scenario}"
+        );
+        assert_eq!(stopped["run"]["status"], "cancelled");
+        if scenario == "unsettled-workspace" {
+            assert_ne!(
+                stopped["paused"], true,
+                "waiting for settlement turned into a permanent pause"
+            );
+            let other = s
+                .chat_create(json!({ "agentId": agent["id"] }))
+                .await
+                .unwrap();
+            s.chat_send(
+                text(&other, "id"),
+                json!({ "id": cairn_installation::config::id(), "text": "Independent work" }),
+            )
+            .await
+            .unwrap();
+            s.chat_tick(&std::collections::HashSet::new())
+                .await
+                .unwrap();
+            assert_eq!(
+                s.chat_detail(text(&other, "id")).await.unwrap()["run"]["status"],
+                "queued"
+            );
+            s.store
+                .patch_run(run_id, json!({ "recoveryPending": false }))
+                .await
+                .unwrap();
+            s.chat_tick(&std::collections::HashSet::new())
+                .await
+                .unwrap();
+            assert_eq!(
+                s.chat_detail(text(&chat, "id")).await.unwrap()["run"]["chatExecution"]["text"],
+                "Request from bob"
+            );
+        } else {
+            assert_eq!(stopped["paused"], true);
+            if scenario == "owner-pause-before-enqueue" {
+                let resumed = common::send(
+                    &app,
+                    owner_request(
+                        "POST",
+                        &format!("/api/chats/{}/pause", text(&chat, "id")),
+                        json!({ "paused": false }),
+                    ),
+                )
+                .await;
+                assert_eq!(resumed.status(), StatusCode::OK);
+                s.chat_tick(&std::collections::HashSet::new())
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    s.chat_detail(text(&chat, "id")).await.unwrap()["run"]["chatExecution"]["text"],
+                    "Request from bob",
+                    "owner resume replayed the abandoned prompt instead of advancing the queued request"
+                );
+            }
+        }
+        session.stop().await;
+    }
+}
+
+#[tokio::test]
+async fn abandoned_deliveries_never_collect_the_next_requesters_answer_or_files() {
+    for (acknowledged, failed) in [(true, false), (false, false), (true, true)] {
+        let (replies, mut received) = tokio::sync::mpsc::unbounded_channel();
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let fenced = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (attempts, mut fences) = tokio::sync::mpsc::unbounded_channel();
+        let platform = axum::Router::new()
+            .route(
+                "/runs/{attempt}",
+                axum::routing::delete({
+                    let fenced = fenced.clone();
+                    move |axum::extract::Path(attempt): axum::extract::Path<String>| {
+                        attempts.send(attempt).unwrap();
+                        let stopped = fenced.load(std::sync::atomic::Ordering::SeqCst);
+                        async move {
+                            if stopped {
+                                StatusCode::NO_CONTENT
+                            } else {
+                                StatusCode::SERVICE_UNAVAILABLE
+                            }
+                        }
+                    }
+                }),
+            )
+            .route(
+                "/stop-barrier",
+                axum::routing::get({
+                    let (entered, release) = (entered.clone(), release.clone());
+                    move || {
+                        let (entered, release) = (entered.clone(), release.clone());
+                        async move {
+                            entered.notify_one();
+                            release.notified().await;
+                            axum::Json(json!({ "ok": true }))
+                        }
+                    }
+                }),
+            )
+            .route(
+                "/reply-result",
+                axum::routing::post(move |axum::Json(reply): axum::Json<Value>| {
+                    replies.send(reply).unwrap();
+                    async { axum::Json(json!({ "ok": true })) }
+                }),
+            );
+        let (origin, server) = common::serve_locally(platform).await;
+        let (_root, s, instance, resource, app) =
+            configured_fixture_with_runner(None, &origin).await;
+        s.plugins.route_http_to(Some(origin));
+        let agent = s
+            .agent(
+                json!({
+                    "name": "Scoped",
+                    "provider": "codex",
+                    "access": { "projects": [], "installation": false, "github": false },
+                }),
+                None,
+            )
+            .await
+            .unwrap();
+        create_route(
+            &app,
+            &instance,
+            &resource,
+            json!({
+                "name": "Channel",
+                "enabled": true,
+                "match": { "channel": "C1" },
+                "agentId": agent["id"],
+                "userIds": ["alice", "bob"],
+            }),
+        )
+        .await;
+        let package = registry::active(&s, "router").await.unwrap();
+        let connection = connections::get(&s, "router", &instance).await.unwrap();
+        let mut session = s
+            .plugins
+            .host
+            .start(
+                &PathBuf::from(env!("CARGO_BIN_EXE_cairn")),
+                &package.manifest,
+                &package.source,
+            )
+            .await
+            .unwrap();
+        let request = |person: &str| {
+            json!({
+                "id": format!("request-{person}"),
+                "resource": resource,
+                "author": { "id": person },
+                "context": { "channel": "C1", "thread": "thread" },
+                "body": { "text": format!("Request from {person}"), "newTurn": true, "trace": true },
+            })
+        };
+        assert_eq!(
+            deliver(&app, &instance, request("alice")).await.1["status"],
+            "accepted"
+        );
+        runtime::pump(&s, &connection, &mut session).await.unwrap();
+        s.chat_tick(&std::collections::HashSet::new())
+            .await
+            .unwrap();
+        let chat = s.chat_list().await.unwrap()[0].clone();
+        let detail = s.chat_detail(text(&chat, "id")).await.unwrap();
+        let run_id = text(&detail["run"], "id").to_owned();
+        let old_delivery = detail["run"]["chatExecution"]["messageId"].clone();
+        // Prepared-checkpoint fixture: no native agent or VM is launched here.
+        s.store
+            .patch_run(
+                &run_id,
+                json!({
+                    "status": "running",
+                    "isolated": true,
+                    "retry": {
+                        "attempt": 3,
+                        "limit": 3,
+                        "nextAttemptAt": null,
+                        "cause": { "kind": "server", "message": "Previous transient failures" },
+                    },
+                }),
+            )
+            .await
+            .unwrap();
+        s.store
+            .set(
+                &format!("run-checkpoint:{run_id}"),
+                json!({
+                    "completed": false,
+                    "launched": true,
+                    "isolated": true,
+                    "runnerId": "old-attempt",
+                }),
+                None,
+            )
+            .await
+            .unwrap();
+        if acknowledged {
+            s.chat_acknowledge(&run_id, old_delivery.as_str().unwrap())
+                .await
+                .unwrap();
+        }
+        assert_eq!(
+            deliver(&app, &instance, request("bob")).await.1["status"],
+            "accepted"
+        );
+        runtime::pump(&s, &connection, &mut session).await.unwrap();
+        assert!(received.try_recv().is_err());
+        assert_eq!(
+            deliver(
+                &app,
+                &instance,
+                json!({
+                    "id": "stop-alice",
+                    "kind": "interaction",
+                    "resource": resource,
+                    "author": { "id": "alice" },
+                    "context": { "channel": "C1", "thread": "thread" },
+                    "body": { "chat": chat["id"], "delivery": old_delivery, "stopDelay": if failed { json!("wait") } else { json!(true) } },
+                })
+            )
+            .await
+            .1["status"],
+            "accepted"
+        );
+        let pump = tokio::spawn({
+            let (s, connection) = (s.clone(), connection.clone());
+            async move {
+                let result = runtime::pump(&s, &connection, &mut session).await;
+                (session, result)
+            }
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(2), entered.notified())
+            .await
+            .unwrap();
+        if failed {
+            // Native provider output after its last allowed automatic retry.
+            s.store
+                .event(&run_id, "turn.failed", "Previous transient failures", None)
+                .await
+                .unwrap();
+            s.store
+                .patch_run(&run_id, json!({ "status": "failed" }))
+                .await
+                .unwrap();
+        }
+        // The event handler is still awaiting platform I/O, so the reply pump
+        // misses the predecessor's terminal state entirely.
+        s.chat_tick(&std::collections::HashSet::new())
+            .await
+            .unwrap();
+        let next = s.chat_detail(text(&chat, "id")).await.unwrap();
+        assert_eq!(next["run"]["chatExecution"]["text"], "Request from bob");
+        assert!(
+            next["run"]["retry"].is_null(),
+            "the independent request inherited its predecessor's spent retry budget"
+        );
+        let new_delivery = next["run"]["chatExecution"]["messageId"].clone();
+        s.accounts
+            .create(
+                &s,
+                cairn_installation::provider::Provider::Codex,
+                "Not connected fixture",
+            )
+            .await
+            .unwrap();
+        // Drive the real native scheduler through its controller fencing boundary.
+        // The prior process did not emit turn.completed; that is not stop evidence.
+        s.worker.tick(&s).await.unwrap();
+        assert_eq!(fences.try_recv().unwrap(), "old-attempt");
+        let waiting = s.chat_detail(text(&chat, "id")).await.unwrap();
+        assert_eq!(waiting["run"]["status"], "queued");
+        assert_eq!(waiting["run"]["recoveryPending"], true);
+        assert!(s.worker.active.lock().await.is_empty());
+        fenced.store(true, std::sync::atomic::Ordering::SeqCst);
+        s.worker.tick(&s).await.unwrap();
+        assert_eq!(fences.try_recv().unwrap(), "old-attempt");
+        let released = s.chat_detail(text(&chat, "id")).await.unwrap();
+        assert_eq!(released["run"]["recoveryPending"], false);
+        assert_eq!(released["run"]["chatExecution"]["messageId"], new_delivery);
+        assert!(s.worker.active.lock().await.is_empty());
+        // This fixture has no connected engine account; after fencing it waits for one.
+        // Supply native agent output at the existing event seam below.
+        s.store
+            .patch_run(&run_id, json!({ "status": "running" }))
+            .await
+            .unwrap();
+        s.chat_acknowledge(&run_id, new_delivery.as_str().unwrap())
+            .await
+            .unwrap();
+        s.store
+            .event(
+                &run_id,
+                "item.completed",
+                "",
+                Some(json!({
+                    "item": { "type": "agent_message", "text": "Bob's answer" },
+                })),
+            )
+            .await
+            .unwrap();
+        s.store
+            .event(
+                &run_id,
+                "artifact",
+                "",
+                Some(json!({
+                    "id": "bob-artifact",
+                    "name": "bob.txt",
+                    "title": "Bob's result",
+                    "mediaType": "text/plain",
+                    "size": 3,
+                })),
+            )
+            .await
+            .unwrap();
+        s.store
+            .event(&run_id, "turn.completed", "", None)
+            .await
+            .unwrap();
+        s.store
+            .patch_run(&run_id, json!({ "status": "succeeded" }))
+            .await
+            .unwrap();
+        release.notify_one();
+        let (session, result) = pump.await.unwrap();
+        result.unwrap();
+        let mut replies = Vec::new();
+        for _ in 0..2 {
+            replies.push(
+                tokio::time::timeout(std::time::Duration::from_secs(2), received.recv())
+                    .await
+                    .unwrap()
+                    .unwrap(),
+            );
+        }
+        let alice = replies
+            .iter()
+            .find(|reply| reply["userId"] == "alice")
+            .unwrap();
+        assert_eq!(
+            alice["status"],
+            if failed { "failed" } else { "cancelled" },
+            "the abandoned delivery consumed a later completion"
+        );
+        assert!(!text(alice, "text").contains("Bob"));
+        assert_eq!(alice["files"], json!([]));
+        let bob = replies
+            .iter()
+            .find(|reply| reply["userId"] == "bob")
+            .unwrap();
+        assert_eq!(bob["status"], "completed");
+        assert_eq!(bob["text"], "Bob's answer");
+        assert_eq!(bob["files"][0]["id"], "bob-artifact");
+        session.stop().await;
+        server.abort();
+    }
+}
+
+#[tokio::test]
+async fn a_sending_ordinary_request_keeps_its_place_before_an_independent_request() {
+    let (_root, s, instance, resource, app) = fixture().await;
+    let agent = s
+        .agent(
+            json!({
+                "name": "Scoped",
+                "access": { "projects": [], "installation": false, "github": false },
+            }),
+            None,
+        )
+        .await
+        .unwrap();
+    create_route(
+        &app,
+        &instance,
+        &resource,
+        json!({
+            "name": "Channel",
+            "enabled": true,
+            "match": { "channel": "C1" },
+            "agentId": agent["id"],
+            "userIds": ["alice", "bob"],
+        }),
+    )
+    .await;
+    let package = registry::active(&s, "router").await.unwrap();
+    let connection = connections::get(&s, "router", &instance).await.unwrap();
+    let mut session = s
+        .plugins
+        .host
+        .start(
+            &PathBuf::from(env!("CARGO_BIN_EXE_cairn")),
+            &package.manifest,
+            &package.source,
+        )
+        .await
+        .unwrap();
+    let request = |person: &str| {
+        json!({
+            "id": format!("request-{person}"),
+            "resource": resource,
+            "author": { "id": person },
+            "context": { "channel": "C1", "thread": "thread" },
+            "body": { "text": format!("Request from {person}"), "newTurn": true },
+        })
+    };
+    assert_eq!(
+        deliver(&app, &instance, request("alice")).await.1["status"],
+        "accepted"
+    );
+    runtime::pump(&s, &connection, &mut session).await.unwrap();
+    s.chat_tick(&std::collections::HashSet::new())
+        .await
+        .unwrap();
+    let chat = s.chat_list().await.unwrap()[0].clone();
+    let first = s.chat_detail(text(&chat, "id")).await.unwrap();
+    let run_id = text(&first["run"], "id");
+    s.chat_acknowledge(run_id, text(&first["run"]["chatExecution"], "messageId"))
+        .await
+        .unwrap();
+    s.store
+        .event(run_id, "turn.completed", "", None)
+        .await
+        .unwrap();
+    s.store
+        .patch_run(run_id, json!({ "status": "succeeded" }))
+        .await
+        .unwrap();
+    s.store
+        .set(
+            &format!("run-checkpoint:{run_id}"),
+            json!({ "launched": false }),
+            None,
+        )
+        .await
+        .unwrap();
+    runtime::pump(&s, &connection, &mut session).await.unwrap();
+
+    // The native owner can also use this shared Cairn conversation. Its ordinary
+    // steering request may already be on the way to the native process at Stop.
+    let messages_path = format!("/api/chats/{}/messages", text(&chat, "id"));
+    let owner_message = cairn_installation::config::id();
+    let sent = common::send(
+        &app,
+        owner_request(
+            "POST",
+            &messages_path,
+            json!({
+                "id": owner_message,
+                "text": "Owner's original request",
+            }),
+        ),
+    )
+    .await;
+    assert_eq!(sent.status(), StatusCode::OK);
+    s.chat_tick(&std::collections::HashSet::new())
+        .await
+        .unwrap();
+    assert_eq!(
+        s.chat_detail(text(&chat, "id")).await.unwrap()["run"]["chatExecution"]["messageId"],
+        owner_message
+    );
+    // Prepared, before-launch checkpoint; no native process or VM is started.
+    s.store
+        .patch_run(
+            run_id,
+            json!({ "status": "running", "isolated": true, "recoveryPending": false }),
+        )
+        .await
+        .unwrap();
+    s.store
+        .set(
+            &format!("run-checkpoint:{run_id}"),
+            json!({ "launched": false }),
+            None,
+        )
+        .await
+        .unwrap();
+    let steering = cairn_installation::config::id();
+    let sent = common::send(
+        &app,
+        owner_request(
+            "POST",
+            &messages_path,
+            json!({
+                "id": steering,
+                "text": "Owner's earlier steering request",
+                "mode": "steer",
+            }),
+        ),
+    )
+    .await;
+    assert_eq!(sent.status(), StatusCode::OK);
+    s.chat_tick(&std::collections::HashSet::from([run_id.to_owned()]))
+        .await
+        .unwrap();
+    let detail = s.chat_detail(text(&chat, "id")).await.unwrap();
+    assert!(
+        detail["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|message| { message["id"] == steering && message["status"] == "sending" })
+    );
+    assert_eq!(
+        deliver(&app, &instance, request("bob")).await.1["status"],
+        "accepted"
+    );
+    runtime::pump(&s, &connection, &mut session).await.unwrap();
+    let stopped = common::send(
+        &app,
+        owner_request(
+            "POST",
+            &format!("/api/chats/{}/stop", text(&chat, "id")),
+            json!({}),
+        ),
+    )
+    .await;
+    assert_eq!(stopped.status(), StatusCode::OK);
+    assert_eq!(
+        s.chat_detail(text(&chat, "id")).await.unwrap()["run"]["status"],
+        "cancelled"
+    );
+    let resumed = common::send(
+        &app,
+        owner_request(
+            "POST",
+            &format!("/api/chats/{}/pause", text(&chat, "id")),
+            json!({ "paused": false }),
+        ),
+    )
+    .await;
+    assert_eq!(resumed.status(), StatusCode::OK);
+    s.chat_tick(&std::collections::HashSet::new())
+        .await
+        .unwrap();
+    let resumed = s.chat_detail(text(&chat, "id")).await.unwrap();
+    assert_eq!(
+        resumed["run"]["chatExecution"]["messageId"], owner_message,
+        "the independent request bypassed an ordinary message already being sent"
+    );
+    session.stop().await;
 }

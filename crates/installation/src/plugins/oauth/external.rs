@@ -317,13 +317,11 @@ pub(super) fn disconnect_subject(
         if link.authorization != authorization_key(resource, name, Some(&link.actor)) {
             return Err(expired());
         }
-        fence(db, &link.authorization, &json!(id()), Some(now() + TTL))?;
-        db.delete(&stored_key(&link.authorization))?;
+        disconnect_authorization(db, &link.authorization)?;
         db.delete(&index)?;
     }
     let key = external_key(resource, name, subject);
-    fence(db, &key, &json!(id()), Some(now() + TTL))?;
-    db.delete(&stored_key(&key))?;
+    disconnect_authorization(db, &key)?;
     let flow = flow_key(resource, name, subject);
     if let Some(key) = db
         .kv(&flow)?

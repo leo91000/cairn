@@ -30,7 +30,10 @@ the web/Android journeys. Tests assert observable behavior at those interfaces.
     own subject, and stale or cross-author answer/stop controls are refused.
   - Shared turns may reuse a question ID. Notification deduplication belongs to
     the issuing delivery, so a later author's question remains visible and an
-    earlier turn's controls cannot answer it. Explicit new-turn/reset remains open.
+    earlier turn's controls cannot answer it. `newTurn` queues an independent
+    request, rechecks its authority after the previous turn stops and starts a
+    fresh native session in the same conversation. Owner pause and workspace
+    settlement are respected. Full conversation reset remains open.
 - [ ] Generic OAuth, secure token capture/rotation and personal identity binding.
   - Owner-connected resource OAuth: declared scopes/endpoints, confidential and
     PKCE clients, encrypted single-use callback capture, same-owner completion,
@@ -183,3 +186,88 @@ All 166 selected installation/Beacon cases outside the direct-peer suites pass,
 including the 13 route journeys; the 50 direct cases pass across the parallel run
 and isolated recheck. One WebRTC opening timed out in the parallel run before any
 application exchange; that case passes alone. `pnpm check` passes again (511 tests).
+
+## OAuth capacity and queued turns
+
+Quality and Storage passed on `400d4afc`. The next OAuth tracer fills the actual
+authorization capacity through owner HTTP and first reproduces a 429 when an
+already disconnected person tries to disconnect. Disconnect now releases an
+existing credential before reserving its revocation state and creates no state
+for an already disconnected person. Active revocation generations remain live
+when another consent starts; consent-only and disconnected generations expire.
+
+A second tracer reproduces Bob's queued request remaining behind Alice's stopped
+turn. Routed `submit{newTurn = true}` now records an independent request, verified
+again against its admitted person, route and thread binding at the transition.
+The same conversation/workspace is kept, the old prompt is cancelled and a fresh
+native session starts. Granted HTTP proves Alice's credential before and Bob's
+after the transition; Alice's old MCP bearer and stop button are refused.
+Owner pause, a revoked queued person and an unsettled workspace all prevent the
+transition. Once settlement completes, the queued request advances without
+blocking another conversation. These tests use the actual Luau worker and HTTP,
+with a prepared-checkpoint fixture; no agent VM or live Slack app was launched.
+Full reset, setup drafts, client journeys and every other unchecked item remain.
+
+The checkpoint review found two missing cases, reproduced before correction:
+new input cleared an earlier owner Pause, and an old queued question answer
+prevented the next independent request from being selected. Native explicit
+Pause/Stop now records user intent separately from an automatic stopped-turn
+pause; only explicit native resume releases it. Resume advances an independent
+queued request rather than replaying the stopped prompt. Candidate selection skips
+only native answers belonging to the abandoned turn; ordinary requests keep their
+queue order. Both focused regressions pass, including cancellation of the answer.
+
+Before these review corrections, the expanded regression passed 529 selected
+Rust tests (11 intentionally ignored), including 359 installation library tests,
+and the 50 direct-peer/authorization cases passed across the full run and an
+isolated retry. One authorization acknowledgement timed out under the full run;
+the same case passes alone. Storage library fixtures require `/usr/sbin` in PATH
+for the already-installed ext4 tools and bounded test concurrency. `pnpm check`
+passes (511 tests, lint, typecheck and production build). Final regression and
+fresh checkpoint review evidence accompany this checkpoint in the draft PR;
+neither replaces the full-delivery validation and independent review.
+
+The second checkpoint review found that the reply tracker used the changing run
+status for every queued delivery. A queued independent request now remains
+waiting during its predecessor's cancellation. Abandonment also records a native
+per-message terminal receipt, retained until conversation purge, so a late reply
+pump cannot collect the following requester's answer or files. A real-worker
+HTTP barrier reproduces that interleaving before correction, both with and without
+an initial message acknowledgement. It now observes only a cancellation for the
+old requester and the correct answer/files for the new requester.
+
+Candidate selection also accounts for ordinary messages already marked sending,
+matching the native queue's recovery behavior. A native owner/HTTP journey first
+reproduces an earlier steering message being bypassed during owner resume. It
+now keeps the ordinary resume path and queue order. All five concrete checkpoint
+review findings have focused failing/passing evidence; the next fresh review
+covers the complete corrected lot rather than only its last edits.
+
+The third checkpoint review identified a lifecycle distinction hidden by the first
+fixture: `completed` records successful agent output, not process settlement.
+The transition no longer waits for a success event that cancelled/failed turns
+will never emit. It retains the existing recovery wait and worker guards; the
+next native execution always fences the saved process/runner before preparing
+or launching its workspace. No parallel checkpoint lifecycle field was added.
+The actual scheduler/HTTP-controller test now refuses fencing first (503), proves
+that the next requester stays queued with no active execution, then confirms the
+stop (204) and observes recovery release. It uses a pending engine account to
+prevent a real agent launch; native output remains supplied at the event seam.
+Both acknowledged and pre-acknowledgement cancellation paths pass, along with all
+17 route journeys. Full VM/live Slack evidence remains outside this checkpoint.
+
+Final web verification twice hit the same legacy JavaScript process test: a
+supervisor handle was treated as proof that its agent had started, allowing the
+running-process cancellation assertion to race startup. The case passes alone.
+It now waits for the fixture agent's observable session-start notification before
+cancelling, using the existing fixture startup bound and leaving cleanup timeouts
+and the legacy runtime unchanged. Full
+verification and a fresh review include this test correction as well.
+
+A subsequent checkpoint review found that an exhausted automatic-retry counter
+also survived run reuse. The failed-predecessor variant first reproduced Bob
+inheriting Alice's third retry. Abandonment now clears that per-request retry
+state alongside the native session, matching ordinary native resume. This does
+not change the durable retry policy within a request. The affected route suite
+is rerun after this final correction; the broader regression and final complete
+Slack validation remain separately identified in the PR evidence.

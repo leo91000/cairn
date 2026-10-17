@@ -395,7 +395,26 @@ Question notifications are limited to their issuing turn. Reusing an agent's
 question ID in a later turn produces a new notification for that turn's author;
 old controls cannot answer it. Resuming an interrupted
 turn also requires its original authority; another author must start a new turn.
-The complete reset and external setup journeys remain in the Slack delivery checklist.
+For a resource-routed message, `cairn.conversations.submit{newTurn = true, ...}`
+queues an independent request in the same conversation. If the preceding turn
+stops, its original prompt is cancelled rather than replayed. Cairn waits until
+its workspace has settled, then starts a fresh native session with the queued
+requester's own authority. History and workspace remain shared. The old turn's
+MCP bearer and controls cannot act for the next requester. Each delivery keeps
+its own terminal outcome even though the native run is reused: queued requests
+are not cancelled with their predecessor, and a late reply pump cannot collect a
+later requester's answer or files for an abandoned request.
+
+A source author's Stop allows an already queued independent request to proceed;
+the owner's Pause in Cairn keeps the queue paused even when new requests arrive.
+An explicit native resume releases that pause and advances the next independent
+request. Answers still queued for the stopped turn are cancelled with that turn;
+ordinary requests retain their queue order. Admission, route, current thread
+binding and requester are rechecked when the new turn actually starts. A waiting
+workspace does not block other conversations. Editing or withdrawing the queued
+message from Cairn removes its automatic new-turn intent. Omitting `newTurn`
+preserves the original-author resume path. Full reset and external setup journeys
+remain in the Slack delivery checklist.
 
 ### Host-managed resource OAuth
 
@@ -552,7 +571,9 @@ The installation permits at most 128 live pending consents and 2,048 authorizati
 storage records (credentials and revocation generations combined). Capacity
 errors preserve existing authorizations. Pending-only and disconnected revocation
 generations expire after ten minutes; active credentials remain until disconnected
-or their resource is deleted.
+or their resource is deleted. Starting another consent keeps an active credential's
+revocation state live. Local disconnect remains available at capacity, including
+when the person is already disconnected, and still invalidates pending exchanges.
 
 Scheduled automation authorities and configuration drafts remain in the Slack delivery checklist.
 Unattributed in-process submissions and owner panels cannot use personal providers.
