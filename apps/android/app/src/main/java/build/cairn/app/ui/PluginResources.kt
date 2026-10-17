@@ -45,6 +45,9 @@ internal fun PluginResources(
         }
     var removing by
         remember(location.plugin, location.instance) { mutableStateOf<PluginResource?>(null) }
+    var grantEditors by
+        remember(location.plugin, location.instance) { mutableStateOf(mapOf<String, Boolean>()) }
+    val grantLocked = grantEditors.values.any { it }
     var authorizations by
         remember(location.plugin, location.instance) {
             mutableStateOf(mapOf<String, PluginAuthorizationActivity>())
@@ -53,12 +56,13 @@ internal fun PluginResources(
     val loads = remember(location.plugin, location.instance) { AtomicInteger() }
     val oauthBusy = authorizations.values.any { it.busy }
     val oauthPending = authorizations.values.any { it.pending }
-    val controlsEnabled = enabled && !state.busy && !loading && !oauthBusy && !oauthPending
-    LaunchedEffect(loading, oauthBusy, oauthPending, editing, removing) {
+    val controlsEnabled =
+        enabled && !state.busy && !loading && !oauthBusy && !oauthPending && !grantLocked
+    LaunchedEffect(loading, oauthBusy, oauthPending, editing, removing, grantLocked) {
         stateChanged(
             PluginResourceActivity(
                 loading || oauthBusy,
-                editing != null || removing != null,
+                editing != null || removing != null || grantLocked,
                 oauthPending,
             )
         )
@@ -119,7 +123,10 @@ internal fun PluginResources(
         }
     }
     Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-        TextButton(onClick = { vm.perform { load() } }, enabled = !state.busy && !loading) {
+        TextButton(
+            onClick = { vm.perform { load() } },
+            enabled = !state.busy && !loading && !grantLocked,
+        ) {
             Text("Actualiser les ressources")
         }
         manifest.resources.forEach { collection ->
@@ -161,6 +168,34 @@ internal fun PluginResources(
                                 Text("Supprimer ${resource.name}")
                             }
                         }
+                        val resourceOperations =
+                            manifest.operations.filter { it.collection == collection.name }
+                        if (
+                            location.setupRevision == null &&
+                                manifest.agentAccess != null &&
+                                resourceOperations.isNotEmpty()
+                        ) {
+                            key("${location.path}/${resource.id}/grants@${resource.revision}") {
+                                PluginResourceGrants(
+                                    vm,
+                                    state,
+                                    "${location.path}/${segment(collection.name)}/${segment(resource.id)}/grants",
+                                    resource.name,
+                                    resourceOperations,
+                                    enabled &&
+                                        !state.busy &&
+                                        !loading &&
+                                        editing == null &&
+                                        !oauthBusy &&
+                                        !oauthPending,
+                                    activity = { active ->
+                                        grantEditors =
+                                            if (active) grantEditors + (resource.id to true)
+                                            else grantEditors - resource.id
+                                    },
+                                )
+                            }
+                        }
                         val authorizationPath =
                             "${location.path}/${segment(collection.name)}/${segment(resource.id)}/oauth/"
                         manifest.oauth
@@ -175,7 +210,11 @@ internal fun PluginResources(
                                         path,
                                         provider,
                                         location.setupRevision,
-                                        enabled && !state.busy && !loading && editing == null,
+                                        enabled &&
+                                            !state.busy &&
+                                            !loading &&
+                                            editing == null &&
+                                            !grantLocked,
                                         blocked =
                                             authorizations.any { (other, activity) ->
                                                 other != identity &&
@@ -200,7 +239,7 @@ internal fun PluginResources(
             if (pages[collection.name]?.nextCursor != null)
                 TextButton(
                     onClick = { vm.perform { more(collection.name) } },
-                    enabled = !state.busy && !loading,
+                    enabled = !state.busy && !loading && !grantLocked,
                 ) {
                     Text("Voir plus · ${collection.title}")
                 }

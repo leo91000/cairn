@@ -111,8 +111,37 @@ export interface Manifest {
   instanceTest?: boolean
   instanceForm?: boolean
   resources?: PluginResourceCollection[]
+  operations?: PluginOperation[]
   oauth?: PluginOAuthProvider[]
   webhooks?: { name: string }[]
+}
+
+export type PluginAccessProfile = 'read' | 'contribute' | 'manage'
+
+export interface PluginOperation {
+  name: string
+  collection: string
+  profile: PluginAccessProfile
+  scopes?: string[]
+}
+
+export interface PluginResourceGrant {
+  id: string
+  resourceId: string
+  agentId: string
+  profile: PluginAccessProfile | null
+  operations: string[]
+  deniedOperations: string[]
+  scopes: Record<string, string[]>
+  revision: string
+}
+
+/** A preview of this rule only; other saved rules may independently grant access. */
+export function resourceRuleOperations(operations: PluginOperation[], rule: Pick<PluginResourceGrant, 'profile' | 'operations' | 'deniedOperations' | 'scopes'>) {
+  const levels = { read: 1, contribute: 2, manage: 3 }
+  return operations.filter(operation => !rule.deniedOperations.includes(operation.name)
+    && ((rule.profile && levels[rule.profile] >= levels[operation.profile]) || rule.operations.includes(operation.name))
+    && Object.keys(rule.scopes).every(scope => operation.scopes?.includes(scope)))
 }
 
 export interface PluginResourceCollection {

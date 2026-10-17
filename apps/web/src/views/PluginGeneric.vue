@@ -496,12 +496,20 @@ onBeforeUnmount(() => {
               </div>
             </dl>
             <p v-if="manifest.agentAccess" class="text-xs text-muted">
-              <template v-if="agentNames(connection).length">
+              <template v-if="manifest.operations?.length">
+                Instance-wide access: <b v-if="agentNames(connection).length" class="text-ink">{{ agentNames(connection).join(', ') }}</b><template v-else>
+                  no agents.
+                </template>
+              </template>
+              <template v-else-if="agentNames(connection).length">
                 Authorized agents: <b class="text-ink">{{ agentNames(connection).join(', ') }}</b>
               </template>
               <template v-else>
                 No agent can use it yet.
               </template>
+            </p>
+            <p v-if="manifest.agentAccess && manifest.operations?.length" class="text-xs text-muted">
+              Resource operations have separate access rules on each resource.
             </p>
             <section v-if="delegates">
               <h3 class="text-xs! font-semibold">
@@ -610,7 +618,12 @@ onBeforeUnmount(() => {
             <Icon :name="Terminal" :size="16" class="text-accent" />How agents use it
           </h2>
           <p class="text-xs leading-relaxed text-muted">
-            Only agents you authorize on an active {{ singular.toLowerCase() }} get these, in their conversations.
+            <template v-if="manifest.operations?.length">
+              Instance and resource access rules determine which commands and tools an agent receives. Resource operations require their own grants.
+            </template>
+            <template v-else>
+              Only agents you authorize on an active {{ singular.toLowerCase() }} get these, in their conversations.
+            </template>
           </p>
           <div v-if="manifest.commands?.length" class="grid min-w-0 grid-cols-[minmax(0,1fr)] gap-2">
             <h3 class="text-3xs! font-semibold uppercase tracking-[.12em] text-subtle">
@@ -732,8 +745,11 @@ onBeforeUnmount(() => {
         />
         <fieldset v-if="manifest.agentAccess" class="grid gap-2" :disabled="busy">
           <legend class="mb-1 text-xs font-semibold">
-            Authorized agents
+            {{ manifest.operations?.length ? 'Instance-wide access' : 'Authorized agents' }}
           </legend>
+          <p v-if="manifest.operations?.length" class="text-xs text-muted">
+            Resource operations have separate access rules on each resource.
+          </p>
           <p v-if="manifest.agentAccess.description" class="text-2xs leading-relaxed text-muted">
             {{ manifest.agentAccess.description }}
           </p>

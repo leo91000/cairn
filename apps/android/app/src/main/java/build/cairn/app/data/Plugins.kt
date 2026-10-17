@@ -1,5 +1,6 @@
 package build.cairn.app.data
 
+import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
@@ -109,6 +110,39 @@ data class PluginCommand(
 }
 
 @Serializable data class PluginTool(val name: String = "", val description: String = "")
+
+@Serializable
+enum class PluginAccessProfile(val label: String) {
+    @SerialName("read") Read("Lecture"),
+    @SerialName("contribute") Contribute("Contribution"),
+    @SerialName("manage") Manage("Gestion"),
+}
+
+@Serializable
+data class PluginOperation(
+    val name: String = "",
+    val collection: String = "",
+    val profile: PluginAccessProfile = PluginAccessProfile.Read,
+    val scopes: List<String> = emptyList(),
+)
+
+@Serializable
+data class PluginResourceGrant(
+    val id: String = "",
+    val resourceId: String = "",
+    val agentId: String = "",
+    val profile: PluginAccessProfile? = null,
+    val operations: List<String> = emptyList(),
+    val deniedOperations: List<String> = emptyList(),
+    val scopes: Map<String, List<String>> = emptyMap(),
+    val revision: String = "",
+) {
+    /** Other saved rules may independently grant access; this previews only this rule. */
+    fun permits(operation: PluginOperation): Boolean =
+        operation.name !in deniedOperations &&
+            ((profile != null && profile >= operation.profile) || operation.name in operations) &&
+            scopes.keys.all { it in operation.scopes }
+}
 
 @Serializable
 data class PluginResourceCollection(
@@ -225,6 +259,7 @@ data class PluginManifest(
     val instanceTest: Boolean = false,
     val instanceForm: Boolean = false,
     val resources: List<PluginResourceCollection> = emptyList(),
+    val operations: List<PluginOperation> = emptyList(),
     val oauth: List<PluginOAuthProvider> = emptyList(),
     val webhooks: List<PluginWebhook> = emptyList(),
 ) {

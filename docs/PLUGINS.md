@@ -98,8 +98,9 @@ A manifest declares `"apiVersion": 2` (the only version Cairn loads) and:
   24×24 grid);
 - `programs` (with `exec`): `[{ name, path, description }]`, absolute paths the
   package may run;
-- `agentAccess`: `{ description }`; the owner grants agents per instance and
-  only granted agents get the package's commands, tools and instructions;
+- `agentAccess`: `{ description }`; the owner grants instance-wide access or
+  individual resource operations. Only granted agents receive the corresponding
+  commands, tools and instructions;
 - `commands`, `tools`, `instructions` (need `agentAccess`), `instanceView`,
   `instanceTest` and `instanceForm`: see [Contributions](#contributions).
 
@@ -391,8 +392,9 @@ save root settings and masked secrets, prepare resource collections and activate
 the saved instance. Activation waits for the latest form answer, saved root
 changes and any resource write. An open resource editor must be saved or closed
 first. Active resources support editing, parent selection, pagination and confirmed
-deletion. OAuth consent, resource grants/routes and provider-side revocation remain
-separate unfinished client/delivery slices in the Slack checklist.
+deletion. Owners can also manage shared resource OAuth and resource agent access
+on both clients. Routes and provider-side revocation remain separate unfinished
+delivery slices in the Slack checklist.
 
 ### Resource collections
 
@@ -445,6 +447,14 @@ multiple rules grant the union of what they allow. Scoped rules do not authorize
 operations that omit those scopes. Nothing is granted by default, including to
 Main agent or through instance-level grants. Tools list only operations the
 agent can use. CLI and MCP share the same checks.
+
+On web and Android, open the active instance, then **Agent access** on its resource.
+Choose an agent explicitly, select a profile or individual operations, optionally
+limit scope values, and inspect the per-rule preview before granting access.
+Resource grants are unavailable during inactive setup. Rules can be revoked with
+confirmation; this does not remove permissions granted by other rules. After an
+uncertain write, refresh the saved rules before another change. Connecting a
+resource provider through OAuth does not grant any agent access by itself.
 
 Rules are bound to the verified current owner's access, and rechecked alongside
 instance, resource/parent revisions and approval before capabilities and before

@@ -849,3 +849,185 @@ test('a late resource page cannot duplicate a newer authorization refresh', asyn
   }
   finally { release() }
 })
+
+async function resourceAccessFixture(workspace: import('./fixtures').Workspace, id: string, scope = 'channel', readOperation = 'read-messages') {
+  const agent = await workspace.api('/api/agents', 'POST', { name: 'Resource helper' })
+  const manifest = {
+    id,
+    name: 'Resource access',
+    description: 'Explicit resource permissions.',
+    version: '1',
+    apiVersion: 2,
+    capabilities: ['resources'],
+    agentAccess: {},
+    resources: [{ name: 'workspace', title: 'Workspaces', singular: 'Workspace' }],
+    operations: [
+      {
+        name: readOperation,
+        collection: 'workspace',
+        profile: 'read',
+        scopes: [scope],
+      },
+      {
+        name: 'send-message',
+        collection: 'workspace',
+        profile: 'contribute',
+        scopes: [scope],
+      },
+      {
+        name: 'delete-message',
+        collection: 'workspace',
+        profile: 'manage',
+        scopes: [scope],
+      },
+      { name: 'list-people', collection: 'workspace', profile: 'read' },
+    ],
+  }
+  const installed = await workspace.api('/api/plugins/packages', 'POST', { manifest, source: 'return {}' })
+  await workspace.api(`/api/plugins/packages/${id}/approve`, 'POST', { version: '1', digest: installed.digest })
+  const instance = await workspace.api(`/api/plugins/${id}/connections`, 'POST', { name: 'Application', enabled: true })
+  const root = `/plugins/${id}/connections/${instance.id}/resources/workspace`
+  const resource = await workspace.api(`/api${root}`, 'POST', { name: 'Engineering' })
+  const path = `/api${root}/${resource.id}/grants`
+  return { id, agent, path }
+}
+
+for (const scope of ['constructor', 'toString']) {
+  test(`resource access accepts the declared ${scope} scope without inherited values`, async ({ page, workspace }) => {
+    test.setTimeout(90000)
+    const operation = scope === 'constructor' ? 'constructor' : 'read-messages'
+    const { id, agent, path } = await resourceAccessFixture(workspace, `scope-${scope.toLowerCase()}`, scope, operation)
+    await page.goto(workspacePath(`/plugins/${id}`))
+    await signIn(page)
+    await page.getByRole('article', { name: 'Engineering', exact: true }).getByRole('button', { name: 'Agent access', exact: true }).click()
+    const access = page.getByRole('dialog', { name: 'Agent access · Engineering', exact: true })
+    await access.getByRole('button', { name: 'Add access rule', exact: true }).click()
+    await expect(access.getByLabel(`Limit ${scope}`, { exact: true })).toHaveValue('')
+    await expect(access.getByRole('combobox', { name: operation, exact: true })).toHaveJSProperty('selectedIndex', 0)
+    await access.getByRole('combobox', { name: 'Agent', exact: true }).selectOption(agent.id)
+    await access.getByRole('combobox', { name: 'Profile', exact: true }).selectOption('read')
+    await access.getByLabel(`Limit ${scope}`, { exact: true }).fill('C111')
+    await access.getByRole('button', { name: 'Grant access', exact: true }).click()
+    await expect(access.getByRole('button', { name: 'Add access rule', exact: true })).toBeVisible()
+    const rules = (await workspace.api(path)).items
+    expect(rules).toHaveLength(1)
+    expect(rules[0]).toMatchObject({
+      agentId: agent.id,
+      profile: 'read',
+      operations: [],
+      deniedOperations: [],
+      scopes: { [scope]: ['C111'] },
+    })
+    await expect(access.getByText(`${scope}: C111`, { exact: true })).toBeVisible()
+    await access.getByRole('button', { name: 'Add access rule', exact: true }).click()
+    await expect(access.getByLabel(`Limit ${scope}`, { exact: true })).toHaveValue('')
+    await expect(access.getByRole('combobox', { name: operation, exact: true })).toHaveJSProperty('selectedIndex', 0)
+  })
+}
+
+test('resource access combines explicit profiles, operation exceptions and scope limits', async ({ page, workspace }) => {
+  test.setTimeout(90000)
+  const { id, agent, path } = await resourceAccessFixture(workspace, 'access-ui')
+  const draft = await workspace.api(`/api/plugins/${id}/setup-drafts`, 'POST', { name: 'Inactive configuration' })
+  await workspace.api(`/api/plugins/${id}/setup-drafts/${draft.id}/resources/workspace`, 'POST', { name: 'Prepared workspace', setupRevision: draft.revision })
+  await useRelayForHttpMocks(page)
+  await page.goto(workspacePath(`/plugins/${id}`))
+  await signIn(page)
+  await page.getByRole('button', { name: 'Continue Inactive configuration', exact: true }).click()
+  const setup = page.getByRole('dialog', { name: 'Set up Resource access', exact: true })
+  await expect(setup.getByRole('article', { name: 'Prepared workspace', exact: true })).toBeVisible()
+  await expect(setup.getByRole('button', { name: 'Agent access', exact: true })).toHaveCount(0)
+  await setup.getByRole('button', { name: 'Close dialog', exact: true }).click()
+  const card = page.getByRole('article', { name: 'Engineering', exact: true })
+  await card.getByRole('button', { name: 'Agent access', exact: true }).click()
+  const access = page.getByRole('dialog', { name: 'Agent access · Engineering', exact: true })
+  await expect(access.getByText('No access rules yet.', { exact: true })).toBeVisible()
+  expect((await workspace.api(path)).items).toEqual([])
+  await access.getByRole('button', { name: 'Add access rule', exact: true }).click()
+  await expect(access.getByRole('button', { name: 'Grant access', exact: true })).toBeDisabled()
+  await expect(access.getByRole('combobox', { name: 'Agent', exact: true })).toHaveValue('')
+  await access.getByRole('combobox', { name: 'Agent', exact: true }).selectOption(agent.id)
+  await access.getByRole('combobox', { name: 'Profile', exact: true }).selectOption('contribute')
+  await access.getByRole('combobox', { name: 'read-messages', exact: true }).selectOption('deny')
+  await access.getByRole('combobox', { name: 'delete-message', exact: true }).selectOption('allow')
+  await access.getByLabel('Limit channel', { exact: true }).fill('C111\nC222')
+  const preview = access.getByRole('list', { name: 'Operations allowed by this rule' })
+  await expect(preview).toContainText('send-message')
+  await expect(preview).toContainText('delete-message')
+  await expect(preview).not.toContainText('read-messages')
+  await expect(preview).not.toContainText('list-people')
+  await access.getByRole('button', { name: 'Grant access', exact: true }).click()
+  await expect(access.getByRole('button', { name: 'Add access rule', exact: true })).toBeVisible()
+  let rules = (await workspace.api(path)).items
+  expect(rules).toHaveLength(1)
+  expect(rules[0]).toMatchObject({
+    agentId: agent.id,
+    profile: 'contribute',
+    operations: ['delete-message'],
+    deniedOperations: ['read-messages'],
+    scopes: { channel: ['C111', 'C222'] },
+  })
+  await expect(access.getByText('channel: C111, C222', { exact: true })).toBeVisible()
+  await access.getByRole('button', { name: 'Close dialog', exact: true }).click()
+  const application = page.getByRole('article', { name: 'Application', exact: true })
+  await expect(application.getByText('No agent can use it yet.', { exact: true })).toHaveCount(0)
+  await expect(application.getByText('Instance-wide access: no agents.', { exact: true })).toBeVisible()
+  await card.getByRole('button', { name: 'Agent access', exact: true }).click()
+  await expect(access.getByText('channel: C111, C222', { exact: true })).toBeVisible()
+
+  await access.getByRole('button', { name: 'Add access rule', exact: true }).click()
+  await access.getByRole('combobox', { name: 'Agent', exact: true }).selectOption(agent.id)
+  await access.getByRole('combobox', { name: 'read-messages', exact: true }).selectOption('allow')
+  await access.getByRole('button', { name: 'Grant access', exact: true }).click()
+  await expect(access.getByRole('button', { name: 'Revoke rule' })).toHaveCount(2)
+  rules = (await workspace.api(path)).items
+  expect(rules).toHaveLength(2)
+  expect(rules.some((rule: any) => rule.profile === null && rule.operations.join() === 'read-messages' && Object.keys(rule.scopes).length === 0)).toBe(true)
+  await page.screenshot({ path: test.info().outputPath('resource-access-rules.png'), fullPage: true })
+  for (let left = 1; left >= 0; left--) {
+    await access.getByRole('button', { name: 'Revoke rule' }).first().click()
+    await access.getByRole('button', { name: 'Confirm revoke', exact: true }).click()
+    await expect(access.getByRole('button', { name: 'Revoke rule' })).toHaveCount(left)
+    expect((await workspace.api(path)).items).toHaveLength(left)
+  }
+
+  await expect(access.getByText('No access rules yet.', { exact: true })).toBeVisible()
+})
+
+test('resource access refreshes uncertain writes without automatically repeating them', async ({ page, workspace }) => {
+  test.setTimeout(90000)
+  const { id, agent, path } = await resourceAccessFixture(workspace, 'access-write')
+  await useRelayForHttpMocks(page)
+  let writes = 0
+  await page.route(`**${path.replace('/api', '')}**`, async (route) => {
+    if (!['POST', 'DELETE'].includes(route.request().method()))
+      return route.continue()
+    writes++
+    const response = await route.fetch()
+    expect(response.ok()).toBe(true)
+    await route.abort('failed')
+  })
+  await page.goto(workspacePath(`/plugins/${id}`))
+  await signIn(page)
+  await page.getByRole('article', { name: 'Engineering', exact: true }).getByRole('button', { name: 'Agent access', exact: true }).click()
+  const access = page.getByRole('dialog', { name: 'Agent access · Engineering', exact: true })
+  await access.getByRole('button', { name: 'Add access rule', exact: true }).click()
+  await access.getByRole('combobox', { name: 'Agent', exact: true }).selectOption(agent.id)
+  await access.getByRole('combobox', { name: 'Profile', exact: true }).selectOption('read')
+  await access.getByRole('button', { name: 'Grant access', exact: true }).click()
+  await expect(access.getByRole('alert')).toContainText('Refresh the rules before making another change.')
+  expect((await workspace.api(path)).items).toHaveLength(1)
+  expect(writes).toBe(1)
+  await expect(access.getByRole('button', { name: 'Add access rule', exact: true })).toHaveCount(0)
+  await access.getByRole('button', { name: 'Refresh rules', exact: true }).click()
+  await expect(access.getByRole('button', { name: 'Revoke rule', exact: true })).toHaveCount(1)
+  expect(writes).toBe(1)
+  await access.getByRole('button', { name: 'Revoke rule', exact: true }).click()
+  await access.getByRole('button', { name: 'Confirm revoke', exact: true }).click()
+  await expect(access.getByRole('alert')).toContainText('Refresh the rules before making another change.')
+  expect((await workspace.api(path)).items).toHaveLength(0)
+  expect(writes).toBe(2)
+  await access.getByRole('button', { name: 'Refresh rules', exact: true }).click()
+  await expect(access.getByText('No access rules yet.', { exact: true })).toBeVisible()
+  expect(writes).toBe(2)
+})

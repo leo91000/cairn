@@ -542,12 +542,19 @@ private fun InstanceCard(
                         state.agents.find { it.id == id }?.name ?: "Agent supprimé"
                     }
                 Text(
-                    if (names.isEmpty()) "Aucun agent ne peut l’utiliser pour l’instant."
+                    if (manifest.operations.isNotEmpty())
+                        "Accès global à l’instance : ${names.joinToString(", ").ifEmpty { "aucun agent." }}"
+                    else if (names.isEmpty()) "Aucun agent ne peut l’utiliser pour l’instant."
                     else "Agents autorisés : ${names.joinToString(", ")}",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
+            if (manifest.agentAccess != null && manifest.operations.isNotEmpty())
+                Text(
+                    "Les opérations des ressources ont leurs propres règles d’accès sur chaque ressource.",
+                    style = MaterialTheme.typography.bodySmall,
+                )
             if (manifest.delegates) {
                 Fact(
                     "Répond en tant que",
@@ -966,7 +973,16 @@ private fun InstanceEditor(
             refresh = ::refresh,
         )
         manifest.agentAccess?.let { access ->
-            Text("Agents autorisés", style = MaterialTheme.typography.titleMedium)
+            Text(
+                if (manifest.operations.isEmpty()) "Agents autorisés"
+                else "Accès global à l’instance",
+                style = MaterialTheme.typography.titleMedium,
+            )
+            if (manifest.operations.isNotEmpty())
+                Text(
+                    "Les opérations des ressources ont leurs propres règles d’accès sur chaque ressource.",
+                    style = MaterialTheme.typography.bodySmall,
+                )
             if (access.description.isNotBlank())
                 Text(
                     access.description,
@@ -1294,7 +1310,10 @@ private fun AgentUsage(manifest: PluginManifest) {
             Text("Utilisation par les agents", style = MaterialTheme.typography.titleSmall)
         }
         Text(
-            "Seuls les agents autorisés sur une instance active y ont accès, dans leurs conversations.",
+            if (manifest.operations.isNotEmpty())
+                "Les règles de l’instance et de ses ressources déterminent les commandes et outils accessibles. Les opérations des ressources exigent leurs propres droits."
+            else
+                "Seuls les agents autorisés sur une instance active y ont accès, dans leurs conversations.",
             Modifier.padding(top = 6.dp, bottom = 4.dp),
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,

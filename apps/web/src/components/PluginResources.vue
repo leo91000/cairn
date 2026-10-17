@@ -15,6 +15,7 @@ import { api } from '../api'
 import { fieldSettings, fieldValues } from '../plugins'
 import PluginFields from './PluginFields.vue'
 import PluginResourceAuthorization from './PluginResourceAuthorization.vue'
+import PluginResourceGrants from './PluginResourceGrants.vue'
 import UiAlert from './UiAlert.vue'
 import UiButton from './UiButton.vue'
 
@@ -38,6 +39,8 @@ const busy = ref(false)
 const loading = ref(false)
 const error = ref('')
 const removing = ref<PluginResource>()
+const grantEditors = ref<Record<string, boolean>>({})
+const grantLocked = computed(() => Object.values(grantEditors.value).some(Boolean))
 const authorizations = ref<Record<string, { busy: boolean, pending: boolean }>>({})
 const oauthBusy = computed(() => Object.values(authorizations.value).some(value => value.busy))
 const oauthPending = computed(() => Object.values(authorizations.value).some(value => value.pending))
@@ -63,8 +66,8 @@ function authorizationState(key: string, value: { busy: boolean, pending: boolea
   authorizations.value = next
 }
 
-watch(() => [busy.value, loading.value, Boolean(editing.value || removing.value), oauthBusy.value, oauthPending.value], () => {
-  emit('state', { busy: busy.value || loading.value || oauthBusy.value, editing: Boolean(editing.value || removing.value), pending: oauthPending.value })
+watch(() => [busy.value, loading.value, Boolean(editing.value || removing.value), oauthBusy.value, oauthPending.value, grantLocked.value], () => {
+  emit('state', { busy: busy.value || loading.value || oauthBusy.value, editing: Boolean(editing.value || removing.value) || grantLocked.value, pending: oauthPending.value })
 }, { immediate: true, flush: 'sync' })
 
 async function load() {
@@ -198,7 +201,7 @@ onBeforeUnmount(() => {
 
 <template>
   <div class="grid min-w-0 gap-5" aria-label="Resources">
-    <UiButton size="small" :disabled="busy || loading" @click="load">
+    <UiButton size="small" :disabled="busy || loading || grantLocked" @click="load">
       Refresh resources
     </UiButton>
     <UiAlert v-if="error">
@@ -214,7 +217,7 @@ onBeforeUnmount(() => {
         <h3 class="text-sm! font-bold">
           {{ collection.title }}
         </h3>
-        <UiButton size="small" :disabled="busy || loading || disabled || oauthLocked" @click="edit(collection)">
+        <UiButton size="small" :disabled="busy || loading || grantLocked || disabled || oauthLocked" @click="edit(collection)">
           Add {{ collection.singular.toLowerCase() }}
         </UiButton>
       </header>
@@ -237,7 +240,7 @@ onBeforeUnmount(() => {
         <div class="flex gap-2">
           <UiButton
             size="small"
-            :disabled="busy || loading || disabled || oauthLocked"
+            :disabled="busy || loading || grantLocked || disabled || oauthLocked"
             :aria-label="`Edit ${resource.name}`"
             @click="edit(collection, resource)"
           >
@@ -245,19 +248,28 @@ onBeforeUnmount(() => {
           </UiButton>
           <UiButton
             size="small"
-            :disabled="busy || loading || disabled || oauthLocked"
+            :disabled="busy || loading || grantLocked || disabled || oauthLocked"
             :aria-label="`Delete ${resource.name}`"
             @click="removing = resource"
           >
             Delete
           </UiButton>
         </div>
+        <PluginResourceGrants
+          v-if="!setupRevision && manifest.agentAccess && manifest.operations?.some(operation => operation.collection === collection.name)"
+          :key="`grants/${resource.id}/${resource.revision}`"
+          :path="`${path}/${collection.name}/${resource.id}/grants`"
+          :name="resource.name"
+          :operations="manifest.operations!.filter(operation => operation.collection === collection.name)"
+          :enabled="!disabled && !busy && !loading && !editing && !oauthLocked"
+          @activity="grantEditors[resource.id] = $event"
+        />
         <PluginResourceAuthorization
           v-for="provider in (manifest.oauth ?? []).filter(provider => provider.collection === collection.name && !provider.personal)"
           :key="authorizationKey(resource, provider.name)"
           :path="`${path}/${collection.name}/${resource.id}/oauth/${provider.name}`"
           :provider="provider"
-          :enabled="!disabled && !busy && !loading && !editing"
+          :enabled="!disabled && !busy && !loading && !editing && !grantLocked"
           :blocked="authorizationBlocked(resource, provider.name)"
           :setup-revision="setupRevision"
           @state="authorizationState(authorizationKey(resource, provider.name), $event)"
@@ -271,7 +283,7 @@ onBeforeUnmount(() => {
             <UiButton size="small" :disabled="busy" @click="removing = undefined">
               Cancel
             </UiButton>
-            <UiButton size="small" :disabled="busy || loading || disabled || oauthLocked" @click="remove">
+            <UiButton size="small" :disabled="busy || loading || grantLocked || disabled || oauthLocked" @click="remove">
               Confirm delete
             </UiButton>
           </div>
@@ -280,7 +292,7 @@ onBeforeUnmount(() => {
       <UiButton
         v-if="pages[collection.name]?.nextCursor"
         size="small"
-        :disabled="busy || loading"
+        :disabled="busy || loading || grantLocked"
         @click="more(collection.name)"
       >
         More {{ collection.title.toLowerCase() }}
@@ -293,11 +305,11 @@ onBeforeUnmount(() => {
       >
         <label>Name<input
           v-model="name"
-          :disabled="busy || loading || disabled || oauthLocked"
+          :disabled="busy || loading || grantLocked || disabled || oauthLocked"
           required
           maxlength="100"
         ></label>
-        <label v-if="collection.parent">Parent<select v-model="parent" :disabled="busy || loading || disabled || oauthLocked" required>
+        <label v-if="collection.parent">Parent<select v-model="parent" :disabled="busy || loading || grantLocked || disabled || oauthLocked" required>
           <option value="">Choose a parent</option>
           <option v-for="item in pages[collection.parent]?.items" :key="item.id" :value="item.id">{{ item.name }}</option>
         </select></label>
@@ -306,19 +318,19 @@ onBeforeUnmount(() => {
           v-model:secrets="secrets"
           :fields="(collection.settings ?? []).map(field => setupRevision ? { ...field, required: false } : field)"
           :saved="editing.resource?.secretKeys"
-          :disabled="busy || loading || disabled || oauthLocked"
+          :disabled="busy || loading || grantLocked || disabled || oauthLocked"
         />
         <label class="flex flex-row! items-center gap-2!"><input
           v-model="enabled"
           type="checkbox"
           class="w-auto!"
-          :disabled="busy || loading || disabled || oauthLocked"
+          :disabled="busy || loading || grantLocked || disabled || oauthLocked"
         >Enabled</label>
         <div class="flex gap-2">
           <UiButton type="button" :disabled="busy" @click="close">
             Cancel
           </UiButton>
-          <UiButton type="submit" variant="primary" :disabled="busy || loading || disabled || oauthLocked">
+          <UiButton type="submit" variant="primary" :disabled="busy || loading || grantLocked || disabled || oauthLocked">
             Save {{ collection.singular.toLowerCase() }}
           </UiButton>
         </div>

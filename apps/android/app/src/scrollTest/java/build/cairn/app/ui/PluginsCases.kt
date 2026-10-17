@@ -1410,8 +1410,10 @@ abstract class PluginsCases {
             }
             compose.onNodeWithText("Actualiser les ressources").performScrollTo().performClick()
             compose.waitUntil(10000) {
-                compose.onAllNodesWithText("Vérifier l’autorisation").fetchSemanticsNodes().size ==
-                    2
+                compose
+                    .onAllNodes(hasText("Vérifier l’autorisation") and isEnabled())
+                    .fetchSemanticsNodes()
+                    .size == 2
             }
             val starts = writes.filter { it.second.containsKey("scopes") }
             assertEquals(2, starts.size)
@@ -1830,6 +1832,288 @@ abstract class PluginsCases {
             compose.onNodeWithText("Connecter", substring = false).assertExists()
             compose.onNodeWithText("Connecté", substring = false).assertExists()
             assertEquals(listOf("owner", "other"), starts.toList())
+        }
+    }
+
+    @Test
+    fun resourceAccessUsesExplicitProfilesOverridesAndScopeLimits() {
+        val manifest =
+            PluginManifest(
+                id = "access-ui",
+                name = "Resource access",
+                version = "1",
+                agentAccess = PluginAgentAccess(),
+                resources =
+                    listOf(PluginResourceCollection("workspace", "Workspaces", "Workspace")),
+                operations =
+                    listOf(
+                        PluginOperation(
+                            "read-messages",
+                            "workspace",
+                            PluginAccessProfile.Read,
+                            listOf("channel"),
+                        ),
+                        PluginOperation(
+                            "send-message",
+                            "workspace",
+                            PluginAccessProfile.Contribute,
+                            listOf("channel"),
+                        ),
+                        PluginOperation(
+                            "delete-message",
+                            "workspace",
+                            PluginAccessProfile.Manage,
+                            listOf("channel"),
+                        ),
+                        PluginOperation("list-people", "workspace", PluginAccessProfile.Read),
+                    ),
+            )
+        val entry = PluginEntry(id = manifest.id, active = "1", manifest = manifest)
+        val resource =
+            PluginResource(
+                id = "engineering",
+                connectionId = "app",
+                collection = "workspace",
+                name = "Engineering",
+                revision = "r1",
+            )
+        val rules = CopyOnWriteArrayList<PluginResourceGrant>()
+        val writes = CopyOnWriteArrayList<JsonObject>()
+        val uncertain = java.util.concurrent.atomic.AtomicBoolean(false)
+        MockWebServer().use { server ->
+            val normal =
+                dispatcher(
+                    read = { path ->
+                        when {
+                            path.endsWith("/plugins") ->
+                                wireJson.encodeToString(
+                                    PluginCatalog(
+                                        packages = listOf(entry),
+                                        connections =
+                                            listOf(
+                                                PluginConnection(
+                                                    id = "app",
+                                                    pluginId = manifest.id,
+                                                    name = "Application",
+                                                    status = PluginStatus("ready"),
+                                                )
+                                            ),
+                                    )
+                                )
+                            path.endsWith("/resources/workspace") ->
+                                wireJson.encodeToString(PluginPage(listOf(resource)))
+                            path.endsWith("/grants") ->
+                                wireJson.encodeToString(PluginPage(rules.toList()))
+                            else -> null
+                        }
+                    }
+                ) { path, body ->
+                    when {
+                        path.endsWith("/grants") -> {
+                            val input = wireJson.parseToJsonElement(body).jsonObject
+                            writes += input
+                            val grant =
+                                wireJson
+                                    .decodeFromString<PluginResourceGrant>(body)
+                                    .copy(id = "grant${writes.size}", resourceId = resource.id)
+                            rules += grant
+                            wireJson.encodeToString(grant)
+                        }
+                        path.contains("/grants/") -> {
+                            rules.removeAll { it.id == path.substringAfterLast('/') }
+                            "{}"
+                        }
+                        else -> null
+                    }
+                }
+            server.dispatcher =
+                object : Dispatcher() {
+                    override fun dispatch(request: RecordedRequest): MockResponse {
+                        val response = normal.dispatch(request)
+                        return if (
+                            uncertain.get() &&
+                                request.method != "GET" &&
+                                request.path.orEmpty().contains("/grants")
+                        )
+                            MockResponse().setSocketPolicy(SocketPolicy.DISCONNECT_AFTER_REQUEST)
+                        else response
+                    }
+                }
+            server.start()
+            show(server) { vm, state -> PluginScreen(vm, state, manifest.id) {} }
+            compose.waitUntil(10000) {
+                compose.onAllNodesWithText("Accès des agents").fetchSemanticsNodes().isNotEmpty()
+            }
+            compose.onNodeWithText("Accès des agents").performScrollTo().performClick()
+            compose.onNodeWithText("Aucune règle d’accès.").assertExists()
+            assertTrue(writes.isEmpty())
+            compose.onNodeWithText("Ajouter une règle").performScrollTo().performClick()
+            compose.onNodeWithText("Enregistrer").assertIsNotEnabled()
+            compose.onNodeWithContentDescription("Helper").performScrollTo().performClick()
+            compose.onNodeWithContentDescription("Contribution").performScrollTo().performClick()
+            compose
+                .onNodeWithContentDescription("Refuser read-messages")
+                .performScrollTo()
+                .performClick()
+            compose
+                .onNodeWithContentDescription("Autoriser delete-message")
+                .performScrollTo()
+                .performClick()
+            compose
+                .onNodeWithText("Limiter channel")
+                .performScrollTo()
+                .performTextInput("C111\nC222")
+            compose
+                .onNodeWithText("Autorisées par cette règle : send-message, delete-message")
+                .performScrollTo()
+                .assertExists()
+            compose.onNodeWithText("Enregistrer").assertIsEnabled().performClick()
+            compose.waitUntil(10000) {
+                rules.size == 1 &&
+                    compose
+                        .onAllNodesWithText("Ajouter une règle")
+                        .fetchSemanticsNodes()
+                        .isNotEmpty()
+            }
+            val input = writes.single()
+            assertEquals("helper", input["agentId"]?.jsonPrimitive?.content)
+            assertEquals("contribute", input["profile"]?.jsonPrimitive?.content)
+            assertEquals(
+                listOf("delete-message"),
+                input["operations"]?.jsonArray?.map { it.jsonPrimitive.content },
+            )
+            assertEquals(
+                listOf("read-messages"),
+                input["deniedOperations"]?.jsonArray?.map { it.jsonPrimitive.content },
+            )
+            assertEquals(
+                listOf("C111", "C222"),
+                input["scopes"]?.jsonObject?.get("channel")?.jsonArray?.map {
+                    it.jsonPrimitive.content
+                },
+            )
+            compose.onNodeWithText("channel : C111, C222").performScrollTo().assertExists()
+            capture("resource-access-rules")
+            compose.onNodeWithContentDescription("Fermer").performClick()
+            compose
+                .onNodeWithText("Accès global à l’instance : aucun agent.")
+                .performScrollTo()
+                .assertExists()
+            compose
+                .onNodeWithText("Aucun agent ne peut l’utiliser pour l’instant.")
+                .assertDoesNotExist()
+            compose.onNodeWithText("Accès des agents").performScrollTo().performClick()
+            compose.waitUntil(10000) {
+                compose.onAllNodesWithText("Révoquer la règle").fetchSemanticsNodes().isNotEmpty()
+            }
+
+            compose.onNodeWithText("Révoquer la règle").performScrollTo().performClick()
+            compose.onNodeWithText("Confirmer").performClick()
+            compose.waitUntil(10000) {
+                rules.isEmpty() &&
+                    compose
+                        .onAllNodesWithText("Aucune règle d’accès.")
+                        .fetchSemanticsNodes()
+                        .isNotEmpty()
+            }
+            assertEquals(1, writes.size)
+            uncertain.set(true)
+            compose.onNodeWithText("Ajouter une règle").performScrollTo().performClick()
+            compose.onNodeWithContentDescription("Helper").performScrollTo().performClick()
+            compose.onNodeWithContentDescription("Lecture").performScrollTo().performClick()
+            compose.onNodeWithText("Enregistrer").performClick()
+            compose.waitUntil(10000) {
+                rules.size == 1 &&
+                    compose
+                        .onAllNodesWithText(
+                            "Actualisez les règles avant une autre modification.",
+                            substring = true,
+                        )
+                        .fetchSemanticsNodes()
+                        .isNotEmpty()
+            }
+            compose.onNodeWithText("Ajouter une règle").assertDoesNotExist()
+            assertEquals(2, writes.size)
+            compose.onNodeWithText("Actualiser les règles").performScrollTo().performClick()
+            compose.waitUntil(10000) {
+                compose.onAllNodesWithText("Ajouter une règle").fetchSemanticsNodes().isNotEmpty()
+            }
+            assertEquals(2, writes.size)
+            compose.onNodeWithText("Révoquer la règle").performScrollTo().performClick()
+            compose.onNodeWithText("Confirmer").performClick()
+            compose.waitUntil(10000) {
+                rules.isEmpty() &&
+                    compose
+                        .onAllNodesWithText(
+                            "Actualisez les règles avant une autre modification.",
+                            substring = true,
+                        )
+                        .fetchSemanticsNodes()
+                        .isNotEmpty()
+            }
+            compose.onNodeWithText("Actualiser les règles").performScrollTo().performClick()
+            compose.waitUntil(10000) {
+                compose
+                    .onAllNodesWithText("Aucune règle d’accès.")
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
+            }
+            assertEquals(2, writes.size)
+        }
+    }
+
+    @Test
+    fun inertResourcesDoNotOfferOperationalGrants() {
+        val manifest =
+            PluginManifest(
+                id = "draft-grants",
+                agentAccess = PluginAgentAccess(),
+                resources =
+                    listOf(PluginResourceCollection("workspace", "Workspaces", "Workspace")),
+                operations = listOf(PluginOperation("read", "workspace", PluginAccessProfile.Read)),
+            )
+        val resource =
+            PluginResource(
+                id = "engineering",
+                connectionId = "draft",
+                collection = "workspace",
+                name = "Prepared workspace",
+                revision = "r1",
+            )
+        val grantReads = java.util.concurrent.atomic.AtomicInteger()
+        MockWebServer().use { server ->
+            server.dispatcher =
+                dispatcher(
+                    read = { path ->
+                        when {
+                            path.endsWith("/resources/workspace") ->
+                                wireJson.encodeToString(PluginPage(listOf(resource)))
+                            path.endsWith("/grants") -> {
+                                grantReads.incrementAndGet()
+                                "{\"items\":[]}"
+                            }
+                            else -> null
+                        }
+                    }
+                ) { _, _ ->
+                    null
+                }
+            server.start()
+            show(server) { vm, state ->
+                Column {
+                    PluginResources(
+                        vm,
+                        state,
+                        manifest,
+                        PluginResourceLocation(manifest.id, "draft", "root1"),
+                    )
+                }
+            }
+            compose.waitUntil(10000) {
+                compose.onAllNodesWithText("Prepared workspace").fetchSemanticsNodes().isNotEmpty()
+            }
+            compose.onNodeWithText("Accès des agents").assertDoesNotExist()
+            assertEquals(0, grantReads.get())
         }
     }
 

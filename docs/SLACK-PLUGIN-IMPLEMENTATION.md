@@ -558,3 +558,21 @@ journeys use their HTTP fixture; native OAuth tests independently exercise real
 provider exchanges and setup provenance. This remains an incremental interface
 checkpoint. Routes, profiles/grants, scoped forms, every remaining Slack lot and
 final qualification in the delivery checklist remain required.
+
+
+## Resource grant clients checkpoint
+
+Owners manage explicit resource access rules on both clients after activation.
+A rule selects an agent, an optional cumulative Read/Contribution/Management
+profile, per-operation allow/deny exceptions and optional scope limits. No agent
+or base profile is preselected. The preview excludes operations missing any
+configured scope. Saved rules expose their individual permissions and confirmed
+revocation; the interface explains that other rules can independently grant the
+same operation. Provider permissions and requester-only OAuth still apply.
+
+Management uses the existing owner-only active resource HTTP namespace. Inert
+setup resources expose no operational grants. The host remains authoritative for
+agent eligibility, resource access and each tool/command invocation. Clients do
+not automatically repeat uncertain writes and require a fresh rule list before
+another change. This remains a delivery slice: route management, scoped resource
+forms, the Slack package and the other unchecked contract items are still pending.
