@@ -1295,14 +1295,17 @@ private fun PluginReview(
         Scaffold(
             modifier = Modifier.fillMaxSize().testTag("plugin-review"),
             topBar = {
-                TopAppBar(
-                    title = { Text("Examiner ${entry.name}") },
-                    navigationIcon = {
-                        IconButton(onClick = close, enabled = !state.busy) {
-                            Icon(Icons.AutoMirrored.Filled.ArrowBack, "Fermer")
-                        }
-                    },
-                )
+                Column {
+                    TopAppBar(
+                        title = { Text("Examiner ${entry.name}") },
+                        navigationIcon = {
+                            IconButton(onClick = close, enabled = !state.busy) {
+                                Icon(Icons.AutoMirrored.Filled.ArrowBack, "Fermer")
+                            }
+                        },
+                    )
+                    Column(Modifier.padding(horizontal = 20.dp)) { ConnectionFeedbackNotice() }
+                }
             },
             bottomBar = {
                 Row(

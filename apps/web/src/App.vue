@@ -28,6 +28,7 @@ import {
   Inbox,
   Keyboard,
   Layers,
+  LoaderCircle,
   LogOut,
   Plus,
   Search,
@@ -195,7 +196,16 @@ function openShortcuts() {
   <div v-if="!state.ready" class="loading-screen min-h-dvh grid place-items-center text-muted">
     Loading…
   </div>
-  <div v-else class="shell flex min-h-0 overflow-hidden" :class="state.installationId ? 'flex-1' : 'h-dvh'">
+  <div v-else class="shell relative flex min-h-0 overflow-hidden" :class="state.installationId ? 'flex-1' : 'h-dvh'">
+    <p
+      v-if="state.connectionLost"
+      role="status"
+      aria-live="polite"
+      class="pointer-events-none absolute left-1/2 top-2 z-40 m-0 flex -translate-x-1/2 items-center gap-1.5 whitespace-nowrap rounded-full bg-canvas px-3 py-1 text-xs text-muted"
+    >
+      <Icon :name="LoaderCircle" :size="12" class="animate-spin motion-reduce:animate-none" />
+      Connection lost · reconnecting…
+    </p>
     <nav class="rail z-30 flex w-19 shrink-0 flex-col items-center gap-1 border-r border-line bg-canvas pb-4 pt-4 phone:hidden" aria-label="Workspace navigation">
       <RouterLink to="/" class="press mb-4 grid size-10 place-items-center rounded-xl" aria-label="Cairn home">
         <img

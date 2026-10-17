@@ -21,6 +21,33 @@ class MemoryVault : SessionVault {
 
 class CairnApiTest {
     @Test
+    fun `transport failures are marked while local download errors remain actionable`() = runTest {
+        val server = MockWebServer()
+        server.start()
+        val api = CairnApi(server.url("/"), MemoryVault())
+        val directory = java.nio.file.Files.createTempDirectory("cairn-download").toFile()
+        try {
+            server.enqueue(MockResponse().setBody("file contents"))
+            try {
+                api.download("/file", directory)
+                fail("Writing a file to a directory must fail")
+            } catch (error: java.io.IOException) {
+                assertFalse(isConnectionFailure(error))
+            }
+            server.shutdown()
+            try {
+                api.request("GET", "/overview")
+                fail("The stopped server must fail")
+            } catch (error: java.io.IOException) {
+                assertTrue(isConnectionFailure(error))
+            }
+        } finally {
+            directory.deleteRecursively()
+            server.close()
+        }
+    }
+
+    @Test
     fun `sign in challenges stay in memory and on the fixed beacon origin`() {
         val origin = "https://cairn.example/".toHttpUrl()
         val vault = MemoryVault()

@@ -5,8 +5,42 @@ import {
   expect,
   expectSingleScroll,
   test,
+  useRelayForHttpMocks,
   workspacePath,
 } from './fixtures'
+
+test('failed saves keep feedback visible above a scrolled MCP form', async ({ page }) => {
+  await useRelayForHttpMocks(page)
+  await page.setViewportSize({ width: 390, height: 440 })
+  await page.goto(workspacePath('/mcps'))
+  await authenticateWorkspace(page)
+  await page.getByRole('button', { name: 'Add MCP', exact: true }).click()
+  const dialog = page.getByRole('dialog')
+  await dialog.getByRole('combobox', { name: 'Connection type', exact: true }).click()
+  await page.getByRole('option', { name: 'Command in agent VM', exact: true }).click()
+  await dialog.getByLabel('Name', { exact: true }).fill('Preserved MCP')
+  await dialog.getByLabel('Command', { exact: true }).fill('printf')
+  for (let index = 1; index <= 8; index++) {
+    await dialog.getByRole('button', { name: 'Add variable', exact: true }).click()
+    await dialog.getByLabel(`Variable ${index} name`).fill(`FIXTURE_${index}`)
+    await dialog.getByLabel(`Variable ${index} value`).fill('fixture')
+  }
+
+  let saves = 0
+  await page.route(/\/mcps$/, async (route) => {
+    if (route.request().method() !== 'POST')
+      return route.continue()
+    saves++
+    await route.fulfill({ status: 503, json: { error: 'Installation unavailable' } })
+  })
+  await page.route(/\/overview$/, route => route.fulfill({ status: 503, json: { error: 'Installation unavailable' } }))
+  await dialog.getByRole('button', { name: 'Save MCP', exact: true }).click()
+  const feedback = dialog.getByRole('status').filter({ hasText: /Connection unavailable|Connection lost/ })
+  await expect(feedback).toBeInViewport({ ratio: 1 })
+  expect(await dialog.locator('.modal-inner').evaluate(element => element.scrollTop)).toBeGreaterThan(0)
+  await expect(dialog.getByLabel('Name', { exact: true })).toHaveValue('Preserved MCP')
+  expect(saves).toBe(1)
+})
 
 test('OAuth navigation does not leave background polls running in the departing page', async ({ page, workspace }) => {
   // Keep the cross-origin navigation pending across the shell's initial poll.

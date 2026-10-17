@@ -185,14 +185,15 @@ it('reads JSON from the actual direct response instead of relaying its payload',
 })
 
 it('retries interrupted reads on relay but leaves other mutations visibly failed', async () => {
-  const { api, channel } = await direct()
+  const { api, channel, state } = await direct()
   const read = api('/chats')
   const write = api('/chats/c', { method: 'DELETE' })
-  const failed = expect(write).rejects.toThrow('Connection interrupted')
+  const failed = expect(write).rejects.toMatchObject({ message: '', status: 0 })
   await vi.waitFor(() => expect(channel.packets.length).toBe(2))
   channel.dispatchEvent(new Event('close'))
   expect(await read).toEqual({ marker: 'relay' })
   await failed
+  expect(state.toast).toBe('Connection unavailable. Please try again.')
   expect(vi.mocked(fetch).mock.calls.filter(([url]) => String(url).endsWith('/api/chats/c'))).toHaveLength(0)
 })
 
@@ -276,13 +277,14 @@ it('uses fallback capacity for unsent mutations and live streams when direct slo
 it('expires only a slow request after allowing the server deadline to respond', async () => {
   const { api, channel, state } = await direct()
   const slow = api('/chats/c', { method: 'DELETE' })
-  const rejected = expect(slow).rejects.toThrow('Request timed out')
+  const rejected = expect(slow).rejects.toMatchObject({ message: '', status: 0 })
   await vi.waitFor(() => expect(channel.packets.length).toBe(1))
   await vi.advanceTimersByTimeAsync(30000)
   expect(state.transportRoute).toBe('direct')
   expect(channel.readyState).toBe('open')
   await vi.advanceTimersByTimeAsync(5000)
   await rejected
+  expect(state.toast).toBe('Connection unavailable. Please try again.')
   expect(state.transportRoute).toBe('direct')
   const next = api('/chats')
   await vi.advanceTimersByTimeAsync(0)

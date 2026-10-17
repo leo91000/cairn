@@ -388,9 +388,12 @@ useReadWhileOpen(() => {
     return null
   return { key: `chat:${chat.id}`, at: run.finishedAt }
 })
-watch(live.error, (value) => {
+// A stream error leaves on its own once the stream recovers; the connection pill covers the outage.
+watch(live.error, (value, previous) => {
   if (value)
     error.value = value
+  else if (error.value === previous)
+    error.value = ''
 })
 onBeforeUnmount(clearAttachments)
 let submission: {
@@ -506,13 +509,17 @@ const newSession = ref(false)
 
 async function action(name: 'pause' | 'stop' | 'restore' | 'new-session', body?: object) {
   if (!detail.value || busy.value)
-    return
+    return false
   busy.value = true
   error.value = ''
   try {
     await api(`/chats/${detail.value.id}/${name}`, { method: 'POST', ...(body ? { body: JSON.stringify(body) } : {}) })
+    return true
   }
-  catch (e) { error.value = (e as Error).message }
+  catch (e) {
+    error.value = (e as Error).message
+    return false
+  }
   finally { busy.value = false }
 }
 
@@ -582,7 +589,7 @@ function key(event: KeyboardEvent) {
   <Modal v-if="newSession" title="Start a fresh agent session?" @close="newSession = false">
     <div class="p-6">
       <p>The conversation history and working files will be preserved. The next message will use a new native agent session.</p>
-      <UiButton :disabled="busy" @click="action('new-session', { confirm: true }).then(() => { if (!error) newSession = false })">
+      <UiButton :disabled="busy" @click="action('new-session', { confirm: true }).then((succeeded) => { if (succeeded) newSession = false })">
         Confirm new session
       </UiButton>
     </div>

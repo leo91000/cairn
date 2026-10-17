@@ -255,3 +255,25 @@ test('account method changes keep header actions disabled while the request is p
     finish()
   }
 })
+
+test('temporary HTTP failures stay quiet and settings finish loading after recovery', async ({ page }) => {
+  await useRelayForHttpMocks(page)
+  await page.goto(workspacePath('/'))
+  await signIn(page)
+  let down = true
+  await page.route('**/api/installations/*/api/**', async (route) => {
+    if (down)
+      await route.fulfill({ status: 503, json: { error: 'Installation busy.' } })
+    else
+      await route.continue()
+  })
+  const header = page.getByRole('banner', { name: 'Current installation' })
+  await header.getByRole('button', { name: 'Installation settings', exact: true }).click()
+  const notice = page.getByRole('status').filter({ hasText: 'Connection lost · reconnecting…' })
+  await expect(notice).toBeVisible()
+  await expect(page.getByRole('alert').filter({ hasText: 'Installation busy.' })).toHaveCount(0)
+  down = false
+  await expect(page.getByRole('heading', { name: 'Worker environment', exact: true })).toBeVisible()
+  await expect(notice).toHaveCount(0)
+  await expect(page.getByRole('alert').filter({ hasText: 'Installation busy.' })).toHaveCount(0)
+})

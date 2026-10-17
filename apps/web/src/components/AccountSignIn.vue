@@ -119,9 +119,9 @@ async function copyCode() {
 async function submit() {
   if (!code.value.trim())
     return
-  await props.accounts.submitCode(code.value.trim())
+  const succeeded = await props.accounts.submitCode(code.value.trim())
   code.value = ''
-  submitted.value = !props.accounts.error.value
+  submitted.value = !!succeeded
 }
 
 async function close() {

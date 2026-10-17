@@ -192,6 +192,7 @@ private fun TokenEditor(
                     Code(token)
                     CopyButton("Copier le jeton", token, sensitive = true)
                 }
+                ConnectionFeedbackNotice()
                 state.error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
             }
         },
