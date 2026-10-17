@@ -190,6 +190,33 @@ pub(crate) fn capture_principal(
     }
 }
 
+/// The same native admission authority is used by runs and personal OAuth flows.
+pub(crate) fn external_in(db: &Db<'_>, actor: &External) -> Result<super::connections::Connection> {
+    let value = db
+        .get(super::connections::KIND, &actor.connection_id)?
+        .ok_or_else(|| Error::forbidden("The requester's instance was removed."))?;
+    let mut expected: super::connections::Connection = serde_json::from_value(value)?;
+    if expected.revision != actor.connection_revision {
+        return Err(Error::forbidden("The requester's instance changed."));
+    }
+    expected.routing = Some(actor.binding.clone());
+    let connection = super::connections::authorize(db, &expected)?;
+    if !connection.allows(&actor.subject) {
+        return Err(Error::forbidden("The requester is no longer allowed."));
+    }
+    Ok(connection)
+}
+
+pub(crate) async fn external(
+    s: &Service,
+    actor: &External,
+) -> Result<super::connections::Connection> {
+    let actor = actor.clone();
+    let connection = s.store.read(move |db| external_in(db, &actor)).await?;
+    super::connections::ensure_owner(s, &connection).await?;
+    Ok(connection)
+}
+
 #[derive(Clone)]
 pub(crate) struct RunRequester {
     pub principal: Principal,
@@ -242,27 +269,7 @@ pub(crate) async fn recheck(s: &Service, requester: &RunRequester) -> Result<()>
             }
         }
         Principal::External(actor) => {
-            let actor = actor.clone();
-            let connection = s
-                .store
-                .read(move |db| {
-                    let value = db
-                        .get(super::connections::KIND, &actor.connection_id)?
-                        .ok_or_else(|| Error::forbidden("The requester's instance was removed."))?;
-                    let mut expected: super::connections::Connection =
-                        serde_json::from_value(value)?;
-                    if expected.revision != actor.connection_revision {
-                        return Err(Error::forbidden("The requester's instance changed."));
-                    }
-                    expected.routing = Some(actor.binding);
-                    let connection = super::connections::authorize(db, &expected)?;
-                    if !connection.allows(&actor.subject) {
-                        return Err(Error::forbidden("The requester is no longer allowed."));
-                    }
-                    Ok(connection)
-                })
-                .await?;
-            super::connections::ensure_owner(s, &connection).await?;
+            external(s, actor).await?;
         }
     }
     let requester = requester.clone();

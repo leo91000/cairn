@@ -153,9 +153,15 @@ pub async fn call(
     {
         return capabilities::checked(s, &context, method, args.clone()).await;
     }
-    if ["conversations.", "inbound.", "instance.", "socket."]
-        .iter()
-        .any(|family| method.starts_with(family))
+    if [
+        "conversations.",
+        "inbound.",
+        "instance.",
+        "socket.",
+        "oauth.",
+    ]
+    .iter()
+    .any(|family| method.starts_with(family))
     {
         return Err(Error::forbidden(
             "Conversations and connections belong to the instance's worker.",

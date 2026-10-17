@@ -42,6 +42,9 @@ pub struct OAuth {
     pub client_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub client_secret: Option<String>,
+    /// Optional owner-controlled URL setting for direct HTTPS callbacks.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub redirect_origin_setting: Option<String>,
     #[serde(default)]
     pub pkce: bool,
     #[serde(default = "scope_parameter")]
@@ -108,6 +111,12 @@ pub(crate) fn validate(manifest: &Manifest) -> Result<(), &'static str> {
                 .iter()
                 .any(|f| f["key"] == *key && f["type"] == "secret")
         });
+        let redirect_origin = provider.redirect_origin_setting.as_ref().is_none_or(|key| {
+            manifest
+                .settings
+                .iter()
+                .any(|field| field["key"] == *key && field["type"] == "url")
+        });
         if !slug(&provider.name, 40)
             || !names.insert(&provider.name)
             || provider.title.trim().is_empty()
@@ -116,6 +125,7 @@ pub(crate) fn validate(manifest: &Manifest) -> Result<(), &'static str> {
             || !endpoint(manifest, &provider.token_url)
             || !client_id
             || !client_secret
+            || !redirect_origin
             || (!provider.pkce && provider.client_secret.is_none())
             || !matches!(provider.scope_separator.as_str(), " " | ",")
             || provider.scope_parameter.is_empty()
@@ -181,7 +191,10 @@ pub(crate) fn validate(manifest: &Manifest) -> Result<(), &'static str> {
                                 || secret.starts_with(&format!("{subject}/"))
                         })
                 });
-            if provider.metadata.is_empty()
+            if !provider
+                .metadata
+                .values()
+                .any(|path| path.rsplit('/').next() == Some("id"))
                 || !pointer(subject)
                 || !matches!(subject.rsplit('/').next(), Some("id" | "sub"))
                 || subject.split('/').any(|part| {

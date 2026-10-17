@@ -63,6 +63,12 @@ cairn.resources = {
     get = function(options) return call("resources.get", options) end,
     list = function(options) return call("resources.list", options) end,
 }
+cairn.oauth = {
+    start = function(options) return call("oauth.start", options) end,
+    finish = function(options) return call("oauth.finish", options) end,
+    status = function(options) return call("oauth.status", options) end,
+    disconnect = function(options) return call("oauth.disconnect", options) end,
+}
 cairn.instance = {
     status = function(state, message) call("instance.status", { state = state, message = message }) end,
 }

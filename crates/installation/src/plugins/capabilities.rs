@@ -78,6 +78,7 @@ pub async fn checked(s: &Service, context: &Context, method: &str, args: Value) 
             super::work::inbound(s, context, &args, method == "inbound.deliver").await
         }
         "instance.status" => instance_status(s, context, &args).await,
+        _ if method.starts_with("oauth.") => super::oauth::call(s, context, method, &args).await,
         _ if method.starts_with("socket.") => super::socket::call(s, context, method, &args).await,
         _ => effect(s, context, method, args).await,
     }?;

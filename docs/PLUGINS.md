@@ -400,7 +400,7 @@ The complete reset and external setup journeys remain in the Slack delivery chec
 The `oauth` capability declares up to eight providers for resource collections.
 The host captures token responses; scripts receive neither authorization codes,
 client secrets, access tokens nor refresh tokens. Providers connect either an
-owner-managed resource or the authenticated requester's personal account.
+owner-managed resource or the verified requester's personal account.
 Setup drafts and the client configuration interfaces remain in the Slack delivery
 checklist.
 
@@ -447,7 +447,10 @@ Authorization management uses this prefix:
   scopes. Returns `url`, `state`, `redirectUri` and `expiresAt`. State expires after
   ten minutes and binds requester, owner access, package approval and resource and
   instance revisions. Optional `directOrigin` selects the owner's exposed HTTPS
-  origin; otherwise the redirect uses Beacon automatically.
+  origin. A provider may declare `redirectOriginSetting`, naming an instance URL
+  setting, to use that owner-configured HTTPS origin for every authorization.
+  Origins cannot contain a path, query or credentials. With neither option, the
+  redirect uses Beacon automatically.
 - The public GET callback only captures one code, encrypted, and returns constant
   plain text. It grants no account authority and cannot exchange credentials.
   Direct: `/api/plugin-oauth/<instance>/callback`; Beacon:
@@ -476,7 +479,9 @@ Add `"personal": {"subject": "/authed_user/id"}` to a provider whose token
 response identifies a person. The host captures this nonsecret subject alongside
 the encrypted credentials. The provider must also declare resource identity
 metadata, and that identity must match an already configured resource. Personal
-authorization cannot create or change the owner's workspace identity.
+providers must capture at least one stable ID, using a pointer ending in `/id`;
+a display name alone is insufficient. Personal authorization cannot create or
+change the owner's workspace identity.
 
 The same management prefix then addresses only the authenticated Cairn account's
 authorization. Members can start, finish, inspect and disconnect their own
@@ -508,8 +513,46 @@ removes the link as well as the credential. An externally admitted routed turn
 can use only the authorization for its exact proved subject in its resource scope.
 The link, membership, route and current turn are rechecked around network I/O.
 
-Self-service OAuth for external people without a Cairn account, scheduled automation
-authorities and their setup flows remain in the Slack delivery checklist.
+An admitted external person can also authorize directly from the external app,
+without a Cairn account. In a routed `message` or `interaction` handler, use:
+
+```lua
+local consent = cairn.oauth.start({
+    resource = workspace.id,
+    provider = "personal",
+    scopes = {"messages:read"},
+})
+-- Send consent.url privately to this person. After their browser authorization,
+-- an admitted interaction from the same person completes it:
+local status = cairn.oauth.finish({resource = workspace.id, provider = "personal"})
+```
+
+`start`, `finish`, `status` and `disconnect` accept only `resource`, `provider`
+and, for `start`, `scopes`. The host supplies the person, native event and source
+route. Public ingress, timers, tools, owner panels and scripts claiming an actor
+cannot initiate personal consent. The resource must belong to the admitted
+resource family. The callback still only deposits a code: an admitted event
+from the same person and route must finish the exchange. The provider must prove
+that exact person and the configured resource ID. This proof creates no Cairn
+account, membership or owner authority.
+
+`start` returns `url`, `redirectUri` and `expiresAt`. Replaying the same durable
+event preserves its consent URL. If that exact event has already completed consent,
+it returns the safe authorization status instead. `finish` returns `pending`,
+`denied`, `authorized` or the current status if already finished. `status` returns
+only this person's safe status, subject, scopes and expiry. A missing one-use
+exchange after an interruption requires a new consent; no code is replayed.
+`disconnect` fences in-flight exchanges and removes both an independent external
+credential and any Cairn-account credential linked to that proved person. An
+invalid independent credential cannot fall back silently to the linked account.
+
+The installation permits at most 128 live pending consents and 2,048 authorization
+storage records (credentials and revocation generations combined). Capacity
+errors preserve existing authorizations. Pending-only and disconnected revocation
+generations expire after ten minutes; active credentials remain until disconnected
+or their resource is deleted.
+
+Scheduled automation authorities and configuration drafts remain in the Slack delivery checklist.
 Unattributed in-process submissions and owner panels cannot use personal providers.
 
 Protocol references checked on 2026-10-17: [Slack OAuth](https://docs.slack.dev/authentication/installing-with-oauth/),

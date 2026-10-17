@@ -84,6 +84,7 @@ pub fn capability(method: &str) -> Option<&'static str> {
         "socket.connect" | "socket.send" | "socket.close" | "socket.timer" => "socket",
         "inbound.accept" | "inbound.deliver" => "inbound",
         "resources.get" | "resources.list" => "resources",
+        "oauth.start" | "oauth.finish" | "oauth.status" | "oauth.disconnect" => "oauth",
         _ => return None,
     };
     CAPABILITIES

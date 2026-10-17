@@ -1,5 +1,6 @@
 //! OAuth code capture and exchange are host operations. Anonymous callbacks can
-//! only deposit one code; the initiating account must finish through the account API.
+//! only deposit one code; the initiating account or admitted external person must
+//! finish through their own authorized interface.
 use super::{
     capabilities, connections, registry,
     requesters::{self, Actor},
@@ -28,7 +29,13 @@ use std::{
 };
 use tokio::sync::{Mutex, OwnedMutexGuard};
 
+mod external;
+
+pub(crate) use external::call;
+
 const TTL: i64 = 600_000;
+const MAX_PENDING: i64 = 128;
+const MAX_AUTHORIZATION_RECORDS: i64 = 2048;
 
 const EXPIRED: &str =
     "Authorization expired or changed. Start again from the plugin configuration.";
@@ -36,7 +43,7 @@ const EXPIRED: &str =
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct Personal {
-    actor: Actor,
+    actor: Option<Actor>,
     subject: String,
 }
 
@@ -99,7 +106,13 @@ struct Pending {
     #[serde(default)]
     actor: Option<Actor>,
     #[serde(default)]
+    external: Option<requesters::External>,
+    #[serde(default)]
     epoch: Option<Value>,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    source_event: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    start_url: Option<String>,
 }
 
 #[derive(Clone, Deserialize, Serialize)]
@@ -125,6 +138,8 @@ struct Authorization {
     refreshing: bool,
     #[serde(default)]
     personal: Option<Personal>,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    source_event: String,
 }
 
 pub(crate) struct Reference {
@@ -149,12 +164,70 @@ fn authorization_key(resource: &str, provider: &str, actor: Option<&Actor>) -> S
     }
 }
 
+fn external_key(resource: &str, provider: &str, subject: &str) -> String {
+    format!(
+        "plugin-oauth:{resource}:{provider}:external:{}",
+        hex_digest(subject)
+    )
+}
+
+fn pending_authorization_key(pending: &Pending) -> String {
+    match &pending.external {
+        Some(person) => external_key(&pending.resource, &pending.provider, &person.subject),
+        None => authorization_key(&pending.resource, &pending.provider, pending.actor.as_ref()),
+    }
+}
+
 fn epoch_key(authorization: &str) -> String {
     stored_key(&format!("{authorization}:epoch"))
 }
 
 fn stored_key(key: &str) -> String {
     format!("mcp-secret:{key}")
+}
+
+/// Count indexed metadata, without loading encrypted values or remote objects.
+fn slots(db: &Db<'_>, prefix: &str) -> Result<i64> {
+    Ok(db.0.query_row(
+        "SELECT COUNT(*) FROM kv WHERE key>=?1 AND key<?2 AND (expires IS NULL OR expires>?3)",
+        rusqlite::params![prefix, format!("{prefix}\u{10ffff}"), now()],
+        |row| row.get(0),
+    )?)
+}
+
+fn reserve(db: &Db<'_>, keys: &[String]) -> Result<()> {
+    let mut additional = 0;
+    for key in keys {
+        if db.kv(key)?.is_none() {
+            additional += 1;
+        }
+    }
+    if additional > 0
+        && slots(db, &stored_key("plugin-oauth:"))? + additional > MAX_AUTHORIZATION_RECORDS
+    {
+        return Err(Error::too_many_requests(
+            "OAuth authorization capacity reached. Disconnect unused authorizations.",
+        ));
+    }
+    Ok(())
+}
+
+fn fence(db: &Db<'_>, key: &str, generation: &Value, expires: Option<i64>) -> Result<()> {
+    let key = epoch_key(key);
+    reserve(db, std::slice::from_ref(&key))?;
+    db.set(&key, generation, expires)
+}
+
+fn persist(db: &Db<'_>, key: &str, encrypted: &Value, personal: bool) -> Result<()> {
+    let mut keys = vec![stored_key(key)];
+    if personal {
+        keys.push(epoch_key(key));
+    }
+    reserve(db, &keys)?;
+    if personal {
+        fence(db, key, &json!(id()), None)?;
+    }
+    db.set(&stored_key(key), encrypted, None)
 }
 
 fn expired() -> Error {
@@ -211,8 +284,18 @@ fn current(db: &Db<'_>, pending: &Pending) -> Result<Value> {
     {
         return Err(expired());
     }
-    if pending.actor.is_some() {
-        let key = authorization_key(&pending.resource, &pending.provider, pending.actor.as_ref());
+    if let Some(person) = &pending.external {
+        if pending.actor.is_some()
+            || !pending.account.is_empty()
+            || instance["enabled"] != true
+            || resource["enabled"] != true
+        {
+            return Err(expired());
+        }
+        requesters::external_in(db, person)?;
+    }
+    if pending.actor.is_some() || pending.external.is_some() {
+        let key = pending_authorization_key(pending);
         if db.kv(&epoch_key(&key))? != pending.epoch {
             return Err(expired());
         }
@@ -270,13 +353,57 @@ pub async fn start(
     let package = registry::active(s, plugin).await?;
     let provider = provider(&package.manifest, name, collection)?;
     let (owner_access, actor) = authority(s, provider, account).await?;
-    if actor.is_some()
-        && !provider.metadata.keys().any(|key| {
-            resource
-                .settings
-                .get(key)
-                .and_then(Value::as_str)
-                .is_some_and(|value| !value.is_empty())
+    begin(
+        s,
+        &package,
+        &connection,
+        resource,
+        provider,
+        Initiator {
+            account: account.into(),
+            owner_access,
+            actor,
+            external: None,
+            source_event: String::new(),
+        },
+        input,
+    )
+    .await
+}
+
+struct Initiator {
+    account: String,
+    owner_access: String,
+    actor: Option<Actor>,
+    external: Option<requesters::External>,
+    source_event: String,
+}
+
+async fn begin(
+    s: &Service,
+    package: &registry::Package,
+    connection: &connections::Connection,
+    resource: resources::Resource,
+    provider: &OAuth,
+    initiator: Initiator,
+    input: &Value,
+) -> Result<Value> {
+    let Initiator {
+        account,
+        owner_access,
+        actor,
+        external,
+        source_event,
+    } = initiator;
+    let (instance, name) = (connection.id.as_str(), provider.name.as_str());
+    if (actor.is_some() || external.is_some())
+        && !provider.metadata.iter().any(|(key, pointer)| {
+            pointer.rsplit('/').next() == Some("id")
+                && resource
+                    .settings
+                    .get(key)
+                    .and_then(Value::as_str)
+                    .is_some_and(|value| !value.is_empty())
         })
     {
         return Err(Error::conflict(
@@ -311,7 +438,17 @@ pub async fn start(
     }
     let state = token();
     let verifier = provider.pkce.then(token);
-    let redirect_uri = redirect(s, instance, input.direct_origin.as_deref()).await?;
+    let configured_origin = provider
+        .redirect_origin_setting
+        .as_ref()
+        .and_then(|key| connection.settings[key].as_str())
+        .filter(|origin| !origin.is_empty());
+    let redirect_uri = redirect(
+        s,
+        instance,
+        input.direct_origin.as_deref().or(configured_origin),
+    )
+    .await?;
     let mut url = url::Url::parse(&provider.authorization_url).map_err(Error::internal)?;
     {
         let mut query = url.query_pairs_mut();
@@ -330,21 +467,25 @@ pub async fn start(
                 .append_pair("code_challenge", &digest(verifier));
         }
     }
-    let auth_key = authorization_key(&resource.id, name, actor.as_ref());
-    let epoch = if actor.is_some() {
+    let auth_key = match &external {
+        Some(person) => external_key(&resource.id, name, &person.subject),
+        None => authorization_key(&resource.id, name, actor.as_ref()),
+    };
+    let epoch = if actor.is_some() || external.is_some() {
         s.store.kv(&epoch_key(&auth_key)).await?
     } else {
         None
     };
-    let pending = Pending {
-        account: account.into(),
+    let start_url = external.as_ref().map(|_| url.to_string());
+    let mut pending = Pending {
+        account,
         owner_access,
         instance: instance.into(),
-        instance_revision: connection.revision,
+        instance_revision: connection.revision.clone(),
         resource: resource.id,
         resource_revision: resource.revision,
         provider: name.into(),
-        digest: package.digest,
+        digest: package.digest.clone(),
         redirect_uri: redirect_uri.clone(),
         client_id,
         scopes,
@@ -353,13 +494,46 @@ pub async fn start(
         code: None,
         denied: false,
         actor,
+        external,
         epoch,
+        source_event,
+        start_url,
     };
     let key = pending_key(&state);
-    let encrypted = s.vault.encrypt(&key, &serde_json::to_value(&pending)?)?;
+    let vault = s.vault.clone();
     s.store
         .transaction(move |db| {
             current(db, &pending)?;
+            let previous = pending.external.as_ref()
+                .map(|person| external::flow_key(&pending.resource, &pending.provider, &person.subject))
+                .map(|index| db.kv(&index))
+                .transpose()?
+                .flatten()
+                .and_then(|value| value["key"].as_str().map(str::to_owned));
+            let replacing = match &previous {
+                Some(key) => i64::from(db.kv(&stored_key(key))?.is_some()),
+                None => 0,
+            };
+            if slots(db, &stored_key("plugin-oauth-pending:"))? >= MAX_PENDING + replacing {
+                return Err(Error::too_many_requests("Too many OAuth requests are waiting for consent. Finish one or wait for expiry."));
+            }
+            if pending.actor.is_some() || pending.external.is_some() {
+                if pending.external.is_some() || pending.epoch.is_none() {
+                    pending.epoch = Some(json!(id()));
+                }
+                fence(db, &auth_key, pending.epoch.as_ref().unwrap(), Some(pending.expires_at))?;
+            }
+            if let Some(person) = &pending.external {
+                let index = external::flow_key(&pending.resource, &pending.provider, &person.subject);
+                if let Some(previous) = previous {
+                    db.delete(&stored_key(&previous))?;
+                }
+                db.set(&index, &json!({
+                    "key": key,
+                    "event": pending.source_event,
+                }), Some(pending.expires_at))?;
+            }
+            let encrypted = vault.encrypt(&key, &serde_json::to_value(&pending)?)?;
             db.set(&stored_key(&key), &encrypted, Some(pending.expires_at))
         })
         .await?;
@@ -426,7 +600,7 @@ pub async fn callback(s: &Service, instance: &str, request: Request) -> Result<R
             ("referrer-policy", "no-referrer"),
             ("x-content-type-options", "nosniff"),
         ],
-        "Authorization received. Return to Cairn to finish.",
+        "Authorization received. Return to the application to finish.",
     )
         .into_response())
 }
@@ -574,11 +748,45 @@ pub async fn finish(
         || pending.resource != resource
         || pending.provider != name
         || pending.actor != actor
+        || pending.external.is_some()
     {
         return Err(Error::forbidden(
             "This authorization belongs to another requester or resource.",
         ));
     }
+    finish_pending(s, &package, &provider, key, value, pending).await
+}
+
+async fn check_initiator(s: &Service, provider: &OAuth, pending: &Pending) -> Result<()> {
+    if let Some(person) = &pending.external {
+        let connection = requesters::external(s, person).await?;
+        if connection.owner_access_id.as_deref() != Some(&pending.owner_access)
+            || provider.personal.is_none()
+        {
+            return Err(expired());
+        }
+    } else if authority(s, provider, &pending.account).await?
+        != (pending.owner_access.clone(), pending.actor.clone())
+    {
+        return Err(expired());
+    }
+    Ok(())
+}
+
+async fn finish_pending(
+    s: &Service,
+    package: &registry::Package,
+    provider: &OAuth,
+    key: String,
+    value: Value,
+    pending: Pending,
+) -> Result<Value> {
+    check_initiator(s, provider, &pending).await?;
+    let (plugin, instance, collection) = (
+        package.manifest.id.as_str(),
+        pending.instance.as_str(),
+        provider.collection.as_str(),
+    );
     if package.digest != pending.digest {
         return Err(expired());
     }
@@ -618,7 +826,7 @@ pub async fn finish(
     let response = exchange(
         s,
         &package.manifest,
-        &provider,
+        provider,
         &pending.client_id,
         instance,
         fields,
@@ -640,24 +848,45 @@ pub async fn finish(
             "OAuth returned no declared resource identity.",
         ));
     }
-    let personal = match (&provider.personal, &actor) {
-        (Some(personal), Some(actor)) => {
-            let subject = response
-                .pointer(&personal.subject)
-                .and_then(Value::as_str)
-                .filter(|s| !s.is_empty() && s.len() <= 256 && !s.chars().any(char::is_control))
-                .ok_or_else(|| Error::bad_gateway("OAuth returned no valid personal identity."))?;
-            Some(Personal {
-                actor: actor.clone(),
-                subject: subject.into(),
-            })
-        }
-        (None, None) => None,
-        _ => return Err(expired()),
-    };
-    if authority(s, &provider, account).await? != (pending.owner_access.clone(), actor)
-        || registry::active(s, plugin).await?.digest != pending.digest
+    if provider.personal.is_some()
+        && !provider
+            .metadata
+            .iter()
+            .any(|(key, path)| path.rsplit('/').next() == Some("id") && metadata.contains_key(key))
     {
+        return Err(Error::bad_gateway(
+            "Personal OAuth returned no stable resource identity.",
+        ));
+    }
+    let personal = if let Some(personal) = &provider.personal {
+        if pending.actor.is_none() && pending.external.is_none() {
+            return Err(expired());
+        }
+        let subject = response
+            .pointer(&personal.subject)
+            .and_then(Value::as_str)
+            .filter(|value| {
+                !value.is_empty() && value.len() <= 256 && !value.chars().any(char::is_control)
+            })
+            .ok_or_else(|| Error::bad_gateway("OAuth returned no valid personal identity."))?;
+        if pending
+            .external
+            .as_ref()
+            .is_some_and(|person| person.subject != subject)
+        {
+            return Err(Error::forbidden(
+                "OAuth proved a different external person.",
+            ));
+        }
+        Some(Personal {
+            actor: pending.actor.clone(),
+            subject: subject.into(),
+        })
+    } else {
+        None
+    };
+    check_initiator(s, provider, &pending).await?;
+    if registry::active(s, plugin).await?.digest != pending.digest {
         return Err(expired());
     }
     let authorization = Authorization {
@@ -670,9 +899,10 @@ pub async fn finish(
         tokens,
         refreshing: false,
         personal,
+        source_event: pending.source_event.clone(),
     };
     let result = summary(&authorization);
-    let auth_key = authorization_key(resource, name, pending.actor.as_ref());
+    let auth_key = pending_authorization_key(&pending);
     let encrypted = s
         .vault
         .encrypt(&auth_key, &serde_json::to_value(&authorization)?)?;
@@ -703,25 +933,26 @@ pub async fn finish(
                     return Err(Error::conflict("Disconnect before linking another personal identity."));
                 }
             }
-            let subject_key = subject_key(&pending.resource, &pending.provider, &personal.subject);
-            if let Some(previous) = db.kv(&subject_key)? {
-                let previous: SubjectLink = serde_json::from_value(previous)?;
-                if previous.actor != personal.actor {
-                    let still_member = membership.grant(&previous.actor.account)
-                        .is_some_and(|grant| grant.access_id == previous.actor.access_id);
-                    if still_member {
-                        return Err(Error::conflict("This external identity is already linked to another installation account."));
+            if let Some(actor) = &personal.actor {
+                let subject_key = subject_key(&pending.resource, &pending.provider, &personal.subject);
+                if let Some(previous) = db.kv(&subject_key)? {
+                    let previous: SubjectLink = serde_json::from_value(previous)?;
+                    if previous.actor != *actor {
+                        let still_member = membership.grant(&previous.actor.account)
+                            .is_some_and(|grant| grant.access_id == previous.actor.access_id);
+                        if still_member {
+                            return Err(Error::conflict("This external identity is already linked to another installation account."));
+                        }
+                        // A new proof may replace a removed membership. Its old
+                        // callback and token must not remain usable after relinking.
+                        fence(db, &previous.authorization, &json!(id()), Some(now() + TTL))?;
+                        db.delete(&stored_key(&previous.authorization))?;
                     }
-                    // A new proof may replace a removed membership. Its old
-                    // callback and token must not remain usable after relinking.
-                    db.set(&epoch_key(&previous.authorization), &json!(id()), None)?;
-                    db.delete(&stored_key(&previous.authorization))?;
                 }
+                let link = SubjectLink {actor: actor.clone(), authorization: auth_key.clone(), revision: id()};
+                db.set(&subject_key, &serde_json::to_value(link)?, None)?;
             }
-            let link = SubjectLink {actor: personal.actor.clone(), authorization: auth_key.clone(), revision: id()};
-            db.set(&subject_key, &serde_json::to_value(link)?, None)?;
-            db.set(&epoch_key(&auth_key), &json!(id()), None)?;
-            db.set(&stored_key(&auth_key), &encrypted, None)?;
+            persist(db, &auth_key, &encrypted, true)?;
             return Ok(());
         }
         for (key, value) in metadata {
@@ -744,7 +975,7 @@ pub async fn finish(
         resource["revision"] = json!(id());
         resource["updatedAt"] = json!(now());
         db.put(resources::KIND, &resource)?;
-        db.set(&stored_key(&auth_key), &encrypted, None)?;
+        persist(db, &auth_key, &encrypted, false)?;
         Ok(())
     }).await?;
     Ok(result)
@@ -794,7 +1025,7 @@ pub async fn status(
         || authorization
             .personal
             .as_ref()
-            .map(|personal| &personal.actor)
+            .and_then(|personal| personal.actor.as_ref())
             != actor.as_ref()
         || authorization.instance_revision != connection.revision
         || authorization.digest != package.digest
@@ -840,18 +1071,17 @@ pub async fn revoke(
             if actor.is_some() {
                 // A per-person generation fences code exchanges without changing
                 // the shared resource or anyone else's authorization.
-                db.set(&epoch_key(&key), &json!(id()), None)?;
+                fence(db, &key, &json!(id()), Some(now() + TTL))?;
                 if let Some(value) = db.kv(&stored_key(&key))? {
                     let authorization: Authorization =
                         serde_json::from_value(vault.decrypt(&key, &value)?)?;
                     if let Some(personal) = authorization.personal {
-                        let index = subject_key(&resource_id, &provider_name, &personal.subject);
-                        if db
-                            .kv(&index)?
-                            .is_some_and(|link| link["authorization"] == key)
-                        {
-                            db.delete(&index)?;
-                        }
+                        external::disconnect_subject(
+                            db,
+                            &resource_id,
+                            &provider_name,
+                            &personal.subject,
+                        )?;
                     }
                 }
                 return db.delete(&stored_key(&key));
@@ -878,6 +1108,7 @@ pub(crate) async fn credential(
     let provider = provider(&context.manifest, name, &selected.collection)?;
     let mut subject_link = None;
     let mut external_subject = None;
+    let mut selected_key = None;
     let actor = if provider.personal.is_some() {
         let requester = context
             .resource_grant
@@ -888,43 +1119,24 @@ pub(crate) async fn credential(
         match &requester.principal {
             requesters::Principal::Account(actor) => Some(actor.clone()),
             requesters::Principal::External(external) => {
-                let within_route = external
-                    .binding
-                    .resources
-                    .iter()
-                    .any(|(id, _)| id == &selected.id)
-                    || resource
-                        .revisions
-                        .iter()
-                        .any(|(id, _)| id == &external.binding.resource);
-                if external.connection_id != context.connection.id || !within_route {
-                    return Err(Error::forbidden(
-                        "This OAuth resource is outside the requester's admitted scope.",
-                    ));
-                }
-                let index = subject_key(&selected.id, name, &external.subject);
-                let value = s.store.kv(&index).await?.ok_or_else(|| {
-                    Error::forbidden(
-                        "Link this external identity to its personal OAuth authorization first.",
-                    )
-                })?;
-                let link: SubjectLink = serde_json::from_value(value.clone())?;
-                if link.authorization != authorization_key(&selected.id, name, Some(&link.actor))
-                    || requesters::account(s, &link.actor.account).await? != link.actor
-                {
-                    return Err(Error::forbidden(
-                        "The external identity's installation access changed.",
-                    ));
-                }
-                subject_link = Some((index, value));
+                let selected =
+                    external::selection(s, &context.connection, &resource, external, name)
+                        .await?
+                        .ok_or_else(|| {
+                            Error::forbidden(
+                                "Connect this external person's OAuth authorization first.",
+                            )
+                        })?;
+                subject_link = selected.link;
+                selected_key = Some(selected.key);
                 external_subject = Some(external.subject.clone());
-                Some(link.actor)
+                selected.actor
             }
         }
     } else {
         None
     };
-    let key = authorization_key(&selected.id, name, actor.as_ref());
+    let key = selected_key.unwrap_or_else(|| authorization_key(&selected.id, name, actor.as_ref()));
     let _lock = s.plugins.oauth.lock(&key).await;
     let value = s
         .vault
@@ -932,11 +1144,12 @@ pub(crate) async fn credential(
         .await?
         .ok_or_else(|| Error::forbidden("Connect this resource through OAuth first."))?;
     let mut authorization: Authorization = serde_json::from_value(value)?;
-    if authorization
-        .personal
-        .as_ref()
-        .map(|personal| &personal.actor)
-        != actor.as_ref()
+    if provider.personal.is_some() != authorization.personal.is_some()
+        || authorization
+            .personal
+            .as_ref()
+            .and_then(|personal| personal.actor.as_ref())
+            != actor.as_ref()
     {
         return Err(Error::forbidden(
             "This OAuth authorization belongs to another requester.",
@@ -1135,6 +1348,12 @@ pub(crate) fn remove_resource(db: &Db<'_>, resource: &str) -> Result<()> {
         db.delete(&key)?;
     }
     for (key, _) in db.keys(&format!("plugin-oauth-subject:{resource}:"))? {
+        db.delete(&key)?;
+    }
+    for (key, value) in db.keys(&format!("plugin-oauth-external-flow:{resource}:"))? {
+        if let Some(pending) = value["key"].as_str() {
+            db.delete(&stored_key(pending))?;
+        }
         db.delete(&key)?;
     }
     Ok(())

@@ -42,9 +42,14 @@ the web/Android journeys. Tests assert observable behavior at those interfaces.
     author; message-ID replay and cross-author steering cannot transfer authority.
   - OAuth-proved subjects now link unambiguously to their Cairn account within a
     resource/provider. Routed external turns select only that subject's personal
-    authorization. Nonmember self-service linking, configuration drafts, provider revocation/token
-    exchange and both client interfaces remain unfinished. This does not complete
-    OAuth or the Slack package.
+    authorization. Admitted external people can now start and finish their own
+    OAuth consent without a Cairn account. The host verifies the exact provider
+    subject and stable resource ID, preserves a consent URL across durable replay,
+    and never retries an uncertain code exchange. Independent proofs grant no
+    Cairn membership; disconnect also removes any credential linked to that same
+    proved identity. Configuration drafts, provider revocation/token exchange and
+    both client interfaces remain unfinished. This does not complete OAuth or the
+    Slack package.
 - [ ] Socket acknowledgement/liveness/replacement, authenticated files.
 - [ ] Slack Luau package: setup, protocol, conversations and native surfaces.
 - [ ] Collaboration/productivity tools with exact scopes and profiles.
@@ -140,3 +145,27 @@ source after approval. The selected regression covers 210 installation/Beacon te
 is ignored. The web checks pass with 511 tests. No client UI or live Slack app was
 exercised in this slice. Compatibility/storage qualification and final independent
 review remain open with the rest of the contract.
+
+## External-person OAuth checkpoint
+
+The resource-route checkpoint passed Quality and Storage at `bd056980`. The next
+slice adds `cairn.oauth.start/finish/status/disconnect` for a resource-routed,
+admitted external person. The public callback still captures only a code, and the
+person must complete consent through an admitted handler with the same native
+route authority. This creates neither a Cairn account nor installation access.
+Provider proof for a different person or workspace is refused. Personal providers
+must capture a stable resource ID; a display name is insufficient.
+
+The first tracer failed because the capability was absent. Further tests reproduced
+unbounded pending consents, name-only resource identity and a retry invalidating
+the URL already sent to a person. Consents are now bounded, exact durable start
+replays keep their URL, and an interrupted exchange never sends its code twice.
+An owner-controlled URL setting supports direct HTTPS callbacks without accepting
+a callback destination from external message content. No live Slack app or client
+UI was exercised in this slice. The remaining checklist is still required.
+
+The selected regression passes 215 installation/Beacon tests, including 12 route
+journeys, the independent external consent, replay and interrupted-exchange cases,
+and 50 direct-peer/authorization cases. All 25 plugin-crate tests and `pnpm check`
+(511 web tests, lint, typecheck and production build) pass. Final full validation
+and independent review remain required after the remaining implementation lots.

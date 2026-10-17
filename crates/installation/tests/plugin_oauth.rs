@@ -796,6 +796,76 @@ fn member_request(method: &str, path: &str, body: Value, account: &str) -> axum:
 }
 
 #[tokio::test]
+async fn pending_consent_is_bounded_and_a_completed_exchange_releases_its_slot() {
+    let (_root, s, instance, _resource, path, app) = configured_fixture(false, true).await;
+    let mut first = Value::Null;
+    for index in 0..128 {
+        let started = begin(&app, &path).await;
+        if index == 0 {
+            first = started;
+        }
+    }
+    let full = common::send(
+        &app,
+        request(
+            "POST",
+            &path,
+            json!({"scopes": ["messages:read"]}),
+            Some("fixture-owner"),
+        ),
+    )
+    .await;
+    assert_eq!(
+        full.status(),
+        StatusCode::TOO_MANY_REQUESTS,
+        "pending consent has no capacity bound"
+    );
+    let provider = axum::Router::new().route(
+        "/token",
+        axum::routing::post(|| async {
+            axum::Json(
+                json!({"access_token": "bounded-consent-fixture", "scope": "messages:read",
+            "team": {"id": "T111"}, "authed_user": {"id": "U111"}}),
+            )
+        }),
+    );
+    let (origin, server) = common::serve_locally(provider).await;
+    s.plugins.route_http_to(Some(origin));
+    let callback = format!(
+        "/api/plugin-oauth/{instance}/callback?state={}&code=fixture",
+        text(&first, "state")
+    );
+    assert_eq!(
+        common::send(&app, request("GET", &callback, Value::Null, None))
+            .await
+            .status(),
+        StatusCode::OK
+    );
+    let completed = common::send(
+        &app,
+        request(
+            "POST",
+            &format!("{path}/finish"),
+            json!({"state": first["state"]}),
+            Some("fixture-owner"),
+        ),
+    )
+    .await;
+    assert_eq!(completed.status(), StatusCode::OK);
+    begin(&app, &path).await;
+    let status = common::read_json(
+        common::send(
+            &app,
+            request("GET", &path, Value::Null, Some("fixture-owner")),
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(status["status"], "authorized");
+    server.abort();
+}
+
+#[tokio::test]
 async fn personal_oauth_isolated_by_verified_account_and_provider_subject() {
     let (_root, s, instance, resource, path, app) = configured_fixture(false, true).await;
     let policy = Arc::new(std::sync::Mutex::new(json!({

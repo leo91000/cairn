@@ -68,6 +68,34 @@ fn packages_declare_host_managed_oauth_with_scopes_and_nested_token_responses() 
         "personal credentials lack a resource identity binding"
     );
 
+    let mut display_name = value.clone();
+    display_name["oauth"][0]["personal"] = json!({"subject": "/authed_user/id"});
+    display_name["oauth"][0]["metadata"] = json!({"externalId": "/team/name"});
+    let display_name: Manifest = serde_json::from_value(display_name).unwrap();
+    assert!(
+        display_name.validate().is_err(),
+        "a nonunique display name became a personal resource identity"
+    );
+
+    let mut direct_origin = value.clone();
+    direct_origin["settings"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!({
+            "key": "publicOrigin",
+            "title": "Public origin",
+            "type": "url",
+        }));
+    direct_origin["oauth"][0]["redirectOriginSetting"] = json!("publicOrigin");
+    let direct_manifest: Manifest = serde_json::from_value(direct_origin.clone()).unwrap();
+    direct_manifest.validate().unwrap();
+    direct_origin["oauth"][0]["redirectOriginSetting"] = json!("clientSecret");
+    let invalid_origin: Manifest = serde_json::from_value(direct_origin).unwrap();
+    assert!(
+        invalid_origin.validate().is_err(),
+        "a secret became an OAuth callback origin"
+    );
+
     for (field, invalid) in [
         ("tokenUrl", json!("https://unapproved.test/token")),
         (

@@ -78,6 +78,17 @@ export type ExecRequest = {
 
 export type ExecResult = { status: number, stdout: string, stderr: string }
 
+export type PersonalOAuthTarget = { resource: string, provider: string }
+export type PersonalOAuthStatus = {
+    status: "disconnected" | "pending" | "denied" | "authorized" | "reconnect",
+    subject: string?,
+    scopes: { string }?,
+    requestedScopes: { string }?,
+    expiresAt: number?,
+}
+
+export type PersonalOAuthConsent = { url: string, redirectUri: string, expiresAt: number }
+
 -- A view component. Tones: "neutral" | "info" | "success" | "warning" | "danger".
 export type Component = { type: string, [string]: Json }
 
@@ -175,6 +186,17 @@ export type Cairn = {
     resources: {
         get: (options: {collection: string, resource: string, instance: string?}) -> Resource,
         list: (options: {collection: string, cursor: string?, instance: string?}) -> {items: {Resource}, nextCursor: string?},
+    },
+    -- capability "oauth": a personal provider, from a resource-routed admitted
+    -- message/interaction only. The host supplies the person and route. Send the
+    -- URL privately; the same person finishes from an admitted event after
+    -- their browser callback. No tokens, account identity or authority in inputs.
+    oauth: {
+        -- A durable replay keeps its URL, or returns its already completed status.
+        start: (options: PersonalOAuthTarget & { scopes: { string } }) -> PersonalOAuthConsent | PersonalOAuthStatus,
+        finish: (options: PersonalOAuthTarget) -> PersonalOAuthStatus,
+        status: (options: PersonalOAuthTarget) -> PersonalOAuthStatus,
+        disconnect: (options: PersonalOAuthTarget) -> PersonalOAuthStatus,
     },
     -- With "socket" or "inbound": the state the owner sees, "connecting" or "connected".
     instance: { status: (state: string, message: string?) -> () },

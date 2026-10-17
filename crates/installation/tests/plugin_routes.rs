@@ -30,6 +30,12 @@ fn owner_request(method: &str, path: &str, value: Value) -> axum::extract::Reque
 }
 
 async fn fixture() -> (TempDir, Arc<Service>, String, String, axum::Router) {
+    configured_fixture(None).await
+}
+
+async fn configured_fixture(
+    public_origin: Option<&str>,
+) -> (TempDir, Arc<Service>, String, String, axum::Router) {
     let root = TempDir::new().unwrap();
     std::fs::create_dir_all(root.path().join("home")).unwrap();
     let mut config = common::config(root.path());
@@ -38,7 +44,7 @@ async fn fixture() -> (TempDir, Arc<Service>, String, String, axum::Router) {
     common::relay_fixture::claimed(&s).await.unwrap();
     s.plugins
         .use_worker(PathBuf::from(env!("CARGO_BIN_EXE_cairn")));
-    let package = registry::install(&s, &json!({
+    let mut input = json!({
         "manifest": {
             "id": "router",
             "name": "Router",
@@ -162,6 +168,18 @@ async fn fixture() -> (TempDir, Arc<Service>, String, String, axum::Router) {
                     reply = {resource = event.resource, route = event.route, channel = event.context.channel}})
             end,
             interaction = function(event)
+                if event.oauth then
+                    local ok, result = pcall(function()
+                        local args = {resource = event.resource, provider = 'personal'}
+                        if event.oauth == 'start' then args.scopes = {'messages:read'} end
+                        if event.overrideOrigin then args.directOrigin = event.overrideOrigin end
+                        return cairn.oauth[event.oauth](args)
+                    end)
+                    local response = cairn.http.request({url = 'https://api.example.test/oauth-result', method = 'POST',
+                        json = ok and result or {status = 'refused'}})
+                    if response.status >= 500 then error('The remote reply was interrupted') end
+                    return response
+                end
                 if event.question then
                     return cairn.conversations.answer({conversation = event.chat, delivery = event.delivery,
                         question = event.question, answers = {choice = "Yes"}})
@@ -169,10 +187,24 @@ async fn fixture() -> (TempDir, Arc<Service>, String, String, axum::Router) {
                 return cairn.conversations.cancel({conversation = event.chat, delivery = event.delivery})
             end
         }"#,
-    })).await.unwrap();
+    });
+    if public_origin.is_some() {
+        input["manifest"]["settings"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({
+                "key": "publicOrigin", "title": "Public HTTPS origin", "type": "url"
+            }));
+        input["manifest"]["oauth"][0]["redirectOriginSetting"] = json!("publicOrigin");
+    }
+    let package = registry::install(&s, &input).await.unwrap();
     registry::approve(&s, "router", "1", text(&package, "digest"))
         .await
         .unwrap();
+    let settings = match public_origin {
+        Some(origin) => json!({"clientId": "client-fixture", "publicOrigin": origin}),
+        None => json!({"clientId": "client-fixture"}),
+    };
     let connection = connections::save(
         &s,
         "router",
@@ -180,7 +212,7 @@ async fn fixture() -> (TempDir, Arc<Service>, String, String, axum::Router) {
             "name": "App",
             "enabled": true,
             "secrets": { "signature": SECRET },
-            "settings": { "clientId": "client-fixture" },
+            "settings": settings,
         }),
         None,
     )
@@ -1228,4 +1260,719 @@ async fn a_worker_loaded_before_approval_cannot_use_a_newly_reviewed_route() {
         "an old source worker used delegation approved for a different package digest"
     );
     old_worker.stop().await;
+}
+
+async fn oauth_action(
+    s: &Service,
+    app: &axum::Router,
+    connection: &connections::Connection,
+    session: &mut cairn_plugin_host::Session,
+    input: Value,
+    results: &mut tokio::sync::mpsc::UnboundedReceiver<Value>,
+) -> Value {
+    assert_eq!(
+        deliver(app, &connection.id, input).await.1["status"],
+        "accepted"
+    );
+    runtime::pump(s, connection, session).await.unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(2), results.recv())
+        .await
+        .expect("the plugin did not deliver its personal OAuth result")
+        .expect("the OAuth result channel closed")
+}
+
+#[tokio::test]
+async fn an_admitted_external_person_can_authorize_without_an_installation_account() {
+    let (_root, s, instance, resource, app) = fixture().await;
+    let (results, mut received) = tokio::sync::mpsc::unbounded_channel();
+    let provider = axum::Router::new()
+        .route("/token", axum::routing::post(|axum::Form(form): axum::Form<std::collections::HashMap<String, String>>| async move {
+            let token = if form["code"] == "native-owner-code" {
+                "native-owner-fixture"
+            } else {
+                "external-person-fixture"
+            };
+            let workspace = if form["code"] == "other-workspace" { "T222" } else { "T111" };
+            let person = if form["code"] == "other-person" { "U222" } else { "U111" };
+            axum::Json(json!({
+                "access_token": token,
+                "scope": "messages:read",
+                "team": { "id": workspace },
+                "authed_user": { "id": person },
+            }))
+        }))
+        .route("/messages", axum::routing::get(|headers: axum::http::HeaderMap| async move {
+            assert_eq!(headers["authorization"], "Bearer external-person-fixture");
+            axum::Json(json!({"subject": "U111"}))
+        }))
+        .route("/oauth-result", axum::routing::post(move |axum::Json(value): axum::Json<Value>| {
+            results.send(value).unwrap();
+            async { axum::Json(json!({"ok": true})) }
+        }));
+    let (origin, server) = common::serve_locally(provider).await;
+    s.plugins.route_http_to(Some(origin));
+    let agent = s
+        .agent(
+            json!({
+                "name": "Scoped",
+                "access": {"projects": [], "installation": false, "github": false},
+            }),
+            None,
+        )
+        .await
+        .unwrap();
+    create_route(
+        &app,
+        &instance,
+        &resource,
+        json!({
+            "name": "Channel",
+            "enabled": true,
+            "match": {"channel": "C1"},
+            "agentId": agent["id"],
+            "userIds": ["U111", "U222"],
+        }),
+    )
+    .await;
+    let grants =
+        format!("/api/plugins/router/connections/{instance}/resources/workspace/{resource}/grants");
+    assert_eq!(
+        common::send(
+            &app,
+            owner_request(
+                "POST",
+                &grants,
+                json!({
+                    "agentId": agent["id"],
+                    "profile": "read",
+                })
+            )
+        )
+        .await
+        .status(),
+        StatusCode::OK
+    );
+    let package = registry::active(&s, "router").await.unwrap();
+    let connection = connections::get(&s, "router", &instance).await.unwrap();
+    let mut session = s
+        .plugins
+        .host
+        .start(
+            &PathBuf::from(env!("CARGO_BIN_EXE_cairn")),
+            &package.manifest,
+            &package.source,
+        )
+        .await
+        .unwrap();
+    let interaction = |action: &str, person: &str| {
+        json!({
+            "id": cairn_installation::config::id(),
+            "kind": "interaction",
+            "resource": resource,
+            "author": {"id": person},
+            "context": {"channel": "C1", "thread": "thread"},
+            "body": {"oauth": action},
+        })
+    };
+    for code in ["other-person", "other-workspace"] {
+        let started = oauth_action(
+            &s,
+            &app,
+            &connection,
+            &mut session,
+            interaction("start", "U111"),
+            &mut received,
+        )
+        .await;
+        let url = url::Url::parse(text(&started, "url")).unwrap();
+        let state = url
+            .query_pairs()
+            .find(|(k, _)| k == "state")
+            .unwrap()
+            .1
+            .into_owned();
+        let callback = format!("/api/plugin-oauth/{instance}/callback?state={state}&code={code}");
+        assert_eq!(
+            common::send(
+                &app,
+                common::request("GET", &callback)
+                    .body(Body::empty())
+                    .unwrap()
+            )
+            .await
+            .status(),
+            StatusCode::OK
+        );
+        let refused = oauth_action(
+            &s,
+            &app,
+            &connection,
+            &mut session,
+            interaction("finish", "U111"),
+            &mut received,
+        )
+        .await;
+        assert_eq!(refused["status"], "refused", "accepted proof for {code}");
+        let status = oauth_action(
+            &s,
+            &app,
+            &connection,
+            &mut session,
+            interaction("status", "U111"),
+            &mut received,
+        )
+        .await;
+        assert_eq!(status["status"], "disconnected");
+    }
+    let started = oauth_action(
+        &s,
+        &app,
+        &connection,
+        &mut session,
+        interaction("start", "U111"),
+        &mut received,
+    )
+    .await;
+    assert!(
+        started["url"].as_str().is_some(),
+        "the admitted external person could not begin OAuth: {started}"
+    );
+    let url = url::Url::parse(text(&started, "url")).unwrap();
+    let state = url
+        .query_pairs()
+        .find(|(k, _)| k == "state")
+        .unwrap()
+        .1
+        .into_owned();
+    let callback = format!("/api/plugin-oauth/{instance}/callback?state={state}&code=fixture");
+    let callback_response = common::send(
+        &app,
+        common::request("GET", &callback)
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(callback_response.status(), StatusCode::OK);
+    assert!(
+        !common::read_text(callback_response)
+            .await
+            .contains("external-person-fixture")
+    );
+    let stranger = oauth_action(
+        &s,
+        &app,
+        &connection,
+        &mut session,
+        interaction("finish", "U222"),
+        &mut received,
+    )
+    .await;
+    assert_ne!(
+        stranger["status"], "authorized",
+        "another person finished this authorization"
+    );
+    let finished = oauth_action(
+        &s,
+        &app,
+        &connection,
+        &mut session,
+        interaction("finish", "U111"),
+        &mut received,
+    )
+    .await;
+    assert_eq!(finished["status"], "authorized", "{finished}");
+    assert_eq!(finished["subject"], "U111");
+    assert!(!finished.to_string().contains("external-person-fixture"));
+
+    assert_eq!(
+        deliver(
+            &app,
+            &instance,
+            json!({
+                "id": "authorized-message",
+                "resource": resource,
+                "author": {"id": "U111"},
+                "context": {"channel": "C1", "thread": "thread"},
+                "body": {"text": "Read as me"},
+            })
+        )
+        .await
+        .1["status"],
+        "accepted"
+    );
+    runtime::pump(&s, &connection, &mut session).await.unwrap();
+    s.chat_tick(&std::collections::HashSet::new())
+        .await
+        .unwrap();
+    let chat = s.chat_list().await.unwrap()[0].clone();
+    let detail = s.chat_detail(text(&chat, "id")).await.unwrap();
+    let run = s
+        .store
+        .patch_run(
+            text(&detail["run"], "id"),
+            json!({
+                "status": "running",
+                "isolated": true,
+            }),
+        )
+        .await
+        .unwrap();
+    let configuration = s.mcps.run_configuration(&s, &run).await.unwrap();
+    let bearer = text(&configuration["env"], "CAIRN_MCP_RUN_TOKEN");
+    assert_eq!(
+        agents::call_tool(&s, bearer, "router_read", &json!({"resource": resource}))
+            .await
+            .unwrap()
+            .unwrap()["subject"],
+        "U111"
+    );
+    let owner_path = format!(
+        "/api/plugins/router/connections/{instance}/resources/workspace/{resource}/oauth/personal"
+    );
+    let owner_status =
+        common::read_json(common::send(&app, owner_request("GET", &owner_path, Value::Null)).await)
+            .await;
+    assert_eq!(
+        owner_status["status"], "disconnected",
+        "the external flow acquired a Cairn account identity"
+    );
+    // A later explicit Cairn consent may coexist for this same proved person.
+    // Disconnecting from the external app must not restore the other credential.
+    let native_started = common::read_json(
+        common::send(
+            &app,
+            owner_request("POST", &owner_path, json!({"scopes": ["messages:read"]})),
+        )
+        .await,
+    )
+    .await;
+    let native_callback = format!(
+        "/api/plugin-oauth/{instance}/callback?state={}&code=native-owner-code",
+        text(&native_started, "state")
+    );
+    assert_eq!(
+        common::send(
+            &app,
+            common::request("GET", &native_callback)
+                .body(Body::empty())
+                .unwrap()
+        )
+        .await
+        .status(),
+        StatusCode::OK
+    );
+    let native_finished = common::send(
+        &app,
+        owner_request(
+            "POST",
+            &format!("{owner_path}/finish"),
+            json!({"state": native_started["state"]}),
+        ),
+    )
+    .await;
+    assert_eq!(native_finished.status(), StatusCode::OK);
+    assert_eq!(
+        agents::call_tool(&s, bearer, "router_read", &json!({"resource": resource}))
+            .await
+            .unwrap()
+            .unwrap()["subject"],
+        "U111"
+    );
+    let disconnected = oauth_action(
+        &s,
+        &app,
+        &connection,
+        &mut session,
+        interaction("disconnect", "U111"),
+        &mut received,
+    )
+    .await;
+    assert_eq!(disconnected["status"], "disconnected");
+    assert!(
+        agents::call_tool(&s, bearer, "router_read", &json!({"resource": resource}))
+            .await
+            .is_err()
+    );
+    let native_status =
+        common::read_json(common::send(&app, owner_request("GET", &owner_path, Value::Null)).await)
+            .await;
+    assert_eq!(native_status["status"], "disconnected");
+    session.stop().await;
+    server.abort();
+}
+
+#[tokio::test]
+async fn external_oauth_uses_only_the_owner_configured_https_callback_origin() {
+    for (origin, expected) in [
+        ("https://cairn.example.test", true),
+        ("https://cairn.example.test/unrelated", false),
+    ] {
+        let (_root, s, instance, resource, app) = configured_fixture(Some(origin)).await;
+        let (results, mut received) = tokio::sync::mpsc::unbounded_channel();
+        let upstream = axum::Router::new().route(
+            "/oauth-result",
+            axum::routing::post(move |axum::Json(value): axum::Json<Value>| {
+                results.send(value).unwrap();
+                async { axum::Json(json!({"ok": true})) }
+            }),
+        );
+        let (upstream, server) = common::serve_locally(upstream).await;
+        s.plugins.route_http_to(Some(upstream));
+        let agent = s
+            .agent(
+                json!({
+                    "name": "Scoped",
+                    "access": {"projects": [], "installation": false, "github": false},
+                }),
+                None,
+            )
+            .await
+            .unwrap();
+        create_route(
+            &app,
+            &instance,
+            &resource,
+            json!({
+                "name": "Channel",
+                "enabled": true,
+                "match": {"channel": "C1"},
+                "agentId": agent["id"],
+                "userIds": ["U111"],
+            }),
+        )
+        .await;
+        let package = registry::active(&s, "router").await.unwrap();
+        let connection = connections::get(&s, "router", &instance).await.unwrap();
+        let mut session = s
+            .plugins
+            .host
+            .start(
+                &PathBuf::from(env!("CARGO_BIN_EXE_cairn")),
+                &package.manifest,
+                &package.source,
+            )
+            .await
+            .unwrap();
+        for override_origin in [None, Some("https://untrusted.example.test")] {
+            let result = oauth_action(
+                &s,
+                &app,
+                &connection,
+                &mut session,
+                json!({
+                    "id": cairn_installation::config::id(),
+                    "kind": "interaction",
+                    "resource": resource,
+                    "author": {"id": "U111"},
+                    "context": {"channel": "C1", "thread": "thread"},
+                    "body": {"oauth": "start", "overrideOrigin": override_origin},
+                }),
+                &mut received,
+            )
+            .await;
+            if expected && override_origin.is_none() {
+                assert_eq!(
+                    result["redirectUri"],
+                    format!("{origin}/api/plugin-oauth/{instance}/callback")
+                );
+            } else {
+                assert_eq!(
+                    result["status"], "refused",
+                    "accepted an unapproved callback destination"
+                );
+            }
+        }
+        session.stop().await;
+        server.abort();
+    }
+}
+
+#[tokio::test]
+async fn a_replayed_consent_start_keeps_the_url_the_person_already_received() {
+    let (_root, s, instance, resource, app) = fixture().await;
+    let (results, mut received) = tokio::sync::mpsc::unbounded_channel();
+    let replies = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let upstream = axum::Router::new().route(
+        "/oauth-result",
+        axum::routing::post(move |axum::Json(value): axum::Json<Value>| {
+            results.send(value).unwrap();
+            let status = if replies.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
+                StatusCode::BAD_GATEWAY
+            } else {
+                StatusCode::OK
+            };
+            async move { (status, axum::Json(json!({"ok": status == StatusCode::OK}))) }
+        }),
+    );
+    let (upstream, server) = common::serve_locally(upstream).await;
+    s.plugins.route_http_to(Some(upstream));
+    let agent = s
+        .agent(
+            json!({
+                "name": "Scoped",
+                "access": {"projects": [], "installation": false, "github": false},
+            }),
+            None,
+        )
+        .await
+        .unwrap();
+    create_route(
+        &app,
+        &instance,
+        &resource,
+        json!({
+            "name": "Channel",
+            "enabled": true,
+            "match": {"channel": "C1"},
+            "agentId": agent["id"],
+            "userIds": ["U111"],
+        }),
+    )
+    .await;
+    let package = registry::active(&s, "router").await.unwrap();
+    let connection = connections::get(&s, "router", &instance).await.unwrap();
+    let mut session = s
+        .plugins
+        .host
+        .start(
+            &PathBuf::from(env!("CARGO_BIN_EXE_cairn")),
+            &package.manifest,
+            &package.source,
+        )
+        .await
+        .unwrap();
+    let first = oauth_action(
+        &s,
+        &app,
+        &connection,
+        &mut session,
+        json!({
+            "id": "one-person-action",
+            "kind": "interaction",
+            "resource": resource,
+            "author": {"id": "U111"},
+            "context": {"channel": "C1", "thread": "thread"},
+            "body": {"oauth": "start"},
+        }),
+        &mut received,
+    )
+    .await;
+    assert!(first["url"].is_string());
+    // Recreate the actual worker, then let the durable event's retry become due.
+    session.stop().await;
+    let mut session = s
+        .plugins
+        .host
+        .start(
+            &PathBuf::from(env!("CARGO_BIN_EXE_cairn")),
+            &package.manifest,
+            &package.source,
+        )
+        .await
+        .unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(5100)).await;
+    runtime::pump(&s, &connection, &mut session).await.unwrap();
+    let retried = tokio::time::timeout(std::time::Duration::from_secs(2), received.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        retried["url"], first["url"],
+        "the retry invalidated an OAuth link already delivered to its person"
+    );
+    let url = url::Url::parse(text(&first, "url")).unwrap();
+    let state = url
+        .query_pairs()
+        .find(|(key, _)| key == "state")
+        .unwrap()
+        .1
+        .into_owned();
+    let callback = format!("/api/plugin-oauth/{instance}/callback?state={state}&code=fixture");
+    assert_eq!(
+        common::send(
+            &app,
+            common::request("GET", &callback)
+                .body(Body::empty())
+                .unwrap()
+        )
+        .await
+        .status(),
+        StatusCode::OK
+    );
+    session.stop().await;
+    server.abort();
+}
+
+#[tokio::test]
+async fn an_interrupted_external_code_exchange_is_never_replayed() {
+    let (_root, s, instance, resource, app) = fixture().await;
+    let (results, mut received) = tokio::sync::mpsc::unbounded_channel();
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let exchanges = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let provider = axum::Router::new()
+        .route(
+            "/token",
+            axum::routing::post({
+                let (entered, release, exchanges) =
+                    (entered.clone(), release.clone(), exchanges.clone());
+                move || {
+                    let (entered, release, exchanges) =
+                        (entered.clone(), release.clone(), exchanges.clone());
+                    async move {
+                        exchanges.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        entered.notify_one();
+                        release.notified().await;
+                        axum::Json(json!({
+                            "access_token": "interrupted-fixture",
+                            "scope": "messages:read",
+                            "team": { "id": "T111" },
+                            "authed_user": { "id": "U111" },
+                        }))
+                    }
+                }
+            }),
+        )
+        .route(
+            "/oauth-result",
+            axum::routing::post(move |axum::Json(value): axum::Json<Value>| {
+                results.send(value).unwrap();
+                async { axum::Json(json!({ "ok": true })) }
+            }),
+        );
+    let (origin, server) = common::serve_locally(provider).await;
+    s.plugins.route_http_to(Some(origin));
+    let agent = s
+        .agent(
+            json!({
+                "name": "Scoped",
+                "access": { "projects": [], "installation": false, "github": false },
+            }),
+            None,
+        )
+        .await
+        .unwrap();
+    create_route(
+        &app,
+        &instance,
+        &resource,
+        json!({
+            "name": "Channel",
+            "enabled": true,
+            "match": { "channel": "C1" },
+            "agentId": agent["id"],
+            "userIds": ["U111"],
+        }),
+    )
+    .await;
+    let package = registry::active(&s, "router").await.unwrap();
+    let connection = connections::get(&s, "router", &instance).await.unwrap();
+    let mut session = s
+        .plugins
+        .host
+        .start(
+            &PathBuf::from(env!("CARGO_BIN_EXE_cairn")),
+            &package.manifest,
+            &package.source,
+        )
+        .await
+        .unwrap();
+    let interaction = |action: &str| {
+        json!({
+            "id": cairn_installation::config::id(),
+            "kind": "interaction",
+            "resource": resource,
+            "author": { "id": "U111" },
+            "context": { "channel": "C1", "thread": "thread" },
+            "body": { "oauth": action },
+        })
+    };
+    let started = oauth_action(
+        &s,
+        &app,
+        &connection,
+        &mut session,
+        interaction("start"),
+        &mut received,
+    )
+    .await;
+    let url = url::Url::parse(text(&started, "url")).unwrap();
+    let state = url
+        .query_pairs()
+        .find(|(key, _)| key == "state")
+        .unwrap()
+        .1
+        .into_owned();
+    let callback = format!("/api/plugin-oauth/{instance}/callback?state={state}&code=fixture");
+    assert_eq!(
+        common::send(
+            &app,
+            common::request("GET", &callback)
+                .body(Body::empty())
+                .unwrap()
+        )
+        .await
+        .status(),
+        StatusCode::OK
+    );
+
+    assert_eq!(
+        deliver(&app, &instance, interaction("finish")).await.1["status"],
+        "accepted"
+    );
+    let interrupted = tokio::spawn({
+        let (s, connection) = (s.clone(), connection.clone());
+        async move { runtime::pump(&s, &connection, &mut session).await }
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(2), entered.notified())
+        .await
+        .unwrap();
+    // The provider has received the one-use code, but Cairn never gets its result.
+    interrupted.abort();
+    assert!(interrupted.await.unwrap_err().is_cancelled());
+    release.notify_one();
+
+    let mut session = s
+        .plugins
+        .host
+        .start(
+            &PathBuf::from(env!("CARGO_BIN_EXE_cairn")),
+            &package.manifest,
+            &package.source,
+        )
+        .await
+        .unwrap();
+    runtime::pump(&s, &connection, &mut session).await.unwrap();
+    let replay = tokio::time::timeout(std::time::Duration::from_secs(2), received.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(replay["status"], "refused");
+    assert_eq!(exchanges.load(std::sync::atomic::Ordering::SeqCst), 1);
+    let status = oauth_action(
+        &s,
+        &app,
+        &connection,
+        &mut session,
+        interaction("status"),
+        &mut received,
+    )
+    .await;
+    assert_eq!(status["status"], "disconnected");
+    let restarted = oauth_action(
+        &s,
+        &app,
+        &connection,
+        &mut session,
+        interaction("start"),
+        &mut received,
+    )
+    .await;
+    assert!(
+        restarted["url"].is_string(),
+        "a new consent could not replace the interrupted exchange"
+    );
+    assert_ne!(restarted["url"], started["url"]);
+    session.stop().await;
+    server.abort();
 }
