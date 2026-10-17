@@ -399,3 +399,35 @@ Draft metadata and encrypted fields have the root draft's expiration and a separ
 namespace. Live operational paths never fall back to drafts. Discarding the root or
 a parent removes its resource tree without affecting another draft or live app.
 Draft OAuth, activation and both configuration clients remain unfinished.
+
+## OAuth for inert setup resources
+
+The resource checkpoint passed Quality and Storage on `7d5718de`. The preceding
+Android direct-network capacity reconnect timed out once; the same test passed on
+that checkpoint without assertion or timeout changes. No precise cause was proven.
+
+Owner-only setup OAuth now shares the native consent/exchange protocol with live
+resources, with explicit draft provenance and a separate management prefix.
+Pending consent is capped by root expiry; finalized encrypted credentials share
+that expiry. Anonymous callbacks capture only a code, while the same verified
+owner finishes the exchange. Public resource metadata remains inert; live OAuth
+finish and credential resolution refuse the setup provenance. Personal providers
+are unavailable until activation. Draft disconnect/edit/discard during a held
+provider response prevents late authority from being restored.
+
+The native HTTP/provider tracers cover initial consent through safe status,
+namespace isolation and held-exchange revocation. Expiry uses a coherent prepared
+persisted draft near the end of its normal lifetime, then the real HTTP protocol.
+No live Slack app, client UI, agent process or device was exercised in this slice.
+Atomic activation, both clients and the rest of Q1–Q20 remain required.
+
+Independent review found that a consent retained only the package digest: returning
+from version B to identical approved A could revive the old state. The HTTP tracer
+first observed callback 200 after reapproval. Pending consent now captures the
+exact approval record fingerprint and rechecks it at callback, consumption and
+final persistence, including ordinary live/personal flows. Both reapproval and
+A/B/A transitions are exercised before callback and before finish; revoked consent
+must not reach the token provider. Older unfinished consent without this proof
+requires a new authorization flow. The expiry tracer also checks the encrypted
+pending/final record becomes unavailable at its prepared root deadline, independently
+of endpoint refusal; it is not a physical disk-erasure measurement.

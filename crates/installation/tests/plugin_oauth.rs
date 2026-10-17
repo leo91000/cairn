@@ -1574,3 +1574,590 @@ async fn personal_tools_use_only_the_authenticated_author_of_the_current_chat_tu
     assert_eq!(calls.load(Ordering::SeqCst), 2);
     server.abort();
 }
+
+async fn draft_fixture(
+    personal: bool,
+) -> (TempDir, Arc<Service>, Value, Value, String, axum::Router) {
+    let (root, s, _live, _resource, _path, app) = configured_fixture(false, personal).await;
+    let collection = "/api/plugins/example/setup-drafts";
+    let response = common::send(
+        &app,
+        request(
+            "POST",
+            collection,
+            json!({
+                "name": "Prepare app",
+                "settings": {"clientId": "client-fixture"},
+                "secrets": {"clientSecret": "client-secret-fixture"},
+            }),
+            Some("fixture-owner"),
+        ),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let draft = common::read_json(response).await;
+    let resources = format!("{collection}/{}/resources/workspace", text(&draft, "id"));
+    let response = common::send(
+        &app,
+        request(
+            "POST",
+            &resources,
+            json!({
+                "setupRevision": draft["revision"],
+                "name": "Workspace",
+            }),
+            Some("fixture-owner"),
+        ),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let resource = common::read_json(response).await;
+    let item = format!("{resources}/{}", text(&resource, "id"));
+    let oauth = format!("{item}/oauth/bot");
+    (root, s, draft, resource, oauth, app)
+}
+
+#[tokio::test]
+async fn owner_can_connect_an_inert_draft_resource_without_publishing_its_tokens_or_authority() {
+    let (_root, s, draft, resource, oauth, app) = draft_fixture(false).await;
+    let item = oauth.strip_suffix("/oauth/bot").unwrap();
+    let response = common::send(
+        &app,
+        request(
+            "POST",
+            &oauth,
+            json!({
+                "setupRevision": draft["revision"],
+                "scopes": ["messages:read"],
+            }),
+            Some("fixture-owner"),
+        ),
+    )
+    .await;
+    assert_eq!(
+        response.status(),
+        StatusCode::OK,
+        "{}",
+        common::read_text(response).await
+    );
+    let started = common::read_json(response).await;
+    assert!(started["expiresAt"].as_i64().unwrap() <= draft["expiresAt"].as_i64().unwrap());
+    let provider = axum::Router::new().route(
+        "/token",
+        axum::routing::post(
+            |headers: axum::http::HeaderMap,
+             axum::Form(form): axum::Form<HashMap<String, String>>| async move {
+                assert!(
+                    headers["authorization"]
+                        .to_str()
+                        .unwrap()
+                        .starts_with("Basic ")
+                );
+                assert_eq!(form["code"], "draft-code-fixture");
+                axum::Json(json!({
+                    "access_token": "draft-bot-token-fixture",
+                    "refresh_token": "draft-refresh-fixture",
+                    "scope": "messages:read",
+                    "team": {"id": "T111"},
+                }))
+            },
+        ),
+    );
+    let (origin, server) = common::serve_locally(provider).await;
+    s.plugins.route_http_to(Some(origin));
+    let callback = format!(
+        "/api/plugin-oauth/{}/callback?state={}&code=draft-code-fixture",
+        text(&draft, "id"),
+        text(&started, "state")
+    );
+    assert_eq!(
+        common::send(&app, request("GET", &callback, Value::Null, None))
+            .await
+            .status(),
+        StatusCode::OK
+    );
+    let finish = format!("{oauth}/finish");
+    let live_finish = format!(
+        "/api/plugins/example/connections/{}/resources/workspace/{}/oauth/bot/finish",
+        text(&draft, "id"),
+        text(&resource, "id")
+    );
+    let wrong_namespace = common::send(
+        &app,
+        request(
+            "POST",
+            &live_finish,
+            json!({"state": started["state"]}),
+            Some("fixture-owner"),
+        ),
+    )
+    .await;
+    assert_eq!(
+        wrong_namespace.status(),
+        StatusCode::FORBIDDEN,
+        "the active OAuth endpoint accepted setup consent"
+    );
+    let response = common::send(
+        &app,
+        request(
+            "POST",
+            &finish,
+            json!({
+                "state": started["state"],
+            }),
+            Some("fixture-owner"),
+        ),
+    )
+    .await;
+    assert_eq!(
+        response.status(),
+        StatusCode::OK,
+        "{}",
+        common::read_text(response).await
+    );
+    let finished = common::read_json(response).await;
+    assert_eq!(finished["status"], "authorized");
+    assert!(!finished.to_string().contains("fixture"));
+    let response = common::send(
+        &app,
+        request("GET", &oauth, Value::Null, Some("fixture-owner")),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(common::read_json(response).await["status"], "authorized");
+    let response = common::send(
+        &app,
+        request("GET", item, Value::Null, Some("fixture-owner")),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let resource = common::read_json(response).await;
+    assert_eq!(resource["settings"]["externalId"], "T111");
+    assert!(!resource.to_string().contains("fixture"));
+    let live = format!(
+        "/api/plugins/example/connections/{}/resources/workspace/{}",
+        text(&draft, "id"),
+        text(&resource, "id")
+    );
+    assert_eq!(
+        common::send(
+            &app,
+            request("GET", &live, Value::Null, Some("fixture-owner"))
+        )
+        .await
+        .status(),
+        StatusCode::NOT_FOUND
+    );
+    assert!(
+        panels::action(
+            &s,
+            "example",
+            text(&draft, "id"),
+            &json!({
+                "action": "read", "payload": {"resource": resource["id"]},
+            })
+        )
+        .await
+        .is_err(),
+        "an inert draft acquired a live owner's OAuth capability"
+    );
+    let replay = common::send(
+        &app,
+        request(
+            "POST",
+            &finish,
+            json!({"state": started["state"]}),
+            Some("fixture-owner"),
+        ),
+    )
+    .await;
+    assert_eq!(replay.status(), StatusCode::CONFLICT);
+    server.abort();
+}
+
+#[tokio::test]
+async fn changing_or_discarding_setup_during_exchange_prevents_late_oauth_authority() {
+    for change in [
+        "disconnect",
+        "edit-resource",
+        "edit-draft",
+        "delete-resource",
+        "delete-draft",
+    ] {
+        let (_root, s, draft, resource, oauth, app) = draft_fixture(false).await;
+        let response = common::send(
+            &app,
+            request(
+                "POST",
+                &oauth,
+                json!({
+                    "setupRevision": draft["revision"],
+                    "scopes": ["messages:read"],
+                }),
+                Some("fixture-owner"),
+            ),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let started = common::read_json(response).await;
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let (entering, releasing) = (entered.clone(), release.clone());
+        let provider = axum::Router::new().route(
+            "/token",
+            axum::routing::post(move || {
+                let (entered, release) = (entering.clone(), releasing.clone());
+                async move {
+                    entered.notify_one();
+                    release.notified().await;
+                    axum::Json(json!({
+                        "access_token": "must-not-escape-draft-fixture",
+                        "scope": "messages:read",
+                        "team": {"id": "T111"},
+                    }))
+                }
+            }),
+        );
+        let (origin, server) = common::serve_locally(provider).await;
+        s.plugins.route_http_to(Some(origin));
+        let callback = format!(
+            "/api/plugin-oauth/{}/callback?state={}&code=fixture",
+            text(&draft, "id"),
+            text(&started, "state")
+        );
+        assert_eq!(
+            common::send(&app, request("GET", &callback, Value::Null, None))
+                .await
+                .status(),
+            StatusCode::OK
+        );
+        let finish = format!("{oauth}/finish");
+        let pending_app = app.clone();
+        let pending = tokio::spawn(async move {
+            common::send(
+                &pending_app,
+                request(
+                    "POST",
+                    &finish,
+                    json!({"state": started["state"]}),
+                    Some("fixture-owner"),
+                ),
+            )
+            .await
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(3), entered.notified())
+            .await
+            .unwrap();
+        let root_path = format!("/api/plugins/example/setup-drafts/{}", text(&draft, "id"));
+        let item = oauth.strip_suffix("/oauth/bot").unwrap();
+        let changed = match change {
+            "disconnect" => request(
+                "DELETE",
+                &oauth,
+                json!({"setupRevision": draft["revision"]}),
+                Some("fixture-owner"),
+            ),
+            "edit-resource" => request(
+                "PUT",
+                item,
+                json!({
+                    "setupRevision": draft["revision"], "revision": resource["revision"],
+                    "name": "Renamed while connecting", "settings": {},
+                }),
+                Some("fixture-owner"),
+            ),
+            "edit-draft" => request(
+                "PATCH",
+                &root_path,
+                json!({
+                    "revision": draft["revision"], "name": "Renamed app",
+                    "settings": {"clientId": "client-fixture"},
+                }),
+                Some("fixture-owner"),
+            ),
+            "delete-resource" => request(
+                "DELETE",
+                item,
+                json!({
+                    "setupRevision": draft["revision"], "revision": resource["revision"],
+                }),
+                Some("fixture-owner"),
+            ),
+            "delete-draft" => request(
+                "DELETE",
+                &root_path,
+                json!({"revision": draft["revision"]}),
+                Some("fixture-owner"),
+            ),
+            _ => unreachable!(),
+        };
+        assert_eq!(common::send(&app, changed).await.status(), StatusCode::OK);
+        release.notify_one();
+        let response = pending.await.unwrap();
+        assert!(
+            matches!(
+                response.status(),
+                StatusCode::FORBIDDEN | StatusCode::NOT_FOUND | StatusCode::CONFLICT
+            ),
+            "{change} allowed a revoked exchange to finish: {}",
+            common::read_text(response).await
+        );
+        server.abort();
+    }
+}
+
+#[tokio::test]
+async fn setup_oauth_requires_its_owner_and_refuses_personal_providers() {
+    let (_root, _s, draft, _resource, oauth, app) = draft_fixture(false).await;
+    let input = json!({"setupRevision": draft["revision"], "scopes": ["messages:read"]});
+    let mut member = request("POST", &oauth, input.clone(), Some("fixture-owner"));
+    member
+        .extensions_mut()
+        .insert(InstallationIdentity::trusted(
+            InstallationRole::Member,
+            "fixture-owner",
+        ));
+    assert_eq!(
+        common::send(&app, member).await.status(),
+        StatusCode::FORBIDDEN
+    );
+    let stranger = common::send(
+        &app,
+        request("POST", &oauth, input.clone(), Some("other-owner")),
+    )
+    .await;
+    assert!(matches!(
+        stranger.status(),
+        StatusCode::FORBIDDEN | StatusCode::NOT_FOUND
+    ));
+    let mut stale = input;
+    stale["setupRevision"] = json!("stale");
+    assert_eq!(
+        common::send(&app, request("POST", &oauth, stale, Some("fixture-owner")))
+            .await
+            .status(),
+        StatusCode::CONFLICT
+    );
+    let (_root, _s, draft, _resource, oauth, app) = draft_fixture(true).await;
+    let response = common::send(
+        &app,
+        request(
+            "POST",
+            &oauth,
+            json!({
+                "setupRevision": draft["revision"], "scopes": ["messages:read"],
+            }),
+            Some("fixture-owner"),
+        ),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn setup_consent_and_authorization_expire_with_their_prepared_draft() {
+    for phase in ["pending", "authorized"] {
+        let (_root, s, draft, resource, oauth, app) = draft_fixture(false).await;
+        // Prepare a coherent persisted draft near the end of its 24-hour lifetime.
+        // HTTP still performs the real consent, callback, exchange and expiry checks.
+        let deadline = cairn_installation::config::now() + 5000;
+        let key = format!("plugin-setup:{}", text(&draft, "id"));
+        let mut saved = s.store.kv(&key).await.unwrap().unwrap();
+        saved["expiresAt"] = json!(deadline);
+        saved["createdAt"] = json!(deadline - 86_400_000);
+        s.store.set(&key, saved, Some(deadline)).await.unwrap();
+        for key in [
+            format!("mcp-secret:plugin-secrets:{}", text(&draft, "id")),
+            format!(
+                "plugin-setup-resource:{}:{}",
+                text(&draft, "id"),
+                text(&resource, "id")
+            ),
+            format!(
+                "mcp-secret:plugin-resource-secrets:{}",
+                text(&resource, "id")
+            ),
+        ] {
+            let value = s.store.kv(&key).await.unwrap().unwrap();
+            s.store.set(&key, value, Some(deadline)).await.unwrap();
+        }
+        let response = common::send(
+            &app,
+            request(
+                "POST",
+                &oauth,
+                json!({
+                    "setupRevision": draft["revision"], "scopes": ["messages:read"],
+                }),
+                Some("fixture-owner"),
+            ),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let started = common::read_json(response).await;
+        assert_eq!(
+            started["expiresAt"], deadline,
+            "setup consent outlived its draft"
+        );
+        let provider = axum::Router::new().route("/token", axum::routing::post(|| async {
+            axum::Json(json!({"access_token": "expiring-draft-fixture", "scope": "messages:read", "team": {"id": "T111"}}))
+        }));
+        let (origin, server) = common::serve_locally(provider).await;
+        s.plugins.route_http_to(Some(origin));
+        let callback = format!(
+            "/api/plugin-oauth/{}/callback?state={}&code=fixture",
+            text(&draft, "id"),
+            text(&started, "state")
+        );
+        if phase == "authorized" {
+            assert_eq!(
+                common::send(&app, request("GET", &callback, Value::Null, None))
+                    .await
+                    .status(),
+                StatusCode::OK
+            );
+            let response = common::send(
+                &app,
+                request(
+                    "POST",
+                    &format!("{oauth}/finish"),
+                    json!({"state": started["state"]}),
+                    Some("fixture-owner"),
+                ),
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_eq!(common::read_json(response).await["status"], "authorized");
+        }
+        // Observe encrypted persisted state as well as endpoint availability: an
+        // expired root must not merely hide a permanently retained credential.
+        let encrypted = s.store.keys("mcp-secret:plugin-oauth").await.unwrap();
+        assert_eq!(
+            encrypted.len(),
+            1,
+            "expected one pending or final credential"
+        );
+        assert!(
+            !encrypted[0]
+                .1
+                .to_string()
+                .contains("expiring-draft-fixture")
+        );
+        let remaining = (deadline - cairn_installation::config::now()).max(0) as u64;
+        tokio::time::sleep(std::time::Duration::from_millis(remaining + 30)).await;
+        assert!(s.store.kv(&encrypted[0].0).await.unwrap().is_none());
+        assert_eq!(
+            common::send(
+                &app,
+                request("GET", &oauth, Value::Null, Some("fixture-owner"))
+            )
+            .await
+            .status(),
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(
+            common::send(&app, request("GET", &callback, Value::Null, None))
+                .await
+                .status(),
+            StatusCode::CONFLICT
+        );
+        server.abort();
+    }
+}
+
+#[tokio::test]
+async fn replacing_the_approval_invalidates_old_setup_consent_even_when_the_same_files_return() {
+    for change in ["reapprove", "roundtrip"] {
+        for phase in ["before-callback", "before-finish"] {
+            let (_root, s, draft, _resource, oauth, app) = draft_fixture(false).await;
+            let response = common::send(
+                &app,
+                request(
+                    "POST",
+                    &oauth,
+                    json!({
+                        "setupRevision": draft["revision"], "scopes": ["messages:read"],
+                    }),
+                    Some("fixture-owner"),
+                ),
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::OK);
+            let started = common::read_json(response).await;
+            let calls = Arc::new(AtomicUsize::new(0));
+            let observed = calls.clone();
+            let provider = axum::Router::new().route("/token", axum::routing::post(move || {
+                let observed = observed.clone();
+                async move {
+                    observed.fetch_add(1, Ordering::SeqCst);
+                    axum::Json(json!({"access_token": "must-not-be-issued-fixture", "scope": "messages:read", "team": {"id": "T111"}}))
+                }
+            }));
+            let (origin, server) = common::serve_locally(provider).await;
+            s.plugins.route_http_to(Some(origin));
+            let callback = format!(
+                "/api/plugin-oauth/{}/callback?state={}&code=fixture",
+                text(&draft, "id"),
+                text(&started, "state")
+            );
+            if phase == "before-finish" {
+                assert_eq!(
+                    common::send(&app, request("GET", &callback, Value::Null, None))
+                        .await
+                        .status(),
+                    StatusCode::OK
+                );
+            }
+            let package = registry::active(&s, "example").await.unwrap();
+            if change == "roundtrip" {
+                let mut manifest = serde_json::to_value(&package.manifest).unwrap();
+                manifest["version"] = json!("2");
+                let second = registry::install(
+                    &s,
+                    &json!({"manifest": manifest, "source": package.source.main}),
+                )
+                .await
+                .unwrap();
+                registry::approve(&s, "example", "2", text(&second, "digest"))
+                    .await
+                    .unwrap();
+                registry::activate(&s, "example", "1").await.unwrap();
+            } else {
+                registry::approve(&s, "example", "1", &package.digest)
+                    .await
+                    .unwrap();
+            }
+            if phase == "before-callback" {
+                assert_eq!(
+                    common::send(&app, request("GET", &callback, Value::Null, None))
+                        .await
+                        .status(),
+                    StatusCode::CONFLICT,
+                    "{change} restored old callback authority"
+                );
+            }
+            let response = common::send(
+                &app,
+                request(
+                    "POST",
+                    &format!("{oauth}/finish"),
+                    json!({"state": started["state"]}),
+                    Some("fixture-owner"),
+                ),
+            )
+            .await;
+            assert_eq!(
+                response.status(),
+                StatusCode::CONFLICT,
+                "{change}/{phase} restored consent: {}",
+                common::read_text(response).await
+            );
+            assert_eq!(
+                calls.load(Ordering::SeqCst),
+                0,
+                "invalid consent reached the token provider"
+            );
+            server.abort();
+        }
+    }
+}

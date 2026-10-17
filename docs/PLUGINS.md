@@ -349,9 +349,25 @@ draft and are removed on discard/uninstall. They never appear through live insta
 APIs and provide no agent or delegation authority. Both active and draft
 configuration writes recheck their exact loaded package approval before committing.
 
-Draft OAuth, activation and the web/Android setup journeys remain in the Slack
-delivery checklist. These APIs alone do not activate an instance or finish its
-configuration.
+Owner OAuth uses `/<draft>/resources/<collection>/<resource>/oauth/<provider>`
+(POST consent, GET safe status, DELETE local disconnect) and `/finish` (POST).
+Consent and disconnect require `setupRevision`; finish requires the captured
+`state`, which pins its root and resource snapshots. Only non-personal providers
+are available in setup. Anonymous callbacks still deposit a single code at the
+stable callback URL; the same owner must complete the exchange.
+
+Consent expires after at most ten minutes and never later than the draft. Final
+authorizations share the draft's encrypted TTL and carry explicit setup provenance.
+Changed or deleted roots/resources, disconnection, expiry or approval changes
+fence in-flight completion. Consent retains the exact approval record fingerprint;
+reapproving identical files or switching away and back cannot revive it. Pending
+consent from a version without that proof must be started again. Discarding a resource also deletes its unconsumed
+setup consent states. Safe identity metadata updates stay in the draft namespace;
+active OAuth endpoints and operational credential lookup refuse setup provenance.
+
+Activation and the web/Android setup journeys remain in the Slack delivery
+checklist. These APIs alone do not activate an instance or finish its configuration;
+provider-side revocation and the other pending OAuth functions are also unfinished.
 
 ### Resource collections
 

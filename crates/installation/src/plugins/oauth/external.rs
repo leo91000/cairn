@@ -230,6 +230,7 @@ pub(crate) async fn call(
                     actor: None,
                     external: Some(person),
                     source_event: source_event.into(),
+                    setup_target: None,
                 },
                 &json!({"scopes": scopes}),
             )

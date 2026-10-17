@@ -16,7 +16,7 @@ use cairn_plugin_api::Manifest;
 use serde_json::Value;
 use std::sync::Arc;
 
-pub(super) enum Target {
+pub(crate) enum Target {
     Active {
         connection: Box<Connection>,
         approved: registry::ApprovedPackage,
@@ -28,14 +28,14 @@ pub(super) enum Target {
 }
 
 impl Target {
-    pub(super) async fn active(s: &Service, plugin: &str, instance: &str) -> Result<Arc<Self>> {
+    pub(crate) async fn active(s: &Service, plugin: &str, instance: &str) -> Result<Arc<Self>> {
         Ok(Arc::new(Self::Active {
             connection: Box::new(connections::get(s, plugin, instance).await?),
             approved: registry::approved(s, plugin).await?,
         }))
     }
 
-    pub(super) async fn setup(
+    pub(crate) async fn setup(
         s: &Service,
         plugin: &str,
         draft: &str,
@@ -49,14 +49,14 @@ impl Target {
         }))
     }
 
-    pub(super) fn instance(&self) -> &str {
+    pub(crate) fn instance(&self) -> &str {
         match self {
             Self::Active { connection, .. } => &connection.id,
             Self::Setup { draft, .. } => &draft.id,
         }
     }
 
-    pub(super) fn manifest(&self) -> &Manifest {
+    pub(crate) fn manifest(&self) -> &Manifest {
         match self {
             Self::Active { approved, .. } | Self::Setup { approved, .. } => {
                 &approved.package.manifest
@@ -64,18 +64,31 @@ impl Target {
         }
     }
 
-    pub(super) fn is_setup(&self) -> bool {
+    pub(crate) fn package(&self) -> &registry::Package {
+        match self {
+            Self::Active { approved, .. } | Self::Setup { approved, .. } => &approved.package,
+        }
+    }
+
+    pub(crate) fn setup_snapshot(&self) -> Option<&SetupDraft> {
+        match self {
+            Self::Setup { draft, .. } => Some(draft),
+            Self::Active { .. } => None,
+        }
+    }
+
+    pub(crate) fn is_setup(&self) -> bool {
         matches!(self, Self::Setup { .. })
     }
 
-    pub(super) fn expires_at(&self) -> Option<i64> {
+    pub(crate) fn expires_at(&self) -> Option<i64> {
         match self {
             Self::Active { .. } => None,
             Self::Setup { draft, .. } => Some(draft.expires_at),
         }
     }
 
-    pub(super) fn current(&self, db: &Db<'_>) -> Result<()> {
+    pub(crate) fn current(&self, db: &Db<'_>) -> Result<()> {
         match self {
             Self::Active {
                 connection,
@@ -95,14 +108,14 @@ impl Target {
         setup_prefix(self.instance())
     }
 
-    pub(super) fn get(&self, db: &Db<'_>, resource: &str) -> Result<Option<Value>> {
+    pub(crate) fn get(&self, db: &Db<'_>, resource: &str) -> Result<Option<Value>> {
         match self {
             Self::Active { .. } => db.get(KIND, resource),
             Self::Setup { .. } => db.kv(&format!("{}{resource}", self.prefix())),
         }
     }
 
-    pub(super) fn list(&self, db: &Db<'_>) -> Result<Vec<Value>> {
+    pub(crate) fn list(&self, db: &Db<'_>) -> Result<Vec<Value>> {
         Ok(match self {
             Self::Active { .. } => db
                 .list(KIND)?
@@ -117,7 +130,7 @@ impl Target {
         })
     }
 
-    pub(super) fn put(&self, db: &Db<'_>, value: &Value) -> Result<Value> {
+    pub(crate) fn put(&self, db: &Db<'_>, value: &Value) -> Result<Value> {
         match self {
             Self::Active { .. } => db.put(KIND, value),
             Self::Setup { .. } => {
@@ -131,14 +144,14 @@ impl Target {
         }
     }
 
-    pub(super) fn remove(&self, db: &Db<'_>, resource: &str) -> Result<()> {
+    pub(crate) fn remove(&self, db: &Db<'_>, resource: &str) -> Result<()> {
         match self {
             Self::Active { .. } => db.remove(KIND, resource),
             Self::Setup { .. } => db.delete(&format!("{}{resource}", self.prefix())),
         }
     }
 
-    pub(super) fn require_revision(&self, input: &Value) -> Result<()> {
+    pub(crate) fn require_revision(&self, input: &Value) -> Result<()> {
         if let Self::Setup { draft, .. } = self
             && input["setupRevision"] != draft.revision
         {
@@ -148,6 +161,6 @@ impl Target {
     }
 }
 
-pub(super) fn setup_prefix(instance: &str) -> String {
+pub(crate) fn setup_prefix(instance: &str) -> String {
     format!("plugin-setup-resource:{instance}:")
 }

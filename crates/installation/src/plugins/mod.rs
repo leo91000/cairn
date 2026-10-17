@@ -254,6 +254,31 @@ pub async fn routes(s: &Arc<Service>, input: &Input) -> Result<Value> {
                 resource,
             ],
         ) => resources::setup_routes(s, input, id, draft, collection, Some(resource)).await,
+        (
+            _,
+            [
+                "plugins",
+                id,
+                "setup-drafts",
+                draft,
+                "resources",
+                collection,
+                resource,
+                "oauth",
+                name,
+                tail @ ..,
+            ],
+        ) => {
+            Box::pin(oauth::setup_routes(
+                s,
+                input,
+                id,
+                draft,
+                &[collection, resource, name],
+                tail,
+            ))
+            .await
+        }
         (method, ["plugins", id, "setup-drafts", draft]) => {
             let account = input
                 .identity

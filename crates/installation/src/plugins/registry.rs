@@ -11,6 +11,7 @@ use crate::{
 use cairn_plugin_api::{
     CAPABILITIES, MAX_MODULES, MAX_SOURCE_BYTES, Manifest, Sources, module_path,
 };
+use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 use std::{
     collections::BTreeMap,
@@ -46,7 +47,40 @@ pub(crate) struct ApprovedPackage {
     record: Option<Value>,
 }
 
+/// Durable proof of the precise approval which admitted an unfinished operation.
+/// Hash the complete record so restoring identical source files cannot revive it.
+#[derive(Clone, Deserialize, Serialize)]
+pub(crate) struct Approval {
+    plugin: String,
+    record_digest: Option<String>,
+}
+
+impl Approval {
+    pub(crate) fn recheck_in(&self, db: &Db<'_>) -> Result<()> {
+        if let Some(expected) = &self.record_digest {
+            let current = db.get(KIND, &format!("package:{}", self.plugin))?;
+            let digest = current.map(|value| crate::auth::hex_digest(&value.to_string()));
+            if digest.as_ref() != Some(expected) {
+                return Err(Error::conflict(
+                    "The package approval changed. Start the operation again.",
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
 impl ApprovedPackage {
+    pub(crate) fn snapshot(&self) -> Approval {
+        Approval {
+            plugin: self.package.manifest.id.clone(),
+            record_digest: self
+                .record
+                .as_ref()
+                .map(|value| crate::auth::hex_digest(&value.to_string())),
+        }
+    }
+
     pub(crate) fn recheck_in(&self, db: &Db<'_>) -> Result<()> {
         if let Some(expected) = &self.record
             && db

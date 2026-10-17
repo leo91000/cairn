@@ -30,6 +30,9 @@ use std::{
 use tokio::sync::{Mutex, OwnedMutexGuard};
 
 mod external;
+mod setup;
+
+pub(crate) use setup::routes as setup_routes;
 
 pub(crate) use external::call;
 
@@ -88,6 +91,8 @@ impl Authorizations {
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct Pending {
+    #[serde(default)]
+    approval: Option<registry::Approval>,
     account: String,
     owner_access: String,
     instance: String,
@@ -113,6 +118,8 @@ struct Pending {
     source_event: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     start_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    setup: Option<Box<super::setup::SetupDraft>>,
 }
 
 #[derive(Clone, Deserialize, Serialize)]
@@ -140,6 +147,8 @@ struct Authorization {
     personal: Option<Personal>,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     source_event: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    setup: Option<Box<super::setup::SetupDraft>>,
 }
 
 pub(crate) struct Reference {
@@ -182,6 +191,14 @@ fn epoch_key(authorization: &str) -> String {
     stored_key(&format!("{authorization}:epoch"))
 }
 
+fn setup_pending_prefix(resource: &str) -> String {
+    format!("plugin-oauth-setup-pending:{resource}:")
+}
+
+fn setup_pending_index(resource: &str, key: &str) -> String {
+    format!("{}{key}", setup_pending_prefix(resource))
+}
+
 fn stored_key(key: &str) -> String {
     format!("mcp-secret:{key}")
 }
@@ -218,7 +235,13 @@ fn fence(db: &Db<'_>, key: &str, generation: &Value, expires: Option<i64>) -> Re
     db.set(&key, generation, expires)
 }
 
-fn persist(db: &Db<'_>, key: &str, encrypted: &Value, personal: bool) -> Result<()> {
+fn persist(
+    db: &Db<'_>,
+    key: &str,
+    encrypted: &Value,
+    personal: bool,
+    expires: Option<i64>,
+) -> Result<()> {
     let mut keys = vec![stored_key(key)];
     if personal {
         keys.push(epoch_key(key));
@@ -227,7 +250,7 @@ fn persist(db: &Db<'_>, key: &str, encrypted: &Value, personal: bool) -> Result<
     if personal {
         fence(db, key, &json!(id()), None)?;
     }
-    db.set(&stored_key(key), encrypted, None)
+    db.set(&stored_key(key), encrypted, expires)
 }
 
 /// Release the credential before reserving its revocation generation. An existing
@@ -283,12 +306,35 @@ async fn authority(
 }
 
 fn current(db: &Db<'_>, pending: &Pending) -> Result<Value> {
-    let instance = db
-        .get(connections::KIND, &pending.instance)?
-        .ok_or_else(expired)?;
-    let resource = db
-        .get(resources::KIND, &pending.resource)?
-        .ok_or_else(expired)?;
+    pending
+        .approval
+        .as_ref()
+        .ok_or_else(expired)?
+        .recheck_in(db)?;
+    let (instance, resource) = match &pending.setup {
+        Some(draft) => {
+            if draft.id != pending.instance
+                || draft.plugin_id.is_empty()
+                || draft.digest != pending.digest
+                || draft.owner_account != pending.account
+                || draft.owner_access_id != pending.owner_access
+                || pending.actor.is_some()
+                || pending.external.is_some()
+            {
+                return Err(expired());
+            }
+            (
+                json!({"revision": draft.revision, "enabled": false}),
+                resources::setup_resource_in(db, draft, &pending.resource)?,
+            )
+        }
+        None => (
+            db.get(connections::KIND, &pending.instance)?
+                .ok_or_else(expired)?,
+            db.get(resources::KIND, &pending.resource)?
+                .ok_or_else(expired)?,
+        ),
+    };
     if instance["revision"] != pending.instance_revision
         || resource["revision"] != pending.resource_revision
         || resource["connectionId"] != pending.instance
@@ -356,6 +402,7 @@ pub async fn start(
             actor,
             external: None,
             source_event: String::new(),
+            setup_target: None,
         },
         input,
     )
@@ -368,6 +415,7 @@ struct Initiator {
     actor: Option<Actor>,
     external: Option<requesters::External>,
     source_event: String,
+    setup_target: Option<Arc<resources::target::Target>>,
 }
 
 async fn begin(
@@ -385,7 +433,12 @@ async fn begin(
         actor,
         external,
         source_event,
+        setup_target,
     } = initiator;
+    let approved = registry::approved(s, &package.manifest.id).await?;
+    if approved.package.digest != package.digest {
+        return Err(expired());
+    }
     let (instance, name) = (connection.id.as_str(), provider.name.as_str());
     if (actor.is_some() || external.is_some())
         && !provider.metadata.iter().any(|(key, pointer)| {
@@ -468,7 +521,16 @@ async fn begin(
         None
     };
     let start_url = external.as_ref().map(|_| url.to_string());
+    let setup = setup_target
+        .as_ref()
+        .and_then(|target| target.setup_snapshot())
+        .cloned()
+        .map(Box::new);
+    let expires_at = setup
+        .as_ref()
+        .map_or(now() + TTL, |draft| draft.expires_at.min(now() + TTL));
     let mut pending = Pending {
+        approval: Some(approved.snapshot()),
         account,
         owner_access,
         instance: instance.into(),
@@ -481,7 +543,7 @@ async fn begin(
         client_id,
         scopes,
         verifier,
-        expires_at: now() + TTL,
+        expires_at,
         code: None,
         denied: false,
         actor,
@@ -489,11 +551,13 @@ async fn begin(
         epoch,
         source_event,
         start_url,
+        setup,
     };
     let key = pending_key(&state);
     let vault = s.vault.clone();
     s.store
         .transaction(move |db| {
+            if let Some(target) = setup_target { target.current(db)?; }
             current(db, &pending)?;
             let previous = pending.external.as_ref()
                 .map(|person| external::flow_key(&pending.resource, &pending.provider, &person.subject))
@@ -529,6 +593,9 @@ async fn begin(
                     "event": pending.source_event,
                 }), Some(pending.expires_at))?;
             }
+            if pending.setup.is_some() {
+                db.set(&setup_pending_index(&pending.resource, &key), &json!(key), Some(pending.expires_at))?;
+            }
             let encrypted = vault.encrypt(&key, &serde_json::to_value(&pending)?)?;
             db.set(&stored_key(&key), &encrypted, Some(pending.expires_at))
         })
@@ -537,7 +604,7 @@ async fn begin(
         "state": state,
         "url": url.as_str(),
         "redirectUri": redirect_uri,
-        "expiresAt": now() + TTL,
+        "expiresAt": expires_at,
     }))
 }
 
@@ -745,6 +812,7 @@ pub async fn finish(
         || pending.provider != name
         || pending.actor != actor
         || pending.external.is_some()
+        || pending.setup.is_some()
     {
         return Err(Error::forbidden(
             "This authorization belongs to another requester or resource.",
@@ -754,6 +822,19 @@ pub async fn finish(
 }
 
 async fn check_initiator(s: &Service, provider: &OAuth, pending: &Pending) -> Result<()> {
+    if let Some(expected) = &pending.setup {
+        if provider.personal.is_some() || pending.actor.is_some() || pending.external.is_some() {
+            return Err(expired());
+        }
+        let draft = super::setup::load(s, &pending.instance).await?;
+        if draft.revision != expected.revision
+            || draft.owner_account != pending.account
+            || draft.owner_access_id != pending.owner_access
+        {
+            return Err(expired());
+        }
+        return Ok(());
+    }
     if let Some(person) = &pending.external {
         let connection = requesters::external(s, person).await?;
         if connection.owner_access_id.as_deref() != Some(&pending.owner_access)
@@ -786,6 +867,11 @@ async fn finish_pending(
     if package.digest != pending.digest {
         return Err(expired());
     }
+    let setup_target = if pending.setup.is_some() {
+        Some(resources::target::Target::setup(s, plugin, instance, &pending.account).await?)
+    } else {
+        None
+    };
     let expected = pending.clone();
     let key_claim = key.clone();
     let claimed = s
@@ -802,6 +888,9 @@ async fn finish_pending(
                 return Ok(false);
             }
             db.delete(&stored_key(&key_claim))?;
+            if expected.setup.is_some() {
+                db.delete(&setup_pending_index(&expected.resource, &key_claim))?;
+            }
             Ok(true)
         })
         .await?;
@@ -896,6 +985,7 @@ async fn finish_pending(
         refreshing: false,
         personal,
         source_event: pending.source_event.clone(),
+        setup: pending.setup.clone(),
     };
     let result = summary(&authorization);
     let auth_key = pending_authorization_key(&pending);
@@ -911,11 +1001,17 @@ async fn finish_pending(
         .ok_or_else(|| Error::not_found("OAuth resource collection is unavailable."))?
         .settings
         .clone();
+    if pending.setup.is_some() {
+        for field in &mut schema.settings {
+            field["required"] = json!(false);
+        }
+    }
     let vault = s.vault.clone();
     let membership = crate::relay::task_author_policy(s)
         .await?
         .ok_or_else(|| Error::forbidden("The installation has no verified membership."))?;
     s.store.transaction(move |db| {
+        if let Some(target) = &setup_target { target.current(db)?; }
         let mut resource = current(db, &pending)?;
         if let Some(personal) = &authorization.personal {
             // Personal authorization proves a person within an already configured
@@ -948,7 +1044,7 @@ async fn finish_pending(
                 let link = SubjectLink {actor: actor.clone(), authorization: auth_key.clone(), revision: id()};
                 db.set(&subject_key, &serde_json::to_value(link)?, None)?;
             }
-            persist(db, &auth_key, &encrypted, true)?;
+            persist(db, &auth_key, &encrypted, true, None)?;
             return Ok(());
         }
         for (key, value) in metadata {
@@ -970,8 +1066,12 @@ async fn finish_pending(
 
         resource["revision"] = json!(id());
         resource["updatedAt"] = json!(now());
-        db.put(resources::KIND, &resource)?;
-        persist(db, &auth_key, &encrypted, false)?;
+        if let Some(target) = setup_target {
+            target.put(db, &resource)?;
+        } else {
+            db.put(resources::KIND, &resource)?;
+        }
+        persist(db, &auth_key, &encrypted, false, pending.setup.as_ref().map(|draft| draft.expires_at))?;
         Ok(())
     }).await?;
     Ok(result)
@@ -1017,7 +1117,8 @@ pub async fn status(
         .await?
         .map(|policy| policy.owner.access_id);
     let mut summary = summary(&authorization);
-    if owner_access.as_deref() != Some(&authorization.owner_access)
+    if authorization.setup.is_some()
+        || owner_access.as_deref() != Some(&authorization.owner_access)
         || authorization
             .personal
             .as_ref()
@@ -1137,6 +1238,11 @@ pub(crate) async fn credential(
         .await?
         .ok_or_else(|| Error::forbidden("Connect this resource through OAuth first."))?;
     let mut authorization: Authorization = serde_json::from_value(value)?;
+    if authorization.setup.is_some() {
+        return Err(Error::forbidden(
+            "This OAuth authorization has not been activated.",
+        ));
+    }
     if provider.personal.is_some() != authorization.personal.is_some()
         || authorization
             .personal
@@ -1335,6 +1441,12 @@ pub(crate) async fn recheck(s: &Service, reference: &Reference) -> Result<()> {
 }
 
 pub(crate) fn remove_resource(db: &Db<'_>, resource: &str) -> Result<()> {
+    for (index, key) in db.keys(&setup_pending_prefix(resource))? {
+        if let Some(key) = key.as_str() {
+            db.delete(&stored_key(key))?;
+        }
+        db.delete(&index)?;
+    }
     // Provider names are bounded, but their definitions may have been removed in
     // a package update. Remove the vault prefix rather than just current providers.
     for (key, _) in db.keys(&stored_key(&format!("plugin-oauth:{resource}:")))? {

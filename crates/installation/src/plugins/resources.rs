@@ -1,6 +1,6 @@
 //! Instance-owned collections. Schema validation and encrypted fields are shared
 //! with instance forms; neither management responses nor Luau can read secrets.
-mod target;
+pub(crate) mod target;
 
 use super::connections::{self, Connection};
 use crate::{
@@ -230,7 +230,7 @@ pub async fn get(
     get_for(s, target, collection, resource).await
 }
 
-async fn get_for(
+pub(crate) async fn get_for(
     s: &Service,
     target: Arc<Target>,
     collection: &str,
@@ -572,4 +572,22 @@ pub(crate) fn remove_setup(db: &Db<'_>, instance: &str) -> Result<()> {
         db.delete(&key)?;
     }
     Ok(())
+}
+
+/// Snapshot read for native OAuth callbacks; it supplies no operational authority.
+pub(crate) fn setup_resource_in(
+    db: &Db<'_>,
+    draft: &super::setup::SetupDraft,
+    resource: &str,
+) -> Result<Value> {
+    draft.recheck_in(db)?;
+    let value = db
+        .kv(&format!("{}{resource}", target::setup_prefix(&draft.id)))?
+        .ok_or_else(|| Error::not_found("Setup resource not found."))?;
+    if value["connectionId"] != draft.id {
+        return Err(Error::forbidden(
+            "The setup resource belongs to another draft.",
+        ));
+    }
+    Ok(value)
 }
