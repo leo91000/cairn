@@ -385,9 +385,12 @@ useReadWhileOpen(() => {
     return null
   return { key: `chat:${chat.id}`, at: run.finishedAt }
 })
-watch(live.error, (value) => {
+// A stream error leaves on its own once the stream recovers; the connection pill covers the outage.
+watch(live.error, (value, previous) => {
   if (value)
     error.value = value
+  else if (error.value === previous)
+    error.value = ''
 })
 onBeforeUnmount(clearAttachments)
 let submission: {

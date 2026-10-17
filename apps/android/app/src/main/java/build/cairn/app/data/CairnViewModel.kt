@@ -9,6 +9,7 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.first
@@ -41,6 +42,8 @@ data class Workspace(
     val modelCatalogs: Map<String, ModelCatalog> = emptyMap(),
     val error: String? = null,
     val notice: String? = null,
+    /** The workspace could not be reached; cleared on its own once a request succeeds again. */
+    val connectionLost: Boolean = false,
     val agents: List<Agent> = emptyList(),
     val projects: List<Project> = emptyList(),
     val tasks: List<Task> = emptyList(),
@@ -125,6 +128,7 @@ constructor(
     val state = mutable.asStateFlow()
     private var connection: CairnApi? = null
     private var routeCollection: kotlinx.coroutines.Job? = null
+    private var recovery: kotlinx.coroutines.Job? = null
     private var accountConnection: CairnApi? = null
     private var emailChallenge: String? = null
     val api: CairnApi
@@ -172,6 +176,8 @@ constructor(
                     error = "Session expirée. Reconnectez-vous.",
                 )
             }
+        } else if (isConnectionFailure(error) && state.value.installation?.online == true) {
+            connectionLost()
         } else {
             mutable.update { it.copy(error = error.message ?: "Connexion impossible. Réessayez.") }
             val source = connection
@@ -257,6 +263,39 @@ constructor(
         }
     }
 
+    /**
+     * Shows the connection as lost instead of an error, and probes the installation with growing
+     * delays. The first answer clears the notice and reloads the workspace.
+     */
+    private fun connectionLost() {
+        val target = connection ?: return
+        mutable.update { it.copy(connectionLost = true) }
+        if (recovery?.isActive == true) return
+        recovery = viewModelScope.launch {
+            var wait = 1_000L
+            var failure: Exception? = null
+            while (true) {
+                delay(wait)
+                if (connection !== target || !state.value.session.authenticated) break
+                try {
+                    target.request("GET", "/overview")
+                    break
+                } catch (e: Exception) {
+                    if (e is CancellationException) throw e
+                    if (!isConnectionFailure(e)) {
+                        failure = e
+                        break
+                    }
+                }
+                wait = (wait * 2).coerceAtMost(10_000L)
+            }
+
+            mutable.update { it.copy(connectionLost = false) }
+            if (connection !== target || !state.value.session.authenticated) return@launch
+            if (failure != null) report(failure) else perform { refresh() }
+        }
+    }
+
     fun perform(block: suspend CairnViewModel.() -> Unit) {
         if (mutable.value.busy) return
         mutable.update { it.copy(busy = true, error = null) }
@@ -265,6 +304,9 @@ constructor(
                 block()
             } catch (e: Exception) {
                 report(e)
+                // The connection notice is quiet; still tell the user this action did not happen.
+                if (state.value.connectionLost && isConnectionFailure(e))
+                    notify("Connexion impossible. Réessayez.")
             } finally {
                 mutable.update { it.copy(busy = false, ready = true) }
             }

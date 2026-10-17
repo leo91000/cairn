@@ -31,7 +31,31 @@ val wireJson = Json {
     explicitNulls = false
 }
 
-class ApiException(val status: Int, message: String) : IOException(message)
+/** [explained] is false when the response carried no Cairn error, as a proxy's error page. */
+class ApiException(val status: Int, message: String, val explained: Boolean = true) :
+    IOException(message)
+
+// Beacon's relay answers these when it cannot reach the installation for a moment.
+private val relayUnavailable =
+    setOf(
+        "Installation unavailable",
+        "Installation busy",
+        "Installation busy or unavailable",
+        "Installation request timed out",
+        "Installation connection lost",
+    )
+
+/**
+ * A request that failed because the device, Beacon or the installation could not be reached, and
+ * that the same request can retry once the connection returns.
+ */
+fun isConnectionFailure(error: Throwable): Boolean =
+    when (error) {
+        is ApiException ->
+            error.status in 502..504 && (!error.explained || error.message in relayUnavailable)
+        is IOException -> true
+        else -> false
+    }
 
 fun serverOrigin(input: String, allowLocalHttp: Boolean = false): HttpUrl {
     val url = input.trim().toHttpUrl()
@@ -365,12 +389,15 @@ internal fun longRequest(path: String): Boolean {
 internal fun checkResponse(response: Response) {
     if (response.isSuccessful) return
     val text = response.body.string()
-    val message =
-        runCatching {
-            wireJson.parseToJsonElement(text).jsonObject["error"]?.jsonPrimitive?.content
-        }
-            .getOrNull() ?: "Le serveur a répondu avec le code ${response.code}."
-    throw ApiException(response.code, message)
+    val message = runCatching {
+        wireJson.parseToJsonElement(text).jsonObject["error"]?.jsonPrimitive?.content
+    }
+        .getOrNull()
+    throw ApiException(
+        response.code,
+        message ?: "Le serveur a répondu avec le code ${response.code}.",
+        explained = message != null,
+    )
 }
 
 internal fun readPortraitBytes(input: java.io.InputStream, maxBytes: Int): ByteArray {

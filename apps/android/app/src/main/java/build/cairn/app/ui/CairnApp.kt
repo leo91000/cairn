@@ -401,6 +401,7 @@ private fun WorkspaceApp(
                     Column(Modifier.padding(padding)) {
                         if (pushReenrollmentRequired) PushReenrollmentNotice()
                         if (state.busy) LinearProgressIndicator(Modifier.fillMaxWidth())
+                        ConnectionLostNotice(state.connectionLost)
                         state.error?.let { ErrorNotice(it, vm::clearMessage) }
                         NavHost(
                             nav,
