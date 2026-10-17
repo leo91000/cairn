@@ -215,3 +215,34 @@ it('recovers pending reads even after the availability poll marked the installat
   expect(client.state.connectionLost).toBe(false)
   expect(request.mock.calls.filter(([url]) => url.endsWith('/settings'))).toHaveLength(2)
 })
+
+it('recovers Beacon account reads independently while installation recovery is still pending', async () => {
+  let down = true
+  let firstAccountRead = true
+  request.mockImplementation((url: string) => {
+    if (url.endsWith('/account/notifications')) {
+      if (firstAccountRead) {
+        firstAccountRead = false
+        throw new TypeError('Failed to fetch')
+      }
+
+      return json({ publicKey: 'fixture' })
+    }
+
+    if (url.endsWith('/account/session'))
+      return json({ authenticated: true })
+    return down ? json({ error: 'Installation unavailable' }, 503) : successful(url)
+  })
+  const settings = client.api('/settings')
+  const notifications = client.accountApi('/notifications')
+  await vi.advanceTimersByTimeAsync(1000)
+  await expect(notifications).resolves.toEqual({ publicKey: 'fixture' })
+  expect(client.state.connectionLost).toBe(true)
+  expect(request.mock.calls.filter(([url]) => url.endsWith('/account/session'))).toHaveLength(1)
+  expect(request.mock.calls.filter(([url]) => url.endsWith('/account/notifications'))).toHaveLength(2)
+  expect(request.mock.calls.filter(([url]) => url.endsWith('/settings'))).toHaveLength(1)
+  down = false
+  await vi.advanceTimersByTimeAsync(2000)
+  await expect(settings).resolves.toEqual({})
+  expect(client.state.connectionLost).toBe(false)
+})

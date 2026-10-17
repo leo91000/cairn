@@ -307,6 +307,39 @@ test('builds a multi-file skill, saves one batch and round-trips it through a zi
   expect(errors).toEqual([])
 })
 
+test('connection feedback preserves the skill footer and a manual save retry', async ({ page, workspace }) => {
+  await useRelayForHttpMocks(page)
+  await workspace.api('/api/skills/global/reconnect-layout/bundle', 'POST', { base: null, changes: [{ op: 'write', path: 'SKILL.md', content: manifest('reconnect-layout', 'Initial') }] })
+  await page.goto(workspacePath('/skills'))
+  await authenticateWorkspace(page)
+  await page.getByRole('button', { name: 'Edit reconnect-layout', exact: true }).click()
+  const editor = page.getByLabel('Skill content')
+  const submitted = manifest('reconnect-layout', 'Preserve this edit')
+  await editor.fill(submitted)
+  let saves = 0
+  await page.route(/\/skills\/global\/reconnect-layout\/bundle$/, async (route) => {
+    if (route.request().method() !== 'POST')
+      return route.continue()
+    saves++
+    await route.fulfill({ status: 503, json: { error: 'Installation unavailable' } })
+  })
+  await page.route(/\/overview$/, route => route.fulfill({ status: 503, json: { error: 'Installation unavailable' } }))
+  const dialog = page.getByRole('dialog', { name: 'Edit skill', exact: true })
+  const save = dialog.getByRole('button', { name: 'Save skill', exact: true })
+  await save.click()
+  await expect(dialog.getByRole('status').filter({ hasText: /Connection unavailable|Connection lost/ })).toBeVisible()
+  await expect(save).toBeEnabled()
+  await expect(save).toBeInViewport({ ratio: 1 })
+  await expect(dialog.getByRole('button', { name: 'Cancel', exact: true })).toBeInViewport({ ratio: 1 })
+  const bounds = await dialog.boundingBox()
+  const button = await save.boundingBox()
+  expect(button!.y + button!.height).toBeLessThanOrEqual(bounds!.y + bounds!.height)
+  await expect(editor).toHaveValue(submitted)
+  expect(saves).toBe(1)
+  await save.click()
+  await expect.poll(() => saves).toBe(2)
+})
+
 test('a stale editor reports the conflict and reloads the latest revision', async ({ page, workspace }) => {
   await useRelayForHttpMocks(page)
   await workspace.api('/api/skills/global/conflict-demo/bundle', 'POST', { base: null, changes: [{ op: 'write', path: 'SKILL.md', content: manifest('conflict-demo', 'Two editors') }] })

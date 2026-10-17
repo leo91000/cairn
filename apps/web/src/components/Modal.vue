@@ -73,7 +73,7 @@ onBeforeUnmount(() => {
           v-if="state.toast || state.connectionLost"
           role="status"
           aria-live="polite"
-          class="m-0 border-b border-line px-6.5 py-2 text-xs text-muted phone:px-5"
+          class="m-0 shrink-0 border-b border-line px-6.5 py-2 text-xs text-muted phone:px-5"
         >
           {{ state.toast || 'Connection lost · reconnecting…' }}
         </p>
@@ -104,6 +104,8 @@ onBeforeUnmount(() => {
   border-radius: 18px;
 }
 .workbench .modal-inner {
+  display: flex;
+  flex-direction: column;
   height: 100%;
   max-height: none;
   overflow: hidden;

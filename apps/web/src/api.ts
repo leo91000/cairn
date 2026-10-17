@@ -79,19 +79,22 @@ function connectionScope() {
   return JSON.stringify([state.installationId, state.accountId, state.csrf])
 }
 
-let recovery: {
+const recoveries = new Map<string, {
   scope: string
   controller: AbortController
   promise: Promise<void>
   reconcile: boolean
-} | undefined
+}>()
 
 watch(() => [connectionScope(), state.authenticated, state.signingOut], () => {
-  if (recovery && (recovery.scope !== connectionScope() || !state.authenticated || state.signingOut)) {
-    recovery.controller.abort()
-    recovery = undefined
-    state.connectionLost = false
+  for (const [probe, recovery] of recoveries) {
+    if (recovery.scope !== connectionScope() || !state.authenticated || state.signingOut) {
+      recoveries.delete(probe)
+      recovery.controller.abort()
+    }
   }
+
+  state.connectionLost = recoveries.size > 0
 }, { flush: 'sync' })
 
 function recoveryDelay(milliseconds: number, signal: AbortSignal) {
@@ -134,7 +137,8 @@ function awaitRecovery(pending: Promise<void>, signal?: AbortSignal | null) {
   })
 }
 
-function recoverConnection(scope: string, reconcile: boolean) {
+function recoverConnection(scope: string, reconcile: boolean, probe: string) {
+  const recovery = recoveries.get(probe)
   if (recovery?.scope === scope) {
     recovery.reconcile ||= reconcile
     return recovery.promise
@@ -147,7 +151,7 @@ function recoverConnection(scope: string, reconcile: boolean) {
     while (true) {
       await recoveryDelay(delay, controller.signal)
       try {
-        await requestOnce(apiUrl('/overview'), { signal: controller.signal })
+        await requestOnce(probe, { signal: controller.signal })
         return
       }
       catch (error) {
@@ -158,9 +162,9 @@ function recoverConnection(scope: string, reconcile: boolean) {
       delay = Math.min(delay * 2, 10000)
     }
   })().finally(() => {
-    if (recovery?.controller === controller) {
-      recovery = undefined
-      state.connectionLost = false
+    if (recoveries.get(probe)?.controller === controller) {
+      recoveries.delete(probe)
+      state.connectionLost = recoveries.size > 0
     }
   })
   const attempt = {
@@ -169,7 +173,7 @@ function recoverConnection(scope: string, reconcile: boolean) {
     promise,
     reconcile,
   }
-  recovery = attempt
+  recoveries.set(probe, attempt)
   // Mutations are never replayed; reload lists to reconcile an uncertain result.
   void promise.then(async () => {
     if (attempt.reconcile && connectionScope() === scope && state.authenticated && !state.signingOut)
@@ -251,7 +255,7 @@ async function requestOnce<T = any>(
   return data
 }
 
-async function requestApi<T = any>(url: string, options: RequestInit = {}): Promise<T> {
+async function requestApi<T = any>(url: string, options: RequestInit = {}, account = false): Promise<T> {
   const scope = connectionScope()
   while (true) {
     try {
@@ -266,7 +270,8 @@ async function requestApi<T = any>(url: string, options: RequestInit = {}): Prom
 
       const method = (options.method || 'GET').toUpperCase()
       const mutation = method !== 'GET' && method !== 'HEAD'
-      const pending = recoverConnection(scope, mutation)
+      const probe = account ? '/api/account/session' : apiUrl('/overview')
+      const pending = recoverConnection(scope, mutation && !account, probe)
       if (mutation) {
         notify('Connection unavailable. Please try again.')
         throw new ApiError('', 0)
@@ -286,7 +291,7 @@ export function api<T = any>(url: string, options: RequestInit = {}): Promise<T>
 }
 
 export function accountApi<T = any>(url: string, options: RequestInit = {}): Promise<T> {
-  return requestApi<T>(`/api/account${url}`, options)
+  return requestApi<T>(`/api/account${url}`, options, true)
 }
 
 export function apiUrl(path: string) {
