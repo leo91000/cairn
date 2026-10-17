@@ -1,0 +1,43 @@
+name: Firecracker discard
+on:
+  pull_request:
+    paths:
+      - Dockerfile
+      - deploy/microvm/firecracker-*.patch
+      - scripts/test-firecracker-discard.sh
+      - .github/workflows/firecracker-discard.yaml
+  push:
+    branches: [main]
+    paths:
+      - Dockerfile
+      - deploy/microvm/firecracker-*.patch
+      - scripts/test-firecracker-discard.sh
+      - .github/workflows/firecracker-discard.yaml
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: firecracker-discard-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  native-engine:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      CARGO_BUILD_JOBS: '2'
+      CARGO_TARGET_DIR: ${{ github.workspace }}/target/firecracker-discard
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - run: rustup toolchain install 1.97.0 --profile minimal
+      - name: Install native bindings toolchain
+        run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends clang libclang-dev libseccomp-dev cmake pkg-config
+      - uses: actions/cache@v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry/
+            ~/.cargo/git/
+            target/firecracker-discard/
+          key: firecracker-discard-${{ runner.os }}-1.97.0-${{ hashFiles('deploy/microvm/firecracker-*.patch') }}
+          restore-keys: firecracker-discard-${{ runner.os }}-1.97.0-
+      - name: Verify discard ordering, completions, feature negotiation and shared-memory reclamation
+        run: scripts/test-firecracker-discard.sh

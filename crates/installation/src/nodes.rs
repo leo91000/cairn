@@ -976,6 +976,7 @@ fn record_heartbeat(
     node["runtimes"] = body["runtimes"].clone();
     node["lastSeen"] = now().into();
     node["runtimeSlots"] = body["pool"]["capacity"].clone();
+    node["retainedRuns"] = body["pool"]["retained_runs"].clone();
     node["usage"] = body["usage"].clone();
     node["pressure"] = body["pressure"].clone();
     node["budgetError"] = body["budgetError"].clone();
@@ -1125,6 +1126,7 @@ pub async fn refresh_local(s: &Service) -> Result<()> {
             record["exclusiveReservations"] = health["exclusiveReservations"].clone();
             record["lastSeen"] = now().into();
             record["runtimeSlots"] = health["pool"]["capacity"].clone();
+            record["retainedRuns"] = health["pool"]["retained_runs"].clone();
             record["usage"] = health["usage"].clone();
             record["pressure"] = health["pressure"].clone();
             db.put("nodes", &record)?;

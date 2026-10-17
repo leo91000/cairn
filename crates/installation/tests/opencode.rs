@@ -213,6 +213,14 @@ async fn native_turn_streams_and_completed_receipt_replays_without_an_engine() {
 async fn rejected_credentials_are_masked_and_truncated_responses_fail_without_hanging() {
     for (input, expected) in [
         ("fixture:opencode-error", "authentication failed"),
+        (
+            "fixture:opencode-region",
+            "OpenCode Go requires Global regions for this model.",
+        ),
+        (
+            "fixture:opencode-unknown-error",
+            "could not complete this response",
+        ),
         ("fixture:opencode-length", "stopped before completing"),
         ("fixture:opencode-continuation", "unsupported continuation"),
     ] {
@@ -295,6 +303,60 @@ async fn persisted_usage_errors_do_not_poison_the_replacement_provider() {
             .unwrap()
             .contains("compact status panel")
     );
+}
+
+#[tokio::test]
+async fn cancelling_during_native_startup_kills_the_waiting_process() {
+    let root = TempDir::new().unwrap();
+    let s = service(&root).await;
+    connect(&s).await;
+    let lease = s
+        .accounts
+        .acquire(&s, "startup-cancel", Provider::Opencode, MODEL)
+        .await
+        .unwrap()
+        .unwrap();
+    let _broker = broker::serve(&s, &lease).await.unwrap();
+    let mut config = s.config.clone();
+    config.home = lease.home.parent().unwrap().to_owned();
+    let mut input = plan(&root, "Never reaches the model");
+    input["opencodeConfig"] = json!({ "fixtureStartupHang": true });
+    let pid_file = lease.home.join("data/opencode/startup.pid");
+    // File creation can be observed before the fixture's PID write completes.
+    tokio::fs::create_dir_all(pid_file.parent().unwrap())
+        .await
+        .unwrap();
+    tokio::fs::write(&pid_file, "").await.unwrap();
+    let stop = CancellationToken::new();
+    let cancellation = stop.clone();
+    let (tx, _rx) = mpsc::channel(128);
+    let task = tokio::spawn(async move { opencode::run(&config, input, tx, cancellation).await });
+    let pid = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if let Ok(pid) = tokio::fs::read_to_string(&pid_file).await
+                && let Ok(pid) = pid.parse::<i32>()
+                && pid > 0
+            {
+                break pid;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    stop.cancel();
+    let result = tokio::time::timeout(Duration::from_secs(3), task)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(result.unwrap_err().message.contains("stopped"));
+    tokio::time::timeout(Duration::from_secs(3), async {
+        while unsafe { libc::kill(pid, 0) } == 0 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("native process survived startup cancellation");
 }
 
 #[tokio::test]
@@ -411,7 +473,7 @@ async fn cancellation_stops_a_busy_native_turn() {
 /// Run with OPENCODE_NATIVE_BIN set via the credential-isolated backend launcher.
 #[tokio::test]
 #[ignore = "requires the pinned OpenCode 1.19.0 binary"]
-async fn pinned_native_cli_executes_against_a_local_model_without_global_plugins() {
+async fn pinned_native_cli_executes_and_resumes_without_global_plugins() {
     use axum::{Router, http::HeaderMap, routing::post};
     let binary = std::env::var("OPENCODE_NATIVE_BIN").expect("set OPENCODE_NATIVE_BIN");
     let root = TempDir::new().unwrap();
@@ -506,10 +568,9 @@ async fn pinned_native_cli_executes_against_a_local_model_without_global_plugins
     });
     let result = tokio::time::timeout(
         Duration::from_secs(60),
-        opencode::run(&config, input, tx, CancellationToken::new()),
+        opencode::run(&config, input.clone(), tx, CancellationToken::new()),
     )
     .await;
-    server.abort();
     result.expect("native execution timed out").unwrap();
     let events = output.await.unwrap();
     assert!(events.iter().any(|e| e["type"] == "turn.completed"));
@@ -520,6 +581,52 @@ async fn pinned_native_cli_executes_against_a_local_model_without_global_plugins
         "Native OpenCode local model passed."
     );
     assert!(!lease.home.join("data/opencode/auth.json").exists());
+
+    let session = text(
+        events
+            .iter()
+            .find(|event| event["type"] == "thread.started")
+            .unwrap(),
+        "thread_id",
+    )
+    .to_owned();
+    input["sessionId"] = session.clone().into();
+    input["execution"]["messageId"] = "follow-up".into();
+    input["execution"]["text"] = "Continue in the same session. Do not call tools.".into();
+    input["output"] = root
+        .path()
+        .join("follow-up.md")
+        .to_string_lossy()
+        .into_owned()
+        .into();
+    let (tx, mut rx) = mpsc::channel(512);
+    let output = tokio::spawn(async move {
+        let mut values = Vec::new();
+        while let Some(value) = rx.recv().await {
+            values.push(value);
+        }
+        values
+    });
+    let result = tokio::time::timeout(
+        Duration::from_secs(60),
+        opencode::run(&config, input, tx, CancellationToken::new()),
+    )
+    .await;
+    server.abort();
+    result.expect("native resume timed out").unwrap();
+    let events = output.await.unwrap();
+    assert!(
+        events
+            .iter()
+            .any(|event| event["type"] == "thread.started" && event["thread_id"] == session)
+    );
+    assert!(events.iter().any(|event| event["type"] == "turn.completed"));
+    assert_eq!(
+        tokio::fs::read_to_string(root.path().join("follow-up.md"))
+            .await
+            .unwrap(),
+        "Native OpenCode local model passed."
+    );
 }
 
 #[tokio::test]

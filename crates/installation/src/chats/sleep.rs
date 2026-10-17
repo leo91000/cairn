@@ -1,5 +1,5 @@
 //! Durable continuation of the same conversation, independent of its native process.
-use super::{chat, chat_for_run};
+use super::{MessageMode, chat, chat_for_run};
 use crate::{
     config::{id, now},
     conversation_lifecycle::{is_active, require_active},
@@ -22,7 +22,8 @@ pub const INSTRUCTIONS: &str = "When waiting for a remote result before continui
     the wakeup. This is a scheduled continuation, not task completion or a request for user input; \
     no outcome report is needed when ending a turn for this wait. Do not use sleep while local \
     background work must keep running: wait for those tasks with the native tools instead. \
-    A new user message replaces the scheduled wakeup. Pausing the conversation holds the wakeup; \
+    Follow-ups the user queued earlier wait until the continuation finishes; a new user message \
+    replaces the scheduled wakeup. Pausing the conversation holds the wakeup; \
     stopping or deleting it cancels it. At wakeup, continue the original authorized task and \
     verify the external result before repeating actions.";
 
@@ -34,7 +35,8 @@ pub fn tool() -> Value {
             when waiting for a remote result; local background processes must use native waiting \
             tools. After confirmation, end this turn so execution resources can be released. \
             The continuation runs after this turn succeeds and its execution stops, no earlier \
-            than wakeAt, subject to available capacity. A new user message replaces the wakeup; \
+            than wakeAt, subject to available capacity. Queued follow-ups start after the continuation; \
+            a new user message replaces the wakeup; \
             pause holds it, stop/delete cancel it. Repeating the same arguments in this turn \
             returns the same wakeup without extending the delay; different arguments replace it.",
         "inputSchema": {
@@ -73,7 +75,7 @@ pub async fn schedule(s: &Service, bearer: &str, input: &Value) -> Result<Value>
                 Error::conflict("Scheduled waiting requires an interactive conversation.")
             })?;
             require_active(&chat)?;
-            if chat["paused"] == true || has_pending_input(db, &chat)? {
+            if chat["paused"] == true || has_unhandled_input(db, &chat)? {
                 return Err(Error::conflict(
                     "Handle pending user input before scheduling a wakeup.",
                 ));
@@ -120,30 +122,56 @@ pub(crate) fn has_pending_input(db: &Db<'_>, chat: &Value) -> Result<bool> {
         .any(|message| matches!(text(message, "status"), "queued" | "sending")))
 }
 
-/// Rechecked in the launch transaction after async snapshot preparation.
-pub(super) fn ready(db: &Db<'_>, chat: &Value, run: Option<&Value>, time: i64) -> Result<bool> {
-    let wakeup = &chat["wakeup"];
-    let eligible = is_active(chat)
+/// Input the current turn must handle before waiting: steering, answers and
+/// messages being delivered. Queued follow-ups wait for the task, wakeup included.
+pub(crate) fn has_unhandled_input(db: &Db<'_>, chat: &Value) -> Result<bool> {
+    Ok(db
+        .messages(text(chat, "id"))?
+        .iter()
+        .any(|message| match text(message, "status") {
+            "sending" => true,
+            "queued" => message["mode"] == MessageMode::Steer,
+            _ => false,
+        }))
+}
+
+/// The wakeup can still resume the turn that scheduled it.
+fn resumable(chat: &Value, run: Option<&Value>) -> bool {
+    chat["wakeup"].is_object()
+        && is_active(chat)
         && chat["paused"] != true
         && chat["sessionRestartRequested"] != true
-        && (if wakeup["condition"].is_object() {
-            run.is_some_and(|run| {
-                super::wait_for::observation(db, chat, run, time)
-                    .is_ok_and(|observation| observation.is_some())
-            })
-        } else {
-            wakeup["wakeAt"]
-                .as_i64()
-                .is_some_and(|deadline| deadline <= time)
-        })
         && run.is_some_and(|run| {
             run["status"] == RunStatus::Succeeded
                 && run["cancelRequestedAt"].is_null()
                 && run["recoveryPending"] != true
                 && run["workspaceCleanedAt"].is_null()
-                && run["chatExecution"]["messageId"] == wakeup["messageId"]
-        });
-    Ok(eligible && !has_pending_input(db, chat)?)
+                && run["chatExecution"]["messageId"] == chat["wakeup"]["messageId"]
+        })
+}
+
+/// Queued follow-ups start after the continuation of a wakeup that can still resume.
+pub(super) fn holds_queue(db: &Db<'_>, chat: &Value, run: Option<&Value>) -> Result<bool> {
+    Ok(resumable(chat, run) && !has_unhandled_input(db, chat)?)
+}
+
+/// Rechecked in the launch transaction after async snapshot preparation.
+pub(super) fn ready(db: &Db<'_>, chat: &Value, run: Option<&Value>, time: i64) -> Result<bool> {
+    if !holds_queue(db, chat, run)? {
+        return Ok(false);
+    }
+
+    let wakeup = &chat["wakeup"];
+    Ok(if wakeup["condition"].is_object() {
+        run.is_some_and(|run| {
+            super::wait_for::observation(db, chat, run, time)
+                .is_ok_and(|observation| observation.is_some())
+        })
+    } else {
+        wakeup["wakeAt"]
+            .as_i64()
+            .is_some_and(|deadline| deadline <= time)
+    })
 }
 
 pub(super) fn message(

@@ -38,15 +38,18 @@ fun rememberLive(
     val scope = rememberCoroutineScope()
     var older by remember(path, api) { mutableStateOf(emptyList<RunEvent>()) }
     var olderHistory by remember(path, api) { mutableStateOf<String?>(null) }
+    var olderEpoch by remember(path, api) { mutableIntStateOf(0) }
     var boundary by remember(path, api) { mutableStateOf<Long?>(null) }
     var moreOlder by remember(path, api) { mutableStateOf(false) }
     var loadingOlder by remember(path, api) { mutableStateOf(false) }
     var olderError by remember(path, api) { mutableStateOf<String?>(null) }
     fun display(snapshot: LiveSnapshot): LiveSnapshot {
-        if (snapshot.history != olderHistory) {
+        // A replaced history, even with the same revision, no longer continues these pages.
+        if (snapshot.history != olderHistory || snapshot.epoch != olderEpoch) {
             older = emptyList()
             boundary = null
             olderHistory = snapshot.history
+            olderEpoch = snapshot.epoch
             olderError = null
         }
         return if (boundary == null) snapshot
@@ -133,6 +136,7 @@ fun rememberLive(
                 loadingOlder = true
                 olderError = null
                 val before = value.oldest
+                val epoch = value.epoch
                 val cacheGeneration = vm.historyCache.generation
                 scope.launch {
                     var pageApplied = false
@@ -142,12 +146,17 @@ fun rememberLive(
                                 path.removeSuffix("/stream") +
                                     "/history?before=$before&history=${segment(history)}"
                             )
-                        if (value.history == history && page.history == history) {
+                        if (
+                            value.history == history &&
+                                value.epoch == epoch &&
+                                page.history == history
+                        ) {
                             require(page.oldest < before || !page.hasOlder) {
                                 "Page d’historique invalide."
                             }
                             older = mergeHistory(page.events, older)
                             olderHistory = history
+                            olderEpoch = epoch
                             boundary = page.oldest
                             moreOlder = page.hasOlder
                             value = display(value)
@@ -185,6 +194,7 @@ fun rememberLive(
                 }
             }
         },
+        followLatest = { session.followsLatest = it },
     )
 }
 
@@ -463,6 +473,7 @@ internal fun rememberHistoryPosition(
     var ready by remember(path) { mutableStateOf(false) }
     val currentFollow by rememberUpdatedState(follow)
     val firstEvent by rememberUpdatedState(live.events.firstOrNull()?.id)
+    val followLatest by rememberUpdatedState(live.followLatest)
     val api = vm.api
     val key = remember(path, api) { vm.historyCache.key(api.cacheScope, api.csrf, path) }
     LaunchedEffect(path, live.catchingUp, visible) {
@@ -488,7 +499,11 @@ internal fun rememberHistoryPosition(
                         firstEvent,
                     )
                 }
-                    .collectLatest { vm.historyCache.position(key, it) }
+                    .collectLatest {
+                        // Published only once restored, never masking a saved reader.
+                        followLatest(it.follow)
+                        vm.historyCache.position(key, it)
+                    }
             } finally {
                 withContext(NonCancellable) {
                     vm.historyCache.position(

@@ -91,6 +91,22 @@ class ConversationPresentationTest {
     }
 
     @Test
+    fun `follow-ups stay queued behind a scheduled wait`() {
+        val chat =
+            Chat(
+                "chat",
+                run = Run("run", status = "succeeded"),
+                messages = listOf(second),
+                wakeup = ChatWakeup("wake", "one", "Attendre la CI", 420, 1, 420001),
+            )
+        assertEquals(ChatDelivery(emptyList(), listOf(second)), chatDelivery(chat, emptyList()))
+        assertEquals(
+            second,
+            chatDelivery(chat.copy(wakeup = null), emptyList()).sending.single().message,
+        )
+    }
+
+    @Test
     fun `queued Claude message explains the missing account and clears notice when running`() {
         val run =
             Run(

@@ -102,7 +102,44 @@ pub async fn assets(state: &Path) -> Result<PathBuf> {
     if !target.join("vmlinux").exists() {
         tokio::fs::copy("/opt/cairn-vm/vmlinux", target.join("vmlinux")).await?;
     }
+    install_control_image(
+        Path::new("/opt/cairn-vm/control.squashfs"),
+        &target.join("control.squashfs"),
+    )
+    .await?;
     Ok(target)
+}
+
+async fn install_control_image(source: &Path, target: &Path) -> Result<()> {
+    use std::io::ErrorKind;
+    match tokio::fs::symlink_metadata(target).await {
+        Ok(metadata) if metadata.is_file() && metadata.permissions().mode() & 0o222 == 0 => {
+            return Ok(());
+        }
+        Ok(_) => return Err(Error::conflict("Invalid guest control image.")),
+        Err(error) if error.kind() == ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
+    let temporary = target.with_extension("squashfs.partial");
+    match tokio::fs::symlink_metadata(&temporary).await {
+        Ok(metadata) if metadata.is_file() => tokio::fs::remove_file(&temporary).await?,
+        Ok(_) => return Err(Error::conflict("Invalid partial guest control image.")),
+        Err(error) if error.kind() == ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
+    tokio::fs::copy(source, &temporary).await?;
+    tokio::fs::set_permissions(&temporary, std::fs::Permissions::from_mode(0o444)).await?;
+    tokio::fs::File::open(&temporary).await?.sync_all().await?;
+    tokio::fs::rename(&temporary, target).await?;
+    tokio::fs::File::open(
+        target
+            .parent()
+            .ok_or_else(|| Error::bad("Missing control directory."))?,
+    )
+    .await?
+    .sync_all()
+    .await?;
+    Ok(())
 }
 
 pub(super) async fn connect(socket: &Path) -> Result<BufReader<UnixStream>> {
@@ -137,6 +174,32 @@ pub(super) async fn call<T: DeserializeOwned>(socket: &Path, request: &GuestRequ
 
 pub(super) async fn status(socket: &Path) -> Result<GuestStatus> {
     call(socket, &GuestRequest::Status).await
+}
+
+/// Older guests and pinned images with different runner bytes keep the archive path.
+pub(super) async fn prepare_entrypoint(
+    socket: &Path,
+    state: &Path,
+    status: &GuestStatus,
+) -> Result<()> {
+    if status.entrypoint_reuse
+        && let Ok(digest) = super::entrypoint::digest().await
+    {
+        let reply: Reply = call(
+            socket,
+            &GuestRequest::ReuseEntrypoint {
+                digest: digest.to_owned(),
+            },
+        )
+        .await?;
+        if reply.succeeded() {
+            tracing::info!(target: "cairn_performance", operation = "vm_entrypoint", reused = true);
+            return Ok(());
+        }
+    }
+    tracing::info!(target: "cairn_performance", operation = "vm_entrypoint", reused = false);
+    let target = Path::new(ENTRYPOINT).parent().unwrap().to_str().unwrap();
+    import(socket, &state.join("entrypoint"), target).await
 }
 
 pub(super) async fn read_reply(stream: &mut BufReader<UnixStream>, message: &str) -> Result<Reply> {
@@ -391,4 +454,178 @@ pub async fn settle_attempt(
     )
     .await
     .map(|_| ())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::net::UnixListener;
+
+    async fn request(listener: &UnixListener) -> (BufReader<UnixStream>, GuestRequest) {
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut stream = BufReader::new(stream);
+        let mut connect = String::new();
+        stream.read_line(&mut connect).await.unwrap();
+        assert_eq!(connect, format!("CONNECT {}\n", wire::PORT));
+        stream.get_mut().write_all(b"OK 5200\n").await.unwrap();
+        let value = wire::read(&mut stream).await.unwrap().unwrap();
+        (stream, serde_json::from_value(value).unwrap())
+    }
+
+    #[tokio::test]
+    async fn matching_guest_skips_the_archive_entirely() {
+        let root = tempfile::tempdir().unwrap();
+        let socket = root.path().join("vsock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        let guest = tokio::spawn(async move {
+            let (mut stream, request) = request(&listener).await;
+            let GuestRequest::ReuseEntrypoint { digest } = request else {
+                panic!("Expected entrypoint verification");
+            };
+            assert_eq!(digest, super::super::entrypoint::digest().await.unwrap());
+            wire::write(stream.get_mut(), &Reply::ok(true))
+                .await
+                .unwrap();
+            // No source directory exists: attempting the archive path would fail.
+        });
+        prepare_entrypoint(
+            &socket,
+            root.path(),
+            &GuestStatus {
+                entrypoint_reuse: true,
+                ..GuestStatus::default()
+            },
+        )
+        .await
+        .unwrap();
+        guest.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn legacy_and_mismatched_guests_receive_the_current_archive() {
+        for capable in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let source = root.path().join("entrypoint");
+            tokio::fs::create_dir(&source).await.unwrap();
+            tokio::fs::write(source.join("cairn"), b"current-controller-runner")
+                .await
+                .unwrap();
+            let socket = root.path().join("vsock");
+            let listener = UnixListener::bind(&socket).unwrap();
+            let guest = tokio::spawn(async move {
+                if capable {
+                    let (mut stream, message) = request(&listener).await;
+                    assert!(matches!(message, GuestRequest::ReuseEntrypoint { .. }));
+                    wire::write(stream.get_mut(), &Reply::ok(false))
+                        .await
+                        .unwrap();
+                }
+                let (mut stream, message) = request(&listener).await;
+                assert!(matches!(message, GuestRequest::Status));
+                wire::write(
+                    stream.get_mut(),
+                    &GuestStatus {
+                        binary_imports: true,
+                        ..GuestStatus::default()
+                    },
+                )
+                .await
+                .unwrap();
+                let (mut stream, message) = request(&listener).await;
+                let GuestRequest::Import {
+                    target, encoding, ..
+                } = message
+                else {
+                    panic!("Expected archive fallback");
+                };
+                assert_eq!(
+                    target,
+                    Path::new(ENTRYPOINT).parent().unwrap().to_str().unwrap()
+                );
+                assert_eq!(encoding, Encoding::Binary);
+                let mut chunk = vec![0; wire::MAX_CHUNK];
+                let mut archive = Vec::new();
+                loop {
+                    let count = wire::read_chunk(&mut stream, &mut chunk).await.unwrap();
+                    if count == 0 {
+                        break;
+                    }
+                    archive.extend_from_slice(&chunk[..count]);
+                }
+                assert!(
+                    archive
+                        .windows(b"current-controller-runner".len())
+                        .any(|bytes| bytes == b"current-controller-runner")
+                );
+                wire::write(stream.get_mut(), &Reply::ok(true))
+                    .await
+                    .unwrap();
+            });
+            prepare_entrypoint(
+                &socket,
+                root.path(),
+                &GuestStatus {
+                    entrypoint_reuse: capable,
+                    ..GuestStatus::default()
+                },
+            )
+            .await
+            .unwrap();
+            guest.await.unwrap();
+        }
+    }
+}
+
+#[cfg(test)]
+mod control_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn control_image_replaces_readonly_partial_and_keeps_installed_bytes_immutable() {
+        let root = tempfile::tempdir().unwrap();
+        let source = root.path().join("source");
+        let target = root.path().join("control.squashfs");
+        let partial = root.path().join("control.squashfs.partial");
+        tokio::fs::write(&source, b"complete").await.unwrap();
+        tokio::fs::write(&partial, b"interrupted").await.unwrap();
+        tokio::fs::set_permissions(&partial, std::fs::Permissions::from_mode(0o444))
+            .await
+            .unwrap();
+        install_control_image(&source, &target).await.unwrap();
+        assert_eq!(tokio::fs::read(&target).await.unwrap(), b"complete");
+        assert_eq!(
+            tokio::fs::metadata(&target)
+                .await
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o222,
+            0
+        );
+        assert!(!partial.exists());
+        tokio::fs::write(&source, b"other runtime").await.unwrap();
+        install_control_image(&source, &target).await.unwrap();
+        assert_eq!(tokio::fs::read(&target).await.unwrap(), b"complete");
+    }
+
+    #[tokio::test]
+    async fn control_image_never_follows_a_final_or_partial_symlink() {
+        let root = tempfile::tempdir().unwrap();
+        let source = root.path().join("source");
+        let target = root.path().join("control.squashfs");
+        let partial = root.path().join("control.squashfs.partial");
+        tokio::fs::write(&source, b"kept").await.unwrap();
+        for link in [&partial, &target] {
+            std::os::unix::fs::symlink(&source, link).unwrap();
+            assert!(install_control_image(&source, &target).await.is_err());
+            assert_eq!(tokio::fs::read(&source).await.unwrap(), b"kept");
+            tokio::fs::remove_file(link).await.unwrap();
+        }
+        assert!(
+            install_control_image(&root.path().join("absent"), &target)
+                .await
+                .is_err()
+        );
+        assert!(!target.exists());
+    }
 }

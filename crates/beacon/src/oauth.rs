@@ -926,10 +926,10 @@ pub(super) async fn native_finish(
     if method.is_none() {
         return Err(rejected());
     }
-    query("DELETE FROM native_oauth_handovers WHERE id = $1")
-        .bind(&input.challenge)
-        .execute(&mut *transaction)
-        .await?;
+
+    // Keep the verified account/subject until the original expiry so a lost
+    // response can be retried with the same secret. Every retry rechecks the
+    // method and (for linking) the original session before issuing a fresh one.
     let response = create_session(
         &service,
         &mut transaction,

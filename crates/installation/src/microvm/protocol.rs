@@ -24,6 +24,10 @@ impl Encoding {
 #[serde(tag = "op", rename_all = "kebab-case")]
 pub enum GuestRequest {
     Status,
+    /// Only sent when status advertises entrypoint reuse.
+    ReuseEntrypoint {
+        digest: String,
+    },
     WarmCodex,
     Shutdown,
     Freeze,
@@ -72,6 +76,26 @@ pub enum GuestRequest {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn legacy_status_does_not_enable_entrypoint_reuse() {
+        // Older controllers ignore the additive capability.
+        #[derive(Deserialize)]
+        struct LegacyStatus {
+            version: u32,
+        }
+
+        let status: GuestStatus = serde_json::from_value(json!({ "version": 1 })).unwrap();
+        assert!(!status.entrypoint_reuse);
+        let status = GuestStatus {
+            version: 1,
+            entrypoint_reuse: true,
+            ..GuestStatus::default()
+        };
+        let legacy: LegacyStatus =
+            serde_json::from_value(serde_json::to_value(status).unwrap()).unwrap();
+        assert_eq!(legacy.version, 1);
+    }
 
     #[test]
     fn imports_accept_legacy_requests_and_optional_trace_ids() {
@@ -145,6 +169,8 @@ pub struct GuestStatus {
     pub workspace_disks: bool,
     /// Supports reseeding and renewing an anonymous snapshot before assignment.
     pub snapshot_clones: bool,
+    /// Can install its running executable into tmpfs after matching its digest.
+    pub entrypoint_reuse: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize)]

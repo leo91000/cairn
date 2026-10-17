@@ -232,3 +232,91 @@ test('OpenCode Auto runs a model on the first connection, then the next one at i
   await expect(picker).toHaveAccessibleName(/Ling 3\.1 Flash Free · OpenCode Zen/)
   expect(errors).toEqual([])
 })
+
+test('OpenCode keeps an explicitly selected model and reasoning after opening and reloading a new chat', async ({ page, workspace }, testInfo) => {
+  test.setTimeout(90000)
+  const accounts = (await workspace.api('/api/accounts')).accounts
+  if (!accounts.some((account: { modelProvider?: string }) => account.modelProvider === 'opencode')) {
+    await workspace.api('/api/accounts', 'POST', {
+      provider: 'opencode',
+      name: 'Model continuity',
+      modelProvider: 'opencode',
+      apiKey: 'synthetic-model-continuity-key',
+    })
+  }
+
+  await page.goto(workspacePath('/chats'))
+  await signIn(page)
+  const picker = page.getByRole('button', { name: /^Agent, model and reasoning/ })
+  const menu = page.getByRole('dialog', { name: 'Agent & model' })
+  await picker.click()
+  await menu.getByRole('radio', { name: 'OpenCode', exact: true }).click()
+  await menu.getByRole('radio', { name: 'Cat Jam Free', exact: true }).click()
+  await menu.getByRole('radiogroup', { name: 'Reasoning' }).getByRole('radio', { name: 'High', exact: true }).click()
+  await menu.getByRole('button', { name: 'Close', exact: true }).click()
+  await page.getByRole('textbox', { name: 'Message', exact: true }).fill('Check the workspace status.')
+  await page.getByRole('button', { name: 'Send', exact: true }).click()
+  await expect(page).toHaveURL(/\/chats\/[a-z]+-[a-z]+-[a-f0-9]{8}$/)
+  const slug = new URL(page.url()).pathname.split('/').at(-1)!
+  await expect.poll(async () => (await workspace.api(`/api/chats/${slug}`)).run?.status, { timeout: 30000 }).toBe('succeeded')
+  await expect(picker).toHaveAccessibleName(/OpenCode · Cat Jam Free · High reasoning$/)
+  await page.reload()
+  await expect(picker).toHaveAccessibleName(/OpenCode · Cat Jam Free · High reasoning$/)
+  await picker.click()
+  await expect(menu.getByRole('radio', { name: 'Conversation model', exact: true })).toHaveAttribute('aria-checked', 'true')
+  await expect(menu.getByText('Models from your connections')).toBeVisible()
+  await page.setViewportSize({ width: 1440, height: 1000 })
+  await page.screenshot({ path: testInfo.outputPath('opencode-catalog-desktop.png'), animations: 'disabled' })
+  await page.setViewportSize({ width: 390, height: 844 })
+  await page.emulateMedia({ colorScheme: 'dark' })
+  await page.screenshot({ path: testInfo.outputPath('opencode-catalog-mobile.png'), animations: 'disabled' })
+  await menu.getByRole('button', { name: 'Close', exact: true }).click()
+  await page.getByRole('textbox', { name: 'Message', exact: true }).fill('Continue with the same model.')
+  await page.getByRole('button', { name: 'Send', exact: true }).click()
+  await expect.poll(async () => (await workspace.api(`/api/chats/${slug}`)).messages.at(-1)).toMatchObject({ provider: 'opencode', model: 'auto/cat-jam-free', reasoning: 'high' })
+  await expect.poll(async () => (await workspace.api(`/api/chats/${slug}`)).run?.status, { timeout: 30000 }).toBe('succeeded')
+  expect((await workspace.api(`/api/chats/${slug}`)).run.snapshot.agent).toMatchObject({ model: 'auto/cat-jam-free', reasoning: 'high' })
+})
+
+test('OpenCode explains a regional Privacy refusal and offers retry or a new conversation', async ({ page, workspace }, testInfo) => {
+  test.setTimeout(90000)
+  // The preceding limit journey intentionally exhausts its Go account.
+  await workspace.api('/api/accounts', 'POST', {
+    provider: 'opencode',
+    name: 'Privacy example',
+    modelProvider: 'opencode-go',
+    apiKey: 'synthetic-privacy-key',
+  })
+
+  const chat = await workspace.api('/api/chats', 'POST', {})
+  await workspace.api(`/api/chats/${chat.id}/messages`, 'POST', {
+    id: crypto.randomUUID(),
+    provider: 'opencode',
+    model: 'opencode-go/ling-3.1-flash-free',
+    text: 'fixture:opencode-region Check the workspace status.',
+  })
+  await expect.poll(async () => (await workspace.api(`/api/chats/${chat.id}`)).run?.status, { timeout: 30000 }).toBe('failed')
+  await page.goto(workspacePath(`/chats/${chat.id}`))
+  await signIn(page)
+  const notice = page.getByRole('alert').filter({ hasText: 'This model needs a Privacy change' })
+  await expect(notice).toBeVisible()
+  await expect(notice).toContainText('Global')
+  await expect(notice.getByRole('link', { name: /OpenCode settings/ })).toHaveAttribute('href', 'https://opencode.ai/console/')
+  await expect(page.getByText('Sensitive provider detail')).toHaveCount(0)
+  for (const [width, colorScheme] of [[1440, 'light'], [390, 'dark']] as const) {
+    await page.setViewportSize({ width, height: 900 })
+    await page.emulateMedia({ colorScheme })
+    await expectSingleScroll(page)
+    await page.screenshot({ path: testInfo.outputPath(`opencode-privacy-${width}.png`), animations: 'disabled' })
+  }
+
+  const previous = (await workspace.api(`/api/chats/${chat.id}`)).run
+  await notice.getByRole('button', { name: 'Retry response', exact: true }).click()
+  await expect.poll(async () => (await workspace.api(`/api/chats/${chat.id}`)).run?.resumeCount, { timeout: 30000 }).toBeGreaterThan(previous.resumeCount ?? 0)
+  await expect.poll(async () => (await workspace.api(`/api/chats/${chat.id}`)).run?.status, { timeout: 30000 }).toBe('failed')
+  expect((await workspace.api(`/api/chats/${chat.id}`)).run.sessionId).toBe(previous.sessionId)
+  await notice.getByRole('link', { name: 'choose another model in a new conversation', exact: true }).click()
+  await expect(page.getByRole('textbox', { name: 'Message', exact: true })).toBeVisible()
+  await expect(page).toHaveURL(/\/chats(?:\?|$)/)
+  expect((await workspace.api(`/api/chats/${chat.id}`)).run.status).toBe('failed')
+})

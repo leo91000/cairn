@@ -236,7 +236,7 @@ class CacheMissReproductionTest {
                     }
                     compose.waitForIdle()
                     assertEquals(
-                        "/api/installations/fixture/api/chats/diagnostic/stream?after=$accepted&history=v1%3Afixture%3A1&window=1",
+                        "/api/installations/fixture/api/chats/diagnostic/stream?after=$accepted&history=v1%3Afixture%3A1&window=1&recent=1",
                         requests[1],
                     )
                     compose.onNodeWithText("Diagnostic cache").assertIsDisplayed()

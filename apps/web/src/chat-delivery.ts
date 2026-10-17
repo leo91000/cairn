@@ -33,7 +33,8 @@ export function chatDelivery(chat: ChatDetail | null, events: RunEvent[], outgoi
   if (outgoing && !messages.some(message => message.id === outgoing.id))
     messages.push(outgoing)
   const active = !!chat?.run && ['queued', 'running'].includes(chat.run.status)
-  const canStart = !chat?.paused && (!chat?.run || chat.run.status === 'succeeded')
+  // A scheduled wait resumes the task before queued follow-ups start.
+  const canStart = !chat?.paused && (!chat?.run || chat.run.status === 'succeeded') && !scheduledWakeup(chat)
   const first = messages[0]
   const sending: SendingMessage[] = []
   const queued: ChatMessage[] = []

@@ -122,6 +122,8 @@ pub struct Health {
     pub ready_memory_mi_b: Option<u64>,
     pub preparing: bool,
     pub retained: usize,
+    /// Completed disks still occupying a physical slot must remain monitored.
+    pub retained_runs: Vec<String>,
     pub retained_memory_mi_b: Option<u64>,
 }
 
@@ -421,6 +423,7 @@ impl Pool {
             ready_memory_mi_b: slots.ready_bytes().map(|bytes| bytes / 1_048_576),
             preparing: slots.preparing.is_some(),
             retained: slots.retained.len(),
+            retained_runs: slots.retained.iter().map(|idle| idle.run.clone()).collect(),
             retained_memory_mi_b: slots
                 .retained
                 .iter()
@@ -1473,6 +1476,7 @@ mod tests {
             }
             slots.ready.push_back(ready);
         }
+        assert!(pool.health().await.retained_runs.contains(&run));
         assert_eq!(pool.evict_conversation(&run).await.unwrap_err().status, 425);
         let first = pool.reserve(&cold_plan("first-active")).await.unwrap();
         assert_eq!(

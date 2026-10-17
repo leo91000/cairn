@@ -23,6 +23,21 @@ pub trait Disk: Send + Sync {
 
     fn write_at(&self, offset: u64, bytes: &[u8]) -> io::Result<()>;
 
+    /// Durably discard a checked range. Reads subsequently return zeros. Like
+    /// write_batch, a failure may leave a durable prefix; it is not atomic.
+    /// Use ordinary write frames so older releases can recover the journal.
+    fn discard(&self, offset: u64, length: usize) -> io::Result<()> {
+        range(self.size(), offset, length)?;
+        let zeros = vec![0; length.min(8 * 1024 * 1024)];
+        let mut completed = 0;
+        while completed < length {
+            let count = (length - completed).min(zeros.len());
+            self.write_at(offset + completed as u64, &zeros[..count])?;
+            completed += count;
+        }
+        Ok(())
+    }
+
     /// Preserve request order and acknowledge only when every write is durable.
     /// Failure may leave an unacknowledged prefix; this is not a transaction.
     fn write_batch(&self, writes: &[DiskWrite<'_>]) -> io::Result<()> {

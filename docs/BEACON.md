@@ -634,7 +634,11 @@ This is explicit consent, not a cryptographic device attestation; only approve
 a flow you just initiated in Cairn on your own device.
 Android polls `POST /api/account/oauth/github/native/finish` with the
 challenge and secret: 202 means pending; success creates the ordinary Cairn session.
-The launcher and completed exchange are each one-use and expire in five minutes.
+The launcher and browser confirmation are each one-use. Until the handover's
+original five-minute expiration, the same challenge and secret can finish again
+to recover a lost response, creating a new session for the same verified account.
+Each finish rechecks the active GitHub identity and the original linking session's
+CSRF and recent independent proof when linking.
 The handover stores no session or provider access tokens, and authenticated linking
 requires the original Cairn session's recent independent email/passkey proof.
 The app session is checked before the provider callback and again under the
