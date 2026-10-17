@@ -96,6 +96,7 @@ export type FormResult = {
 export type Inbound = {
     kind: string?, -- handler to call, default "message"
     id: string, -- platform message ID, deduplicated for 30 days
+    resource: string?, -- required for collections declaring delegation; host selects its route
     author: Author,
     context: { [string]: Json }?, -- routing the package needs; kept for requests too
     body: { [string]: Json }?, -- what the person wrote; kept only for allowed people
@@ -198,16 +199,18 @@ export type Cairn = {
             reply: Json?,
         }) -> { chatId: string, messageId: string },
         -- capability "conversations.control": while handling `message` or `interaction`.
-        -- Name the conversation by ID or by its shared thread.
+        -- Name the conversation by ID or by its shared thread. Resource-routed
+        -- controls require the issuing turn's deliveryId; only its author may act.
         -- Check before collecting a partial answer; the final effect also rechecks.
-        check: (target: { conversation: string?, thread: string? }) -> { conversation: string },
+        check: (target: { conversation: string?, thread: string?, delivery: string? }) -> { conversation: string },
         answer: (answer: {
             conversation: string?,
             thread: string?,
+            delivery: string?,
             question: string,
             answers: { [string]: string },
         }) -> { status: string },
-        cancel: (target: { conversation: string?, thread: string?, shared: boolean? }) -> { stopped: boolean },
+        cancel: (target: { conversation: string?, thread: string?, shared: boolean?, delivery: string? }) -> { stopped: boolean },
     },
 }
 

@@ -20,7 +20,7 @@ pub const KIND: &str = "plugin-resources";
 #[derive(Clone)]
 pub(crate) struct Reference {
     pub(crate) resource: Resource,
-    revisions: Vec<(String, String)>,
+    pub(crate) revisions: Vec<(String, String)>,
 }
 
 #[derive(Clone, Deserialize, Serialize)]
@@ -165,7 +165,7 @@ pub async fn save(
         secret_keys: secrets.keys().cloned().collect(),
         updated_at: now(),
     };
-    let encrypted = s.vault.encrypt(&key, &json!({"fields": secrets}))?;
+    let encrypted = s.vault.encrypt(&key, &json!({ "fields": secrets }))?;
     let input = input.clone();
     s.store
         .transaction(move |db| {
@@ -197,7 +197,7 @@ pub async fn save(
             db.put(KIND, &value)?;
             db.audit(
                 "plugin.resource.saved",
-                &json!({"id": value["id"], "connectionId": connection.id}),
+                &json!({ "id": value["id"], "connectionId": connection.id }),
             )?;
             Ok(value)
         })
@@ -265,15 +265,16 @@ pub async fn remove(
                 }
             }
             for id in ids {
+                super::routes::remove_resource(db, &id)?;
                 super::oauth::remove_resource(db, &id)?;
                 db.delete(&format!("mcp-secret:{}", secrets_key(&id)))?;
                 db.remove(KIND, &id)?;
             }
             db.audit(
                 "plugin.resource.deleted",
-                &json!({"id": resource.id, "connectionId": connection.id}),
+                &json!({ "id": resource.id, "connectionId": connection.id }),
             )?;
-            Ok(json!({"deleted": true}))
+            Ok(json!({ "deleted": true }))
         })
         .await
 }
@@ -306,7 +307,7 @@ pub async fn list(
     let more = values.len() > 100;
     values.truncate(100);
     let next = more.then(|| values.last().unwrap()["id"].clone());
-    Ok(json!({"items": values, "nextCursor": next}))
+    Ok(json!({ "items": values, "nextCursor": next }))
 }
 
 pub(crate) async fn call(
@@ -352,48 +353,54 @@ pub(crate) async fn reference(
     let manifest = context.manifest.clone();
     let resource = resource.to_owned();
     s.store
-        .read(move |db| {
-            current(db, &connection)?;
-            let denied =
-                || Error::forbidden("The resource is unavailable or belongs to another instance.");
-            let mut id = resource.clone();
-            let mut revisions = Vec::new();
-            let mut selected = None;
-            let mut expected_collection = None;
-            loop {
-                if revisions.len() > 16 || revisions.iter().any(|(seen, _)| seen == &id) {
-                    return Err(denied());
-                }
-                let value = db.get(KIND, &id)?.ok_or_else(denied)?;
-                let value: Resource = serde_json::from_value(value)?;
-                if !value.enabled
-                    || value.connection_id != connection.id
-                    || expected_collection
-                        .as_ref()
-                        .is_some_and(|name| name != &value.collection)
-                {
-                    return Err(denied());
-                }
-                let collection = declared(&manifest, &value.collection)?;
-                revisions.push((value.id.clone(), value.revision.clone()));
-                if selected.is_none() {
-                    selected = Some(value.clone());
-                }
-                match (&collection.parent, &value.parent_id) {
-                    (None, None) => break,
-                    (Some(name), Some(parent)) => {
-                        expected_collection = Some(name.clone());
-                        id = parent.clone();
-                    }
-                    _ => return Err(denied()),
-                }
-            }
-            Ok(Reference {
-                resource: selected.unwrap(),
-                revisions,
-            })
-        })
+        .read(move |db| reference_in(db, &connection, &manifest, &resource))
         .await
+}
+
+pub(crate) fn reference_in(
+    db: &Db<'_>,
+    connection: &Connection,
+    manifest: &Manifest,
+    resource: &str,
+) -> Result<Reference> {
+    current(db, connection)?;
+    let denied = || Error::forbidden("The resource is unavailable or belongs to another instance.");
+    let mut id = resource.to_owned();
+    let mut revisions = Vec::new();
+    let mut selected = None;
+    let mut expected_collection = None;
+    loop {
+        if revisions.len() > 16 || revisions.iter().any(|(seen, _)| seen == &id) {
+            return Err(denied());
+        }
+        let value = db.get(KIND, &id)?.ok_or_else(denied)?;
+        let value: Resource = serde_json::from_value(value)?;
+        if !value.enabled
+            || value.connection_id != connection.id
+            || expected_collection
+                .as_ref()
+                .is_some_and(|name| name != &value.collection)
+        {
+            return Err(denied());
+        }
+        let collection = declared(manifest, &value.collection)?;
+        revisions.push((value.id.clone(), value.revision.clone()));
+        if selected.is_none() {
+            selected = Some(value.clone());
+        }
+        match (&collection.parent, &value.parent_id) {
+            (None, None) => break,
+            (Some(name), Some(parent)) => {
+                expected_collection = Some(name.clone());
+                id = parent.clone();
+            }
+            _ => return Err(denied()),
+        }
+    }
+    Ok(Reference {
+        resource: selected.unwrap(),
+        revisions,
+    })
 }
 
 pub(crate) async fn recheck(
@@ -451,6 +458,7 @@ pub(crate) fn remove_owned(db: &Db<'_>, instance: &str) -> Result<()> {
     for value in db.list(KIND)? {
         if value["connectionId"] == instance {
             let id = text(&value, "id");
+            super::routes::remove_resource(db, id)?;
             super::oauth::remove_resource(db, id)?;
             db.delete(&format!("mcp-secret:{}", secrets_key(id)))?;
             db.remove(KIND, id)?;

@@ -293,6 +293,8 @@ pub async fn deliver(
     link: &Link,
     event: Value,
 ) -> Result<Value> {
+    let digest = super::registry::digest(session.manifest(), session.sources())?;
+    super::registry::require_digest(s, &connection.plugin_id, &digest).await?;
     let context = Context {
         connection: connection.clone(),
         manifest: session.manifest().clone(),
@@ -302,10 +304,10 @@ pub async fn deliver(
         resource_grant: None,
     };
     let refused = Mutex::new(None::<Error>);
-    let (context_ref, refused_ref) = (&context, &refused);
+    let (context_ref, refused_ref, digest_ref) = (&context, &refused, &digest);
     let result = session
         .dispatch("socket", event, |method, args| async move {
-            capabilities::checked(s, context_ref, &method, args)
+            capabilities::approved(s, context_ref, digest_ref, &method, args)
                 .await
                 .map_err(|error| {
                     let code = capabilities::code(&error);
@@ -314,6 +316,7 @@ pub async fn deliver(
                 })
         })
         .await;
+    super::registry::require_digest(s, &connection.plugin_id, &digest).await?;
     match (result, refused.into_inner().unwrap()) {
         (Ok(value), _) => Ok(value),
         (Err(message), _) if message.starts_with(cairn_plugin_api::REJECTED) => Err(
@@ -432,7 +435,12 @@ fn message_event(message: &str, paths: &[String]) -> Value {
 }
 
 fn closed(code: Option<u16>, reason: &str, error: Option<&str>) -> Value {
-    json!({ "type": "close", "code": code, "reason": reason, "error": error })
+    json!({
+        "type": "close",
+        "code": code,
+        "reason": reason,
+        "error": error,
+    })
 }
 
 impl State {
@@ -536,9 +544,14 @@ impl State {
                 self.outgoing.push_back(message);
                 None
             }
-            pacing::Ready::Expired => message.name.map(
-                |name| json!({ "type": "sent", "name": name, "sent": false, "retryAfter": 0 }),
-            ),
+            pacing::Ready::Expired => message.name.map(|name| {
+                json!({
+                    "type": "sent",
+                    "name": name,
+                    "sent": false,
+                    "retryAfter": 0,
+                })
+            }),
         }
     }
 
@@ -632,11 +645,9 @@ async fn serve(
         last_attempt: None,
         backoff: Duration::from_secs(1),
     };
-    let mut events = VecDeque::from([json!({
-        "type": "start",
-        "instance": connection.id,
-        "settings": connection.settings,
-    })]);
+    let mut events = VecDeque::from([
+        json!({ "type": "start", "instance": connection.id, "settings": connection.settings }),
+    ]);
     loop {
         // A completion handler may immediately enqueue its next completion. Check
         // cancellation even when that FIFO never becomes empty.

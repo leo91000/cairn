@@ -72,6 +72,7 @@ pub(crate) fn enqueue(
             "id": id(),
             "connectionId": connection.id,
             "revision": connection.revision,
+            "routing": connection.routing,
             "name": name,
             "payload": payload,
             "authorId": author,
@@ -115,7 +116,12 @@ pub async fn deliver(s: &Service, connection: &Connection, inbound: Inbound) -> 
             let current = authorize(db, &expected)?;
             let author = json!({ "id": inbound.author.id, "name": label(&inbound.author.name) });
             // The host's identity fields always win over the package's own.
-            let identity = json!({ "id": inbound.id, "author": author });
+            let mut identity = json!({ "id": inbound.id, "author": author });
+            if let Some(routing) = &current.routing {
+                identity["resource"] = json!(routing.resource);
+                identity["route"] = json!(routing.id);
+                identity["context"] = inbound.context.clone();
+            }
             let base = merge(&inbound.context, &identity);
             if !current.allows(&inbound.author.id) {
                 if current.access_mode == AccessMode::Requests && inbound.kind == "message" {
@@ -123,7 +129,11 @@ pub async fn deliver(s: &Service, connection: &Connection, inbound: Inbound) -> 
                 }
                 return Ok(Admission::Denied);
             }
-            let dedupe = format!("plugin-seen:{}:{}", current.id, inbound.id);
+            let namespace = current.routing.as_ref().map_or_else(
+                || current.id.clone(),
+                |r| format!("{}:{}", current.id, r.resource),
+            );
+            let dedupe = format!("plugin-seen:{namespace}:{}", inbound.id);
             if db.kv(&dedupe)?.is_some() {
                 return Ok(Admission::Duplicate);
             }
@@ -158,7 +168,11 @@ fn request(
     let requests = db.list("plugin-requests")?;
     if let Some(mut existing) = requests
         .iter()
-        .find(|value| value["connectionId"] == connection.id && value["userId"] == author.id)
+        .find(|value| {
+            value["connectionId"] == connection.id
+                && value["userId"] == author.id
+                && value["routeId"].as_str() == connection.routing.as_ref().map(|r| r.id.as_str())
+        })
         .cloned()
     {
         if existing["status"] == "pending" {
@@ -194,6 +208,7 @@ fn request(
         &json!({
             "id": id(),
             "connectionId": connection.id,
+            "routeId": connection.routing.as_ref().map(|r| &r.id),
             "userId": author.id,
             "name": label(&author.name),
             "status": "pending",
@@ -268,9 +283,24 @@ pub(crate) async fn inbound(
         context: extra,
         body,
     };
-    let result = deliver(s, &context.connection, inbound).await?;
+    let by_resource = context
+        .manifest
+        .resources
+        .iter()
+        .any(|resource| resource.delegation);
+    let result = if by_resource || args.get("resource").is_some() {
+        let resource = args["resource"]
+            .as_str()
+            .ok_or_else(|| Error::bad("Name the resource that received this event."))?;
+        match super::routes::select(s, &context.connection, resource, &inbound.context).await? {
+            Some(connection) => deliver(s, &connection, inbound).await?,
+            None => Admission::Denied,
+        }
+    } else {
+        deliver(s, &context.connection, inbound).await?
+    };
     Ok(if detailed {
-        json!({"status": result})
+        json!({ "status": result })
     } else {
         json!(result == Admission::Accepted)
     })
@@ -278,13 +308,14 @@ pub(crate) async fn inbound(
 
 fn binding(connection: &Connection, author: &str, thread: &str, shared: bool) -> String {
     let thread = crate::auth::hex_digest(thread);
+    let namespace = connection.delegation_key();
     if shared {
         // A shared thread (e.g. a Discord thread) is one conversation for everyone
         // allowed on this connection who writes in it.
-        format!("plugin-chat:{}:thread:{thread}", connection.id)
+        format!("plugin-chat:{namespace}:thread:{thread}")
     } else {
         // Otherwise the author is part of the key: a plugin chooses threads, never people.
-        format!("plugin-chat:{}:{author}:{thread}", connection.id)
+        format!("plugin-chat:{namespace}:{author}:{thread}")
     }
 }
 
@@ -315,7 +346,7 @@ fn limits(db: &Db<'_>, connection: &Connection, author: &str) -> Result<Counters
     let used = |key: &str| -> Result<u64> {
         Ok(db.kv(key)?.and_then(|value| value.as_u64()).unwrap_or(0))
     };
-    let rate_key = format!("plugin-rate:{}:{hour}", connection.id);
+    let rate_key = format!("plugin-rate:{}:{hour}", connection.delegation_key());
     let count = used(&rate_key)?;
     if count >= u64::from(connection.max_messages_per_hour) {
         return Err(Error::too_many_requests(
@@ -325,7 +356,10 @@ fn limits(db: &Db<'_>, connection: &Connection, author: &str) -> Result<Counters
     let mut counters = vec![(rate_key, count)];
     // When anyone can write, nobody may use up the whole connection alone.
     if connection.access_mode == AccessMode::Everyone {
-        let key = format!("plugin-rate:{}:{author}:{hour}", connection.id);
+        let key = format!(
+            "plugin-rate:{}:{author}:{hour}",
+            connection.delegation_key()
+        );
         let personal = used(&key)?;
         if personal >= u64::from(connection.max_per_person_per_hour) {
             return Err(Error::too_many_requests("Personal message limit reached."));
@@ -422,7 +456,11 @@ pub async fn submit(s: &Service, context: &Context, args: &Value) -> Result<Valu
         return Err(Error::bad("Write a message or attach a file."));
     }
     let external_id = text(&event["payload"], "id").to_owned();
-    let dedupe = format!("plugin-submitted:{}:{external_id}", expected.id);
+    let namespace = expected.routing.as_ref().map_or_else(
+        || expected.id.clone(),
+        |r| format!("{}:{}", expected.id, r.resource),
+    );
+    let dedupe = format!("plugin-submitted:{namespace}:{external_id}");
 
     // Resolve (or start) the conversation first, so attachments can be stored in it.
     let resolved = {
@@ -478,7 +516,12 @@ pub async fn submit(s: &Service, context: &Context, args: &Value) -> Result<Valu
                     .unwrap_or_else(|| author.clone());
                 db.set(
                     &owner_key,
-                    &json!({ "connectionId": connection.id, "thread": thread, "startedBy": started_by }),
+                    &json!({
+                        "connectionId": connection.id,
+                        "thread": thread,
+                        "startedBy": started_by,
+                        "routing": connection.routing,
+                    }),
                     None,
                 )?;
                 Ok(Ok(chat_id))
@@ -501,9 +544,25 @@ pub async fn submit(s: &Service, context: &Context, args: &Value) -> Result<Valu
         {
             let expected = expected.clone();
             let event = event.clone();
+            let resumed_chat = chat_id.clone();
+            let resumed_run = run_id.to_owned();
             s.worker
                 .resume_authorized(s, run_id, move |db| {
-                    admit(db, &expected, &event).map(|_| ())
+                    let (connection, author) = admit(db, &expected, &event)?;
+                    if let Some(principal) = super::requesters::Principal::admitted(&connection, &author) {
+                        let chat = db.get("chats", &resumed_chat)?
+                            .ok_or_else(|| Error::not_found("Conversation no longer exists."))?;
+                        if chat["runId"] != resumed_run {
+                            return Err(Error::conflict("The conversation's execution changed."));
+                        }
+                        let run = db.run(text(&chat, "runId"))?
+                            .ok_or_else(|| Error::not_found("Run no longer exists."))?;
+                        let previous = super::requesters::recorded(db, &resumed_chat, text(&run["chatExecution"], "messageId"))?;
+                        if !previous.is_some_and(|previous| previous.same_authority(&principal)) {
+                            return Err(Error::conflict("Only the previous request's author may resume its stopped execution. Start a new turn instead."));
+                        }
+                    }
+                    Ok(())
                 })
                 .await?;
         }
@@ -531,10 +590,13 @@ pub async fn submit(s: &Service, context: &Context, args: &Value) -> Result<Valu
             db.put("chats", &chat)?;
             let counters = limits(db, &connection, &author)?;
             let message_id = id();
+            let message = json!({ "id": message_id, "text": content, "attachmentIds": attachment_ids });
+            let principal = super::requesters::Principal::admitted(&connection, &author);
+            super::requesters::capture_principal(db, &chat_id, &message, principal.as_ref(), super::requesters::Capture::New)?;
             let queued = crate::chats::send_in(
                 db,
                 &chat_id,
-                json!({ "id": message_id, "text": content, "attachmentIds": attachment_ids }),
+                message,
             )?;
             counters.increment(db)?;
             let receipt = json!({ "chatId": chat_id, "messageId": queued["id"] });
@@ -545,6 +607,7 @@ pub async fn submit(s: &Service, context: &Context, args: &Value) -> Result<Valu
                     "id": message_id,
                     "connectionId": connection.id,
                     "revision": connection.revision,
+                    "routing": connection.routing,
                     "chatId": chat_id,
                     "thread": thread,
                     "userId": author,
@@ -564,6 +627,7 @@ pub async fn submit(s: &Service, context: &Context, args: &Value) -> Result<Valu
                     "deliveryId": message_id,
                     "connectionId": connection.id,
                     "chatId": chat_id,
+                    "routeId": connection.routing.as_ref().map(|r| &r.id),
                     "userId": author,
                     "name": event["payload"]["author"]["name"],
                     "preview": preview,
@@ -615,6 +679,28 @@ fn conversation(
     let Some(owner) = owner.filter(|owner| owner["connectionId"] == connection.id) else {
         return Err(Error::not_found("Conversation not found."));
     };
+    if let Some(principal) = super::requesters::Principal::admitted(connection, author) {
+        let detail = db
+            .get("chats", &chat)?
+            .ok_or_else(|| Error::not_found("Conversation not found."))?;
+        let run = db
+            .run(text(&detail, "runId"))?
+            .ok_or_else(|| Error::conflict("This conversation has no current execution."))?;
+        let delivery = text(args, "delivery");
+        let current = super::requesters::recorded(db, &chat, delivery)?;
+        if delivery.is_empty()
+            || run["chatExecution"]["messageId"] != delivery
+            || !crate::run_status::RunStatus::of(&run)
+                .is_some_and(crate::run_status::RunStatus::is_active)
+            || !run["cancelRequestedAt"].is_null()
+            || !current.is_some_and(|current| current.same_authority(&principal))
+        {
+            return Err(Error::forbidden(
+                "Only the author of the current execution can control it.",
+            ));
+        }
+        return Ok(chat);
+    }
     // When anyone can write, only listed people and whoever started the conversation
     // may answer for it or stop it.
     if connection.access_mode == AccessMode::Everyone
@@ -661,11 +747,15 @@ pub async fn answer(s: &Service, context: &Context, args: &Value) -> Result<Valu
         context.event.clone(),
         args.clone(),
     );
-    let chat = s
+    let (chat, principal) = s
         .store
         .read(move |db| {
             let (connection, author) = admit(db, &expected, &event)?;
-            conversation(db, &connection, &author, &input)
+            let chat = conversation(db, &connection, &author, &input)?;
+            Ok((
+                chat,
+                super::requesters::Principal::admitted(&connection, &author),
+            ))
         })
         .await?;
     let question = text(args, "question");
@@ -678,8 +768,39 @@ pub async fn answer(s: &Service, context: &Context, args: &Value) -> Result<Valu
         }
         answers.insert(field.clone(), json!([value]));
     }
+    let (expected, event, input, chat_id) = (
+        context.connection.clone(),
+        context.event.clone(),
+        args.clone(),
+        chat.clone(),
+    );
     let answered = s
-        .question_answer(&chat, question, json!({ "id": id(), "answers": answers }))
+        .question_answer_authorized(
+            &chat,
+            question,
+            json!({ "id": id(), "answers": answers }),
+            principal,
+            false,
+            move |db, question| {
+                let (connection, author) = admit(db, &expected, &event)?;
+                if conversation(db, &connection, &author, &input)? != chat_id {
+                    return Err(Error::forbidden("The controlled conversation changed."));
+                }
+                if connection.routing.is_some() {
+                    let chat = db
+                        .get("chats", &chat_id)?
+                        .ok_or_else(|| Error::not_found("Conversation not found."))?;
+                    if question.run_id != text(&chat, "runId")
+                        || question.turn_id != text(&input, "delivery")
+                    {
+                        return Err(Error::forbidden(
+                            "This question belongs to another execution.",
+                        ));
+                    }
+                }
+                Ok(())
+            },
+        )
         .await?;
     Ok(json!({ "status": answered["status"] }))
 }
@@ -704,6 +825,34 @@ pub async fn cancel(s: &Service, context: &Context, args: &Value) -> Result<Valu
         })
         .await?;
     let detail = s.get("chats", &chat).await?;
+    if context.connection.routing.is_some() {
+        let run = text(&detail, "runId").to_owned();
+        let expected_run = run.clone();
+        let (expected, event, input, chat_id) = (
+            context.connection.clone(),
+            context.event.clone(),
+            args.clone(),
+            chat.clone(),
+        );
+        s.worker
+            .cancel_authorized(s, &run, move |db| {
+                let (connection, author) = admit(db, &expected, &event)?;
+                if conversation(db, &connection, &author, &input)? != chat_id {
+                    return Err(Error::forbidden("The controlled conversation changed."));
+                }
+                let mut detail = db
+                    .get("chats", &chat_id)?
+                    .ok_or_else(|| Error::not_found("Conversation not found."))?;
+                if detail["runId"] != expected_run {
+                    return Err(Error::conflict("The conversation's execution changed."));
+                }
+                detail["paused"] = json!(true);
+                db.put("chats", &detail)?;
+                Ok(())
+            })
+            .await?;
+        return Ok(json!({ "stopped": true, "conversation": chat }));
+    }
     s.chat_pause(&chat, true).await?;
     if let Some(run) = detail["runId"].as_str()
         && crate::run_status::RunStatus::of(&s.store.run(run).await?)
@@ -795,8 +944,8 @@ pub struct Reply {
 }
 
 pub async fn reply(s: &Service, expected: &Connection, delivery: &Value) -> Result<Option<Reply>> {
-    ensure_owner(s, expected).await?;
-    let expected = expected.clone();
+    let expected = super::routes::bound(s, expected, &delivery["routing"]).await?;
+    ensure_owner(s, &expected).await?;
     let delivery = delivery.clone();
     s.store.read(move |db| {
         let connection = authorize(db, &expected)?;
@@ -838,7 +987,7 @@ pub async fn progress(
     expected: &Connection,
     delivery: &Value,
 ) -> Result<Option<Value>> {
-    let expected = expected.clone();
+    let expected = super::routes::bound(s, expected, &delivery["routing"]).await?;
     let delivery = delivery.clone();
     s.store
         .read(move |db| {
@@ -873,7 +1022,7 @@ fn step(item: &Value) -> String {
 
 /// Questions the agent is waiting on in this conversation.
 pub async fn questions(s: &Service, expected: &Connection, delivery: &Value) -> Result<Vec<Value>> {
-    let expected = expected.clone();
+    let expected = super::routes::bound(s, expected, &delivery["routing"]).await?;
     let delivery = delivery.clone();
     let prefix = crate::chats::questions::question_prefix(text(&delivery, "chatId"));
     s.store
@@ -891,6 +1040,9 @@ pub async fn questions(s: &Service, expected: &Connection, delivery: &Value) -> 
                 .into_iter()
                 .map(|(_, question)| question)
                 .filter(|question| question["status"] == "pending" && question["runId"] == run)
+                .filter(|question| {
+                    connection.routing.is_none() || question["turnId"] == delivery["id"]
+                })
                 .filter_map(|question| {
                     match db.kv(&format!(
                         "plugin-question-seen:{}:{}",

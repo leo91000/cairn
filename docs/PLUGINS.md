@@ -356,6 +356,45 @@ returning results. Deleting resources removes their rules. Agents reachable by
 anyone cannot receive resource credentials; adding such a delegation also checks
 existing resource rules.
 
+### Owner-selected conversation routes
+
+A resource collection can declare `delegation: true` when the package also declares
+`conversations.submit`. These instances do not delegate to one app-wide agent.
+The owner configures routes under each resource at
+`/api/plugins/<plugin>/connections/<instance>/resources/<collection>/<resource>/routes`.
+POST creates, GET lists `{items}`, and `/<route>` supports PUT with its last
+`revision` or DELETE. A route contains `name`, `enabled`, exact string `match`
+conditions on source context, `agentId`, optional `projectId`, `accessMode`,
+`userIds`, optional `people`, and hourly limits. Defaults are 20 messages per hour
+and five per person; the latter applies to everyone access. No route or person is
+granted by default. The selected agent must have only the selected project's access
+and no installation access; everyone access retains the stricter public-agent rules.
+
+`cairn.inbound.deliver` supplies the configured `resource` and authentic source
+`context` alongside its message. The host selects the most specific matching route.
+A disabled override denies admission; equally specific matching rules conflict.
+Packages cannot select an agent or route using message bodies. Access requests and
+approvals are local to the selected route: append `/<route>/requests` for GET or
+`/<route>/people/<person>` for POST `{action = "approve" | "deny" | "remove"}`.
+Unapproved requests retain the person's identity, never message content.
+
+Accepted events and deliveries retain native route authority outside the Luau
+payload. Instance, ancestor-resource, route, owner-access and package revisions
+are checked again before effects and after slow results. Adding a more specific
+route can revoke older queued authority. Each worker is checked against the exact
+manifest and source files it loaded, including across package approval changes.
+Operation scopes with the same name as a route condition must match that condition;
+operations on the source integration cannot select a different instance or an
+unrelated resource even if the agent has a broader grant.
+
+Shared threads still share a conversation, while each admitted message records its
+own external subject. Answer and cancel calls must include `delivery`, the issuing
+turn's `deliveryId`, and come from that turn's author under the same route authority.
+Old buttons, another participant and another route cannot control the current turn.
+Question notifications are limited to their issuing turn. Resuming an interrupted
+turn also requires its original authority; another author must start a new turn.
+The complete reset and external setup journeys remain in the Slack delivery checklist.
+
 ### Host-managed resource OAuth
 
 The `oauth` capability declares up to eight providers for resource collections.
@@ -461,9 +500,16 @@ answer another person's question from Cairn; doing so suspends personal credenti
 for that turn, including calls already in flight. The original author and their
 authorization remain unchanged, and a new turn can use its own requester again.
 
-This checkpoint supports authenticated Cairn chat authors. External identities,
-scheduled automation authorities and their account-linking flows remain in the
-Slack delivery checklist; they cannot use a personal credential implicitly.
+Finishing personal OAuth also links its proved external subject to that account
+for this resource and provider. An active external identity cannot be linked to
+two installation accounts. Removed memberships can be replaced only by a fresh
+OAuth proof; their old callbacks and credentials are invalidated. Disconnecting
+removes the link as well as the credential. An externally admitted routed turn
+can use only the authorization for its exact proved subject in its resource scope.
+The link, membership, route and current turn are rechecked around network I/O.
+
+Self-service OAuth for external people without a Cairn account, scheduled automation
+authorities and their setup flows remain in the Slack delivery checklist.
 Unattributed in-process submissions and owner panels cannot use personal providers.
 
 Protocol references checked on 2026-10-17: [Slack OAuth](https://docs.slack.dev/authentication/installing-with-oauth/),

@@ -22,7 +22,12 @@ the web/Android journeys. Tests assert observable behavior at those interfaces.
   - Operation/profile/scope grants, request bindings (including resource metadata),
     form encoding and CLI/MCP enforcement implemented; the first end-to-end grant
     journey passes, including revocation and agent deletion. More identity, profile
-    and concurrency cases remain, along with routing and both collection interfaces.
+    and concurrency cases remain, along with both collection interfaces.
+  - Host-owned routes select a dedicated agent/project per resource and source
+    context. Disabled overrides and equal-specificity conflicts fail closed;
+    resource/route/owner/package revisions fence accepted work. Access requests
+    and people approvals stay local to their route. External turns retain their
+    own subject, and stale or cross-author answer/stop controls are refused.
 - [ ] Generic OAuth, secure token capture/rotation and personal identity binding.
   - Owner-connected resource OAuth: declared scopes/endpoints, confidential and
     PKCE clients, encrypted single-use callback capture, same-owner completion,
@@ -35,7 +40,9 @@ the web/Android journeys. Tests assert observable behavior at those interfaces.
     installation-access revision, with a host-captured external subject and verified
     resource identity. Tools/commands use the current authenticated Cairn chat
     author; message-ID replay and cross-author steering cannot transfer authority.
-  - External identity linking, configuration drafts, provider revocation/token
+  - OAuth-proved subjects now link unambiguously to their Cairn account within a
+    resource/provider. Routed external turns select only that subject's personal
+    authorization. Nonmember self-service linking, configuration drafts, provider revocation/token
     exchange and both client interfaces remain unfinished. This does not complete
     OAuth or the Slack package.
 - [ ] Socket acknowledgement/liveness/replacement, authenticated files.
@@ -108,9 +115,28 @@ as does workspace Clippy with warnings denied. No Slack app or device journey wa
 exercised. Final storage/compatibility measurements and independent review remain
 open with the full contract.
 
+## Resource-route checkpoint
+
+The personal-account checkpoint passed Quality and Storage at `c314f3f0`. The
+next slice implements host-selected routes, route-local people and requests,
+native external turn attribution and proved subject/account links. Tests first
+reproduced cross-author cancellation, refusal of the rightful external question
+answer, escape to another channel and reuse of a new approval by an old worker.
+These are tested through signed ingress, actual Luau workers and granted MCP calls.
+This does not deliver external nonmember OAuth, reset/setup UI or the Slack package.
+
 The native question-answer path also participates in requester checks. A test first
 showed another participant's answer joining a personal turn (HTTP 200); it now
 refuses that transfer (409). The owner retains question control from Cairn, while
 that intervention suspends personal authority for the turn and rejects stale
 in-flight authorizations. A later turn obtains its own authority. Conversation
 purge removes both attribution and suspension records.
+
+The eight route journeys pass, including in-flight personal disconnect and retention
+of route access requests across app edits. The two socket-completion fixtures now
+install and approve their real generic package instead of changing Discord's loaded
+source after approval. The selected regression covers 210 installation/Beacon tests
+(including 50 actual direct-peer/authorization cases); one explicit performance test
+is ignored. The web checks pass with 511 tests. No client UI or live Slack app was
+exercised in this slice. Compatibility/storage qualification and final independent
+review remain open with the rest of the contract.

@@ -17,22 +17,32 @@ use std::{
 
 impl Worker {
     pub async fn cancel(&self, s: &Service, id: &str) -> Result<()> {
-        self.cancel_with_grant(s, id, None).await
+        self.cancel_authorized(s, id, |_| Ok(())).await
     }
 
     pub(crate) async fn cancel_from_run(&self, s: &Service, id: &str, bearer: &str) -> Result<()> {
-        self.cancel_with_grant(s, id, Some(bearer.to_owned())).await
+        let bearer = bearer.to_owned();
+        self.cancel_authorized(s, id, move |db| {
+            crate::installation_mcp::authorize_in(db, &bearer).map(|_| ())
+        })
+        .await
     }
 
-    async fn cancel_with_grant(&self, s: &Service, id: &str, bearer: Option<String>) -> Result<()> {
+    pub(crate) async fn cancel_authorized<F>(
+        &self,
+        s: &Service,
+        id: &str,
+        authorize: F,
+    ) -> Result<()>
+    where
+        F: FnOnce(&Db<'_>) -> Result<()> + Send + 'static,
+    {
         let active = self.active.lock().await;
         let is_active = active.contains_key(id);
         let run_id = id.to_owned();
         s.store
             .transaction(move |db| {
-                if let Some(bearer) = bearer {
-                    crate::installation_mcp::authorize_in(db, &bearer)?;
-                }
+                authorize(db)?;
                 request_cancel(db, &run_id, is_active)
             })
             .await?;
@@ -113,11 +123,8 @@ impl Worker {
         for workspace in &managed {
             remove_workspace(&run, workspace, &env).await?;
         }
-        let patch = json!({
-            "workspace": null,
-            "resumeAvailable": false,
-            "workspaceCleanedAt": now(),
-        });
+        let patch =
+            json!({ "workspace": null, "resumeAvailable": false, "workspaceCleanedAt": now() });
         s.store.patch_run(id, patch).await?;
         s.store
             .audit("run.workspace.cleaned", json!({ "id": id }))

@@ -40,6 +40,21 @@ struct Personal {
     subject: String,
 }
 
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SubjectLink {
+    actor: Actor,
+    authorization: String,
+    revision: String,
+}
+
+fn subject_key(resource: &str, provider: &str, subject: &str) -> String {
+    format!(
+        "plugin-oauth-subject:{resource}:{provider}:{}",
+        hex_digest(subject)
+    )
+}
+
 #[derive(Default)]
 pub struct Authorizations {
     locks: Mutex<HashMap<String, Weak<Mutex<()>>>>,
@@ -119,6 +134,7 @@ pub(crate) struct Reference {
     plugin: String,
     digest: String,
     actor: Option<Actor>,
+    subject_link: Option<(String, Value)>,
 }
 
 fn pending_key(state: &str) -> String {
@@ -347,9 +363,12 @@ pub async fn start(
             db.set(&stored_key(&key), &encrypted, Some(pending.expires_at))
         })
         .await?;
-    Ok(
-        json!({"state": state, "url": url.as_str(), "redirectUri": redirect_uri, "expiresAt": now() + TTL}),
-    )
+    Ok(json!({
+        "state": state,
+        "url": url.as_str(),
+        "redirectUri": redirect_uri,
+        "expiresAt": now() + TTL,
+    }))
 }
 
 /// No code exchange, redirect, cookie, active HTML or account authority here.
@@ -583,10 +602,10 @@ pub async fn finish(
         })
         .await?;
     if !claimed {
-        return Ok(json!({"status": "pending"}));
+        return Ok(json!({ "status": "pending" }));
     }
     if pending.denied {
-        return Ok(json!({"status": "denied"}));
+        return Ok(json!({ "status": "denied" }));
     }
     let mut fields = BTreeMap::from([
         ("grant_type", "authorization_code".into()),
@@ -667,6 +686,9 @@ pub async fn finish(
         .settings
         .clone();
     let vault = s.vault.clone();
+    let membership = crate::relay::task_author_policy(s)
+        .await?
+        .ok_or_else(|| Error::forbidden("The installation has no verified membership."))?;
     s.store.transaction(move |db| {
         let mut resource = current(db, &pending)?;
         if let Some(personal) = &authorization.personal {
@@ -681,6 +703,23 @@ pub async fn finish(
                     return Err(Error::conflict("Disconnect before linking another personal identity."));
                 }
             }
+            let subject_key = subject_key(&pending.resource, &pending.provider, &personal.subject);
+            if let Some(previous) = db.kv(&subject_key)? {
+                let previous: SubjectLink = serde_json::from_value(previous)?;
+                if previous.actor != personal.actor {
+                    let still_member = membership.grant(&previous.actor.account)
+                        .is_some_and(|grant| grant.access_id == previous.actor.access_id);
+                    if still_member {
+                        return Err(Error::conflict("This external identity is already linked to another installation account."));
+                    }
+                    // A new proof may replace a removed membership. Its old
+                    // callback and token must not remain usable after relinking.
+                    db.set(&epoch_key(&previous.authorization), &json!(id()), None)?;
+                    db.delete(&stored_key(&previous.authorization))?;
+                }
+            }
+            let link = SubjectLink {actor: personal.actor.clone(), authorization: auth_key.clone(), revision: id()};
+            db.set(&subject_key, &serde_json::to_value(link)?, None)?;
             db.set(&epoch_key(&auth_key), &json!(id()), None)?;
             db.set(&stored_key(&auth_key), &encrypted, None)?;
             return Ok(());
@@ -714,7 +753,8 @@ pub async fn finish(
 fn summary(authorization: &Authorization) -> Value {
     let mut result = json!({
         "status": if authorization.refreshing {"reconnect"} else {"authorized"},
-        "scopes": authorization.tokens.scopes, "requestedScopes": authorization.requested_scopes,
+        "scopes": authorization.tokens.scopes,
+        "requestedScopes": authorization.requested_scopes,
         "expiresAt": authorization.tokens.expires_at,
     });
     if let Some(personal) = &authorization.personal {
@@ -743,7 +783,7 @@ pub async fn status(
         .get(&authorization_key(&resource.id, name, actor.as_ref()))
         .await?
     else {
-        return Ok(json!({"status": "disconnected"}));
+        return Ok(json!({ "status": "disconnected" }));
     };
     let authorization: Authorization = serde_json::from_value(value)?;
     let owner_access = crate::relay::task_author_policy(s)
@@ -788,6 +828,9 @@ pub async fn revoke(
     status(s, plugin, instance, collection, resource, name, account).await?;
     let resource = resources::get(s, plugin, instance, collection, resource).await?;
     let key = authorization_key(&resource.id, name, actor.as_ref());
+    let vault = s.vault.clone();
+    let resource_id = resource.id.clone();
+    let provider_name = name.to_owned();
     s.store
         .transaction(move |db| {
             let mut current = db.get(resources::KIND, &resource.id)?.ok_or_else(expired)?;
@@ -798,6 +841,19 @@ pub async fn revoke(
                 // A per-person generation fences code exchanges without changing
                 // the shared resource or anyone else's authorization.
                 db.set(&epoch_key(&key), &json!(id()), None)?;
+                if let Some(value) = db.kv(&stored_key(&key))? {
+                    let authorization: Authorization =
+                        serde_json::from_value(vault.decrypt(&key, &value)?)?;
+                    if let Some(personal) = authorization.personal {
+                        let index = subject_key(&resource_id, &provider_name, &personal.subject);
+                        if db
+                            .kv(&index)?
+                            .is_some_and(|link| link["authorization"] == key)
+                        {
+                            db.delete(&index)?;
+                        }
+                    }
+                }
                 return db.delete(&stored_key(&key));
             }
             // Also invalidate exchanges that have already consumed their pending
@@ -808,7 +864,7 @@ pub async fn revoke(
             db.delete(&stored_key(&key))
         })
         .await?;
-    Ok(json!({"status": "disconnected"}))
+    Ok(json!({ "status": "disconnected" }))
 }
 
 pub(crate) async fn credential(
@@ -820,6 +876,8 @@ pub(crate) async fn credential(
     let resource = resources::reference(s, context, resource).await?;
     let selected = &resource.resource;
     let provider = provider(&context.manifest, name, &selected.collection)?;
+    let mut subject_link = None;
+    let mut external_subject = None;
     let actor = if provider.personal.is_some() {
         let requester = context
             .resource_grant
@@ -827,7 +885,42 @@ pub(crate) async fn credential(
             .and_then(|grant| grant.requester.as_ref())
             .ok_or_else(|| Error::forbidden("Personal OAuth requires a verified run requester."))?;
         requesters::recheck(s, requester).await?;
-        Some(requester.actor.clone())
+        match &requester.principal {
+            requesters::Principal::Account(actor) => Some(actor.clone()),
+            requesters::Principal::External(external) => {
+                let within_route = external
+                    .binding
+                    .resources
+                    .iter()
+                    .any(|(id, _)| id == &selected.id)
+                    || resource
+                        .revisions
+                        .iter()
+                        .any(|(id, _)| id == &external.binding.resource);
+                if external.connection_id != context.connection.id || !within_route {
+                    return Err(Error::forbidden(
+                        "This OAuth resource is outside the requester's admitted scope.",
+                    ));
+                }
+                let index = subject_key(&selected.id, name, &external.subject);
+                let value = s.store.kv(&index).await?.ok_or_else(|| {
+                    Error::forbidden(
+                        "Link this external identity to its personal OAuth authorization first.",
+                    )
+                })?;
+                let link: SubjectLink = serde_json::from_value(value.clone())?;
+                if link.authorization != authorization_key(&selected.id, name, Some(&link.actor))
+                    || requesters::account(s, &link.actor.account).await? != link.actor
+                {
+                    return Err(Error::forbidden(
+                        "The external identity's installation access changed.",
+                    ));
+                }
+                subject_link = Some((index, value));
+                external_subject = Some(external.subject.clone());
+                Some(link.actor)
+            }
+        }
     } else {
         None
     };
@@ -847,6 +940,16 @@ pub(crate) async fn credential(
     {
         return Err(Error::forbidden(
             "This OAuth authorization belongs to another requester.",
+        ));
+    }
+    if let Some(subject) = external_subject
+        && !authorization
+            .personal
+            .as_ref()
+            .is_some_and(|p| p.subject == subject)
+    {
+        return Err(Error::forbidden(
+            "OAuth did not prove this external requester.",
         ));
     }
     let owner_access = crate::relay::task_author_policy(s)
@@ -954,6 +1057,7 @@ pub(crate) async fn credential(
             plugin: context.connection.plugin_id.clone(),
             digest: authorization.digest.clone(),
             actor: actor.clone(),
+            subject_link: subject_link.clone(),
         };
         recheck(s, &check).await?;
         authorization.tokens = tokens;
@@ -984,6 +1088,7 @@ pub(crate) async fn credential(
             plugin: context.connection.plugin_id.clone(),
             digest: authorization.digest,
             actor,
+            subject_link,
         },
     ))
 }
@@ -1007,6 +1112,13 @@ pub(crate) async fn recheck(s: &Service, reference: &Reference) -> Result<()> {
             "The personal OAuth requester's access changed.",
         ));
     }
+    if let Some((key, value)) = &reference.subject_link
+        && s.store.kv(key).await?.as_ref() != Some(value)
+    {
+        return Err(Error::forbidden(
+            "The external identity was unlinked during the request.",
+        ));
+    }
     let current = s.vault.get(&reference.key).await?;
     if !current.is_some_and(|value| value["revision"] == reference.revision) {
         return Err(Error::forbidden(
@@ -1020,6 +1132,9 @@ pub(crate) fn remove_resource(db: &Db<'_>, resource: &str) -> Result<()> {
     // Provider names are bounded, but their definitions may have been removed in
     // a package update. Remove the vault prefix rather than just current providers.
     for (key, _) in db.keys(&stored_key(&format!("plugin-oauth:{resource}:")))? {
+        db.delete(&key)?;
+    }
+    for (key, _) in db.keys(&format!("plugin-oauth-subject:{resource}:"))? {
         db.delete(&key)?;
     }
     Ok(())

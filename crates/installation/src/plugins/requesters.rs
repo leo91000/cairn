@@ -17,6 +17,57 @@ pub(crate) struct Actor {
     pub access_id: String,
 }
 
+#[derive(Clone, Deserialize, Serialize, PartialEq)]
+#[serde(untagged)]
+pub(crate) enum Principal {
+    Account(Actor),
+    External(External),
+}
+
+#[derive(Clone, Deserialize, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct External {
+    pub connection_id: String,
+    pub connection_revision: String,
+    pub binding: super::routes::Binding,
+    pub subject: String,
+}
+
+impl Principal {
+    pub(crate) fn admitted(
+        connection: &super::connections::Connection,
+        subject: &str,
+    ) -> Option<Self> {
+        connection.routing.as_ref().map(|binding| {
+            Self::External(External {
+                connection_id: connection.id.clone(),
+                connection_revision: connection.revision.clone(),
+                binding: binding.clone(),
+                subject: subject.to_owned(),
+            })
+        })
+    }
+
+    /// Interaction context may differ from message context, but not the native
+    /// resource, route, revision or subject which supplied its authority.
+    pub(crate) fn same_authority(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Account(a), Self::Account(b)) => a == b,
+            (Self::External(a), Self::External(b)) => {
+                a.connection_id == b.connection_id
+                    && a.connection_revision == b.connection_revision
+                    && a.subject == b.subject
+                    && a.binding.id == b.binding.id
+                    && a.binding.revision == b.binding.revision
+                    && a.binding.resource == b.binding.resource
+                    && a.binding.resources == b.binding.resources
+                    && a.binding.digest == b.binding.digest
+            }
+            _ => false,
+        }
+    }
+}
+
 pub(crate) async fn account(s: &Service, account: &str) -> Result<Actor> {
     let policy = crate::relay::task_author_policy(s)
         .await?
@@ -38,7 +89,7 @@ fn key(chat: &str, message: &str) -> String {
     format!("{}{message}", prefix(chat))
 }
 
-fn recorded(db: &Db<'_>, chat: &str, message: &str) -> Result<Option<Actor>> {
+pub(crate) fn recorded(db: &Db<'_>, chat: &str, message: &str) -> Result<Option<Principal>> {
     db.kv(&key(chat, message))?
         .map(serde_json::from_value)
         .transpose()
@@ -77,7 +128,18 @@ pub(crate) fn capture(
     db: &Db<'_>,
     chat: &str,
     message: &Value,
-    mut actor: Option<&Actor>,
+    actor: Option<&Actor>,
+    kind: Capture,
+) -> Result<()> {
+    let principal = actor.cloned().map(Principal::Account);
+    capture_principal(db, chat, message, principal.as_ref(), kind)
+}
+
+pub(crate) fn capture_principal(
+    db: &Db<'_>,
+    chat: &str,
+    message: &Value,
+    mut actor: Option<&Principal>,
     kind: Capture,
 ) -> Result<()> {
     let message_id = text(message, "id");
@@ -95,7 +157,12 @@ pub(crate) fn capture(
                 text(&run["chatExecution"], "messageId"),
             )?
         };
-        if current.as_ref() != actor {
+        let same = match (current.as_ref(), actor) {
+            (Some(current), Some(actor)) => current.same_authority(actor),
+            (None, None) => true,
+            _ => false,
+        };
+        if !same {
             if !matches!(kind, Capture::OwnerAnswer) {
                 return Err(Error::conflict(
                     "Queue this message to use your own permissions on the next turn.",
@@ -104,7 +171,7 @@ pub(crate) fn capture(
             db.set(&control_key(text(&chat, "id"), &run), &json!(true), None)?;
             db.audit(
                 "chat.personal_authority.suspended",
-                &json!({"chatId": chat["id"], "runId": run["id"]}),
+                &json!({ "chatId": chat["id"], "runId": run["id"] }),
             )?;
             actor = None;
         }
@@ -125,7 +192,7 @@ pub(crate) fn capture(
 
 #[derive(Clone)]
 pub(crate) struct RunRequester {
-    pub actor: Actor,
+    pub principal: Principal,
     run: String,
     chat: String,
     message: String,
@@ -149,12 +216,14 @@ pub(crate) async fn for_run(s: &Service, run: &Value) -> Result<Option<RunReques
             if suspended(db, chat_id, &run)? {
                 return Ok(None);
             }
-            Ok(recorded(db, chat_id, &message)?.map(|actor| RunRequester {
-                actor,
-                run: run_id,
-                chat: chat_id.into(),
-                message,
-            }))
+            Ok(
+                recorded(db, chat_id, &message)?.map(|principal| RunRequester {
+                    principal,
+                    run: run_id,
+                    chat: chat_id.into(),
+                    message,
+                }),
+            )
         })
         .await?;
     if let Some(requester) = &requester {
@@ -164,10 +233,37 @@ pub(crate) async fn for_run(s: &Service, run: &Value) -> Result<Option<RunReques
 }
 
 pub(crate) async fn recheck(s: &Service, requester: &RunRequester) -> Result<()> {
-    if account(s, &requester.actor.account).await? != requester.actor {
-        return Err(Error::forbidden(
-            "The requester's installation access changed.",
-        ));
+    match &requester.principal {
+        Principal::Account(actor) => {
+            if account(s, &actor.account).await? != *actor {
+                return Err(Error::forbidden(
+                    "The requester's installation access changed.",
+                ));
+            }
+        }
+        Principal::External(actor) => {
+            let actor = actor.clone();
+            let connection = s
+                .store
+                .read(move |db| {
+                    let value = db
+                        .get(super::connections::KIND, &actor.connection_id)?
+                        .ok_or_else(|| Error::forbidden("The requester's instance was removed."))?;
+                    let mut expected: super::connections::Connection =
+                        serde_json::from_value(value)?;
+                    if expected.revision != actor.connection_revision {
+                        return Err(Error::forbidden("The requester's instance changed."));
+                    }
+                    expected.routing = Some(actor.binding);
+                    let connection = super::connections::authorize(db, &expected)?;
+                    if !connection.allows(&actor.subject) {
+                        return Err(Error::forbidden("The requester is no longer allowed."));
+                    }
+                    Ok(connection)
+                })
+                .await?;
+            super::connections::ensure_owner(s, &connection).await?;
+        }
     }
     let requester = requester.clone();
     s.store
@@ -183,7 +279,7 @@ pub(crate) async fn recheck(s: &Service, requester: &RunRequester) -> Result<()>
                     .get("chats", &requester.chat)?
                     .is_some_and(|chat| chat["runId"] == requester.run)
                 || recorded(db, &requester.chat, &requester.message)?.as_ref()
-                    != Some(&requester.actor)
+                    != Some(&requester.principal)
             {
                 return Err(Error::forbidden(
                     "The requester's execution changed or stopped.",

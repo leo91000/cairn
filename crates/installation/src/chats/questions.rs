@@ -45,6 +45,9 @@ pub struct Question {
     pub chat_id: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub run_id: String,
+    /// The user message whose execution issued this question, not its answer.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub turn_id: String,
     #[serde(default)]
     pub blocking: bool,
     pub status: QuestionStatus,
@@ -124,7 +127,14 @@ fn receive(db: &Db<'_>, mut question: Question) -> Result<()> {
         return Ok(());
     }
     question.chat_id = text(&chat, "id").to_owned();
-    if let Some(mut existing) = find_question(db, &question.chat_id, &question.id)? {
+    question.turn_id = db
+        .run(&question.run_id)?
+        .map(|run| text(&run["chatExecution"], "messageId").to_owned())
+        .unwrap_or_default();
+    if let Some(mut existing) = find_question(db, &question.chat_id, &question.id)?
+        && existing.run_id == question.run_id
+        && existing.turn_id == question.turn_id
+    {
         existing.blocking = existing.status == QuestionStatus::Pending && question.blocking;
         return save_question(db, &existing);
     }
@@ -203,6 +213,7 @@ impl Service {
             id: id.to_owned(),
             chat_id: String::new(),
             run_id: run_id.to_owned(),
+            turn_id: String::new(),
             blocking,
             status: QuestionStatus::Pending,
             fields,
@@ -233,12 +244,7 @@ impl Service {
         input: Value,
         identity: Option<&crate::auth::InstallationIdentity>,
     ) -> Result<Value> {
-        use crate::{
-            auth::InstallationRole,
-            plugins::requesters::{self, Capture},
-        };
-
-        let input = parse_as::<AnswerInput>("answer", input)?;
+        use crate::{auth::InstallationRole, plugins::requesters};
 
         let actor = match identity {
             Some(identity) => Some(requesters::account(self, &identity.account_id).await?),
@@ -253,17 +259,46 @@ impl Service {
                 false
             };
 
+        self.question_answer_authorized(
+            chat_id,
+            id,
+            input,
+            actor.map(requesters::Principal::Account),
+            owner_control,
+            |_, _| Ok(()),
+        )
+        .await
+    }
+
+    pub(crate) async fn question_answer_authorized<F>(
+        &self,
+        chat_id: &str,
+        id: &str,
+        input: Value,
+        principal: Option<crate::plugins::requesters::Principal>,
+        owner_control: bool,
+        authorize: F,
+    ) -> Result<Value>
+    where
+        F: FnOnce(&Db<'_>, &Question) -> Result<()> + Send + 'static,
+    {
+        use crate::plugins::requesters::{self, Capture};
+
+        let input = parse_as::<AnswerInput>("answer", input)?;
+
         let (chat_id, id) = (chat_id.to_owned(), id.to_owned());
         let question = self
             .store
             .transaction(move |db| {
-                let message = json!({"id": input.id, "mode": "steer"});
+                let question = required(find_question(db, &chat_id, &id)?, "Question not found")?;
+                authorize(db, &question)?;
+                let message = json!({ "id": input.id, "mode": "steer" });
                 let kind = if owner_control {
                     Capture::OwnerAnswer
                 } else {
                     Capture::New
                 };
-                requesters::capture(db, &chat_id, &message, actor.as_ref(), kind)?;
+                requesters::capture_principal(db, &chat_id, &message, principal.as_ref(), kind)?;
                 answer(db, &chat_id, &id, &input)
             })
             .await?;

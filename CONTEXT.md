@@ -173,6 +173,13 @@ Une action nommée proposée par un plugin sur une ressource, comme lire des mes
 ou en publier. Son profil et son périmètre définissent ce qu’un agent peut recevoir
 comme droit.
 
+**Route de conversation d’un plugin** :
+Une délégation définie par le propriétaire pour une ressource externe. Cairn choisit
+la règle qui correspond le plus précisément au contexte reçu, puis applique son
+agent, son projet, les personnes autorisées et les limites. Le package décrit la
+source ; il ne choisit pas l’autorité. Le contrôle d’une exécution reste réservé à
+son auteur, même dans un fil partagé.
+
 **Règle d’automatisation d’un plugin** :
 Une instruction activée par le propriétaire pour déclencher le travail d’un agent
 sur des événements externes, avec une source, des conditions et des limites

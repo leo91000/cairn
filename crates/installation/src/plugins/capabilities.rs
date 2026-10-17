@@ -49,12 +49,27 @@ pub async fn call(
         .map_err(|error| Denied(code(&error)))
 }
 
+/// A worker may outlive the supervisor's next poll after an approval change.
+/// Fence its exact loaded files before effects and after slow results.
+pub(crate) async fn approved(
+    s: &Service,
+    context: &Context,
+    digest: &str,
+    method: &str,
+    args: Value,
+) -> Result<Value> {
+    super::registry::require_digest(s, &context.manifest.id, digest).await?;
+    let result = checked(s, context, method, args).await?;
+    super::registry::require_digest(s, &context.manifest.id, digest).await?;
+    Ok(result)
+}
+
 /// A long-lived worker's call, after rechecking the owner and the instance.
 pub async fn checked(s: &Service, context: &Context, method: &str, args: Value) -> Result<Value> {
     ensure_owner(s, &context.connection).await?;
     let expected = context.connection.clone();
     s.store.read(move |db| authorize(db, &expected)).await?;
-    match method {
+    let result = match method {
         "conversations.submit" => super::work::submit(s, context, &args).await,
         "conversations.check" => super::work::check(s, context, &args).await,
         "conversations.answer" => super::work::answer(s, context, &args).await,
@@ -65,7 +80,13 @@ pub async fn checked(s: &Service, context: &Context, method: &str, args: Value) 
         "instance.status" => instance_status(s, context, &args).await,
         _ if method.starts_with("socket.") => super::socket::call(s, context, method, &args).await,
         _ => effect(s, context, method, args).await,
+    }?;
+    if context.connection.routing.is_some() {
+        ensure_owner(s, &context.connection).await?;
+        let expected = context.connection.clone();
+        s.store.read(move |db| authorize(db, &expected)).await?;
     }
+    Ok(result)
 }
 
 /// The package's own view of its connection, shown to the owner.
@@ -162,11 +183,19 @@ async fn storage(
                         return Err(Error::too_large("Stored values are limited to 64 KB."));
                     }
                     if db.get(KIND, &record_id)?.is_none() && owned()?.len() >= 1000 {
-                        return Err(Error::too_large("A connection can keep at most 1000 values."));
+                        return Err(Error::too_large(
+                            "A connection can keep at most 1000 values.",
+                        ));
                     }
                     db.put(
                         KIND,
-                        &json!({ "id": record_id, "connectionId": connection, "key": key, "value": value, "updatedAt": now() }),
+                        &json!({
+                            "id": record_id,
+                            "connectionId": connection,
+                            "key": key,
+                            "value": value,
+                            "updatedAt": now(),
+                        }),
                     )?;
                     Ok(Value::Null)
                 }

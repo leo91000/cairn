@@ -52,9 +52,17 @@ struct Input {
 }
 
 fn summary(grant: &Grant) -> Value {
-    json!({"id": grant.id, "resourceId": grant.resource_id, "agentId": grant.agent_id,
-        "profile": grant.profile, "operations": grant.operations, "deniedOperations": grant.denied_operations,
-        "scopes": grant.scopes, "revision": grant.revision, "updatedAt": grant.updated_at})
+    json!({
+        "id": grant.id,
+        "resourceId": grant.resource_id,
+        "agentId": grant.agent_id,
+        "profile": grant.profile,
+        "operations": grant.operations,
+        "deniedOperations": grant.denied_operations,
+        "scopes": grant.scopes,
+        "revision": grant.revision,
+        "updatedAt": grant.updated_at,
+    })
 }
 
 fn permits(grant: &Grant, operation: &Operation, input: Option<&Value>) -> bool {
@@ -186,7 +194,7 @@ pub async fn create(
             db.put(KIND, &serde_json::to_value(&grant)?)?;
             db.audit(
                 "plugin.resource.granted",
-                &json!({"id": grant.id, "connectionId": connection.id, "agentId": grant.agent_id}),
+                &json!({ "id": grant.id, "connectionId": connection.id, "agentId": grant.agent_id }),
             )?;
             Ok(summary(&grant))
         })
@@ -209,7 +217,7 @@ pub async fn list(
         .filter(|value| value["resourceId"] == resource && value["connectionId"] == instance)
         .map(serde_json::from_value::<Grant>)
         .collect::<std::result::Result<Vec<_>, _>>()?;
-    Ok(json!({"items": values.iter().map(summary).collect::<Vec<_>>()}))
+    Ok(json!({ "items": values.iter().map(summary).collect::<Vec<_>>() }))
 }
 
 pub async fn remove(
@@ -234,9 +242,9 @@ pub async fn remove(
             db.remove(KIND, &grant)?;
             db.audit(
                 "plugin.resource.revoked",
-                &json!({"id": grant, "connectionId": instance}),
+                &json!({ "id": grant, "connectionId": instance }),
             )?;
-            Ok(json!({"deleted": true}))
+            Ok(json!({ "deleted": true }))
         })
         .await
 }
@@ -428,9 +436,38 @@ pub async fn recheck(s: &Service, authorization: &Authorization) -> Result<()> {
     let expected = authorization.connection.clone();
     let grant = authorization.grant.clone();
     let resource = authorization.resource.clone();
+    let requester = authorization.requester.clone();
+    let reference = authorization.reference.clone();
+    let scopes = authorization.scopes.clone();
     s.store
         .read(move |db| {
             connections::authorize(db, &expected)?;
+            if let Some(requester) = requester
+                && let super::requesters::Principal::External(actor) = requester.principal
+            {
+                let origin = db
+                    .get(connections::KIND, &actor.connection_id)?
+                    .ok_or_else(|| Error::forbidden("The requester's instance was removed."))?;
+                // A source route constrains operations on that integration. Other
+                // integrations still require the agent's own explicit grants.
+                if origin["pluginId"] == expected.plugin_id {
+                    let within_resource = actor.binding.resources.iter()
+                        .any(|(id, _)| id == &resource.id)
+                        || reference.revisions.iter()
+                            .any(|(id, _)| id == &actor.binding.resource);
+                    let route = db
+                        .get(super::routes::KIND, &actor.binding.id)?
+                        .ok_or_else(|| Error::forbidden("The requester's route was removed."))?;
+                    let within_scopes = scopes.iter().all(|(key, value)| {
+                        route["match"].get(key).is_none_or(|selected| selected == value)
+                    });
+                    if expected.id != actor.connection_id || !within_resource || !within_scopes {
+                        return Err(Error::forbidden(
+                            "This operation is outside the requester's admitted resource and source scope.",
+                        ));
+                    }
+                }
+            }
             if db.get("agents", &grant.agent_id)?.is_none()
                 || !db
                     .get(KIND, &grant.id)?
@@ -565,7 +602,7 @@ pub async fn call(
             serde_json::to_value(&authorization.resource)?
         }
         "resources.list" if args["collection"] == authorization.resource.collection => {
-            json!({"items": [&authorization.resource], "nextCursor": null})
+            json!({ "items": [&authorization.resource], "nextCursor": null })
         }
         "http.request" if request_permitted(authorization, args) => {
             let context = Context {

@@ -39,13 +39,22 @@ pub struct Package {
 }
 
 /// What the owner approves: the manifest and every Luau file, by path.
-fn digest(manifest: &Manifest, source: &Sources) -> Result<String> {
+pub(crate) fn digest(manifest: &Manifest, source: &Sources) -> Result<String> {
     let files = source.files().collect::<BTreeMap<_, _>>();
     Ok(crate::auth::hex_digest(&format!(
         "cairn-package\n{}\n{}",
         serde_json::to_string(manifest)?,
         serde_json::to_string(&files)?
     )))
+}
+
+pub(crate) async fn require_digest(s: &Service, plugin: &str, digest: &str) -> Result<()> {
+    if active(s, plugin).await?.digest != digest {
+        return Err(Error::forbidden(
+            "The plugin worker's package approval changed.",
+        ));
+    }
+    Ok(())
 }
 
 fn package(manifest: &str, source: Sources, builtin: bool) -> Result<Package> {

@@ -802,7 +802,8 @@ async fn personal_oauth_isolated_by_verified_account_and_provider_subject() {
         "owner": {"account_id": "fixture-owner", "access_id": "fixture-owner"},
         "members": [
             {"account_id": "alice", "access_id": "alice-membership-1"},
-            {"account_id": "bob", "access_id": "bob-membership-1"}
+            {"account_id": "bob", "access_id": "bob-membership-1"},
+            {"account_id": "charlie", "access_id": "charlie-membership-1"}
         ]
     })));
     let policy_ref = policy.clone();
@@ -825,7 +826,7 @@ async fn personal_oauth_isolated_by_verified_account_and_provider_subject() {
         axum::routing::post(
             |axum::Form(form): axum::Form<HashMap<String, String>>| async move {
                 let (subject, token) = match form["code"].as_str() {
-                    "alice-code" => ("U111", "personal-alice-fixture"),
+                    "alice-code" | "charlie-as-alice" => ("U111", "personal-alice-fixture"),
                     "bob-code" => ("U222", "personal-bob-fixture"),
                     code => panic!("Unexpected fixture code: {code}"),
                 };
@@ -913,6 +914,43 @@ async fn personal_oauth_isolated_by_verified_account_and_provider_subject() {
         .await;
         assert_eq!(status["subject"], subject);
     }
+    let duplicate = common::send(
+        &app,
+        member_request(
+            "POST",
+            &path,
+            json!({"scopes": ["messages:read"]}),
+            "charlie",
+        ),
+    )
+    .await;
+    assert_eq!(duplicate.status(), StatusCode::OK);
+    let duplicate = common::read_json(duplicate).await;
+    let callback = format!(
+        "/api/plugin-oauth/{instance}/callback?state={}&code=charlie-as-alice",
+        text(&duplicate, "state")
+    );
+    assert_eq!(
+        common::send(&app, request("GET", &callback, Value::Null, None))
+            .await
+            .status(),
+        StatusCode::OK
+    );
+    let refused = common::send(
+        &app,
+        member_request(
+            "POST",
+            &format!("{path}/finish"),
+            json!({"state": duplicate["state"]}),
+            "charlie",
+        ),
+    )
+    .await;
+    assert_eq!(
+        refused.status(),
+        StatusCode::CONFLICT,
+        "two active accounts acquired the same external identity"
+    );
     let owner_status = common::read_json(
         common::send(
             &app,

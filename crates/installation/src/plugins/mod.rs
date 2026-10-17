@@ -14,6 +14,7 @@ pub mod programs;
 pub mod registry;
 pub(crate) mod requesters;
 pub mod resources;
+pub mod routes;
 pub mod runtime;
 pub mod scope;
 pub mod socket;
@@ -325,6 +326,117 @@ pub async fn routes(s: &Arc<Service>, input: &Input) -> Result<Value> {
                 resource,
             ],
         ) => resources::remove(s, id, connection, collection, resource).await,
+        (
+            method,
+            [
+                "plugins",
+                id,
+                "connections",
+                connection,
+                "resources",
+                collection,
+                resource,
+                "routes",
+            ],
+        ) => {
+            let account = input
+                .identity
+                .as_ref()
+                .map_or("", |i| i.account_id.as_str());
+            match method {
+                "POST" => {
+                    routes::save(s, id, connection, collection, resource, account, body, None).await
+                }
+                "GET" => routes::list(s, id, connection, collection, resource).await,
+                _ => Err(Error::method_not_allowed("Method not allowed.")),
+            }
+        }
+        (
+            method,
+            [
+                "plugins",
+                id,
+                "connections",
+                connection,
+                "resources",
+                collection,
+                resource,
+                "routes",
+                route,
+            ],
+        ) => {
+            let account = input
+                .identity
+                .as_ref()
+                .map_or("", |i| i.account_id.as_str());
+            match method {
+                "PUT" => {
+                    routes::save(
+                        s,
+                        id,
+                        connection,
+                        collection,
+                        resource,
+                        account,
+                        body,
+                        Some(route),
+                    )
+                    .await
+                }
+                "DELETE" => {
+                    routes::remove(s, id, connection, collection, resource, route, account).await
+                }
+                _ => Err(Error::method_not_allowed("Method not allowed.")),
+            }
+        }
+        (
+            "GET",
+            [
+                "plugins",
+                id,
+                "connections",
+                connection,
+                "resources",
+                collection,
+                resource,
+                "routes",
+                route,
+                "requests",
+            ],
+        ) => routes::requests(s, id, connection, collection, resource, route).await,
+        (
+            "POST",
+            [
+                "plugins",
+                id,
+                "connections",
+                connection,
+                "resources",
+                collection,
+                resource,
+                "routes",
+                route,
+                "people",
+                user,
+            ],
+        ) => {
+            let account = input
+                .identity
+                .as_ref()
+                .map_or("", |i| i.account_id.as_str());
+            routes::people(
+                s,
+                id,
+                connection,
+                collection,
+                resource,
+                route,
+                account,
+                user,
+                crate::validation::text(body, "action"),
+            )
+            .await
+        }
         (
             "POST",
             [
