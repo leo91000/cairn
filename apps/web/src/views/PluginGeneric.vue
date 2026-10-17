@@ -5,6 +5,8 @@ import type {
   FormResult,
   PluginConnection,
   PluginEntry,
+  PluginPage,
+  PluginSetupDraft,
 } from '../plugins'
 import {
   computed,
@@ -25,7 +27,9 @@ import PersonAvatar from '../components/PersonAvatar.vue'
 import PluginFields from '../components/PluginFields.vue'
 import PluginInstancePanel from '../components/PluginInstancePanel.vue'
 import PluginMark from '../components/PluginMark.vue'
+import PluginResources from '../components/PluginResources.vue'
 import PluginReview from '../components/PluginReview.vue'
+import PluginSetup from '../components/PluginSetup.vue'
 import PluginView from '../components/PluginView.vue'
 import UiAlert from '../components/UiAlert.vue'
 import UiButton from '../components/UiButton.vue'
@@ -49,9 +53,12 @@ import {
   contributions,
   delegates as delegating,
   eligibleAgent,
+  formResult,
+  hasSetup,
   instanceNoun,
   personName,
   publicProblem,
+  unshownFormErrors,
 } from '../plugins'
 
 const route = useRoute()
@@ -63,6 +70,9 @@ const error = ref('')
 const reviewing = ref(false)
 const editing = ref<PluginConnection | null>()
 const removing = ref<PluginConnection>()
+const setupDraft = ref<PluginSetupDraft>()
+const drafts = ref<PluginSetupDraft[]>([])
+const discarding = ref<PluginSetupDraft>()
 const form = ref<Record<string, any>>({})
 const values = ref<Record<string, any>>({})
 const secrets = ref<Record<string, string>>({})
@@ -110,6 +120,7 @@ const tones = {
 
 async function load() {
   catalog.value = await api<Catalog>('/plugins')
+  drafts.value = (await api<PluginPage<PluginSetupDraft>>(`/plugins/${id.value}/setup-drafts`)).items
   loaded.value = true
 }
 
@@ -139,7 +150,18 @@ function agentNames(connection: PluginConnection) {
   return (connection.agentIds ?? []).map(agent => state.agents.find(item => item.id === agent)?.name ?? 'Removed agent')
 }
 
-function edit(connection: PluginConnection | null) {
+async function edit(connection: PluginConnection | null) {
+  if (!connection && hasSetup(manifest.value)) {
+    await action(async () => {
+      setupDraft.value = await api<PluginSetupDraft>(`/plugins/${id.value}/setup-drafts`, {
+        method: 'POST',
+        body: JSON.stringify({ name: manifest.value?.name }),
+      })
+      await load()
+    })
+    return
+  }
+
   error.value = ''
   editing.value = connection
   values.value = Object.fromEntries(storedFields.value.map(field => [
@@ -163,6 +185,14 @@ function edit(connection: PluginConnection | null) {
   void complete()
 }
 
+async function discard(draft: PluginSetupDraft) {
+  await action(async () => {
+    await api(`/plugins/${id.value}/setup-drafts/${draft.id}`, { method: 'DELETE', body: JSON.stringify({ revision: draft.revision }) })
+    discarding.value = undefined
+    await load()
+  })
+}
+
 function settings() {
   return Object.fromEntries(Object.entries(values.value)
     .filter(([, value]) => value !== '' && value !== undefined && value !== null)
@@ -179,7 +209,7 @@ async function complete(changed?: string) {
   const ask = ++asked
   completing.value = true
   try {
-    const result = await api<FormResult>(`/plugins/${id.value}/form`, {
+    const result = formResult(await api<FormResult | null>(`/plugins/${id.value}/form`, {
       method: 'POST',
       body: JSON.stringify({
         instance: editing.value?.id,
@@ -188,7 +218,7 @@ async function complete(changed?: string) {
         ...(form.value.token ? { token: form.value.token } : {}),
         ...(changed ? { changed } : {}),
       }),
-    })
+    }))
     if (ask !== asked)
       return
     for (const [key, value] of Object.entries(result.values))
@@ -294,7 +324,7 @@ function closeEditor() {
 onMounted(async () => {
   await action(load)
   timer = setInterval(() => {
-    if (!busy.value && editing.value === undefined)
+    if (!busy.value && editing.value === undefined && !setupDraft.value)
       void load().catch(() => {})
   }, 5000)
 })
@@ -340,7 +370,12 @@ onBeforeUnmount(() => {
           <UiButton @click="reviewing = true">
             <Icon :name="ShieldCheck" :size="15" />Access and versions
           </UiButton>
-          <UiButton v-if="entry.active" variant="primary" @click="edit(null)">
+          <UiButton
+            v-if="entry.active"
+            variant="primary"
+            :disabled="busy"
+            @click="edit(null)"
+          >
             <Icon :name="Plus" :size="15" />Add {{ singular.toLowerCase() }}
           </UiButton>
         </div>
@@ -366,7 +401,31 @@ onBeforeUnmount(() => {
 
       <div class="mt-1 grid items-start gap-5" :class="manifest.agentAccess ? 'grid-cols-[minmax(0,1fr)_300px] tablet:grid-cols-1' : ''">
         <div class="min-w-0">
-          <p v-if="loaded && !connections.length && entry.active" class="mt-5 rounded-2xl border border-dashed border-line p-6 text-center text-sm text-muted">
+          <section v-if="drafts.length" class="mt-5 grid gap-3" aria-label="Unfinished setup">
+            <h2 class="text-sm! font-bold">
+              Continue setup
+            </h2>
+            <article
+              v-for="draft in drafts"
+              :key="draft.id"
+              class="flex flex-wrap items-center gap-3 rounded-xl border border-line bg-inset p-4"
+              :aria-label="draft.name"
+            >
+              <div class="min-w-0 flex-1">
+                <b class="break-words text-sm">{{ draft.name }}</b>
+                <p class="text-xs text-muted">
+                  {{ draft.status === 'setup' ? 'Inactive · expires' : 'Package review needed · expires' }} {{ new Date(draft.expiresAt).toLocaleString() }}
+                </p>
+              </div>
+              <UiButton :disabled="busy || draft.status !== 'setup'" :aria-label="`Continue ${draft.name}`" @click="setupDraft = draft">
+                Continue
+              </UiButton>
+              <UiButton :disabled="busy" :aria-label="`Discard ${draft.name}`" @click="discarding = draft">
+                Discard
+              </UiButton>
+            </article>
+          </section>
+          <p v-if="loaded && !connections.length && !drafts.length && entry.active" class="mt-5 rounded-2xl border border-dashed border-line p-6 text-center text-sm text-muted">
             No {{ plural.toLowerCase() }} yet. Add one to start using this plugin.
           </p>
           <article
@@ -386,6 +445,12 @@ onBeforeUnmount(() => {
             <p v-if="connection.status.message" class="-mt-2 text-xs" :class="connection.status.state === 'needs_review' ? 'text-coral' : 'text-muted'">
               {{ connection.status.message }}
             </p>
+            <PluginResources
+              v-if="manifest.resources?.length"
+              :plugin="id"
+              :manifest="manifest"
+              :instance="connection.id"
+            />
             <dl v-if="shownFields.length || secretFields.length || delegates" class="grid grid-cols-[repeat(auto-fill,minmax(180px,1fr))] gap-3">
               <div v-for="field in shownFields" :key="field.key" class="rounded-xl border border-line bg-inset px-3.5 py-2.5">
                 <dt class="text-3xs font-semibold uppercase tracking-[.12em] text-subtle">
@@ -590,6 +655,34 @@ onBeforeUnmount(() => {
       @changed="load"
     />
 
+    <Modal v-if="discarding" :title="`Discard ${discarding.name}?`" @close="discarding = undefined">
+      <div class="grid gap-4 p-5">
+        <p class="text-sm text-muted">
+          Prepared settings and credentials will be deleted. This instance has never been activated.
+        </p>
+        <UiAlert v-if="error">
+          {{ error }}
+        </UiAlert>
+        <div class="flex justify-end gap-2">
+          <UiButton :disabled="busy" @click="discarding = undefined">
+            Cancel
+          </UiButton>
+          <UiButton :disabled="busy" @click="discard(discarding)">
+            Discard setup
+          </UiButton>
+        </div>
+      </div>
+    </Modal>
+    <PluginSetup
+      v-if="setupDraft && manifest"
+      :key="setupDraft.id"
+      :plugin="id"
+      :manifest="manifest"
+      :initial="setupDraft"
+      @close="setupDraft = undefined; load()"
+      @changed="load"
+      @activated="setupDraft = undefined; load()"
+    />
     <Modal
       v-if="editing !== undefined && manifest"
       :title="editing ? `Edit ${editing.name}` : manifest.instances ? `New ${singular.toLowerCase()}` : `New ${manifest.name} instance`"
@@ -602,6 +695,9 @@ onBeforeUnmount(() => {
         <label>Name<input v-model="form.name" required maxlength="100"></label>
         <UiAlert v-if="completion?.errors.form">
           {{ completion.errors.form }}
+        </UiAlert>
+        <UiAlert v-for="(message, index) in unshownFormErrors(manifest, completion?.errors)" :key="index">
+          {{ message }}
         </UiAlert>
         <label v-if="manifest.credential">{{ editing ? `New ${manifest.credential.label.toLowerCase()} (optional)` : manifest.credential.label }}<input
           v-model="form.token"

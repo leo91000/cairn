@@ -385,8 +385,14 @@ Failure preserves the draft and starts no worker. A successful retry against the
 consumed draft returns not found/conflict rather than creating a second instance.
 Workers are notified only after commit. No agent is granted by default.
 
-The web/Android setup journeys, provider-side revocation and the other pending
-OAuth functions remain in the Slack delivery checklist.
+The web and Android owner interfaces use saved setup drafts for packages declaring
+resources, OAuth or webhooks. Owners can resume or discard an unfinished setup,
+save root settings and masked secrets, prepare resource collections and activate
+the saved instance. Activation waits for the latest form answer, saved root
+changes and any resource write. An open resource editor must be saved or closed
+first. Active resources support editing, parent selection, pagination and confirmed
+deletion. OAuth consent, resource grants/routes and provider-side revocation remain
+separate unfinished client/delivery slices in the Slack checklist.
 
 ### Resource collections
 

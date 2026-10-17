@@ -603,12 +603,492 @@ abstract class PluginsCases {
         }
     }
 
-    /** Answers the workspace fixture; [handle] takes plugin writes first. */
-    private fun dispatcher(handle: (String, String) -> String?) =
+    @Test
+    fun anOwnerResumesSetupAndActivatesItsPreparedResources() {
+        val entry =
+            wireJson.decodeFromString<PluginEntry>(
+                """{
+            "id":"workspace-service","active":"1","manifest":{
+                "id":"workspace-service","name":"Workspace service","version":"1",
+                "capabilities":["resources"],"instanceForm":true,
+                "settings":[
+                    {"key":"clientId","title":"Client ID","required":true,"refresh":true},
+                    {"key":"apiKey","title":"App key","type":"secret","required":true},
+                    {"key":"setupIdentity","title":"Setup identity","hidden":true}
+                ],
+                "resources":[{"name":"workspace","title":"Workspaces","singular":"Workspace","settings":[
+                    {"key":"externalId","title":"Workspace ID","required":true},
+                    {"key":"token","title":"Workspace token","type":"secret","required":true}
+                ]}]
+            }
+        }"""
+            )
+        val draft = java.util.concurrent.atomic.AtomicReference<JsonObject?>(null)
+        val resources = CopyOnWriteArrayList<JsonObject>()
+        val writes = CopyOnWriteArrayList<Pair<String, JsonObject>>()
+        val active = java.util.concurrent.atomic.AtomicReference<PluginConnection?>(null)
+        val root = "/plugins/workspace-service/setup-drafts"
+        MockWebServer().use { server ->
+            server.dispatcher =
+                dispatcher(
+                    read = { path ->
+                        when {
+                            path.endsWith("/plugins") ->
+                                wireJson.encodeToString(
+                                    PluginCatalog(
+                                        packages = listOf(entry),
+                                        connections = listOfNotNull(active.get()),
+                                    )
+                                )
+                            path.endsWith(root) -> buildJsonObject {
+                                    put("items", JsonArray(listOfNotNull(draft.get())))
+                                }
+                                    .toString()
+                            path.endsWith("/resources/workspace") ->
+                                buildJsonObject { put("items", JsonArray(resources.toList())) }
+                                    .toString()
+                            else -> null
+                        }
+                    }
+                ) { path, body ->
+                    val input = wireJson.parseToJsonElement(body).jsonObject
+                    writes.add(path to input)
+                    when {
+                        path.endsWith("$root/setup1/form") ->
+                            """{"options":{},"values":{"setupIdentity":"setup1"},"errors":{},"view":[{"type":"alert","tone":"info","title":"Prepare the service","text":"Save settings before adding workspaces."}]}"""
+                        path.endsWith(root) || path.endsWith("$root/setup1") -> {
+                            val value = buildJsonObject {
+                                put("id", "setup1")
+                                put("pluginId", "workspace-service")
+                                put("status", "setup")
+                                put("name", input["name"] ?: JsonPrimitive("Workspace service"))
+                                put("revision", if (draft.get() == null) "rev1" else "rev2")
+                                put("settings", input["settings"] ?: JsonObject(emptyMap()))
+                                put(
+                                    "secretKeys",
+                                    if (input["secrets"]?.jsonObject?.isNotEmpty() == true)
+                                        JsonArray(listOf(JsonPrimitive("apiKey")))
+                                    else JsonArray(emptyList()),
+                                )
+                                put("createdAt", System.currentTimeMillis())
+                                put("expiresAt", System.currentTimeMillis() + 86400000)
+                            }
+                            draft.set(value)
+                            value.toString()
+                        }
+                        path.endsWith("$root/setup1/resources/workspace") -> {
+                            val value = buildJsonObject {
+                                put("id", "workspace1")
+                                put("connectionId", "setup1")
+                                put("collection", "workspace")
+                                put("name", input["name"]!!)
+                                put("settings", input["settings"]!!)
+                                put("revision", "resource1")
+                                put("enabled", true)
+                                put("secretKeys", JsonArray(listOf(JsonPrimitive("token"))))
+                            }
+                            resources.add(value)
+                            value.toString()
+                        }
+                        path.endsWith("$root/setup1/activate") -> {
+                            active.set(
+                                PluginConnection(
+                                    id = "setup1",
+                                    pluginId = "workspace-service",
+                                    name = "Production service",
+                                    settings = draft.get()!!["settings"]!!.jsonObject,
+                                    status = PluginStatus("ready"),
+                                )
+                            )
+                            draft.set(null)
+                            wireJson.encodeToString(active.get()!!)
+                        }
+                        path.endsWith("/connections/setup1/resources/workspace/workspace1") -> {
+                            if (input["name"] != null) {
+                                val updated =
+                                    JsonObject(
+                                        resources.single() +
+                                            mapOf(
+                                                "name" to input["name"]!!,
+                                                "revision" to JsonPrimitive("resource2"),
+                                            )
+                                    )
+                                resources.clear()
+                                resources.add(updated)
+                                updated.toString()
+                            } else {
+                                resources.clear()
+                                "{}"
+                            }
+                        }
+                        else -> null
+                    }
+                }
+            server.start()
+            show(server) { vm, state -> PluginScreen(vm, state, "workspace-service") {} }
+            compose.waitUntil(10000) {
+                compose
+                    .onAllNodesWithText("Ajouter une instance")
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
+            }
+            compose.onNodeWithText("Ajouter une instance").performClick()
+            compose.waitUntil(10000) {
+                compose
+                    .onAllNodesWithText("Configurer Workspace service")
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
+            }
+            compose.waitUntil(10000) {
+                compose
+                    .onAllNodes(hasText("Nom") and isEnabled())
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
+            }
+            compose.onNodeWithText("Nom").performTextReplacement("Production service")
+            compose.onNodeWithText("App key").performTextInput("app-android-fixture")
+            compose.onNodeWithText("Client ID").performTextInput("client-android-fixture")
+            compose.waitUntil(10000) {
+                compose
+                    .onAllNodes(hasText("Enregistrer la configuration") and isEnabled())
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
+            }
+            assertEquals(
+                "clientId",
+                writes
+                    .last { it.first.endsWith("/form") }
+                    .second["changed"]
+                    ?.jsonPrimitive
+                    ?.content,
+            )
+            compose.onNodeWithText("Enregistrer la configuration").performScrollTo().performClick()
+            compose.waitUntil(10000) {
+                draft.get()?.get("name")?.jsonPrimitive?.content == "Production service" &&
+                    draft.get()?.get("revision")?.jsonPrimitive?.content == "rev2"
+            }
+            compose.waitUntil(10000) {
+                compose
+                    .onAllNodes(hasContentDescription("Fermer") and isEnabled())
+                    .fetchSemanticsNodes()
+                    .isNotEmpty() &&
+                    compose
+                        .onAllNodesWithText("Tout est enregistré")
+                        .fetchSemanticsNodes()
+                        .isNotEmpty()
+            }
+            compose.onNodeWithContentDescription("Fermer").performClick()
+            compose.onNodeWithText("Continuer Production service").performScrollTo().performClick()
+            compose
+                .onNodeWithText("App key")
+                .assert(
+                    SemanticsMatcher.expectValue(
+                        SemanticsProperties.EditableText,
+                        androidx.compose.ui.text.AnnotatedString(""),
+                    )
+                )
+            compose.waitUntil(10000) {
+                compose
+                    .onAllNodes(hasText("Ajouter · Workspace") and isEnabled())
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
+            }
+            compose.onNodeWithText("Ajouter · Workspace").performScrollTo().performClick()
+            compose.waitUntil(10000) {
+                compose
+                    .onAllNodes(hasText("Nom · Workspace") and isEnabled())
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
+            }
+            compose.onNodeWithText("Nom · Workspace").performTextInput("Engineering")
+            compose.onNodeWithText("Workspace ID").performTextInput("T111")
+            compose.onNodeWithText("Workspace token").performTextInput("workspace-android-fixture")
+            compose.onNodeWithText("Enregistrer").performClick()
+            compose.waitUntil(10000) { resources.isNotEmpty() }
+            compose.waitUntil(10000) {
+                compose.onAllNodesWithText("Nouveau · Workspace").fetchSemanticsNodes().isEmpty() &&
+                    compose
+                        .onAllNodes(hasText("Activer l’instance") and isEnabled())
+                        .fetchSemanticsNodes()
+                        .isNotEmpty()
+            }
+            capture("plugin-setup-prepared-resources")
+            compose.onNodeWithText("Activer l’instance").performScrollTo().performClick()
+            compose.waitUntil(10000) { active.get() != null }
+            val activation = writes.single { it.first.endsWith("/activate") }.second
+            assertEquals("rev2", activation["revision"]?.jsonPrimitive?.content)
+            assertEquals(JsonArray(emptyList()), activation["agentIds"])
+            val saved = writes.single { it.first.endsWith("$root/setup1") }.second
+            assertEquals(
+                "app-android-fixture",
+                saved["secrets"]?.jsonObject?.get("apiKey")?.jsonPrimitive?.content,
+            )
+            assertEquals(
+                "setup1",
+                saved["settings"]?.jsonObject?.get("setupIdentity")?.jsonPrimitive?.content,
+            )
+            assertNull(draft.get())
+            compose.waitUntil(10000) {
+                compose
+                    .onAllNodes(hasText("Modifier Engineering") and isEnabled())
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
+            }
+            compose.onNodeWithText("Modifier Engineering").performScrollTo().performClick()
+            compose.waitUntil(10000) {
+                compose
+                    .onAllNodes(hasText("Nom · Workspace") and isEnabled())
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
+            }
+            compose
+                .onNodeWithText("Workspace token")
+                .assert(
+                    SemanticsMatcher.expectValue(
+                        SemanticsProperties.EditableText,
+                        androidx.compose.ui.text.AnnotatedString(""),
+                    )
+                )
+            compose.onNodeWithText("Nom · Workspace").performTextReplacement("Engineering team")
+            compose.onNodeWithText("Enregistrer").performClick()
+            compose.waitUntil(10000) {
+                compose
+                    .onAllNodes(hasText("Supprimer Engineering team") and isEnabled())
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
+            }
+            val resourceUpdate =
+                writes
+                    .single {
+                        it.first.endsWith("/connections/setup1/resources/workspace/workspace1")
+                    }
+                    .second
+            assertEquals(JsonObject(emptyMap()), resourceUpdate["secrets"])
+            assertEquals("resource1", resourceUpdate["revision"]?.jsonPrimitive?.content)
+            compose.onNodeWithText("Supprimer Engineering team").performScrollTo().performClick()
+            compose.waitUntil(10000) {
+                compose
+                    .onAllNodesWithText("Supprimer Engineering team ?")
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
+            }
+            compose.onNodeWithText("Confirmer").performClick()
+            compose.waitUntil(10000) { resources.isEmpty() }
+            val resourceDelete =
+                writes
+                    .last {
+                        it.first.endsWith("/connections/setup1/resources/workspace/workspace1")
+                    }
+                    .second
+            assertEquals("resource2", resourceDelete["revision"]?.jsonPrimitive?.content)
+        }
+    }
+
+    @Test
+    fun obsoleteSetupsRemainVisibleAfterApprovingASimpleManifest() {
+        val entry =
+            PluginEntry(
+                id = "workspace-service",
+                active = "2",
+                manifest =
+                    PluginManifest(
+                        id = "workspace-service",
+                        name = "Workspace service",
+                        version = "2",
+                    ),
+            )
+        val draft =
+            java.util.concurrent.atomic.AtomicReference<PluginSetupDraft?>(
+                PluginSetupDraft(
+                    id = "old-setup",
+                    pluginId = "workspace-service",
+                    name = "Old setup",
+                    status = "review_needed",
+                    revision = "old-revision",
+                    expiresAt = System.currentTimeMillis() + 86400000,
+                )
+            )
+        val deleted = CopyOnWriteArrayList<String>()
+        MockWebServer().use { server ->
+            server.dispatcher =
+                dispatcher(
+                    read = { path ->
+                        when {
+                            path.endsWith("/plugins") ->
+                                wireJson.encodeToString(PluginCatalog(packages = listOf(entry)))
+                            path.endsWith("/setup-drafts") ->
+                                wireJson.encodeToString(PluginPage(listOfNotNull(draft.get())))
+                            else -> null
+                        }
+                    }
+                ) { path, body ->
+                    if (path.endsWith("/setup-drafts/old-setup")) {
+                        deleted.add(body)
+                        draft.set(null)
+                        "{}"
+                    } else null
+                }
+            server.start()
+            show(server) { vm, state -> PluginScreen(vm, state, "workspace-service") {} }
+            compose.waitUntil(10000) {
+                compose
+                    .onAllNodesWithText("Abandonner Old setup")
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
+            }
+            compose.onNodeWithText("Le package doit être approuvé.").assertExists()
+            compose.onNodeWithText("Abandonner Old setup").performScrollTo().performClick()
+            compose.onNodeWithText("Annuler").performClick()
+            assertEquals(0, deleted.size)
+            compose.onNodeWithText("Abandonner Old setup").performScrollTo().performClick()
+            compose.onNodeWithText("Confirmer").performClick()
+            compose.waitUntil(10000) { deleted.isNotEmpty() }
+            assertEquals(
+                "old-revision",
+                wireJson
+                    .parseToJsonElement(deleted.single())
+                    .jsonObject["revision"]
+                    ?.jsonPrimitive
+                    ?.content,
+            )
+        }
+    }
+
+    @Test
+    fun setupExplainsCredentialErrorsAndAcceptsAnEmptyFormAnswer() {
+        val entry =
+            PluginEntry(
+                id = "setup-feedback",
+                active = "1",
+                manifest =
+                    PluginManifest(
+                        id = "setup-feedback",
+                        name = "Optional form",
+                        version = "1",
+                        instanceForm = true,
+                        credential =
+                            PluginCredential(
+                                label = "Service credential",
+                                header = "authorization",
+                            ),
+                        resources =
+                            listOf(
+                                PluginResourceCollection(
+                                    name = "workspace",
+                                    title = "Workspaces",
+                                    singular = "Workspace",
+                                )
+                            ),
+                    ),
+            )
+        val draft =
+            java.util.concurrent.atomic.AtomicReference(
+                PluginSetupDraft(
+                    id = "setup-feedback1",
+                    pluginId = "setup-feedback",
+                    name = "Optional form",
+                    revision = "revision1",
+                    expiresAt = System.currentTimeMillis() + 86400000,
+                )
+            )
+        val activated = java.util.concurrent.atomic.AtomicBoolean(false)
+        val formRequests = CopyOnWriteArrayList<JsonObject>()
+        MockWebServer().use { server ->
+            server.dispatcher =
+                dispatcher(
+                    read = { path ->
+                        when {
+                            path.endsWith("/plugins") ->
+                                wireJson.encodeToString(PluginCatalog(packages = listOf(entry)))
+                            path.endsWith("/resources/workspace") -> """{"items":[]}"""
+                            else -> null
+                        }
+                    }
+                ) { path, body ->
+                    val input = wireJson.parseToJsonElement(body).jsonObject
+                    when {
+                        path.endsWith("/setup-drafts") -> wireJson.encodeToString(draft.get())
+                        path.endsWith("/setup-feedback1/form") -> {
+                            formRequests.add(input)
+                            if (input["token"] != null) "null"
+                            else if (draft.get().credential)
+                                """{"options":null,"values":null,"errors":null,"view":null}"""
+                            else
+                                """{"errors":{"credential":"Enter the service credential.","verifiedTeam":"Invite the app to the workspace before continuing."}}"""
+                        }
+                        path.endsWith("/setup-drafts/setup-feedback1") -> {
+                            draft.set(draft.get().copy(credential = true, revision = "revision2"))
+                            wireJson.encodeToString(draft.get())
+                        }
+                        path.endsWith("/setup-feedback1/activate") -> {
+                            activated.set(true)
+                            "{}"
+                        }
+                        else -> null
+                    }
+                }
+            server.start()
+            show(server) { vm, state -> PluginScreen(vm, state, "setup-feedback") {} }
+            compose.waitUntil(10000) {
+                compose
+                    .onAllNodesWithText("Ajouter une instance")
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
+            }
+            compose.onNodeWithText("Ajouter une instance").performClick()
+            compose.waitUntil(10000) {
+                compose
+                    .onAllNodesWithText("Enter the service credential.")
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
+            }
+            compose
+                .onNodeWithText("Invite the app to the workspace before continuing.")
+                .assertExists()
+            compose.onNodeWithText("Activer l’instance").assertIsNotEnabled()
+            compose.waitUntil(10000) {
+                compose
+                    .onAllNodes(hasText("Service credential") and isEnabled())
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
+            }
+            compose
+                .onNodeWithText("Service credential")
+                .performTextInput("credential-android-fixture")
+            compose.waitUntil(10000) {
+                compose
+                    .onAllNodes(hasText("Enregistrer la configuration") and isEnabled())
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
+            }
+            assertEquals("credential", formRequests.last()["changed"]?.jsonPrimitive?.content)
+            compose.onNodeWithText("Enregistrer la configuration").performScrollTo().performClick()
+            compose.waitUntil(10000) {
+                compose
+                    .onAllNodes(hasText("Activer l’instance") and isEnabled())
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
+            }
+            compose.onNodeWithText("Activer l’instance").performScrollTo().performClick()
+            compose.waitUntil(10000) { activated.get() }
+        }
+    }
+
+    /** Answers the workspace fixture; custom reads and writes remain HTTP boundaries. */
+    private fun dispatcher(
+        read: (String) -> String? = { null },
+        handle: (String, String) -> String?,
+    ) =
         object : Dispatcher() {
             override fun dispatch(request: RecordedRequest): MockResponse {
                 val path = request.path.orEmpty()
                 val body = request.body.readUtf8()
+                if (request.method == "GET")
+                    read(path)?.let {
+                        return MockResponse().setBody(it)
+                    }
+                if (request.method == "GET" && path.endsWith("/setup-drafts"))
+                    return MockResponse().setBody("""{"items":[]}""")
                 if (request.method != "GET") {
                     if (request.getHeader("X-CSRF-Token") != "fixture-csrf")
                         return MockResponse().setResponseCode(403)

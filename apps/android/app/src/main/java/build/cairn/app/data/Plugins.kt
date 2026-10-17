@@ -1,12 +1,15 @@
 package build.cairn.app.data
 
 import kotlinx.serialization.Serializable
+import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.decodeFromJsonElement
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonPrimitive
 
@@ -51,6 +54,20 @@ data class PluginForm(
     val view: JsonArray = JsonArray(emptyList()),
 )
 
+private val pluginFormJson = Json(wireJson) { coerceInputValues = true }
+
+/** Optional/null guidance is successful; null fields use their declared defaults. */
+fun decodePluginForm(value: JsonElement): PluginForm =
+    if (value == JsonNull) PluginForm() else pluginFormJson.decodeFromJsonElement(value)
+
+/** Errors without an inline control still need an explanation in the form. */
+fun PluginManifest.unshownFormErrors(errors: Map<String, String>): List<String> {
+    val inline = settings.filterNot { it.hidden }.map { it.key }.toMutableSet()
+    inline += "form"
+    if (credential != null) inline += "credential"
+    return errors.filterKeys { it !in inline }.values.toList()
+}
+
 @Serializable data class PluginCredential(val label: String = "", val header: String = "")
 
 /** The package's mark: a background colour and an SVG path on a 24×24 grid. */
@@ -94,6 +111,59 @@ data class PluginCommand(
 @Serializable data class PluginTool(val name: String = "", val description: String = "")
 
 @Serializable
+data class PluginResourceCollection(
+    val name: String = "",
+    val title: String = "",
+    val singular: String = "",
+    val parent: String? = null,
+    val delegation: Boolean = false,
+    val settings: List<PluginSetting> = emptyList(),
+)
+
+@Serializable
+data class PluginResource(
+    val id: String = "",
+    val connectionId: String = "",
+    val collection: String = "",
+    val parentId: String? = null,
+    val name: String = "",
+    val enabled: Boolean = true,
+    val revision: String = "",
+    val settings: JsonObject = JsonObject(emptyMap()),
+    val secretKeys: List<String> = emptyList(),
+)
+
+@Serializable data class PluginOAuthPersonal(val subject: String = "")
+
+@Serializable
+data class PluginOAuthProvider(
+    val name: String = "",
+    val title: String = "",
+    val collection: String = "",
+    val scopes: List<String> = emptyList(),
+    val personal: PluginOAuthPersonal? = null,
+)
+
+@Serializable data class PluginWebhook(val name: String = "")
+
+@Serializable
+data class PluginSetupDraft(
+    val id: String = "",
+    val pluginId: String = "",
+    val name: String = "",
+    val status: String = "setup",
+    val settings: JsonObject = JsonObject(emptyMap()),
+    val secretKeys: List<String> = emptyList(),
+    val credential: Boolean = false,
+    val revision: String = "",
+    val createdAt: Long = 0,
+    val expiresAt: Long = 0,
+)
+
+@Serializable
+data class PluginPage<T>(val items: List<T> = emptyList(), val nextCursor: String? = null)
+
+@Serializable
 data class PluginManifest(
     val id: String = "",
     val name: String = "",
@@ -113,10 +183,16 @@ data class PluginManifest(
     val instanceView: Boolean = false,
     val instanceTest: Boolean = false,
     val instanceForm: Boolean = false,
+    val resources: List<PluginResourceCollection> = emptyList(),
+    val oauth: List<PluginOAuthProvider> = emptyList(),
+    val webhooks: List<PluginWebhook> = emptyList(),
 ) {
     /** Instances answer external people through a dedicated agent. */
     val delegates
-        get() = "conversations.submit" in capabilities
+        get() = "conversations.submit" in capabilities && resources.none { it.delegation }
+
+    val hasSetup
+        get() = resources.isNotEmpty() || oauth.isNotEmpty() || webhooks.isNotEmpty()
 
     /** Packages that react to people, connections or timers keep a worker running. */
     val needsWorker
@@ -318,6 +394,9 @@ fun capabilityLabel(name: String) =
         "storage" -> "Stockage"
         "timers" -> "Minuteurs"
         "exec" -> "Exécute des programmes"
+        "resources" -> "Ressources"
+        "oauth" -> "Autorisations de comptes"
+        "webhooks" -> "Reçoit des requêtes web"
         else -> name
     }
 

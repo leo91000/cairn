@@ -24,6 +24,7 @@ It does not assert pixel equality between a browser and Material components.
 | Skills and MCPs | Skill content/files, scopes and validation, MCP configuration/authentication/discovery/tool restrictions | Existing API and MCP/Compose cases; form/API comparison |
 | Connections and access | OAuth, GitHub, Codex and Claude Code accounts/usage, token grants, authorization, logout and encrypted sessions | Existing network/authorization/cache suite |
 | Plugins | Catalogue, instances, manifest-driven settings and secrets, agent grants, version/file review and approval, declarative panels/actions/tests, native Discord setup and delegation/access/activity, 1Password instances | `PluginsJourneyTest`, shared `PluginsCases` / `PluginsDeviceTest`; browser plugin journeys |
+| Plugin setup and resources | Owner can save/resume/discard an inactive 24-hour setup, edit root fields and masked secrets, prepare related resources, then activate the same instance with no default agent grants. Active resources support creation, editing, parent selection, pagination and confirmed deletion. | Browser setup/resource journey against the installation; shared setup/resource Compose journey. OAuth, resource grants and routes remain separate unfinished delivery slices. |
 | Artifacts | Authenticated previews, versions, groups, images/PDF/Markdown, save/share and deep links from replies | Chat journey; artifact and link gesture regressions |
 | Reading | Wrapped long text/URLs, selectable native Markdown, history pagination, stable reading anchors during drag/streaming, jump to latest | Markdown/history suite; real device gesture tests |
 | Live catch-up | Following the latest output, a resume past a backlog longer than one page reopens on the recent window; older messages load on scroll. Reading older messages keeps the complete replay and the reading position. Stored backlog pages bypass the live coalescing delay | Backend recent-window, cached-resume, reconnect and history/reset tests; web connection test; Android `LiveTest`, `ScrollResumeTest` and `RecentWindowResumeTest` |
@@ -42,6 +43,9 @@ coverage used, not a claim that every production account/provider was exercised.
   upload/download/clipboard controls. External OAuth uses Custom Tabs.
 - Installing a plugin package uses « Continuer sur le web ». Reviewing files and
   versions, approving packages, editing instances and configuring Discord are native.
+- Plugin setup uses a full-screen native editor and resource dialogs on Android;
+  the web uses a setup modal and inline resource forms. Both keep typed secrets
+  only in memory and require saved root settings before resource changes or activation.
 - Foreground updates use SSE. Background question notifications retain the
   existing Firebase-free WorkManager service: Android schedules periodic checks
   (approximately 15 minutes, potentially delayed by the OS), rather than browser

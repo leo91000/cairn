@@ -460,3 +460,47 @@ refuses that transition transactionally while preserving the draft authorization
 Saving the final client ID and completing fresh consent allows activation; unrelated
 derived fields remain supported. Both fresh review axes must cover the complete
 corrected checkpoint before it is committed.
+
+## Generic owner setup and resource interfaces
+
+The native activation checkpoint passed Quality and Storage on `bbd5a90d`.
+Web and Android now select a persisted setup for manifests declaring resources,
+OAuth or webhooks. Owners can save partial settings, close and resume with blank
+secret inputs, prepare resources and activate the same UUID with no agent grants
+by default. Discard requires confirmation. Active collection management provides
+parent choices, pagination, creation, revision-bound editing and confirmed deletion.
+The ordinary instance editor remains available for simple manifests.
+
+The actual installation/browser journey exercises retained IDs, secret masking,
+resource creation/promotion/edit/delete and confirmed draft discard. Holding the
+resource POST first reproduced an enabled activation button; activation now waits
+until resource editing and writes finish. The shared Compose journey covers the
+same setup/active resource transitions through synthetic HTTP responses. This does
+not yet deliver OAuth controls, routes/profiles/grants, the Slack package or the
+rest of Q1–Q20. Device and final checkpoint validation are recorded separately;
+no live Slack app, workspace or credential has been used.
+
+The first independent client checkpoint review found two protocol/parity gaps.
+Android omitted the changed field from form requests; its HTTP/Compose tracer
+observed `null` instead of `clientId`. Both clients also hid preserved drafts when
+a newly approved simple manifest no longer requested setup. A real browser
+version-change journey and a synthetic Android journey reproduced the missing
+discard control. Android now carries the field/credential key, and both clients
+list existing drafts independently of how they create new instances. Fresh full
+checkpoint reviews cover these corrections; final whole-PR qualification remains
+separate.
+
+The second Spec review identified invisible credential errors and a valid Luau
+`nil` form result being treated as a failed response. Both setup clients now show
+credential errors and normalize absent guidance to an empty successful form.
+The browser tracer uses an actual package which requests a credential, then returns
+`nil` through save and activation; Android exercises the same HTTP protocol. These
+corrections require another full independent checkpoint review.
+
+The third Spec review reproduced an error for a declared hidden field which
+silently disabled activation. Setup and ordinary instance editors now summarize
+errors without an inline control. Form normalization also accepts explicitly null
+optional guidance fields. The shared device scenarios explicitly start their HTTP
+fixtures before composing a screen; their initial lazy startup was refused by
+Android's main-thread network policy. Static collection fields are delivered here;
+scoped dynamic resource forms/diagnostics remain a separate native/client slice.

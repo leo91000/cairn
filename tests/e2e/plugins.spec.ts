@@ -231,3 +231,208 @@ test('installed packages wait for review and connect through a generated form', 
   await page.getByRole('dialog').getByRole('button', { name: 'Confirm uninstall' }).click()
   await expect(page.getByText('This plugin isn’t installed.')).toBeVisible()
 })
+
+test('owner resumes an inert setup, prepares resources and activates the same instance', async ({ page, workspace }) => {
+  test.setTimeout(90000)
+  await useRelayForHttpMocks(page)
+  const manifest = {
+    id: 'workspace-service',
+    name: 'Workspace service',
+    version: '1',
+    apiVersion: 2,
+    description: 'A service with separate workspaces.',
+    capabilities: ['resources'],
+    instanceForm: true,
+    settings: [
+      {
+        key: 'clientId',
+        title: 'Client ID',
+        type: 'string',
+        required: true,
+      },
+      {
+        key: 'apiKey',
+        title: 'App key',
+        type: 'secret',
+        required: true,
+      },
+      {
+        key: 'setupIdentity',
+        title: 'Setup identity',
+        type: 'string',
+        hidden: true,
+      },
+    ],
+    resources: [{
+      name: 'workspace',
+      title: 'Workspaces',
+      singular: 'Workspace',
+      settings: [
+        {
+          key: 'externalId',
+          title: 'Workspace ID',
+          type: 'string',
+          required: true,
+        },
+        {
+          key: 'token',
+          title: 'Workspace token',
+          type: 'secret',
+          required: true,
+        },
+      ],
+    }],
+  }
+  const source = `return {form = function(event)
+    assert(event.instance ~= nil and event.setup ~= nil)
+    assert(event.values.apiKey == nil)
+    return {values = {setupIdentity = event.instance}, view = {{type = 'alert', tone = 'info', title = 'Prepare the service', text = 'Save settings before adding workspaces.'}}}
+  end}`
+  const installed = await workspace.api('/api/plugins/packages', 'POST', { manifest, source })
+  await workspace.api('/api/plugins/packages/workspace-service/approve', 'POST', { version: '1', digest: installed.digest })
+  await page.goto(workspacePath('/plugins/workspace-service'))
+  await signIn(page)
+  await page.getByRole('button', { name: 'Add instance', exact: true }).click()
+  const setup = page.getByRole('dialog', { name: 'Set up Workspace service' })
+  await expect(setup.getByText('Prepare the service', { exact: true })).toBeVisible()
+  await setup.getByLabel('Name', { exact: true }).fill('Production service')
+  await setup.getByLabel('Client ID', { exact: true }).fill('client-browser-fixture')
+  await setup.getByLabel('App key', { exact: true }).fill('app-browser-fixture')
+  await setup.getByRole('button', { name: 'Save setup', exact: true }).click()
+  await expect(setup.getByText('All changes saved', { exact: true })).toBeVisible()
+  let drafts = await workspace.api('/api/plugins/workspace-service/setup-drafts')
+  expect(drafts.items).toHaveLength(1)
+  const draft = drafts.items[0]
+  expect((await workspace.api('/api/plugins')).connections.filter((item: any) => item.pluginId === manifest.id)).toHaveLength(0)
+  expect(JSON.stringify(drafts)).not.toContain('app-browser-fixture')
+  await setup.getByRole('button', { name: 'Close dialog' }).click()
+  await page.reload()
+  await page.getByRole('button', { name: 'Continue Production service', exact: true }).click()
+  await expect(setup.getByLabel('App key', { exact: true })).toHaveValue('')
+  await setup.getByRole('button', { name: 'Add workspace', exact: true }).click()
+  await expect(setup.getByRole('button', { name: 'Activate instance', exact: true })).toBeDisabled()
+  const resource = setup.getByRole('form', { name: 'New workspace' })
+  await resource.getByLabel('Name', { exact: true }).fill('Engineering')
+  await resource.getByLabel('Workspace ID', { exact: true }).fill('T111')
+  await resource.getByLabel('Workspace token', { exact: true }).fill('workspace-browser-fixture')
+  let releaseResource!: () => void
+  let resourceStarted!: () => void
+  const held = new Promise<void>((resolve) => {
+    releaseResource = resolve
+  })
+  const entered = new Promise<void>((resolve) => {
+    resourceStarted = resolve
+  })
+  await page.route('**/plugins/workspace-service/setup-drafts/*/resources/workspace', async (route) => {
+    if (route.request().method() === 'POST') {
+      resourceStarted()
+      await held
+    }
+
+    await route.continue()
+  })
+  await resource.getByRole('button', { name: 'Save workspace', exact: true }).click()
+  await entered
+  try {
+    await expect(setup.getByRole('button', { name: 'Activate instance', exact: true })).toBeDisabled()
+  }
+  finally {
+    releaseResource()
+  }
+
+  await expect(setup.getByRole('article', { name: 'Engineering', exact: true })).toBeVisible()
+  await setup.getByRole('button', { name: 'Activate instance', exact: true }).click()
+  await expect(setup).not.toBeVisible()
+  const active = (await workspace.api('/api/plugins')).connections.find((item: any) => item.pluginId === manifest.id)
+  expect(active.id).toBe(draft.id)
+  expect(active.settings.setupIdentity).toBe(draft.id)
+  expect(active.agentIds).toEqual([])
+  const resources = await workspace.api(`/api/plugins/workspace-service/connections/${active.id}/resources/workspace`)
+  expect(resources.items).toHaveLength(1)
+  expect(resources.items[0].name).toBe('Engineering')
+  expect(JSON.stringify(resources)).not.toContain('workspace-browser-fixture')
+  const instance = page.getByRole('article', { name: 'Production service', exact: true })
+  await instance.getByRole('button', { name: 'Edit Engineering', exact: true }).click()
+  const editor = instance.getByRole('form', { name: 'Edit Engineering', exact: true })
+  await expect(editor.getByLabel('Workspace token', { exact: true })).toHaveValue('')
+  await editor.getByLabel('Name', { exact: true }).fill('Engineering team')
+  await editor.getByRole('button', { name: 'Save workspace', exact: true }).click()
+  const updated = await workspace.api(`/api/plugins/workspace-service/connections/${active.id}/resources/workspace/${resources.items[0].id}`)
+  expect(updated.name).toBe('Engineering team')
+  expect(updated.secretKeys).toEqual(['token'])
+  await instance.getByRole('button', { name: 'Delete Engineering team', exact: true }).click()
+  await instance.getByRole('button', { name: 'Confirm delete', exact: true }).click()
+  await expect(instance.getByRole('article', { name: 'Engineering team', exact: true })).not.toBeVisible()
+  drafts = await workspace.api('/api/plugins/workspace-service/setup-drafts')
+  expect(drafts.items).toEqual([])
+  await page.getByRole('button', { name: 'Add instance', exact: true }).click()
+  await expect(setup).toBeVisible()
+  await setup.getByRole('button', { name: 'Close dialog' }).click()
+  const replacement = await workspace.api('/api/plugins/packages', 'POST', {
+    manifest: {
+      ...manifest,
+      version: '2',
+      capabilities: [],
+      settings: [],
+      resources: [],
+      instanceForm: false,
+    },
+    source: 'return {}',
+  })
+  await workspace.api('/api/plugins/packages/workspace-service/approve', 'POST', { version: '2', digest: replacement.digest })
+  await page.reload()
+  await expect(page.getByText(/Package review needed · expires/)).toBeVisible()
+  await page.getByRole('button', { name: 'Discard Workspace service', exact: true }).click()
+  const discard = page.getByRole('dialog', { name: 'Discard Workspace service?' })
+  await discard.getByRole('button', { name: 'Cancel', exact: true }).click()
+  expect((await workspace.api('/api/plugins/workspace-service/setup-drafts')).items).toHaveLength(1)
+  await page.getByRole('button', { name: 'Discard Workspace service', exact: true }).click()
+  await discard.getByRole('button', { name: 'Discard setup', exact: true }).click()
+  await expect(discard).not.toBeVisible()
+  expect((await workspace.api('/api/plugins/workspace-service/setup-drafts')).items).toEqual([])
+  expect((await workspace.api('/api/plugins')).connections.find((item: any) => item.id === active.id)).toBeDefined()
+})
+
+test('setup explains credential errors and accepts an empty form answer', async ({ page, workspace }) => {
+  const manifest = {
+    id: 'setup-feedback',
+    name: 'Optional form',
+    version: '1',
+    apiVersion: 2,
+    description: 'A form that can return no additional guidance.',
+    capabilities: ['resources'],
+    instanceForm: true,
+    credential: { label: 'Service credential', header: 'authorization' },
+    settings: [{
+      key: 'verifiedTeam',
+      title: 'Verified team',
+      type: 'string',
+      hidden: true,
+    }],
+    resources: [{ name: 'workspace', title: 'Workspaces', singular: 'Workspace' }],
+  }
+  const source = `return {form = function(event)
+    if not event.credential then return {errors = {credential = 'Enter the service credential.', verifiedTeam = 'Invite the app to the workspace before continuing.'}} end
+    if event.changed == 'credential' then return nil end
+    return cairn.json.decode('{"options":null,"values":null,"errors":null,"view":null}')
+  end}`
+  const installed = await workspace.api('/api/plugins/packages', 'POST', { manifest, source })
+  await workspace.api('/api/plugins/packages/setup-feedback/approve', 'POST', { version: '1', digest: installed.digest })
+  await page.goto(workspacePath('/plugins/setup-feedback'))
+  await signIn(page)
+  await page.getByRole('button', { name: 'Add instance', exact: true }).click()
+  const setup = page.getByRole('dialog', { name: 'Set up Optional form' })
+  await expect(setup.getByText('Enter the service credential.', { exact: true })).toBeVisible()
+  await expect(setup.getByText('Invite the app to the workspace before continuing.', { exact: true })).toBeVisible()
+  await expect(setup.getByLabel('Service credential', { exact: true })).toHaveAttribute('aria-invalid', 'true')
+  await expect(setup.getByRole('button', { name: 'Activate instance', exact: true })).toBeDisabled()
+  await setup.getByLabel('Service credential', { exact: true }).fill('credential-browser-fixture')
+  await setup.getByRole('button', { name: 'Save setup', exact: true }).click()
+  await expect(setup.getByText('All changes saved', { exact: true })).toBeVisible()
+  await expect(setup.getByRole('button', { name: 'Activate instance', exact: true })).toBeEnabled()
+  await setup.getByRole('button', { name: 'Activate instance', exact: true }).click()
+  await expect(setup).not.toBeVisible()
+  const catalog = await workspace.api('/api/plugins')
+  expect(catalog.connections.find((item: any) => item.pluginId === manifest.id)).toBeDefined()
+  expect(JSON.stringify(catalog)).not.toContain('credential-browser-fixture')
+})
