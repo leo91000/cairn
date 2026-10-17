@@ -77,9 +77,10 @@ pub fn capability(method: &str) -> Option<&'static str> {
         "http.request" => "http",
         "timers.after" | "timers.cancel" => "timers",
         "conversations.submit" => "conversations.submit",
-        "conversations.check" | "conversations.answer" | "conversations.cancel" => {
-            "conversations.control"
-        }
+        "conversations.check"
+        | "conversations.answer"
+        | "conversations.cancel"
+        | "conversations.reset" => "conversations.control",
         "exec.run" => "exec",
         "socket.connect" | "socket.send" | "socket.close" | "socket.timer" => "socket",
         "inbound.accept" | "inbound.deliver" => "inbound",

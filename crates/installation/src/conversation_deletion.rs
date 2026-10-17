@@ -228,6 +228,7 @@ fn forget(db: &Db<'_>, cid: &str, run: &str) -> Result<()> {
         crate::plugins::requesters::control_prefix(cid),
         crate::plugins::turns::prefix(cid),
         crate::plugins::turns::abandoned_prefix(cid),
+        format!("plugin-reset:{cid}:"),
     ] {
         for (key, value) in db.keys(&prefix)? {
             if let Some(token) = value["publicToken"].as_str() {

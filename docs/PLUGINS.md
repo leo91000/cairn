@@ -413,8 +413,23 @@ ordinary requests retain their queue order. Admission, route, current thread
 binding and requester are rechecked when the new turn actually starts. A waiting
 workspace does not block other conversations. Editing or withdrawing the queued
 message from Cairn removes its automatic new-turn intent. Omitting `newTurn`
-preserves the original-author resume path. Full reset and external setup journeys
-remain in the Slack delivery checklist.
+preserves the original-author resume path.
+
+An admitted resource participant can call
+`cairn.conversations.reset{conversation = expectedChatId, thread = sourceThread, shared = true}`
+with the `conversations.control` capability. The expected conversation must still
+be the current binding of that source thread; stale buttons and other threads
+cannot reset its replacement. Queued messages, a preparing/running/stopping worker,
+unsettled native recovery, scheduled continuations (including paused waits) or
+undelivered replies prevent reset. Finish or stop
+that work first and wait for its reply. Reset retires only the binding: existing
+Cairn history and workspace are retained. It creates no empty conversation; the
+next source submit starts a fresh one. A retry of the same admitted event returns
+its committed receipt, including after that new conversation exists. Receipts
+expire after 30 days and conversation purge removes them; a purged expected chat
+can never identify the replacement. Old source deliveries and controls cannot act
+for a retired binding. Generic setup journeys and the Slack controls that use
+this API remain in the delivery checklist.
 
 ### Host-managed resource OAuth
 

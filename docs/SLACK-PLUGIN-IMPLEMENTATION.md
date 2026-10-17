@@ -33,7 +33,8 @@ the web/Android journeys. Tests assert observable behavior at those interfaces.
     earlier turn's controls cannot answer it. `newTurn` queues an independent
     request, rechecks its authority after the previous turn stops and starts a
     fresh native session in the same conversation. Owner pause and workspace
-    settlement are respected. Full conversation reset remains open.
+    settlement are respected. Explicit native thread reset is implemented below;
+    its Slack commands/buttons remain in the package delivery.
 - [ ] Generic OAuth, secure token capture/rotation and personal identity binding.
   - Owner-connected resource OAuth: declared scopes/endpoints, confidential and
     PKCE clients, encrypted single-use callback capture, same-owner completion,
@@ -271,3 +272,34 @@ state alongside the native session, matching ordinary native resume. This does
 not change the durable retry policy within a request. The affected route suite
 is rerun after this final correction; the broader regression and final complete
 Slack validation remain separately identified in the PR evidence.
+
+## Explicit source reset checkpoint
+
+An admitted resource participant can reset a settled thread by naming its current
+conversation and source thread. The native binding is retired atomically; Cairn
+retains the old history/workspace and creates the next conversation only when a
+new source message arrives. Pending messages, native preparation/active guards,
+unsettled recovery and undelivered replies prevent reset. Reset does not stop
+another author's active work. Source controls/deliveries reject retired bindings;
+submission rechecks its binding before resuming and before enqueueing after I/O.
+
+The first actual-worker/signed-HTTP tracer fails with the missing capability and
+passes after implementation. It proves queued/active/recovering work cannot be
+orphaned, another thread/stale button cannot detach the replacement, and Alice's
+history is retained while Bob gets a new conversation. A lost-acknowledgement
+variant first reproduces a failed reset replay without its native receipt. The
+same admitted event now returns the original receipt after a replacement has
+been created; later messages still use that replacement. No process, VM, client
+UI or live Slack app is exercised by this native lifecycle fixture. This is still
+an incomplete Slack delivery; all unchecked package/client/qualification work
+above remains required.
+
+The first independent reset review found one omitted pending-work case: a native
+scheduled continuation can survive a successful interim turn and reply. A real
+native `sleep` registration reproduces reset detaching that unfinished task.
+Reset now refuses every saved wakeup, including a due timed wait and paused
+condition wait. The condition variants use prepared native lifecycle state,
+including a saved wait whose earlier grant has been reduced; they do not claim a
+successful `wait_for` registration by a source agent without installation access.
+The owner explicitly cancels the future work before the later reset succeeds.
+A fresh full checkpoint review follows this correction.

@@ -38,6 +38,7 @@ cairn.conversations = {
     check = function(target) return call("conversations.check", target) end,
     answer = function(answer) return call("conversations.answer", answer) end,
     cancel = function(target) return call("conversations.cancel", target) end,
+    reset = function(target) return call("conversations.reset", target) end,
 }
 cairn.exec = {
     run = function(request) return call("exec.run", request) end,

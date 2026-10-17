@@ -180,6 +180,15 @@ async fn configured_fixture_with_runner(
                 end
             end,
             interaction = function(event)
+                if event.reset then
+                    local ok, result = pcall(function()
+                        return cairn.conversations.reset({conversation = event.chat, thread = event.context.thread, shared = true})
+                    end)
+                    local response = cairn.http.request({url = 'https://api.example.test/reset-result', method = 'POST',
+                        json = ok and result or {status = 'refused'}})
+                    if response.status >= 500 then error('The reset acknowledgement was interrupted') end
+                    return response
+                end
                 if event.stopDelay then
                     local result = {}
                     if event.stopDelay ~= 'wait' then
@@ -3230,4 +3239,301 @@ async fn a_sending_ordinary_request_keeps_its_place_before_an_independent_reques
         "the independent request bypassed an ordinary message already being sent"
     );
     session.stop().await;
+}
+
+#[tokio::test]
+async fn an_authorized_participant_can_reset_a_settled_thread_without_erasing_its_history() {
+    let (_root, s, instance, resource, app) = fixture().await;
+    let (results, mut received) = tokio::sync::mpsc::unbounded_channel();
+    let fail_first_reset = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let upstream = axum::Router::new().route(
+        "/reset-result",
+        axum::routing::post(move |axum::Json(value): axum::Json<Value>| {
+            let fail = value["reset"] == true
+                && fail_first_reset.swap(false, std::sync::atomic::Ordering::SeqCst);
+            results.send(value).unwrap();
+            async move {
+                (
+                    if fail {
+                        StatusCode::SERVICE_UNAVAILABLE
+                    } else {
+                        StatusCode::OK
+                    },
+                    axum::Json(json!({ "ok": true })),
+                )
+            }
+        }),
+    );
+    let (origin, server) = common::serve_locally(upstream).await;
+    s.plugins.route_http_to(Some(origin));
+    let agent = s
+        .agent(
+            json!({
+                "name": "Scoped",
+                "access": { "projects": [], "installation": false, "github": false },
+            }),
+            None,
+        )
+        .await
+        .unwrap();
+    create_route(
+        &app,
+        &instance,
+        &resource,
+        json!({
+            "name": "Thread", "enabled": true, "match": { "channel": "C1" },
+            "agentId": agent["id"], "userIds": ["alice", "bob"],
+        }),
+    )
+    .await;
+    let package = registry::active(&s, "router").await.unwrap();
+    let connection = connections::get(&s, "router", &instance).await.unwrap();
+    let mut session = s
+        .plugins
+        .host
+        .start(
+            &PathBuf::from(env!("CARGO_BIN_EXE_cairn")),
+            &package.manifest,
+            &package.source,
+        )
+        .await
+        .unwrap();
+    let message = |id: &str, author: &str| {
+        json!({
+            "id": id, "resource": resource, "author": { "id": author },
+            "context": { "channel": "C1", "thread": "thread" },
+            "body": { "text": format!("Request from {author}") },
+        })
+    };
+    assert_eq!(
+        deliver(&app, &instance, message("first", "alice")).await.1["status"],
+        "accepted"
+    );
+    runtime::pump(&s, &connection, &mut session).await.unwrap();
+    let original = s.chat_list().await.unwrap()[0].clone();
+    let chat = text(&original, "id");
+    let reset = |id: &str| {
+        json!({
+            "id": id, "kind": "interaction", "resource": resource, "author": { "id": "bob" },
+            "context": { "channel": "C1", "thread": "thread" },
+            "body": { "reset": true, "chat": chat },
+        })
+    };
+    assert_eq!(
+        deliver(&app, &instance, reset("before-settlement")).await.1["status"],
+        "accepted"
+    );
+    runtime::pump(&s, &connection, &mut session).await.unwrap();
+    assert_eq!(
+        received.recv().await.unwrap()["status"],
+        "refused",
+        "reset orphaned queued work"
+    );
+
+    // Native lifecycle fixture: no process or VM is launched.
+    s.chat_tick(&std::collections::HashSet::new())
+        .await
+        .unwrap();
+    let detail = s.chat_detail(chat).await.unwrap();
+    let run = text(&detail["run"], "id");
+    s.chat_acknowledge(run, text(&detail["run"]["chatExecution"], "messageId"))
+        .await
+        .unwrap();
+    s.store
+        .patch_run(
+            run,
+            json!({ "status": "running", "recoveryPending": false }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        deliver(&app, &instance, reset("active-reset")).await.1["status"],
+        "accepted"
+    );
+    runtime::pump(&s, &connection, &mut session).await.unwrap();
+    assert_eq!(
+        received.recv().await.unwrap()["status"],
+        "refused",
+        "reset orphaned active work"
+    );
+    s.store
+        .event(run, "turn.completed", "", None)
+        .await
+        .unwrap();
+    s.store
+        .patch_run(
+            run,
+            json!({"status": "succeeded", "recoveryPending": false}),
+        )
+        .await
+        .unwrap();
+    runtime::pump(&s, &connection, &mut session).await.unwrap();
+
+    let configuration = s
+        .mcps
+        .run_configuration(&s, &s.store.run(run).await.unwrap())
+        .await
+        .unwrap();
+    let bearer = text(&configuration["env"], "CAIRN_MCP_RUN_TOKEN");
+    for mode in ["timed", "due", "condition", "paused-condition"] {
+        s.store
+            .patch_run(run, json!({ "status": "running" }))
+            .await
+            .unwrap();
+        cairn_installation::chats::sleep::schedule(
+            &s,
+            bearer,
+            &json!({
+                "seconds": if mode == "due" { 1 } else { 3600 }, "reason": "Await provider result",
+            }),
+        )
+        .await
+        .unwrap();
+        if mode.contains("condition") {
+            // Prepared native wait state. Source agents cannot acquire installation
+            // access to register run_finished; this also represents a saved wait
+            // whose earlier grants have since been reduced, awaiting its native result.
+            let mut waiting = s.get("chats", chat).await.unwrap();
+            waiting["wakeup"]["condition"] = json!({
+                "type": "run_finished", "runId": cairn_installation::config::id(),
+            });
+            s.store.put("chats", waiting).await.unwrap();
+        }
+        s.store
+            .patch_run(run, json!({ "status": "succeeded" }))
+            .await
+            .unwrap();
+        if mode == "due" {
+            tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
+        }
+        if mode.starts_with("paused") {
+            s.chat_pause(chat, true).await.unwrap();
+        }
+        assert_eq!(
+            deliver(&app, &instance, reset(&format!("waiting-{mode}")))
+                .await
+                .1["status"],
+            "accepted"
+        );
+        runtime::pump(&s, &connection, &mut session).await.unwrap();
+        assert_eq!(
+            received.recv().await.unwrap()["status"],
+            "refused",
+            "reset orphaned {mode} continuation"
+        );
+        assert!(s.chat_detail(chat).await.unwrap()["wakeup"].is_object());
+        // The owner explicitly cancels this future work; reset itself must not.
+        s.chat_pause(chat, false).await.unwrap();
+        s.worker.cancel(&s, run).await.unwrap();
+        assert!(s.chat_detail(chat).await.unwrap()["wakeup"].is_null());
+    }
+
+    s.store
+        .patch_run(run, json!({ "recoveryPending": true }))
+        .await
+        .unwrap();
+    assert_eq!(
+        deliver(&app, &instance, reset("before-recovery")).await.1["status"],
+        "accepted"
+    );
+    runtime::pump(&s, &connection, &mut session).await.unwrap();
+    assert_eq!(
+        received.recv().await.unwrap()["status"],
+        "refused",
+        "reset orphaned recovery"
+    );
+    s.store
+        .patch_run(run, json!({ "recoveryPending": false }))
+        .await
+        .unwrap();
+    let mut wrong_thread = reset("another-thread");
+    wrong_thread["context"]["thread"] = json!("unrelated-thread");
+    assert_eq!(
+        deliver(&app, &instance, wrong_thread).await.1["status"],
+        "accepted"
+    );
+    runtime::pump(&s, &connection, &mut session).await.unwrap();
+    assert_eq!(
+        received.recv().await.unwrap()["status"],
+        "refused",
+        "another thread could reset this one"
+    );
+
+    assert_eq!(
+        deliver(&app, &instance, reset("settled-reset")).await.1["status"],
+        "accepted"
+    );
+    runtime::pump(&s, &connection, &mut session).await.unwrap();
+    let result = received.recv().await.unwrap();
+    assert_eq!(
+        result["reset"], true,
+        "settled thread could not be reset: {result}"
+    );
+    assert_eq!(result["conversation"], chat);
+    assert_eq!(
+        s.chat_list().await.unwrap().len(),
+        1,
+        "reset created an empty conversation"
+    );
+    assert_eq!(
+        s.chat_detail(chat).await.unwrap()["messages"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(
+        deliver(&app, &instance, message("after-reset", "bob"))
+            .await
+            .1["status"],
+        "accepted"
+    );
+    runtime::pump(&s, &connection, &mut session).await.unwrap();
+    let chats = s.chat_list().await.unwrap();
+    assert_eq!(
+        chats.len(),
+        2,
+        "the next message reused the retired thread's history"
+    );
+    let next = chats.iter().find(|value| value["id"] != chat).unwrap();
+    assert_ne!(next["id"], chat);
+    assert_eq!(
+        s.chat_detail(text(next, "id")).await.unwrap()["messages"][0]["text"],
+        "Request from bob"
+    );
+    assert_eq!(
+        s.chat_detail(chat).await.unwrap()["messages"][0]["text"],
+        "Request from alice"
+    );
+    // The first reset committed, but its HTTP acknowledgement failed. Its durable
+    // handler retry must return that receipt after Bob has created the new binding.
+    tokio::time::sleep(std::time::Duration::from_millis(5100)).await;
+    runtime::pump(&s, &connection, &mut session).await.unwrap();
+    assert_eq!(
+        received.recv().await.unwrap(),
+        result,
+        "reset replay lost its committed receipt"
+    );
+    assert_eq!(
+        deliver(&app, &instance, message("same-new-thread", "bob"))
+            .await
+            .1["status"],
+        "accepted"
+    );
+    runtime::pump(&s, &connection, &mut session).await.unwrap();
+    assert_eq!(
+        s.chat_list().await.unwrap().len(),
+        2,
+        "reset retry detached the replacement conversation"
+    );
+    assert_eq!(
+        deliver(&app, &instance, reset("stale-reset-button"))
+            .await
+            .1["status"],
+        "accepted"
+    );
+    runtime::pump(&s, &connection, &mut session).await.unwrap();
+    assert_eq!(received.recv().await.unwrap()["status"], "refused");
+    session.stop().await;
+    server.abort();
 }

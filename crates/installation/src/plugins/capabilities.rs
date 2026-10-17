@@ -74,6 +74,7 @@ pub async fn checked(s: &Service, context: &Context, method: &str, args: Value) 
         "conversations.check" => super::work::check(s, context, &args).await,
         "conversations.answer" => super::work::answer(s, context, &args).await,
         "conversations.cancel" => super::work::cancel(s, context, &args).await,
+        "conversations.reset" => super::work::reset(s, context, &args).await,
         "inbound.accept" | "inbound.deliver" => {
             super::work::inbound(s, context, &args, method == "inbound.deliver").await
         }

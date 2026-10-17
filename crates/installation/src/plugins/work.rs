@@ -556,9 +556,11 @@ pub async fn submit(s: &Service, context: &Context, args: &Value) -> Result<Valu
             let event = event.clone();
             let resumed_chat = chat_id.clone();
             let resumed_run = run_id.to_owned();
+            let resumed_thread = thread.clone();
             s.worker
                 .resume_authorized(s, run_id, move |db| {
                     let (connection, author) = admit(db, &expected, &event)?;
+                    require_binding(db, &binding(&connection, &author, &resumed_thread, shared), &resumed_chat)?;
                     if let Some(principal) = super::requesters::Principal::admitted(&connection, &author) {
                         let chat = db.get("chats", &resumed_chat)?
                             .ok_or_else(|| Error::not_found("Conversation no longer exists."))?;
@@ -598,6 +600,7 @@ pub async fn submit(s: &Service, context: &Context, args: &Value) -> Result<Valu
             crate::conversation_lifecycle::require_active(&chat)?;
             chat["paused"] = json!(chat["pausedByUser"] == true);
             db.put("chats", &chat)?;
+            require_binding(db, &binding(&connection, &author, &thread, shared), &chat_id)?;
             let counters = limits(db, &connection, &author)?;
             let message_id = id();
             let message = json!({ "id": message_id, "text": content, "attachmentIds": attachment_ids });
@@ -691,7 +694,9 @@ fn conversation(
             .ok_or_else(|| Error::not_found("Conversation not found."))?,
     };
     let owner = db.kv(&format!("plugin-conversation:{chat}"))?;
-    let Some(owner) = owner.filter(|owner| owner["connectionId"] == connection.id) else {
+    let Some(owner) = owner
+        .filter(|owner| owner["connectionId"] == connection.id && owner["retiredAt"].is_null())
+    else {
         return Err(Error::not_found("Conversation not found."));
     };
     if let Some(principal) = super::requesters::Principal::admitted(connection, author) {
@@ -886,6 +891,132 @@ pub async fn cancel(s: &Service, context: &Context, args: &Value) -> Result<Valu
     Ok(json!({ "stopped": true, "conversation": chat }))
 }
 
+/// Retire a settled source binding, preserving its Cairn history. The next source
+/// message creates its own conversation; retrying this event never detaches it.
+pub async fn reset(s: &Service, context: &Context, args: &Value) -> Result<Value> {
+    if !personal(&context.event) || context.connection.routing.is_none() {
+        return Err(Error::forbidden(
+            "Only an admitted resource person can reset a thread.",
+        ));
+    }
+    let chat = text(args, "conversation").to_owned();
+    crate::validation::uuid(&chat)?;
+    let thread = text(args, "thread").to_owned();
+    if thread.is_empty()
+        || thread.chars().count() > 200
+        || args.get("shared").is_some_and(|v| !v.is_boolean())
+    {
+        return Err(Error::bad(
+            "Name the source thread and its expected conversation.",
+        ));
+    }
+    let shared = args["shared"] != false;
+    ensure_owner(s, &context.connection).await?;
+    let (expected, event, expected_chat) = (
+        context.connection.clone(),
+        context.event.clone(),
+        chat.clone(),
+    );
+    let receipt_key = format!("plugin-reset:{chat}:{}", text(&event, "id"));
+    let lookup_key = receipt_key.clone();
+    let initial = s
+        .store
+        .read(move |db| {
+            admit(db, &expected, &event)?;
+            if let Some(receipt) = db.kv(&lookup_key)? {
+                return Ok(Err(receipt));
+            }
+            let chat = db
+                .get("chats", &expected_chat)?
+                .ok_or_else(|| Error::not_found("Conversation not found."))?;
+            Ok(Ok(text(&chat, "runId").to_owned()))
+        })
+        .await?;
+    let run = match initial {
+        Ok(run) => run,
+        Err(receipt) => return Ok(receipt),
+    };
+    let preparation = s.worker.run_preparation_lock(&run).await;
+    let _preparation = preparation
+        .try_lock_owned()
+        .map_err(|_| Error::conflict("Wait for this conversation to finish preparing."))?;
+    let active = s
+        .worker
+        .active
+        .try_lock()
+        .map_err(|_| Error::conflict("Wait for this conversation to finish stopping."))?;
+    if active.contains_key(&run) {
+        return Err(Error::conflict(
+            "Wait for this conversation to finish stopping.",
+        ));
+    }
+    let (expected, event) = (context.connection.clone(), context.event.clone());
+    s.store
+        .transaction(move |db| {
+            let (connection, author) = admit(db, &expected, &event)?;
+            if let Some(receipt) = db.kv(&receipt_key)? {
+                return Ok(receipt);
+            }
+            let binding_key = binding(&connection, &author, &thread, shared);
+            require_binding(db, &binding_key, &chat)?;
+            let detail = db
+                .get("chats", &chat)?
+                .ok_or_else(|| Error::not_found("Conversation not found."))?;
+            crate::conversation_lifecycle::require_active(&detail)?;
+            if detail["runId"].as_str().unwrap_or("") != run {
+                return Err(Error::conflict("The conversation's execution changed."));
+            }
+            let pending = db
+                .messages(&chat)?
+                .iter()
+                .any(|message| message["status"] == "queued" || message["status"] == "sending");
+            let delivering = db
+                .list(DELIVERIES)?
+                .iter()
+                .any(|delivery| delivery["chatId"] == chat);
+            let execution = if run.is_empty() { None } else { db.run(&run)? };
+            let unsettled = execution.as_ref().is_some_and(|run| {
+                crate::run_status::RunStatus::of(run)
+                    .is_none_or(crate::run_status::RunStatus::is_active)
+                    || run["recoveryPending"] == true
+            });
+            if pending || delivering || unsettled || detail["wakeup"].is_object() {
+                return Err(Error::conflict(
+                    "Finish or stop the current work and wait for its reply before resetting.",
+                ));
+            }
+            let owner_key = format!("plugin-conversation:{chat}");
+            let mut owner = db
+                .kv(&owner_key)?
+                .filter(|owner| owner["connectionId"] == connection.id && owner["thread"] == thread)
+                .ok_or_else(|| Error::not_found("Conversation not found."))?;
+            owner["retiredAt"] = json!(now());
+            db.set(&owner_key, &owner, None)?;
+            db.delete(&binding_key)?;
+            let receipt = json!({ "reset": true, "conversation": chat });
+            db.set(&receipt_key, &receipt, Some(now() + 30 * 86_400_000))?;
+            db.audit(
+                "plugin.conversation.reset",
+                &json!({
+                    "connectionId": connection.id, "chatId": chat, "userId": author,
+                }),
+            )?;
+            Ok(receipt)
+        })
+        .await
+}
+
+/// Source authority is tied to this exact binding, even across slow submission I/O.
+fn require_binding(db: &Db<'_>, key: &str, chat: &str) -> Result<()> {
+    let owner = db.kv(&format!("plugin-conversation:{chat}"))?;
+    if db.kv(key)?.as_ref() != Some(&json!(chat))
+        || owner.is_none_or(|owner| !owner["retiredAt"].is_null())
+    {
+        return Err(Error::conflict("This source thread has been reset."));
+    }
+    Ok(())
+}
+
 /// Where the admitted message stands in its conversation's run.
 enum Turn {
     Waiting,
@@ -911,7 +1042,10 @@ fn turn(db: &Db<'_>, connection: &Connection, delivery: &Value) -> Result<Turn> 
     let chat = db
         .get("chats", text(delivery, "chatId"))?
         .ok_or_else(|| Error::not_found("Conversation no longer exists."))?;
-    if !crate::conversation_lifecycle::is_active(&chat) {
+    let owner = db.kv(&format!("plugin-conversation:{}", text(&chat, "id")))?;
+    if !crate::conversation_lifecycle::is_active(&chat)
+        || owner.is_none_or(|owner| !owner["retiredAt"].is_null())
+    {
         return Err(Error::forbidden("Conversation is no longer active."));
     }
     if let Some(ended) = db.kv(&super::turns::abandoned_key(

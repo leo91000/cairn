@@ -236,6 +236,11 @@ export type Cairn = {
             answers: { [string]: string },
         }) -> { status: string },
         cancel: (target: { conversation: string?, thread: string?, shared: boolean?, delivery: string? }) -> { stopped: boolean },
+        -- Resource-routed admitted people only. Reset a settled source thread,
+        -- naming its expected conversation; outstanding work/replies must finish.
+        -- Cairn keeps its history. The next submit creates a new conversation.
+        -- Retrying the same admitted event returns the committed reset receipt.
+        reset: (target: { conversation: string, thread: string, shared: boolean? }) -> { reset: boolean, conversation: string },
     },
 }
 
