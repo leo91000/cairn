@@ -177,6 +177,13 @@ pub async fn routes(s: &Arc<Service>, input: &Input) -> Result<Value> {
     let body = &input.body;
     let version = || crate::validation::text(body, "version").to_owned();
     match (input.method.as_str(), parts.as_slice()) {
+        ("GET", ["plugins", "personal-authorizations"]) => {
+            let account = input
+                .identity
+                .as_ref()
+                .map_or("", |identity| identity.account_id.as_str());
+            oauth::personal::list(s, account, input.query.get("cursor").map(String::as_str)).await
+        }
         ("GET", ["plugins"]) => {
             let mut catalog = registry::catalog(s).await?;
             let mut overview = connections::overview(s).await?;

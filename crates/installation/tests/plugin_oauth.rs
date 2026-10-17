@@ -1096,6 +1096,60 @@ async fn personal_oauth_isolated_by_verified_account_and_provider_subject() {
     identity["origin"] = json!(authority_origin);
     std::fs::write(&identity_path, serde_json::to_vec(&identity).unwrap()).unwrap();
 
+    let discovery = "/api/plugins/personal-authorizations";
+    let discovered =
+        common::send(&app, member_request("GET", discovery, Value::Null, "alice")).await;
+    assert_eq!(
+        discovered.status(),
+        StatusCode::OK,
+        "{}",
+        common::read_text(discovered).await
+    );
+    let discovered = common::read_json(discovered).await;
+    assert_eq!(discovered["items"].as_array().unwrap().len(), 1);
+    assert_eq!(discovered["items"][0]["resourceName"], "Engineering");
+    assert_eq!(
+        discovered["items"][0]["authorization"]["status"],
+        "disconnected"
+    );
+    for private in [
+        "client-secret-fixture",
+        "client-fixture",
+        "externalId",
+        "settings",
+        "owner_access",
+        "alice-membership-1",
+    ] {
+        assert!(
+            !discovered.to_string().contains(private),
+            "discovery exposed {private}"
+        );
+    }
+    assert_eq!(
+        common::send(
+            &app,
+            member_request("GET", "/api/plugins", Value::Null, "alice")
+        )
+        .await
+        .status(),
+        StatusCode::FORBIDDEN
+    );
+    assert_eq!(
+        common::send(&app, member_request("POST", discovery, json!({}), "alice"))
+            .await
+            .status(),
+        StatusCode::FORBIDDEN
+    );
+    assert_eq!(
+        common::send(
+            &app,
+            member_request("GET", discovery, Value::Null, "stranger")
+        )
+        .await
+        .status(),
+        StatusCode::FORBIDDEN
+    );
+
     let provider = axum::Router::new().route(
         "/token",
         axum::routing::post(
@@ -1188,6 +1242,14 @@ async fn personal_oauth_isolated_by_verified_account_and_provider_subject() {
         )
         .await;
         assert_eq!(status["subject"], subject);
+        let own = common::read_json(
+            common::send(&app, member_request("GET", discovery, Value::Null, account)).await,
+        )
+        .await;
+        assert_eq!(own["items"][0]["authorization"]["subject"], subject);
+        let other = if account == "alice" { "U222" } else { "U111" };
+        assert!(!own.to_string().contains(other));
+        assert!(!own.to_string().contains("personal-"));
     }
     let duplicate = common::send(
         &app,
@@ -1402,6 +1464,12 @@ async fn personal_oauth_isolated_by_verified_account_and_provider_subject() {
     assert_eq!(bob["status"], "authorized");
     assert_eq!(bob["subject"], "U222");
     policy.lock().unwrap()["members"] = json!([]);
+    assert_eq!(
+        common::send(&app, member_request("GET", discovery, Value::Null, "bob"))
+            .await
+            .status(),
+        StatusCode::FORBIDDEN
+    );
     let removed = common::send(&app, member_request("GET", &path, Value::Null, "bob")).await;
     assert_eq!(removed.status(), StatusCode::FORBIDDEN);
     policy.lock().unwrap()["members"] =
@@ -1414,6 +1482,49 @@ async fn personal_oauth_isolated_by_verified_account_and_provider_subject() {
         rejoined["status"], "reconnect",
         "rejoining restored the revoked membership's token"
     );
+    policy.lock().unwrap()["members"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!({"account_id": "charlie", "access_id": "charlie-membership-1"}));
+    let connection = connections::get(&s, "example", &instance).await.unwrap();
+    connections::save(
+        &s,
+        "example",
+        &json!({"name": connection.name, "enabled": false, "settings": connection.settings}),
+        Some(&instance),
+    )
+    .await
+    .unwrap();
+    let paused = common::read_json(
+        common::send(&app, member_request("GET", discovery, Value::Null, "bob")).await,
+    )
+    .await;
+    assert_eq!(
+        paused["items"].as_array().unwrap().len(),
+        1,
+        "pausing hid the person's existing authorization"
+    );
+    assert_eq!(paused["items"][0]["enabled"], false);
+    let unavailable = common::read_json(
+        common::send(
+            &app,
+            member_request("GET", discovery, Value::Null, "charlie"),
+        )
+        .await,
+    )
+    .await;
+    assert!(unavailable["items"].as_array().unwrap().is_empty());
+    assert_eq!(
+        common::send(&app, member_request("DELETE", &path, Value::Null, "bob"))
+            .await
+            .status(),
+        StatusCode::OK
+    );
+    let disconnected = common::read_json(
+        common::send(&app, member_request("GET", discovery, Value::Null, "bob")).await,
+    )
+    .await;
+    assert!(disconnected["items"].as_array().unwrap().is_empty());
     server.abort();
     authority_server.abort();
 }
@@ -2591,4 +2702,190 @@ async fn final_form_cannot_promote_oauth_from_a_different_client_app() {
     .await;
     assert_eq!(common::read_json(response).await["status"], "authorized");
     server.abort();
+}
+
+#[tokio::test]
+async fn personal_authorization_discovery_pages_only_personal_providers() {
+    let (_root, s, instance, _resource, _path, app) = configured_fixture(false, true).await;
+    let original = registry::active(&s, "example").await.unwrap();
+    let mut manifest = serde_json::to_value(&original.manifest).unwrap();
+    manifest["version"] = json!("2");
+    let mut owner_provider = manifest["oauth"][0].clone();
+    owner_provider["name"] = json!("owner");
+    owner_provider["title"] = json!("Owner-only connection");
+    owner_provider.as_object_mut().unwrap().remove("personal");
+    manifest["oauth"]
+        .as_array_mut()
+        .unwrap()
+        .push(owner_provider);
+    let installed = registry::install(
+        &s,
+        &json!({"manifest": manifest, "source": original.source.main}),
+    )
+    .await
+    .unwrap();
+    registry::approve(&s, "example", "2", text(&installed, "digest"))
+        .await
+        .unwrap();
+    for i in 0..100 {
+        resources::save(
+            &s,
+            "example",
+            &instance,
+            "workspace",
+            &json!({"name": format!("Workspace {i}"), "settings": {"externalId": "T111"}}),
+            None,
+        )
+        .await
+        .unwrap();
+    }
+    let path = "/api/plugins/personal-authorizations";
+    let first = common::send(
+        &app,
+        request("GET", path, Value::Null, Some("fixture-owner")),
+    )
+    .await;
+    assert_eq!(
+        first.status(),
+        StatusCode::OK,
+        "{}",
+        common::read_text(first).await
+    );
+    let first = common::read_json(first).await;
+    assert_eq!(first["items"].as_array().unwrap().len(), 100);
+    assert!(!first.to_string().contains("Owner-only connection"));
+    let cursor = text(&first, "nextCursor");
+    assert!(!cursor.is_empty());
+    let second = common::read_json(
+        common::send(
+            &app,
+            request(
+                "GET",
+                &format!("{path}?cursor={cursor}"),
+                Value::Null,
+                Some("fixture-owner"),
+            ),
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(second["items"].as_array().unwrap().len(), 1);
+    assert!(second["nextCursor"].is_null());
+    let mut ids = first["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|item| text(item, "id"))
+        .collect::<HashSet<_>>();
+    assert!(ids.insert(text(&second["items"][0], "id")));
+    assert_eq!(ids.len(), 101);
+    assert_eq!(
+        common::send(
+            &app,
+            request(
+                "GET",
+                &format!("{path}?cursor=bad"),
+                Value::Null,
+                Some("fixture-owner")
+            )
+        )
+        .await
+        .status(),
+        StatusCode::BAD_REQUEST
+    );
+}
+
+#[tokio::test]
+async fn personal_discovery_rechecks_membership_owner_and_package_after_loading_metadata() {
+    for changed in ["membership", "owner", "approval"] {
+        let (_root, s, _instance, _resource, _path, app) = configured_fixture(false, true).await;
+        let reads = Arc::new(AtomicUsize::new(0));
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let reads_ref = reads.clone();
+        let entered_ref = entered.clone();
+        let release_ref = release.clone();
+        let authority = axum::Router::new().route(
+            "/api/relay/00000000-0000-4000-8000-000000000055/task-authors",
+            axum::routing::get(move || {
+                let read = reads_ref.fetch_add(1, Ordering::SeqCst);
+                let entered = entered_ref.clone();
+                let release = release_ref.clone();
+                async move {
+                    if read == 1 {
+                        entered.notify_one();
+                        release.notified().await;
+                    }
+                    axum::Json(json!({
+                        "owner": {
+                            "account_id": "fixture-owner",
+                            "access_id": if read > 0 && changed == "owner" {"new-owner-access"} else {"fixture-owner"}
+                        },
+                        "members": [{
+                            "account_id": "alice",
+                            "access_id": if read > 0 && changed == "membership" {"alice-rejoined"} else {"alice-original"}
+                        }]
+                    }))
+                }
+            }),
+        );
+        let (origin, authority_server) = common::serve_locally(authority).await;
+        let identity_path = s.config.data_dir.join("installation-relay/identity.json");
+        let mut identity: Value =
+            serde_json::from_slice(&std::fs::read(&identity_path).unwrap()).unwrap();
+        identity["origin"] = json!(origin);
+        std::fs::write(identity_path, serde_json::to_vec(&identity).unwrap()).unwrap();
+        let app_ref = app.clone();
+        let pending = tokio::spawn(async move {
+            common::send(
+                &app_ref,
+                member_request(
+                    "GET",
+                    "/api/plugins/personal-authorizations",
+                    Value::Null,
+                    "alice",
+                ),
+            )
+            .await
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(5), entered.notified())
+            .await
+            .unwrap();
+        if changed == "approval" {
+            let original = registry::active(&s, "example").await.unwrap();
+            let mut manifest = serde_json::to_value(&original.manifest).unwrap();
+            manifest["version"] = json!("2");
+            let installed = registry::install(
+                &s,
+                &json!({"manifest": manifest, "source": original.source.main}),
+            )
+            .await
+            .unwrap();
+            let approved = common::send(
+                &app,
+                request(
+                    "POST",
+                    "/api/plugins/packages/example/approve",
+                    json!({"version": "2", "digest": installed["digest"]}),
+                    Some("fixture-owner"),
+                ),
+            )
+            .await;
+            assert_eq!(approved.status(), StatusCode::OK);
+        }
+        release.notify_one();
+        let response = pending.await.unwrap();
+        let expected = if changed == "approval" {
+            StatusCode::CONFLICT
+        } else {
+            StatusCode::FORBIDDEN
+        };
+        assert_eq!(
+            response.status(),
+            expected,
+            "stale {changed} discovery: {}",
+            common::read_text(response).await
+        );
+        authority_server.abort();
+    }
 }

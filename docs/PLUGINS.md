@@ -629,6 +629,27 @@ Responses include the verified `subject`, never tokens. Disconnect before linkin
 a different external person. Disconnecting one person leaves others connected and
 fences code exchanges already in flight.
 
+Atelier → **Your plugin accounts** (Android: **Vos comptes de plugins**) is available
+to owners and members. It lists personal providers on configured live resources,
+lets the person choose explicit scopes, open the provider's HTTPS consent page,
+check its completion and confirm disconnection. Signing in grants no agent access.
+The pending consent URL and state stay in the current page's memory; after leaving
+it, start a new sign-in. A pending callback can be checked again, but an uncertain
+exchange failure ends that local flow rather than retrying a possibly consumed code.
+Disconnection removes Cairn's authorization and pending sign-ins; provider-side
+revocation still requires the service's settings.
+
+`GET /api/plugins/personal-authorizations?cursor=…` is a member-readable directory
+of labels, provider scopes and only that account's authorization summary. It never
+returns settings, secrets, another person's status or access to the owner catalog.
+It requires current installation membership, a currently approved personal provider
+and a configured stable resource ID. Pages contain at most 100 entries and an opaque
+`nextCursor`. Paused/unavailable resources are listed only when the current person
+already has an authorization, so they can disconnect it. An unapproved package
+contributes no entries until the owner restores approval. Membership and approval
+are checked again after loading package metadata; resource and own-authorization
+reads share a single SQLite snapshot.
+
 Resource-granted tools and commands select personal credentials from the current
 chat turn's authenticated author. The host records this authority atomically with
 the message; an input's claimed account, the conversation's first author and the

@@ -135,6 +135,46 @@ data class PluginResource(
 
 @Serializable data class PluginOAuthPersonal(val subject: String = "")
 
+/** Safe authorization summary: provider credentials never reach either client. */
+@Serializable
+data class PluginOAuthStatus(
+    val status: String = "disconnected",
+    val scopes: List<String> = emptyList(),
+    val requestedScopes: List<String> = emptyList(),
+    val expiresAt: Long? = null,
+    val subject: String? = null,
+)
+
+/** A short-lived sign-in held only in the current screen's memory. */
+@Serializable
+data class PluginOAuthConsent(
+    val state: String,
+    val url: String,
+    val expiresAt: Long,
+)
+
+/** The member directory exposes labels and only the current person's status. */
+@Serializable
+data class PluginPersonalAuthorization(
+    val id: String = "",
+    val pluginId: String = "",
+    val pluginName: String = "",
+    val instanceId: String = "",
+    val instanceName: String = "",
+    val collection: String = "",
+    val resourceId: String = "",
+    val resourceName: String = "",
+    val providerName: String = "",
+    val title: String = "",
+    val scopes: List<String> = emptyList(),
+    val enabled: Boolean = false,
+    val authorization: PluginOAuthStatus = PluginOAuthStatus(),
+) {
+    val path: String
+        get() =
+            "/plugins/${segment(pluginId)}/connections/${segment(instanceId)}/resources/${segment(collection)}/${segment(resourceId)}/oauth/${segment(providerName)}"
+}
+
 @Serializable
 data class PluginOAuthProvider(
     val name: String = "",

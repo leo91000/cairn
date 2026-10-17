@@ -1074,6 +1074,144 @@ abstract class PluginsCases {
         }
     }
 
+    @Test
+    fun membersCanOpenTheirOwnPluginAccountsWithoutOwnerManagement() {
+        MockWebServer().use { server ->
+            server.dispatcher = dispatcher { _, _ -> null }
+            server.start()
+            var destination = ""
+            show(server) { vm, state ->
+                AtelierScreen(
+                    vm,
+                    state.copy(
+                        installation = state.installation?.copy(role = InstallationRole.Member)
+                    ),
+                ) {
+                    destination = it
+                }
+            }
+            compose.waitUntil(30000) {
+                compose
+                    .onAllNodesWithText("Atelier", substring = false)
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
+            }
+            compose.onNodeWithText("Vos comptes de plugins").performScrollTo().performClick()
+            compose.runOnIdle { assertEquals("personal-connections", destination) }
+            compose.onNodeWithText("Connexions").assertDoesNotExist()
+            compose.onNodeWithText("Plugins", substring = false).assertDoesNotExist()
+        }
+    }
+
+    @Test
+    fun personalPluginAuthorizationSelectsScopesChecksConsentAndDisconnects() {
+        val oauth =
+            "/api/installations/fixture/api/plugins/personal-ui/connections/app/resources/workspace/team/oauth/personal"
+        val starts = CopyOnWriteArrayList<JsonObject>()
+        val finishes = java.util.concurrent.atomic.AtomicInteger(0)
+        val connected = java.util.concurrent.atomic.AtomicBoolean(false)
+        val disconnected = java.util.concurrent.atomic.AtomicBoolean(false)
+        fun status() =
+            if (connected.get())
+                """{"status":"authorized","scopes":["messages:read"],"requestedScopes":["messages:read"],"subject":"U111"}"""
+            else """{"status":"disconnected"}"""
+        MockWebServer().use { server ->
+            server.dispatcher =
+                dispatcher(
+                    read = { path ->
+                        if (path.endsWith("/plugins/personal-authorizations"))
+                            """{"items":[{"id":"own-authorization","pluginId":"personal-ui","pluginName":"Personal service","instanceId":"app","instanceName":"Company service","collection":"workspace","resourceId":"team","resourceName":"Engineering","providerName":"personal","title":"Personal workspace access","enabled":true,"scopes":["messages:read","messages:write"],"authorization":${status()}}]}"""
+                        else null
+                    }
+                ) { path, body ->
+                    when (path) {
+                        oauth -> {
+                            val parsed = wireJson.parseToJsonElement(body).jsonObject
+                            if ("scopes" in parsed) {
+                                starts += parsed
+                                """{"state":"fixture-state","url":"https://provider.example.test/authorize","expiresAt":${System.currentTimeMillis() + 600000}}"""
+                            } else {
+                                connected.set(false)
+                                disconnected.set(true)
+                                status()
+                            }
+                        }
+                        "$oauth/finish" -> {
+                            assertEquals(
+                                "fixture-state",
+                                wireJson
+                                    .parseToJsonElement(body)
+                                    .jsonObject["state"]
+                                    ?.jsonPrimitive
+                                    ?.content,
+                            )
+                            if (finishes.incrementAndGet() == 1) """{"status":"pending"}"""
+                            else {
+                                connected.set(true)
+                                status()
+                            }
+                        }
+                        else -> null
+                    }
+                }
+            server.start()
+            show(server) { vm, state -> PersonalPluginAccountsScreen(vm, state) }
+            compose.waitUntil(30000) {
+                compose
+                    .onAllNodesWithText("Connecter", substring = false)
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
+            }
+            compose.onNodeWithText("Vos comptes de plugins").assertExists()
+            compose.onNodeWithText("Connecter", substring = false).assertIsNotEnabled()
+            compose.onNodeWithText("messages:read").performScrollTo().performClick()
+            compose.onNodeWithText("Connecter", substring = false).performScrollTo().performClick()
+            compose.waitUntil(10000) {
+                compose
+                    .onAllNodesWithText("Ouvrir la page d’autorisation")
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
+            }
+            compose.onNodeWithText("Ouvrir la page d’autorisation").assertExists()
+            assertEquals(
+                listOf("messages:read"),
+                starts.single()["scopes"]?.jsonArray?.map { it.jsonPrimitive.content },
+            )
+            compose.onNodeWithText("Vérifier l’autorisation").performScrollTo().performClick()
+            compose.waitUntil(10000) {
+                compose
+                    .onAllNodesWithText("Terminez l’autorisation dans votre navigateur.")
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
+            }
+            compose.onNodeWithText("Terminez l’autorisation dans votre navigateur.").assertExists()
+            compose.onNodeWithText("Vérifier l’autorisation").performScrollTo().performClick()
+            compose.waitUntil(10000) {
+                compose
+                    .onAllNodesWithText("Connecté en tant que U111")
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
+            }
+            compose.onNodeWithText("Connecté en tant que U111").performScrollTo().assertExists()
+            capture("personal-plugin-account")
+            compose
+                .onNodeWithText("Déconnecter", substring = false)
+                .performScrollTo()
+                .performClick()
+            compose.onNodeWithText("Déconnecter Personal workspace access ?").assertExists()
+            compose.onNodeWithText("Confirmer").performClick()
+            compose.waitUntil(10000) { disconnected.get() }
+            compose.waitUntil(10000) {
+                compose
+                    .onAllNodesWithText("Non connecté", substring = false)
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
+            }
+            compose.onNodeWithText("Non connecté", substring = false).assertExists()
+            compose.onNodeWithText("Ouvrir la page d’autorisation").assertDoesNotExist()
+        }
+    }
+
     /** Answers the workspace fixture; custom reads and writes remain HTTP boundaries. */
     private fun dispatcher(
         read: (String) -> String? = { null },

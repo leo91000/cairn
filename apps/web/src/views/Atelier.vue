@@ -66,6 +66,12 @@ const workspace = computed<Array<{
     detail: 'Coding agent accounts and GitHub',
   },
   {
+    to: '/personal-connections',
+    label: 'Your plugin accounts',
+    icon: Plug,
+    detail: 'Your personal permissions, kept separate from other people',
+  },
+  {
     to: '/plugins',
     label: 'Plugins',
     icon: Puzzle,

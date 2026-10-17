@@ -504,3 +504,29 @@ optional guidance fields. The shared device scenarios explicitly start their HTT
 fixtures before composing a screen; their initial lazy startup was refused by
 Android's main-thread network policy. Static collection fields are delivered here;
 scoped dynamic resource forms/diagnostics remain a separate native/client slice.
+
+## Personal OAuth discovery and client controls
+
+The setup UI checkpoint passed Quality, Android and Storage on `d76d008e`.
+The next slice exposes a narrow member-readable directory of configured personal
+providers. Only the current person's subject/status and safe resource labels are
+returned; owner configuration and other people's credentials stay private. Current
+membership/owner access are rechecked around package loading, followed by approval
+and configuration/authorization reads in one SQLite snapshot. Pagination is bounded
+to 100 entries, and paused resources retain only existing personal authorizations
+so their owners can disconnect them.
+
+Atelier links to a dedicated personal-accounts page for both roles, on web and
+Android. Scopes are explicit, credentials remain native, HTTPS consent is opened
+by the person, and completion is checked after returning. Pending callbacks can be
+checked again; uncertain exchange failures require a new flow. Nonces and consent
+URLs stay in screen memory. Disconnection clearly distinguishes local removal
+from provider-side revocation. No agent receives a grant from this operation.
+
+Native tests exercise real provider exchange and identity isolation, 100+1 pagination,
+membership removal/rejoin, paused-resource discovery/disconnect and membership,
+owner-access or package changes held during discovery. Browser provider consent is
+synthetic at the public HTTP boundary; Android shares the same HTTP protocol with
+an explicit member navigation case. Neither proves a live Slack installation.
+Owner-resource OAuth controls, scoped resource forms, routes/profiles/grants and
+all remaining Slack lots are still required; this checkpoint does not finish Q1–Q20.

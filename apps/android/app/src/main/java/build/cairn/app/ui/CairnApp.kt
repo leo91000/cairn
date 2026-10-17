@@ -505,6 +505,9 @@ private fun WorkspaceApp(
                             composable("atelier") {
                                 AtelierScreen(vm, state) { nav.navigate(it) }
                             }
+                            composable("personal-connections") {
+                                PersonalPluginAccountsScreen(vm, state)
+                            }
                             composable("agents") {
                                 ResourcesScreen(vm, state, true) { agent, project ->
                                     nav.navigate("new-chat?agent=$agent&project=$project")

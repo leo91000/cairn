@@ -144,6 +144,41 @@ export interface PluginOAuthProvider {
   personal?: { subject: string }
 }
 
+export interface PluginOAuthStatus {
+  status: 'disconnected' | 'authorized' | 'reconnect' | 'pending' | 'denied'
+  scopes?: string[]
+  requestedScopes?: string[]
+  expiresAt?: number | null
+  subject?: string
+}
+
+export interface PluginOAuthConsent {
+  state: string
+  url: string
+  redirectUri?: string
+  expiresAt: number
+}
+
+export interface PluginPersonalAuthorization {
+  id: string
+  pluginId: string
+  pluginName: string
+  instanceId: string
+  instanceName: string
+  collection: string
+  resourceId: string
+  resourceName: string
+  providerName: string
+  title: string
+  scopes: string[]
+  enabled: boolean
+  authorization: PluginOAuthStatus
+}
+
+export function personalAuthorizationPath(item: PluginPersonalAuthorization) {
+  return `/plugins/${encodeURIComponent(item.pluginId)}/connections/${encodeURIComponent(item.instanceId)}/resources/${encodeURIComponent(item.collection)}/${encodeURIComponent(item.resourceId)}/oauth/${encodeURIComponent(item.providerName)}`
+}
+
 export interface PluginSetupDraft {
   id: string
   pluginId: string

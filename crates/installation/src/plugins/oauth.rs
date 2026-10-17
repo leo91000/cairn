@@ -1,6 +1,8 @@
 //! OAuth code capture and exchange are host operations. Anonymous callbacks can
 //! only deposit one code; the initiating account or admitted external person must
 //! finish through their own authorized interface.
+pub(crate) mod personal;
+
 use super::{
     capabilities, connections, registry,
     requesters::{self, Actor},
@@ -1117,16 +1119,34 @@ pub async fn status(
     let owner_access = crate::relay::task_author_policy(s)
         .await?
         .map(|policy| policy.owner.access_id);
-    let mut summary = summary(&authorization);
+    Ok(status_summary(
+        &authorization,
+        &connection,
+        &resource,
+        &package.digest,
+        owner_access.as_deref(),
+        actor.as_ref(),
+    ))
+}
+
+fn status_summary(
+    authorization: &Authorization,
+    connection: &connections::Connection,
+    resource: &resources::Resource,
+    digest: &str,
+    owner_access: Option<&str>,
+    actor: Option<&Actor>,
+) -> Value {
+    let mut summary = summary(authorization);
     if authorization.setup.is_some()
-        || owner_access.as_deref() != Some(&authorization.owner_access)
+        || owner_access != Some(authorization.owner_access.as_str())
         || authorization
             .personal
             .as_ref()
             .and_then(|personal| personal.actor.as_ref())
-            != actor.as_ref()
+            != actor
         || authorization.instance_revision != connection.revision
-        || authorization.digest != package.digest
+        || authorization.digest != digest
         || authorization
             .metadata
             .iter()
@@ -1139,7 +1159,7 @@ pub async fn status(
     {
         summary["status"] = json!("reconnect");
     }
-    Ok(summary)
+    summary
 }
 
 pub async fn revoke(

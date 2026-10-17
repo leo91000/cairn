@@ -25,6 +25,7 @@ It does not assert pixel equality between a browser and Material components.
 | Connections and access | OAuth, GitHub, Codex and Claude Code accounts/usage, token grants, authorization, logout and encrypted sessions | Existing network/authorization/cache suite |
 | Plugins | Catalogue, instances, manifest-driven settings and secrets, agent grants, version/file review and approval, declarative panels/actions/tests, native Discord setup and delegation/access/activity, 1Password instances | `PluginsJourneyTest`, shared `PluginsCases` / `PluginsDeviceTest`; browser plugin journeys |
 | Plugin setup and resources | Owner can save/resume/discard an inactive 24-hour setup, edit root fields and masked secrets, prepare related resources, then activate the same instance with no default agent grants. Active resources support creation, editing, parent selection, pagination and confirmed deletion. | Browser setup/resource journey against the installation; shared setup/resource Compose journey. OAuth, resource grants and routes remain separate unfinished delivery slices. |
+| Personal plugin accounts | Members and owners open their own accounts from Atelier, select explicit provider scopes, open consent, check pending/completed authorization and confirm disconnection. Paused resources retain access to disconnect an existing authorization. | Public HTTP/native OAuth tests; browser consent-popup journey; shared Compose member navigation and personal consent journey. The Android journey answers provider completion at the HTTP boundary; it does not exercise a real provider or Custom Tab handoff. Owner-resource OAuth controls remain a separate slice. |
 | Artifacts | Authenticated previews, versions, groups, images/PDF/Markdown, save/share and deep links from replies | Chat journey; artifact and link gesture regressions |
 | Reading | Wrapped long text/URLs, selectable native Markdown, history pagination, stable reading anchors during drag/streaming, jump to latest | Markdown/history suite; real device gesture tests |
 | Live catch-up | Following the latest output, a resume past a backlog longer than one page reopens on the recent window; older messages load on scroll. Reading older messages keeps the complete replay and the reading position. Stored backlog pages bypass the live coalescing delay | Backend recent-window, cached-resume, reconnect and history/reset tests; web connection test; Android `LiveTest`, `ScrollResumeTest` and `RecentWindowResumeTest` |
@@ -46,6 +47,9 @@ coverage used, not a claim that every production account/provider was exercised.
 - Plugin setup uses a full-screen native editor and resource dialogs on Android;
   the web uses a setup modal and inline resource forms. Both keep typed secrets
   only in memory and require saved root settings before resource changes or activation.
+- Personal plugin consent opens an explicit new browser page on the web and a
+  Custom Tab on Android. Both require returning to check completion, keep consent
+  state only in screen memory and never receive provider credentials.
 - Foreground updates use SSE. Background question notifications retain the
   existing Firebase-free WorkManager service: Android schedules periodic checks
   (approximately 15 minutes, potentially delayed by the OS), rather than browser

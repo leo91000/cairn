@@ -436,3 +436,107 @@ test('setup explains credential errors and accepts an empty form answer', async 
   expect(catalog.connections.find((item: any) => item.pluginId === manifest.id)).toBeDefined()
   expect(JSON.stringify(catalog)).not.toContain('credential-browser-fixture')
 })
+
+test('personal plugin accounts select scopes and complete only their own authorization', async ({ page, workspace }) => {
+  test.setTimeout(90000)
+  await useRelayForHttpMocks(page)
+  const manifest = {
+    id: 'personal-ui',
+    name: 'Personal service',
+    version: '1',
+    apiVersion: 2,
+    description: 'Personal authorizations on separate workspaces.',
+    capabilities: ['resources', 'oauth', 'http'],
+    hosts: ['provider.example.test'],
+    settings: [{ key: 'clientId', title: 'Client ID', type: 'string' }],
+    resources: [{
+      name: 'workspace',
+      title: 'Workspaces',
+      singular: 'Workspace',
+      settings: [{ key: 'externalId', title: 'Workspace ID', type: 'string' }],
+    }],
+    oauth: [{
+      name: 'personal',
+      title: 'Personal workspace access',
+      collection: 'workspace',
+      authorizationUrl: 'https://provider.example.test/authorize',
+      tokenUrl: 'https://provider.example.test/token',
+      clientId: 'clientId',
+      pkce: true,
+      scopes: ['messages:read', 'messages:write'],
+      token: { accessToken: '/access_token', scope: '/scope' },
+      metadata: { externalId: '/team/id' },
+      personal: { subject: '/authed_user/id' },
+    }],
+  }
+  const installed = await workspace.api('/api/plugins/packages', 'POST', { manifest, source: 'return {}' })
+  await workspace.api('/api/plugins/packages/personal-ui/approve', 'POST', { version: '1', digest: installed.digest })
+  const instance = await workspace.api('/api/plugins/personal-ui/connections', 'POST', { name: 'Company service', enabled: true, settings: { clientId: 'fixture-ui-client' } })
+  const resource = await workspace.api(`/api/plugins/personal-ui/connections/${instance.id}/resources/workspace`, 'POST', { name: 'Engineering', settings: { externalId: 'T111' } })
+  const oauth = `/plugins/personal-ui/connections/${instance.id}/resources/workspace/${resource.id}/oauth/personal`
+  const nonce = 's'.repeat(43)
+  let approved = false
+  let authorized = false
+  const starts: any[] = []
+  const status = () => authorized
+    ? {
+        status: 'authorized',
+        scopes: ['messages:read'],
+        requestedScopes: ['messages:read'],
+        subject: 'U111',
+      }
+    : { status: 'disconnected' }
+  // The directory is real. Provider consent/exchange is answered at the public HTTP
+  // seam; the native provider/identity protocol is exercised by plugin_oauth.rs.
+  await page.route('**/plugins/personal-authorizations*', async (route) => {
+    const response = await route.fetch()
+    const result = await response.json()
+    result.items = result.items.map((item: any) => ({ ...item, authorization: status() }))
+    await route.fulfill({ response, json: result })
+  })
+  await page.route(`**${oauth}`, async (route) => {
+    if (route.request().method() === 'POST') {
+      starts.push(route.request().postDataJSON())
+      await route.fulfill({ json: { state: nonce, url: `https://provider.example.test/authorize?state=${nonce}`, expiresAt: Date.now() + 60000 } })
+    }
+    else if (route.request().method() === 'DELETE') {
+      authorized = false
+      await route.fulfill({ json: { status: 'disconnected' } })
+    }
+    else { await route.fulfill({ json: status() }) }
+  })
+  await page.route(`**${oauth}/finish`, async (route) => {
+    expect(route.request().postDataJSON()).toEqual({ state: nonce })
+    if (approved)
+      authorized = true
+    await route.fulfill({ json: approved ? status() : { status: 'pending' } })
+  })
+  await page.context().route('https://provider.example.test/**', async (route) => {
+    approved = true
+    await route.fulfill({ contentType: 'text/html', body: '<p>Authorized. Return to Cairn.</p>' })
+  })
+  await page.goto(workspacePath('/atelier'))
+  await signIn(page)
+  await page.getByRole('link', { name: 'Your plugin accounts', exact: true }).click()
+  await expect(page.getByRole('heading', { name: 'Your plugin accounts', exact: true })).toBeVisible()
+  const account = page.getByRole('article', { name: 'Engineering · Personal workspace access', exact: true })
+  await expect(account.getByRole('button', { name: 'Connect', exact: true })).toBeDisabled()
+  await account.getByRole('checkbox', { name: 'messages:read', exact: true }).check()
+  await account.getByRole('button', { name: 'Connect', exact: true }).click()
+  expect(starts).toEqual([{ scopes: ['messages:read'] }])
+  await account.getByRole('button', { name: 'Check authorization', exact: true }).click()
+  await expect(account.getByText('Finish authorizing in your browser.', { exact: true })).toBeVisible()
+  const opened = page.context().waitForEvent('page')
+  await account.getByRole('link', { name: 'Open authorization page', exact: true }).click()
+  const provider = await opened
+  await expect(provider.getByText('Authorized. Return to Cairn.')).toBeVisible()
+  await provider.close()
+  await account.getByRole('button', { name: 'Check authorization', exact: true }).click()
+  await expect(account.getByText('Connected as U111', { exact: true })).toBeVisible()
+  await expect(page.getByRole('button', { name: 'Refresh', exact: true })).toBeEnabled()
+  await page.screenshot({ path: test.info().outputPath('personal-plugin-account.png'), fullPage: true })
+  await account.getByRole('button', { name: 'Disconnect', exact: true }).click()
+  await page.getByRole('dialog', { name: 'Disconnect Personal workspace access?' }).getByRole('button', { name: 'Disconnect', exact: true }).click()
+  await expect(account.getByText('Not connected', { exact: true })).toBeVisible()
+  await expect(page.getByRole('button', { name: 'Refresh', exact: true })).toBeEnabled()
+})
