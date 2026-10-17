@@ -123,15 +123,22 @@ export type Cairn = {
     -- Commands apply once the handler returns.
     socket: {
         -- `after`: seconds to wait first (one day at most). `oversized`: JSON fields such
-        -- as "d.id" kept from messages over 1 MB instead of dropping the connection.
+        -- as "d.id" or "d.threads.*.id" kept from messages over 1 MB. * projects arrays.
         connect: (request: {
             url: string,
             auth: (boolean | { secret: string, header: string?, prefix: string? })?,
             after: number?,
             oversized: { string }?,
         }) -> (),
-        -- `pace` (ms): sends with the same credential wait for each other across instances.
-        send: (text: string, options: { auth: (boolean | { secret: string })?, pace: number? }?) -> (),
+        -- Queued outside the handler; paced actual writes share the credential's budget.
+        -- `name` emits { type = "sent", name, sent = true } after writing, or sent=false
+        -- if the budget observation expires or lowers while queued (refetch and retry).
+        send: (text: string, options: {
+            auth: (boolean | { secret: string })?,
+            pace: number?, -- ms, up to 60000
+            budget: { remaining: number, resetAfter: number }?, -- resetAfter in ms
+            name: string?,
+        }?) -> { queued: boolean, retryAfter: number? },
         close: (code: number?) -> (),
         -- Named timers of the current connection, delivered as { type = "tick", name }.
         every: (name: string, ms: number, first: number?) -> (),

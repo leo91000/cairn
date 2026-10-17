@@ -18,8 +18,11 @@ local READY_TIMEOUT = 15000
 -- One Identify per bot token every five seconds (max_concurrency 1), across instances.
 local IDENTIFY_PACE = 5000
 -- A large guild's GUILD_CREATE can exceed what Cairn delivers whole; keep what the
--- session needs, and fetch its threads separately.
-local OVERSIZED = cairn.array({ "op", "t", "s", "d.id", "d.guild_id" })
+-- session and thread routing need, without HTTP work on the transport worker.
+local OVERSIZED = cairn.array({
+    "op", "t", "s", "d.id", "d.guild_id",
+    "d.threads.*.id", "d.threads.*.guild_id", "d.threads.*.parent_id", "d.threads.*.thread_metadata.archived",
+})
 local settings: any = {}
 local gateway: any = { acked = true, threads = {} }
 
@@ -41,36 +44,46 @@ end
 -- Resumes go to the session's resume URL. New sessions use the URL from
 -- GET /gateway/bot and wait when today's session starts are used up: past the limit,
 -- Discord resets the bot's token.
-local function connect(after: number?)
-    local wait = after or 0
+local function connect()
+    local wait = 0
     if resumable() then
         cairn.socket.connect({ url = (gateway.resume or GATEWAY) .. QUERY, after = wait, oversized = OVERSIZED })
         return
     end
     local url = GATEWAY
+    local observed = os.clock()
     local ok, response = pcall(discord.request, "GET", "/gateway/bot")
     if ok and response.status == 401 then
         cairn.fail("Discord rejected the bot token. Reset it in the Developer Portal and save the bot again.")
     end
-    if ok and response.status == 200 and type(response.json) == "table" then
-        url = safeUrl(response.json.url) or GATEWAY
-        local limit = response.json.session_start_limit
-        if type(limit) == "table" and limit.remaining == 0 and type(limit.reset_after) == "number" then
-            wait = math.max(wait, math.min(limit.reset_after / 1000, 86400))
-            cairn.instance.status(
-                "connecting",
-                "Discord’s daily session limit is reached. Reconnecting in about "
-                    .. math.max(1, math.ceil(wait / 60)) .. " min."
-            )
-        end
+    local limit = if ok and response.status == 200 and type(response.json) == "table"
+        then response.json.session_start_limit else nil
+    if type(limit) ~= "table" or type(limit.remaining) ~= "number" or limit.remaining < 0
+        or type(limit.reset_after) ~= "number" or limit.reset_after < 1 then
+        cairn.instance.status("connecting", "Waiting for Discord’s session budget. Retrying shortly.")
+        cairn.socket.after("connect", 5000)
+        return
     end
+    url = safeUrl(response.json.url) or GATEWAY
+    if limit.remaining == 0 then
+        wait = math.max(1, observed + math.min(limit.reset_after / 1000, 86400) - os.clock())
+        cairn.instance.status(
+            "connecting",
+            "Discord’s daily session limit is reached. Reconnecting in about "
+                .. math.max(1, math.ceil(wait / 60)) .. " min."
+        )
+        -- Fetch again after reset; never reuse a budget observed before the wait.
+        cairn.socket.after("connect", wait * 1000)
+        return
+    end
+    gateway.budget = { remaining = limit.remaining, expires = observed + math.min(limit.reset_after / 1000, 86400) }
     cairn.socket.connect({ url = url .. QUERY, after = wait, oversized = OVERSIZED })
 end
 
 -- Closing with 4000 keeps the session resumable; 1000 or 1001 would end it.
 local function reconnect(after: number?)
     cairn.socket.close(4000)
-    connect(after)
+    cairn.socket.after("connect", (after or 0) * 1000)
 end
 
 local function heartbeat()
@@ -86,14 +99,27 @@ local function identify()
         cairn.socket.send(cairn.json.encode(payload), { auth = true })
         return
     end
+    -- Backoff, dialing and Hello can cross the reset boundary. Never let a stale
+    -- observation lower another instance’s balance in the new window.
+    local resetAfter = (gateway.budget.expires - os.clock()) * 1000
+    if resetAfter < 1 then
+        reconnect()
+        return
+    end
     -- Guilds and guild messages. Mentions carry their text without Message Content.
     local intents = if settings.messageContent then 513 + 32768 else 513
     local payload = {
         op = 2,
         d = { token = "{{secret}}", intents = intents, properties = { os = "linux", browser = "cairn", device = "cairn" } },
     }
-    cairn.socket.send(cairn.json.encode(payload), { auth = true, pace = IDENTIFY_PACE })
-    cairn.socket.after("ready", READY_TIMEOUT)
+    local result = cairn.socket.send(cairn.json.encode(payload), {
+        auth = true, pace = IDENTIFY_PACE, name = "identify",
+        budget = { remaining = gateway.budget.remaining, resetAfter = resetAfter },
+    })
+    if not result.queued then
+        cairn.instance.status("connecting", "Discord’s session budget is reserved by another instance. Waiting for reset.")
+        reconnect(math.max(1, result.retryAfter / 1000))
+    end
 end
 
 local function track(thread: any)
@@ -102,16 +128,6 @@ local function track(thread: any)
     end
     local archived = thread.thread_metadata and thread.thread_metadata.archived
     gateway.threads[thread.id] = if thread.parent_id == settings.channelId and not archived then true else nil
-end
-
--- Active threads under the channel, when GUILD_CREATE was too large to read whole.
-local function refreshThreads()
-    local ok, response = pcall(discord.request, "GET", "/guilds/" .. settings.guildId .. "/threads/active")
-    if ok and response.status == 200 and type(response.json) == "table" then
-        for _, thread in response.json.threads or {} do
-            track(thread)
-        end
-    end
 end
 
 local function person(user: any): any
@@ -212,7 +228,7 @@ local function clicked(interaction: any)
     })
 end
 
-local function dispatched(name: string, data: any, oversized: boolean)
+local function dispatched(name: string, data: any)
     if name == "READY" then
         if type(data.user) ~= "table" or not data.user.bot then
             cairn.fail("Use a Discord bot token, not a user account token.")
@@ -235,9 +251,6 @@ local function dispatched(name: string, data: any, oversized: boolean)
         if guild ~= settings.guildId then
             return
         end
-        if oversized then
-            refreshThreads()
-        end
         for _, thread in data.threads or {} do
             thread.guild_id = thread.guild_id or guild
             track(thread)
@@ -249,7 +262,7 @@ local function dispatched(name: string, data: any, oversized: boolean)
     end
 end
 
-local function frame(payload: any, oversized: boolean)
+local function frame(payload: any)
     local op = payload.op
     if op == 10 then
         local interval = payload.d and payload.d.heartbeat_interval
@@ -275,7 +288,7 @@ local function frame(payload: any, oversized: boolean)
         end
         reconnect(1 + math.random() * 4)
     elseif op == 0 and type(payload.t) == "string" then
-        dispatched(payload.t, if type(payload.d) == "table" then payload.d else {}, oversized)
+        dispatched(payload.t, if type(payload.d) == "table" then payload.d else {})
         -- Advance only after admission: a failed admission is replayed on resume, and
         -- replays deduplicate.
         if type(payload.s) == "number" and (gateway.sequence == nil or payload.s > gateway.sequence) then
@@ -293,6 +306,12 @@ return {
         elseif event.type == "open" then
             gateway.acked = true
             cairn.socket.after("hello", HELLO_TIMEOUT)
+        elseif event.type == "sent" and event.name == "identify" then
+            if event.sent then
+                cairn.socket.after("ready", READY_TIMEOUT)
+            else
+                reconnect()
+            end
         elseif event.type == "close" then
             if event.code and FATAL[event.code] then
                 cairn.fail("Discord rejected the bot configuration. Check its token and the intents enabled in the Developer Portal.")
@@ -324,7 +343,7 @@ return {
             end
             local ok, payload = pcall(cairn.json.decode, event.text)
             if ok and type(payload) == "table" then
-                frame(payload, event.oversized ~= nil)
+                frame(payload)
             end
         end
         return nil

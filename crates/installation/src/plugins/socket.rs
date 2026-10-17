@@ -12,11 +12,20 @@ use crate::{
     service::Service,
     validation::text,
 };
+use cairn_plugin_api::{Frame, MAX_FRAME_BYTES};
 use cairn_plugin_host::{Denied, Session};
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{Map, Value, json};
-use std::{collections::BTreeMap, sync::Mutex, time::Duration};
-use tokio::{net::TcpStream, sync::mpsc, time::Instant};
+use std::{
+    collections::{BTreeMap, VecDeque},
+    sync::{Arc, Mutex},
+    time::Duration,
+};
+use tokio::{
+    net::TcpStream,
+    sync::{OwnedSemaphorePermit, Semaphore, mpsc},
+    time::Instant,
+};
 use tokio_tungstenite::{
     MaybeTlsStream, WebSocketStream, connect_async_with_config,
     tungstenite::{
@@ -27,6 +36,8 @@ use tokio_tungstenite::{
     },
 };
 use tokio_util::sync::CancellationToken;
+
+pub(super) mod pacing;
 
 /// Largest message a package sends, or receives as text.
 pub const MAX_MESSAGE: usize = 1_048_576;
@@ -49,7 +60,7 @@ pub enum Command {
         /// JSON fields (`d.id`) kept from messages too large to deliver whole.
         oversized: Vec<String>,
     },
-    Send(String),
+    Send(Outgoing),
     Close(u16),
     /// A named timer of the current connection: once after `at`, then every `every`.
     Timer {
@@ -64,19 +75,44 @@ pub enum Command {
 
 /// The transport worker's handle on its socket, given to its capability calls.
 #[derive(Clone)]
-pub struct Link(mpsc::UnboundedSender<Command>);
+pub struct Link {
+    sender: mpsc::UnboundedSender<Command>,
+    slots: Arc<Semaphore>,
+}
+
+#[derive(Debug)]
+pub struct Outgoing {
+    pub text: String,
+    name: Option<String>,
+    ticket: Option<pacing::Ticket>,
+    _slot: OwnedSemaphorePermit,
+}
 
 impl Link {
     pub fn channel() -> (Self, mpsc::UnboundedReceiver<Command>) {
         let (sender, receiver) = mpsc::unbounded_channel();
-        (Self(sender), receiver)
+        (
+            Self {
+                sender,
+                slots: Arc::new(Semaphore::new(16)),
+            },
+            receiver,
+        )
     }
 
     pub(crate) fn send(&self, command: Command) -> Result<()> {
-        self.0
+        self.sender
             .send(command)
             .map_err(|_| Error::bad_gateway("The connection stopped."))
     }
+}
+
+fn valid_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 40
+        && name
+            .bytes()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, b'_' | b'-'))
 }
 
 fn enabled(value: Option<&Value>) -> Option<&Value> {
@@ -115,7 +151,7 @@ pub(crate) async fn call(
                     path.as_str().is_some_and(|path| {
                         !path.is_empty()
                             && path.len() <= 80
-                            && path.split('.').count() <= 4
+                            && path.split('.').count() <= 6
                             && path.split('.').all(|key| !key.is_empty())
                     })
                 })
@@ -160,15 +196,52 @@ pub(crate) async fn call(
                 let escaped = serde_json::to_string(&secret)?;
                 message = message.replace("{{secret}}", &escaped[1..escaped.len() - 1]);
             }
-            if pace > 0.0 {
-                s.plugins
-                    .pace(
-                        &crate::auth::hex_digest(&key),
-                        Duration::from_secs_f64(pace / 1000.0),
-                    )
-                    .await;
+            let name = args["name"].as_str().map(str::to_owned);
+            if name.as_ref().is_some_and(|name| !valid_name(name)) {
+                return Err(Error::bad("Name sends with lowercase letters and digits."));
             }
-            link.send(Command::Send(message))?;
+            let budget = match args.get("budget").filter(|budget| !budget.is_null()) {
+                Some(budget) => {
+                    let remaining = budget["remaining"]
+                        .as_u64()
+                        .filter(|value| *value <= 1_000_000)
+                        .ok_or_else(|| Error::bad("Give a nonnegative remaining budget."))?;
+                    let reset = budget["resetAfter"]
+                        .as_f64()
+                        .filter(|value| (1.0..=86_400_000.0).contains(value))
+                        .ok_or_else(|| {
+                            Error::bad("Reset the budget within one day (milliseconds).")
+                        })?;
+                    Some((remaining, Duration::from_secs_f64(reset / 1000.0)))
+                }
+                None => None,
+            };
+            let slot = link
+                .slots
+                .clone()
+                .try_acquire_owned()
+                .map_err(|_| Error::bad("At most 16 socket sends may be pending."))?;
+            let ticket = if pace > 0.0 || budget.is_some() {
+                match s.plugins.paces.reserve(
+                    crate::auth::hex_digest(&key),
+                    Duration::from_secs_f64(pace / 1000.0),
+                    budget,
+                ) {
+                    Ok(ticket) => Some(ticket),
+                    Err(after) => {
+                        return Ok(json!({ "queued": false, "retryAfter": after.as_millis() }));
+                    }
+                }
+            } else {
+                None
+            };
+            link.send(Command::Send(Outgoing {
+                text: message,
+                name,
+                ticket,
+                _slot: slot,
+            }))?;
+            return Ok(json!({ "queued": true }));
         }
         "socket.close" => {
             let code = args["code"].as_u64().unwrap_or(1000);
@@ -179,12 +252,7 @@ pub(crate) async fn call(
         }
         "socket.timer" => {
             let name = text(args, "name");
-            if name.is_empty()
-                || name.len() > 40
-                || !name.bytes().all(|c| {
-                    c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, b'_' | b'-')
-                })
-            {
+            if !valid_name(name) {
                 return Err(Error::bad("Name timers with lowercase letters and digits."));
             }
             if args["cancel"] == true {
@@ -268,6 +336,7 @@ struct State {
     socket: Option<Socket>,
     /// The connection's named timers: when each fires next, and its period.
     timers: BTreeMap<String, (Instant, Option<Duration>)>,
+    outgoing: VecDeque<Outgoing>,
     connect: Option<Pending>,
     oversized: Vec<String>,
     last_attempt: Option<Instant>,
@@ -278,36 +347,81 @@ enum Wake {
     Stop,
     Frame(Option<std::result::Result<Message, tokio_tungstenite::tungstenite::Error>>),
     Timer,
+    Send,
     Connect,
 }
 
-/// Only the named fields of an oversized JSON message, e.g. `op`, `s` and `d.id`.
+/// Only the requested fields; `*` projects each array entry without keeping large
+/// sibling fields. Merge paths recursively so array entries retain their identities.
 fn project(message: &str, paths: &[String]) -> Option<String> {
+    fn select(value: &Value, keys: &[&str]) -> Option<Value> {
+        let Some((key, rest)) = keys.split_first() else {
+            return Some(value.clone());
+        };
+        if *key == "*" {
+            return Some(Value::Array(
+                value
+                    .as_array()?
+                    .iter()
+                    .map(|value| select(value, rest).unwrap_or(Value::Null))
+                    .collect(),
+            ));
+        }
+        Some(json!({ *key: select(value.get(*key)?, rest)? }))
+    }
+    fn merge(target: &mut Value, value: Value) {
+        match (target, value) {
+            (Value::Object(target), Value::Object(value)) => {
+                for (key, value) in value {
+                    merge(target.entry(key).or_insert(Value::Null), value);
+                }
+            }
+            (Value::Array(target), Value::Array(value)) => {
+                for (target, value) in target.iter_mut().zip(value) {
+                    merge(target, value);
+                }
+            }
+            (target, value) if !value.is_null() => *target = value,
+            _ => {}
+        }
+    }
     if paths.is_empty() {
         return None;
     }
     let value: Value = serde_json::from_str(message).ok()?;
     let mut output = Value::Object(Map::new());
     for path in paths {
-        let pointer = format!("/{}", path.replace('.', "/"));
-        let Some(found) = value.pointer(&pointer) else {
-            continue;
-        };
-        let keys = path.split('.').collect::<Vec<_>>();
-        let mut target = &mut output;
-        for key in &keys[..keys.len() - 1] {
-            target = target
-                .as_object_mut()?
-                .entry((*key).to_owned())
-                .or_insert_with(|| Value::Object(Map::new()));
+        if let Some(value) = select(&value, &path.split('.').collect::<Vec<_>>()) {
+            merge(&mut output, value);
         }
-        target
-            .as_object_mut()?
-            .insert(keys[keys.len() - 1].to_owned(), found.clone());
     }
     serde_json::to_string(&output)
         .ok()
         .filter(|text| text.len() <= MAX_MESSAGE)
+}
+
+/// The script text is nested inside a JSON worker frame. Escaping and the envelope
+/// count toward its limit too, including messages under the raw wire threshold.
+fn message_event(message: &str, paths: &[String]) -> Value {
+    fn fits(event: &Value) -> bool {
+        serde_json::to_vec(&Frame::Event {
+            name: "socket".into(),
+            payload: event.clone(),
+        })
+        .is_ok_and(|bytes| bytes.len() < MAX_FRAME_BYTES)
+    }
+    if message.len() <= MAX_MESSAGE {
+        let event = json!({ "type": "message", "text": message });
+        if fits(&event) {
+            return event;
+        }
+    }
+    let mut event =
+        json!({ "type": "message", "oversized": message.len(), "text": project(message, paths) });
+    if !fits(&event) {
+        event["text"] = Value::Null;
+    }
+    event
 }
 
 fn closed(code: Option<u16>, reason: &str, error: Option<&str>) -> Value {
@@ -336,10 +450,10 @@ impl State {
                 });
             }
             Command::Send(message) => {
-                let socket = self.socket.as_mut()?;
-                if socket.send(Message::Text(message.into())).await.is_err() {
-                    self.drop_socket();
-                    return Some(closed(None, "", Some("interrupted")));
+                if message.ticket.is_some() {
+                    self.outgoing.push_back(message);
+                } else {
+                    return self.send(message).await;
                 }
             }
             Command::Close(code) => {
@@ -352,6 +466,7 @@ impl State {
                         .await;
                 }
                 self.timers.clear();
+                self.outgoing.clear();
             }
             Command::Timer { name, at, every } => {
                 if self.timers.len() < MAX_TIMERS || self.timers.contains_key(&name) {
@@ -370,6 +485,48 @@ impl State {
     fn drop_socket(&mut self) {
         self.socket = None;
         self.timers.clear();
+        self.outgoing.clear();
+    }
+
+    async fn send(&mut self, message: Outgoing) -> Option<Value> {
+        let socket = self.socket.as_mut()?;
+        let sent = tokio::time::timeout(
+            Duration::from_secs(10),
+            socket.send(Message::Text(message.text.into())),
+        )
+        .await;
+        if !matches!(sent, Ok(Ok(()))) {
+            self.drop_socket();
+            return Some(closed(None, "", Some("interrupted")));
+        }
+        message
+            .name
+            .map(|name| json!({ "type": "sent", "name": name, "sent": true }))
+    }
+
+    async fn send_pending(&mut self) -> Option<Value> {
+        let index = self
+            .outgoing
+            .iter()
+            .enumerate()
+            .min_by_key(|(_, message)| message.ticket.as_ref().unwrap().at())
+            .map(|(index, _)| index)?;
+        let mut message = self.outgoing.remove(index)?;
+        match message.ticket.take()?.start() {
+            pacing::Ready::Send(sending) => {
+                let event = self.send(message).await;
+                drop(sending);
+                event
+            }
+            pacing::Ready::Wait(ticket) => {
+                message.ticket = Some(ticket);
+                self.outgoing.push_back(message);
+                None
+            }
+            pacing::Ready::Expired => message.name.map(
+                |name| json!({ "type": "sent", "name": name, "sent": false, "retryAfter": 0 }),
+            ),
+        }
     }
 
     async fn open(&mut self, s: &Service) -> Value {
@@ -456,18 +613,19 @@ async fn serve(
     let mut state = State {
         socket: None,
         timers: BTreeMap::new(),
+        outgoing: VecDeque::new(),
         connect: None,
         oversized: Vec::new(),
         last_attempt: None,
         backoff: Duration::from_secs(1),
     };
-    let mut event = Some(json!({
+    let mut events = VecDeque::from([json!({
         "type": "start",
         "instance": connection.id,
         "settings": connection.settings,
-    }));
+    })]);
     loop {
-        if let Some(value) = event.take() {
+        if let Some(value) = events.pop_front() {
             match deliver(s, connection, session, &link, value).await {
                 Err(error) if matches!(error.status, 401 | 403) => {
                     if let Some(mut socket) = state.socket.take() {
@@ -482,22 +640,28 @@ async fn serve(
             }
             while let Ok(command) = commands.try_recv() {
                 if let Some(value) = state.apply(command).await {
-                    event = Some(value);
+                    events.push_back(value);
                 }
             }
-            if event.is_some() {
+            if !events.is_empty() {
                 continue;
             }
         }
         let timer_at = state.timers.values().map(|(at, _)| *at).min();
         let connect_at = state.connect.as_ref().map(|pending| pending.at);
+        let send_at = state
+            .outgoing
+            .iter()
+            .filter_map(|message| message.ticket.as_ref().map(pacing::Ticket::at))
+            .min();
         let wake = tokio::select! {
             () = stop.cancelled() => Wake::Stop,
             frame = async { state.socket.as_mut().expect("socket").next().await }, if state.socket.is_some() => Wake::Frame(frame),
             () = tokio::time::sleep_until(timer_at.unwrap_or_else(Instant::now)), if timer_at.is_some() => Wake::Timer,
+            () = tokio::time::sleep_until(send_at.unwrap_or_else(Instant::now)), if send_at.is_some() => Wake::Send,
             () = tokio::time::sleep_until(connect_at.unwrap_or_else(Instant::now)), if connect_at.is_some() => Wake::Connect,
         };
-        event = match wake {
+        let event = match wake {
             Wake::Stop => {
                 if let Some(mut socket) = state.socket.take() {
                     let _ = tokio::time::timeout(Duration::from_secs(2), socket.close(None)).await;
@@ -526,16 +690,10 @@ async fn serve(
                     json!({ "type": "tick", "name": name })
                 })
             }
+            Wake::Send => state.send_pending().await,
             Wake::Connect => Some(state.open(s).await),
-            Wake::Frame(Some(Ok(Message::Text(message)))) if message.len() > MAX_MESSAGE => {
-                Some(json!({
-                    "type": "message",
-                    "oversized": message.len(),
-                    "text": project(message.as_str(), &state.oversized),
-                }))
-            }
             Wake::Frame(Some(Ok(Message::Text(message)))) => {
-                Some(json!({ "type": "message", "text": message.as_str() }))
+                Some(message_event(message.as_str(), &state.oversized))
             }
             Wake::Frame(Some(Ok(Message::Ping(bytes)))) => {
                 let socket = state.socket.as_mut().expect("socket");
@@ -563,5 +721,43 @@ async fn serve(
                 Some(closed(None, "", Some("interrupted")))
             }
         };
+        if let Some(event) = event {
+            events.push_back(event);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn oversized_projection_includes_json_escaping_in_the_worker_limit() {
+        let payload =
+            json!({ "op": 0, "data": "\\".repeat(400_000), "unused": "x".repeat(500_000) })
+                .to_string();
+        let paths = vec!["op".into(), "data".into()];
+        assert!(project(&payload, &paths).unwrap().len() < MAX_MESSAGE);
+        let event = message_event(&payload, &paths);
+        let encoded = serde_json::to_vec(&Frame::Event {
+            name: "socket".into(),
+            payload: event.clone(),
+        })
+        .unwrap();
+        assert!(encoded.len() < MAX_FRAME_BYTES);
+        assert!(
+            event["text"].is_null(),
+            "the requested projection cannot fit the frame"
+        );
+        assert_eq!(message_event("small", &paths)["text"], "small");
+    }
+
+    #[test]
+    fn wire_messages_below_one_megabyte_project_when_the_ipc_frame_would_overflow() {
+        let payload = json!({ "op": 0, "data": "\\".repeat(400_000) }).to_string();
+        assert!(payload.len() < MAX_MESSAGE);
+        let event = message_event(&payload, &["op".into()]);
+        assert_eq!(event["text"], "{\"op\":0}");
+        assert_eq!(event["oversized"], payload.len());
     }
 }

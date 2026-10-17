@@ -45,7 +45,8 @@ cairn.exec = {
 cairn.socket = {
     connect = function(request) call("socket.connect", request) end,
     send = function(text, options)
-        call("socket.send", { text = text, auth = options and options.auth, pace = options and options.pace })
+        return call("socket.send", { text = text, auth = options and options.auth, pace = options and options.pace,
+            name = options and options.name, budget = options and options.budget })
     end,
     close = function(code) call("socket.close", { code = code }) end,
     every = function(name, ms, first)

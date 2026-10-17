@@ -202,13 +202,25 @@ A package that keeps its own connection, such as a chat platform's gateway, decl
   60 s) until the package reports `connected`; `after` waits longer (seconds, a day at
   most). `auth` adds the instance's credential or a secret to the handshake headers,
   like `http`. Messages up to 16 MB are read; above 1 MB the script receives only the
-  JSON fields listed in `oversized` (such as `op`, `s` and `d.id`), so a large payload
-  never drops the connection.
-- `cairn.socket.send(text, { auth = true | { secret }, pace? }?)`: with `auth`, the host
-  replaces `{{secret}}` in the text with the JSON-escaped secret; the script never sees
-  it (Discord's Identify and Resume carry the token this way). `pace` (ms, a minute at
-  most) spaces sends with the same credential across every instance, such as one
-  Identify per bot token every five seconds.
+  JSON fields listed in `oversized` (such as `op`, `s` and `d.id`). Paths may have six
+  segments; `*` projects every array entry (`d.threads.*.id`) without retaining its
+  other fields. The complete worker frame, including JSON escaping, must fit in 1 MB.
+  A smaller wire message can also require projection because of escaping. When even
+  the projection cannot fit, `text` is null and the socket remains open.
+- `cairn.socket.send(text, { auth = true | { secret }, pace?, budget?, name? }?)`: with
+  `auth`, the host replaces `{{secret}}` with the JSON-escaped secret. `pace` (ms, a
+  minute at most) queues sends outside the handler and spaces actual writes with the
+  same credential across every instance. Reads, heartbeats and cancellation keep
+  running while queued; at most 16 sends may be pending per worker.
+  `budget = { remaining, resetAfter }` reserves a send from a shared balance until reset
+  (`resetAfter` in milliseconds, a day at most). Observations can lower the balance;
+  they never replenish it before reset. Unsent reservations are released on close.
+  Returns `{ queued = true }`, or `{ queued = false, retryAfter = milliseconds }` when
+  the budget is exhausted. With `name`, an actual write delivers
+  `{ type = "sent", name, sent = true }`; an observation expiring while queued delivers
+  `{ type = "sent", name, sent = false, retryAfter = 0 }` so the package can refetch it.
+  The same applies when a newer observation invalidates a queued reservation.
+  Timers for a response should start on `sent`, rather than when queued.
 - `cairn.socket.close(code?)` (1000 or 3000–4999). Timers: `every(name, ms, first?)`
   (100 ms to an hour), `after(name, ms)` (once) and `cancel(name)`, eight at most; they
   belong to the current connection and stop when it closes.
@@ -219,7 +231,8 @@ A package that keeps its own connection, such as a chat platform's gateway, decl
 
 Commands apply in order once the handler returns. Frames, ticks and connection
 changes run in the transport worker, separate from the worker handling queued events,
-so a slow reply never delays a heartbeat or a three-second acknowledgement.
+so a slow reply never delays a heartbeat or a three-second acknowledgement. Transport
+handlers still run sequentially: avoid synchronous REST hydration in them.
 
 `cairn.inbound.accept{ kind?, id, author: { id, name }, context?, body? }` (capability
 `inbound`) hands Cairn something a person wrote, from the transport worker or from a
@@ -373,8 +386,11 @@ The transport worker follows Discord's Gateway lifecycle, checked against
 
 - new sessions connect to the URL from `GET /gateway/bot` and wait for
   `session_start_limit.reset_after` when no session start is left today (past the
-  limit Discord resets the token); Identify is paced to one per bot token every five
-  seconds across instances; resumes use the session's `resume_gateway_url`;
+  limit Discord resets the token); session starts are reserved per credential across
+  instances, and Identify writes are paced five seconds apart without blocking
+  heartbeats. Failed budget lookups retry without identifying, and resets trigger a
+  fresh lookup. Observation expiry includes the time spent dialing and waiting for
+  Hello, so an old window never lowers the new window’s balance. Resumes use the session's `resume_gateway_url`;
 - Hello must arrive within 60 seconds and READY within 15 seconds of Identify,
   otherwise it reconnects (starting over after a missing READY);
 - heartbeats start after a random part of the interval and carry the last sequence;
@@ -386,7 +402,8 @@ The transport worker follows Discord's Gateway lifecycle, checked against
   version or intents); 1000, 1001, 4003, 4005, 4007, 4008 and 4009 start a new
   session; others resume;
 - a GUILD_CREATE over 1 MB (large servers) keeps the session going: the worker reads
-  its sequence and fetches the channel's active threads over REST instead.
+  its sequence and the threads’ routing fields through an array projection. No REST
+  hydration blocks heartbeats or interactions.
 
 The bot token is injected by the host and never seen by the script. It tracks threads under the configured channel, acknowledges button presses
 within Discord's three-second limit and admits only messages for the bot: mentions in

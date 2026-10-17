@@ -45,7 +45,7 @@ pub struct Plugins {
     worker: Mutex<Option<std::path::PathBuf>>,
     programs: Mutex<HashMap<(String, String), PathBuf>>,
     /// When each paced key (e.g. a bot token's Identify budget) may send next.
-    paces: tokio::sync::Mutex<HashMap<String, tokio::time::Instant>>,
+    paces: socket::pacing::Paces,
 }
 
 impl Default for Plugins {
@@ -61,7 +61,7 @@ impl Default for Plugins {
             socket_origin: Mutex::new(None),
             worker: Mutex::new(None),
             programs: Mutex::new(HashMap::new()),
-            paces: tokio::sync::Mutex::new(HashMap::new()),
+            paces: socket::pacing::Paces::default(),
         }
     }
 }
@@ -117,20 +117,6 @@ impl Plugins {
             .get(&(plugin.to_owned(), program.name.clone()))
             .cloned()
             .unwrap_or_else(|| PathBuf::from(&program.path))
-    }
-
-    /// Waits until `key` may send again, then reserves its next slot `gap` later. Shared
-    /// by every instance, so two instances of one bot never identify together.
-    pub(crate) async fn pace(&self, key: &str, gap: std::time::Duration) {
-        let now = tokio::time::Instant::now();
-        let slot = {
-            let mut paces = self.paces.lock().await;
-            paces.retain(|_, next| *next > now);
-            let slot = paces.get(key).copied().unwrap_or(now).max(now);
-            paces.insert(key.to_owned(), slot + gap);
-            slot
-        };
-        tokio::time::sleep_until(slot).await;
     }
 
     /// Run-scoped CLI commands declared by any package the run's agent is granted.
