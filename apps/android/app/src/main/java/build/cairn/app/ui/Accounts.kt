@@ -469,15 +469,16 @@ internal fun AccountSheet(
         sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
         containerColor = MaterialTheme.colorScheme.surface,
     ) {
+        Column(Modifier.padding(horizontal = 20.dp)) { ConnectionFeedbackNotice() }
         Column(
             Modifier.fillMaxWidth()
+                .weight(1f, fill = false)
                 .testTag("account-sheet")
                 .verticalScroll(rememberScrollState())
                 .padding(horizontal = 20.dp)
                 .padding(bottom = 24.dp),
             verticalArrangement = Arrangement.spacedBy(16.dp),
         ) {
-            ConnectionFeedbackNotice()
             Row(verticalAlignment = Alignment.CenterVertically) {
                 if (account.activeRunIds.isNotEmpty())
                     WorkingAvatar(account.name, account.id, 48.dp)
@@ -820,8 +821,10 @@ internal fun AccountSignInSheet(
         sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
         containerColor = MaterialTheme.colorScheme.surface,
     ) {
+        Column(Modifier.padding(horizontal = 20.dp)) { ConnectionFeedbackNotice() }
         Column(
             Modifier.fillMaxWidth()
+                .weight(1f, fill = false)
                 .testTag("account-sign-in")
                 .verticalScroll(rememberScrollState())
                 .padding(horizontal = 20.dp)
@@ -1118,7 +1121,6 @@ internal fun AccountSignInSheet(
                     }
                 }
             }
-            ConnectionFeedbackNotice()
             state.error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
         }
     }

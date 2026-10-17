@@ -332,17 +332,22 @@ fun Editor(
         Scaffold(
             modifier = Modifier.fillMaxSize().imePadding(),
             topBar = {
-                TopAppBar(
-                    title = { Text(title) },
-                    navigationIcon = {
-                        IconButton(onClick = close, enabled = !busy) {
-                            Icon(Icons.AutoMirrored.Filled.ArrowBack, "Fermer")
-                        }
-                    },
-                    actions = {
-                        TextButton(onClick = save, enabled = valid && !busy) { Text("Enregistrer") }
-                    },
-                )
+                Column {
+                    TopAppBar(
+                        title = { Text(title) },
+                        navigationIcon = {
+                            IconButton(onClick = close, enabled = !busy) {
+                                Icon(Icons.AutoMirrored.Filled.ArrowBack, "Fermer")
+                            }
+                        },
+                        actions = {
+                            TextButton(onClick = save, enabled = valid && !busy) {
+                                Text("Enregistrer")
+                            }
+                        },
+                    )
+                    Column(Modifier.padding(horizontal = 20.dp)) { ConnectionFeedbackNotice() }
+                }
             },
         ) { padding ->
             Column(
@@ -353,7 +358,6 @@ fun Editor(
                 verticalArrangement = Arrangement.spacedBy(16.dp),
             ) {
                 if (busy) LinearProgressIndicator(Modifier.fillMaxWidth())
-                ConnectionFeedbackNotice()
                 if (error != null) Text(error, color = MaterialTheme.colorScheme.error)
                 content()
             }

@@ -1295,14 +1295,17 @@ private fun PluginReview(
         Scaffold(
             modifier = Modifier.fillMaxSize().testTag("plugin-review"),
             topBar = {
-                TopAppBar(
-                    title = { Text("Examiner ${entry.name}") },
-                    navigationIcon = {
-                        IconButton(onClick = close, enabled = !state.busy) {
-                            Icon(Icons.AutoMirrored.Filled.ArrowBack, "Fermer")
-                        }
-                    },
-                )
+                Column {
+                    TopAppBar(
+                        title = { Text("Examiner ${entry.name}") },
+                        navigationIcon = {
+                            IconButton(onClick = close, enabled = !state.busy) {
+                                Icon(Icons.AutoMirrored.Filled.ArrowBack, "Fermer")
+                            }
+                        },
+                    )
+                    Column(Modifier.padding(horizontal = 20.dp)) { ConnectionFeedbackNotice() }
+                }
             },
             bottomBar = {
                 Row(
@@ -1357,7 +1360,6 @@ private fun PluginReview(
                 verticalArrangement = Arrangement.spacedBy(14.dp),
             ) {
                 if (state.busy) LinearProgressIndicator(Modifier.fillMaxWidth())
-                ConnectionFeedbackNotice()
                 state.error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
                 if (manifest != null)
                     Row(verticalAlignment = Alignment.Top) {

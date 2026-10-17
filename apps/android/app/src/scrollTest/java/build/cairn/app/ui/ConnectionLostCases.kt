@@ -1,6 +1,7 @@
 package build.cairn.app.ui
 
 import android.app.Application
+import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
@@ -347,6 +348,73 @@ abstract class ConnectionLostCases {
                 compose.mainClock.advanceTimeBy(6000)
                 waitFor { vm.state.value.notice == null }
                 compose.onNodeWithText("Connexion impossible. Réessayez.").assertDoesNotExist()
+            } finally {
+                models.clear()
+            }
+        }
+    }
+
+    @Test
+    fun aFailedSaveStaysVisibleAfterScrollingTheEditor() {
+        val down = AtomicBoolean(false)
+        val saves = AtomicInteger()
+        MockWebServer().use { server ->
+            server.dispatcher =
+                object : Dispatcher() {
+                    override fun dispatch(request: RecordedRequest): MockResponse {
+                        val path = request.path!!.substringBefore('?')
+                        if (request.method == "POST" && path.endsWith("/tasks"))
+                            saves.incrementAndGet()
+                        if (down.get()) return unavailable()
+                        val body =
+                            when {
+                                path == "/api/account/session" -> beaconAccountFixture()
+                                path == "/api/installations" -> beaconInstallationsFixture()
+                                path.endsWith("/overview") || path.endsWith("/models") -> "{}"
+                                else -> "[]"
+                            }
+                        return MockResponse()
+                            .setHeader("Content-Type", "application/json")
+                            .setBody(body)
+                    }
+                }
+            val vm =
+                connect(server) { model, state ->
+                    CompositionLocalProvider(
+                        LocalConnectionFeedback provides
+                            ConnectionFeedback(state.connectionLost, state.notice)
+                    ) {
+                        if (state.installation != null)
+                            Editor(
+                                "Formulaire long",
+                                state.busy,
+                                state.error,
+                                {},
+                                {
+                                    model.perform {
+                                        api.request(
+                                            "POST",
+                                            "/tasks",
+                                            kotlinx.serialization.json.buildJsonObject {},
+                                        )
+                                    }
+                                },
+                            ) {
+                                repeat(40) { Text("Champ $it") }
+                            }
+                    }
+                }
+            val models = ViewModelStore().apply { put("fixture", vm) }
+            try {
+                compose.onNodeWithText("Champ 39").performScrollTo().assertIsDisplayed()
+                down.set(true)
+                compose.onNodeWithText("Enregistrer").performClick()
+                waitFor { vm.state.value.connectionLost && !vm.state.value.busy }
+                compose.onNodeWithText("Champ 0").assertIsNotDisplayed()
+                compose.onNodeWithText("Connexion impossible. Réessayez.").assertIsDisplayed()
+                compose.onNodeWithText("Connexion perdue · reconnexion…").assertIsDisplayed()
+                assertNull(vm.state.value.error)
+                assertEquals(1, saves.get())
             } finally {
                 models.clear()
             }
