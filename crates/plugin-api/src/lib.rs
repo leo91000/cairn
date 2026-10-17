@@ -61,7 +61,7 @@ pub fn capability(method: &str) -> Option<&'static str> {
             "conversations.control"
         }
         "exec.run" => "exec",
-        "socket.connect" | "socket.send" | "socket.close" | "socket.every" => "socket",
+        "socket.connect" | "socket.send" | "socket.close" | "socket.timer" => "socket",
         "inbound.accept" => "inbound",
         _ => return None,
     };
