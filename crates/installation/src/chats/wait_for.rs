@@ -29,7 +29,8 @@ pub fn tool() -> Value {
             wake immediately; success waits for all required checks. Never use this for local background processes that need this VM. \
             Run dependencies require the existing installation grant; GitHub uses the agent's existing connection. \
             One wait is stored per conversation. Identical repeated requests preserve the deadline; \
-            a different request replaces the previous wait, including sleep. A new user message, stop, deletion, \
+            a different request replaces the previous wait, including sleep. Queued follow-ups start after the continuation. \
+            A new user message, stop, deletion, \
             terminal turn failure or manual run resume cancels the wait; queue pause holds it.",
         "inputSchema": {
             "type": "object",
@@ -113,12 +114,21 @@ fn same_request(previous: &Value, run: &Value, input: &Value) -> bool {
         && previous["reason"] == input["reason"]
 }
 
-fn input_revision(db: &Db<'_>, run: &Value) -> Result<i64> {
-    Ok(db.0.query_row(
+fn input_revision(db: &Db<'_>, run: &Value, chat: &Value) -> Result<(i64, Vec<String>)> {
+    let acknowledged = db.0.query_row(
         "SELECT COALESCE(MAX(id),0) FROM events WHERE run_id=? AND type='chat.user'",
         [text(run, "id")],
         |row| row.get(0),
-    )?)
+    )?;
+
+    // A new queued message cancels a wakeup before producing a chat.user event.
+    // Keep submissions in the baseline so an in-flight probe cannot undo that.
+    let submitted =
+        db.0.prepare("SELECT id FROM chat_messages WHERE chat_id=? ORDER BY id")?
+            .query_map([text(chat, "id")], |row| row.get(0))?
+            .collect::<rusqlite::Result<Vec<String>>>()?;
+
+    Ok((acknowledged, submitted))
 }
 
 fn registering(db: &Db<'_>, bearer: &str, input: &Value) -> Result<(Value, Value)> {
@@ -126,7 +136,7 @@ fn registering(db: &Db<'_>, bearer: &str, input: &Value) -> Result<(Value, Value
     let chat = chat_for_run(db, text(&run, "id"))?
         .ok_or_else(|| Error::conflict("Waiting requires an interactive conversation."))?;
     require_active(&chat)?;
-    if chat["paused"] == true || sleep::has_pending_input(db, &chat)? {
+    if chat["paused"] == true || sleep::has_unhandled_input(db, &chat)? {
         return Err(Error::conflict(
             "Handle pending user input before registering a wait.",
         ));
@@ -229,7 +239,7 @@ pub async fn schedule(s: &Service, bearer: &str, raw: &Value) -> Result<Value> {
         .store
         .transaction(move |db| {
             let (run, chat) = registering(db, &token, &request)?;
-            let revision = input_revision(db, &run)?;
+            let revision = input_revision(db, &run, &chat)?;
             Ok((run, chat, revision))
         })
         .await?;
@@ -246,7 +256,7 @@ pub async fn schedule(s: &Service, bearer: &str, raw: &Value) -> Result<Value> {
         .store
         .transaction(move |db| {
             let (run, mut chat) = registering(db, &token, &input)?;
-            if input_revision(db, &run)? != revision {
+            if input_revision(db, &run, &chat)? != revision {
                 return Err(Error::conflict("User input changed while the condition was checked. Handle it before registering a wait."));
             }
             if same_request(&chat["wakeup"], &run, &input) {

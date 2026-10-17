@@ -2,6 +2,9 @@
 
 Date: 2026-10-12.
 
+Updated: 2026-10-17 — follow-ups queued before the wait no longer prevent it;
+they start after its continuation.
+
 An agent saying it will return after a delay does not schedule another turn.
 Native waiting tools depend on their process staying alive. Cairn must own the
 deadline when the conversation can release its execution while awaiting a remote
@@ -12,21 +15,25 @@ current turn's workspace grant. Its seconds, reason, deadline and unique
 continuation ID persist together with the activity event. Identical repeated
 calls return the original deadline; changed arguments replace it. The agent
 ends its turn after confirmation. This is cooperative deferral, not a forced
-interrupt of arbitrary commands. Pending user input prevents scheduling.
+interrupt of arbitrary commands. Input the turn has not handled yet (steering,
+question answers or a message being delivered) prevents scheduling. Follow-ups
+queued for after the current turn do not: the wait continues the current task,
+so they start once its continuation finishes.
 
 The existing worker wakes a conversation after its turn succeeds, its execution
 is released and its deadline passes. Snapshot preparation rechecks the current
 agent permissions; the launch transaction rechecks the wakeup, run, lifecycle,
-pause and pending messages. It consumes the wakeup atomically with queuing a
+pause and unhandled input. It consumes the wakeup atomically with queuing a
 fresh turn of the same run. Native session, workspace and transcript survive;
 no synthetic user message is added to the chat. Capacity, account admission,
 fencing, publication protection and bounded recovery retain their contracts.
 
-A new user message cancels the wakeup. Queue pause holds the original deadline;
-resume makes an overdue wakeup eligible. Stop, run cancellation, deletion and a
-fresh session cancel it. A terminal failure pauses the chat and clears its
-wakeup. Restart reloads the persisted deadline, including overdue waits, without
-resetting it or relying on guest timers. Resumption is no earlier than the
+A new user message cancels the wakeup; earlier queued follow-ups then start in
+order. A wakeup that can no longer resume does not hold them. Queue pause holds
+the original deadline; resume makes an overdue wakeup eligible. Stop, run
+cancellation, deletion and a fresh session cancel it. A terminal failure pauses
+the chat and clears its wakeup. Restart reloads the persisted deadline,
+including overdue waits, without resetting it or relying on guest timers. Resumption is no earlier than the
 deadline and depends on available capacity.
 
 Waiting releases the normal execution/account/MCP leases. Claude's VM can stop;
