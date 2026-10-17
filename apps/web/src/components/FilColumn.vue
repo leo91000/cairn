@@ -10,7 +10,9 @@ import {
 } from 'vue'
 import { useRouter } from 'vue-router'
 import { api, notify, state } from '../api'
+import { waitLeft } from '../chat-wait'
 import {
+  Check,
   CheckCheck,
   ListFilter,
   RotateCcw,
@@ -18,14 +20,20 @@ import {
   X,
 } from '../icons'
 import { refreshMissionRuns, useMissionRuns } from '../mission-runs'
+import { localReads, markRead } from '../reads'
 import { typingTarget } from '../shortcuts'
-import { filOf, greeting, shortAge } from '../signal'
+import {
+  filOf,
+  greeting,
+  isUnread,
+  shortAge,
+} from '../signal'
 import AgentAvatar from './AgentAvatar.vue'
 import Icon from './Icon.vue'
 import InstallationHeader from './InstallationHeader.vue'
 
-// The Fil: what needs the user, live work and recent conversations. J/K move the selection,
-// Enter opens it and / filters, as in a mail client.
+// The Fil: what needs the user, live work, waiting and recent conversations. J/K move the selection,
+// Enter opens it, E marks finished work as read and / filters, as in a mail client.
 const props = withDefaults(defineProps<{
   chats: ChatView[]
   selected?: string | null
@@ -41,7 +49,33 @@ const now = ref(Date.now())
 const clock = setInterval(() => now.value = Date.now(), 30000)
 onBeforeUnmount(() => clearInterval(clock))
 
-const fil = computed(() => filOf(props.chats, state.tasks, runs.value))
+const fil = computed(() => filOf(props.chats, state.tasks, runs.value, localReads))
+const opened = (item: FilItem) => (item.chatId && item.chatId === props.selected) || (item.runId && item.runId === props.selectedRun)
+
+// Finished work opened from For you stays there, read, while it is open: it moves to Recent once
+// the user moves on rather than jumping away under the cursor. Work that finishes while it is
+// open was read as it happened and goes straight to Recent.
+const lingering = ref<FilItem | null>(null)
+watch(() => [props.selected, props.selectedRun], () => {
+  lingering.value = fil.value.forYou.find(item => isUnread(item) && opened(item)) ?? null
+}, { immediate: true })
+const readingNow = (item: FilItem) => isUnread(item) && opened(item) && item.key !== lingering.value?.key
+const forYou = computed(() => {
+  const items = fil.value.forYou.filter(item => !readingNow(item))
+  const kept = lingering.value
+  if (!kept || [...items, ...fil.value.live, ...fil.value.waiting].some(item => item.key === kept.key))
+    return items
+  const firstUnread = items.findIndex(isUnread)
+  const at = firstUnread < 0 ? items.length : firstUnread
+  return [...items.slice(0, at), kept, ...items.slice(at)]
+})
+// Missions have no Recent section: one read as it finishes simply leaves For you.
+const recent = computed(() => [
+  ...fil.value.forYou.filter(item => item.chatId && readingNow(item)).map(item => ({ ...item, kind: 'recent' as const, preview: undefined })),
+  ...fil.value.recent.filter(item => item.key !== lingering.value?.key),
+].sort((a, b) => b.at - a.at))
+const unread = computed(() => fil.value.forYou.filter(item => isUnread(item) && !readingNow(item)))
+const read = (item: FilItem) => isUnread(item) && !fil.value.forYou.some(other => other.key === item.key)
 
 function matches(item: FilItem) {
   const query = filter.value.trim().toLowerCase()
@@ -49,16 +83,24 @@ function matches(item: FilItem) {
 }
 
 const sections = computed(() => [
-  { key: 'for-you', label: 'For you', items: fil.value.forYou.filter(matches) },
+  { key: 'for-you', label: 'For you', items: forYou.value.filter(matches) },
   { key: 'live', label: 'Live', items: fil.value.live.filter(matches) },
-  { key: 'recent', label: 'Recent', items: fil.value.recent.filter(matches) },
+  { key: 'waiting', label: 'Waiting', items: fil.value.waiting.filter(matches) },
+  { key: 'recent', label: 'Recent', items: recent.value.filter(matches) },
 ])
 const flat = computed(() => sections.value.flatMap(section => section.items))
 const summary = computed(() => {
-  const need = fil.value.forYou.length
+  const need = fil.value.forYou.filter(item => !isUnread(item)).length
   const working = fil.value.live.filter(item => item.kind === 'running').length
   const suspended = fil.value.live.filter(item => item.kind === 'suspended').length
-  return [need ? `${need} need${need === 1 ? 's' : ''} you` : 'Nothing needs you', working ? `${working} working` : '', suspended ? `${suspended} suspended` : ''].filter(Boolean).join(' · ')
+  const waiting = fil.value.waiting.length
+  return [
+    need ? `${need} need${need === 1 ? 's' : ''} you` : unread.value.length ? '' : 'Nothing needs you',
+    unread.value.length ? `${unread.value.length} to read` : '',
+    working ? `${working} working` : '',
+    suspended ? `${suspended} suspended` : '',
+    waiting ? `${waiting} waiting` : '',
+  ].filter(Boolean).join(' · ')
 })
 watch(() => props.selected, (id) => {
   if (id)
@@ -70,14 +112,12 @@ watch(() => props.selectedRun, (id) => {
     cursor.value = item.key
 }, { immediate: true })
 
-const opened = (item: FilItem) => (item.chatId && item.chatId === props.selected) || (item.runId && item.runId === props.selectedRun)
-
 function current(item: FilItem) {
   return opened(item) || cursor.value === item.key
 }
 
 function badge(item: FilItem) {
-  return item.kind === 'question' ? 'question' : item.kind === 'failed' || item.kind === 'failed-mission' ? 'failed' : item.kind === 'queued' ? 'queued' : item.kind === 'paused' || item.kind === 'suspended' ? 'paused' : null
+  return item.kind === 'question' ? 'question' : item.kind === 'failed' || item.kind === 'failed-mission' ? 'failed' : item.kind === 'unread' ? 'done' : item.kind === 'queued' ? 'queued' : item.kind === 'waiting' ? 'waiting' : item.kind === 'paused' || item.kind === 'suspended' ? 'paused' : null
 }
 
 const labels: Partial<Record<FilItem['kind'], string>> = {
@@ -85,6 +125,29 @@ const labels: Partial<Record<FilItem['kind'], string>> = {
   'failed': 'Failed',
   'failed-mission': 'Mission failed',
   'review': 'Needs review',
+}
+
+function label(item: FilItem) {
+  if (isUnread(item))
+    return item.taskId ? 'Mission finished' : 'Finished'
+  return labels[item.kind]
+}
+
+// The coloured edge says what kind of attention a card asks for.
+function edge(item: FilItem) {
+  if (read(item))
+    return 'bg-line'
+  return item.kind === 'review' ? 'bg-warning' : isUnread(item) ? 'bg-accent' : 'bg-coral'
+}
+
+function tone(item: FilItem) {
+  if (read(item))
+    return 'text-muted'
+  return item.kind === 'review' ? 'text-warning' : isUnread(item) ? 'text-accent' : 'text-coral'
+}
+
+function action(item: FilItem) {
+  return item.kind === 'question' ? 'Answer' : item.kind === 'failed' ? 'Resume' : isUnread(item) && !read(item) ? 'Read' : 'Open'
 }
 
 function open(item: FilItem) {
@@ -126,6 +189,13 @@ function key(event: KeyboardEvent) {
     if (item) {
       event.preventDefault()
       open(item)
+    }
+  }
+  else if (event.key === 'e') {
+    const item = flat.value.find(item => item.key === cursor.value)
+    if (item && isUnread(item) && !read(item)) {
+      event.preventDefault()
+      void markRead([item])
     }
   }
   else if (event.key === '/') {
@@ -185,9 +255,18 @@ onBeforeUnmount(() => document.removeEventListener('keydown', key))
       <template v-for="section in sections" :key="section.key">
         <section v-if="section.items.length || section.key === 'for-you'" class="mt-3" :aria-label="section.label">
           <h2 class="flex items-center gap-2 px-3 pb-2 pt-2 text-base!">
-            <span class="eyebrow" :class="{ 'text-coral!': section.key === 'for-you' && section.items.length }">{{ section.label }}</span>
-            <span class="rounded-full px-1.5 text-[10.5px] font-bold tabular-nums" :class="section.key === 'for-you' && section.items.length ? 'bg-coral-soft text-coral' : 'bg-hover text-muted'">{{ section.items.length }}</span>
+            <span class="eyebrow" :class="{ 'text-coral!': section.key === 'for-you' && section.items.some(item => !isUnread(item)), 'text-accent!': section.key === 'for-you' && section.items.length && section.items.every(isUnread) }">{{ section.label }}</span>
+            <span class="rounded-full px-1.5 text-[10.5px] font-bold tabular-nums" :class="section.key !== 'for-you' || !section.items.length ? 'bg-hover text-muted' : section.items.some(item => !isUnread(item)) ? 'bg-coral-soft text-coral' : 'bg-soft text-accent'">{{ section.items.length }}</span>
             <span v-if="section.key === 'live' && section.items.some(item => item.kind === 'running')" class="live-dot ml-auto mr-1" />
+            <button
+              v-if="section.key === 'for-you' && unread.length"
+              type="button"
+              class="press -my-1 ml-auto flex h-7 items-center gap-1.5 rounded-full px-2.5 text-[11.5px] font-semibold text-muted transition-colors hover:bg-hover hover:text-ink"
+              :aria-label="`Mark ${unread.length} finished ${unread.length === 1 ? 'item' : 'items'} as read`"
+              @click="markRead(unread)"
+            >
+              <Icon :name="CheckCheck" :size="14" /> Mark all read
+            </button>
           </h2>
           <p v-if="section.key === 'for-you' && !section.items.length && !filter" class="mx-2 flex items-center gap-2 rounded-2xl border border-dashed border-line px-4 py-3 text-[13px] text-muted">
             <Icon :name="CheckCheck" :size="16" class="text-success" /> All clear — nothing is waiting on you.
@@ -204,9 +283,10 @@ onBeforeUnmount(() => document.removeEventListener('keydown', key))
                 :key="item.key"
                 :data-fil-key="item.key"
                 class="lift relative overflow-hidden rounded-2xl border bg-surface"
-                :class="current(item) ? 'border-accent shadow-focus' : 'border-line'"
+                :class="[current(item) ? 'border-accent shadow-focus' : 'border-line', { 'fil-unread': isUnread(item) && !read(item) }]"
+                :data-unread="isUnread(item) && !read(item) ? '' : undefined"
               >
-                <span class="absolute inset-y-0 left-0 w-[3px]" :class="item.kind === 'review' ? 'bg-warning' : 'bg-coral'" />
+                <span class="absolute inset-y-0 left-0 w-[3px] transition-colors duration-500" :class="edge(item)" />
                 <button type="button" class="flex w-full items-start gap-3 px-4 pb-3 pt-3.5 text-left" @click="open(item)">
                   <AgentAvatar
                     :name="item.agent"
@@ -216,13 +296,21 @@ onBeforeUnmount(() => document.removeEventListener('keydown', key))
                   />
                   <span class="min-w-0 flex-1">
                     <span class="flex items-center gap-2 whitespace-nowrap text-[11.5px] font-semibold">
-                      <span :class="item.kind === 'review' ? 'text-warning' : 'text-coral'">{{ labels[item.kind] }}</span>
+                      <span
+                        v-if="isUnread(item)"
+                        class="unread-dot"
+                        :class="{ 'unread-dot-read': read(item) }"
+                        :aria-label="read(item) ? undefined : 'Unread'"
+                        :role="read(item) ? undefined : 'img'"
+                      />
+                      <span class="transition-colors duration-500" :class="tone(item)">{{ read(item) ? 'Read' : label(item) }}</span>
                       <span class="text-subtle">·</span>
                       <span class="truncate font-medium text-muted">{{ [item.agent, item.project].filter(Boolean).join(' · ') }}</span>
                       <span class="ml-auto shrink-0 font-medium text-subtle">{{ shortAge(item.at, now) }}</span>
                     </span>
                     <span class="mt-1 line-clamp-2 block font-heading text-[14.5px] font-bold leading-snug text-ink">{{ item.title }}</span>
-                    <span class="mt-1 line-clamp-1 text-[12.5px] leading-relaxed text-muted phone:line-clamp-2">{{ item.subtitle }}</span>
+                    <span v-if="item.preview" class="fil-preview mt-2 line-clamp-2 block rounded-lg bg-inset px-2.5 py-1.5 text-[12.5px] leading-relaxed text-muted phone:line-clamp-3">{{ item.preview }}</span>
+                    <span v-else class="mt-1 line-clamp-1 text-[12.5px] leading-relaxed text-muted phone:line-clamp-2">{{ item.subtitle }}</span>
                   </span>
                 </button>
                 <div class="flex gap-1.5 px-4 pb-3.5 pl-[62px]">
@@ -237,12 +325,22 @@ onBeforeUnmount(() => document.removeEventListener('keydown', key))
                   </button>
                   <button
                     type="button"
-                    :aria-label="`${item.kind === 'question' ? 'Answer' : item.kind === 'failed' ? 'Resume' : 'Open'} “${item.title}”`"
+                    :aria-label="`${action(item)} “${item.title}”`"
                     class="press h-8 rounded-full px-3 text-[12.5px] font-semibold"
-                    :class="item.kind === 'question' ? 'bg-accent text-surface' : 'text-muted hover:bg-hover'"
+                    :class="item.kind === 'question' ? 'bg-accent text-surface' : isUnread(item) && !read(item) ? 'bg-soft text-accent' : 'text-muted hover:bg-hover'"
                     @click="open(item)"
                   >
-                    {{ item.kind === 'question' ? 'Answer' : item.kind === 'failed' ? 'Resume' : 'Open' }}
+                    {{ action(item) }}
+                  </button>
+                  <button
+                    v-if="isUnread(item) && !read(item)"
+                    type="button"
+                    :aria-label="`Mark “${item.title}” as read`"
+                    title="Mark as read (E)"
+                    class="press flex h-8 items-center gap-1.5 rounded-full px-3 text-[12.5px] font-semibold text-muted hover:bg-hover hover:text-ink"
+                    @click="markRead([item])"
+                  >
+                    <Icon :name="Check" :size="14" /> Mark as read
                   </button>
                 </div>
               </article>
@@ -278,6 +376,10 @@ onBeforeUnmount(() => document.removeEventListener('keydown', key))
                       <span class="shrink-0 font-semibold text-muted">Queued</span>
                       <span class="ml-1.5 truncate text-subtle">· {{ item.subtitle }}</span>
                     </template>
+                    <template v-else-if="item.kind === 'waiting'">
+                      <span class="truncate font-medium text-accent">{{ item.subtitle }}</span>
+                      <span v-if="item.project" class="ml-1.5 truncate text-subtle">· {{ item.project }}</span>
+                    </template>
                     <template v-else-if="item.kind === 'suspended'">
                       <span class="truncate font-medium text-muted">{{ item.subtitle }}</span>
                     </template>
@@ -287,7 +389,12 @@ onBeforeUnmount(() => document.removeEventListener('keydown', key))
                     </template>
                   </span>
                 </span>
-                <span class="shrink-0 self-start pt-0.5 text-[11px] tabular-nums" :class="item.kind === 'running' ? 'font-semibold text-accent' : 'text-subtle'">{{ shortAge(item.at, now) }}</span>
+                <span
+                  v-if="item.kind === 'waiting'"
+                  class="shrink-0 self-start pt-0.5 text-[11px] font-semibold tabular-nums text-accent"
+                  :title="item.condition ? 'Resumes when the result arrives, at the latest by its deadline' : 'Time left before it resumes'"
+                >{{ waitLeft({ wakeAt: item.wakeAt!, condition: item.condition, resolved: item.resolved }, now) }}</span>
+                <span v-else class="shrink-0 self-start pt-0.5 text-[11px] tabular-nums" :class="item.kind === 'running' ? 'font-semibold text-accent' : 'text-subtle'">{{ shortAge(item.at, now) }}</span>
               </button>
             </template>
           </TransitionGroup>
@@ -295,6 +402,7 @@ onBeforeUnmount(() => document.removeEventListener('keydown', key))
       </template>
       <p v-if="!compact" class="mt-6 flex flex-wrap items-center justify-center gap-x-3 gap-y-1 text-[11.5px] text-subtle phone:hidden">
         <span><kbd class="keycap">J</kbd> <kbd class="keycap">K</kbd> move</span>
+        <span v-if="unread.length"><kbd class="keycap">E</kbd> read</span>
         <span><kbd class="keycap">C</kbd> new</span>
         <span class="inline-flex items-center gap-1"><Icon :name="Search" :size="12" /><kbd class="keycap">⌘ K</kbd></span>
         <span><kbd class="keycap">?</kbd> shortcuts</span>

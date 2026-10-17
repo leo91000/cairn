@@ -81,6 +81,7 @@ class HistoryScrollDeviceTest {
                     base + 1,
                     "chat.user",
                     "Question $turn : peux-tu vérifier l’étape $turn ?",
+                    runId = "long",
                 )
             ) +
                 (1..8).map { step ->
@@ -100,6 +101,7 @@ class HistoryScrollDeviceTest {
                                     put("exit_code", 0)
                                 }
                         ),
+                        runId = "long",
                     )
                 } +
                 RunEvent(
@@ -118,6 +120,7 @@ class HistoryScrollDeviceTest {
                                 )
                             }
                     ),
+                    runId = "long",
                 )
         }
 

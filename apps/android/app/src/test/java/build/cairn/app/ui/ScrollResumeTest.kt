@@ -68,6 +68,7 @@ class ScrollResumeTest {
                                     "chat.user",
                                     "Message %03d\nUne ligne de diagnostic.\nUne autre ligne de diagnostic."
                                         .format(n),
+                                    runId = "fixture",
                                 )
                             }
                     val json =

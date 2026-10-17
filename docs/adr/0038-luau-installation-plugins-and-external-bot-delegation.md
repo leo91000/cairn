@@ -3,7 +3,7 @@
 Date: 2026-10-12.
 
 Arbitrary native execution and the built-in-only 1Password capability are
-superseded by [ADR-0044](0044-declarative-plugin-contributions.md).
+superseded by [ADR-0045](0045-declarative-plugin-contributions.md).
 
 ## Decision
 

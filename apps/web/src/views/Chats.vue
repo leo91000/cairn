@@ -6,6 +6,7 @@ import type {
   ChatDetail,
   ChatMessage,
 } from '../../../../packages/contracts/chats'
+import type { LiveWait } from '../chat-wait'
 import {
   computed,
   inject,
@@ -19,8 +20,9 @@ import { useRoute, useRouter } from 'vue-router'
 import { latestArtifacts } from '../../../../packages/contracts/artifacts'
 import { MAIN_AGENT_ID } from '../../../../packages/contracts/constants'
 import { api, state } from '../api'
-import { chatDelivery, chatSleepNotice, chatWaitNotice } from '../chat-delivery'
+import { chatDelivery, chatWaitNotice, scheduledWakeup } from '../chat-delivery'
 import { chatList as chats, publishChats } from '../chat-list'
+import { liveWakeup, waitStatus } from '../chat-wait'
 import ActivityFeed from '../components/ActivityFeed.vue'
 import AgentAvatar from '../components/AgentAvatar.vue'
 import AssistantPicker from '../components/AssistantPicker.vue'
@@ -64,6 +66,7 @@ import {
   Zap,
 } from '../icons'
 import { connectionTone, installationKey, routeLabel } from '../installation-context'
+import { useReadWhileOpen } from '../reads'
 import { useRetryNotice } from '../run-retry'
 import { exclusiveSuspensionLabel, isExclusivelySuspended } from '../run-status'
 import { backgroundWait } from '../signal'
@@ -252,10 +255,35 @@ function pasteFiles(event: ClipboardEvent) {
 const active = computed(() => !!detail.value?.run && ['queued', 'running'].includes(detail.value.run.status))
 const suspended = computed(() => isExclusivelySuspended(detail.value?.run))
 const retryNotice = useRetryNotice(() => detail.value?.run)
-const sleepNotice = computed(() => chatSleepNotice(detail.value))
+const scheduled = computed(() => scheduledWakeup(detail.value))
+// The scheduled wait shows as a card in the conversation; these notices explain a run that cannot start.
 const waitNotice = computed(() => retryNotice.value
   ? { account: null, message: retryNotice.value }
-  : chatWaitNotice(detail.value?.run) ?? sleepNotice.value)
+  : chatWaitNotice(detail.value?.run))
+const waitNow = ref(Date.now())
+let waitClock: ReturnType<typeof setInterval> | undefined
+watch(() => !!scheduled.value, (waiting) => {
+  clearInterval(waitClock)
+  waitNow.value = Date.now()
+  if (waiting)
+    waitClock = setInterval(() => waitNow.value = Date.now(), 1000)
+}, { immediate: true })
+onBeforeUnmount(() => clearInterval(waitClock))
+const sleepStatus = computed(() => {
+  const wakeup = scheduled.value
+  if (!wakeup)
+    return null
+  return waitStatus(wakeup, waitNow.value)
+})
+// One object per conversation state: a new one on each render would re-render the whole feed.
+const liveWait = computed<LiveWait | undefined>(() => detail.value
+  ? {
+      wakeup: liveWakeup(detail.value),
+      paused: detail.value.paused,
+      settled: detail.value.run?.status === 'succeeded',
+      busy: busy.value,
+    }
+  : undefined)
 const backgroundTasks = computed(() => detail.value?.run?.status === 'running' ? backgroundWait(events.value)?.tasks.length ?? 0 : 0)
 const chatStatus = computed(() => {
   const status = detail.value?.run?.status
@@ -268,16 +296,17 @@ const chatStatus = computed(() => {
 
   if (suspended.value)
     return exclusiveSuspensionLabel
+  // "Waiting" names the Fil section of scheduled waits; a run waiting for a runner is queued.
   if (status === 'queued')
-    return 'Waiting'
+    return 'Queued'
   if (status === 'running') {
     if (backgroundTasks.value)
       return backgroundTasks.value === 1 ? 'Background task' : 'Background tasks'
     return 'Working'
   }
 
-  if (sleepNotice.value)
-    return detail.value?.wakeup?.condition ? 'Waiting for a result' : 'Scheduled wait'
+  if (sleepStatus.value)
+    return sleepStatus.value
   return 'Ready'
 })
 const outgoing = ref<ChatMessage | null>(null)
@@ -338,6 +367,14 @@ watch(live.snapshot, (value) => {
   detail.value = value?.chat ?? null
   if (value?.chats)
     publishChats(value.chats)
+})
+// The open conversation's finished turns are read while the page is visible.
+useReadWhileOpen(() => {
+  const chat = detail.value
+  const run = chat?.run
+  if (!chat || !live.synced.value || catchingUp.value || switching.value || chat.id !== selectedChatId.value || run?.status !== 'succeeded' || !run.finishedAt)
+    return null
+  return { key: `chat:${chat.id}`, at: run.finishedAt }
 })
 watch(live.error, (value) => {
   if (value)
@@ -814,6 +851,7 @@ function key(event: KeyboardEvent) {
             :outcome="detail?.run?.status === 'succeeded' ? detail.run.outcome : null"
             :sending="delivery.sending"
             :events="events"
+            :wakeup="liveWait"
             :active="detail?.run?.status === 'running'"
             :suspended="suspended"
             :agent-id="detail?.agentId || selectedAgent?.id"
@@ -830,6 +868,7 @@ function key(event: KeyboardEvent) {
             chat
             @load="live.loadOlder"
             @position="live.savePosition"
+            @pause-wait="busy || action('pause', { paused: true })"
           />
           <div v-if="!inactive" class="mx-auto w-full max-w-205 shrink-0 px-5 pb-1 pt-3 phone:px-0 phone:pt-2">
             <ChatQuestions
@@ -856,15 +895,6 @@ function key(event: KeyboardEvent) {
               <p class="wrap-anywhere">
                 {{ waitNotice.message }}
               </p>
-              <UiButton
-                v-if="sleepNotice"
-                size="small"
-                class="mt-2"
-                :disabled="busy"
-                @click="action('pause', { paused: true })"
-              >
-                Pause wait
-              </UiButton>
               <RouterLink v-if="waitNotice.account && state.installationRole === 'owner'" to="/connections" class="mt-2 inline-flex font-semibold text-accent underline">
                 Open Connections
               </RouterLink>
@@ -971,7 +1001,7 @@ function key(event: KeyboardEvent) {
                   v-model="draft"
                   :skills="skills"
                   aria-label="Message"
-                  :placeholder="responding ? 'Add a follow-up…' : skills.length ? 'Message your agent… Type $ for skills' : 'Message your agent…'"
+                  :placeholder="liveWait?.wakeup ? (detail?.paused ? 'Add to the queue — this cancels the wait' : 'Reply now — this cancels the wait') : responding ? 'Add a follow-up…' : skills.length ? 'Message your agent… Type $ for skills' : 'Message your agent…'"
                   rows="2"
                   maxlength="50000"
                   @keydown="key"
@@ -1025,8 +1055,8 @@ function key(event: KeyboardEvent) {
                       v-if="(active || detail?.wakeup) && !editing && !hasDraft"
                       type="button"
                       class="round-action border border-line text-coral"
-                      :aria-label="sleepNotice ? 'Cancel scheduled wait' : 'Stop response'"
-                      :title="sleepNotice ? 'Cancel wakeup and pause queue' : 'Stop response and pause queue'"
+                      :aria-label="scheduled ? 'Cancel scheduled wait' : 'Stop response'"
+                      :title="scheduled ? 'Cancel wakeup and pause queue' : 'Stop response and pause queue'"
                       :disabled="busy"
                       @click="action('stop')"
                     >

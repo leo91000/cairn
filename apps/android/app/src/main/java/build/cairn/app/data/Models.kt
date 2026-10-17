@@ -158,6 +158,10 @@ data class Run(
     val outcome: TaskOutcome? = null,
     val chatExecution: ChatExecution? = null,
     val error: String? = null,
+    /** A mission run that finished after this account last opened its mission. */
+    val unread: Boolean = false,
+    /** The opening of the agent's final message, while unread. */
+    val preview: String? = null,
     val nodeId: String? = null,
     val nodeState: String? = null,
     val resources: NodeResources? = null,
@@ -186,6 +190,8 @@ data class RunEvent(
     val payload: Map<String, JsonElement>? = null,
     // Presentation identity survives newer wire event IDs and encrypted cache restores.
     val displayId: Long? = null,
+    // A conversation streams several runs; item IDs such as a subagent's are scoped to their run.
+    val runId: String = "",
 )
 
 @Serializable

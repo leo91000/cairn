@@ -1,0 +1,6 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <application android:label="Cairn release smoke" />
+    <instrumentation
+        android:name="build.cairn.smoke.WebRtcSmoke"
+        android:targetPackage="build.cairn.app" />
+</manifest>

@@ -7,20 +7,11 @@ export interface SendingMessage {
   label: string
 }
 
-export function chatSleepNotice(chat: ChatDetail | null | undefined) {
+/** The wait a finished turn scheduled; the header counts it down, as `waitStatus` words it. */
+export function scheduledWakeup(chat: ChatDetail | null | undefined) {
   if (chat?.paused || (chat?.lifecycle && chat.lifecycle !== 'active') || chat?.run?.status !== 'succeeded' || !chat.wakeup)
     return null
-  const when = new Date(chat.wakeup.wakeAt).toLocaleString([], {
-    month: 'short',
-    day: 'numeric',
-    hour: '2-digit',
-    minute: '2-digit',
-    second: '2-digit',
-  })
-  const timing = chat.wakeup.condition
-    ? `Automatic resume when a result is available or the wait deadline ${when} expires, when capacity is available.`
-    : `Automatic resume from ${when}, when capacity is available.`
-  return { account: null, message: `${chat.wakeup.reason} · ${timing}` }
+  return chat.wakeup
 }
 
 export function chatWaitNotice(run: Run | null | undefined) {

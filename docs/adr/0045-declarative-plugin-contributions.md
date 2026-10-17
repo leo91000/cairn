@@ -57,9 +57,9 @@ owner; packages cannot download or write executables.
 Native transports (Discord's Gateway) and the Discord setup and dashboard pages stay
 in Cairn for now. Inbound webhooks, long-lived sockets for scripts and a plugin-level
 page outside instances are not part of v2. (Sockets, inbound messages and package
-forms were added by ADR-0045, which removed Discord's native code.)
+forms were added by ADR-0046, which removed Discord's native code.)
 
-Only API v2 manifests load; v1 packages must be updated (ADR-0046 also changed how
+Only API v2 manifests load; v1 packages must be updated (ADR-0047 also changed how
 approvals are computed, so installed packages are reviewed again).
 Instances that delegate nothing to external people are no longer bound to the owner
 who created them; external delegation still is. ADR-0038's capability model, approval digests,

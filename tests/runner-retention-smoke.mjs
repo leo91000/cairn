@@ -61,7 +61,7 @@ async function main() {
   const name = `cairn-retention-${randomUUID().slice(0, 8)}`
   const peer = `${name}-peer`
   const network = `${name}-public`
-  const endpoint = 'http://203.0.113.3:8080'
+  const endpoint = 'http://93.184.216.3:8080'
   const runId = randomUUID()
   const runRoot = `/data/runs/${runId}`
   const samples = []
@@ -142,12 +142,12 @@ async function main() {
       })
     })
     await new Promise(resolve => broker.listen(path.join(home, 'cairn-auth.sock'), resolve))
-    docker('network', 'create', '--internal', '--subnet', '203.0.113.0/29', network)
+    docker('network', 'create', '--internal', '--subnet', '93.184.216.0/29', network)
     docker('run', '-d', '--name', peer, '-v', `${root}/peer.cjs:/peer.cjs:ro`, '--entrypoint', 'node', image, '/peer.cjs')
-    docker('network', 'connect', '--ip', '203.0.113.3', network, peer)
+    docker('network', 'connect', '--ip', '93.184.216.3', network, peer)
     const capabilities = ['SYS_ADMIN', 'NET_ADMIN', 'SYS_CHROOT', 'SETUID', 'SETGID', 'MKNOD', 'CHOWN', 'FOWNER', 'KILL', 'DAC_OVERRIDE']
     docker('run', '-d', '--name', name, '--user', '0:0', '--read-only', '--cap-drop', 'ALL', ...capabilities.flatMap(value => ['--cap-add', value]), '--security-opt', 'apparmor=unconfined', '--security-opt', 'seccomp=unconfined', '--device', '/dev/kvm', '--device', '/dev/fuse', '--device', '/dev/net/tun', '--sysctl', 'net.ipv4.ip_forward=1', '--sysctl', 'net.ipv6.conf.all.disable_ipv6=1', '--tmpfs', '/run', '--tmpfs', '/tmp', '-v', `${root}/data:/data`, '-v', `${root}/state:/runner-state`, '-p', '127.0.0.1::4311', '--memory', `${process.env.CAIRN_RETENTION_MEMORY_GIB ?? 10}g`, '--cpus', cpuQuota, '-e', 'CONCURRENCY=3', '-e', `CAIRN_VM_RETENTION_SECONDS=${retention}`, '-e', 'CAIRN_READY_VM_POOL=false', '--entrypoint', '/usr/local/bin/cairn', image, 'runner-broker')
-    docker('network', 'connect', '--ip', '203.0.113.2', network, name)
+    docker('network', 'connect', '--ip', '93.184.216.2', network, name)
     url = `http://${await until(() => {
       try {
         return docker('port', name, '4311/tcp')

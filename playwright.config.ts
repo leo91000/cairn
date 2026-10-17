@@ -48,6 +48,7 @@ export default defineConfig({
     { name: 'layout-webkit-models', testMatch: 'models.spec.ts', use: { browserName: 'webkit', hasTouch: true } },
     { name: 'journeys-signal', testMatch: 'signal.spec.ts' },
     { name: 'layout-webkit-signal', testMatch: 'signal.spec.ts', use: { browserName: 'webkit', hasTouch: true } },
+    { name: 'journeys-unread', testMatch: 'unread.spec.ts' },
     { name: 'journeys-chats', testMatch: 'chats.spec.ts' },
     { name: 'journeys-installation-subdomains', testMatch: 'installation-subdomains.spec.ts' },
     { name: 'layout-webkit-installation-drafts', testMatch: 'installation-subdomains.spec.ts', use: { browserName: 'webkit' } },

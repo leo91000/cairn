@@ -4,6 +4,7 @@ package build.cairn.app.ui
 
 import android.content.Intent
 import androidx.browser.customtabs.CustomTabsIntent
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.selection.toggleable
@@ -20,6 +21,7 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
@@ -397,7 +399,33 @@ fun Markdown(content: String) {
             Spacer(Modifier.fillMaxWidth().height(lineHeight * lines))
         }
         blocks.forEachIndexed { index, block ->
-            key(index) { MarkdownBlockView(markwon, block, color, linkColor, copyText) }
+            key(index) {
+                if (block.tableColumns > 0) {
+                    BoxWithConstraints(Modifier.fillMaxWidth()) {
+                        val minimum =
+                            with(androidx.compose.ui.platform.LocalDensity.current) {
+                                (96 * block.tableColumns).sp.toDp()
+                            }
+                        val width = maxOf(maxWidth, minimum)
+                        Box(
+                            Modifier.fillMaxWidth()
+                                .horizontalScroll(rememberScrollState())
+                                .testTag("markdown-table")
+                        ) {
+                            MarkdownBlockView(
+                                markwon,
+                                block,
+                                color,
+                                linkColor,
+                                copyText,
+                                Modifier.width(width),
+                            )
+                        }
+                    }
+                } else {
+                    MarkdownBlockView(markwon, block, color, linkColor, copyText)
+                }
+            }
         }
     }
 }
@@ -409,6 +437,7 @@ private fun MarkdownBlockView(
     color: Int,
     linkColor: Int,
     copyText: () -> String,
+    modifier: Modifier = Modifier.fillMaxWidth(),
 ) {
     val textSizePx =
         with(androidx.compose.ui.platform.LocalDensity.current) {
@@ -424,7 +453,7 @@ private fun MarkdownBlockView(
                 typeface = ResourcesCompat.getFont(context, R.font.cairn_body)
             }
         },
-        modifier = Modifier.fillMaxWidth(),
+        modifier = modifier,
         update = {
             if (it.textSize != textSizePx)
                 it.setTextSize(android.util.TypedValue.COMPLEX_UNIT_PX, textSizePx)

@@ -7,6 +7,7 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.semantics.SemanticsProperties
 import androidx.compose.ui.test.*
 import androidx.compose.ui.test.junit4.v2.createComposeRule
+import androidx.lifecycle.ViewModelStore
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.test.core.app.ApplicationProvider
 import build.cairn.app.data.*
@@ -24,7 +25,11 @@ abstract class SkillMentionCases {
 
     @Test fun emptySkillsExplainsTheMissingSuggestionsAndCanBeDismissed() = skillJourney(true)
 
-    private fun skillJourney(noSkills: Boolean) {
+    @Test
+    fun emptySkillsCanBeUsedAfterASlowInstallationRefresh() =
+        skillJourney(noSkills = true, slowRefresh = true)
+
+    private fun skillJourney(noSkills: Boolean, slowRefresh: Boolean = false) {
         MockWebServer().use { server ->
             val sent = CopyOnWriteArrayList<JsonObject>()
             val agent = Agent(MAIN_AGENT_ID, "Agent principal")
@@ -76,7 +81,10 @@ abstract class SkillMentionCases {
                                 "/api/installations/fixture/api/overview" -> "{}"
                                 else -> "[]"
                             }
-                        return MockResponse().setBody(body)
+                        return MockResponse().setBody(body).apply {
+                            if (slowRefresh && path.endsWith("/skills"))
+                                setBodyDelay(750, java.util.concurrent.TimeUnit.MILLISECONDS)
+                        }
                     }
                 }
             server.start()
@@ -86,59 +94,110 @@ abstract class SkillMentionCases {
                     SkillVault(),
                     beaconOrigin = "",
                 )
+            val models = ViewModelStore().apply { put("fixture", vm) }
+            var mounted by mutableStateOf(true)
             var backDispatcher: OnBackPressedDispatcher? = null
-            compose.setContent {
-                backDispatcher = LocalOnBackPressedDispatcherOwner.current?.onBackPressedDispatcher
-                val state by vm.state.collectAsStateWithLifecycle()
-                LaunchedEffect(Unit) {
-                    vm.state.first { it.ready }
-                    if (!vm.state.value.session.authenticated)
-                        vm.connect(server.url("/").toString())
+            try {
+                compose.setContent {
+                    if (mounted) {
+                        backDispatcher =
+                            LocalOnBackPressedDispatcherOwner.current?.onBackPressedDispatcher
+                        val state by vm.state.collectAsStateWithLifecycle()
+                        LaunchedEffect(Unit) {
+                            vm.state.first { it.ready }
+                            if (!vm.state.value.session.authenticated)
+                                vm.connect(server.url("/").toString())
+                        }
+                        CairnTheme {
+                            if (state.session.authenticated)
+                                ChatScreen(vm, state, "chat", openChat = {}, openRun = {})
+                        }
+                    }
                 }
-                CairnTheme {
-                    if (state.session.authenticated)
-                        ChatScreen(vm, state, "chat", openChat = {}, openRun = {})
+                compose.waitUntil(20000) {
+                    compose
+                        .onAllNodesWithText(
+                            if (noSkills) "Votre message…" else "Votre message… $ pour les skills"
+                        )
+                        .fetchSemanticsNodes()
+                        .isNotEmpty()
                 }
-            }
-            compose.waitUntil(20000) {
-                compose
-                    .onAllNodesWithText(
-                        if (noSkills) "Votre message…" else "Votre message… $ pour les skills"
+                // History and suggestions render asynchronously on slower machines.
+                fun shown(matcher: SemanticsMatcher) =
+                    compose.waitUntil(15000) {
+                        runCatching { compose.onNode(matcher).assertIsDisplayed() }.isSuccess
+                    }
+                fun gone(matcher: SemanticsMatcher) =
+                    compose.waitUntil(15000) {
+                        compose.onAllNodes(matcher).fetchSemanticsNodes().isEmpty()
+                    }
+                shown(hasText("Merci d’utiliser \$review ici"))
+                // The placeholder and history can render while connect() is still refreshing
+                // the installation. A disabled TextField deliberately has no SetText action.
+                compose.waitUntil(15000) {
+                    compose
+                        .onAllNodes(hasSetTextAction() and isEnabled())
+                        .fetchSemanticsNodes()
+                        .size == 1
+                }
+                val field = compose.onNode(hasSetTextAction())
+                if (noSkills) {
+                    val empty = hasText("Aucun skill disponible pour cette conversation")
+                    field.performTextInput("$")
+                    shown(empty)
+                    shown(
+                        hasText(
+                            "Gérez les skills globaux et de projet dans la bibliothèque Skills."
+                        )
                     )
-                    .fetchSemanticsNodes()
-                    .isNotEmpty()
-            }
-            // History and suggestions render asynchronously on slower machines.
-            fun shown(matcher: SemanticsMatcher) =
-                compose.waitUntil(15000) {
-                    runCatching { compose.onNode(matcher).assertIsDisplayed() }.isSuccess
+                    compose.runOnIdle { checkNotNull(backDispatcher).onBackPressed() }
+                    gone(hasTestTag("skill-suggestions"))
+                    assertEquals(
+                        "$",
+                        field.fetchSemanticsNode().config[SemanticsProperties.EditableText].text,
+                    )
+                    field.performTextReplacement("")
+                    field.performTextInput("\$css")
+                    shown(empty)
+                    field.performTextReplacement("\$5")
+                    gone(hasTestTag("skill-suggestions"))
+                    field.performTextReplacement("\$HOME")
+                    gone(hasTestTag("skill-suggestions"))
+                    field.performTextReplacement("\$css")
+                    shown(empty)
+                    compose.waitUntil(15000) {
+                        compose
+                            .onAllNodes(hasTestTag("conversation-send") and isEnabled())
+                            .fetchSemanticsNodes()
+                            .isNotEmpty()
+                    }
+                    compose.onNodeWithTag("conversation-send").performClick()
+                    compose.waitUntil(10000) { sent.size == 1 }
+                    assertEquals("\$css", sent[0]["text"]?.jsonPrimitive?.content)
+                    return
                 }
-            fun gone(matcher: SemanticsMatcher) =
-                compose.waitUntil(15000) {
-                    compose.onAllNodes(matcher).fetchSemanticsNodes().isEmpty()
-                }
-            shown(hasText("Merci d’utiliser \$review ici"))
-            val field = compose.onNode(hasSetTextAction())
-            if (noSkills) {
-                val empty = hasText("Aucun skill disponible pour cette conversation")
-                field.performTextInput("$")
-                shown(empty)
-                shown(hasText("Gérez les skills globaux et de projet dans la bibliothèque Skills."))
-                compose.runOnIdle { checkNotNull(backDispatcher).onBackPressed() }
+                field.performTextInput("\$unknown")
+                shown(hasText("Aucun skill ne correspond à votre recherche"))
+                field.performTextReplacement("")
+                field.performTextInput("Lance $")
+                shown(hasTestTag("skill-suggestion-review"))
+                compose.onNodeWithTag("skill-suggestions").assertIsDisplayed()
+                compose.onNodeWithTag("skill-suggestion-review").assertIsDisplayed()
+                compose.onNodeWithTag("skill-suggestion-deploy").assertIsDisplayed()
+                compose.onNodeWithTag("skill-suggestion-broken").assertDoesNotExist()
+                field.performTextInput("re")
+                gone(hasTestTag("skill-suggestion-deploy"))
+                shown(hasText("Relire les changements en cours"))
+                compose.onNodeWithTag("skill-suggestion-review").performClick()
                 gone(hasTestTag("skill-suggestions"))
                 assertEquals(
-                    "$",
+                    "Lance \$review ",
                     field.fetchSemanticsNode().config[SemanticsProperties.EditableText].text,
                 )
-                field.performTextReplacement("")
-                field.performTextInput("\$css")
-                shown(empty)
-                field.performTextReplacement("\$5")
-                gone(hasTestTag("skill-suggestions"))
-                field.performTextReplacement("\$HOME")
-                gone(hasTestTag("skill-suggestions"))
-                field.performTextReplacement("\$css")
-                shown(empty)
+                field.performTextInput("maintenant")
+                // `$5` is not a skill and must not reopen the list.
+                field.performTextInput(" pour \$5")
+                compose.onNodeWithTag("skill-suggestions").assertDoesNotExist()
                 compose.waitUntil(15000) {
                     compose
                         .onAllNodes(hasTestTag("conversation-send") and isEnabled())
@@ -147,43 +206,16 @@ abstract class SkillMentionCases {
                 }
                 compose.onNodeWithTag("conversation-send").performClick()
                 compose.waitUntil(10000) { sent.size == 1 }
-                assertEquals("\$css", sent[0]["text"]?.jsonPrimitive?.content)
-                return
+                assertEquals(
+                    "Lance \$review maintenant pour \$5",
+                    sent[0]["text"]?.jsonPrimitive?.content,
+                )
+            } finally {
+                // Dispose UI-owned connections before clearing the model and closing HTTP.
+                compose.runOnIdle { mounted = false }
+                compose.waitForIdle()
+                compose.runOnIdle { models.clear() }
             }
-            field.performTextInput("\$unknown")
-            shown(hasText("Aucun skill ne correspond à votre recherche"))
-            field.performTextReplacement("")
-            field.performTextInput("Lance $")
-            shown(hasTestTag("skill-suggestion-review"))
-            compose.onNodeWithTag("skill-suggestions").assertIsDisplayed()
-            compose.onNodeWithTag("skill-suggestion-review").assertIsDisplayed()
-            compose.onNodeWithTag("skill-suggestion-deploy").assertIsDisplayed()
-            compose.onNodeWithTag("skill-suggestion-broken").assertDoesNotExist()
-            field.performTextInput("re")
-            gone(hasTestTag("skill-suggestion-deploy"))
-            shown(hasText("Relire les changements en cours"))
-            compose.onNodeWithTag("skill-suggestion-review").performClick()
-            gone(hasTestTag("skill-suggestions"))
-            assertEquals(
-                "Lance \$review ",
-                field.fetchSemanticsNode().config[SemanticsProperties.EditableText].text,
-            )
-            field.performTextInput("maintenant")
-            // `$5` is not a skill and must not reopen the list.
-            field.performTextInput(" pour \$5")
-            compose.onNodeWithTag("skill-suggestions").assertDoesNotExist()
-            compose.waitUntil(15000) {
-                compose
-                    .onAllNodes(hasTestTag("conversation-send") and isEnabled())
-                    .fetchSemanticsNodes()
-                    .isNotEmpty()
-            }
-            compose.onNodeWithTag("conversation-send").performClick()
-            compose.waitUntil(10000) { sent.size == 1 }
-            assertEquals(
-                "Lance \$review maintenant pour \$5",
-                sent[0]["text"]?.jsonPrimitive?.content,
-            )
         }
     }
 }

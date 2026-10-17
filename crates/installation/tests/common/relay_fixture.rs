@@ -31,6 +31,21 @@ pub async fn context(service: &Service) -> Value {
     json!({ "value": value })
 }
 
+/// A relay context for another Cairn account, as a member of the installation.
+pub async fn member_context(service: &Service, account: &str) -> Value {
+    let value = token();
+    service
+        .store
+        .set(
+            &format!("test-relay:{}", digest(&value)),
+            json!({ "account": account }),
+            None,
+        )
+        .await
+        .unwrap();
+    json!({ "value": value })
+}
+
 pub async fn grant(service: &Service, scopes: &[&str]) -> String {
     let value = token();
     service
@@ -91,8 +106,12 @@ async fn transport(
             .await
         {
             Ok(Some(context)) => {
-                let mut identity =
-                    InstallationIdentity::trusted(InstallationRole::Owner, "fixture-owner");
+                let mut identity = match context["account"].as_str() {
+                    Some(account) => {
+                        InstallationIdentity::trusted(InstallationRole::Member, account)
+                    }
+                    None => InstallationIdentity::trusted(InstallationRole::Owner, "fixture-owner"),
+                };
                 if path == "/mcp" {
                     identity.mcp_scopes = serde_json::from_value(context["scopes"].clone()).ok();
                     *request.uri_mut() = "/api/mcp".parse().unwrap();

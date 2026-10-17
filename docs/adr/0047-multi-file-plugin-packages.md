@@ -33,4 +33,4 @@ a shared library would need signed packages first. Each worker of an instance lo
 its own copy of the modules, so module-level state is per worker, as it already was
 for a single file.
 
-Builds on ADR-0044 and ADR-0045.
+Builds on ADR-0045 and ADR-0046.

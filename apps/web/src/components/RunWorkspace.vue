@@ -17,6 +17,7 @@ import {
   Square,
   Terminal,
 } from '../icons'
+import { useReadWhileOpen } from '../reads'
 import { useRetryNotice } from '../run-retry'
 import { exclusiveSuspensionLabel, isExclusivelySuspended, runDisplayStatus } from '../run-status'
 import { useLiveRun } from '../use-live-run'
@@ -58,6 +59,8 @@ const artifactViewer = ref<string | null>(null)
 const error = ref('')
 // As on Android, a run opens on its conversation.
 const tab = ref('events')
+// Only acknowledge output that is displayed, including a mission finishing while it is open.
+useReadWhileOpen(() => ['events', 'result'].includes(tab.value) && live.synced.value && !loading.value && run.value?.trigger !== 'chat' && run.value?.status === 'succeeded' && run.value.finishedAt ? { key: `task:${run.value.taskId}`, at: run.value.finishedAt } : null)
 const confirm = ref(false)
 const confirmCleanup = ref(false)
 const active = computed(

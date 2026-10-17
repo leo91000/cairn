@@ -51,6 +51,6 @@ for fields marked `refresh` and avoid network calls on `submit`.
 Sockets are text only; binary frames are ignored. Gateway resume state still lives
 in memory, so events missed while the installation is offline are not recovered.
 
-Builds on ADR-0044, which deferred native transports and long-lived sockets for
+Builds on ADR-0045, which deferred native transports and long-lived sockets for
 scripts; ADR-0038's capability model, approval digests and owner-only management are
 unchanged.

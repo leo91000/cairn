@@ -561,3 +561,220 @@ async fn agents_default_to_unlimited_and_migrate_only_the_main_agents_old_defaul
         "An explicit choice after migration must survive restart"
     );
 }
+
+#[tokio::test]
+async fn history_reads_do_not_block_sending_a_message() {
+    let (_root, _fixture, service) = app().await;
+    let chat = service.chat_create(json!({})).await.unwrap();
+    let app = cairn_installation::http::router(service).await.unwrap();
+    let identity = InstallationIdentity::trusted(InstallationRole::Owner, "reading-account");
+
+    // Reads made by navigation, pagination and background refresh share this account.
+    for _ in 0..300 {
+        let response = send(
+            &app,
+            json_request("GET", "/api/chats")
+                .extension(identity.clone())
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    let response = send(
+        &app,
+        json_request(
+            "POST",
+            &format!("/api/chats/{}/messages", chat["id"].as_str().unwrap()),
+        )
+        .extension(identity)
+        .body(Body::from(
+            json!({ "id": id(), "text": "Continue" }).to_string(),
+        ))
+        .unwrap(),
+    )
+    .await;
+    assert_eq!(
+        response.status(),
+        StatusCode::OK,
+        "reading must not exhaust the message submission budget"
+    );
+}
+
+#[tokio::test]
+async fn account_reads_share_a_bounded_budget_across_paths_and_methods() {
+    let (_root, _fixture, service) = app().await;
+    let app = cairn_installation::http::router(service).await.unwrap();
+    let identity = InstallationIdentity::trusted(InstallationRole::Member, "reading-account");
+
+    for _ in 0..300 {
+        let response = send(
+            &app,
+            json_request("GET", "/api/chats")
+                .extension(identity.clone())
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    let response = send(
+        &app,
+        json_request("HEAD", "/api/agents")
+            .extension(identity)
+            .header("x-forwarded-for", "192.0.2.123")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(response.headers()["cache-control"], "no-store");
+
+    let response = send(
+        &app,
+        json_request("GET", "/api/chats")
+            .extension(InstallationIdentity::trusted(
+                InstallationRole::Member,
+                "other-account",
+            ))
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn exhausting_writes_does_not_block_reading_the_conversation() {
+    let (_root, _fixture, service) = app().await;
+    let chat = service.chat_create(json!({})).await.unwrap();
+    let app = cairn_installation::http::router(service).await.unwrap();
+    let identity = InstallationIdentity::trusted(InstallationRole::Owner, "writing-account");
+
+    for _ in 0..300 {
+        let response = send(
+            &app,
+            json_request("POST", "/api/chats")
+                .extension(identity.clone())
+                .body(Body::from("{}"))
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    let response = send(
+        &app,
+        json_request("POST", "/api/chats")
+            .extension(identity.clone())
+            .body(Body::from("{}"))
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+
+    let response = send(
+        &app,
+        json_request(
+            "GET",
+            &format!("/api/chats/{}/stream", chat["id"].as_str().unwrap()),
+        )
+        .extension(identity)
+        .body(Body::empty())
+        .unwrap(),
+    )
+    .await;
+    assert_eq!(
+        response.status(),
+        StatusCode::OK,
+        "opening the conversation must not consume the exhausted write budget"
+    );
+}
+
+#[tokio::test]
+async fn mixed_peer_limits_report_the_first_refusal_once_per_window() {
+    use std::io::Write;
+    use std::sync::Mutex;
+    use tracing::instrument::WithSubscriber;
+
+    #[derive(Clone)]
+    struct Logs(Arc<Mutex<Vec<u8>>>);
+
+    impl Write for Logs {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    // Generic peer traffic and gateway traffic retain their existing shared bucket.
+    // Its selected maximum depends on the path (300 or 600).
+    for gateway_first in [true, false] {
+        let (_root, _fixture, service) = app().await;
+        let app = cairn_installation::http::router(service).await.unwrap();
+        let gateway = format!("/mcp-gateway/{}", id());
+        let bytes = Arc::new(Mutex::new(Vec::new()));
+        let captured = Logs(bytes.clone());
+        let subscriber = tracing_subscriber::fmt()
+            .with_ansi(false)
+            .without_time()
+            .with_writer(move || captured.clone())
+            .finish();
+
+        async {
+            let first = if gateway_first { &gateway } else { "/health" };
+            for _ in 0..301 {
+                let response = send(
+                    &app,
+                    json_request("GET", first).body(Body::empty()).unwrap(),
+                )
+                .await;
+                if gateway_first {
+                    assert_ne!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+                }
+            }
+
+            // At count 302, /health refuses even if count 301 used the higher limit.
+            assert_eq!(
+                send(
+                    &app,
+                    json_request("GET", "/health").body(Body::empty()).unwrap()
+                )
+                .await
+                .status(),
+                StatusCode::TOO_MANY_REQUESTS,
+            );
+            assert_eq!(
+                String::from_utf8(bytes.lock().unwrap().clone())
+                    .unwrap()
+                    .matches("Installation HTTP rate limit exceeded")
+                    .count(),
+                1,
+                "the first refusal must be reported immediately"
+            );
+            for _ in 0..300 {
+                let response = send(
+                    &app,
+                    json_request("GET", &gateway).body(Body::empty()).unwrap(),
+                )
+                .await;
+                drop(response);
+            }
+        }
+        .with_subscriber(subscriber)
+        .await;
+
+        let logs = String::from_utf8(bytes.lock().unwrap().clone()).unwrap();
+        assert_eq!(
+            logs.matches("Installation HTTP rate limit exceeded")
+                .count(),
+            1
+        );
+    }
+}
