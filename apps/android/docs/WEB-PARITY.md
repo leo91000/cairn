@@ -25,6 +25,7 @@ It does not assert pixel equality between a browser and Material components.
 | Plugins | Catalogue, instances, manifest-driven settings and secrets, agent grants, version/file review and approval, declarative panels/actions/tests, native Discord setup and delegation/access/activity, 1Password instances | `PluginsJourneyTest`, shared `PluginsCases` / `PluginsDeviceTest`; browser plugin journeys |
 | Artifacts | Authenticated previews, versions, groups, images/PDF/Markdown, save/share and deep links from replies | Chat journey; artifact and link gesture regressions |
 | Reading | Wrapped long text/URLs, selectable native Markdown, history pagination, stable reading anchors during drag/streaming, jump to latest | Markdown/history suite; real device gesture tests |
+| Live catch-up | Android and web share the server replay path: stored backlog pages bypass the live coalescing delay while preserving every event and the accepted cursor | Backend cached-resume, reconnect and history/reset tests |
 | Appearance | Android-specific « Signal » palette since 0.32.0 (paper/ink with the Cairn blue accent, coral for attention), agent/project identity colours, light/dark/system themes, font scaling, touch-sized labelled actions | Native captures; large-text/keyboard device checks |
 
 Validation results are recorded in `../VALIDATION.md`; entries above identify the

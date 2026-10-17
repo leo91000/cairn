@@ -313,9 +313,11 @@ impl Subscription {
             }
             // Mark observed changes before reading the next durable page.
             self.changes.borrow_and_update();
-            if let Some(event) = self.poll().await? {
-                // Coalesce rapid commits without an unbounded per-client queue.
-                tokio::time::sleep(Duration::from_millis(25)).await;
+            if let Some((event, has_backlog)) = self.poll().await? {
+                // Coalesce live updates without throttling pages already stored for replay.
+                if !has_backlog {
+                    tokio::time::sleep(Duration::from_millis(25)).await;
+                }
                 return Ok(Some(event));
             }
             tokio::select! {
@@ -329,7 +331,7 @@ impl Subscription {
     }
 
     /// Reads the next page; returns a batch when it carries anything new.
-    async fn poll(&mut self) -> Result<Option<Event>> {
+    async fn poll(&mut self) -> Result<Option<(Event, bool)>> {
         let mut current = match self.pending.take() {
             Some(first) => first,
             None => self.read(self.cursor, self.history.clone()).await?,
@@ -362,12 +364,13 @@ impl Subscription {
         if !(changed || has_events || reset) {
             return Ok(None);
         }
+        let has_backlog = batch.more;
         let event = Event::default()
             .event("batch")
             .id(self.cursor.to_string())
             .json_data(batch)
             .map_err(Error::internal)?;
-        Ok(Some(event))
+        Ok(Some((event, has_backlog)))
     }
 }
 

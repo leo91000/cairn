@@ -207,6 +207,63 @@ async fn ids(f: &Fixture) -> Vec<i64> {
 }
 
 #[tokio::test]
+async fn cached_resume_drains_backlog_without_waiting_between_live_batches() {
+    let f = Fixture::new().await;
+    f.service
+        .store
+        .patch_run(&f.run, json!({ "trigger": "chat" }))
+        .await
+        .unwrap();
+    let mut chat = f.service.chat_create(json!({})).await.unwrap();
+    chat["runId"] = f.run.clone().into();
+    let path = format!("/api/chats/{}/stream", text(&chat, "id"));
+    f.service.store.put("chats", chat).await.unwrap();
+    let mut initial = f.open_path(&format!("{path}?window=1"), None).await;
+    let (cursor, batch) = initial.batch().await;
+    let history = batch["history"].as_str().unwrap();
+    drop(initial);
+
+    f.append(24000).await;
+    let run = f.run.clone();
+    let expected: Vec<i64> = f
+        .service
+        .store
+        .read(move |db| {
+            Ok(db
+                .events(&run, cursor, 25000)?
+                .iter()
+                .map(|event| event["id"].as_i64().unwrap())
+                .collect())
+        })
+        .await
+        .unwrap();
+    assert_eq!(expected.len(), 24000);
+
+    let started = Instant::now();
+    let mut resumed = f
+        .open_path(
+            &format!("{path}?after={cursor}&history={history}&window=1"),
+            None,
+        )
+        .await;
+
+    // 240 pages would impose six seconds of artificial coalescing delays.
+    // Leave ample time for real I/O while catching a delay on every replay page.
+    let received = resumed.through(*expected.last().unwrap()).await;
+    let elapsed = started.elapsed();
+    eprintln!("24,000 cached events replayed in {elapsed:?}");
+    assert_eq!(received.len(), expected.len());
+    assert!(
+        received == expected,
+        "cached replay changed the event sequence"
+    );
+    assert!(
+        elapsed < Duration::from_secs(4),
+        "cached replay waited for live coalescing between backlog pages: {elapsed:?}"
+    );
+}
+
+#[tokio::test]
 async fn multiple_clients_refresh_disconnect_and_catch_up_without_gaps() {
     let f = Fixture::new().await;
     f.append(237).await;
