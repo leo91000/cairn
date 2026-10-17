@@ -123,6 +123,10 @@ data class LiveSnapshot(
     val loadingOlder: Boolean = false,
     val olderError: String? = null,
     val loadOlder: () -> Unit = {},
+    /** Changes when the stream replaces its events; pages loaded above them are dropped. */
+    val epoch: Int = 0,
+    /** Tells the stream whether the reader follows the latest output, from the reading position. */
+    val followLatest: (Boolean) -> Unit = {},
 )
 
 private fun CairnApi.frames(
@@ -131,14 +135,17 @@ private fun CairnApi.frames(
     generation: Long,
     history: String?,
     forceRelay: Boolean,
+    recent: Boolean,
 ): Flow<StreamFrame> = callbackFlow {
+    val windowed = path != "/chats/stream"
     val call =
         transport.newCall(
             streaming,
             builder(
                     "$path?after=$cursor" +
                         (history?.let { "&history=${segment(it)}" } ?: "") +
-                        if (path == "/chats/stream") "" else "&window=1"
+                        (if (windowed) "&window=1" else "") +
+                        if (windowed && recent) "&recent=1" else ""
                 )
                 .header("Accept", "text/event-stream")
                 .get()
@@ -230,6 +237,11 @@ class LiveSession {
     internal var path = ""
     internal var cursor = 0L
     internal var snapshot = LiveSnapshot()
+    /**
+     * A reader at the latest output resumes on the recent window instead of replaying a long
+     * backlog; a reader of older messages keeps the replay that preserves their position.
+     */
+    @Volatile var followsLatest = true
 
     fun restore(value: CachedHistory, route: String, currentGeneration: Long) {
         // Older caches discarded run identities. Re-fetch them instead of mixing their
@@ -240,6 +252,7 @@ class LiveSession {
         generation = currentGeneration
         path = route
         cursor = value.cursor
+        followsLatest = value.position?.follow ?: true
         snapshot =
             LiveSnapshot(
                 value.state,
@@ -261,7 +274,7 @@ fun CairnApi.live(path: String, session: LiveSession = LiveSession()): Flow<Live
         if (session.generation != generation || session.path != path) {
             session.accumulator.clear()
             session.cursor = 0L
-            session.snapshot = LiveSnapshot()
+            session.snapshot = LiveSnapshot(epoch = session.snapshot.epoch + 1)
             session.generation = generation
             session.path = path
         }
@@ -278,7 +291,9 @@ fun CairnApi.live(path: String, session: LiveSession = LiveSession()): Flow<Live
             try {
                 val forceRelay = relayRecovery
                 relayRecovery = false
-                frames(path, cursor, generation, snapshot.history, forceRelay).collect { frame ->
+                val recent = cursor > 0 && session.followsLatest
+                frames(path, cursor, generation, snapshot.history, forceRelay, recent).collect {
+                    frame ->
                     val batch = frame.batch
                     require(snapshot.history == null || batch.history != null) {
                         "Révision indisponible"
@@ -312,6 +327,7 @@ fun CairnApi.live(path: String, session: LiveSession = LiveSession()): Flow<Live
                                 if (replaceBoundary) batch.hasOlder
                                 else !reset && snapshot.hasOlder,
                             position = if (reset) null else snapshot.position,
+                            epoch = if (reset) snapshot.epoch + 1 else snapshot.epoch,
                         )
                     cursor = frame.cursor
                     if (!batch.more && !caughtUp) {
@@ -332,7 +348,7 @@ fun CairnApi.live(path: String, session: LiveSession = LiveSession()): Flow<Live
                 if (e !is IOException) {
                     accumulator.clear()
                     cursor = 0
-                    snapshot = LiveSnapshot()
+                    snapshot = LiveSnapshot(epoch = snapshot.epoch + 1)
                 }
                 snapshot =
                     snapshot.copy(

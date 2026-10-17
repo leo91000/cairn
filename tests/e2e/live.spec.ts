@@ -592,6 +592,84 @@ test('a cached run restores the reading offset while its stream is still connect
   await expectFollowing(page)
 })
 
+test('following the latest output resumes a long backlog on the recent window, while a reader keeps its place', async ({ page, workspace }) => {
+  await useRelayForHttpMocks(page)
+  const run = workspace.service.store.runs()[0]
+  const write = (from: number, to: number) => {
+    for (let i = from; i < to; i++) {
+      const text = `Resume line ${String(i).padStart(3, '0')}. A paragraph to retain a stable reading position.`
+      workspace.service.store.event(run.id, 'item.completed', text, { item: { id: `resume-${i}`, type: 'agent_message', text } })
+    }
+  }
+
+  const line = (i: number) => page.locator('.activity-message').filter({ hasText: `Resume line ${String(i).padStart(3, '0')}.` })
+  const saved = () => page.evaluate(runId => new Promise<{ cursor: number, top?: number, follow?: boolean } | null>((resolve) => {
+    const open = indexedDB.open('cairn-history-v1', 1)
+    open.onsuccess = () => {
+      const db = open.result
+      const tx = db.transaction('entries')
+      const request = tx.objectStore('entries').getAll()
+      request.onsuccess = () => {
+        const value = request.result.map(entry => JSON.parse(entry.text)).find(entry => entry.state.run?.id === runId)
+        resolve(value ? { cursor: value.cursor, top: value.position?.top, follow: value.position?.follow } : null)
+      }
+
+      tx.oncomplete = () => db.close()
+    }
+  }), run.id)
+  const streams: string[] = []
+  page.on('request', (request) => {
+    if (request.url().includes(`/api/runs/${run.id}/stream?`))
+      streams.push(request.url())
+  })
+  write(0, 40)
+  await page.goto(workspacePath(`${workspace.url}/runs/${run.id}`))
+  await authenticateWorkspace(page)
+  await page.getByRole('button', { name: /^Conversation/ }).click()
+  await expect(line(39)).toBeVisible()
+  await expect.poll(async () => (await saved())?.cursor ?? 0).toBeGreaterThan(0)
+
+  // Following viewers skip the backlog: the cached lines give way to the latest window.
+  await page.goto(workspacePath(`${workspace.url}/agents`))
+  write(40, 300)
+  streams.length = 0
+  await page.goto(workspacePath(`${workspace.url}/runs/${run.id}`))
+  await expect(line(299)).toBeVisible()
+  expect(new URL(streams[0]).searchParams.get('recent')).toBe('1')
+  await expect(line(39)).toHaveCount(0)
+  await expectFollowing(page)
+  const scroller = page.getByRole('region', { name: 'Activity output' })
+  // Older messages load from the window's boundary.
+  await expect.poll(async () => {
+    await scroller.evaluate(el => el.scrollTop = 0)
+    return line(150).count()
+  }).toBe(1)
+
+  // A reader of older messages keeps the replay and its place. Reading mid-history
+  // stays clear of older-page prefetching, which shifts the offset to hold the content.
+  await scroller.evaluate(el => el.scrollTop = Math.round(el.scrollHeight / 2))
+  await expect(page.getByRole('button', { name: 'Latest activity', exact: true })).toBeVisible()
+  const top = await scroller.evaluate(el => el.scrollTop)
+  await expect.poll(async () => (await saved())?.top).toBe(top)
+  expect((await saved())?.follow).toBe(false)
+  const anchor = await scroller.evaluate((el) => {
+    const edge = el.getBoundingClientRect().top
+    const first = [...el.querySelectorAll('.activity-message')].find(message => message.getBoundingClientRect().top >= edge)
+    return Number(first?.textContent?.match(/Resume line (\d{3})\./)?.[1])
+  })
+  expect(anchor).toBeGreaterThan(0)
+  const anchorTop = async () => (await line(anchor).boundingBox())?.y ?? Number.NaN
+  const before = await anchorTop()
+  await page.goto(workspacePath(`${workspace.url}/agents`))
+  write(300, 560)
+  streams.length = 0
+  await page.goto(workspacePath(`${workspace.url}/runs/${run.id}`))
+  await expect(line(559)).toBeAttached()
+  expect(new URL(streams[0]).searchParams.get('recent')).toBeNull()
+  await expect.poll(async () => Math.abs(await anchorTop() - before)).toBeLessThan(2)
+  await expect(page.getByRole('button', { name: 'Latest activity', exact: true })).toBeVisible()
+})
+
 test('recent history loads older pages without moving the reader and survives a blocked reconnect', async ({ page, workspace }) => {
   await useRelayForHttpMocks(page)
   const run = workspace.service.store.runs()[0]

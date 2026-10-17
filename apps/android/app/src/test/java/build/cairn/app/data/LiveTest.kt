@@ -168,6 +168,71 @@ class LiveTest {
     }
 
     @Test
+    fun `a reader following the latest output resumes on the recent window`() = runBlocking {
+        for (follow in listOf(true, false)) {
+            MockWebServer().use { server ->
+                val revision = "v1:r1:1"
+                val state = LiveState(run = Run("r1", status = "succeeded"))
+                // The installation answers `recent=1` with its recent window as a history reset.
+                server.dispatcher =
+                    object : Dispatcher() {
+                        override fun dispatch(request: RecordedRequest): MockResponse {
+                            val recent = request.requestUrl!!.queryParameter("recent") == "1"
+                            val batch =
+                                LiveBatch(
+                                    listOf(message(900, "Récent", itemId = "latest")),
+                                    state,
+                                    recent,
+                                    false,
+                                    revision,
+                                    oldest = if (recent) 900 else null,
+                                    hasOlder = recent,
+                                )
+                            return MockResponse()
+                                .setHeader("Content-Type", "text/event-stream")
+                                .setBody(frame(900, batch))
+                        }
+                    }
+                server.start()
+                val api = CairnApi(server.url("/"), MemoryVault())
+                val path = "/chats/c1/stream"
+                val session = LiveSession()
+                session.restore(
+                    CachedHistory(
+                        10,
+                        revision,
+                        state,
+                        (1L..10L).map { message(it, "saved", itemId = "m$it") },
+                        position = ReadingPosition(index = 3, follow = follow),
+                        oldest = 1,
+                    ),
+                    path,
+                    api.streamGeneration.get(),
+                )
+                val final = withTimeout(5000) { api.live(path, session).first { it.synced } }
+
+                val request = server.takeRequest().requestUrl!!
+                assertEquals("10", request.queryParameter("after"))
+                assertEquals(if (follow) "1" else null, request.queryParameter("recent"))
+                if (follow) {
+                    // Older messages stay reachable from the new window's boundary.
+                    assertEquals(listOf(900L), final.events.map { it.id })
+                    assertEquals(900L, final.oldest)
+                    assertTrue(final.hasOlder)
+                    assertEquals(1, final.epoch)
+                    assertNull(final.position)
+                } else {
+                    // The replay keeps the restored rows and the reader's place among them.
+                    assertEquals((1L..10L).toList() + 900L, final.events.map { it.id })
+                    assertEquals(1L, final.oldest)
+                    assertEquals(0, final.epoch)
+                    assertEquals(3, final.position?.index)
+                }
+            }
+        }
+    }
+
+    @Test
     fun `slow display receives the complete answer without blocking or dropping wire deltas`() =
         runBlocking {
             MockWebServer().use { server ->
@@ -372,7 +437,10 @@ class LiveTest {
                             .toList()
                     }
                 assertEquals("/api/chats/chat/stream?after=0&window=1", server.takeRequest().path)
-                assertEquals("/api/chats/chat/stream?after=1&window=1", server.takeRequest().path)
+                assertEquals(
+                    "/api/chats/chat/stream?after=1&window=1&recent=1",
+                    server.takeRequest().path,
+                )
                 assertEquals("r2", snapshots.last().state?.run?.id)
                 assertEquals(1, snapshots.last().events.size)
                 assertTrue(api.streamCalls.isEmpty())
@@ -438,7 +506,10 @@ class LiveTest {
                     )
                 }
                 assertEquals("/api/chats/one/stream?after=0&window=1", server.takeRequest().path)
-                assertEquals("/api/chats/one/stream?after=1&window=1", server.takeRequest().path)
+                assertEquals(
+                    "/api/chats/one/stream?after=1&window=1&recent=1",
+                    server.takeRequest().path,
+                )
                 assertEquals("/api/chats/two/stream?after=0&window=1", server.takeRequest().path)
                 assertEquals("/api/chats/two/stream?after=0&window=1", server.takeRequest().path)
             }

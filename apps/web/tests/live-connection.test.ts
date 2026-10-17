@@ -110,6 +110,24 @@ it('validates cached history and restarts safely when the server no longer suppo
   connection.close()
 })
 
+it('offers the recent window only when a viewer following the latest output resumes', () => {
+  let follows = true
+  const connection = liveConnection('/chats/c/stream', vi.fn(), vi.fn(), { cursor: 42, history: 'v1:r:1' }, () => follows)
+  expect(Source.instances[0].url).toBe('/api/chats/c/stream?after=42&history=v1%3Ar%3A1&window=1&recent=1')
+  // A reader of older messages keeps the replay that preserves their position.
+  follows = false
+  connection.reconnect()
+  expect(Source.instances[1].url).toBe('/api/chats/c/stream?after=42&history=v1%3Ar%3A1&window=1')
+  connection.close()
+  // A fresh stream already opens on the recent window; the conversation list has none.
+  const fresh = liveConnection('/runs/r/stream', vi.fn(), vi.fn(), undefined, () => true)
+  expect(Source.instances[2].url).toBe('/api/runs/r/stream?after=0&window=1')
+  fresh.close()
+  const list = liveConnection('/chats/stream', vi.fn(), vi.fn(), { cursor: 7, history: 'v1:list:1' }, () => true)
+  expect(Source.instances[3].url).toBe('/api/chats/stream?after=7&history=v1%3Alist%3A1')
+  list.close()
+})
+
 it('replays from zero with a reset when a cached consumer baseline is invalid', () => {
   const accept = vi.fn().mockImplementationOnce(() => {
     throw new Error('invalid baseline')
