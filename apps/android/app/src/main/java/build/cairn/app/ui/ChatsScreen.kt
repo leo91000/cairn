@@ -1085,7 +1085,7 @@ internal fun ChatPage(
                                                     LiveWait(it.wakeup, it.paused) {
                                                         if (!state.busy) togglePause(it)
                                                     }
-                                                }
+                                                },
                                         ) {
                                             TimelineRow(
                                                 vm,
