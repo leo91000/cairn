@@ -685,6 +685,8 @@ pub async fn save(
         let draft = forms::Draft {
             credential,
             secrets: secret_fields.clone(),
+            setup: None,
+            urls: None,
         };
         settings = forms::submit(s, &package, &connection_id, settings, draft).await?;
     }

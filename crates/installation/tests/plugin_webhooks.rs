@@ -837,3 +837,261 @@ async fn setup_drafts_offer_a_stable_signed_challenge_without_admitting_work() {
     }
     authority_server.abort();
 }
+
+#[tokio::test]
+async fn owner_setup_forms_use_saved_secrets_and_stable_draft_identity_without_activating() {
+    use cairn_installation::auth::{InstallationIdentity, InstallationRole};
+    let (_root, app, s, _) = fixture_with("return {}", &[], json!({})).await;
+    let original = registry::active(&s, "inbox").await.unwrap();
+    let mut manifest = serde_json::to_value(&original.manifest).unwrap();
+    manifest["version"] = json!("2");
+    manifest["capabilities"] = json!(["webhooks", "http", "storage"]);
+    manifest["hosts"] = json!(["api.example.test"]);
+    manifest["instanceForm"] = json!(true);
+    manifest["credential"] = json!({"label": "App token", "header": "x-app-key"});
+    manifest["settings"].as_array_mut().unwrap().extend([
+        json!({"key": "label", "title": "Label", "type": "string"}),
+        json!({"key": "workspaceId", "title": "Workspace", "type": "string", "hidden": true}),
+        json!({"key": "callbackId", "title": "Callback", "type": "string", "hidden": true}),
+        json!({"key": "callbackUrl", "title": "URL", "type": "url", "hidden": true}),
+        json!({"key": "oauthCallback", "title": "OAuth URL", "type": "url", "hidden": true}),
+    ]);
+    let installed = registry::install(&s, &json!({
+        "manifest": manifest,
+        "source": r#"return { form = function(event)
+            assert(event.setup.revision ~= nil and event.setup.expiresAt > 0)
+            assert(event.credential == true)
+            local token_probe = cairn.http.request({url = 'https://api.example.test/credential', auth = true})
+            assert(token_probe.status == 200)
+            local allowed = pcall(function() cairn.storage.set('unexpected', 'work') end)
+            if allowed then return {errors = {form = 'Setup acquired storage'}} end
+            local response = cairn.http.request({
+                url = 'https://api.example.test/probe',
+                auth = {secret = 'signingSecret', prefix = 'Bearer '},
+            })
+            assert(response.status == 200)
+            local workspace = response.json
+            if event.values.label == "Held result" then cairn.fail("Late provider result " .. workspace.id) end
+            return {
+                values = {
+                    workspaceId = workspace.id, callbackId = event.instance,
+                    callbackUrl = event.setup.urls.webhooks.events,
+                    oauthCallback = event.setup.urls.oauthCallback,
+                },
+                view = {{type = 'text', text = event.values.label}},
+            }
+        end }"#,
+    })).await.unwrap();
+    registry::approve(&s, "inbox", "2", text(&installed, "digest"))
+        .await
+        .unwrap();
+    let hold = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let (held, read_entered, read_release) = (hold.clone(), entered.clone(), release.clone());
+    let provider = Router::new().route(
+        "/probe",
+        axum::routing::get(move |headers: axum::http::HeaderMap| {
+            let (held, entered, release) =
+                (held.clone(), read_entered.clone(), read_release.clone());
+            async move {
+                assert_eq!(
+                    headers.get("authorization").unwrap(),
+                    "Bearer webhook-fixture-secret"
+                );
+                if held.swap(false, std::sync::atomic::Ordering::SeqCst) {
+                    entered.notify_one();
+                    release.notified().await;
+                }
+                axum::Json(json!({"id": "T-fixture"}))
+            }
+        }),
+    );
+    let provider = provider.route(
+        "/credential",
+        axum::routing::get(|headers: axum::http::HeaderMap| async move {
+            assert_eq!(headers.get("x-app-key").unwrap(), "app-token-fixture");
+            StatusCode::OK
+        }),
+    );
+    let (origin, server) = common::serve_locally(provider).await;
+    s.plugins.route_http_to(Some(origin));
+    let request = |method: &str, path: &str, body: serde_json::Value| {
+        let mut request = common::request(method, path)
+            .header("content-type", "application/json")
+            .body(Body::from(body.to_string()))
+            .unwrap();
+        request
+            .extensions_mut()
+            .insert(InstallationIdentity::trusted(
+                InstallationRole::Owner,
+                "fixture-owner",
+            ));
+        request
+    };
+    let collection = "/api/plugins/inbox/setup-drafts";
+    let response = common::send(
+        &app,
+        request(
+            "POST",
+            collection,
+            json!({
+                "name": "Workspace setup",
+                "token": "app-token-fixture",
+                "settings": {"label": "Saved label"},
+                "secrets": {"signingSecret": SECRET},
+            }),
+        ),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let draft = common::read_json(response).await;
+    assert_eq!(draft["credential"], true);
+    assert!(!draft.to_string().contains("app-token-fixture"));
+    let item = format!("{collection}/{}", text(&draft, "id"));
+    let saved = common::send(
+        &app,
+        request(
+            "PATCH",
+            &item,
+            json!({
+                "revision": draft["revision"],
+                "name": "Workspace setup",
+                "settings": {"label": "Saved label"},
+            }),
+        ),
+    )
+    .await;
+    assert_eq!(saved.status(), StatusCode::OK);
+    let updated = common::read_json(saved).await;
+    assert_eq!(updated["id"], draft["id"]);
+    assert_eq!(updated["expiresAt"], draft["expiresAt"]);
+    assert_eq!(updated["credential"], true);
+    let draft = updated;
+    let form = format!("{item}/form");
+    let input = json!({"revision": draft["revision"], "settings": {"label": "Typed label"}});
+    let response = common::send(&app, request("POST", &form, input.clone())).await;
+    assert_eq!(
+        response.status(),
+        StatusCode::OK,
+        "{}",
+        common::read_text(response).await
+    );
+    let result = common::read_json(response).await;
+    assert_eq!(result["values"]["workspaceId"], "T-fixture");
+    assert_eq!(result["values"]["callbackId"], draft["id"]);
+    assert_eq!(result["view"][0]["text"], "Typed label");
+    assert!(text(&result["values"], "callbackUrl").ends_with(&format!(
+        "/api/public/installations/00000000-0000-4000-8000-000000000055/plugins/{}/events",
+        text(&draft, "id")
+    )));
+    assert!(text(&result["values"], "oauthCallback").ends_with(&format!(
+        "/api/public/installations/00000000-0000-4000-8000-000000000055/plugin-oauth/{}/callback",
+        text(&draft, "id")
+    )));
+    let direct = common::send(
+        &app,
+        request(
+            "POST",
+            &form,
+            json!({
+                "revision": draft["revision"],
+                "directOrigin": "https://cairn.example.test/",
+            }),
+        ),
+    )
+    .await;
+    assert_eq!(direct.status(), StatusCode::OK);
+    let direct = common::read_json(direct).await;
+    assert_eq!(
+        direct["values"]["callbackUrl"],
+        format!(
+            "https://cairn.example.test/api/plugin-webhooks/{}/events",
+            text(&draft, "id")
+        )
+    );
+    assert_eq!(
+        direct["values"]["oauthCallback"],
+        format!(
+            "https://cairn.example.test/api/plugin-oauth/{}/callback",
+            text(&draft, "id")
+        )
+    );
+    for origin in [
+        "http://cairn.example.test",
+        "https://cairn.example.test/path",
+        "https://name:password@cairn.example.test",
+        "https://cairn.example.test/?query=1",
+    ] {
+        let invalid = common::send(
+            &app,
+            request(
+                "POST",
+                &form,
+                json!({
+                    "revision": draft["revision"],
+                    "directOrigin": origin,
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(
+            invalid.status(),
+            StatusCode::BAD_REQUEST,
+            "invalid callback origin accepted: {origin}"
+        );
+    }
+    assert!(
+        !result.to_string().contains(SECRET),
+        "form exposed a saved secret"
+    );
+    let response = common::send(&app, request("GET", &item, json!({}))).await;
+    let unchanged = common::read_json(response).await;
+    assert_eq!(unchanged["revision"], draft["revision"]);
+    assert_eq!(unchanged["settings"], json!({"label": "Saved label"}));
+    let mut member = request("POST", &form, input);
+    member
+        .extensions_mut()
+        .insert(InstallationIdentity::trusted(
+            InstallationRole::Member,
+            "alice",
+        ));
+    assert_eq!(
+        common::send(&app, member).await.status(),
+        StatusCode::FORBIDDEN
+    );
+    assert!(s.chat_list().await.unwrap().is_empty());
+    hold.store(true, std::sync::atomic::Ordering::SeqCst);
+    let pending_app = app.clone();
+    let form_request = request(
+        "POST",
+        &form,
+        json!({
+            "revision": draft["revision"],
+            "settings": {"label": "Held result"},
+        }),
+    );
+    let pending = tokio::spawn(async move { common::send(&pending_app, form_request).await });
+    tokio::time::timeout(std::time::Duration::from_secs(3), entered.notified())
+        .await
+        .unwrap();
+    let deleted = common::send(
+        &app,
+        request("DELETE", &item, json!({"revision": draft["revision"]})),
+    )
+    .await;
+    assert_eq!(deleted.status(), StatusCode::OK);
+    release.notify_one();
+    let response = pending.await.unwrap();
+    let status = response.status();
+    let body = common::read_text(response).await;
+    assert!(
+        !body.contains("Late provider result"),
+        "deleted setup delivered its held HTTP result to Luau: {body}"
+    );
+    assert!(matches!(
+        status,
+        StatusCode::NOT_FOUND | StatusCode::FORBIDDEN | StatusCode::CONFLICT
+    ));
+    server.abort();
+}

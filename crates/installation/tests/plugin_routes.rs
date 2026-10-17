@@ -1056,6 +1056,27 @@ async fn routed_runs_use_only_the_oauth_subject_proved_by_their_external_request
             ),
         }
         if expected.is_some() {
+            let continued = wake_after_sleep(
+                &s,
+                text(chat, "id"),
+                &run,
+                text(&config["env"], "CAIRN_MCP_RUN_TOKEN"),
+            )
+            .await;
+            let config = s.mcps.run_configuration(&s, &continued).await.unwrap();
+            let result = agents::call_tool(
+                &s,
+                text(&config["env"], "CAIRN_MCP_RUN_TOKEN"),
+                "router_read",
+                &json!({"resource": resource}),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            assert_eq!(
+                result["subject"], "U111",
+                "a durable wake lost its personal OAuth requester"
+            );
             hold.store(true, std::sync::atomic::Ordering::SeqCst);
             let (pending_service, input) = (s.clone(), json!({"resource":resource}));
             let bearer = text(&config["env"], "CAIRN_MCP_RUN_TOKEN").to_owned();
@@ -1077,6 +1098,66 @@ async fn routed_runs_use_only_the_oauth_subject_proved_by_their_external_request
     }
     session.stop().await;
     server.abort();
+}
+
+// Native lifecycle fixture: actual sleep API and scheduler, with a prepared
+// completed checkpoint instead of a launched process/VM.
+async fn wake_after_sleep(s: &Service, chat: &str, run: &Value, bearer: &str) -> Value {
+    let run_id = text(run, "id");
+    s.chat_acknowledge(run_id, text(&run["chatExecution"], "messageId"))
+        .await
+        .unwrap();
+    cairn_installation::chats::sleep::schedule(
+        s,
+        bearer,
+        &json!({
+            "seconds": 1,
+            "reason": "Await a provider response as the same requester",
+        }),
+    )
+    .await
+    .unwrap();
+    let checkpoint = json!({"launched": true, "completed": true, "remainingMs": null});
+    s.store
+        .set(&format!("run-checkpoint:{run_id}"), checkpoint, None)
+        .await
+        .unwrap();
+    s.store
+        .event(run_id, "turn.completed", "", None)
+        .await
+        .unwrap();
+    s.store
+        .patch_run(
+            run_id,
+            json!({"status": "succeeded", "recoveryPending": false}),
+        )
+        .await
+        .unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
+    s.chat_tick(&std::collections::HashSet::new())
+        .await
+        .unwrap();
+    let continued = s.store.run(run_id).await.unwrap();
+    let waiting_chat = s.chat_detail(chat).await.unwrap();
+    assert_ne!(
+        continued["chatExecution"]["messageId"],
+        run["chatExecution"]["messageId"],
+        "wakeup={}, paused={}, error={:?}",
+        waiting_chat["wakeup"],
+        waiting_chat["paused"],
+        s.store.kv(&format!("chat-error:{chat}")).await.unwrap()
+    );
+    s.store
+        .patch_run(
+            run_id,
+            json!({
+                "status": "running",
+                "recoveryPending": false,
+                "isolated": true,
+            }),
+        )
+        .await
+        .unwrap()
 }
 
 #[tokio::test]
@@ -1196,6 +1277,117 @@ async fn an_external_run_cannot_select_another_workspace_or_escape_its_channel_r
             "the external run escaped its admission scope: {input}"
         );
     }
+    let continued = wake_after_sleep(&s, text(&chat, "id"), &run, bearer).await;
+    let configuration = s.mcps.run_configuration(&s, &continued).await.unwrap();
+    let continued_bearer = text(&configuration["env"], "CAIRN_MCP_RUN_TOKEN");
+    assert_eq!(
+        agents::call_tool(
+            &s,
+            continued_bearer,
+            "router_scope",
+            &json!({
+                "resource": resource, "channel": "C1",
+            })
+        )
+        .await
+        .unwrap()
+        .unwrap()["channel"],
+        "C1"
+    );
+    for input in [
+        json!({"resource": resource, "channel": "C2"}),
+        json!({"resource": other["id"], "channel": "C1"}),
+    ] {
+        assert!(
+            agents::call_tool(&s, continued_bearer, "router_scope", &input)
+                .await
+                .is_err(),
+            "the durable continuation escaped its requester's source scope: {input}"
+        );
+    }
+    let question = "b".repeat(64);
+    s.question_receive(
+        text(&continued, "id"),
+        json!({
+            "id": question,
+            "blocking": false,
+            "fields": [{ "id": "choice", "title": "Continue?", "options": [] }],
+        }),
+    )
+    .await
+    .unwrap();
+    let answer_path = format!(
+        "/api/chats/{}/questions/{question}/answer",
+        text(&chat, "id")
+    );
+    let answer = json!({
+        "id": cairn_installation::config::id(),
+        "answers": { "choice": ["Yes"] },
+    });
+    let response = common::send(&app, owner_request("POST", &answer_path, answer.clone())).await;
+    assert_eq!(
+        response.status(),
+        StatusCode::OK,
+        "owner control was denied"
+    );
+    assert_eq!(
+        agents::call_tool(
+            &s,
+            continued_bearer,
+            "router_scope",
+            &json!({
+                "resource": resource, "channel": "C1",
+            })
+        )
+        .await
+        .unwrap()
+        .unwrap()["channel"],
+        "C1"
+    );
+    for input in [
+        json!({ "resource": resource, "channel": "C2" }),
+        json!({ "resource": other["id"], "channel": "C1" }),
+    ] {
+        assert!(
+            agents::call_tool(&s, continued_bearer, "router_scope", &input)
+                .await
+                .is_err(),
+            "owner intervention released the requester's source scope: {input}"
+        );
+    }
+    s.chat_acknowledge(text(&continued, "id"), text(&answer, "id"))
+        .await
+        .unwrap();
+    let resumed = wake_after_sleep(&s, text(&chat, "id"), &continued, continued_bearer).await;
+    let configuration = s.mcps.run_configuration(&s, &resumed).await.unwrap();
+    let resumed_bearer = text(&configuration["env"], "CAIRN_MCP_RUN_TOKEN");
+    assert_eq!(
+        agents::call_tool(
+            &s,
+            resumed_bearer,
+            "router_scope",
+            &json!({
+                "resource": resource, "channel": "C1",
+            })
+        )
+        .await
+        .unwrap()
+        .unwrap()["channel"],
+        "C1"
+    );
+    assert!(
+        agents::call_tool(
+            &s,
+            resumed_bearer,
+            "router_scope",
+            &json!({
+                "resource": resource, "channel": "C2",
+            })
+        )
+        .await
+        .is_err(),
+        "a second wake released the suspended requester's source scope"
+    );
     session.stop().await;
 }
 

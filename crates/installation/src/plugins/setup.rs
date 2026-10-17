@@ -22,6 +22,8 @@ pub struct SetupDraft {
     pub name: String,
     pub settings: Value,
     pub secret_keys: Vec<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub credential: bool,
     pub revision: String,
     pub digest: String,
     pub owner_account: String,
@@ -58,6 +60,7 @@ impl SetupDraft {
             "status": if available { "setup" } else { "review_needed" },
             "settings": self.settings,
             "secretKeys": self.secret_keys,
+            "credential": self.credential,
             "revision": self.revision,
             "createdAt": self.created_at,
             "expiresAt": self.expires_at,
@@ -184,6 +187,21 @@ pub async fn get(s: &Service, plugin: &str, draft: &str, account: &str) -> Resul
     Ok(draft.public(available))
 }
 
+pub async fn form(
+    s: &Service,
+    plugin: &str,
+    draft: &str,
+    account: &str,
+    input: &Value,
+) -> Result<Value> {
+    let draft = owned(s, plugin, draft, account).await?;
+    if input["revision"].as_str() != Some(&draft.revision) {
+        return Err(Error::conflict("Setup changed. Reload its form."));
+    }
+    let approved = approved_package(s, &draft).await?;
+    super::forms::setup_form(s, &approved.package, draft, input).await
+}
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct Input {
@@ -192,6 +210,8 @@ struct Input {
     settings: Value,
     #[serde(default)]
     secrets: Value,
+    #[serde(default)]
+    token: Value,
     revision: Option<String>,
 }
 
@@ -241,6 +261,13 @@ pub async fn save(
     }
     let settings = connections::settings(&partial, &input.settings)?;
     let draft_id = old.as_ref().map_or_else(id, |d| d.id.clone());
+    let token = super::forms::typed_credential(&package.manifest, &input.token)?;
+    let credential_key = connections::credential_key(&draft_id);
+    let saved_credential = s.vault.get(&credential_key).await?;
+    let credential = token.is_some() || saved_credential.is_some();
+    let encrypted_credential = token
+        .map(|token| s.vault.encrypt(&credential_key, &json!({"token": token})))
+        .transpose()?;
     let saved = connections::secret_values(s, &draft_id).await?;
     let fields = connections::secrets(&partial, &input.secrets, &saved)?;
     let expires_at = old
@@ -252,6 +279,7 @@ pub async fn save(
         name: name.to_owned(),
         settings,
         secret_keys: fields.keys().cloned().collect(),
+        credential,
         revision: id(),
         digest: package.digest.clone(),
         owner_account: account.to_owned(),
@@ -294,6 +322,13 @@ pub async fn save(
                 ));
             }
             db.set(&key, &serde_json::to_value(&draft)?, Some(expires_at))?;
+            if let Some(encrypted) = encrypted_credential {
+                db.set(
+                    &format!("mcp-secret:{credential_key}"),
+                    &encrypted,
+                    Some(expires_at),
+                )?;
+            }
             db.set(
                 &format!("mcp-secret:{secret_key}"),
                 &encrypted,
@@ -337,6 +372,10 @@ pub async fn remove(
 
 fn erase(db: &Db<'_>, draft: &SetupDraft) -> Result<()> {
     db.delete(&format!("{PREFIX}{}", draft.id))?;
+    db.delete(&format!(
+        "mcp-secret:{}",
+        connections::credential_key(&draft.id)
+    ))?;
     db.delete(&format!(
         "mcp-secret:{}",
         connections::secrets_key(&draft.id)

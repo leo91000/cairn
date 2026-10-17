@@ -27,7 +27,9 @@
 --                     return { notice?, tone?, view? }
 --   test              the owner tests an instance            { instance } -> { ok, message? }
 --   form              the owner edits an instance (instanceForm)
---                     { values, credential, secrets, instance?, changed?, submit }
+--                     { values, credential, secrets, instance?, changed?, submit, setup? }
+--                     setup = {revision, expiresAt, urls = {webhooks: {[name]: url}, oauthCallback}}
+--                     appears only for an owner-bound persisted configuration draft
 --                     -> FormResult; http and exec use the draft's credential and secrets
 --   webhook           a verified signed public POST         {endpoint, method, headers, body, instance, setup}
 --                     setup=true accepts only declared setup challenges; all host capabilities are refused

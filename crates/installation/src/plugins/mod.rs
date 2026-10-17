@@ -1,6 +1,7 @@
 //! Installation-owned plugins. Every package (bundled or installed) runs in an isolated
 //! Luau worker and reaches Cairn only through capabilities its manifest declares and
 //! the owner approved.
+mod addresses;
 pub mod agents;
 pub mod capabilities;
 pub mod cli;
@@ -222,6 +223,13 @@ pub async fn routes(s: &Arc<Service>, input: &Input) -> Result<Value> {
                 .as_ref()
                 .map_or("", |identity| identity.account_id.as_str());
             setup::save(s, id, account, body, None).await
+        }
+        ("POST", ["plugins", id, "setup-drafts", draft, "form"]) => {
+            let account = input
+                .identity
+                .as_ref()
+                .map_or("", |identity| identity.account_id.as_str());
+            Box::pin(setup::form(s, id, draft, account, body)).await
         }
         (method, ["plugins", id, "setup-drafts", draft]) => {
             let account = input

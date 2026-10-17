@@ -16,7 +16,8 @@ the web/Android journeys. Tests assert observable behavior at those interfaces.
     interfaces. Includes queue saturation, exact signed bytes, isolated public
     authority, disabled instances, malformed responses and a slow-body deadline.
   - Expiring owner-bound setup drafts now accept only declared signed challenges;
-    their forms/OAuth/activation and both client journeys remain below.
+    their owner forms now reuse saved secrets/credentials and expose stable callback
+    URLs; OAuth/activation and both client journeys remain below.
 - [ ] Generic resources, routes, granular grants and declarative collections UI.
   - Native collection CRUD, encrypted fields, parent references, revision checks,
     cascade cleanup and resource credentials implemented; three worker/HTTP tests pass.
@@ -364,3 +365,28 @@ This closes an A/B activation interleaving supported by static control-flow
 analysis; the precise interleaving has no deterministic HTTP-barrier regression
 here. Existing sequential approval-change and full HTTP/worker cases are rerun,
 and another fresh complete review assesses the final binding.
+
+## Owner setup forms and durable requester continuation
+
+The main integration checkpoint adds the current scheduler and corrects an OpenCode
+fixture race: the test now waits for a positive parsed PID before cancelling the
+process. It still asserts timely cancellation and actual process death.
+
+Persisted setup forms use the same stable draft ID and encrypted fields as signed
+setup challenges. The owner may temporarily override values for validation without
+saving or activating them. Credentials share the draft's expiration; form Lua sees
+only a configured flag. Native callback addressing supplies Beacon by default and
+an explicitly selected direct HTTPS origin. Deleted or changed drafts cannot
+return held HTTP results to Lua. Draft resources, OAuth, activation and both client
+journeys are still pending.
+
+Two native lifecycle tracers found requester defects: a durable wake lost its
+external resource/channel bounds and personal OAuth subject, and owner question
+control suspended personal OAuth by dropping those same source bounds. Native
+wake inputs now inherit the verified prior requester and any suspension. Bot tools
+retain their original source constraints; personal OAuth stays suspended after
+owner intervention. In-flight grants also snapshot suspension. Tests use actual
+HTTP, Luau and MCP plus the native sleep/scheduler with a prepared completed
+checkpoint; no agent process/VM or live Slack was exercised.
+
+This is a checkpoint, not the complete Slack package or a final whole-PR review.

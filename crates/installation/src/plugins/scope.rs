@@ -81,9 +81,15 @@ async fn current(s: &Service, scope: &Scope, args: &Value) -> Result<Connection>
         super::grants::recheck(s, authorization).await?;
         return Ok(authorization.connection.clone());
     }
-    if let Scope::Draft(connection, _) = scope {
+    if let Scope::Draft(connection, values) = scope {
         if requested.is_some_and(|id| id != connection.id) {
             return Err(Error::forbidden("Another instance is not available here."));
+        }
+        if let Some(expected) = &values.setup {
+            let draft = super::setup::load(s, &expected.id).await?;
+            if draft.revision != expected.revision {
+                return Err(Error::conflict("Setup changed. Reload its form."));
+            }
         }
         return Ok((**connection).clone());
     }
@@ -189,7 +195,10 @@ pub async fn call(
     }
     let result = capabilities::effect(s, &context, method, args.clone()).await?;
     // Revocation or a changed secret during slow I/O must not deliver its result.
-    if matches!(scope, Scope::Agent { .. }) && matches!(method, "exec.run" | "http.request") {
+    let bound_form = matches!(scope, Scope::Draft(_, values) if values.setup.is_some());
+    if (matches!(scope, Scope::Agent { .. }) || bound_form)
+        && matches!(method, "exec.run" | "http.request")
+    {
         current(s, scope, args).await?;
     }
     Ok(result)

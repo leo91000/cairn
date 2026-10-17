@@ -302,10 +302,12 @@ the instance's admission rules or grants public requests conversation control.
 
 Owner-only `/api/plugins/<plugin>/setup-drafts` supports POST and GET (a list of
 `{items, nextCursor: null}`). Append `/<draft>` for GET, PATCH or DELETE. POST
-accepts `{name, settings?, secrets?}`; PATCH additionally requires the last
+accepts `{name, settings?, secrets?, token?}`; PATCH additionally requires the last
 `revision`, as does DELETE. Missing required fields are allowed during setup;
 provided fields still use the manifest's validation. Secret values remain encrypted
-and responses expose only their names. PATCH keeps the draft ID and original expiry.
+and responses expose only their names. An optional declared credential is stored
+with the same encrypted TTL; responses expose only `credential: boolean`. Blank or
+omitted tokens keep the saved credential. PATCH keeps the draft ID and original expiry.
 
 Drafts expire after 24 hours, with at most 32 live drafts per installation. They
 belong to the current owner's account and installation-access revision and never
@@ -323,9 +325,23 @@ is refused. Signature verification precedes the live owner check; expired,
 deleted, revoked or changed drafts cannot return a challenge. Other events are
 refused before invoking the package. Live instances receive `setup = false`.
 
-Draft form execution, OAuth/resources, activation and the web/Android setup
-journeys remain in the Slack delivery checklist. This API alone does not activate
-an instance or finish its configuration.
+With `instanceForm`, the owner can POST `/<draft>/form` with `{revision,
+settings?, secrets?, token?, changed?, directOrigin?}`. Typed values temporarily
+override saved values; a separate PATCH persists them. The form receives the stable
+`instance` ID and `setup = {revision, expiresAt, urls}`. `urls.webhooks` maps every
+declared endpoint name to its callback URL; `urls.oauthCallback` is the shared OAuth
+callback for that draft. They use Beacon by default. An explicit `directOrigin`
+uses an HTTPS origin without credentials, a path or query, under the same rule as
+OAuth. These addresses do not by themselves authorize any public request.
+
+Form handlers may use only declared HTTP and exec capabilities, with credentials
+injected by the host. Saved secret values never reach Luau. Editing, deleting or
+expiring the draft during I/O prevents that response reaching the handler. Signed
+public setup challenges retain their pure-Luau scope with no host effects.
+
+OAuth/resources, activation and the web/Android setup journeys remain in the Slack
+delivery checklist. These APIs alone do not activate an instance or finish its
+configuration.
 
 ### Resource collections
 
@@ -539,6 +555,11 @@ again around I/O. Resource-granted calls also recheck the agent before issuing a
 new provider request after a slow renewal.
 
 #### Personal providers
+
+Native sleep and condition wakeups continue the captured requester's authority.
+Owner intervention suspends personal OAuth for that task, including later wakeups;
+it retains the original external resource and channel restrictions for bot tools.
+Held tool calls are fenced when that suspension changes.
 
 Add `"personal": {"subject": "/authed_user/id"}` to a provider whose token
 response identifies a person. The host captures this nonsecret subject alongside

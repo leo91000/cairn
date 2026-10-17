@@ -662,6 +662,12 @@ fn launch_turn(
     if !is_active(&chat) || chat["paused"] == true || !unchanged {
         return Ok(());
     }
+    if waking {
+        let previous = run
+            .as_ref()
+            .ok_or_else(|| Error::conflict("The wakeup's run was removed."))?;
+        crate::plugins::requesters::capture_wakeup(db, chat_id, previous, &message)?;
+    }
     if let Some(crate::plugins::requesters::Principal::External(person)) =
         crate::plugins::requesters::recorded(db, chat_id, text(&message, "id"))?
     {

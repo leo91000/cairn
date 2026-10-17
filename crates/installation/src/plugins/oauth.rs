@@ -316,30 +316,9 @@ fn current(db: &Db<'_>, pending: &Pending) -> Result<Value> {
 }
 
 async fn redirect(s: &Service, instance: &str, direct: Option<&str>) -> Result<String> {
-    if let Some(origin) = direct {
-        let url = url::Url::parse(origin)
-            .map_err(|_| Error::bad("Enter an HTTPS installation origin."))?;
-        if url.scheme() != "https"
-            || url.host_str().is_none()
-            || !url.username().is_empty()
-            || url.password().is_some()
-            || origin.trim_end_matches('/') != url.origin().ascii_serialization()
-        {
-            return Err(Error::bad(
-                "Enter an HTTPS installation origin without a path or query.",
-            ));
-        }
-        return Ok(format!(
-            "{}/api/plugin-oauth/{instance}/callback",
-            url.origin().ascii_serialization()
-        ));
-    }
-    let (origin, installation) = crate::relay::beacon_address(&s.config.data_dir)
+    Ok(super::addresses::Addresses::load(s, direct)
         .await?
-        .ok_or_else(|| Error::unavailable("Claim this installation before connecting a plugin."))?;
-    Ok(format!(
-        "{origin}/api/public/installations/{installation}/plugin-oauth/{instance}/callback"
-    ))
+        .oauth(instance))
 }
 
 #[derive(Deserialize)]
@@ -1129,7 +1108,7 @@ pub(crate) async fn credential(
             .as_ref()
             .and_then(|grant| grant.requester.as_ref())
             .ok_or_else(|| Error::forbidden("Personal OAuth requires a verified run requester."))?;
-        requesters::recheck(s, requester).await?;
+        requesters::personal(s, requester).await?;
         match &requester.principal {
             requesters::Principal::Account(actor) => Some(actor.clone()),
             requesters::Principal::External(external) => {

@@ -101,16 +101,35 @@ pub(crate) fn control_prefix(chat: &str) -> String {
 }
 
 fn control_key(chat: &str, run: &Value) -> String {
-    format!(
-        "{}{}:{}",
-        control_prefix(chat),
+    control_key_for(
+        chat,
         text(run, "id"),
-        text(&run["chatExecution"], "messageId")
+        text(&run["chatExecution"], "messageId"),
     )
+}
+
+fn control_key_for(chat: &str, run: &str, message: &str) -> String {
+    format!("{}{run}:{message}", control_prefix(chat))
 }
 
 fn suspended(db: &Db<'_>, chat: &str, run: &Value) -> Result<bool> {
     Ok(db.kv(&control_key(chat, run))?.is_some())
+}
+
+/// A native wakeup continues the task which scheduled it. Its synthetic input ID
+/// identifies a new delivery, never a new person or a release of owner control.
+pub(crate) fn capture_wakeup(db: &Db<'_>, chat: &str, run: &Value, message: &Value) -> Result<()> {
+    let previous = text(&run["chatExecution"], "messageId");
+    if message["wakeup"]["messageId"] != previous {
+        return Err(Error::conflict("The wakeup's requesting turn changed."));
+    }
+    let principal = recorded(db, chat, previous)?;
+    capture_principal(db, chat, message, principal.as_ref(), Capture::New)?;
+    if suspended(db, chat, run)? {
+        let key = control_key_for(chat, text(run, "id"), text(message, "id"));
+        db.set(&key, &json!(true), None)?;
+    }
+    Ok(())
 }
 
 #[derive(Clone, Copy)]
@@ -223,6 +242,7 @@ pub(crate) struct RunRequester {
     run: String,
     chat: String,
     message: String,
+    suspended: bool,
 }
 
 pub(crate) async fn for_run(s: &Service, run: &Value) -> Result<Option<RunRequester>> {
@@ -240,15 +260,14 @@ pub(crate) async fn for_run(s: &Service, run: &Value) -> Result<Option<RunReques
                 return Ok(None);
             };
             let chat_id = text(&chat, "id");
-            if suspended(db, chat_id, &run)? {
-                return Ok(None);
-            }
+            let suspended = suspended(db, chat_id, &run)?;
             Ok(
                 recorded(db, chat_id, &message)?.map(|principal| RunRequester {
                     principal,
                     run: run_id,
                     chat: chat_id.into(),
                     message,
+                    suspended,
                 }),
             )
         })
@@ -281,7 +300,7 @@ pub(crate) async fn recheck(s: &Service, requester: &RunRequester) -> Result<()>
             if run["status"] != RunStatus::Running
                 || !run["cancelRequestedAt"].is_null()
                 || run["chatExecution"]["messageId"] != requester.message
-                || suspended(db, &requester.chat, &run)?
+                || suspended(db, &requester.chat, &run)? != requester.suspended
                 || !db
                     .get("chats", &requester.chat)?
                     .is_some_and(|chat| chat["runId"] == requester.run)
@@ -295,4 +314,16 @@ pub(crate) async fn recheck(s: &Service, requester: &RunRequester) -> Result<()>
             Ok(())
         })
         .await
+}
+
+/// Owner intervention suspends personal credentials, while retaining the original
+/// source boundaries for the agent's bot/resource operations.
+pub(crate) async fn personal(s: &Service, requester: &RunRequester) -> Result<()> {
+    recheck(s, requester).await?;
+    if requester.suspended {
+        return Err(Error::forbidden(
+            "Personal authority is suspended for this turn.",
+        ));
+    }
+    Ok(())
 }
