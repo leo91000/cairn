@@ -211,7 +211,9 @@ A package that keeps its own connection, such as a chat platform's gateway, decl
   `auth`, the host replaces `{{secret}}` with the JSON-escaped secret. `pace` (ms, a
   minute at most) queues sends outside the handler and spaces actual writes with the
   same credential across every instance. Reads, heartbeats and cancellation keep
-  running while queued; at most 16 sends may be pending per worker.
+  running while queued; at most 16 sends may be pending per worker. Completion
+  callbacks share the event loop with socket reads and timers; cancellation is checked
+  between callbacks. A worker exceeding 128 queued socket events is stopped.
   `budget = { remaining, resetAfter }` reserves a send from a shared balance until reset
   (`resetAfter` in milliseconds, a day at most). Observations can lower the balance;
   they never replenish it before reset. Unsent reservations are released on close.

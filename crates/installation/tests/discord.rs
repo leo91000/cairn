@@ -1162,3 +1162,64 @@ async fn every_named_socket_send_delivers_its_completion() {
     worker.await.unwrap().unwrap();
     result.unwrap().unwrap();
 }
+
+#[tokio::test]
+async fn continuous_named_send_completions_do_not_starve_reads_or_cancellation() {
+    let (_root, s, agent) = service().await;
+    let connection: Connection = serde_json::from_value(
+        save(&s, &agent, json!({ "guildId": "100", "channelId": "200" }))
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    let mut package = registry::active(&s, "discord").await.unwrap();
+    package.source.main = r#"
+        return { socket = function(event)
+            if event.type == "start" then
+                cairn.socket.connect({ url = "wss://gateway.discord.gg" })
+            elseif event.type == "open" or event.type == "sent" then
+                cairn.socket.send("next", { name = "next" })
+            elseif event.type == "message" and event.text == "probe" then
+                cairn.socket.send("ack")
+            end
+        end }
+    "#
+    .into();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    s.plugins
+        .route_sockets_to(Some(format!("ws://{}", listener.local_addr().unwrap())));
+    let (started, active) = tokio::sync::oneshot::channel();
+    let upstream = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut socket = accept_async(stream).await.unwrap();
+        assert!(matches!(socket.next().await, Some(Ok(Message::Text(_)))));
+        socket.send(Message::Text("probe".into())).await.unwrap();
+        let mut started = Some(started);
+        while let Some(Ok(Message::Text(text))) = socket.next().await {
+            if text == "ack"
+                && let Some(started) = started.take()
+            {
+                started.send(()).unwrap();
+            }
+        }
+    });
+    let stop = CancellationToken::new();
+    let mut worker = {
+        let (s, stop) = (s.clone(), stop.clone());
+        tokio::spawn(async move { socket::run(&s, &connection, &package, &stop).await })
+    };
+    let probe = tokio::time::timeout(Duration::from_secs(5), active).await;
+    stop.cancel();
+    let result = tokio::time::timeout(Duration::from_secs(3), &mut worker).await;
+    if result.is_err() {
+        worker.abort();
+    }
+    upstream.abort();
+    probe
+        .expect("socket reads must proceed while completions keep queuing")
+        .unwrap();
+    result
+        .expect("cancellation must be checked between completion events")
+        .unwrap()
+        .unwrap();
+}

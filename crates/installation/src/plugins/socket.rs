@@ -345,6 +345,7 @@ struct State {
 
 enum Wake {
     Stop,
+    Queued,
     Frame(Option<std::result::Result<Message, tokio_tungstenite::tungstenite::Error>>),
     Timer,
     Send,
@@ -488,6 +489,12 @@ impl State {
         self.outgoing.clear();
     }
 
+    async fn shutdown(&mut self) {
+        if let Some(mut socket) = self.socket.take() {
+            let _ = tokio::time::timeout(Duration::from_secs(2), socket.close(None)).await;
+        }
+    }
+
     async fn send(&mut self, message: Outgoing) -> Option<Value> {
         let socket = self.socket.as_mut()?;
         let sent = tokio::time::timeout(
@@ -625,6 +632,12 @@ async fn serve(
         "settings": connection.settings,
     })]);
     loop {
+        // A completion handler may immediately enqueue its next completion. Check
+        // cancellation even when that FIFO never becomes empty.
+        if stop.is_cancelled() {
+            state.shutdown().await;
+            return Ok(());
+        }
         if let Some(value) = events.pop_front() {
             match deliver(s, connection, session, &link, value).await {
                 Err(error) if matches!(error.status, 401 | 403) => {
@@ -643,8 +656,8 @@ async fn serve(
                     events.push_back(value);
                 }
             }
-            if !events.is_empty() {
-                continue;
+            if events.len() > 128 {
+                return Err(Error::bad_gateway("Plugin socket event queue is full."));
             }
         }
         let timer_at = state.timers.values().map(|(at, _)| *at).min();
@@ -656,16 +669,16 @@ async fn serve(
             .min();
         let wake = tokio::select! {
             () = stop.cancelled() => Wake::Stop,
+            () = async {}, if !events.is_empty() => Wake::Queued,
             frame = async { state.socket.as_mut().expect("socket").next().await }, if state.socket.is_some() => Wake::Frame(frame),
             () = tokio::time::sleep_until(timer_at.unwrap_or_else(Instant::now)), if timer_at.is_some() => Wake::Timer,
             () = tokio::time::sleep_until(send_at.unwrap_or_else(Instant::now)), if send_at.is_some() => Wake::Send,
             () = tokio::time::sleep_until(connect_at.unwrap_or_else(Instant::now)), if connect_at.is_some() => Wake::Connect,
         };
         let event = match wake {
+            Wake::Queued => None,
             Wake::Stop => {
-                if let Some(mut socket) = state.socket.take() {
-                    let _ = tokio::time::timeout(Duration::from_secs(2), socket.close(None)).await;
-                }
+                state.shutdown().await;
                 return Ok(());
             }
             Wake::Timer => {
