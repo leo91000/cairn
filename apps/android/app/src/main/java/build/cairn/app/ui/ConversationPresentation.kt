@@ -30,8 +30,8 @@ internal data class ChatDelivery(val sending: List<SendingMessage>, val queued: 
 /** [account] names the coding agent whose account the user must connect, reconnect or resume. */
 internal data class ChatWaitNotice(val message: String, val account: String? = null)
 
-/** The wait a finished turn scheduled; the composer shows it live, as [waitCountdown] words it. */
-internal fun chatSleepNotice(chat: Chat?): ChatWakeup? {
+/** The wait a finished turn scheduled; the header counts it down, as [waitStatus] words it. */
+internal fun scheduledWakeup(chat: Chat?): ChatWakeup? {
     val wakeup = chat?.wakeup ?: return null
     if (chat.paused || chat.lifecycle != "active" || chat.run?.status != "succeeded") return null
     return wakeup
@@ -72,14 +72,7 @@ internal fun conversationState(
             chat.paused -> "En pause"
             chat.exclusiveSuspended -> "Suspendue (exclusivité)"
             run == "queued" -> "En attente"
-            chatSleepNotice(chat) != null -> {
-                val wakeup = chat.wakeup!!
-                when {
-                    wakeup.wakeAt <= now -> waitCountdown(wakeup, now)
-                    wakeup.condition != null -> "En attente · ${waitCountdown(wakeup, now)}"
-                    else -> "Reprise ${waitCountdown(wakeup, now)}"
-                }
-            }
+            scheduledWakeup(chat) != null -> waitStatus(chat.wakeup!!, now)
             run in listOf("failed", "interrupted") -> "${statusLabel(run)} · $identity"
             else -> identity
         }
@@ -262,8 +255,11 @@ internal fun ConversationHeader(
     route: ConnectionRoute,
     back: () -> Unit,
     choose: () -> Unit,
+    /** A scheduled wait: its status counts down here, without recomposing the whole page. */
+    wakeup: ChatWakeup? = null,
     actions: @Composable RowScope.() -> Unit,
 ) {
+    val status = wakeup?.let { waitStatus(it, rememberNow(it.id)) } ?: status
     Surface(Modifier.testTag("conversation-header"), color = MaterialTheme.colorScheme.background) {
         Column {
             Row(

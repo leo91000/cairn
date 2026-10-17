@@ -4,6 +4,7 @@ import type { ChatWakeup } from '../../../../packages/contracts/chats'
 import type { RunEvent, TaskOutcome } from '../../../../packages/contracts/contracts'
 import type { ActivityEntry } from '../activity'
 import type { SendingMessage } from '../chat-delivery'
+import type { LiveWait } from '../chat-wait'
 import type { ReadingPosition } from '../history-cache'
 import { twMerge } from 'tailwind-merge'
 import {
@@ -59,7 +60,7 @@ const props = defineProps<{
   /** The page shows the current subagents beside the composer, so the feed need not. */
   subagentBar?: boolean
   /** The conversation's pending wakeup, which keeps its wait card live. */
-  wakeup?: { wakeup: ChatWakeup | null, paused: boolean }
+  wakeup?: LiveWait
 }>()
 const emit = defineEmits<{ load: [], position: [value: ReadingPosition, key?: string], pauseWait: [] }>()
 const skillNames = computed(() => new Set(props.skills ?? []))

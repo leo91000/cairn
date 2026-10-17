@@ -631,10 +631,16 @@ internal fun timelineEntries(
         // The wait still pending, by its wakeup ID, so that its result and resumption complete it.
         val waits = mutableMapOf<String, Int>()
         var openWait: Int? = null
+        // The current wait call's reason: its tool row is hidden, and an immediate result omits
+        // it. Only that call may lend it, so it resets once used, once a wakeup carries it, and
+        // each turn.
+        var waitCall = ""
+        var waitReason = ""
         fun updateWait(index: Int, change: (ActivityWait) -> ActivityWait) {
             result[index] = result[index].copy(wait = change(result[index].wait!!))
         }
         for ((eventIndex, event) in folded.withIndex()) {
+            if (event.type == "turn.started") waitReason = ""
             when (event.type) {
                 "chat.sleep",
                 "chat.wait" -> {
@@ -644,6 +650,7 @@ internal fun timelineEntries(
                     flushActivity()
                     openWait = result.size
                     waits[wakeup.id] = result.size
+                    waitReason = ""
                     result.add(
                         TimelineEntry(
                             "wait:${wakeup.id}",
@@ -657,7 +664,8 @@ internal fun timelineEntries(
                 // The condition completed: right away (the agent never waited) or while it waited.
                 "chat.wait_ready" -> {
                     val observation = event.payload?.let(::JsonObject)
-                    val immediate = event.text == "Wait condition already completed"
+                    // Right away, the agent never waited, and this call replaced any wait.
+                    val immediate = event.text == IMMEDIATE_WAIT_RESULT
                     if (immediate) {
                         openWait?.let { index -> updateWait(index) { it.copy(ended = "replaced") } }
                         openWait = null
@@ -703,10 +711,22 @@ internal fun timelineEntries(
                                 "wait-ready:${event.id}",
                                 listOf(event),
                                 false,
-                                wait = ActivityWait(null, observation, observed = true),
+                                wait =
+                                    ActivityWait(
+                                        null,
+                                        observation,
+                                        observed = true,
+                                        // Cairn records the reason with the result; older
+                                        // histories only kept it on the call.
+                                        reason =
+                                            if (immediate)
+                                                observation.string("reason").ifBlank { waitReason }
+                                            else "",
+                                    ),
                             )
                         )
                     }
+                    if (immediate) waitReason = ""
                     continue
                 }
                 "chat.wakeup" -> {
@@ -739,14 +759,33 @@ internal fun timelineEntries(
                 }
                 // A new message cancels the pending wakeup.
                 "chat.user" -> {
-                    openWait?.let { index -> updateWait(index) { it.copy(ended = "message") } }
+                    openWait?.let { index -> updateWait(index) { it.copy(ended = "cancelled") } }
                     openWait = null
                 }
             }
+            // A run that ends without succeeding never resumes the wait it scheduled. Only its
+            // terminal status says so: a failed turn may be retried, and the retry keeps the
+            // wakeup.
+            val failedTurn =
+                event.type == "status" && event.text in setOf("failed", "cancelled", "interrupted")
+            openWait
+                ?.takeIf { failedTurn && result[it].wait?.observed != true }
+                ?.let { index ->
+                    updateWait(index) { it.copy(ended = "cancelled") }
+                    openWait = null
+                }
             val waitTool =
                 event.item().let { it.string("type") == "mcp_tool_call" && isWaitTool(it) }
             // The wait shows as its own card; only a call that failed stays among the tools.
-            if (waitTool && !presentActivity(event).failed) continue
+            if (waitTool && !presentActivity(event).failed) {
+                // A provider may announce the call before its arguments: keep what the same call
+                // said.
+                val callId = event.item().string("id")
+                val reason = toolArguments(event.item()).string("reason")
+                if (callId != waitCall || reason.isNotBlank()) waitReason = reason
+                waitCall = callId
+                continue
+            }
             val route = event.activityData()?.get("route") as? JsonObject
             // An attempt may name the provider of its replies; the next attempt ends that label.
             val data = event.activityData()
