@@ -38,6 +38,8 @@ export interface FilItem {
   wakeAt?: number
   /** It waits for a condition, so it may resume before `wakeAt`. */
   condition?: boolean
+  /** Its result already arrived: it resumes as soon as capacity allows. */
+  resolved?: boolean
 }
 export interface Fil {
   forYou: FilItem[]
@@ -95,7 +97,7 @@ export function filOf(chats: ChatView[], tasks: Task[], runs: RunListItem[], rea
       live.push({ ...base, kind: 'running', subtitle: 'Working' })
     }
     else if (chat.status === 'queued') {
-      live.push({ ...base, kind: 'queued', subtitle: 'Waiting for a runner' })
+      live.push({ ...base, kind: 'queued', subtitle: 'Needs a free runner' })
     }
     else if (chat.wakeup && chat.status === 'succeeded') {
       waiting.push({
@@ -104,6 +106,8 @@ export function filOf(chats: ChatView[], tasks: Task[], runs: RunListItem[], rea
         subtitle: waitTarget(chat.wakeup).short,
         wakeAt: chat.wakeup.wakeAt,
         condition: !!chat.wakeup.condition,
+        // Recorded by GitHub polling; another run's result is only computed at resumption.
+        resolved: !!chat.wakeup.observation,
       })
     }
     else if (chat.unread && unreadNow(base.key, chat.finishedAt)) {
@@ -148,7 +152,7 @@ export function filOf(chats: ChatView[], tasks: Task[], runs: RunListItem[], rea
       live.push({ ...base, kind: 'suspended', subtitle: exclusiveSuspensionLabel })
     }
     else if (run.status === 'running' || run.status === 'queued') {
-      live.push({ ...base, kind: run.status === 'running' ? 'running' : 'queued', subtitle: run.status === 'running' ? 'Mission running' : 'Mission waiting for a runner' })
+      live.push({ ...base, kind: run.status === 'running' ? 'running' : 'queued', subtitle: run.status === 'running' ? 'Mission running' : 'Mission needs a free runner' })
     }
     else if (run.status === 'failed' || run.status === 'interrupted') {
       forYou.push({ ...base, kind: 'failed-mission', subtitle: run.error?.split('\n')[0] || (run.status === 'failed' ? 'Mission failed' : 'Mission interrupted') })
@@ -169,10 +173,12 @@ export function filOf(chats: ChatView[], tasks: Task[], runs: RunListItem[], rea
   const newest = (a: FilItem, b: FilItem) => b.at - a.at
   // What asks for an answer or a decision stays above what only waits to be read.
   const urgency = (a: FilItem, b: FilItem) => Number(isUnread(a)) - Number(isUnread(b)) || newest(a, b)
+  // A wait whose result arrived resumes first, before any deadline.
+  const soonest = (a: FilItem, b: FilItem) => Number(!!b.resolved) - Number(!!a.resolved) || a.wakeAt! - b.wakeAt!
   return {
     forYou: forYou.sort(urgency),
     live: live.sort(newest),
-    waiting: waiting.sort((a, b) => a.wakeAt! - b.wakeAt!),
+    waiting: waiting.sort(soonest),
     recent: recent.sort(newest),
   }
 }

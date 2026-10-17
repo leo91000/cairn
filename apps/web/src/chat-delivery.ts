@@ -7,11 +7,11 @@ export interface SendingMessage {
   label: string
 }
 
-/** The wait a finished turn scheduled; the composer shows it live, as `waitCountdown` words it. */
-export function chatSleepNotice(chat: ChatDetail | null | undefined) {
+/** The wait a finished turn scheduled; the header counts it down, as `waitStatus` words it. */
+export function scheduledWakeup(chat: ChatDetail | null | undefined) {
   if (chat?.paused || (chat?.lifecycle && chat.lifecycle !== 'active') || chat?.run?.status !== 'succeeded' || !chat.wakeup)
     return null
-  return { account: null, message: chat.wakeup.reason, wakeup: chat.wakeup }
+  return chat.wakeup
 }
 
 export function chatWaitNotice(run: Run | null | undefined) {

@@ -10,7 +10,7 @@ import {
 } from 'vue'
 import { useRouter } from 'vue-router'
 import { api, notify, state } from '../api'
-import { timeLeft } from '../chat-wait'
+import { waitLeft } from '../chat-wait'
 import {
   Check,
   CheckCheck,
@@ -392,8 +392,8 @@ onBeforeUnmount(() => document.removeEventListener('keydown', key))
                 <span
                   v-if="item.kind === 'waiting'"
                   class="shrink-0 self-start pt-0.5 text-[11px] font-semibold tabular-nums text-accent"
-                  :title="item.condition ? 'Resumes when the result arrives, at the latest by its deadline' : 'Resumes then'"
-                >{{ item.condition ? '≤ ' : '' }}{{ timeLeft(item.wakeAt! - now) }}</span>
+                  :title="item.condition ? 'Resumes when the result arrives, at the latest by its deadline' : 'Time left before it resumes'"
+                >{{ waitLeft({ wakeAt: item.wakeAt!, condition: item.condition, resolved: item.resolved }, now) }}</span>
                 <span v-else class="shrink-0 self-start pt-0.5 text-[11px] tabular-nums" :class="item.kind === 'running' ? 'font-semibold text-accent' : 'text-subtle'">{{ shortAge(item.at, now) }}</span>
               </button>
             </template>

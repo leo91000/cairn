@@ -300,6 +300,28 @@ async fn already_finished_sources_return_results_without_scheduling_or_ending_th
     assert_eq!(result["deferred"], false);
     assert_eq!(result["observation"]["conclusion"], "failure");
     assert!(f.s.chat_detail(&f.chat).await.unwrap()["wakeup"].is_null());
+    // Web and Android tell an immediate result from a polled one by this text, and show the
+    // agent's reason that comes with it.
+    let run = f.run.clone();
+    let ready =
+        f.s.store
+            .read(move |db| {
+                Ok(db
+                    .events(&run, 0, 100)?
+                    .into_iter()
+                    .filter(|event| event["type"] == "chat.wait_ready")
+                    .map(|event| (event["text"].clone(), event["payload"]["reason"].clone()))
+                    .collect::<Vec<_>>())
+            })
+            .await
+            .unwrap();
+    assert_eq!(
+        ready,
+        [(
+            json!("Wait condition already completed"),
+            json!("Wait for result")
+        )]
+    );
 }
 
 #[tokio::test]

@@ -259,11 +259,15 @@ pub async fn schedule(s: &Service, bearer: &str, raw: &Value) -> Result<Value> {
             };
             if let Some(observed) = observed {
                 sleep::cancel(db, text(&chat, "id"))?;
+                // Web and Android match this text to show the result on its own card, which
+                // names the agent's reason: no wakeup records it.
+                let mut announced = observed.clone();
+                announced["reason"] = input["reason"].clone();
                 db.event(
                     text(&run, "id"),
                     "chat.wait_ready",
                     "Wait condition already completed",
-                    Some(&observed),
+                    Some(&announced),
                 )?;
                 return Ok(json!({ "deferred": false, "observation": observed }));
             }

@@ -14,6 +14,7 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import build.cairn.app.data.Chat
 import build.cairn.app.data.ChatWakeup
 import build.cairn.app.data.RunEvent
 import build.cairn.app.data.wireJson
@@ -54,8 +55,13 @@ internal data class ActivityWait(
     val observed: Boolean = false,
     /** When the conversation resumed. */
     val resumedAt: Long? = null,
-    /** A message from the user ("message"), or another wait ("replaced"), ended it first. */
+    /**
+     * A message or a failed turn cancelled it ("cancelled"), or another wait replaced it
+     * ("replaced").
+     */
     val ended: String? = null,
+    /** The agent's reason, for a result that was already available: no wakeup carries it. */
+    val reason: String = "",
 ) {
     val finished
         get() = resumedAt != null || observed
@@ -66,6 +72,10 @@ internal data class LiveWait(
     val wakeup: ChatWakeup?,
     val paused: Boolean,
     val pause: () -> Unit = {},
+    /** The turn that scheduled it ended successfully: only then does Cairn check its condition. */
+    val settled: Boolean = true,
+    /** Another action is under way, so pausing would be ignored. */
+    val busy: Boolean = false,
 )
 
 internal val LocalLiveWait = compositionLocalOf<LiveWait?> { null }
@@ -76,6 +86,17 @@ private fun JsonObject?.number(key: String) = (this?.get(key) as? JsonPrimitive)
 
 // Codex names the workspace server; Claude and OpenCode prefix the tool with it.
 private val workspaceWaitTool = Regex("^(?:mcp__)?cairn_workspace(?:__|_|\\.)(?:sleep|wait_for)$")
+
+/** A tool call's arguments, which some providers record as JSON text. */
+internal fun toolArguments(item: JsonObject?): JsonObject? =
+    when (val value = item?.get("arguments")) {
+        is JsonObject -> value
+        is JsonPrimitive ->
+            value.contentOrNull?.let {
+                runCatching { wireJson.parseToJsonElement(it).jsonObject }.getOrNull()
+            }
+        else -> null
+    }
 
 internal fun isWaitTool(item: JsonObject?): Boolean {
     val tool = item.string("tool")
@@ -94,7 +115,8 @@ internal fun wakeTime(at: Long, now: Long = System.currentTimeMillis()): String 
     val today = date.toLocalDate() == java.time.Instant.ofEpochMilli(now).atZone(zone).toLocalDate()
     return java.time.format.DateTimeFormatter.ofPattern(
             if (today) "HH:mm" else "d MMM HH:mm",
-            java.util.Locale.getDefault(),
+            // The copy is French: so are its months.
+            java.util.Locale.FRENCH,
         )
         .format(date)
 }
@@ -155,6 +177,16 @@ internal fun waitTarget(wakeup: ChatWakeup, now: Long = System.currentTimeMillis
 }
 
 /**
+ * A wait seen only in a run's history: whether it still stands is unknown, so it reads as what was
+ * scheduled rather than what will happen.
+ */
+internal fun recordedTitle(wakeup: ChatWakeup, now: Long = System.currentTimeMillis()): String {
+    val target = waitTarget(wakeup, now)
+    return if (target.kind == WaitKind.TIMER) "Reprise programmée à ${wakeTime(wakeup.wakeAt, now)}"
+    else "Attente programmée · ${target.short}"
+}
+
+/**
  * The live status: a timer resumes at its deadline, a condition at the latest by it. An overdue
  * wait resumes when capacity allows.
  */
@@ -164,7 +196,34 @@ internal fun waitCountdown(wakeup: ChatWakeup, now: Long = System.currentTimeMil
     return if (wakeup.condition != null) "${timeLeft(left)} max" else "dans ${timeLeft(left)}"
 }
 
-/** What Cairn observed when a wait ended; null after a plain timer. */
+/**
+ * The wakeup a conversation still honours: a failed or interrupted turn never resumes it, even when
+ * the record lingers. A paused conversation keeps it.
+ */
+internal fun liveWakeup(chat: Chat?): ChatWakeup? {
+    val wakeup = chat?.wakeup ?: return null
+    val status = chat.run?.status ?: chat.status
+    if (chat.lifecycle != "active" || status in setOf("failed", "interrupted", "cancelled"))
+        return null
+    return wakeup
+}
+
+/** Its result already arrived, or its deadline passed: it resumes as soon as capacity allows. */
+internal fun waitDue(wakeup: ChatWakeup, now: Long = System.currentTimeMillis()) =
+    wakeup.observation != null || wakeup.wakeAt <= now
+
+/** The conversation header while it waits. */
+internal fun waitStatus(wakeup: ChatWakeup, now: Long = System.currentTimeMillis()): String =
+    when {
+        waitDue(wakeup, now) -> "Reprise imminente"
+        wakeup.condition != null -> "Résultat attendu · ${timeLeft(wakeup.wakeAt - now)} max"
+        else -> "Reprise dans ${timeLeft(wakeup.wakeAt - now)}"
+    }
+
+/** The text Cairn gives `chat.wait_ready` when `wait_for` finds its condition already met. */
+internal const val IMMEDIATE_WAIT_RESULT = "Wait condition already completed"
+
+/** What Cairn observed when a wait ended; a plain timer observes nothing and reads as neutral. */
 internal fun waitOutcome(observation: JsonObject?): WaitOutcome {
     val state = observation.string("state")
     val finished = WaitOutcome(WaitTone.NEUTRAL, "Attente terminée", "")
@@ -201,7 +260,7 @@ internal fun waitOutcome(observation: JsonObject?): WaitOutcome {
                         "L’exécution est terminée",
                         when (observation.string("outcomeStatus")) {
                             "blocked" -> "Bloquée"
-                            "needs_input" -> "Attend une réponse"
+                            "needs_input" -> "Attend votre réponse"
                             else -> ""
                         },
                     )
@@ -218,6 +277,7 @@ internal fun waitOutcome(observation: JsonObject?): WaitOutcome {
             val conclusion = observation.string("conclusion")
             val attempt = observation.number("runAttempt")
             val detail = if (attempt != null && attempt > 1) "Tentative $attempt" else ""
+            // GitHub's conclusions, in French: a plain failure needs no detail.
             when (conclusion) {
                 "success" -> WaitOutcome(WaitTone.OK, "Workflow réussi", detail)
                 "failure",
@@ -226,14 +286,28 @@ internal fun waitOutcome(observation: JsonObject?): WaitOutcome {
                     WaitOutcome(
                         WaitTone.ERROR,
                         "Workflow en échec",
-                        listOf(friendlyStatus(conclusion), detail)
+                        listOf(
+                                when (conclusion) {
+                                    "startup_failure" -> "échec au démarrage"
+                                    "timed_out" -> "délai dépassé"
+                                    else -> ""
+                                },
+                                detail,
+                            )
                             .filter { it.isNotBlank() }
                             .joinToString(" · "),
                     )
                 else ->
                     WaitOutcome(
                         WaitTone.WARNING,
-                        "Workflow : ${friendlyStatus(conclusion)}",
+                        when (conclusion) {
+                            "cancelled" -> "Workflow annulé"
+                            "skipped" -> "Workflow ignoré"
+                            "neutral" -> "Workflow neutre"
+                            "action_required" -> "Workflow : action requise"
+                            "stale" -> "Workflow périmé"
+                            else -> "Workflow : ${friendlyStatus(conclusion)}"
+                        },
                         detail,
                     )
             }
@@ -282,14 +356,86 @@ private fun waitIcon(kind: WaitKind) =
         WaitKind.RUN -> CairnIcons.Orbit
     }
 
+/** What a result answers, for a card that has no scheduled wakeup to name it. */
+internal fun observedTarget(observation: JsonObject?): String =
+    when (observation.string("type")) {
+        "github_pr_checks" -> "Checks PR #${observation.number("prNumber")}"
+        "github_workflow" -> "Workflow GitHub"
+        "run_finished" -> "Autre exécution"
+        else -> ""
+    }
+
+/** Where a wait card stands, from its history and, when known, the conversation's live state. */
+internal data class WaitProgress(
+    /** Its wakeup is the one the conversation still honours. */
+    val current: Boolean,
+    /** What Cairn observed, from the history or the pending wakeup; null before any result. */
+    val observation: JsonObject?,
+    /** Its result arrived or the conversation resumed. */
+    val finished: Boolean,
+    val replaced: Boolean,
+    val cancelled: Boolean,
+    val paused: Boolean,
+    /** It still counts down. */
+    val pending: Boolean,
+    /**
+     * Once its turn ended, the conversation can be paused before it resumes, even with the result
+     * in.
+     */
+    val pausable: Boolean,
+)
+
+internal fun waitProgress(wait: ActivityWait, live: LiveWait?): WaitProgress {
+    val wakeup = wait.wakeup
+    val current = wakeup != null && live?.wakeup?.id == wakeup.id
+    // GitHub polling records the result on the pending wakeup too, which matters when its event
+    // is unloaded. Another run's result is only computed when the conversation resumes.
+    val observation =
+        if (wait.observed) wait.observation else if (current) live?.wakeup?.observation else null
+    val finished = wait.finished || observation != null
+    val replaced = wait.ended == "replaced"
+    // Live state, when known, is authoritative: stopping a wait leaves no event in the history.
+    val cancelled = if (live != null) !current && !replaced else wait.ended == "cancelled"
+    val paused = current && live?.paused == true
+    return WaitProgress(
+        current,
+        observation,
+        finished,
+        replaced,
+        cancelled,
+        paused,
+        pending = current && !paused && !finished,
+        pausable = current && !paused && wait.resumedAt == null && live?.settled == true,
+    )
+}
+
+/** Time left in the Fil, which refreshes every 30 s: seconds would read stale. */
+internal fun waitLeft(
+    wakeAt: Long,
+    condition: Boolean,
+    resolved: Boolean,
+    now: Long = System.currentTimeMillis(),
+): String {
+    val left = wakeAt - now
+    if (resolved || left <= 0) return "bientôt"
+    if (left < 60_000) return "< 1 min"
+    return if (condition) "≤ ${timeLeft(left)}" else timeLeft(left)
+}
+
 /** One card per wait in the conversation, live while it is the conversation's pending wakeup. */
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
 internal fun WaitCard(wait: ActivityWait) {
     val live = LocalLiveWait.current
     val wakeup = wait.wakeup
-    val current = wakeup != null && live?.wakeup?.id == wakeup.id
-    val pending = current && live?.paused != true && !wait.finished
+    val state = waitProgress(wait, live)
+    val current = state.current
+    val observation = state.observation
+    val finished = state.finished
+    val cancelled = state.cancelled
+    val paused = state.paused
+    val pending = state.pending
+    val pausable = state.pausable
     var now by remember { mutableLongStateOf(System.currentTimeMillis()) }
     LaunchedEffect(pending) {
         now = System.currentTimeMillis()
@@ -298,31 +444,23 @@ internal fun WaitCard(wait: ActivityWait) {
             now = System.currentTimeMillis()
         }
     }
-    val reason = wakeup?.reason.orEmpty()
+    val reason = wakeup?.reason ?: wait.reason
     fun duration() =
         if (wakeup != null && wait.resumedAt != null)
             "Attente de ${waited(wait.resumedAt - wakeup.createdAt)}"
         else ""
-    // An observed condition may still be cancelled or paused before the wakeup launches.
-    val interrupted =
-        wait.resumedAt == null &&
-            wakeup != null &&
-            (wait.ended != null || (live != null && (!current || live.paused)))
     val view =
         when {
-            wait.finished &&
-                !interrupted &&
-                wakeup?.condition == null &&
-                wait.observation == null ->
+            finished && wakeup?.condition == null && observation == null ->
                 WaitView(
                     WaitTone.NEUTRAL,
                     false,
                     CairnIcons.Clock,
                     "Reprise à l’heure prévue",
-                    duration(),
+                    listOf(reason, duration()).filter { it.isNotBlank() }.joinToString(" · "),
                 )
-            wait.finished && !interrupted -> {
-                val outcome = waitOutcome(wait.observation)
+            finished -> {
+                val outcome = waitOutcome(observation)
                 val icon =
                     when (outcome.tone) {
                         WaitTone.OK -> CairnIcons.Check
@@ -334,6 +472,9 @@ internal fun WaitCard(wait: ActivityWait) {
                     when {
                         wakeup == null -> "Le résultat était déjà disponible"
                         wait.resumedAt != null -> duration()
+                        state.replaced -> "Remplacée par un nouvel appel d’attente"
+                        cancelled -> "Attente annulée"
+                        paused -> "Reprise quand vous reprendrez la conversation"
                         else -> "Reprise selon la capacité disponible"
                     }
                 WaitView(
@@ -341,38 +482,41 @@ internal fun WaitCard(wait: ActivityWait) {
                     false,
                     icon,
                     outcome.title,
-                    listOf(outcome.detail, time).filter { it.isNotBlank() }.joinToString(" · "),
+                    // A finished card still says why and what it waited for; a timer's outcome
+                    // says the latter.
+                    listOf(
+                            reason,
+                            if (wakeup == null) observedTarget(observation)
+                            else if (wakeup.condition != null) waitTarget(wakeup, now).short
+                            else "",
+                            outcome.detail,
+                            time,
+                        )
+                        .filter { it.isNotBlank() }
+                        .joinToString(" · "),
                 )
             }
-            wait.ended == "message" ->
+            state.replaced ->
                 WaitView(
                     null,
                     true,
                     CairnIcons.Hourglass,
-                    "Attente annulée par votre message",
+                    "Remplacée par un nouvel appel d’attente",
                     reason,
                 )
-            wait.ended == "replaced" ->
-                WaitView(
-                    null,
-                    true,
-                    CairnIcons.Hourglass,
-                    "Remplacée par une nouvelle attente",
-                    reason,
-                )
-            live != null && !current ->
-                WaitView(null, true, CairnIcons.Hourglass, "Attente annulée", reason)
-            current && live?.paused == true ->
-                WaitView(
-                    null,
-                    true,
-                    CairnIcons.Pause,
-                    "Attente en pause",
-                    "L’échéance reste valable. Reprenez la conversation pour continuer.",
-                )
+            cancelled -> WaitView(null, true, CairnIcons.Hourglass, "Attente annulée", reason)
+            paused ->
+                WaitView(null, true, CairnIcons.Pause, waitTarget(wakeup!!, now).title, reason)
+            // A run's history cannot tell whether the wait still stands: it is shown as recorded.
             else -> {
                 val target = waitTarget(wakeup!!, now)
-                WaitView(null, false, waitIcon(target.kind), target.title, reason)
+                WaitView(
+                    if (live != null) null else WaitTone.NEUTRAL,
+                    false,
+                    waitIcon(target.kind),
+                    if (live != null) target.title else recordedTitle(wakeup, now),
+                    reason,
+                )
             }
         }
     val (container, content) =
@@ -426,15 +570,19 @@ internal fun WaitCard(wait: ActivityWait) {
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
                     val chips =
-                        if (pending && wakeup != null)
+                        if (!finished && !cancelled && !state.replaced && wakeup != null)
                             waitTarget(wakeup, now).details.filter { it.isNotBlank() }
                         else emptyList()
                     // Cairn updates the pending wakeup as it polls; the event keeps the original.
                     val latest = if (current) live?.wakeup else wakeup
                     val retrying = pending && !latest?.lastError.isNullOrBlank()
                     // GitHub conditions are polled: say when Cairn looks again.
+                    // Cairn checks GitHub only once the turn has ended, and until the deadline.
                     val polled =
                         pending &&
+                            live?.settled == true &&
+                            latest != null &&
+                            !waitDue(latest, now) &&
                             !retrying &&
                             wakeup?.condition.string("type") in
                                 setOf("github_pr_checks", "github_workflow")
@@ -473,25 +621,42 @@ internal fun WaitCard(wait: ActivityWait) {
                             fontWeight = FontWeight.Bold,
                             color = MaterialTheme.colorScheme.primary,
                         )
+                        // A timer names its time in the title already.
+                        if (wakeup.condition != null)
+                            Text(
+                                "échéance ${wakeTime(wakeup.wakeAt, now)}",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                    }
+                } else if (paused && !finished && wakeup != null) {
+                    Spacer(Modifier.width(10.dp))
+                    Column(horizontalAlignment = Alignment.End) {
                         Text(
-                            if (wakeup.condition != null) "échéance ${wakeTime(wakeup.wakeAt, now)}"
-                            else wakeTime(wakeup.wakeAt, now),
-                            style = MaterialTheme.typography.labelSmall,
+                            "En pause",
+                            style = MaterialTheme.typography.titleSmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
+                        if (wakeup.condition != null)
+                            Text(
+                                "échéance ${wakeTime(wakeup.wakeAt, now)}",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
                     }
-                } else if (!wait.finished && live == null && wakeup != null) {
+                } else if (!finished && live == null && wakeup?.condition != null) {
                     Spacer(Modifier.width(10.dp))
                     Text(
-                        "${if (wakeup.condition != null) "Échéance" else "Reprise"} ${wakeTime(wakeup.wakeAt, now)}",
+                        "Échéance ${wakeTime(wakeup.wakeAt, now)}",
                         style = MaterialTheme.typography.labelSmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
             }
-            if (pending && live != null)
+            if (pausable && live != null)
                 TextButton(
                     onClick = live.pause,
+                    enabled = !live.busy,
                     modifier = Modifier.align(Alignment.End).padding(end = 4.dp),
                 ) {
                     Icon(CairnIcons.Pause, null, Modifier.size(14.dp))

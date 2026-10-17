@@ -48,13 +48,14 @@ test('a durable scheduled wait survives restart and resumes without a user messa
 
   await page.getByRole('button', { name: 'Pause wait', exact: true }).click()
   await expect.poll(async () => (await workspace.api(`/api/chats/${chat.id}`)).paused).toBe(true)
-  await expect(card).toContainText('Wait paused')
+  // Paused, it still names what it waits for and why.
+  await expect(card).toContainText(/Resumes at .+Wait for CI.*Paused/)
   workspace.service.store.put('chats', { ...workspace.service.store.get('chats', chat.id)!, wakeup: { ...wakeup, wakeAt: Date.now() } })
   await expect(page.getByRole('button', { name: 'Resume', exact: true })).toBeVisible()
   expect((await workspace.api(`/api/chats/${chat.id}`)).run.status).toBe('succeeded')
   await page.getByRole('button', { name: 'Resume', exact: true }).click()
   await expect.poll(async () => (await workspace.api(`/api/chats/${chat.id}`)).run?.summary).toContain('Cairn resumed this conversation')
-  await expect(card).toContainText('Resumed as scheduled')
+  await expect(card).toContainText(/Resumed as scheduled.*Wait for CI/)
   await expect(card.getByRole('button', { name: 'Pause wait' })).toHaveCount(0)
   await expect(waiting).toHaveCount(0)
   const resumed = await workspace.api(`/api/chats/${chat.id}`)
@@ -124,7 +125,7 @@ test('a durable condition wait follows a dependency across restart and queue pau
     await page.goto(workspacePath(`/chats/${chat.id}`))
     await authenticateWorkspace(page)
     await expect(page.locator('.chat-wait')).toContainText(/Waiting for another run to finish.*Join dependency.*up to \d+ min/)
-    await expect(page.getByText(/^Waiting · up to \d+ min$/).first()).toBeVisible()
+    await expect(page.getByText(/^Awaiting result · up to \d+ min$/).first()).toBeVisible()
     await expect(page.getByRole('region', { name: 'Waiting', exact: true }).locator(`[data-fil-key="chat:${chat.id}"]`)).toContainText('Another run')
     await expect(page.locator('.agent-waiting')).toHaveCount(0)
     for (const width of [1280, 390]) {

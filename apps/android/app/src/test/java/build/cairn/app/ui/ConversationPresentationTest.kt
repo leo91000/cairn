@@ -60,13 +60,13 @@ class ConversationPresentationTest {
                         condition = condition,
                     ),
             )
-        assertEquals(chat.wakeup, chatSleepNotice(chat))
+        assertEquals(chat.wakeup, scheduledWakeup(chat))
         assertEquals(
-            "En attente · 7 min max",
+            "Résultat attendu · 7 min max",
             conversationState(chat, "Agent", null, now = 1).status,
         )
         assertTrue(chatDelivery(chat, emptyList()).sending.isEmpty())
-        assertNull(chatSleepNotice(chat.copy(paused = true)))
+        assertNull(scheduledWakeup(chat.copy(paused = true)))
     }
 
     @Test
@@ -77,17 +77,17 @@ class ConversationPresentationTest {
                 run = Run("run", status = "succeeded"),
                 wakeup = ChatWakeup("wake", "one", "Attendre la CI", 420, 1, 420001),
             )
-        assertEquals(chat.wakeup, chatSleepNotice(chat))
+        assertEquals(chat.wakeup, scheduledWakeup(chat))
         assertEquals("Reprise dans 7 min", conversationState(chat, "Agent", null, now = 1).status)
         assertEquals(
             "Reprise imminente",
             conversationState(chat, "Agent", null, now = 420001).status,
         )
         assertTrue(chatDelivery(chat, emptyList()).sending.isEmpty())
-        assertNull(chatSleepNotice(chat.copy(paused = true)))
-        assertNull(chatSleepNotice(chat.copy(lifecycle = "trash")))
-        assertNull(chatSleepNotice(chat.copy(run = Run("run", status = "running"))))
-        assertNull(chatSleepNotice(chat.copy(wakeup = null)))
+        assertNull(scheduledWakeup(chat.copy(paused = true)))
+        assertNull(scheduledWakeup(chat.copy(lifecycle = "trash")))
+        assertNull(scheduledWakeup(chat.copy(run = Run("run", status = "running"))))
+        assertNull(scheduledWakeup(chat.copy(wakeup = null)))
     }
 
     @Test
