@@ -11,6 +11,7 @@ It does not assert pixel equality between a browser and Material components.
 | Navigation | Since 0.32.0: Fil / Missions / Atelier floating dock with an always-available new-conversation button (rail on large windows), universal search with direct actions; no workspace-owner decorations | Workspace and Signal journeys; device review |
 | Conversations | Fil home grouped by what needs the user, live work and recent conversations; conversations and missions opened from it read in one pager that swipes in the Fil's order, a mission run adding a Mission tab; compact chooser from the conversation title with search and date groups; agent/project chosen on screen for a new conversation | Chat and Signal journeys; device switching/search |
 | Composer | Native expanding text field, attachments, model/reasoning controls, preserved drafts when switching chats, send/queue/steer/stop, IME insets | Chat journey; device keyboard and enlarged text |
+| Attachments | ＋ opens the attach sheet (recent photos, camera, photo picker, files). The draft shows a horizontal tray: image thumbnails and file cards with a coloured type badge and the name shortened in the middle, upload progress per file, upload failures retried on the next send, and refused files (over 10 MB, or 40 MB per message) that block sending until removed. Sent and queued messages show their files above the bubble: an image mosaic (+N beyond four), document cards picturing a PDF's first page or a text file's opening lines, and one-line cards with page or line counts. Tapping opens a full-screen viewer that pages through the message's files with a filmstrip; a long press saves, shares, copies an image or attaches the file again. The file families, their colours and the server `?preview` / `?summary` endpoints are shared with the web (`apps/web/src/attachments.ts`) | `AttachmentPresentationTest` mirrors the web family table; `AttachmentViewsTest`; `ImagePasteCases` |
 | Delivery | Initial send and initiating run message appear in transcript; only waiting follow-ups appear in queue; acknowledgements deduplicate optimistic messages; question responses use server privacy redaction | Six presentation regressions; existing message/network cases |
 | Queue and questions | Queue strip next to the composer (first follow-up visible, expandable), pause/resume, edit/remove/steer, option/free-text/private answers | Chat journey; network/Compose suite |
 | Subagents | Subagents started together form a team card in the conversation and the run log (state, current step or report, elapsed time); each opens its full activity (prompt, steps, report, nested teams) in a sheet with one tab per teammate; a bar above the composer keeps working subagents in sight and replaces the working indicator when the agent only waits for them | `SubagentsTest` mirrors the web subagent cases; `SubagentViewsTest` |
@@ -37,6 +38,11 @@ coverage used, not a claim that every production account/provider was exercised.
   layout shows a side panel. A team row opens that sheet directly instead of expanding inline.
 - Android document/photo pickers and system share/save/selection replace browser
   upload/download/clipboard controls. External OAuth uses Custom Tabs.
+- Attachments: the attach sheet lists recent photos from the device (asked for only when the
+  user taps the tile; Android 14 limited access is supported), which browsers cannot offer; the
+  web menu has Photos, Camera and Files. File actions use a long press on Android and a ⋯ menu
+  on the web. Message images keep a fixed mosaic size on Android so the history does not move
+  while pictures load.
 - Foreground updates use SSE. Background question notifications retain the
   existing Firebase-free WorkManager service: Android schedules periodic checks
   (approximately 15 minutes, potentially delayed by the OS), rather than browser

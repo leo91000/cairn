@@ -496,6 +496,33 @@ internal object CairnIcons {
             arcTo(1.5f, 1.5f, 0f, false, true, 7.9f, 14.9f)
             lineTo(15f, 7.8f)
         }
+    val Camera =
+        line("Camera") {
+            moveTo(3.5f, 8f)
+            lineTo(7.5f, 8f)
+            lineTo(9f, 5.5f)
+            lineTo(15f, 5.5f)
+            lineTo(16.5f, 8f)
+            lineTo(20.5f, 8f)
+            lineTo(20.5f, 19f)
+            lineTo(3.5f, 19f)
+            close()
+            moveTo(15.5f, 13f)
+            arcTo(3.5f, 3.5f, 0f, true, true, 15.49f, 13f)
+        }
+    val Copy =
+        line("Copy") {
+            moveTo(9f, 9f)
+            lineTo(20f, 9f)
+            lineTo(20f, 20f)
+            lineTo(9f, 20f)
+            close()
+            moveTo(5.5f, 15f)
+            lineTo(4f, 15f)
+            lineTo(4f, 4f)
+            lineTo(15f, 4f)
+            lineTo(15f, 5.5f)
+        }
     // Skill workbench: file kinds and file actions.
     val Image =
         line("Image") {

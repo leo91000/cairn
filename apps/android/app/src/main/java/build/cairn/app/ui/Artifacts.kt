@@ -239,39 +239,6 @@ private fun ArtifactTile(vm: CairnViewModel, artifact: Deliverable, open: () -> 
     }
 }
 
-@Composable
-fun AttachmentList(
-    vm: CairnViewModel,
-    items: List<ChatAttachment>,
-    remove: ((String) -> Unit)? = null,
-    local: Map<String, String> = emptyMap(),
-) {
-    var opening by remember { mutableStateOf<ChatAttachment?>(null) }
-    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-        items.forEach { item ->
-            Row(Modifier.fillMaxWidth()) {
-                TextButton(onClick = { opening = item }, modifier = Modifier.weight(1f)) {
-                    Text("${item.name} · ${fileSize(item.size)}", maxLines = 2)
-                }
-                if (remove != null)
-                    ActionIcon("Retirer ${item.name}", Icons.Default.Close) { remove(item.id) }
-            }
-        }
-    }
-    opening?.let { item ->
-        FilePreview(
-            vm,
-            "/chats/${segment(item.chatId)}/attachments/${segment(item.id)}",
-            item.name,
-            item.mediaType,
-            item.kind,
-            local[item.id],
-        ) {
-            opening = null
-        }
-    }
-}
-
 /** Freeze the browsing order for this opening, even if the conversation publishes new files. */
 @Composable
 internal fun ArtifactGallery(
@@ -522,115 +489,7 @@ private fun FilePreviewPage(
                 TextButton(onClick = { retry++ }) { Text("Réessayer") }
             }
             currentFile?.let { current ->
-                val extension = name.substringAfterLast('.', "").lowercase()
-                when {
-                    mime == "image/svg+xml" || (mime == "image/gif" && active) -> {
-                        var document by remember(current) { mutableStateOf<String?>(null) }
-                        LaunchedEffect(current) {
-                            document =
-                                withContext(Dispatchers.IO) {
-                                    val limit = if (mime == "image/gif") 20L else 4L
-                                    if (current.length() <= limit * 1024 * 1024)
-                                        imageDocument(current.readBytes(), mime)
-                                    else ""
-                                }
-                        }
-                        document?.let {
-                            if (it.isEmpty() && mime == "image/gif")
-                                Column(Modifier.fillMaxSize()) {
-                                    Box(Modifier.weight(1f)) {
-                                        NativeImage(current, name, active, zoomChanged)
-                                    }
-                                    Text(
-                                        "Aperçu fixe : l’animation est limitée aux GIF de 20 Mo maximum.",
-                                        Modifier.padding(horizontal = 20.dp, vertical = 12.dp),
-                                        style = MaterialTheme.typography.bodySmall,
-                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                    )
-                                }
-                            else if (it.isEmpty())
-                                Page {
-                                    Text(
-                                        "Image trop volumineuse pour un aperçu. Enregistrez-la pour l’ouvrir."
-                                    )
-                                }
-                            else
-                                ZoomableImage(active, zoomChanged) { modifier ->
-                                    InertWebPage(it, name, modifier)
-                                }
-                        }
-                    }
-                    kind == "image" || mime.startsWith("image/") ->
-                        NativeImage(current, name, active, zoomChanged)
-                    kind == "pdf" || mime == "application/pdf" -> NativePdf(current)
-                    kind in listOf("video", "audio") ||
-                        mime.startsWith("video/") ||
-                        mime.startsWith("audio/") -> NativeMedia(current, active)
-                    kind in listOf("markdown", "code") ||
-                        mime.startsWith("text/") ||
-                        mime == "application/json" -> {
-                        var text by remember(current) { mutableStateOf("") }
-                        LaunchedEffect(current) {
-                            text =
-                                withContext(Dispatchers.IO) {
-                                    current.inputStream().bufferedReader().use { reader ->
-                                        val chars = CharArray(1024 * 1024)
-                                        val count = reader.read(chars)
-                                        if (count < 0) "" else String(chars, 0, count)
-                                    }
-                                }
-                        }
-                        // Markup and tables have a rendered view; their source stays one tap away.
-                        val page = kind == "code" && extension in listOf("html", "htm")
-                        val table = kind == "code" && extension in listOf("csv", "tsv")
-                        var source by remember(current) { mutableStateOf(false) }
-                        Column(Modifier.fillMaxSize()) {
-                            if (page || table)
-                                FilterChip(
-                                    selected = source,
-                                    onClick = { source = !source },
-                                    label = { Text("Source") },
-                                    modifier = Modifier.padding(horizontal = 20.dp),
-                                )
-                            if (page && !source) InertWebPage(text, name)
-                            else
-                                Page {
-                                    if (table && !source)
-                                        DelimitedTable(
-                                            remember(text) {
-                                                parseDelimited(
-                                                    text,
-                                                    if (extension == "tsv") '\t' else ',',
-                                                )
-                                            }
-                                        )
-                                    else if (kind == "markdown" || mime.contains("markdown"))
-                                        Markdown(text)
-                                    else if (
-                                        mime == "application/json" || name.endsWith(".json", true)
-                                    ) {
-                                        if (text.length <= 500_000) ResultContent(text)
-                                        else
-                                            Text(
-                                                "Fichier volumineux : consultez la source ou enregistrez-le pour lire la suite."
-                                            )
-                                        Disclosure("Voir la source JSON") { Code(text) }
-                                    } else Code(text)
-                                    if (current.length() > 1024 * 1024)
-                                        Text(
-                                            "Aperçu limité à 1 Mo. Enregistrez le fichier pour lire la suite."
-                                        )
-                                }
-                        }
-                    }
-                    else ->
-                        Page {
-                            Text("${fileSize(current.length())} · $mime")
-                            Text(
-                                "Enregistrez ce fichier ou ouvrez-le dans une application compatible."
-                            )
-                        }
-                }
+                FileContent(current, name, mime, kind, active, zoomChanged)
             }
                 ?: if (error == null)
                     Box(
@@ -646,6 +505,118 @@ private fun FilePreviewPage(
                     }
                 else Unit
         }
+    }
+}
+
+/** The body of a downloaded file: native image, PDF and media views, text, tables and pages. */
+@Composable
+internal fun FileContent(
+    current: File,
+    name: String,
+    mime: String,
+    kind: String,
+    active: Boolean,
+    zoomChanged: (Boolean) -> Unit,
+) {
+    val extension = name.substringAfterLast('.', "").lowercase()
+    when {
+        mime == "image/svg+xml" || (mime == "image/gif" && active) -> {
+            var document by remember(current) { mutableStateOf<String?>(null) }
+            LaunchedEffect(current) {
+                document =
+                    withContext(Dispatchers.IO) {
+                        val limit = if (mime == "image/gif") 20L else 4L
+                        if (current.length() <= limit * 1024 * 1024)
+                            imageDocument(current.readBytes(), mime)
+                        else ""
+                    }
+            }
+            document?.let {
+                if (it.isEmpty() && mime == "image/gif")
+                    Column(Modifier.fillMaxSize()) {
+                        Box(Modifier.weight(1f)) {
+                            NativeImage(current, name, active, zoomChanged)
+                        }
+                        Text(
+                            "Aperçu fixe : l’animation est limitée aux GIF de 20 Mo maximum.",
+                            Modifier.padding(horizontal = 20.dp, vertical = 12.dp),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                else if (it.isEmpty())
+                    Page {
+                        Text("Image trop volumineuse pour un aperçu. Enregistrez-la pour l’ouvrir.")
+                    }
+                else
+                    ZoomableImage(active, zoomChanged) { modifier ->
+                        InertWebPage(it, name, modifier)
+                    }
+            }
+        }
+        kind == "image" || mime.startsWith("image/") ->
+            NativeImage(current, name, active, zoomChanged)
+        kind == "pdf" || mime == "application/pdf" -> NativePdf(current)
+        kind in listOf("video", "audio") ||
+            mime.startsWith("video/") ||
+            mime.startsWith("audio/") -> NativeMedia(current, active)
+        kind in listOf("markdown", "code") ||
+            mime.startsWith("text/") ||
+            mime == "application/json" -> {
+            var text by remember(current) { mutableStateOf("") }
+            LaunchedEffect(current) {
+                text =
+                    withContext(Dispatchers.IO) {
+                        current.inputStream().bufferedReader().use { reader ->
+                            val chars = CharArray(1024 * 1024)
+                            val count = reader.read(chars)
+                            if (count < 0) "" else String(chars, 0, count)
+                        }
+                    }
+            }
+            // Markup and tables have a rendered view; their source stays one tap away.
+            val page = kind == "code" && extension in listOf("html", "htm")
+            val table = kind == "code" && extension in listOf("csv", "tsv")
+            var source by remember(current) { mutableStateOf(false) }
+            Column(Modifier.fillMaxSize()) {
+                if (page || table)
+                    FilterChip(
+                        selected = source,
+                        onClick = { source = !source },
+                        label = { Text("Source") },
+                        modifier = Modifier.padding(horizontal = 20.dp),
+                    )
+                if (page && !source) InertWebPage(text, name)
+                else
+                    Page {
+                        if (table && !source)
+                            DelimitedTable(
+                                remember(text) {
+                                    parseDelimited(
+                                        text,
+                                        if (extension == "tsv") '\t' else ',',
+                                    )
+                                }
+                            )
+                        else if (kind == "markdown" || mime.contains("markdown")) Markdown(text)
+                        else if (mime == "application/json" || name.endsWith(".json", true)) {
+                            if (text.length <= 500_000) ResultContent(text)
+                            else
+                                Text(
+                                    "Fichier volumineux : consultez la source ou enregistrez-le pour lire la suite."
+                                )
+                            Disclosure("Voir la source JSON") { Code(text) }
+                        } else Code(text)
+                        if (current.length() > 1024 * 1024)
+                            Text("Aperçu limité à 1 Mo. Enregistrez le fichier pour lire la suite.")
+                    }
+            }
+        }
+        else ->
+            Page {
+                Text("${fileSize(current.length())} · $mime")
+                Text("Enregistrez ce fichier ou ouvrez-le dans une application compatible.")
+            }
     }
 }
 
