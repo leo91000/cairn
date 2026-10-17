@@ -151,6 +151,22 @@ describe('agent plan', () => {
     expect(kinds(entries)).toEqual(['plan', 'plan-update'])
   })
 
+  it.each(['in_progress', 'completed'])('refreshes metadata without another card or delta for an unchanged %s plan', (status) => {
+    const initial = plan('plan', [['Implement', status, 'Implementing A']], { explanation: 'Initial approach.' })
+    const revised = plan('plan', [['Implement', status, 'Implementing B']], { explanation: 'Revised approach.' })
+    const repeated = plan('plan', [['Implement', status, 'Implementing B']], { explanation: 'Revised approach.' })
+    const entries = activityEntries([initial, revised, repeated], true)
+
+    expect(kinds(entries)).toEqual(['plan'])
+    const card = entries[0] as Extract<ActivityEntry, { kind: 'plan' }>
+    expect(card.plan.steps[0]!.activeText).toBe('Implementing B')
+    expect(card.plan.explanation).toBe('Revised approach.')
+    expect(card.plan.time).toBe(initial.createdAt)
+    expect(card.plan.updatedAt).toBe(revised.createdAt)
+    if (status === 'in_progress')
+      expect(currentPlan(entries)?.steps[0]!.activeText).toBe('Implementing B')
+  })
+
   it('starts a new plan once the previous one is finished or replaced', () => {
     const entries = activityEntries([
       plan('first', [['Explore', 'completed']]),
@@ -182,6 +198,20 @@ describe('agent plan', () => {
     expect(team.agents[0]!.subagent!.steps.map(step => [step.kind, step.tasks])).toEqual([
       ['plan', [{ text: 'Review the keyboard', completed: false }]],
     ])
+  })
+
+  it('keeps a child plan among tools when its parent is outside the loaded history', () => {
+    const child = plan('child', [['Review', 'in_progress']], { parent_id: 'older-parent' })
+    const childOnly = activityEntries([child], true)
+
+    expect(kinds(childOnly)).toEqual(['group'])
+    const group = childOnly[0] as Extract<ActivityEntry, { kind: 'group' }>
+    expect(group.artifacts[0]!.tasks).toEqual([{ text: 'Review', completed: false }])
+    expect(currentPlan(childOnly)).toBeUndefined()
+
+    const entries = activityEntries([plan('root', [['Implement', 'in_progress']]), child], true)
+    expect(kinds(entries)).toEqual(['plan', 'group'])
+    expect(currentPlan(entries)?.steps.map(step => step.text)).toEqual(['Implement'])
   })
 
   it('keeps the current request plan beside the composer until it is finished', () => {

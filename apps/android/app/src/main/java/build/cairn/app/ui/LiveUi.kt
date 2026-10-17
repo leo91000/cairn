@@ -826,13 +826,31 @@ internal fun timelineEntries(
             }
             // The agent's own plan shows apart from its tools. A call that failed did not change
             // it.
-            val planItem = event.item()?.takeIf { it.string("type") == "todo_list" }
+            val planItem =
+                event.item()?.takeIf {
+                    it.string("type") == "todo_list" && it.string("parent_id").isBlank()
+                }
             if (planItem != null) {
                 val steps = planSteps(planItem)
                 if (steps.isEmpty() || planItem.string("status") == "failed") continue
                 val current = planIndex?.let { result[it].plan }
-                if (current != null && samePlan(current.steps, steps)) continue
                 val explanation = planItem.string("explanation")
+                if (current != null && samePlan(current.steps, steps)) {
+                    val updatedExplanation = explanation.ifBlank { current.explanation }
+                    if (steps != current.steps || updatedExplanation != current.explanation) {
+                        val index = checkNotNull(planIndex)
+                        result[index] =
+                            result[index].copy(
+                                plan =
+                                    current.copy(
+                                        steps = steps,
+                                        explanation = updatedExplanation,
+                                        updatedAt = event.createdAt,
+                                    )
+                            )
+                    }
+                    continue
+                }
                 if (current == null || !continuesPlan(current.steps, steps)) {
                     flushActivity()
                     planIndex = result.size

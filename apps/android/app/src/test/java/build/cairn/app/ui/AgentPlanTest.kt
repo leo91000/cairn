@@ -241,6 +241,37 @@ class AgentPlanTest {
     }
 
     @Test
+    fun `metadata refreshes without another card or delta for an unchanged plan`() {
+        for (status in listOf("in_progress", "completed")) {
+            fun update(activity: String, explanation: String) =
+                plan("plan") {
+                    put("explanation", explanation)
+                    putJsonArray("items") {
+                        addJsonObject {
+                            put("text", "Implement")
+                            put("status", status)
+                            put("active_text", activity)
+                        }
+                    }
+                }
+
+            val initial = update("Implementing A", "Initial approach.")
+            val revised = update("Implementing B", "Revised approach.")
+            val repeated = update("Implementing B", "Revised approach.")
+            val timeline = timelineEntries(listOf(initial, revised, repeated), chat = true)
+
+            assertEquals(listOf("plan"), kinds(timeline))
+            val card = timeline.single().plan!!
+            assertEquals("Implementing B", card.steps.single().activeText)
+            assertEquals("Revised approach.", card.explanation)
+            assertEquals(initial.createdAt, card.time)
+            assertEquals(revised.createdAt, card.updatedAt)
+            if (status == "in_progress")
+                assertEquals("Implementing B", currentPlan(timeline)?.steps?.single()?.activeText)
+        }
+    }
+
+    @Test
     fun `empty and failed updates are left out and a subagent plan stays among its steps`() {
         val timeline =
             timelineEntries(
@@ -264,6 +295,24 @@ class AgentPlanTest {
             )
 
         assertEquals(listOf("team"), kinds(timeline))
+    }
+
+    @Test
+    fun `a child plan stays among tools when its parent is outside the loaded history`() {
+        val child = plan("child", "Review" to "in_progress") { put("parent_id", "older-parent") }
+        val childOnly = timelineEntries(listOf(child), chat = true)
+
+        assertEquals(listOf("group"), kinds(childOnly))
+        assertEquals(listOf(child), childOnly.single().events)
+        assertNull(currentPlan(childOnly))
+
+        val timeline =
+            timelineEntries(
+                listOf(plan("root", "Implement" to "in_progress"), child),
+                chat = true,
+            )
+        assertEquals(listOf("plan", "group"), kinds(timeline))
+        assertEquals(listOf("Implement"), currentPlan(timeline)?.steps?.map { it.text })
     }
 
     @Test

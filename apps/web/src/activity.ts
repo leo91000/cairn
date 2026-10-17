@@ -406,13 +406,27 @@ export function activityEntries(events: RunEvent[], chat = false, groups = new A
     }
 
     // The agent's own plan shows apart from its tools. A call that failed did not change it.
-    if (type === 'todo_list' && !parent) {
+    if (type === 'todo_list' && !text(item.parent_id)) {
       const steps = planSteps(item)
       if (!steps.length || text(item.status) === 'failed')
         continue
-      if (plan && samePlan(plan.plan.steps, steps))
-        continue
       const explanation = text(item.explanation)
+      if (plan && samePlan(plan.plan.steps, steps)) {
+        const previous = plan.plan
+        const updatedExplanation = explanation || previous.explanation
+        const activityChanged = steps.some((step, index) => step.activeText !== previous.steps[index]!.activeText)
+        if (activityChanged || updatedExplanation !== previous.explanation) {
+          plan.plan = {
+            ...previous,
+            steps,
+            explanation: updatedExplanation,
+            updatedAt: event.createdAt,
+          }
+        }
+
+        continue
+      }
+
       if (!plan || !continuesPlan(plan.plan.steps, steps)) {
         plan = {
           kind: 'plan',
