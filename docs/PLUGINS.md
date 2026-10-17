@@ -193,19 +193,39 @@ A package that keeps its own connection, such as a chat platform's gateway, decl
 |---|---|---|
 | `start` | the transport worker started | `instance`, `settings` |
 | `open` | a requested connection opened | — |
-| `message` | a text frame arrived (1 MB at most) | `text` |
-| `tick` | the interval set with `every` elapsed | — |
+| `message` | a text frame arrived | `text`, or for messages over 1 MB `oversized` (their size) and `text` with only the fields named in `connect` |
+| `tick` | a timer set with `every` or `after` fired | `name` |
 | `close` | the server closed or the connection failed | `code?`, `reason`, `error?` |
 
-- `cairn.socket.connect{ url, auth? }`: WSS to a declared host, default port, no
-  credentials in the URL. Reconnections slow down (1 s doubling to 60 s) until the
-  package reports `connected`. `auth` adds the instance's credential or a secret to
-  the handshake headers, like `http`.
-- `cairn.socket.send(text, { auth = true | { secret } }?)`: with `auth`, the host
-  replaces `{{secret}}` in the text with the JSON-escaped secret; the script never sees
-  it (Discord's Identify and Resume carry the token this way).
-- `cairn.socket.close(code?)` (1000 or 3000–4999) and `cairn.socket.every(ms, first?)`
-  (100 ms to an hour, `0` stops; ticks stop when the connection closes).
+- `cairn.socket.connect{ url, auth?, after?, oversized? }`: WSS to a declared host,
+  default port, no credentials in the URL. Reconnections slow down (1 s doubling to
+  60 s) until the package reports `connected`; `after` waits longer (seconds, a day at
+  most). `auth` adds the instance's credential or a secret to the handshake headers,
+  like `http`. Messages up to 16 MB are read; above 1 MB the script receives only the
+  JSON fields listed in `oversized` (such as `op`, `s` and `d.id`). Paths may have six
+  segments; `*` projects every array entry (`d.threads.*.id`) without retaining its
+  other fields. The complete worker frame, including JSON escaping, must fit in 1 MB.
+  A smaller wire message can also require projection because of escaping. When even
+  the projection cannot fit, `text` is null and the socket remains open.
+- `cairn.socket.send(text, { auth = true | { secret }, pace?, budget?, name? }?)`: with
+  `auth`, the host replaces `{{secret}}` with the JSON-escaped secret. `pace` (ms, a
+  minute at most) queues sends outside the handler and spaces actual writes with the
+  same credential across every instance. Reads, heartbeats and cancellation keep
+  running while queued; at most 16 sends may be pending per worker. Completion
+  callbacks share the event loop with socket reads and timers; cancellation is checked
+  between callbacks. A worker exceeding 128 queued socket events is stopped.
+  `budget = { remaining, resetAfter }` reserves a send from a shared balance until reset
+  (`resetAfter` in milliseconds, a day at most). Observations can lower the balance;
+  they never replenish it before reset. Unsent reservations are released on close.
+  Returns `{ queued = true }`, or `{ queued = false, retryAfter = milliseconds }` when
+  the budget is exhausted. With `name`, an actual write delivers
+  `{ type = "sent", name, sent = true }`; an observation expiring while queued delivers
+  `{ type = "sent", name, sent = false, retryAfter = 0 }` so the package can refetch it.
+  The same applies when a newer observation invalidates a queued reservation.
+  Timers for a response should start on `sent`, rather than when queued.
+- `cairn.socket.close(code?)` (1000 or 3000–4999). Timers: `every(name, ms, first?)`
+  (100 ms to an hour), `after(name, ms)` (once) and `cancel(name)`, eight at most; they
+  belong to the current connection and stop when it closes.
 - `cairn.instance.status(state, message?)`: `connecting` or `connected`, with a short
   message the owner sees (for example who the bot is signed in as).
 - `cairn.fail(message)` in the transport worker stops the connection until the owner
@@ -213,7 +233,8 @@ A package that keeps its own connection, such as a chat platform's gateway, decl
 
 Commands apply in order once the handler returns. Frames, ticks and connection
 changes run in the transport worker, separate from the worker handling queued events,
-so a slow reply never delays a heartbeat or a three-second acknowledgement.
+so a slow reply never delays a heartbeat or a three-second acknowledgement. Transport
+handlers still run sequentially: avoid synchronous REST hydration in them.
 
 `cairn.inbound.accept{ kind?, id, author: { id, name }, context?, body? }` (capability
 `inbound`) hands Cairn something a person wrote, from the transport worker or from a
@@ -366,10 +387,31 @@ Adding a bot, on the web or Android:
    an agent restricted to one project at most without installation access; an hourly
    limit.
 
-The transport worker identifies (or resumes) with the bot token injected by the host,
-sends heartbeats and reconnects when Discord asks, when acknowledgements stop or when
-the connection drops; an invalid token or disallowed intents stop the bot until it is
-reviewed. It tracks threads under the configured channel, acknowledges button presses
+The transport worker follows Discord's Gateway lifecycle, checked against
+`@discordjs/ws`:
+
+- new sessions connect to the URL from `GET /gateway/bot` and wait for
+  `session_start_limit.reset_after` when no session start is left today (past the
+  limit Discord resets the token); session starts are reserved per credential across
+  instances, and Identify writes are paced five seconds apart without blocking
+  heartbeats. Failed budget lookups retry without identifying, and resets trigger a
+  fresh lookup. Observation expiry includes the time spent dialing and waiting for
+  Hello, so an old window never lowers the new window’s balance. Resumes use the session's `resume_gateway_url`;
+- Hello must arrive within 60 seconds and READY within 15 seconds of Identify,
+  otherwise it reconnects (starting over after a missing READY);
+- heartbeats start after a random part of the interval and carry the last sequence;
+  a missing acknowledgement means a zombie connection: close with 4000 (keeping the
+  session) and resume; Discord's heartbeat requests (op 1) are answered at once;
+- Reconnect (op 7) resumes; Invalid Session (op 9) waits 1 to 5 seconds, then resumes
+  when Discord allows it or identifies again;
+- close codes 4004 and 4010–4014 stop the bot until it is reviewed (token, shards,
+  version or intents); 1000, 1001, 4003, 4005, 4007, 4008 and 4009 start a new
+  session; others resume;
+- a GUILD_CREATE over 1 MB (large servers) keeps the session going: the worker reads
+  its sequence and the threads’ routing fields through an array projection. No REST
+  hydration blocks heartbeats or interactions.
+
+The bot token is injected by the host and never seen by the script. It tracks threads under the configured channel, acknowledges button presses
 within Discord's three-second limit and admits only messages for the bot: mentions in
 the channel or its threads, plus, with Message Content, replies in those threads or to
 the bot. The event worker does the rest:
@@ -436,7 +478,10 @@ Discord's nonce window; a crash followed by a late retry can still duplicate a p
 Replies expire after 24 hours and are capped at 16,000 characters. Gateway resume
 state is currently in memory, so events missed while the installation is offline
 are not recovered after a manager restart. Slash commands, direct messages and
-reading channel history are deliberately out of scope.
+reading channel history are deliberately out of scope. A bot runs one shard: bots in
+2,500 servers or more stop with Discord's “sharding required” close. Transport
+compression and presence updates are not used. Button presses arrive over the Gateway
+only when the application has no Interactions Endpoint URL in the Developer Portal.
 
 ## Validation
 
@@ -447,7 +492,9 @@ denial, live grants, ingress deduplication, rate limits, changed agent access,
 final-answer correlation, access requests and approvals. The real Discord package runs
 end to end against a mock Discord API and a local Gateway: Identify with the injected
 token, heartbeats with the last sequence, replay deduplication, Resume after a
-reconnect request, an invalid token stopping the bot, the setup form's permission
+reconnect request, an invalid token stopping the bot, the lifecycle rules above
+(gateway URL and session budget, Hello and READY timeouts, zombie connections,
+Invalid Session waits, close codes, paced Identify) and a GUILD_CREATE over 1 MB, the setup form's permission
 resolution, invite link and errors, socket host checks, mention handling, chunked
 replies, rate-limit retries with stable nonces, disabled mentions and one-time
 notices. Registry tests cover

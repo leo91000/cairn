@@ -14,8 +14,10 @@
 --   timer             a timer scheduled with cairn.timers    { id, name, payload }
 --   start             when Cairn starts the worker           { connectionId, settings }
 --   socket            capability "socket", in the transport worker: { type = "start", instance,
---                     settings } | { type = "open" } | { type = "message", text } |
---                     { type = "tick" } | { type = "close", code?, reason, error? }
+--                     settings } | { type = "open" } | { type = "message", text?, oversized? } |
+--                     { type = "tick", name } | { type = "close", code?, reason, error? }
+--                     (`oversized`: the message's size; `text` then holds only the fields
+--                     named in `connect`'s `oversized`)
 -- One-shot handlers, each in a fresh worker:
 --   command           `cairn plugin <id> <command> …`        { command, arguments, agent, instances }
 --                     return text for `text`/`secret` commands, any JSON otherwise
@@ -120,10 +122,28 @@ export type Cairn = {
     -- `{{secret}}` in sent text becomes the credential (auth = true) or a secret field.
     -- Commands apply once the handler returns.
     socket: {
-        connect: (request: { url: string, auth: (boolean | { secret: string, header: string?, prefix: string? })? }) -> (),
-        send: (text: string, options: { auth: (boolean | { secret: string })? }?) -> (),
+        -- `after`: seconds to wait first (one day at most). `oversized`: JSON fields such
+        -- as "d.id" or "d.threads.*.id" kept from messages over 1 MB. * projects arrays.
+        connect: (request: {
+            url: string,
+            auth: (boolean | { secret: string, header: string?, prefix: string? })?,
+            after: number?,
+            oversized: { string }?,
+        }) -> (),
+        -- Queued outside the handler; paced actual writes share the credential's budget.
+        -- `name` emits { type = "sent", name, sent = true } after writing, or sent=false
+        -- if the budget observation expires or lowers while queued (refetch and retry).
+        send: (text: string, options: {
+            auth: (boolean | { secret: string })?,
+            pace: number?, -- ms, up to 60000
+            budget: { remaining: number, resetAfter: number }?, -- resetAfter in ms
+            name: string?,
+        }?) -> { queued: boolean, retryAfter: number? },
         close: (code: number?) -> (),
-        every: (ms: number, first: number?) -> (),
+        -- Named timers of the current connection, delivered as { type = "tick", name }.
+        every: (name: string, ms: number, first: number?) -> (),
+        after: (name: string, ms: number) -> (),
+        cancel: (name: string) -> (),
     },
     -- capability "inbound": Cairn keeps it only if the person is allowed (approval mode
     -- records a request without content). Returns whether it was queued.

@@ -44,6 +44,8 @@ pub struct Plugins {
     socket_origin: Mutex<Option<String>>,
     worker: Mutex<Option<std::path::PathBuf>>,
     programs: Mutex<HashMap<(String, String), PathBuf>>,
+    /// When each paced key (e.g. a bot token's Identify budget) may send next.
+    paces: socket::pacing::Paces,
 }
 
 impl Default for Plugins {
@@ -59,6 +61,7 @@ impl Default for Plugins {
             socket_origin: Mutex::new(None),
             worker: Mutex::new(None),
             programs: Mutex::new(HashMap::new()),
+            paces: socket::pacing::Paces::default(),
         }
     }
 }

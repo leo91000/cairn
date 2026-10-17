@@ -45,10 +45,15 @@ cairn.exec = {
 cairn.socket = {
     connect = function(request) call("socket.connect", request) end,
     send = function(text, options)
-        call("socket.send", { text = text, auth = options and options.auth })
+        return call("socket.send", { text = text, auth = options and options.auth, pace = options and options.pace,
+            name = options and options.name, budget = options and options.budget })
     end,
     close = function(code) call("socket.close", { code = code }) end,
-    every = function(ms, first) call("socket.every", { ms = ms, first = first }) end,
+    every = function(name, ms, first)
+        call("socket.timer", { name = name, at = if first == nil then ms else first, every = ms })
+    end,
+    after = function(name, ms) call("socket.timer", { name = name, at = ms }) end,
+    cancel = function(name) call("socket.timer", { name = name, cancel = true }) end,
 }
 cairn.inbound = {
     accept = function(message) return call("inbound.accept", message) end,
