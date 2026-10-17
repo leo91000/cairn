@@ -465,7 +465,196 @@ struct OAuthMock {
 }
 
 #[tokio::test]
-async fn native_github_handover_links_with_the_original_session_and_is_one_use() {
+async fn native_github_finish_recovers_a_lost_response_with_a_fresh_session() {
+    let provider = OAuthMock::new().await;
+    let app = Fixture::with_oauth(provider.providers()).await;
+    let start = provider.native_ready(&app).await;
+    let finish = || {
+        app.post(
+            "/api/account/oauth/github/native/finish",
+            json!({
+                "challenge": start["challenge"],
+                "secret": start["secret"],
+            }),
+        )
+    };
+
+    // The server has committed, but the app never receives the session cookie.
+    let lost = finish().await;
+    assert_eq!(lost.status(), StatusCode::OK);
+    drop(lost);
+
+    let retry = finish().await;
+    assert_eq!(
+        retry.status(),
+        StatusCode::OK,
+        "a lost response must be recoverable"
+    );
+    let cookie = retry.headers()["set-cookie"]
+        .to_str()
+        .unwrap()
+        .split(';')
+        .next()
+        .unwrap()
+        .to_owned();
+    let session: Value = retry.json().await.unwrap();
+    let authenticated: Value = app
+        .client
+        .get(format!("{}/api/account/session", app.url))
+        .header("cookie", &cookie)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(authenticated["account"]["id"], session["account"]["id"]);
+    assert_eq!(session["account"]["email"], "alice@example.test");
+    let link = app
+        .authenticated(
+            &cookie,
+            &session,
+            reqwest::Method::POST,
+            "/api/account/oauth/github/start",
+        )
+        .json(&json!({ "native": true }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        link.status(),
+        StatusCode::FORBIDDEN,
+        "OAuth retries must not grant recent email/passkey proof"
+    );
+    assert!(link.headers().get("set-cookie").is_none());
+    let (accounts,): (i64,) = sqlx_core::query_as::query_as("SELECT count(*) FROM cairn_accounts")
+        .fetch_one(&app.pool)
+        .await
+        .unwrap();
+    let (sessions,): (i64,) = sqlx_core::query_as::query_as("SELECT count(*) FROM web_sessions")
+        .fetch_one(&app.pool)
+        .await
+        .unwrap();
+    assert_eq!(accounts, 1);
+    assert_eq!(
+        sessions, 2,
+        "retry must create a new session for the same account"
+    );
+    provider.server.abort();
+    app.close().await;
+}
+
+#[tokio::test]
+async fn native_github_finish_rejects_invalid_secrets_and_expired_or_removed_identity() {
+    for invalidate in ["expired", "removed", "expired_locked", "removed_locked"] {
+        let provider = OAuthMock::new().await;
+        let app = Fixture::with_oauth(provider.providers()).await;
+        let start = provider.native_ready(&app).await;
+        let request = |secret: &Value| {
+            app.client
+                .post(format!(
+                    "{}/api/account/oauth/github/native/finish",
+                    app.url
+                ))
+                .header("origin", &app.url)
+                .json(&json!({ "challenge": start["challenge"], "secret": secret }))
+        };
+        for before_consumption in [true, false] {
+            let refused = request(&json!("wrong-secret")).send().await.unwrap();
+            assert_eq!(refused.status(), StatusCode::UNAUTHORIZED);
+            assert!(refused.headers().get("set-cookie").is_none());
+            if before_consumption {
+                assert_eq!(
+                    request(&start["secret"]).send().await.unwrap().status(),
+                    StatusCode::OK
+                );
+            }
+        }
+
+        let mutation = if invalidate.starts_with("expired") {
+            "UPDATE native_oauth_handovers SET expires_at = clock_timestamp() - interval '1 millisecond'"
+        } else {
+            "UPDATE sign_in_methods SET removed = true WHERE kind = 'github'"
+        };
+        let refused = if invalidate.ends_with("locked") {
+            let mut barrier = app.pool.begin().await.unwrap();
+            let (pid,): (i32,) = sqlx_core::query_as::query_as("SELECT pg_backend_pid()")
+                .fetch_one(&mut *barrier)
+                .await
+                .unwrap();
+            let lock = if invalidate == "expired_locked" {
+                "SELECT id FROM native_oauth_handovers FOR UPDATE"
+            } else {
+                "SELECT id FROM cairn_accounts FOR UPDATE"
+            };
+            query(lock).execute(&mut *barrier).await.unwrap();
+            let request = request(&start["secret"]);
+            let pending = tokio::spawn(async move { request.send().await.unwrap() });
+            app.wait_for_blocked_request(pid).await;
+            query(mutation).execute(&mut *barrier).await.unwrap();
+            barrier.commit().await.unwrap();
+            pending.await.unwrap()
+        } else {
+            query(mutation).execute(&app.pool).await.unwrap();
+            request(&start["secret"]).send().await.unwrap()
+        };
+        assert_eq!(refused.status(), StatusCode::UNAUTHORIZED, "{invalidate}");
+        assert!(refused.headers().get("set-cookie").is_none());
+        let (sessions,): (i64,) =
+            sqlx_core::query_as::query_as("SELECT count(*) FROM web_sessions")
+                .fetch_one(&app.pool)
+                .await
+                .unwrap();
+        assert_eq!(sessions, 1, "a refused retry must not issue a session");
+        provider.server.abort();
+        app.close().await;
+    }
+}
+
+#[tokio::test]
+async fn native_github_finish_concurrent_retries_keep_the_account_and_original_deadline() {
+    let provider = OAuthMock::new().await;
+    let app = Fixture::with_oauth(provider.providers()).await;
+    let start = provider.native_ready(&app).await;
+    let (deadline,): (String,) =
+        sqlx_core::query_as::query_as("SELECT expires_at::text FROM native_oauth_handovers")
+            .fetch_one(&app.pool)
+            .await
+            .unwrap();
+    let request = || {
+        app.post(
+            "/api/account/oauth/github/native/finish",
+            json!({
+                "challenge": start["challenge"], "secret": start["secret"],
+            }),
+        )
+    };
+    let (first, second) = tokio::join!(request(), request());
+    assert_eq!(first.status(), StatusCode::OK);
+    assert_eq!(second.status(), StatusCode::OK);
+    assert_ne!(
+        first.headers()["set-cookie"],
+        second.headers()["set-cookie"]
+    );
+    let first: Value = first.json().await.unwrap();
+    let second: Value = second.json().await.unwrap();
+    assert_eq!(first["account"]["id"], second["account"]["id"]);
+    assert_ne!(first["csrf"], second["csrf"]);
+    let (after,): (String,) =
+        sqlx_core::query_as::query_as("SELECT expires_at::text FROM native_oauth_handovers")
+            .fetch_one(&app.pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        after, deadline,
+        "retries must not extend the original deadline"
+    );
+    provider.server.abort();
+    app.close().await;
+}
+
+#[tokio::test]
+async fn native_github_handover_keeps_one_use_consent_and_requires_the_original_session() {
     for expire_at in [
         "never",
         "callback",
@@ -473,6 +662,8 @@ async fn native_github_handover_links_with_the_original_session_and_is_one_use()
         "finish",
         "consent_locked",
         "session_locked",
+        "retry_proof_locked",
+        "retry_session_locked",
     ] {
         let provider = OAuthMock::new().await;
         let app = Fixture::with_oauth(provider.providers()).await;
@@ -810,14 +1001,78 @@ async fn native_github_handover_links_with_the_original_session_and_is_one_use()
 
         let response = exchange().send().await.unwrap();
         assert_eq!(response.status(), StatusCode::OK);
+        let new_cookie = response.headers()["set-cookie"]
+            .to_str()
+            .unwrap()
+            .split(';')
+            .next()
+            .unwrap()
+            .to_owned();
+        let new_session: Value = response.json().await.unwrap();
+        assert_eq!(new_session["account"]["id"], session["account"]["id"]);
+        assert_eq!(exchange().send().await.unwrap().status(), StatusCode::OK);
+
+        // Even another session for this same account cannot replay a link.
+        for (supplied_cookie, csrf, status) in [
+            ("", "", StatusCode::UNAUTHORIZED),
+            (
+                new_cookie.as_str(),
+                new_session["csrf"].as_str().unwrap(),
+                StatusCode::UNAUTHORIZED,
+            ),
+            (cookie.as_str(), "wrong-csrf", StatusCode::FORBIDDEN),
+        ] {
+            let refused = app
+                .client
+                .post(format!(
+                    "{}/api/account/oauth/github/native/finish",
+                    app.url
+                ))
+                .header("origin", &app.url)
+                .header("cookie", supplied_cookie)
+                .header("x-csrf-token", csrf)
+                .json(&json!({ "challenge": start["challenge"], "secret": start["secret"] }))
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(refused.status(), status);
+            assert!(refused.headers().get("set-cookie").is_none());
+        }
+
+        let mutation = if expire_at == "retry_session_locked" {
+            "UPDATE web_sessions SET expires_at = clock_timestamp() - interval '1 millisecond'"
+        } else {
+            "UPDATE web_sessions SET last_proof_at = NULL"
+        };
+        let refused = if expire_at.starts_with("retry_") {
+            let mut barrier = app.pool.begin().await.unwrap();
+            let (pid,): (i32,) = sqlx_core::query_as::query_as("SELECT pg_backend_pid()")
+                .fetch_one(&mut *barrier)
+                .await
+                .unwrap();
+            query("SELECT id FROM cairn_accounts FOR UPDATE")
+                .execute(&mut *barrier)
+                .await
+                .unwrap();
+            let request = exchange();
+            let pending = tokio::spawn(async move { request.send().await.unwrap() });
+            app.wait_for_blocked_request(pid).await;
+            query(mutation).execute(&app.pool).await.unwrap();
+            barrier.commit().await.unwrap();
+            pending.await.unwrap()
+        } else {
+            query(mutation).execute(&app.pool).await.unwrap();
+            exchange().send().await.unwrap()
+        };
         assert_eq!(
-            response.json::<Value>().await.unwrap()["account"]["id"],
-            session["account"]["id"]
+            refused.status(),
+            if expire_at == "retry_session_locked" {
+                StatusCode::UNAUTHORIZED
+            } else {
+                StatusCode::FORBIDDEN
+            }
         );
-        assert_eq!(
-            exchange().send().await.unwrap().status(),
-            StatusCode::UNAUTHORIZED
-        );
+        assert!(refused.headers().get("set-cookie").is_none());
         provider.server.abort();
         app.close().await;
     }
@@ -945,6 +1200,93 @@ impl OAuthMock {
             params["code_challenge"].clone(),
             (params["client_id"].clone(), redirect),
         );
+    }
+
+    async fn native_ready(&self, app: &Fixture) -> Value {
+        let response = app
+            .post("/api/account/oauth/github/start", json!({"native": true}))
+            .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let start: Value = response.json().await.unwrap();
+        let browser = Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .unwrap();
+        let launch = browser
+            .get(start["url"].as_str().unwrap())
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(launch.status(), StatusCode::SEE_OTHER);
+        let cookie = launch.headers()["set-cookie"]
+            .to_str()
+            .unwrap()
+            .split(';')
+            .next()
+            .unwrap();
+        let authorization =
+            url::Url::parse(launch.headers()["location"].to_str().unwrap()).unwrap();
+        self.expect_authorization(
+            &authorization,
+            format!("{}/api/account/oauth/github/callback", app.url),
+        );
+        let state = authorization
+            .query_pairs()
+            .find(|(key, _)| key == "state")
+            .unwrap()
+            .1
+            .to_string();
+        let callback = browser
+            .get(format!(
+                "{}/api/account/oauth/github/callback?state={state}&code=verified",
+                app.url
+            ))
+            .header("cookie", cookie)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(callback.status(), StatusCode::OK);
+        let cookie = callback
+            .headers()
+            .get_all("set-cookie")
+            .iter()
+            .find(|value| {
+                value
+                    .to_str()
+                    .unwrap()
+                    .starts_with("cairn_native_confirmation=")
+            })
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .split(';')
+            .next()
+            .unwrap()
+            .to_owned();
+        let html = callback.text().await.unwrap();
+        let proof = html
+            .split("name=proof value='")
+            .nth(1)
+            .unwrap()
+            .split('\'')
+            .next()
+            .unwrap();
+        let confirmed = browser
+            .post(format!(
+                "{}/api/account/oauth/github/native/confirm",
+                app.url
+            ))
+            .header("origin", &app.url)
+            .header("cookie", cookie)
+            .form(&[
+                ("challenge", start["challenge"].as_str().unwrap()),
+                ("proof", proof),
+            ])
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(confirmed.status(), StatusCode::OK);
+        start
     }
 
     async fn begin(
