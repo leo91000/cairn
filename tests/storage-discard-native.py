@@ -34,10 +34,12 @@ def api(path, method, resource, body, status):
     client = UnixConnection(str(path), timeout=2)
     started = time.monotonic()
     try:
-        client.request(method, resource, json.dumps(body), {"Content-Type": "application/json"})
+        payload = json.dumps(body) if body is not None else None
+        headers = {"Content-Type": "application/json"} if payload is not None else {}
+        client.request(method, resource, payload, headers)
         response = client.getresponse()
-        response.read()
-        assert response.status == status, "Unexpected private VMM management response"
+        response_body = response.read()
+        assert response.status == status, f"Private VMM {method} {resource}: expected {status}, received {response.status}: {response_body[:512]!r}"
     finally:
         client.close()
     elapsed = (time.monotonic() - started) * 1000
@@ -113,7 +115,7 @@ def trial(root, data, paired, args):
         wait_for(entered, processes, 90, "real backend discard")
         # Keep actual kernel discard pending while the management requests run.
         time.sleep(2)
-        timings = [api(folder / "api.sock", "GET", "/", {}, 200), api(folder / "api.sock", "PATCH", "/vm", {"state": "Paused"}, 204), api(folder / "api.sock", "PATCH", "/vm", {"state": "Resumed"}, 204)]
+        timings = [api(folder / "api.sock", "GET", "/", None, 200), api(folder / "api.sock", "PATCH", "/vm", {"state": "Paused"}, 204), api(folder / "api.sock", "PATCH", "/vm", {"state": "Resumed"}, 204)]
         for context in contexts:
             context["hold"].unlink(missing_ok=True)
         wait_for(lambda: "CAIRN_LIVE_DATA_VERIFIED" in serial.read_text(errors="replace"), processes, 90, "retained live files after discard")
