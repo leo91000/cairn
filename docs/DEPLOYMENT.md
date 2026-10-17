@@ -314,7 +314,7 @@ own HTTPS origin. Additional nodes still need a direct private route to port 431
 
 The production workflow targets the **beacon Compose service**, never the old
 public installation manager. The [release runbook](PRODUCTION-CAIRN.md) covers
-release checks, backups and rollback. The [configuration reference](PRODUCTION-CAIRN-SETUP.md)
+release checks and failure recovery. The [configuration reference](PRODUCTION-CAIRN-SETUP.md)
 covers environment setup, DNS, Resend, OAuth and co-location.
 
 Main and same-repository PRs build both installation and beacon images. All
@@ -333,11 +333,11 @@ Main, PR and manual workflows never deploy.
 
 The GitHub `production` environment uses `CAIRN_RELEASE_COOLIFY_TOKEN`, a
 restricted release SSH identity and pinned host key, and the Coolify/Beacon
-variables listed in the [production setup](PRODUCTION-CAIRN-SETUP.md#automatic-recovery-host).
+variables listed in the [production setup](PRODUCTION-CAIRN-SETUP.md#read-only-release-verification-host).
 Follow that setup's credential transition before removing required reviewers;
 the legacy `COOLIFY_TOKEN` environment secret must be deleted so historical
-workflows cannot bypass recovery. Routine stable releases then deploy automatically
-after backup, isolated restore and encrypted off-host retention succeed.
+workflows cannot bypass current checks. Routine stable releases deploy automatically
+after installation data compatibility verification; they create no backups.
 The obsolete `CAIRN_PUBLIC_URL` and standalone-manager deployment target are no
 longer used by the CLI. The script refuses a manager/runner Compose target.
 
@@ -350,28 +350,19 @@ verify the pair. Only beacon is restarted. It waits up to ten minutes for
 `/health` to report the tested image's commit/runtime identity and
 `/install/release` to approve the paired installation image. Reused PR images
 report the tested merge commit with the released tree. Existing installations
-update through their host timer; the check does not wait for every installation.
-A failed beacon rollout needs operator rollback of the previous digest and
-matching Postgres backup; see [rollback](PRODUCTION-CAIRN.md#backups-and-rollback).
+update through their host timer; the release job also verifies the configured host has both approved images and
+execution readiness. See [failed releases](PRODUCTION-CAIRN.md#failed-releases)
+for operator intervention; do not roll back an incompatible data migration.
 
 Retained VM disks keep their original guest OS and tools. Only approve an
-installation image if the previous release can still read its database, or
-prepare matching stopped backups before approving it.
+installation image automatically if both versions can read the persisted data.
+Review incompatible forward migrations separately.
 
-## Backups
+## Persisted data
 
-Back up **all four volumes together**. Stop the manager first so SQLite and Git
-worktrees are consistent, make encrypted volume backups with your server backup
-system, then restart it. Credentials in the home volume make those backups secrets.
-For a live SQLite-only snapshot, Node's `node:sqlite` backup API can create a
-consistent database backup, but that does not include working directories or CLI
-accounts and is not a complete recovery point.
-
-Restore into fresh volumes while the manager is stopped, preserve UID/GID 1000,
-and start the same image version that created the backup. Check beacon claim/relay access, profiles,
-tasks, global/project skills, and worktree paths. Database schema versions newer
-than the application are rejected rather than silently downgraded. Roll back the
-image and its matching backup together when a future migration requires it.
+The release system does not create or retain backups. Image rollback cannot undo
+an incompatible data migration. Keep active volumes and credentials intact;
+recover incompatible migrations with a reviewed forward fix.
 
 Finished-run events expire after 30 days and audit entries after 90 days. Expired
 OAuth/session records are removed hourly. Run summaries and preserved worktrees

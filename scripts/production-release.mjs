@@ -1,8 +1,5 @@
 import { execFile } from 'node:child_process'
-import { createHash, randomBytes } from 'node:crypto'
 import {
-  appendFile,
-  mkdir,
   mkdtemp,
   rm,
   writeFile,
@@ -14,47 +11,8 @@ import { setTimeout } from 'node:timers/promises'
 import { promisify } from 'node:util'
 
 const exec = promisify(execFile)
-const maximumBackup = 512 * 1024 * 1024
 const digest = /^sha256:[a-f0-9]{64}$/
 const commit = /^[a-f0-9]{40}$/
-
-export function verifyProof(proof, tag, identifier, now = Date.now()) {
-  if (proof.schema !== 1 || proof.id !== identifier || proof.release !== tag
-    || proof.restore?.verified !== true || !Number.isSafeInteger(proof.restore.sourceTables)
-    || proof.restore.sourceTables <= 0 || proof.restore.sourceTables !== proof.restore.restoredTables
-    || !Number.isSafeInteger(proof.encryptedSize) || proof.encryptedSize <= 0 || proof.encryptedSize > maximumBackup
-    || !/^[a-f0-9]{64}$/.test(proof.encryptedSha256)
-    || !Number.isSafeInteger(proof.createdAt) || now - proof.createdAt > 15 * 60 * 1000 || proof.createdAt > now + 60 * 1000
-    || !commit.test(proof.previous?.commit)
-    || !/^ghcr\.io\/[a-z0-9_.\-/]+@sha256:[a-f0-9]{64}$/.test(proof.previous?.beaconImage)
-    || !/^ghcr\.io\/[a-z0-9_.\-/]+@sha256:[a-f0-9]{64}$/.test(proof.previous?.installationImage)) {
-    throw new Error('Production recovery evidence is missing, stale, or inconsistent')
-  }
-
-  return proof
-}
-
-export async function prepareRecovery(config, {
-  ssh,
-  verifyCompatibility,
-  now = Date.now,
-  identifier = randomBytes(16).toString('hex'),
-} = {}) {
-  const raw = await ssh(`prepare ${config.tag} ${identifier}`)
-  const proof = verifyProof(JSON.parse(raw.toString()), config.tag, identifier, now())
-  const ciphertext = await ssh(`download ${identifier}`)
-  if (ciphertext.length !== proof.encryptedSize || createHash('sha256').update(ciphertext).digest('hex') !== proof.encryptedSha256)
-    throw new Error('The downloaded encrypted backup does not match its recovery evidence')
-
-  await mkdir(config.directory, { recursive: true, mode: 0o700 })
-  await writeFile(path.join(config.directory, 'beacon.dump.age'), ciphertext, { mode: 0o600, flag: 'wx' })
-  const record = { ...proof, candidate: { commit: config.commit, beaconImage: config.beaconImage, installationImage: config.installationImage } }
-  await writeFile(path.join(config.directory, 'release.json'), `${JSON.stringify(record, null, 2)}\n`, { mode: 0o600, flag: 'wx' })
-
-  await verifyCompatibility(proof.previous.commit, config.commit)
-
-  return record
-}
 
 export async function verifyInstallation(config, {
   ssh,
@@ -106,13 +64,23 @@ export async function verifyInstallationCompatibility(before, after, { cwd } = {
   if (previous) {
     if (candidate.epoch === previous.epoch)
       return
-    throw new Error('Installation data compatibility changed: prepare a matching stopped installation backup and a reviewed rollout before deployment')
+    throw new Error('Installation data compatibility changed: use a reviewed forward migration procedure before deployment')
   }
 
   // The first adoption accepts only the reviewed pre-contract release tree.
   const { stdout: tree } = await exec('git', ['rev-parse', `${before}^{tree}`], { cwd })
   if (candidate.epoch !== 1 || candidate.legacyTree !== tree.trim())
-    throw new Error('Unknown installation data baseline: prepare a matching stopped installation backup and a reviewed rollout before deployment')
+    throw new Error('Unknown installation data baseline: use a reviewed forward migration procedure before deployment')
+}
+
+export async function checkInstallationCompatibility(config, { fetchHealth = fetch, verifyCompatibility = verifyInstallationCompatibility } = {}) {
+  const response = await fetchHealth(new URL('/health', config.publicUrl), { signal: AbortSignal.timeout(20000) })
+  if (!response.ok)
+    throw new Error('Current production health is unavailable')
+  const health = await response.json()
+  if (health.status !== 'ok' || !commit.test(health.commit ?? ''))
+    throw new Error('Current production health identity is unavailable')
+  await verifyCompatibility(health.commit, config.commit)
 }
 
 async function withSsh(action) {
@@ -138,13 +106,13 @@ async function withSsh(action) {
           env,
           encoding: 'buffer',
           timeout: 16 * 60 * 1000,
-          maxBuffer: maximumBackup,
+          maxBuffer: 64 * 1024,
         })
         return stdout
       }
       catch {
         // Child-process errors include stderr and environment: never print them.
-        throw new Error('Restricted production recovery SSH request failed')
+        throw new Error('Restricted production release SSH request failed')
       }
     }
 
@@ -159,31 +127,28 @@ if (import.meta.main) {
   const config = {
     tag: process.env.GITHUB_REF_NAME,
     commit: process.env.GITHUB_SHA,
-    beaconImage: process.env.DEPLOY_IMAGE,
     installationImage: process.env.DEPLOY_INSTALLATION_IMAGE,
-    directory: process.env.PRODUCTION_RECOVERY_DIRECTORY,
+    publicUrl: process.env.CAIRN_BEACON_ORIGIN,
   }
   try {
     if (!/^v(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)$/.test(config.tag ?? '') || !commit.test(config.commit ?? ''))
-      throw new Error('Production recovery requires an exact stable release tag and commit')
+      throw new Error('Production release requires an exact stable release tag and commit')
     if (process.argv[2] === 'verify') {
       await withSsh(ssh => verifyInstallation(config, { ssh }))
       console.log('Installation manager and runner are healthy on the approved image.')
     }
-    else if (process.argv[2] === 'prepare') {
-      const record = await withSsh(ssh => prepareRecovery(config, { ssh, verifyCompatibility: verifyInstallationCompatibility }))
-      if (process.env.GITHUB_OUTPUT)
-        await appendFile(process.env.GITHUB_OUTPUT, `backup-id=${record.id}\n`)
-      console.log('Postgres backup restored successfully; encrypted recovery artifact downloaded for off-host retention.')
+    else if (process.argv[2] === 'check') {
+      await checkInstallationCompatibility(config)
+      console.log('Installation data compatibility verified.')
     }
     else {
-      throw new Error('Expected prepare or verify')
+      throw new Error('Expected check or verify')
     }
   }
   catch (error) {
     // Only explicitly created validation errors are safe to expose. Git/filesystem
     // errors can contain request details, so keep their diagnostics on the host.
-    console.error(error instanceof Error && !error.code ? error.message : 'Production recovery preparation failed')
+    console.error(error instanceof Error && !error.code ? error.message : 'Production release verification failed')
     process.exitCode = 1
   }
 }

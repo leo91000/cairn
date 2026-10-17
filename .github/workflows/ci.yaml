@@ -160,7 +160,7 @@ jobs:
           python3 scripts/tests/installation_installer_test.py
           python3 scripts/tests/compressed_swap_test.py
           python3 scripts/tests/installation_updates_test.py
-          python3 scripts/tests/production_recovery_test.py
+          python3 scripts/tests/production_release_test.py
           bash tests/installation-installer-container.sh
           python3 tests/installation_update_containers.py
           python3 -m venv .node-s3-test
@@ -632,8 +632,6 @@ jobs:
       - uses: ./.github/actions/setup-pnpm
         with:
           install: false
-      - name: Install encrypted backup test dependency
-        run: sudo apt-get update && sudo apt-get install -y age
       - name: Smoke-test the exact beacon image with disposable Postgres
         env:
           IMAGE_DIGEST: ${{ steps.build.outputs.digest }}
@@ -644,7 +642,6 @@ jobs:
             image=cairn-beacon:test
           fi
           node tests/beacon-container-smoke.mjs "$image"
-          node tests/beacon-postgres-backup.mjs
   image-cache:
     # Main reuses a pull request image without building it; refresh the shared
     # layer cache for later pull requests. This never gates a release.
@@ -773,26 +770,10 @@ jobs:
       - uses: ./.github/actions/setup-pnpm
         with:
           cache: true
-      - name: Prepare and verify encrypted production recovery
-        id: recovery
+      - name: Verify installation data compatibility
         env:
-          CAIRN_RELEASE_SSH_HOST: ${{ vars.CAIRN_RELEASE_SSH_HOST }}
-          CAIRN_RELEASE_SSH_USER: ${{ vars.CAIRN_RELEASE_SSH_USER }}
-          CAIRN_RELEASE_SSH_KNOWN_HOSTS: ${{ vars.CAIRN_RELEASE_SSH_KNOWN_HOSTS }}
-          CAIRN_RELEASE_SSH_KEY: ${{ secrets.CAIRN_RELEASE_SSH_KEY }}
-          PRODUCTION_RECOVERY_DIRECTORY: ${{ runner.temp }}/production-recovery
-          DEPLOY_IMAGE: ghcr.io/${{ github.repository_owner }}/cairn-beacon@${{ needs.resolve.outputs.beacon-digest || needs.beacon-image.outputs.digest }}
-          DEPLOY_INSTALLATION_IMAGE: ghcr.io/${{ github.repository_owner }}/cairn@${{ needs.resolve.outputs.digest || needs.image.outputs.digest }}
-        run: node scripts/production-recovery.mjs prepare
-      - name: Retain encrypted recovery outside the production host
-        uses: actions/upload-artifact@v7.0.1
-        with:
-          name: production-recovery-${{ github.ref_name }}-${{ steps.recovery.outputs.backup-id }}
-          path: |
-            ${{ runner.temp }}/production-recovery/beacon.dump.age
-            ${{ runner.temp }}/production-recovery/release.json
-          retention-days: 90
-          if-no-files-found: error
+          CAIRN_BEACON_ORIGIN: ${{ vars.CAIRN_BEACON_ORIGIN }}
+        run: node scripts/production-release.mjs check
       - name: Deploy the published image and verify the running commit
         env:
           COOLIFY_URL: ${{ vars.COOLIFY_URL }}
@@ -811,4 +792,4 @@ jobs:
           CAIRN_RELEASE_SSH_KNOWN_HOSTS: ${{ vars.CAIRN_RELEASE_SSH_KNOWN_HOSTS }}
           CAIRN_RELEASE_SSH_KEY: ${{ secrets.CAIRN_RELEASE_SSH_KEY }}
           DEPLOY_INSTALLATION_IMAGE: ghcr.io/${{ github.repository_owner }}/cairn@${{ needs.resolve.outputs.digest || needs.image.outputs.digest }}
-        run: node scripts/production-recovery.mjs verify
+        run: node scripts/production-release.mjs verify
