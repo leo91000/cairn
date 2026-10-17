@@ -263,7 +263,7 @@ test('a failed account removal keeps its confirmation and temporary failure feed
   await workspace.api('/api/accounts/refresh', 'POST')
   await signIn(page)
   await page.getByRole('region', { name: 'Codex accounts' }).getByRole('button', { name: /^Removal retry,/ }).click()
-  await page.getByRole('dialog', { name: 'Removal retry', exact: true }).getByRole('button', { name: 'Remove', exact: true }).click()
+  await page.getByRole('dialog', { name: 'Removal retry' }).getByRole('button', { name: 'Remove', exact: true }).click()
   let attempts = 0
   await page.route(`**/accounts/${account.id}`, async (route) => {
     if (route.request().method() === 'DELETE') {

@@ -430,6 +430,7 @@ abstract class ConnectionLostCases {
             ConnectionLostNotice(state.connectionLost)
         },
     ): CairnViewModel {
+        val origin = server.url("/").toString()
         val vault =
             object : SessionVault {
                 override fun read(origin: String): String? = null
@@ -441,7 +442,7 @@ abstract class ConnectionLostCases {
         compose.setContent {
             LaunchedEffect(Unit) {
                 vm.state.first { it.ready }
-                vm.connect(server.url("/").toString())
+                vm.connect(origin)
             }
             val state = vm.state.collectAsState().value
             CairnTheme { content(vm, state) }
