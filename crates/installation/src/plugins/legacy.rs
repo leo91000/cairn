@@ -37,6 +37,7 @@ pub async fn migrate(s: &Service) -> Result<()> {
             .vault
             .encrypt(&secrets_key(&account_id), &json!({ "fields": secrets }))?;
         let connection = Connection {
+            routing: None,
             id: account_id.clone(),
             plugin_id: "onepassword".into(),
             name: text(&account, "name").to_owned(),

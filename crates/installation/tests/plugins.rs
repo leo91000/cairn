@@ -173,6 +173,7 @@ fn context(connection: &Connection, event: &Value) -> capabilities::Context {
         event: event.clone(),
         link: None,
         draft: None,
+        resource_grant: None,
     }
 }
 

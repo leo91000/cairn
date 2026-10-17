@@ -5,11 +5,13 @@ use crate::{
     config::now,
     error::{Error, Result},
     service::Service,
+    store::Db,
     validation::text,
 };
 use cairn_plugin_api::{
     CAPABILITIES, MAX_MODULES, MAX_SOURCE_BYTES, Manifest, Sources, module_path,
 };
+use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 use std::{
     collections::BTreeMap,
@@ -38,14 +40,79 @@ pub struct Package {
     pub digest: String,
 }
 
+/// The exact approval which selected these loaded files. A delayed configuration
+/// write must not survive uninstall/reinstallation of otherwise identical files.
+pub(crate) struct ApprovedPackage {
+    pub package: Package,
+    record: Option<Value>,
+}
+
+/// Durable proof of the precise approval which admitted an unfinished operation.
+/// Hash the complete record so restoring identical source files cannot revive it.
+#[derive(Clone, Deserialize, Serialize)]
+pub(crate) struct Approval {
+    plugin: String,
+    record_digest: Option<String>,
+}
+
+impl Approval {
+    pub(crate) fn recheck_in(&self, db: &Db<'_>) -> Result<()> {
+        if let Some(expected) = &self.record_digest {
+            let current = db.get(KIND, &format!("package:{}", self.plugin))?;
+            let digest = current.map(|value| crate::auth::hex_digest(&value.to_string()));
+            if digest.as_ref() != Some(expected) {
+                return Err(Error::conflict(
+                    "The package approval changed. Start the operation again.",
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
+impl ApprovedPackage {
+    pub(crate) fn snapshot(&self) -> Approval {
+        Approval {
+            plugin: self.package.manifest.id.clone(),
+            record_digest: self
+                .record
+                .as_ref()
+                .map(|value| crate::auth::hex_digest(&value.to_string())),
+        }
+    }
+
+    pub(crate) fn recheck_in(&self, db: &Db<'_>) -> Result<()> {
+        if let Some(expected) = &self.record
+            && db
+                .get(KIND, &format!("package:{}", self.package.manifest.id))?
+                .as_ref()
+                != Some(expected)
+        {
+            return Err(Error::conflict(
+                "The package approval changed. Retry with its current version.",
+            ));
+        }
+        Ok(())
+    }
+}
+
 /// What the owner approves: the manifest and every Luau file, by path.
-fn digest(manifest: &Manifest, source: &Sources) -> Result<String> {
+pub(crate) fn digest(manifest: &Manifest, source: &Sources) -> Result<String> {
     let files = source.files().collect::<BTreeMap<_, _>>();
     Ok(crate::auth::hex_digest(&format!(
         "cairn-package\n{}\n{}",
         serde_json::to_string(manifest)?,
         serde_json::to_string(&files)?
     )))
+}
+
+pub(crate) async fn require_digest(s: &Service, plugin: &str, digest: &str) -> Result<()> {
+    if active(s, plugin).await?.digest != digest {
+        return Err(Error::forbidden(
+            "The plugin worker's package approval changed.",
+        ));
+    }
+    Ok(())
 }
 
 fn package(manifest: &str, source: Sources, builtin: bool) -> Result<Package> {
@@ -210,8 +277,15 @@ async fn record(s: &Service, id: &str) -> Result<Value> {
 
 /// The package a connection runs: bundled, or the approved active installed version.
 pub async fn active(s: &Service, id: &str) -> Result<Package> {
+    Ok(approved(s, id).await?.package)
+}
+
+pub(crate) async fn approved(s: &Service, id: &str) -> Result<ApprovedPackage> {
     if let Some(package) = builtin(id) {
-        return Ok(package);
+        return Ok(ApprovedPackage {
+            package,
+            record: None,
+        });
     }
     let record = record(s, id).await?;
     let version = record["active"]
@@ -223,7 +297,10 @@ pub async fn active(s: &Service, id: &str) -> Result<Package> {
             "This plugin changed since it was approved. Review it in Plugins.",
         ));
     }
-    Ok(package)
+    Ok(ApprovedPackage {
+        package,
+        record: Some(record),
+    })
 }
 
 fn summary(package: &Package) -> Value {
@@ -398,6 +475,7 @@ async fn set_active(
         ));
     }
     record["active"] = json!(version);
+    record["revision"] = json!(crate::config::id());
     record["updatedAt"] = json!(now());
     let (plugin, action) = (
         id.to_owned(),
@@ -452,6 +530,7 @@ pub async fn uninstall(s: &Service, id: &str) -> Result<Value> {
     s.store
         .transaction(move |db| {
             db.remove(KIND, &format!("package:{plugin}"))?;
+            super::setup::forget_plugin_in(db, &plugin)?;
             db.audit("plugin.package.uninstalled", &json!({ "plugin": plugin }))
         })
         .await?;

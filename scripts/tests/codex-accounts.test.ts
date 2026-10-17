@@ -5,6 +5,7 @@ import {
   writeFile,
 } from 'node:fs/promises'
 import path from 'node:path'
+import { pathToFileURL } from 'node:url'
 import {
   afterEach,
   beforeEach,
@@ -289,12 +290,22 @@ describe('codex account pool', () => {
     expect(codexArgs(result, '/output', result.sessionId!)).not.toContain('--color')
   })
 
-  it('waits on exhaustion when all accounts are unavailable and remains cancellable', async () => {
+  it.each([0, 1250])('waits on exhaustion and remains cancellable with a %ims process start delay', async (startupDelay) => {
+    if (startupDelay) {
+      const delayed = path.join(ctx.directory, 'delayed-codex.mjs')
+      await writeFile(delayed, `#!/usr/bin/env node
+await new Promise(resolve => setTimeout(resolve, ${startupDelay}));
+await import(${JSON.stringify(pathToFileURL(binary).href)});
+`, { mode: 0o755 })
+      ctx.service.config.codexBin = delayed
+    }
+
     data.seed('Only account')
     ctx.service.task({ ...ctx.task, prompt: 'fixture:exhaust' }, ctx.task.id)
     const run = await ctx.service.enqueue(ctx.task.id)
     await ctx.worker.tick()
-    await expect.poll(() => ctx.service.store.run(run.id)?.accountWaitReason).toMatch(/Waiting/)
+    // Like the resume case above, allow bounded subprocess startup before exhaustion.
+    await expect.poll(() => ctx.service.store.run(run.id)?.accountWaitReason, { timeout: 6000 }).toMatch(/Waiting/)
     ctx.worker.cancel(run.id)
     await expect.poll(() => ctx.service.store.run(run.id)?.status, { timeout: 3000 }).toBe('cancelled')
     expect(data.pool.leases.size).toBe(0)

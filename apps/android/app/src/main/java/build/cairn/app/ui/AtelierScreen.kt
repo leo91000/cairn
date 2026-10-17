@@ -70,6 +70,7 @@ fun AtelierScreen(vm: CairnViewModel, state: Workspace, navigate: (String) -> Un
                     "agents" to "Agents",
                     "projects" to "Projets",
                     "skills" to "Skills",
+                    "personal-connections" to "Vos comptes de plugins",
                     "runs" to "Journal des exécutions",
                     "settings" to "Paramètres",
                 )
@@ -325,6 +326,8 @@ fun AtelierScreen(vm: CairnViewModel, state: Workspace, navigate: (String) -> Un
             Modifier.fillMaxWidth(),
             padding = PaddingValues(horizontal = 16.dp, vertical = 4.dp),
         ) {
+            LinkRow(CairnIcons.Plug, "Vos comptes de plugins") { navigate("personal-connections") }
+            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
             LinkRow(CairnIcons.Gear, "Nodes et ressources") { navigate("nodes") }
             HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
             LinkRow(CairnIcons.Log, "Journal des exécutions") { navigate("runs") }

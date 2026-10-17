@@ -11,7 +11,7 @@ use cairn_plugin_api::Manifest;
 use cairn_plugin_host::Denied;
 use futures_util::StreamExt;
 use serde_json::{Map, Value, json};
-use std::{sync::Arc, time::Duration};
+use std::{collections::BTreeMap, sync::Arc, time::Duration};
 
 /// What a handler acts for: its connection and the event being handled.
 pub struct Context {
@@ -22,6 +22,8 @@ pub struct Context {
     pub link: Option<super::socket::Link>,
     /// An instance being edited: its unsaved credential and secrets.
     pub draft: Option<Arc<super::forms::Draft>>,
+    /// A slow credential renewal must not let a revoked run start a new request.
+    pub resource_grant: Option<Arc<super::grants::Authorization>>,
 }
 
 /// Maps host errors to the short codes scripts may see. Messages stay in the host.
@@ -47,21 +49,46 @@ pub async fn call(
         .map_err(|error| Denied(code(&error)))
 }
 
+/// A worker may outlive the supervisor's next poll after an approval change.
+/// Fence its exact loaded files before effects and after slow results.
+pub(crate) async fn approved(
+    s: &Service,
+    context: &Context,
+    digest: &str,
+    method: &str,
+    args: Value,
+) -> Result<Value> {
+    super::registry::require_digest(s, &context.manifest.id, digest).await?;
+    let result = checked(s, context, method, args).await?;
+    super::registry::require_digest(s, &context.manifest.id, digest).await?;
+    Ok(result)
+}
+
 /// A long-lived worker's call, after rechecking the owner and the instance.
 pub async fn checked(s: &Service, context: &Context, method: &str, args: Value) -> Result<Value> {
     ensure_owner(s, &context.connection).await?;
     let expected = context.connection.clone();
     s.store.read(move |db| authorize(db, &expected)).await?;
-    match method {
+    let result = match method {
         "conversations.submit" => super::work::submit(s, context, &args).await,
         "conversations.check" => super::work::check(s, context, &args).await,
         "conversations.answer" => super::work::answer(s, context, &args).await,
         "conversations.cancel" => super::work::cancel(s, context, &args).await,
-        "inbound.accept" => super::work::inbound(s, context, &args).await,
+        "conversations.reset" => super::work::reset(s, context, &args).await,
+        "inbound.accept" | "inbound.deliver" => {
+            super::work::inbound(s, context, &args, method == "inbound.deliver").await
+        }
         "instance.status" => instance_status(s, context, &args).await,
+        _ if method.starts_with("oauth.") => super::oauth::call(s, context, method, &args).await,
         _ if method.starts_with("socket.") => super::socket::call(s, context, method, &args).await,
         _ => effect(s, context, method, args).await,
+    }?;
+    if context.connection.routing.is_some() {
+        ensure_owner(s, &context.connection).await?;
+        let expected = context.connection.clone();
+        s.store.read(move |db| authorize(db, &expected)).await?;
     }
+    Ok(result)
 }
 
 /// The package's own view of its connection, shown to the owner.
@@ -94,6 +121,9 @@ pub async fn effect(s: &Service, context: &Context, method: &str, args: Value) -
             storage(s, &context.connection, method, &args).await
         }
         "http.request" => http(s, context, &args).await,
+        "resources.get" | "resources.list" => {
+            super::resources::call(s, context, method, &args).await
+        }
         "timers.after" | "timers.cancel" => timers(s, &context.connection, method, &args).await,
         "exec.run" => super::programs::run(s, context, &args).await,
         _ => Err(Error::forbidden("Unknown plugin capability.")),
@@ -155,11 +185,19 @@ async fn storage(
                         return Err(Error::too_large("Stored values are limited to 64 KB."));
                     }
                     if db.get(KIND, &record_id)?.is_none() && owned()?.len() >= 1000 {
-                        return Err(Error::too_large("A connection can keep at most 1000 values."));
+                        return Err(Error::too_large(
+                            "A connection can keep at most 1000 values.",
+                        ));
                     }
                     db.put(
                         KIND,
-                        &json!({ "id": record_id, "connectionId": connection, "key": key, "value": value, "updatedAt": now() }),
+                        &json!({
+                            "id": record_id,
+                            "connectionId": connection,
+                            "key": key,
+                            "value": value,
+                            "updatedAt": now(),
+                        }),
                     )?;
                     Ok(Value::Null)
                 }
@@ -273,6 +311,11 @@ pub(crate) async fn authorization(
     context: &Context,
     auth: &Value,
 ) -> Result<Option<(String, String, String)>> {
+    if auth.get("oauth").is_some() {
+        return Err(Error::forbidden(
+            "OAuth credentials require a saved resource HTTP request.",
+        ));
+    }
     if *auth == Value::Bool(true) {
         let rule = context
             .manifest
@@ -312,12 +355,24 @@ pub(crate) async fn authorization(
         return Err(Error::bad("Invalid credential header."));
     }
     let key = rule.get("secret").and_then(Value::as_str).unwrap_or("");
-    let secret = secrets(s, context)
-        .await?
-        .get(key)
-        .and_then(Value::as_str)
-        .map(str::to_owned)
-        .ok_or_else(|| Error::forbidden("This instance has no such secret."))?;
+    let secret = if let Some(resource) = rule.get("resource") {
+        if context.draft.is_some() {
+            return Err(Error::forbidden(
+                "Resource credentials are only available to saved HTTP requests.",
+            ));
+        }
+        let resource = resource
+            .as_str()
+            .ok_or_else(|| Error::bad("Name a resource."))?;
+        super::resources::credential(s, context, resource, key).await?
+    } else {
+        secrets(s, context)
+            .await?
+            .get(key)
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+            .ok_or_else(|| Error::forbidden("This instance has no such secret."))?
+    };
     Ok(Some((header.to_owned(), prefix.to_owned(), secret)))
 }
 
@@ -342,6 +397,12 @@ async fn http(s: &Service, context: &Context, args: &Value) -> Result<Value> {
         _ => return Err(invalid("Unsupported HTTP method.")),
     };
     let target = target(s, &context.manifest, text(args, "url"), "https")?;
+    let resource = match args["auth"].get("resource") {
+        Some(value) => {
+            Some(super::resources::reference(s, context, value.as_str().unwrap_or_default()).await?)
+        }
+        None => None,
+    };
     let mut request = s
         .plugins
         .http
@@ -362,7 +423,25 @@ async fn http(s: &Service, context: &Context, args: &Value) -> Result<Value> {
             request = request.header(name, value);
         }
     }
-    if let Some(spec) = args.get("multipart").filter(|value| value.is_object()) {
+    if let Some(form) = args.get("form").filter(|value| !value.is_null()) {
+        if !form
+            .as_object()
+            .is_some_and(|form| form.len() <= 50 && form.values().all(Value::is_string))
+            || ["json", "body", "multipart"]
+                .iter()
+                .any(|key| args.get(*key).is_some_and(|value| !value.is_null()))
+        {
+            return Err(invalid(
+                "Use form text fields without another request body.",
+            ));
+        }
+        let fields: BTreeMap<String, String> = serde_json::from_value(form.clone())?;
+        let encoded = serde_urlencoded::to_string(&fields).map_err(Error::internal)?;
+        if encoded.len() > 262_144 {
+            return Err(Error::too_large("Request body is too large."));
+        }
+        request = request.form(&fields);
+    } else if let Some(spec) = args.get("multipart").filter(|value| value.is_object()) {
         let (kind, body) = multipart(s, context, spec).await?;
         request = request.header("content-type", kind).body(body);
     } else if let Some(body) = args.get("json").filter(|value| !value.is_null()) {
@@ -376,8 +455,37 @@ async fn http(s: &Service, context: &Context, args: &Value) -> Result<Value> {
         }
         request = request.body(body.to_owned());
     }
-    if let Some((header, prefix, secret)) = authorization(s, context, &args["auth"]).await? {
+    let oauth = if let Some(name) = args["auth"].get("oauth") {
+        if context.draft.is_some()
+            || !context.manifest.permits_capability("oauth")
+            || args["auth"].as_object().is_none_or(|auth| auth.len() != 2)
+        {
+            return Err(Error::forbidden(
+                "Use an OAuth provider and resource on a saved instance.",
+            ));
+        }
+        let (token, reference) = super::oauth::credential(
+            s,
+            context,
+            text(&args["auth"], "resource"),
+            name.as_str().unwrap_or(""),
+        )
+        .await?;
+        request = request.bearer_auth(token);
+        Some(reference)
+    } else {
+        None
+    };
+    if oauth.is_none()
+        && let Some((header, prefix, secret)) = authorization(s, context, &args["auth"]).await?
+    {
         request = request.header(header, format!("{prefix}{secret}"));
+    }
+    if let Some(grant) = &context.resource_grant {
+        super::grants::recheck(s, grant).await?;
+    }
+    if let Some(oauth) = &oauth {
+        super::oauth::recheck(s, oauth).await?;
     }
     let response = request
         .send()
@@ -403,6 +511,12 @@ async fn http(s: &Service, context: &Context, args: &Value) -> Result<Value> {
         body.extend_from_slice(&chunk);
     }
     let json = serde_json::from_slice::<Value>(&body).ok();
+    if let Some(resource) = &resource {
+        super::resources::recheck(s, context, resource).await?;
+    }
+    if let Some(oauth) = &oauth {
+        super::oauth::recheck(s, oauth).await?;
+    }
     Ok(json!({
         "status": status,
         "headers": headers,

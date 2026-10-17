@@ -6,6 +6,8 @@ import android.content.Intent
 import android.net.ConnectivityManager
 import android.net.NetworkCapabilities
 import android.os.Build
+import android.os.Handler
+import android.os.Looper
 import androidx.activity.compose.LocalActivity
 import androidx.compose.runtime.*
 import androidx.compose.ui.test.*
@@ -276,6 +278,7 @@ class DirectTransportDeviceTest {
 
                     // A real foreground transition must retain the capacity-error deadline.
                     val capacityAttempts = AtomicInteger()
+                    val capacityControl = ConcurrentLinkedQueue<String>()
                     val rejectedAt = AtomicLong()
                     val retryAt = AtomicLong()
                     val capacityClient =
@@ -285,6 +288,7 @@ class DirectTransportDeviceTest {
                                 if (request.url.encodedPath.endsWith("/direct/authorize")) {
                                     if (capacityAttempts.incrementAndGet() == 1) {
                                         rejectedAt.set(System.nanoTime())
+                                        capacityControl.add("authorize:503")
                                         return@addInterceptor Response.Builder()
                                             .request(request)
                                             .protocol(Protocol.HTTP_1_1)
@@ -295,7 +299,13 @@ class DirectTransportDeviceTest {
                                     }
                                     retryAt.set(System.nanoTime())
                                 }
-                                chain.proceed(request)
+                                chain.proceed(request).also { response ->
+                                    capacityControl.add(
+                                        request.url.encodedPath.substringAfterLast('/') +
+                                            ":" +
+                                            response.code
+                                    )
+                                }
                             }
                             .build()
                     val capacity = CairnApi(origin, vault, capacityClient, api.installationId)
@@ -321,11 +331,48 @@ class DirectTransportDeviceTest {
                             1,
                             capacityAttempts.get(),
                         )
-                        withTimeout(25000) {
-                            do {
-                                delay(200)
-                                assertEquals("[]", capacity.request("GET", "/chats"))
-                            } while (capacity.transport.route.value != "direct")
+                        try {
+                            withTimeout(25000) {
+                                do {
+                                    delay(200)
+                                    assertEquals("[]", capacity.request("GET", "/chats"))
+                                } while (capacity.transport.route.value != "direct")
+                            }
+                        } catch (error: TimeoutCancellationException) {
+                            val snapshot = CompletableDeferred<String>()
+                            val handler = Handler(Looper.getMainLooper())
+                            val readLifecycle = Runnable {
+                                val lifecycle =
+                                    androidx.lifecycle.ProcessLifecycleOwner.get()
+                                        .lifecycle
+                                        .currentState
+                                        .name
+                                snapshot.complete(
+                                    "lifecycle=$lifecycle, focused=${activity.hasWindowFocus()}"
+                                )
+                            }
+                            handler.post(readLifecycle)
+                            val lifecycleSnapshot =
+                                try {
+                                    withTimeoutOrNull(1000) { snapshot.await() }
+                                        ?: "lifecycle=unavailable, focused=unavailable"
+                                } finally {
+                                    handler.removeCallbacks(readLifecycle)
+                                    snapshot.cancel()
+                                }
+                            val nativeTrace =
+                                instrumentation.uiAutomation
+                                    .executeShellCommand("logcat -d -t 200 -s CairnDirect:D")
+                                    .use { descriptor ->
+                                        android.os.ParcelFileDescriptor.AutoCloseInputStream(
+                                                descriptor
+                                            )
+                                            .use { it.bufferedReader().readText() }
+                                    }
+                            throw AssertionError(
+                                "Capacity recovery timed out: authorizationCalls=${capacityAttempts.get()}, route=${capacity.transport.route.value}, elapsedMs=${(System.nanoTime() - rejectedAt.get()) / 1000000}, $lifecycleSnapshot, control=$capacityControl\n$nativeTrace",
+                                error,
+                            )
                         }
                         assertTrue(
                             "Retry must retain its fifteen-second deadline",

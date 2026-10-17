@@ -183,12 +183,17 @@ private fun PluginInstances(
     var editing by remember { mutableStateOf<PluginConnection?>(null) }
     var removing by remember { mutableStateOf<PluginConnection?>(null) }
     var reviewing by remember { mutableStateOf(false) }
+    var setupDraft by remember(id) { mutableStateOf<PluginSetupDraft?>(null) }
+    var drafts by remember(id) { mutableStateOf(emptyList<PluginSetupDraft>()) }
+    var discarding by remember(id) { mutableStateOf<PluginSetupDraft?>(null) }
     val context = LocalContext.current
     suspend fun load() {
         catalog = vm.api.get<PluginCatalog>("/plugins")
+        drafts =
+            vm.api.get<PluginPage<PluginSetupDraft>>("/plugins/${segment(id)}/setup-drafts").items
     }
     Poll("plugin-$id", 5000) {
-        if (editing == null && !reviewing && !state.busy)
+        if (editing == null && setupDraft == null && !reviewing && !state.busy)
             try {
                 load()
             } catch (e: Exception) {
@@ -272,14 +277,49 @@ private fun PluginInstances(
                     height = 40.dp,
                 ) {
                     vm.clearMessage()
-                    editing =
-                        PluginConnection(
-                            name = if (manifest.instances == null) manifest.name else "",
-                            accessMode = "requests",
-                        )
+                    if (manifest.hasSetup) {
+                        vm.perform {
+                            setupDraft =
+                                api.send(
+                                    "POST",
+                                    "/plugins/${segment(id)}/setup-drafts",
+                                    buildJsonObject { put("name", manifest.name) },
+                                )
+                            load()
+                        }
+                    } else
+                        editing =
+                            PluginConnection(
+                                name = if (manifest.instances == null) manifest.name else "",
+                                accessMode = "requests",
+                            )
                 }
         }
-        if (instances.isEmpty() && entry.active != null)
+        if (drafts.isNotEmpty())
+            Text("Reprendre la configuration", style = MaterialTheme.typography.titleSmall)
+        drafts.forEach { draft ->
+            SignalCard(Modifier.fillMaxWidth()) {
+                Text(draft.name, style = MaterialTheme.typography.titleSmall)
+                Text(
+                    "Inactive · expire le ${java.text.DateFormat.getDateTimeInstance().format(java.util.Date(draft.expiresAt))}",
+                    style = MaterialTheme.typography.bodySmall,
+                )
+                if (draft.status != "setup") FormError("Le package doit être approuvé.")
+                TextButton(
+                    onClick = {
+                        vm.clearMessage()
+                        setupDraft = draft
+                    },
+                    enabled = !state.busy && draft.status == "setup",
+                ) {
+                    Text("Continuer ${draft.name}")
+                }
+                TextButton(onClick = { discarding = draft }, enabled = !state.busy) {
+                    Text("Abandonner ${draft.name}")
+                }
+            }
+        }
+        if (instances.isEmpty() && drafts.isEmpty() && entry.active != null)
             Empty(
                 if (manifest.instances != null) "${manifest.noun(2)} : aucun"
                 else "Aucune instance",
@@ -305,6 +345,41 @@ private fun PluginInstances(
             )
         }
         if (manifest.agentAccess != null) AgentUsage(manifest)
+    }
+    setupDraft?.let { draft ->
+        manifest?.let { current ->
+            PluginSetup(
+                vm,
+                state,
+                current,
+                draft,
+                close = { setupDraft = null },
+                changed = { load() },
+                activated = {
+                    setupDraft = null
+                    load()
+                },
+            )
+        }
+    }
+    discarding?.let { draft ->
+        Confirm(
+            "Abandonner ${draft.name} ?",
+            "Les réglages et identifiants préparés seront supprimés. Aucune instance n’a été activée.",
+            state.busy,
+            state.error,
+            dismiss = { discarding = null },
+        ) {
+            vm.perform {
+                api.request(
+                    "DELETE",
+                    "/plugins/${segment(id)}/setup-drafts/${segment(draft.id)}",
+                    buildJsonObject { put("revision", draft.revision) },
+                )
+                discarding = null
+                load()
+            }
+        }
     }
     if (reviewing && entry != null)
         PluginReview(
@@ -467,12 +542,19 @@ private fun InstanceCard(
                         state.agents.find { it.id == id }?.name ?: "Agent supprimé"
                     }
                 Text(
-                    if (names.isEmpty()) "Aucun agent ne peut l’utiliser pour l’instant."
+                    if (manifest.operations.isNotEmpty())
+                        "Accès global à l’instance : ${names.joinToString(", ").ifEmpty { "aucun agent." }}"
+                    else if (names.isEmpty()) "Aucun agent ne peut l’utiliser pour l’instant."
                     else "Agents autorisés : ${names.joinToString(", ")}",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
+            if (manifest.agentAccess != null && manifest.operations.isNotEmpty())
+                Text(
+                    "Les opérations des ressources ont leurs propres règles d’accès sur chaque ressource.",
+                    style = MaterialTheme.typography.bodySmall,
+                )
             if (manifest.delegates) {
                 Fact(
                     "Répond en tant que",
@@ -552,6 +634,13 @@ private fun InstanceCard(
                     ActivityRow(connection, item) { openChat(item.chatId) }
                 }
             }
+            if (manifest.resources.isNotEmpty())
+                PluginResources(
+                    vm,
+                    state,
+                    manifest,
+                    PluginResourceLocation(connection.pluginId, connection.id),
+                )
             if (manifest.instanceView) PluginPanel(vm, state, path, connection.name)
             HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
             Toggle(
@@ -706,23 +795,25 @@ private fun InstanceEditor(
             completing = true
             if (asking.second != null) kotlinx.coroutines.delay(400)
             runCatching {
-                vm.api.send<PluginForm>(
-                    "POST",
-                    "/plugins/${segment(pluginId)}/form",
-                    buildJsonObject {
-                        if (!creating) put("instance", initial.id)
-                        put("settings", pluginSettings(stored, values))
-                        put(
-                            "secrets",
-                            JsonObject(
-                                secrets
-                                    .filterValues { it.isNotBlank() }
-                                    .mapValues { JsonPrimitive(it.value.trim()) }
-                            ),
-                        )
-                        if (token.isNotBlank()) put("token", token.trim())
-                        asking.second?.let { put("changed", it) }
-                    },
+                decodePluginForm(
+                    vm.api.send<JsonElement>(
+                        "POST",
+                        "/plugins/${segment(pluginId)}/form",
+                        buildJsonObject {
+                            if (!creating) put("instance", initial.id)
+                            put("settings", pluginSettings(stored, values))
+                            put(
+                                "secrets",
+                                JsonObject(
+                                    secrets
+                                        .filterValues { it.isNotBlank() }
+                                        .mapValues { JsonPrimitive(it.value.trim()) }
+                                ),
+                            )
+                            if (token.isNotBlank()) put("token", token.trim())
+                            asking.second?.let { put("changed", it) }
+                        },
+                    )
                 )
             }
                 .onSuccess { form ->
@@ -826,6 +917,7 @@ private fun InstanceEditor(
         },
     ) {
         completion?.errors?.get("form")?.let { FormError(it) }
+        manifest.unshownFormErrors(completion?.errors.orEmpty()).forEach { FormError(it) }
         Field("Nom", name, { name = it }, enabled = !state.busy)
         manifest.credential?.let { credential ->
             val problem = completion?.errors?.get("credential")
@@ -881,7 +973,16 @@ private fun InstanceEditor(
             refresh = ::refresh,
         )
         manifest.agentAccess?.let { access ->
-            Text("Agents autorisés", style = MaterialTheme.typography.titleMedium)
+            Text(
+                if (manifest.operations.isEmpty()) "Agents autorisés"
+                else "Accès global à l’instance",
+                style = MaterialTheme.typography.titleMedium,
+            )
+            if (manifest.operations.isNotEmpty())
+                Text(
+                    "Les opérations des ressources ont leurs propres règles d’accès sur chaque ressource.",
+                    style = MaterialTheme.typography.bodySmall,
+                )
             if (access.description.isNotBlank())
                 Text(
                     access.description,
@@ -998,7 +1099,7 @@ private fun InstanceEditor(
 }
 
 @Composable
-private fun FormError(text: String) {
+internal fun FormError(text: String) {
     Text(
         text,
         Modifier.fillMaxWidth()
@@ -1209,7 +1310,10 @@ private fun AgentUsage(manifest: PluginManifest) {
             Text("Utilisation par les agents", style = MaterialTheme.typography.titleSmall)
         }
         Text(
-            "Seuls les agents autorisés sur une instance active y ont accès, dans leurs conversations.",
+            if (manifest.operations.isNotEmpty())
+                "Les règles de l’instance et de ses ressources déterminent les commandes et outils accessibles. Les opérations des ressources exigent leurs propres droits."
+            else
+                "Seuls les agents autorisés sur une instance active y ont accès, dans leurs conversations.",
             Modifier.padding(top = 6.dp, bottom = 4.dp),
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,

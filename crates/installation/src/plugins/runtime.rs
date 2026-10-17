@@ -249,8 +249,12 @@ pub async fn pump(s: &Service, connection: &Connection, session: &mut Session) -
             "state": delivery["state"],
         });
         // Uploads are limited to this reply's deliverables.
-        let event =
-            json!({ "name": "reply", "revision": connection.revision, "files": reply.files });
+        let event = json!({
+            "name": "reply",
+            "revision": connection.revision,
+            "files": reply.files,
+            "routing": delivery["routing"],
+        });
         let outcome = match reply.status {
             "completed" => "replied",
             "cancelled" => "stopped",
@@ -311,16 +315,12 @@ async fn follow(
             "question": question,
             "reply": delivery["reply"],
         });
-        let event = json!({ "name": "question", "revision": connection.revision });
+        let event = json!({ "name": "question", "revision": connection.revision, "routing": delivery["routing"] });
         match dispatch(s, connection, session, &event, "question", payload).await {
             Ok(value) if !value["retryAfter"].is_number() => {
                 s.store
                     .set(
-                        &format!(
-                            "plugin-question-seen:{}:{}",
-                            connection.id,
-                            text(&question, "id")
-                        ),
+                        &work::question_seen_key(connection, delivery, &question),
                         json!(true),
                         Some(now() + 30 * 86_400_000),
                     )
@@ -357,7 +357,7 @@ async fn follow(
             "step": progress["step"],
             "reply": delivery["reply"],
         });
-        let event = json!({ "name": "progress", "revision": connection.revision });
+        let event = json!({ "name": "progress", "revision": connection.revision, "routing": delivery["routing"] });
         let _ = dispatch(s, connection, session, &event, "progress", payload).await;
         delivery["progressAt"] = json!(now());
         changed = true;
@@ -376,19 +376,34 @@ async fn dispatch(
     name: &str,
     payload: Value,
 ) -> std::result::Result<Value, String> {
+    let digest = registry::digest(session.manifest(), session.sources()).map_err(|e| e.message)?;
+    registry::require_digest(s, &connection.plugin_id, &digest)
+        .await
+        .map_err(|e| e.message)?;
+    let connection = super::routes::bound(s, connection, &event["routing"])
+        .await
+        .map_err(|e| e.message)?;
     let context = Context {
-        connection: connection.clone(),
+        connection,
         manifest: session.manifest().clone(),
         event: event.clone(),
         link: None,
         draft: None,
+        resource_grant: None,
     };
     let context = &context;
-    session
+    let digest_ref = &digest;
+    let result = session
         .dispatch(name, payload, |method, args| async move {
-            capabilities::call(s, context, &method, args).await
+            capabilities::approved(s, context, digest_ref, &method, args)
+                .await
+                .map_err(|error| cairn_plugin_host::Denied(capabilities::code(&error)))
         })
+        .await?;
+    registry::require_digest(s, &context.manifest.id, &digest)
         .await
+        .map_err(|e| e.message)?;
+    Ok(result)
 }
 
 async fn owned(s: &Service, kind: &str, connection: &Connection) -> Result<Vec<Value>> {

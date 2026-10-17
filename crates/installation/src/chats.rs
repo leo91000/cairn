@@ -239,7 +239,10 @@ fn message_id_used(db: &Db<'_>, id: &str) -> Result<bool> {
 fn require_sendable(db: &Db<'_>, chat: &Value, messages: &[Value], id: &str) -> Result<()> {
     let undelivered = messages
         .iter()
-        .filter(|message| message["status"] != MessageStatus::Delivered)
+        .filter(|message| {
+            message["status"] == MessageStatus::Queued
+                || message["status"] == MessageStatus::Sending
+        })
         .count();
     if undelivered >= MAX_UNDELIVERED {
         return Err(Error::conflict(
@@ -335,6 +338,7 @@ fn edit(db: &Db<'_>, chat_id: &str, message_id: &str, values: Option<Value>) -> 
         return Err(Error::conflict("This message is already being sent."));
     }
     let Some(mut values) = values else {
+        db.delete(&crate::plugins::turns::key(chat_id, message_id))?;
         return withdraw(db, chat_id, &current);
     };
     if current["questionId"].is_string() {
@@ -343,6 +347,7 @@ fn edit(db: &Db<'_>, chat_id: &str, message_id: &str, values: Option<Value>) -> 
     crate::attachments::message(db, chat_id, &mut values)?;
     validate_steer(db, &chat, &values)?;
     crate::store::merge(&mut current, &values);
+    db.delete(&crate::plugins::turns::key(chat_id, message_id))?;
     db.put_message(&current)
 }
 
@@ -436,6 +441,81 @@ fn needs_attention(chat: &Value, run: Option<&Value>) -> bool {
     run.is_some_and(|run| run["status"] != RunStatus::Succeeded)
         && chat["cancelledByDeletion"] != true
         && chat["sessionRestartRequested"] != true
+}
+
+/// Abandon a settled turn without replaying its original prompt. Called under
+/// the worker's preparation and active guards, with the next requester rechecked.
+pub(crate) fn request_next_turn_in(db: &Db<'_>, chat_id: &str, run_id: &str) -> Result<bool> {
+    let mut chat = chat(db, chat_id)?;
+    require_active(&chat)?;
+    let run = required(db.run(run_id)?, "Run not found")?;
+    if chat["paused"] == true
+        || chat["runId"] != run_id
+        || !RunStatus::of(&run).is_some_and(RunStatus::is_resumable)
+    {
+        return Ok(false);
+    }
+    let checkpoint_key = format!("run-checkpoint:{run_id}");
+    let mut checkpoint = db.kv(&checkpoint_key)?.unwrap_or_else(|| json!({}));
+    if run["recoveryPending"] == true {
+        return Ok(false);
+    }
+    // completed records agent success, not process settlement. The worker guards
+    // exclude a live execution; continue_run schedules native fencing of the saved
+    // process/runner before the next request may prepare or launch its workspace.
+    if !run["workspaceCleanedAt"].is_null() {
+        return Err(Error::conflict(
+            "The workspace was cleaned up. Start a new conversation.",
+        ));
+    }
+    let old_message = text(&run["chatExecution"], "messageId");
+    db.set(
+        &crate::plugins::turns::abandoned_key(chat_id, old_message),
+        &json!({
+            "runId": run_id,
+            "failed": run["status"] != RunStatus::Cancelled,
+        }),
+        None,
+    )?;
+    let mut answers = HashSet::new();
+    for mut question in questions(db, chat_id)? {
+        if question.run_id == run_id && question.turn_id == old_message && question.is_open() {
+            if let Some(message) = &question.message_id {
+                answers.insert(message.clone());
+            }
+            question.status = QuestionStatus::Cancelled;
+            question.blocking = false;
+            save_question(db, &question)?;
+        }
+    }
+    for mut message in db.messages(chat_id)? {
+        let pending = message["status"] == MessageStatus::Queued
+            || message["status"] == MessageStatus::Sending;
+        if !pending {
+            continue;
+        }
+        if message["id"] == old_message || answers.contains(text(&message, "id")) {
+            message["status"] = MessageStatus::Cancelled.into();
+        } else if message["mode"] == MessageMode::Steer {
+            message["mode"] = MessageMode::Queue.into();
+        }
+        db.put_message(&message)?;
+    }
+    checkpoint["freshSession"] = true.into();
+    checkpoint["launched"] = false.into();
+    db.set(&checkpoint_key, &checkpoint, None)?;
+    db.patch_run(
+        run_id,
+        &json!({
+            "sessionId": null,
+            "resumeAvailable": false,
+            "retry": null,
+        }),
+    )?;
+    chat["sessionRestartRequested"] = true.into();
+    chat["wakeup"] = Value::Null;
+    db.put("chats", &chat)?;
+    Ok(true)
 }
 
 /// Applies the provider, model and reasoning chosen for this message.
@@ -582,6 +662,17 @@ fn launch_turn(
     if !is_active(&chat) || chat["paused"] == true || !unchanged {
         return Ok(());
     }
+    if waking {
+        let previous = run
+            .as_ref()
+            .ok_or_else(|| Error::conflict("The wakeup's run was removed."))?;
+        crate::plugins::requesters::capture_wakeup(db, chat_id, previous, &message)?;
+    }
+    if let Some(crate::plugins::requesters::Principal::External(person)) =
+        crate::plugins::requesters::recorded(db, chat_id, text(&message, "id"))?
+    {
+        crate::plugins::requesters::external_in(db, &person)?;
+    }
     let execution = ChatExecution {
         message_id: message["id"].clone(),
         text: with_invoked_skills(text(&message, "text"), &snapshot["snapshot"]["skills"]),
@@ -614,6 +705,7 @@ fn launch_turn(
         return Ok(());
     }
     message["status"] = MessageStatus::Sending.into();
+    db.delete(&crate::plugins::turns::key(chat_id, text(&message, "id")))?;
     db.put_message(&message)?;
     Ok(())
 }
@@ -655,17 +747,59 @@ impl Service {
     }
 
     pub async fn chat_send(&self, id: &str, input: Value) -> Result<Value> {
+        self.chat_send_as(id, input, None).await
+    }
+
+    pub async fn chat_send_as(
+        &self,
+        id: &str,
+        input: Value,
+        identity: Option<&crate::auth::InstallationIdentity>,
+    ) -> Result<Value> {
         let values = parse("message", input)?;
+
+        let actor = match identity {
+            Some(identity) => {
+                Some(crate::plugins::requesters::account(self, &identity.account_id).await?)
+            }
+            None => None,
+        };
+
         let id = id.to_owned();
         let result = self
             .store
-            .transaction(move |db| send(db, &id, values, None))
+            .transaction(move |db| {
+                crate::plugins::requesters::capture(
+                    db,
+                    &id,
+                    &values,
+                    actor.as_ref(),
+                    crate::plugins::requesters::Capture::New,
+                )?;
+                send(db, &id, values, None)
+            })
             .await?;
         self.worker.notify();
         Ok(result)
     }
 
     pub async fn chat_edit(&self, id: &str, message: &str, input: Option<Value>) -> Result<Value> {
+        self.chat_edit_as(id, message, input, None).await
+    }
+
+    pub async fn chat_edit_as(
+        &self,
+        id: &str,
+        message: &str,
+        input: Option<Value>,
+        identity: Option<&crate::auth::InstallationIdentity>,
+    ) -> Result<Value> {
+        let actor = match identity {
+            Some(identity) if input.is_some() => {
+                Some(crate::plugins::requesters::account(self, &identity.account_id).await?)
+            }
+            _ => None,
+        };
         let (id, message) = (id.to_owned(), message.to_owned());
         let values = input
             .map(|mut input| {
@@ -675,13 +809,34 @@ impl Service {
             .transpose()?;
         let result = self
             .store
-            .transaction(move |db| edit(db, &id, &message, values))
+            .transaction(move |db| {
+                let attribution = values
+                    .as_ref()
+                    .cloned()
+                    .unwrap_or_else(|| json!({"id": message}));
+                crate::plugins::requesters::capture(
+                    db,
+                    &id,
+                    &attribution,
+                    actor.as_ref(),
+                    crate::plugins::requesters::Capture::Edit,
+                )?;
+                edit(db, &id, &message, values)
+            })
             .await?;
         self.worker.notify();
         Ok(result)
     }
 
     pub async fn chat_pause(&self, id: &str, paused: bool) -> Result<Value> {
+        self.set_chat_pause(id, paused, false).await
+    }
+
+    pub(crate) async fn chat_pause_by_user(&self, id: &str, paused: bool) -> Result<Value> {
+        self.set_chat_pause(id, paused, true).await
+    }
+
+    async fn set_chat_pause(&self, id: &str, paused: bool, by_user: bool) -> Result<Value> {
         let id = id.to_owned();
         let result = self
             .store
@@ -691,7 +846,10 @@ impl Service {
                 if chat["lastActivityAt"].is_null() {
                     chat["lastActivityAt"] = chat["updatedAt"].clone();
                 }
-                chat["paused"] = paused.into();
+                if by_user {
+                    chat["pausedByUser"] = paused.into();
+                }
+                chat["paused"] = (paused || chat["pausedByUser"] == true).into();
                 chat["updatedAt"] = now().into();
                 db.put("chats", &chat)
             })
@@ -708,7 +866,7 @@ impl Service {
     }
 
     pub async fn chat_tick(&self, active: &HashSet<String>) -> Result<()> {
-        for chat in self.store.list("chats").await? {
+        for mut chat in self.store.list("chats").await? {
             if !is_active(&chat) {
                 continue;
             }
@@ -728,16 +886,45 @@ impl Service {
             }
             let id = text(&chat, "id").to_owned();
             if needs_attention(&chat, run.as_ref()) {
-                self.chat_cancel_sleep(&id).await?;
-                if chat["paused"] == true {
-                    continue;
+                let advance = match crate::plugins::turns::advance(
+                    self,
+                    &chat,
+                    run.as_ref().unwrap(),
+                )
+                .await
+                {
+                    Ok(value) => value,
+                    Err(error) => {
+                        self.chat_pause(&id, true).await?;
+                        let shown = if error.status < 500 {
+                            error.message
+                        } else {
+                            "Unable to start a new turn.".into()
+                        };
+                        self.store
+                            .set(&format!("chat-error:{id}"), shown.into(), None)
+                            .await?;
+                        continue;
+                    }
+                };
+                match advance {
+                    crate::plugins::turns::Advance::Waiting => continue,
+                    crate::plugins::turns::Advance::Ready => {
+                        chat = self.get("chats", &id).await?;
+                    }
+                    crate::plugins::turns::Advance::NoRequest => {
+                        self.chat_cancel_sleep(&id).await?;
+                        if chat["paused"] == true {
+                            continue;
+                        }
+                        let chat_id = id.clone();
+                        self.store
+                            .transaction(move |db| next_queued(db, &chat_id).map(|_| ()))
+                            .await?;
+                        self.chat_pause(&id, true).await?;
+                        continue;
+                    }
                 }
-                let chat_id = id.clone();
-                self.store
-                    .transaction(move |db| next_queued(db, &chat_id).map(|_| ()))
-                    .await?;
-                self.chat_pause(&id, true).await?;
-                continue;
             }
             if chat["paused"] == true {
                 continue;

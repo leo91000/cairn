@@ -391,6 +391,14 @@ pub async fn router_with_installation_hosts(
                             "/api/public/installations/{installation}/artifacts/{token}",
                             get(relay::public_artifact),
                         )
+                        .route(
+                            "/api/public/installations/{installation}/plugins/{instance}/{endpoint}",
+                            post(relay::public_webhook),
+                        )
+                        .route(
+                            "/api/public/installations/{installation}/plugin-oauth/{instance}/callback",
+                            get(relay::public_oauth),
+                        )
                         .route("/oauth/register", post(mcp::register))
                         .route("/oauth/authorize", get(mcp::authorize))
                         .route("/oauth/token", post(mcp::exchange))

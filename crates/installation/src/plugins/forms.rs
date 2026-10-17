@@ -21,6 +21,31 @@ use std::sync::Arc;
 pub struct Draft {
     pub credential: Option<String>,
     pub secrets: Map<String, Value>,
+    pub setup: Option<Box<super::setup::SetupDraft>>,
+    pub urls: Option<Value>,
+}
+
+/// A credential entered during setup; incomplete drafts may omit it.
+pub(crate) fn typed_credential(manifest: &Manifest, input: &Value) -> Result<Option<String>> {
+    if input.is_null() {
+        return Ok(None);
+    }
+    let token = input
+        .as_str()
+        .ok_or_else(|| Error::bad("Enter a valid credential."))?
+        .trim();
+    if token.is_empty() {
+        return Ok(None);
+    }
+    if manifest.credential.is_none()
+        || token.len() > 4096
+        || token.chars().any(|c| c.is_whitespace() || c.is_control())
+    {
+        return Err(Error::bad(
+            "Enter a valid credential declared by the plugin.",
+        ));
+    }
+    Ok(Some(token.to_owned()))
 }
 
 /// Settings as typed so far: valid values only, nothing required yet.
@@ -71,6 +96,11 @@ async fn run(
         "instance": instance,
         "changed": changed,
         "submit": submit,
+        "setup": draft.setup.as_ref().map(|setup| json!({
+            "revision": setup.revision,
+            "expiresAt": setup.expires_at,
+            "urls": draft.urls,
+        })),
     });
     let connection = Connection::draft(
         &instance.map_or_else(id, str::to_owned),
@@ -120,6 +150,8 @@ pub async fn form(s: &Service, plugin_id: &str, input: &Value) -> Result<Value> 
     let draft = Draft {
         credential: credential.filter(|_| manifest.credential.is_some()),
         secrets: secrets(manifest, &input["secrets"], saved),
+        setup: None,
+        urls: None,
     };
     let changed = input["changed"].as_str().filter(|key| {
         *key == "credential" || manifest.settings.iter().any(|field| field["key"] == *key)
@@ -143,6 +175,74 @@ pub async fn form(s: &Service, plugin_id: &str, input: &Value) -> Result<Value> 
     }))
 }
 
+/// Owner-only form for a persisted, still-inert setup draft. Typed values are
+/// temporary; saving them requires the draft's separate revision-checked PATCH.
+pub(crate) async fn setup_form(
+    s: &Service,
+    package: &Package,
+    setup: super::setup::SetupDraft,
+    input: &Value,
+) -> Result<Value> {
+    if !package.manifest.instance_form {
+        return Err(Error::not_found("This plugin has no instance form."));
+    }
+    let saved = secret_values(s, &setup.id).await?;
+    let settings = values(
+        &package.manifest,
+        input.get("settings").unwrap_or(&setup.settings),
+    );
+    let changed = input["changed"].as_str().filter(|key| {
+        *key == "credential"
+            || package
+                .manifest
+                .settings
+                .iter()
+                .any(|field| field["key"] == *key)
+    });
+    let instance = setup.id.clone();
+    let urls = setup_urls(s, &package.manifest, &instance, input).await?;
+    let credential = match typed_credential(&package.manifest, &input["token"])? {
+        Some(token) => Some(token),
+        None => s
+            .vault
+            .get(&credential_key(&instance))
+            .await?
+            .map(|value| text(&value, "token").to_owned()),
+    };
+    let draft = Draft {
+        credential,
+        secrets: secrets(&package.manifest, &input["secrets"], saved),
+        setup: Some(Box::new(setup)),
+        urls: Some(urls),
+    };
+    run(s, package, Some(&instance), settings, draft, changed, false).await
+}
+
+pub(crate) async fn setup_urls(
+    s: &Service,
+    manifest: &Manifest,
+    instance: &str,
+    input: &Value,
+) -> Result<Value> {
+    let direct = match input.get("directOrigin").filter(|value| !value.is_null()) {
+        None => None,
+        Some(Value::String(origin)) => Some(origin.as_str()),
+        Some(_) => return Err(Error::bad("Enter an HTTPS installation origin.")),
+    };
+    let addresses = super::addresses::Addresses::load(s, direct).await?;
+    let webhooks = manifest
+        .webhooks
+        .iter()
+        .map(|endpoint| {
+            (
+                endpoint.name.clone(),
+                json!(addresses.webhook(instance, &endpoint.name)),
+            )
+        })
+        .collect::<Map<String, Value>>();
+    Ok(json!({"webhooks": webhooks, "oauthCallback": addresses.oauth(instance)}))
+}
+
 /// The package's last word before an instance is saved: derived values are applied
 /// and checked again, and any error refuses the save with the package's message.
 pub(crate) async fn submit(
@@ -152,11 +252,14 @@ pub(crate) async fn submit(
     settings: Value,
     draft: Draft,
 ) -> Result<Value> {
-    let existing = s
-        .store
-        .get(connections::KIND, instance)
-        .await?
-        .map(|_| instance);
+    let existing = if draft.setup.is_some() {
+        Some(instance)
+    } else {
+        s.store
+            .get(connections::KIND, instance)
+            .await?
+            .map(|_| instance)
+    };
     let result = run(s, package, existing, settings.clone(), draft, None, true).await?;
     if let Some(errors) = result["errors"]
         .as_object()

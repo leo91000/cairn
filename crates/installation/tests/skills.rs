@@ -1004,9 +1004,10 @@ async fn snapshots_describe_the_manifest_version_that_was_frozen() {
         .await
         .unwrap();
     let service = api.service.clone();
+    let next_task = task.clone();
     let snapshot = tokio::spawn(async move { service.snapshot(task, "manual").await.unwrap() });
-    // A project listing starts after the global listing. Its first directory creation
-    // marks that point; queue the writer behind its read lock and ahead of freeze's read.
+    // Encourage a save between listing and freezing. Observing directory creation
+    // does not stop the snapshot; either complete version may legitimately win.
     tokio::time::timeout(std::time::Duration::from_secs(10), async {
         while !project.join(".agents").exists() {
             tokio::task::yield_now().await;
@@ -1032,11 +1033,27 @@ async fn snapshots_describe_the_manifest_version_that_was_frozen() {
     .unwrap();
     let run = snapshot.await.unwrap();
     let selected = &run["snapshot"]["skills"][0];
+    let description = if selected["content"] == SKILL {
+        "Review the current changes"
+    } else {
+        assert_eq!(selected["content"], content);
+        "Use the latest branch conventions"
+    };
+    assert_eq!(selected["description"], description);
+    let frozen =
+        cairn_installation::skills::frozen(&api.service.config, text(selected, "bundle")).unwrap();
     assert_eq!(
-        selected["content"], content,
-        "writer must commit between listing and freezing"
+        std::fs::read_to_string(frozen.join("SKILL.md")).unwrap(),
+        text(selected, "content")
     );
-    assert_eq!(selected["description"], "Use the latest branch conventions");
+
+    // After the writer finishes, a fresh snapshot must select the new version.
+    let next = api.service.snapshot(next_task, "manual").await.unwrap();
+    assert_eq!(next["snapshot"]["skills"][0]["content"], content);
+    assert_eq!(
+        next["snapshot"]["skills"][0]["description"],
+        "Use the latest branch conventions"
+    );
 }
 
 /// A `gh` that serves `fixture/skills` from JSON files named after endpoints.

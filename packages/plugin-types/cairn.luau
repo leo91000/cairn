@@ -27,8 +27,14 @@
 --                     return { notice?, tone?, view? }
 --   test              the owner tests an instance            { instance } -> { ok, message? }
 --   form              the owner edits an instance (instanceForm)
---                     { values, credential, secrets, instance?, changed?, submit }
+--                     { values, credential, secrets, instance?, changed?, submit, setup? }
+--                     setup = {revision, expiresAt, urls = {webhooks: {[name]: url}, oauthCallback}}
+--                     appears only for an owner-bound persisted configuration draft
 --                     -> FormResult; http and exec use the draft's credential and secrets
+--   webhook           a verified signed public POST         {endpoint, method, headers, body, instance, setup}
+--                     setup=true accepts only declared setup challenges; all host capabilities are refused
+--                     -> {status, body: string, headers?: {["content-type"]: string}}
+--                     Original UTF-8 body; 128 KiB input, 64 KiB response, 2.5 s total.
 -- `instances` are those the agent is granted: { id, name, enabled, settings, secrets }
 -- (secret field names only). Pass `instance = id` to capability calls when several.
 -- Each handler runs to completion under a deadline and a 16 MB memory limit.
@@ -46,6 +52,7 @@ export type HttpRequest = {
     -- content-type, accept, user-agent or x-* only.
     headers: { [string]: string }?,
     json: Json?,
+    form: { [string]: string }?, -- URL encoded text fields, exclusive with other body types
     body: string?,
     -- multipart/form-data: a JSON part plus deliverables of the reply being handled.
     multipart: {
@@ -55,7 +62,8 @@ export type HttpRequest = {
     }?,
     -- true adds the instance's credential using the manifest's "credential" rule; a
     -- table adds a secret field to one header. The script never sees the value.
-    auth: (boolean | { secret: string, header: string?, prefix: string? })?,
+    auth: (boolean | { secret: string, header: string?, prefix: string?, resource: string? }
+        | { resource: string, oauth: string })?, -- host-managed bearer token; saved HTTP only
     -- The instance to act for, in commands and tools granted several.
     instance: string?,
 }
@@ -72,6 +80,17 @@ export type ExecRequest = {
 }
 
 export type ExecResult = { status: number, stdout: string, stderr: string }
+
+export type PersonalOAuthTarget = { resource: string, provider: string }
+export type PersonalOAuthStatus = {
+    status: "disconnected" | "pending" | "denied" | "authorized" | "reconnect",
+    subject: string?,
+    scopes: { string }?,
+    requestedScopes: { string }?,
+    expiresAt: number?,
+}
+
+export type PersonalOAuthConsent = { url: string, redirectUri: string, expiresAt: number }
 
 -- A view component. Tones: "neutral" | "info" | "success" | "warning" | "danger".
 export type Component = { type: string, [string]: Json }
@@ -91,9 +110,23 @@ export type FormResult = {
 export type Inbound = {
     kind: string?, -- handler to call, default "message"
     id: string, -- platform message ID, deduplicated for 30 days
+    resource: string?, -- required for collections declaring delegation; host selects its route
     author: Author,
     context: { [string]: Json }?, -- routing the package needs; kept for requests too
     body: { [string]: Json }?, -- what the person wrote; kept only for allowed people
+}
+
+export type Resource = {
+    id: string,
+    connectionId: string,
+    collection: string,
+    parentId: string?,
+    name: string,
+    enabled: boolean,
+    revision: string,
+    settings: { [string]: Json },
+    secretKeys: { string }, -- names only; auth.resource injects a value in HTTP
+    updatedAt: number,
 }
 
 export type HttpResponse = {
@@ -147,7 +180,27 @@ export type Cairn = {
     },
     -- capability "inbound": Cairn keeps it only if the person is allowed (approval mode
     -- records a request without content). Returns whether it was queued.
-    inbound: { accept: (message: Inbound) -> boolean },
+    inbound: {
+        accept: (message: Inbound) -> boolean,
+        -- Use the precise result before acknowledging external delivery. "busy" is
+        -- temporary; "requested" stores identity/routing only, never message content.
+        deliver: (message: Inbound) -> {status: "accepted" | "duplicate" | "denied" | "requested" | "busy"},
+    },
+    resources: {
+        get: (options: {collection: string, resource: string, instance: string?}) -> Resource,
+        list: (options: {collection: string, cursor: string?, instance: string?}) -> {items: {Resource}, nextCursor: string?},
+    },
+    -- capability "oauth": a personal provider, from a resource-routed admitted
+    -- message/interaction only. The host supplies the person and route. Send the
+    -- URL privately; the same person finishes from an admitted event after
+    -- their browser callback. No tokens, account identity or authority in inputs.
+    oauth: {
+        -- A durable replay keeps its URL, or returns its already completed status.
+        start: (options: PersonalOAuthTarget & { scopes: { string } }) -> PersonalOAuthConsent | PersonalOAuthStatus,
+        finish: (options: PersonalOAuthTarget) -> PersonalOAuthStatus,
+        status: (options: PersonalOAuthTarget) -> PersonalOAuthStatus,
+        disconnect: (options: PersonalOAuthTarget) -> PersonalOAuthStatus,
+    },
     -- With "socket" or "inbound": the state the owner sees, "connecting" or "connected".
     instance: { status: (state: string, message: string?) -> () },
     json: { decode: (text: string) -> Json, encode: (value: Json) -> string },
@@ -167,20 +220,30 @@ export type Cairn = {
             text: string,
             thread: string?,
             shared: boolean?,
+            -- Resource-routed messages only: queue an independent turn. If the
+            -- preceding turn stops, do not replay its prompt or native session.
+            newTurn: boolean?,
             files: { { url: string, name: string? } }?,
             reply: Json?,
         }) -> { chatId: string, messageId: string },
         -- capability "conversations.control": while handling `message` or `interaction`.
-        -- Name the conversation by ID or by its shared thread.
+        -- Name the conversation by ID or by its shared thread. Resource-routed
+        -- controls require the issuing turn's deliveryId; only its author may act.
         -- Check before collecting a partial answer; the final effect also rechecks.
-        check: (target: { conversation: string?, thread: string? }) -> { conversation: string },
+        check: (target: { conversation: string?, thread: string?, delivery: string? }) -> { conversation: string },
         answer: (answer: {
             conversation: string?,
             thread: string?,
+            delivery: string?,
             question: string,
             answers: { [string]: string },
         }) -> { status: string },
-        cancel: (target: { conversation: string?, thread: string?, shared: boolean? }) -> { stopped: boolean },
+        cancel: (target: { conversation: string?, thread: string?, shared: boolean?, delivery: string? }) -> { stopped: boolean },
+        -- Resource-routed admitted people only. Reset a settled source thread,
+        -- naming its expected conversation; outstanding work/replies must finish.
+        -- Cairn keeps its history. The next submit creates a new conversation.
+        -- Retrying the same admitted event returns the committed reset receipt.
+        reset: (target: { conversation: string, thread: string, shared: boolean? }) -> { reset: boolean, conversation: string },
     },
 }
 

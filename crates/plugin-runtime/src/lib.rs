@@ -38,6 +38,7 @@ cairn.conversations = {
     check = function(target) return call("conversations.check", target) end,
     answer = function(answer) return call("conversations.answer", answer) end,
     cancel = function(target) return call("conversations.cancel", target) end,
+    reset = function(target) return call("conversations.reset", target) end,
 }
 cairn.exec = {
     run = function(request) return call("exec.run", request) end,
@@ -57,6 +58,17 @@ cairn.socket = {
 }
 cairn.inbound = {
     accept = function(message) return call("inbound.accept", message) end,
+    deliver = function(message) return call("inbound.deliver", message) end,
+}
+cairn.resources = {
+    get = function(options) return call("resources.get", options) end,
+    list = function(options) return call("resources.list", options) end,
+}
+cairn.oauth = {
+    start = function(options) return call("oauth.start", options) end,
+    finish = function(options) return call("oauth.finish", options) end,
+    status = function(options) return call("oauth.status", options) end,
+    disconnect = function(options) return call("oauth.disconnect", options) end,
 }
 cairn.instance = {
     status = function(state, message) call("instance.status", { state = state, message = message }) end,

@@ -527,6 +527,7 @@ async fn sockets_reach_only_declared_hosts_from_the_transport_worker() {
         event: json!({ "name": "socket" }),
         link: Some(link.clone()),
         draft: None,
+        resource_grant: None,
     };
     for url in [
         "wss://gateway.discord.gg.attacker.example",
@@ -924,6 +925,7 @@ async fn same_credential_reserves_the_last_session_start_across_instances() {
         event: json!({ "name": "socket" }),
         link: Some(link.clone()),
         draft: None,
+        resource_grant: None,
     };
     let (first, second) = (context(first), context(second));
     let send = json!({ "text": "{\"token\":\"{{secret}}\"}", "auth": true, "pace": 5000,
@@ -1114,17 +1116,42 @@ async fn expired_session_budget_is_refetched_before_identifying() {
     server.abort();
 }
 
+async fn socket_fixture(s: &Service, source: &str) -> (Connection, registry::Package) {
+    let installed = registry::install(
+        s,
+        &json!({
+            "manifest": {
+                "id": "socket-fixture", "name": "Socket fixture", "version": "1", "apiVersion": 2,
+                "capabilities": ["socket"], "hosts": ["gateway.discord.gg"]
+            },
+            "source": source
+        }),
+    )
+    .await
+    .unwrap();
+    registry::approve(s, "socket-fixture", "1", text(&installed, "digest"))
+        .await
+        .unwrap();
+    let connection = connections::save(
+        s,
+        "socket-fixture",
+        &json!({"name": "Socket fixture", "enabled": true}),
+        None,
+    )
+    .await
+    .unwrap();
+    (
+        serde_json::from_value(connection).unwrap(),
+        registry::active(s, "socket-fixture").await.unwrap(),
+    )
+}
+
 #[tokio::test]
 async fn every_named_socket_send_delivers_its_completion() {
-    let (_root, s, agent) = service().await;
-    let connection: Connection = serde_json::from_value(
-        save(&s, &agent, json!({ "guildId": "100", "channelId": "200" }))
-            .await
-            .unwrap(),
-    )
-    .unwrap();
-    let mut package = registry::active(&s, "discord").await.unwrap();
-    package.source.main = r#"
+    let (_root, s, _agent) = service().await;
+    let (connection, package) = socket_fixture(
+        &s,
+        r#"
         return { socket = function(event)
             if event.type == "start" then
                 cairn.socket.connect({ url = "wss://gateway.discord.gg" })
@@ -1135,8 +1162,9 @@ async fn every_named_socket_send_delivers_its_completion() {
                 cairn.socket.send("done:" .. event.name)
             end
         end }
-    "#
-    .into();
+    "#,
+    )
+    .await;
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     s.plugins
         .route_sockets_to(Some(format!("ws://{}", listener.local_addr().unwrap())));
@@ -1165,15 +1193,10 @@ async fn every_named_socket_send_delivers_its_completion() {
 
 #[tokio::test]
 async fn continuous_named_send_completions_do_not_starve_reads_or_cancellation() {
-    let (_root, s, agent) = service().await;
-    let connection: Connection = serde_json::from_value(
-        save(&s, &agent, json!({ "guildId": "100", "channelId": "200" }))
-            .await
-            .unwrap(),
-    )
-    .unwrap();
-    let mut package = registry::active(&s, "discord").await.unwrap();
-    package.source.main = r#"
+    let (_root, s, _agent) = service().await;
+    let (connection, package) = socket_fixture(
+        &s,
+        r#"
         return { socket = function(event)
             if event.type == "start" then
                 cairn.socket.connect({ url = "wss://gateway.discord.gg" })
@@ -1183,8 +1206,9 @@ async fn continuous_named_send_completions_do_not_starve_reads_or_cancellation()
                 cairn.socket.send("ack")
             end
         end }
-    "#
-    .into();
+    "#,
+    )
+    .await;
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     s.plugins
         .route_sockets_to(Some(format!("ws://{}", listener.local_addr().unwrap())));

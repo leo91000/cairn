@@ -98,8 +98,9 @@ A manifest declares `"apiVersion": 2` (the only version Cairn loads) and:
   24×24 grid);
 - `programs` (with `exec`): `[{ name, path, description }]`, absolute paths the
   package may run;
-- `agentAccess`: `{ description }`; the owner grants agents per instance and
-  only granted agents get the package's commands, tools and instructions;
+- `agentAccess`: `{ description }`; the owner grants instance-wide access or
+  individual resource operations. Only granted agents receive the corresponding
+  commands, tools and instructions;
 - `commands`, `tools`, `instructions` (need `agentAccess`), `instanceView`,
   `instanceTest` and `instanceForm`: see [Contributions](#contributions).
 
@@ -249,6 +250,484 @@ Separate processes, capability checks and Luau's sandbox are dogfood boundaries,
 not yet a marketplace guarantee: a public catalogue still needs signed packages,
 OS-level isolation of workers and an update policy. No Codex plugin catalog is
 enabled or downloaded.
+
+### Signed public HTTP
+
+The `webhooks` capability declares POST endpoints authenticated in the installation
+with HMAC-SHA256 over the original bytes. Each declaration names a secret setting,
+signature header, optional digest prefix, and template containing `{{body}}` once.
+An optional signed Unix timestamp uses `{{timestamp}}` and a declared header with
+`maxAgeSeconds` (1–600). The host checks timestamp age, rejects ambiguous duplicate
+signature headers, and compares the digest in constant time before starting Luau.
+
+```json
+{
+  "webhooks": [{
+    "name": "events",
+    "signature": {
+      "secret": "signingSecret",
+      "header": "x-provider-signature",
+      "prefix": "v0=",
+      "template": "v0:{{timestamp}}:{{body}}",
+      "timestamp": { "header": "x-provider-timestamp", "maxAgeSeconds": 300 }
+    }
+  }]
+}
+```
+
+Beacon relays the public route
+`/api/public/installations/<installation>/plugins/<instance>/<endpoint>` without
+storing its body. It forwards provider signature/retry headers and binds the request
+to the exact installation route, excluding browser credentials and proxy headers.
+Offline installations return 503; the relay deadline is 2.8 seconds.
+
+The direct route is `/api/plugin-webhooks/<instance>/<endpoint>`. The instance
+must be enabled and its package approved. This route has no Cairn account authority.
+Its fresh `webhook` handler receives `{endpoint, method, headers, body, instance, setup}`;
+`body` is the original UTF-8 text. It returns `{status, body, headers?}` where `body`
+is text and only `content-type` is accepted in response headers. Ordinary cookies
+and authorization headers are never exposed to the script. Limits are 128 KiB of
+request body, 16 KiB of headers, 64 KiB of response body and 2.5 seconds for the
+whole operation, including body reading and worker startup. A failed or timed-out
+handler is an error response, never an empty successful acknowledgement.
+
+`cairn.inbound.deliver(message)` returns `{status}`: `accepted`, `duplicate`,
+`denied`, `requested` or `busy`. `accepted` means the event and its deduplication
+marker were committed together; `busy` means they were not committed and the
+sender can retry. Requests retain only identity and routing. Use this result when
+deciding whether to acknowledge a signed HTTP or socket delivery. The shorter
+`inbound.accept` returns true only for a newly accepted event. Neither API bypasses
+the instance's admission rules or grants public requests conversation control.
+
+### Setup drafts
+
+Owner-only `/api/plugins/<plugin>/setup-drafts` supports POST and GET (a list of
+`{items, nextCursor: null}`). Append `/<draft>` for GET, PATCH or DELETE. POST
+accepts `{name, settings?, secrets?, token?}`; PATCH additionally requires the last
+`revision`, as does DELETE. Missing required fields are allowed during setup;
+provided fields still use the manifest's validation. Secret values remain encrypted
+and responses expose only their names. An optional declared credential is stored
+with the same encrypted TTL; responses expose only `credential: boolean`. Blank or
+omitted tokens keep the saved credential. PATCH keeps the draft ID and original expiry.
+
+Drafts expire after 24 hours, with at most 32 live drafts per installation. They
+belong to the current owner's account and installation-access revision and never
+start workers or grant agents access. Changing the approved package makes the
+draft `review_needed`: the owner can inspect or discard it, but cannot edit it or
+use its public endpoint. Uninstalling the package deletes its drafts and secrets;
+reinstalling identical files does not restore them or an in-flight creation.
+
+A webhook can declare `"setup": {"match": {"/type": "url_verification"}}`.
+Between one and eight JSON pointer selectors must all match string values. A
+signed JSON request matching that declaration can use the draft's stable direct
+or Beacon route before activation. Its handler receives `setup = true`; only
+pure Luau computation is available, including `cairn.json`. Every host capability
+is refused. Signature verification precedes the live owner check; expired,
+deleted, revoked or changed drafts cannot return a challenge. Other events are
+refused before invoking the package. Live instances receive `setup = false`.
+
+With `instanceForm`, the owner can POST `/<draft>/form` with `{revision,
+settings?, secrets?, token?, changed?, directOrigin?}`. Typed values temporarily
+override saved values; a separate PATCH persists them. The form receives the stable
+`instance` ID and `setup = {revision, expiresAt, urls}`. `urls.webhooks` maps every
+declared endpoint name to its callback URL; `urls.oauthCallback` is the shared OAuth
+callback for that draft. They use Beacon by default. An explicit `directOrigin`
+uses an HTTPS origin without credentials, a path or query, under the same rule as
+OAuth. These addresses do not by themselves authorize any public request.
+
+Form handlers may use only declared HTTP and exec capabilities, with credentials
+injected by the host. Saved secret values never reach Luau. Editing, deleting or
+expiring the draft during I/O prevents that response reaching the handler. Signed
+public setup challenges retain their pure-Luau scope with no host effects.
+
+Draft resources use the separate owner-only path
+`/<draft>/resources/<collection>` (GET/POST), with `/<resource>` for GET/PUT/DELETE.
+Mutations require `setupRevision`; replacing or deleting a resource also requires
+its `revision`. Missing required fields are allowed while preparing, while supplied
+fields retain the schema and 64 KiB limits. Parents must belong to the same draft
+and declared collection tree. Resources and their encrypted fields expire with the
+draft and are removed on discard/uninstall. They never appear through live instance
+APIs and provide no agent or delegation authority. Both active and draft
+configuration writes recheck their exact loaded package approval before committing.
+
+Owner OAuth uses `/<draft>/resources/<collection>/<resource>/oauth/<provider>`
+(POST consent, GET safe status, DELETE local disconnect) and `/finish` (POST).
+Consent and disconnect require `setupRevision`; finish requires the captured
+`state`, which pins its root and resource snapshots. Only non-personal providers
+are available in setup. Anonymous callbacks still deposit a single code at the
+stable callback URL; the same owner must complete the exchange.
+
+Consent expires after at most ten minutes and never later than the draft. Final
+authorizations share the draft's encrypted TTL and carry explicit setup provenance.
+Changed or deleted roots/resources, disconnection, expiry or approval changes
+fence in-flight completion. Consent retains the exact approval record fingerprint;
+reapproving identical files or switching away and back cannot revive it. Pending
+consent from a version without that proof must be started again. Discarding a resource also deletes its unconsumed
+setup consent states. Safe identity metadata updates stay in the draft namespace;
+active OAuth endpoints and operational credential lookup refuse setup provenance.
+
+The owner activates a saved draft with POST `/<draft>/activate`: `{revision,
+enabled, agentIds?, agentId?, projectId?, accessMode?, userIds?, people?,
+maxMessagesPerHour?, maxPerPersonPerHour?, directOrigin?}`. Name, settings,
+credentials and secrets come from the persisted draft; update them with PATCH
+before activation. The final `form` invocation has `submit = true`, the same stable
+`instance` ID and `setup` addresses. It may supply derived required values before
+full schema validation. Ordinary instance saves use the same validators.
+
+Activation requires complete root/resource fields and secrets, valid parent trees,
+current owner/approval and unchanged root/resources after form I/O. One transaction
+publishes the live instance and resources with their original IDs, promotes only
+finished owner OAuth by clearing setup provenance and rebinding its instance
+revision, removes credential expirations and consumes setup metadata. A final form
+cannot change a connected provider's client ID while retaining that authorization:
+save the final configuration and complete fresh consent first. Pending
+consent is discarded; an already-consumed exchange cannot publish late tokens.
+Failure preserves the draft and starts no worker. A successful retry against the
+consumed draft returns not found/conflict rather than creating a second instance.
+Workers are notified only after commit. No agent is granted by default.
+
+The web and Android owner interfaces use saved setup drafts for packages declaring
+resources, OAuth or webhooks. Owners can resume or discard an unfinished setup,
+save root settings and masked secrets, prepare resource collections and activate
+the saved instance. Activation waits for the latest form answer, saved root
+changes and any resource write. An open resource editor must be saved or closed
+first. Active resources support editing, parent selection, pagination and confirmed
+deletion. Owners can also manage shared resource OAuth and resource agent access
+on both clients. Routes and provider-side revocation remain separate unfinished
+delivery slices in the Slack checklist.
+
+### Resource collections
+
+The `resources` capability declares related collections in `resources`:
+`{name, title, singular, parent?, delegation?, settings}`. Each collection uses the
+same field schema as instance forms; parent declarations must form an acyclic tree.
+Resources belong to exactly one instance. Parent references cannot cross instances
+or name an unrelated collection. Each instance can keep at most 256 resources;
+values and encrypted secrets are bounded to 64 KiB each.
+
+Owner management uses
+`/api/plugins/<plugin>/connections/<instance>/resources/<collection>`: POST creates,
+GET lists `{items, nextCursor}` in pages of 100. Append `/<resource>` for GET, PUT
+and DELETE. PUT includes the last `revision`; concurrent/stale edits return 409.
+Secret fields are submitted separately; blank keeps the existing secret. Responses
+contain `secretKeys` (names), never values. Deleting a parent deletes its descendants
+and encrypted secrets atomically; removing the instance also removes its resources.
+
+`cairn.resources.list{collection, cursor?}` and `get{collection, resource}` read
+metadata. HTTP can select a secret using
+`auth = {resource = id, secret = key, header = "authorization", prefix = "Bearer "}`.
+Cairn verifies the resource and every parent before use and after I/O; paused,
+removed or changed resources cannot deliver a result. The package never receives
+the credential. Resource access by agents requires a separate resource grant.
+
+### Resource grants and operations
+
+`operations` declares `{name, collection, profile, scopes?, requests?}`. Profiles
+are `read`, `contribute` and `manage`, in increasing order. Each request fixes
+`{method, host, path, bindings?}`; a trailing `*` permits a path prefix. A binding
+maps a request field to an admitted input scope (for example `channel` to
+`channel`) or to a non-secret resource setting (`team_id` to `resource.externalId`).
+The host verifies it in query/JSON/form arguments, rejects duplicates and
+ambiguous raw/multipart bodies, and never relies on the script to enforce that
+request's method, endpoint or bound fields.
+
+A command or tool declares `operation` and must require a `resource` plus every
+declared scope as text arguments. The host selects the resource and operation
+before running Luau; the event includes `operation`. Resource-scoped handlers may
+read their selected resource and make only that operation's approved HTTP requests
+with its credential. They cannot switch instances, use root-instance credentials,
+run a program or bypass admission through another capability.
+
+The owner manages rules at
+`/api/plugins/<plugin>/connections/<instance>/resources/<collection>/<resource>/grants`:
+POST creates and GET lists; DELETE of `/<grant>` revokes. A rule has `agentId`, an
+optional `profile`, extra `operations`, `deniedOperations`, and `scopes` mapping
+input names to allowed values. Exclusions override the profile within a rule;
+multiple rules grant the union of what they allow. Scoped rules do not authorize
+operations that omit those scopes. Nothing is granted by default, including to
+Main agent or through instance-level grants. Tools list only operations the
+agent can use. CLI and MCP share the same checks.
+
+On web and Android, open the active instance, then **Agent access** on its resource.
+Choose an agent explicitly, select a profile or individual operations, optionally
+limit scope values, and inspect the per-rule preview before granting access.
+Resource grants are unavailable during inactive setup. Rules can be revoked with
+confirmation; this does not remove permissions granted by other rules. After an
+uncertain write, refresh the saved rules before another change. Connecting a
+resource provider through OAuth does not grant any agent access by itself.
+
+Rules are bound to the verified current owner's access, and rechecked alongside
+instance, resource/parent revisions and approval before capabilities and before
+returning results. Deleting resources removes their rules. Agents reachable by
+anyone cannot receive resource credentials; adding such a delegation also checks
+existing resource rules.
+
+### Owner-selected conversation routes
+
+A resource collection can declare `delegation: true` when the package also declares
+`conversations.submit`. These instances do not delegate to one app-wide agent.
+The owner configures routes under each resource at
+`/api/plugins/<plugin>/connections/<instance>/resources/<collection>/<resource>/routes`.
+POST creates, GET lists `{items}`, and `/<route>` supports PUT with its last
+`revision` or DELETE. A route contains `name`, `enabled`, exact string `match`
+conditions on source context, `agentId`, optional `projectId`, `accessMode`,
+`userIds`, optional `people`, and hourly limits. Defaults are 20 messages per hour
+and five per person; the latter applies to everyone access. No route or person is
+granted by default. The selected agent must have only the selected project's access
+and no installation access; everyone access retains the stricter public-agent rules.
+
+`cairn.inbound.deliver` supplies the configured `resource` and authentic source
+`context` alongside its message. The host selects the most specific matching route.
+A disabled override denies admission; equally specific matching rules conflict.
+Packages cannot select an agent or route using message bodies. Access requests and
+approvals are local to the selected route: append `/<route>/requests` for GET or
+`/<route>/people/<person>` for POST `{action = "approve" | "deny" | "remove"}`.
+Unapproved requests retain the person's identity, never message content.
+
+Accepted events and deliveries retain native route authority outside the Luau
+payload. Instance, ancestor-resource, route, owner-access and package revisions
+are checked again before effects and after slow results. Adding a more specific
+route can revoke older queued authority. Each worker is checked against the exact
+manifest and source files it loaded, including across package approval changes.
+Operation scopes with the same name as a route condition must match that condition;
+operations on the source integration cannot select a different instance or an
+unrelated resource even if the agent has a broader grant.
+
+Shared threads still share a conversation, while each admitted message records its
+own external subject. Answer and cancel calls must include `delivery`, the issuing
+turn's `deliveryId`, and come from that turn's author under the same route authority.
+Old buttons, another participant and another route cannot control the current turn.
+Question notifications are limited to their issuing turn. Reusing an agent's
+question ID in a later turn produces a new notification for that turn's author;
+old controls cannot answer it. Resuming an interrupted
+turn also requires its original authority; another author must start a new turn.
+For a resource-routed message, `cairn.conversations.submit{newTurn = true, ...}`
+queues an independent request in the same conversation. If the preceding turn
+stops, its original prompt is cancelled rather than replayed. Cairn waits until
+its workspace has settled, then starts a fresh native session with the queued
+requester's own authority. History and workspace remain shared. The old turn's
+MCP bearer and controls cannot act for the next requester. Each delivery keeps
+its own terminal outcome even though the native run is reused: queued requests
+are not cancelled with their predecessor, and a late reply pump cannot collect a
+later requester's answer or files for an abandoned request.
+
+A source author's Stop allows an already queued independent request to proceed;
+the owner's Pause in Cairn keeps the queue paused even when new requests arrive.
+An explicit native resume releases that pause and advances the next independent
+request. Answers still queued for the stopped turn are cancelled with that turn;
+ordinary requests retain their queue order. Admission, route, current thread
+binding and requester are rechecked when the new turn actually starts. A waiting
+workspace does not block other conversations. Editing or withdrawing the queued
+message from Cairn removes its automatic new-turn intent. Omitting `newTurn`
+preserves the original-author resume path.
+
+An admitted resource participant can call
+`cairn.conversations.reset{conversation = expectedChatId, thread = sourceThread, shared = true}`
+with the `conversations.control` capability. The expected conversation must still
+be the current binding of that source thread; stale buttons and other threads
+cannot reset its replacement. Queued messages, a preparing/running/stopping worker,
+unsettled native recovery, scheduled continuations (including paused waits) or
+undelivered replies prevent reset. Finish or stop
+that work first and wait for its reply. Reset retires only the binding: existing
+Cairn history and workspace are retained. It creates no empty conversation; the
+next source submit starts a fresh one. A retry of the same admitted event returns
+its committed receipt, including after that new conversation exists. Receipts
+expire after 30 days and conversation purge removes them; a purged expected chat
+can never identify the replacement. Old source deliveries and controls cannot act
+for a retired binding. Generic setup journeys and the Slack controls that use
+this API remain in the delivery checklist.
+
+### Host-managed resource OAuth
+
+The `oauth` capability declares up to eight providers for resource collections.
+The host captures token responses; scripts receive neither authorization codes,
+client secrets, access tokens nor refresh tokens. Providers connect either an
+owner-managed resource or the verified requester's personal account.
+Setup drafts and the client configuration interfaces remain in the Slack delivery
+checklist.
+
+```json
+{
+  "name": "bot",
+  "title": "Connect workspace",
+  "collection": "workspace",
+  "authorizationUrl": "https://api.example.com/authorize",
+  "tokenUrl": "https://api.example.com/token",
+  "clientId": "clientId",
+  "clientSecret": "clientSecret",
+  "scopes": ["messages:read", "messages:write"],
+  "token": {
+    "accessToken": "/access_token",
+    "refreshToken": "/refresh_token",
+    "expiresIn": "/expires_in",
+    "scope": "/scope"
+  },
+  "metadata": { "externalId": "/team/id" }
+}
+```
+
+Both endpoints use HTTPS on declared hosts, without redirects. `clientId` names
+an instance text setting; `clientSecret` names a secret setting. `pkce: true` adds
+S256 PKCE and permits a public client without `clientSecret`. Confidential clients
+use HTTP Basic authentication at the token endpoint. A provider supporting both
+may declare both. Slack's PKCE switch changes the app to a public client; do not
+enable it silently in a server app.
+
+`scopeParameter` defaults to `scope` and may name another nonreserved parameter,
+such as `user_scope`. `scopeSeparator`
+defaults to a space and can be a comma. Response mappings are bounded JSON
+pointers; `refreshTokenResponse` may declare a different shape for renewals, such
+as a nested initial token and a root-level refresh response. Optional expiry is in
+seconds. Metadata captures only identity strings ending in `id` or `name`, into
+declared nonsecret text fields, without overlapping token paths. Existing identity
+values cannot be silently replaced by a different OAuth workspace.
+
+Authorization management uses this prefix:
+`/api/plugins/<plugin>/connections/<instance>/resources/<collection>/<resource>/oauth/<provider>`.
+
+- POST `{scopes: [...]}` starts authorization with a distinct subset of declared
+  scopes. Returns `url`, `state`, `redirectUri` and `expiresAt`. State expires after
+  ten minutes and binds requester, owner access, package approval and resource and
+  instance revisions. Optional `directOrigin` selects the owner's exposed HTTPS
+  origin. A provider may declare `redirectOriginSetting`, naming an instance URL
+  setting, to use that owner-configured HTTPS origin for every authorization.
+  Origins cannot contain a path, query or credentials. With neither option, the
+  redirect uses Beacon automatically.
+- The public GET callback only captures one code, encrypted, and returns constant
+  plain text. It grants no account authority and cannot exchange credentials.
+  Direct: `/api/plugin-oauth/<instance>/callback`; Beacon:
+  `/api/public/installations/<installation>/plugin-oauth/<instance>/callback`.
+- POST `/finish` appended to that prefix, with
+  `{state}`, must come from the initiating account. It returns `pending`, `denied`
+  or `authorized`. The code is consumed before the exchange, including failures;
+  start again after an uncertain result. GET of the prefix returns safe status,
+  granted `scopes`, `requestedScopes` and `expiresAt`. Provider grants can be
+  cumulative; extra token scopes do not grant any Cairn agent permissions.
+- DELETE of the prefix disconnects locally, invalidates in-flight exchanges and
+  prevents late responses from restoring credentials. This does not revoke the
+  token at its provider. Resource and instance deletion also erase credentials.
+
+Saved HTTP calls use `auth = {resource = id, oauth = "bot"}`. Cairn injects a bearer
+token and renews it near expiry. Concurrent calls share a renewal; the consumed
+refresh state is persisted before sending a single-use token. An interrupted or
+uncertain renewal requires reconnection, rather than replaying the old token.
+Owner access, approval, resource identity and authorization revision are checked
+again around I/O. Resource-granted calls also recheck the agent before issuing a
+new provider request after a slow renewal.
+
+#### Personal providers
+
+Native sleep and condition wakeups continue the captured requester's authority.
+Owner intervention suspends personal OAuth for that task, including later wakeups;
+it retains the original external resource and channel restrictions for bot tools.
+Held tool calls are fenced when that suspension changes.
+
+Add `"personal": {"subject": "/authed_user/id"}` to a provider whose token
+response identifies a person. The host captures this nonsecret subject alongside
+the encrypted credentials. The provider must also declare resource identity
+metadata, and that identity must match an already configured resource. Personal
+providers must capture at least one stable ID, using a pointer ending in `/id`;
+a display name alone is insufficient. Personal authorization cannot create or
+change the owner's workspace identity.
+
+The same management prefix then addresses only the authenticated Cairn account's
+authorization. Members can start, finish, inspect and disconnect their own
+authorization; owner-connected providers still require the current owner. Each
+authorization is bound to the account's current installation access, independently
+of the owner. Removing and reinviting a member requires a new authorization.
+Responses include the verified `subject`, never tokens. Disconnect before linking
+a different external person. Disconnecting one person leaves others connected and
+fences code exchanges already in flight.
+
+Atelier → **Your plugin accounts** (Android: **Vos comptes de plugins**) is available
+to owners and members. It lists personal providers on configured live resources,
+lets the person choose explicit scopes, open the provider's HTTPS consent page,
+check its completion and confirm disconnection. Signing in grants no agent access.
+The pending consent URL and state stay in the current page's memory; after leaving
+it, start a new sign-in. A pending callback can be checked again, but an uncertain
+exchange failure ends that local flow rather than retrying a possibly consumed code.
+Disconnection removes Cairn's authorization and pending sign-ins; provider-side
+revocation still requires the service's settings.
+
+`GET /api/plugins/personal-authorizations?cursor=…` is a member-readable directory
+of labels, provider scopes and only that account's authorization summary. It never
+returns settings, secrets, another person's status or access to the owner catalog.
+It requires current installation membership, a currently approved personal provider
+and a configured stable resource ID. Pages contain at most 100 entries and an opaque
+`nextCursor`. Paused/unavailable resources are listed only when the current person
+already has an authorization, so they can disconnect it. An unapproved package
+contributes no entries until the owner restores approval. Membership and approval
+are checked again after loading package metadata; resource and own-authorization
+reads share a single SQLite snapshot.
+
+Resource-granted tools and commands select personal credentials from the current
+chat turn's authenticated author. The host records this authority atomically with
+the message; an input's claimed account, the conversation's first author and the
+installation owner cannot supply a fallback. Tool calls recheck the author, turn,
+membership, agent grant and authorization around network operations. Retrying
+another person's message ID cannot transfer its authority. Steering another
+person's active turn is refused; queue a new turn to use your own permissions.
+Editing a queued message reattributes it to the authenticated editor.
+Question answers follow the same check. The current installation owner can still
+answer another person's question from Cairn; doing so suspends personal credentials
+for that turn, including calls already in flight. The original author and their
+authorization remain unchanged, and a new turn can use its own requester again.
+
+Finishing personal OAuth also links its proved external subject to that account
+for this resource and provider. An active external identity cannot be linked to
+two installation accounts. Removed memberships can be replaced only by a fresh
+OAuth proof; their old callbacks and credentials are invalidated. Disconnecting
+removes the link as well as the credential. An externally admitted routed turn
+can use only the authorization for its exact proved subject in its resource scope.
+The link, membership, route and current turn are rechecked around network I/O.
+
+An admitted external person can also authorize directly from the external app,
+without a Cairn account. In a routed `message` or `interaction` handler, use:
+
+```lua
+local consent = cairn.oauth.start({
+    resource = workspace.id,
+    provider = "personal",
+    scopes = {"messages:read"},
+})
+-- Send consent.url privately to this person. After their browser authorization,
+-- an admitted interaction from the same person completes it:
+local status = cairn.oauth.finish({resource = workspace.id, provider = "personal"})
+```
+
+`start`, `finish`, `status` and `disconnect` accept only `resource`, `provider`
+and, for `start`, `scopes`. The host supplies the person, native event and source
+route. Public ingress, timers, tools, owner panels and scripts claiming an actor
+cannot initiate personal consent. The resource must belong to the admitted
+resource family. The callback still only deposits a code: an admitted event
+from the same person and route must finish the exchange. The provider must prove
+that exact person and the configured resource ID. This proof creates no Cairn
+account, membership or owner authority.
+
+`start` returns `url`, `redirectUri` and `expiresAt`. Replaying the same durable
+event preserves its consent URL. If that exact event has already completed consent,
+it returns the safe authorization status instead. `finish` returns `pending`,
+`denied`, `authorized` or the current status if already finished. `status` returns
+only this person's safe status, subject, scopes and expiry. A missing one-use
+exchange after an interruption requires a new consent; no code is replayed.
+`disconnect` fences in-flight exchanges and removes both an independent external
+credential and any Cairn-account credential linked to that proved person. An
+invalid independent credential cannot fall back silently to the linked account.
+
+The installation permits at most 128 live pending consents and 2,048 authorization
+storage records (credentials and revocation generations combined). Capacity
+errors preserve existing authorizations. Pending-only and disconnected revocation
+generations expire after ten minutes; active credentials remain until disconnected
+or their resource is deleted. Starting another consent keeps an active credential's
+revocation state live. Local disconnect remains available at capacity, including
+when the person is already disconnected, and still invalidates pending exchanges.
+
+Scheduled automation authorities and configuration drafts remain in the Slack delivery checklist.
+Unattributed in-process submissions and owner panels cannot use personal providers.
+
+Protocol references checked on 2026-10-17: [Slack OAuth](https://docs.slack.dev/authentication/installing-with-oauth/),
+[PKCE](https://docs.slack.dev/authentication/using-pkce/) and
+[token rotation](https://docs.slack.dev/authentication/using-token-rotation/).
 
 ## Contributions
 

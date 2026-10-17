@@ -14,20 +14,24 @@ use crate::{
 };
 use cairn_plugin_api::{Output, parse_arguments, usage};
 use serde_json::{Value, json};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 
 /// Active packages with agent access, each with the enabled instances granting `agent_id`.
 async fn granted(
     s: &Service,
     agent_id: &str,
     plugin: Option<&str>,
-) -> Result<Vec<(Package, Vec<Connection>)>> {
+) -> Result<Vec<(Package, Vec<Connection>, HashSet<String>)>> {
+    let resources = super::grants::Catalog::load(s, agent_id).await?;
+    let resource_instances = resources.instances();
     let mut by_plugin = BTreeMap::<String, Vec<Connection>>::new();
     for value in s.store.list(connections::KIND).await? {
         let Ok(connection) = serde_json::from_value::<Connection>(value) else {
             continue;
         };
-        if connection.grants(agent_id) && plugin.is_none_or(|plugin| plugin == connection.plugin_id)
+        if connection.enabled
+            && (connection.grants(agent_id) || resource_instances.contains(&connection.id))
+            && plugin.is_none_or(|plugin| plugin == connection.plugin_id)
         {
             by_plugin
                 .entry(connection.plugin_id.clone())
@@ -44,7 +48,8 @@ async fn granted(
             continue;
         }
         instances.sort_by(|a, b| a.name.cmp(&b.name));
-        output.push((package, instances));
+        let operations = resources.operations(&package.manifest, &instances);
+        output.push((package, instances, operations));
     }
     Ok(output)
 }
@@ -60,7 +65,7 @@ pub async fn instructions(s: &Service, agent_id: &str) -> Result<String> {
     Ok(granted(s, agent_id, None)
         .await?
         .iter()
-        .map(|(package, _)| package.manifest.instructions.trim())
+        .map(|(package, _, _)| package.manifest.instructions.trim())
         .filter(|text| !text.is_empty())
         .collect::<Vec<_>>()
         .join("\n"))
@@ -115,23 +120,30 @@ pub async fn command(s: &Service, bearer: &str, input: &Value) -> Result<Value> 
     let instances = granted(s, &agent_id, Some(plugin))
         .await?
         .into_iter()
-        .flat_map(|(_, instances)| instances)
+        .flat_map(|(_, instances, _)| instances)
+        .filter(|connection| connection.grants(&agent_id))
         .collect::<Vec<_>>();
-    if instances.is_empty() {
+    if command.operation.is_none() && instances.is_empty() {
         return Err(Error::forbidden(format!(
             "No enabled {} instance grants this agent.",
             package.manifest.name
         )));
     }
-    let scope = Scope::Agent {
-        agent_id,
-        instances,
+    let scope = match &command.operation {
+        Some(operation) => {
+            super::grants::authorize(s, &run, &package, operation, &json!(values)).await?
+        }
+        None => Scope::Agent {
+            agent_id,
+            instances,
+        },
     };
     let payload = json!({
         "command": name,
         "arguments": values,
         "agent": agent,
         "instances": scope.instances(),
+        "operation": command.operation,
     });
     let value = scope::invoke(s, &package, "command", payload, &scope).await?;
     Ok(match command.output {
@@ -158,7 +170,14 @@ pub async fn tools(s: &Service, bearer: &str) -> Result<Vec<Value>> {
     Ok(granted(s, &agent_id, None)
         .await?
         .iter()
-        .flat_map(|(package, _)| package.manifest.tools.iter())
+        .flat_map(|(package, instances, operations)| {
+            let instance_access = instances.iter().any(|instance| instance.grants(&agent_id));
+            package.manifest.tools.iter().filter(move |tool| {
+                tool.operation
+                    .as_ref()
+                    .map_or(instance_access, |operation| operations.contains(operation))
+            })
+        })
         .map(|tool| {
             json!({
                 "name": tool.name,
@@ -178,10 +197,10 @@ pub async fn call_tool(
 ) -> Result<Option<Value>> {
     let run = authorize(s, bearer).await?;
     let (agent_id, agent) = agent(&run);
-    let Some((package, instances)) = granted(s, &agent_id, None)
+    let Some((package, instances, _)) = granted(s, &agent_id, None)
         .await?
         .into_iter()
-        .find(|(package, _)| package.manifest.tool(name).is_some())
+        .find(|(package, _, _)| package.manifest.tool(name).is_some())
     else {
         return Ok(None);
     };
@@ -189,15 +208,28 @@ pub async fn call_tool(
     if !jsonschema::is_valid(&tool.input_schema, input) {
         return Err(Error::bad(format!("Invalid input for {name}.")));
     }
-    let scope = Scope::Agent {
-        agent_id,
-        instances,
+    let scope = match &tool.operation {
+        Some(operation) => super::grants::authorize(s, &run, &package, operation, input).await?,
+        None => {
+            let instances = instances
+                .into_iter()
+                .filter(|instance| instance.grants(&agent_id))
+                .collect::<Vec<_>>();
+            if instances.is_empty() {
+                return Ok(None);
+            }
+            Scope::Agent {
+                agent_id,
+                instances,
+            }
+        }
     };
     let payload = json!({
         "tool": name,
         "input": input,
         "agent": agent,
         "instances": scope.instances(),
+        "operation": tool.operation,
     });
     scope::invoke(s, &package, "tool", payload, &scope)
         .await

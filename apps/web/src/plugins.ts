@@ -56,6 +56,25 @@ export interface FormResult {
   view: any[]
 }
 
+/** Omitted or null guidance is a successful form with nothing to add. */
+export function formResult(value: Partial<FormResult> | null): FormResult {
+  return {
+    options: value?.options ?? {},
+    values: value?.values ?? {},
+    errors: value?.errors ?? {},
+    view: value?.view ?? [],
+  }
+}
+
+/** Errors without an inline field still need an explanation in the form. */
+export function unshownFormErrors(manifest: Manifest, errors: Record<string, string> = {}) {
+  const inline = new Set((manifest.settings ?? []).filter(field => !field.hidden).map(field => field.key))
+  inline.add('form')
+  if (manifest.credential)
+    inline.add('credential')
+  return Object.entries(errors).filter(([key]) => !inline.has(key)).map(([, message]) => message)
+}
+
 export interface PluginArgument {
   name: string
   flag?: string
@@ -91,6 +110,138 @@ export interface Manifest {
   instanceView?: boolean
   instanceTest?: boolean
   instanceForm?: boolean
+  resources?: PluginResourceCollection[]
+  operations?: PluginOperation[]
+  oauth?: PluginOAuthProvider[]
+  webhooks?: { name: string }[]
+}
+
+export type PluginAccessProfile = 'read' | 'contribute' | 'manage'
+
+export interface PluginOperation {
+  name: string
+  collection: string
+  profile: PluginAccessProfile
+  scopes?: string[]
+}
+
+export interface PluginResourceGrant {
+  id: string
+  resourceId: string
+  agentId: string
+  profile: PluginAccessProfile | null
+  operations: string[]
+  deniedOperations: string[]
+  scopes: Record<string, string[]>
+  revision: string
+}
+
+/** A preview of this rule only; other saved rules may independently grant access. */
+export function resourceRuleOperations(operations: PluginOperation[], rule: Pick<PluginResourceGrant, 'profile' | 'operations' | 'deniedOperations' | 'scopes'>) {
+  const levels = { read: 1, contribute: 2, manage: 3 }
+  return operations.filter(operation => !rule.deniedOperations.includes(operation.name)
+    && ((rule.profile && levels[rule.profile] >= levels[operation.profile]) || rule.operations.includes(operation.name))
+    && Object.keys(rule.scopes).every(scope => operation.scopes?.includes(scope)))
+}
+
+export interface PluginResourceCollection {
+  name: string
+  title: string
+  singular: string
+  parent?: string
+  delegation?: boolean
+  settings?: SettingField[]
+}
+
+export interface PluginResource {
+  id: string
+  connectionId: string
+  collection: string
+  parentId?: string | null
+  name: string
+  enabled: boolean
+  revision: string
+  settings: Record<string, any>
+  secretKeys: string[]
+}
+
+export interface PluginOAuthProvider {
+  name: string
+  title: string
+  collection: string
+  scopes: string[]
+  personal?: { subject: string }
+}
+
+export interface PluginOAuthStatus {
+  status: 'disconnected' | 'authorized' | 'reconnect' | 'pending' | 'denied'
+  scopes?: string[]
+  requestedScopes?: string[]
+  expiresAt?: number | null
+  subject?: string
+}
+
+export interface PluginOAuthConsent {
+  state: string
+  url: string
+  redirectUri?: string
+  expiresAt: number
+}
+
+export interface PluginPersonalAuthorization {
+  id: string
+  pluginId: string
+  pluginName: string
+  instanceId: string
+  instanceName: string
+  collection: string
+  resourceId: string
+  resourceName: string
+  providerName: string
+  title: string
+  scopes: string[]
+  enabled: boolean
+  authorization: PluginOAuthStatus
+}
+
+export function personalAuthorizationPath(item: PluginPersonalAuthorization) {
+  return `/plugins/${encodeURIComponent(item.pluginId)}/connections/${encodeURIComponent(item.instanceId)}/resources/${encodeURIComponent(item.collection)}/${encodeURIComponent(item.resourceId)}/oauth/${encodeURIComponent(item.providerName)}`
+}
+
+export interface PluginSetupDraft {
+  id: string
+  pluginId: string
+  name: string
+  status: 'setup' | 'review_needed'
+  settings: Record<string, any>
+  secretKeys: string[]
+  credential: boolean
+  revision: string
+  createdAt: number
+  expiresAt: number
+}
+
+export interface PluginPage<T> {
+  items: T[]
+  nextCursor?: string | null
+}
+
+/** Configuration requiring stable callbacks or resources before activation. */
+export function hasSetup(manifest: Manifest | null | undefined) {
+  return Boolean(manifest?.resources?.length || manifest?.oauth?.length || manifest?.webhooks?.length)
+}
+
+export function fieldValues(fields: SettingField[], settings: Record<string, any>) {
+  return Object.fromEntries(fields.filter(field => field.type !== 'secret').map(field => [
+    field.key,
+    settings[field.key] ?? field.default ?? (field.type === 'boolean' ? false : field.type === 'multiselect' ? [] : ''),
+  ]))
+}
+
+export function fieldSettings(fields: SettingField[], values: Record<string, any>) {
+  return Object.fromEntries(fields.filter(field => field.type !== 'secret')
+    .filter(field => values[field.key] !== '' && values[field.key] !== undefined && values[field.key] !== null)
+    .map(field => [field.key, field.type === 'number' ? Number(values[field.key]) : values[field.key]]))
 }
 
 export interface PackageVersion {
@@ -176,6 +327,9 @@ export const capabilityLabels: Record<string, [IconName, string]> = {
   'storage': [HardDrive, 'Storage'],
   'timers': [Clock, 'Timers'],
   'exec': [Cpu, 'Runs programs'],
+  'resources': [HardDrive, 'Resources'],
+  'oauth': [KeyRound, 'Account authorization'],
+  'webhooks': [Inbox, 'Receives web requests'],
 }
 
 /** What a package gives agents, for catalogue chips. */
@@ -198,7 +352,7 @@ export function needsWorker(manifest: Manifest | null | undefined) {
 
 /** Packages whose instances let people outside Cairn talk to an agent. */
 export function delegates(manifest: Manifest | null | undefined) {
-  return manifest?.capabilities.includes('conversations.submit') ?? false
+  return Boolean(manifest?.capabilities.includes('conversations.submit') && !manifest.resources?.some(resource => resource.delegation))
 }
 
 /** "Service account" / "Service accounts", or the generic wording. */

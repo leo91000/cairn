@@ -795,7 +795,7 @@ async fn connected(
                             }
                             _ => return Err(Error::bad("Unexpected relay frame.")),
                         };
-                        let capacity = if request.public_artifact.is_some() {
+                        let capacity = if request.public_artifact.is_some() || request.public_webhook.is_some() || request.public_oauth.is_some() {
                             &public_slots
                         } else {
                             &slots
@@ -879,7 +879,8 @@ async fn dispatch(
         .body(Body::from(input.body))
         .map_err(|_| Error::bad_gateway("Invalid installation request."))?;
     for (name, value) in input.headers {
-        if cairn_protocol::request_header(&name)
+        if (cairn_protocol::request_header(&name)
+            || (input.public_webhook.is_some() && cairn_protocol::webhook_header(&name)))
             && let (Ok(name), Ok(value)) =
                 (HeaderName::try_from(name), HeaderValue::try_from(value))
         {
@@ -893,6 +894,8 @@ async fn dispatch(
     let mut identity = InstallationIdentity::trusted(role, &input.account_id);
     identity.mcp_scopes = input.mcp_scopes;
     identity.public_artifact = input.public_artifact;
+    identity.public_webhook = input.public_webhook;
+    identity.public_oauth = input.public_oauth;
     request.extensions_mut().insert(identity);
 
     let deadline = tokio::time::Instant::now() + REQUEST_TIMEOUT;

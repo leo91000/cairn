@@ -1,0 +1,183 @@
+{
+  "id": "example",
+  "name": "Example",
+  "version": "1",
+  "apiVersion": 2,
+  "capabilities": [
+    "resources",
+    "http"
+  ],
+  "hosts": [
+    "api.example.test"
+  ],
+  "agentAccess": {},
+  "resources": [
+    {
+      "name": "workspace",
+      "title": "Workspaces",
+      "singular": "Workspace",
+      "settings": [
+        {
+          "key": "token",
+          "title": "Token",
+          "type": "secret",
+          "required": true
+        },
+        {
+          "key": "externalId",
+          "title": "Workspace ID",
+          "type": "string",
+          "required": true
+        }
+      ]
+    }
+  ],
+  "operations": [
+    {
+      "name": "read",
+      "collection": "workspace",
+      "profile": "read",
+      "scopes": [
+        "channel"
+      ],
+      "requests": [
+        {
+          "method": "GET",
+          "host": "api.example.test",
+          "path": "/messages",
+          "bindings": {
+            "channel": "channel",
+            "team_id": "resource.externalId"
+          }
+        },
+        {
+          "method": "POST",
+          "host": "api.example.test",
+          "path": "/read-messages",
+          "bindings": {
+            "channel": "channel",
+            "team_id": "resource.externalId"
+          }
+        }
+      ]
+    },
+    {
+      "name": "write",
+      "collection": "workspace",
+      "profile": "contribute",
+      "scopes": [
+        "channel"
+      ],
+      "requests": [
+        {
+          "method": "POST",
+          "host": "api.example.test",
+          "path": "/messages",
+          "bindings": {
+            "channel": "channel"
+          }
+        }
+      ]
+    }
+  ],
+  "commands": [
+    {
+      "name": "read",
+      "operation": "read",
+      "arguments": [
+        {
+          "name": "resource",
+          "flag": "--resource",
+          "required": true
+        },
+        {
+          "name": "channel",
+          "flag": "--channel",
+          "required": true
+        }
+      ]
+    }
+  ],
+  "tools": [
+    {
+      "name": "example_read",
+      "description": "Read messages",
+      "operation": "read",
+      "inputSchema": {
+        "type": "object",
+        "required": [
+          "resource",
+          "channel"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "resource": {
+            "type": "string"
+          },
+          "channel": {
+            "type": "string"
+          },
+          "method": {
+            "type": "string",
+            "enum": [
+              "GET",
+              "POST"
+            ]
+          },
+          "override": {
+            "type": "string"
+          },
+          "raw": {
+            "type": "string"
+          },
+          "form": {
+            "type": "boolean"
+          },
+          "teamOverride": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    {
+      "name": "example_write",
+      "description": "Write messages",
+      "operation": "write",
+      "inputSchema": {
+        "type": "object",
+        "required": [
+          "resource",
+          "channel"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "resource": {
+            "type": "string"
+          },
+          "channel": {
+            "type": "string"
+          },
+          "method": {
+            "type": "string",
+            "enum": [
+              "GET",
+              "POST"
+            ]
+          },
+          "override": {
+            "type": "string"
+          },
+          "raw": {
+            "type": "string"
+          },
+          "form": {
+            "type": "boolean"
+          },
+          "teamOverride": {
+            "type": "string"
+          }
+        }
+      }
+    }
+  ]
+}

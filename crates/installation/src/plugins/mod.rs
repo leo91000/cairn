@@ -1,18 +1,27 @@
 //! Installation-owned plugins. Every package (bundled or installed) runs in an isolated
 //! Luau worker and reaches Cairn only through capabilities its manifest declares and
 //! the owner approved.
+mod addresses;
 pub mod agents;
 pub mod capabilities;
 pub mod cli;
 pub mod connections;
 pub mod forms;
+pub mod grants;
 pub mod legacy;
+pub mod oauth;
 pub mod panels;
 pub mod programs;
 pub mod registry;
+pub(crate) mod requesters;
+pub mod resources;
+pub mod routes;
 pub mod runtime;
 pub mod scope;
+pub mod setup;
 pub mod socket;
+pub(crate) mod turns;
+pub mod webhooks;
 pub mod work;
 
 use crate::{
@@ -46,6 +55,7 @@ pub struct Plugins {
     programs: Mutex<HashMap<(String, String), PathBuf>>,
     /// When each paced key (e.g. a bot token's Identify budget) may send next.
     paces: socket::pacing::Paces,
+    oauth: oauth::Authorizations,
 }
 
 impl Default for Plugins {
@@ -62,6 +72,7 @@ impl Default for Plugins {
             worker: Mutex::new(None),
             programs: Mutex::new(HashMap::new()),
             paces: socket::pacing::Paces::default(),
+            oauth: oauth::Authorizations::default(),
         }
     }
 }
@@ -156,7 +167,7 @@ pub(crate) async fn command_response(s: &Service, request: Request) -> Result<Re
     Ok(response)
 }
 
-/// Owner-only management API (enforced by the HTTP layer for `/api/plugins`).
+/// Owner management, plus authenticated accounts' own personal OAuth flows.
 pub async fn routes(s: &Arc<Service>, input: &Input) -> Result<Value> {
     let parts = input
         .path
@@ -166,6 +177,13 @@ pub async fn routes(s: &Arc<Service>, input: &Input) -> Result<Value> {
     let body = &input.body;
     let version = || crate::validation::text(body, "version").to_owned();
     match (input.method.as_str(), parts.as_slice()) {
+        ("GET", ["plugins", "personal-authorizations"]) => {
+            let account = input
+                .identity
+                .as_ref()
+                .map_or("", |identity| identity.account_id.as_str());
+            oauth::personal::list(s, account, input.query.get("cursor").map(String::as_str)).await
+        }
         ("GET", ["plugins"]) => {
             let mut catalog = registry::catalog(s).await?;
             let mut overview = connections::overview(s).await?;
@@ -199,6 +217,371 @@ pub async fn routes(s: &Arc<Service>, input: &Input) -> Result<Value> {
         }
         ("DELETE", ["plugins", "packages", id]) => registry::uninstall(s, id).await,
         ("POST", ["plugins", id, "form"]) => forms::form(s, id, body).await,
+        ("GET", ["plugins", id, "setup-drafts"]) => {
+            let account = input
+                .identity
+                .as_ref()
+                .map_or("", |identity| identity.account_id.as_str());
+            setup::list(s, id, account).await
+        }
+        ("POST", ["plugins", id, "setup-drafts"]) => {
+            let account = input
+                .identity
+                .as_ref()
+                .map_or("", |identity| identity.account_id.as_str());
+            setup::save(s, id, account, body, None).await
+        }
+        ("POST", ["plugins", id, "setup-drafts", draft, "activate"]) => {
+            let account = input
+                .identity
+                .as_ref()
+                .map_or("", |identity| identity.account_id.as_str());
+            Box::pin(setup::activate(s, id, draft, account, body)).await
+        }
+        ("POST", ["plugins", id, "setup-drafts", draft, "form"]) => {
+            let account = input
+                .identity
+                .as_ref()
+                .map_or("", |identity| identity.account_id.as_str());
+            Box::pin(setup::form(s, id, draft, account, body)).await
+        }
+        (
+            _,
+            [
+                "plugins",
+                id,
+                "setup-drafts",
+                draft,
+                "resources",
+                collection,
+            ],
+        ) => resources::setup_routes(s, input, id, draft, collection, None).await,
+        (
+            _,
+            [
+                "plugins",
+                id,
+                "setup-drafts",
+                draft,
+                "resources",
+                collection,
+                resource,
+            ],
+        ) => resources::setup_routes(s, input, id, draft, collection, Some(resource)).await,
+        (
+            _,
+            [
+                "plugins",
+                id,
+                "setup-drafts",
+                draft,
+                "resources",
+                collection,
+                resource,
+                "oauth",
+                name,
+                tail @ ..,
+            ],
+        ) => {
+            Box::pin(oauth::setup_routes(
+                s,
+                input,
+                id,
+                draft,
+                &[collection, resource, name],
+                tail,
+            ))
+            .await
+        }
+        (method, ["plugins", id, "setup-drafts", draft]) => {
+            let account = input
+                .identity
+                .as_ref()
+                .map_or("", |identity| identity.account_id.as_str());
+            match method {
+                "GET" => setup::get(s, id, draft, account).await,
+                "PATCH" => setup::save(s, id, account, body, Some(draft)).await,
+                "DELETE" => setup::remove(s, id, draft, account, body).await,
+                _ => Err(Error::method_not_allowed("Method not allowed.")),
+            }
+        }
+
+        (
+            method,
+            [
+                "plugins",
+                id,
+                "connections",
+                instance,
+                "resources",
+                collection,
+                resource,
+                "oauth",
+                name,
+            ],
+        ) => {
+            let account = input
+                .identity
+                .as_ref()
+                .map_or("", |identity| identity.account_id.as_str());
+            match method {
+                "POST" => {
+                    oauth::start(s, id, instance, collection, resource, name, account, body).await
+                }
+                "GET" => oauth::status(s, id, instance, collection, resource, name, account).await,
+                "DELETE" => {
+                    oauth::revoke(s, id, instance, collection, resource, name, account).await
+                }
+                _ => Err(Error::method_not_allowed("Method not allowed.")),
+            }
+        }
+        (
+            "POST",
+            [
+                "plugins",
+                id,
+                "connections",
+                instance,
+                "resources",
+                collection,
+                resource,
+                "oauth",
+                name,
+                "finish",
+            ],
+        ) => {
+            let account = input
+                .identity
+                .as_ref()
+                .map_or("", |identity| identity.account_id.as_str());
+            oauth::finish(s, id, instance, collection, resource, name, account, body).await
+        }
+        (
+            "POST",
+            [
+                "plugins",
+                id,
+                "connections",
+                connection,
+                "resources",
+                collection,
+            ],
+        ) => resources::save(s, id, connection, collection, body, None).await,
+        (
+            "GET",
+            [
+                "plugins",
+                id,
+                "connections",
+                connection,
+                "resources",
+                collection,
+            ],
+        ) => {
+            resources::list(
+                s,
+                id,
+                connection,
+                collection,
+                input.query.get("cursor").map(String::as_str),
+            )
+            .await
+        }
+        (
+            "GET",
+            [
+                "plugins",
+                id,
+                "connections",
+                connection,
+                "resources",
+                collection,
+                resource,
+            ],
+        ) => Ok(serde_json::to_value(
+            resources::get(s, id, connection, collection, resource).await?,
+        )?),
+        (
+            "PUT",
+            [
+                "plugins",
+                id,
+                "connections",
+                connection,
+                "resources",
+                collection,
+                resource,
+            ],
+        ) => resources::save(s, id, connection, collection, body, Some(resource)).await,
+        (
+            "DELETE",
+            [
+                "plugins",
+                id,
+                "connections",
+                connection,
+                "resources",
+                collection,
+                resource,
+            ],
+        ) => resources::remove(s, id, connection, collection, resource).await,
+        (
+            method,
+            [
+                "plugins",
+                id,
+                "connections",
+                connection,
+                "resources",
+                collection,
+                resource,
+                "routes",
+            ],
+        ) => {
+            let account = input
+                .identity
+                .as_ref()
+                .map_or("", |i| i.account_id.as_str());
+            match method {
+                "POST" => {
+                    routes::save(s, id, connection, collection, resource, account, body, None).await
+                }
+                "GET" => routes::list(s, id, connection, collection, resource).await,
+                _ => Err(Error::method_not_allowed("Method not allowed.")),
+            }
+        }
+        (
+            method,
+            [
+                "plugins",
+                id,
+                "connections",
+                connection,
+                "resources",
+                collection,
+                resource,
+                "routes",
+                route,
+            ],
+        ) => {
+            let account = input
+                .identity
+                .as_ref()
+                .map_or("", |i| i.account_id.as_str());
+            match method {
+                "PUT" => {
+                    routes::save(
+                        s,
+                        id,
+                        connection,
+                        collection,
+                        resource,
+                        account,
+                        body,
+                        Some(route),
+                    )
+                    .await
+                }
+                "DELETE" => {
+                    routes::remove(s, id, connection, collection, resource, route, account).await
+                }
+                _ => Err(Error::method_not_allowed("Method not allowed.")),
+            }
+        }
+        (
+            "GET",
+            [
+                "plugins",
+                id,
+                "connections",
+                connection,
+                "resources",
+                collection,
+                resource,
+                "routes",
+                route,
+                "requests",
+            ],
+        ) => routes::requests(s, id, connection, collection, resource, route).await,
+        (
+            "POST",
+            [
+                "plugins",
+                id,
+                "connections",
+                connection,
+                "resources",
+                collection,
+                resource,
+                "routes",
+                route,
+                "people",
+                user,
+            ],
+        ) => {
+            let account = input
+                .identity
+                .as_ref()
+                .map_or("", |i| i.account_id.as_str());
+            routes::people(
+                s,
+                id,
+                connection,
+                collection,
+                resource,
+                route,
+                account,
+                user,
+                crate::validation::text(body, "action"),
+            )
+            .await
+        }
+        (
+            "POST",
+            [
+                "plugins",
+                id,
+                "connections",
+                connection,
+                "resources",
+                collection,
+                resource,
+                "grants",
+            ],
+        ) => {
+            let account = input
+                .identity
+                .as_ref()
+                .map_or("", |identity| identity.account_id.as_str());
+            grants::create(s, id, connection, collection, resource, account, body).await
+        }
+        (
+            "GET",
+            [
+                "plugins",
+                id,
+                "connections",
+                connection,
+                "resources",
+                collection,
+                resource,
+                "grants",
+            ],
+        ) => grants::list(s, id, connection, collection, resource).await,
+        (
+            "DELETE",
+            [
+                "plugins",
+                id,
+                "connections",
+                connection,
+                "resources",
+                collection,
+                resource,
+                "grants",
+                grant,
+            ],
+        ) => grants::remove(s, id, connection, collection, resource, grant).await,
         ("POST", ["plugins", id, "connections"]) => connections::save(s, id, body, None).await,
         ("PUT", ["plugins", id, "connections", connection]) => {
             connections::get(s, id, connection).await?;
