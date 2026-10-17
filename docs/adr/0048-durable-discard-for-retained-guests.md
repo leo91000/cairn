@@ -28,10 +28,11 @@ sandbox, and disposable guest tests verify retained-image bootstrap behavior.
 
 ## Consequences
 
-The installation compatibility epoch remains unchanged: journal bytes, database
-schemas, manifests and envelopes are still readable by the preceding release.
+This storage change preserves the existing installation compatibility epoch:
+journal frames, database schemas, manifests and envelopes retain their formats.
+Rollback follows the installation's overall compatibility policy.
 The new cached template uses the same identity fields and a different version;
-rollback can cold-boot ordinary disks and skip maintenance. No guest data reset,
+a compatible release can cold-boot ordinary disks and skip maintenance. No guest data reset,
 delta dependency graph or eager bucket scan is introduced.
 
 Trim adds bounded journal work and can increase competing read/write latency;

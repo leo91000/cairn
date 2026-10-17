@@ -114,10 +114,13 @@ in the entrypoint identity. An older template cannot restore the previous device
 topology. Fresh templates retain the helper and the same immutable control disk
 when cloned; live conversation VMs are never copied as templates.
 
-The installation compatibility epoch stays 1. Disk frames, database schemas,
+This storage change preserves the existing installation compatibility epoch.
+Disk frames, database schemas,
 manifest/envelope formats and runtime records are unchanged. Template identity
 uses the existing fields; its version prevents reuse across the topology change.
-Older releases can ignore the new cached templates and boot the retained disk.
+A release compatible with the installation's data epoch can ignore the new cached
+templates and boot the retained disk. Rollback must follow the installation's
+[compatibility policy](PRODUCTION-CAIRN.md#installation-data-compatibility).
 The updated init tolerates a missing control disk on rollback, so ordinary disk
 reads and the older bridge remain usable. Rolling back disables new maintenance;
 it does not resurrect discarded bytes, which were already free in ext4.
