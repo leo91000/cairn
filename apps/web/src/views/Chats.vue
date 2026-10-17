@@ -45,6 +45,7 @@ import VirtualSelect from '../components/VirtualSelect.vue'
 import {
   ArrowDown,
   ArrowUp,
+  ArrowUpRight,
   Bell,
   Bot,
   Check,
@@ -61,6 +62,7 @@ import {
   Plug,
   Plus,
   Search,
+  Shield,
   Trash2,
   X,
   Zap,
@@ -165,6 +167,7 @@ function switcherAnchor() {
 const error = ref('')
 const dismissedError = ref(false)
 const visibleError = computed(() => error.value || detail.value?.error || (detail.value?.run?.status === 'failed' ? detail.value.run.error || 'The response stopped before finishing. Resume the conversation to continue.' : ''))
+const openCodeRegionBlocked = computed(() => visibleError.value.startsWith('OpenCode Go requires Global regions for this model.'))
 watch(() => [visibleError.value, detail.value?.id, detail.value?.run?.finishedAt], () => {
   dismissedError.value = false
 })
@@ -334,7 +337,13 @@ const chosenProvider = computed({
   },
 })
 const switchingProvider = computed(() => !!detail.value?.run && chosenProvider.value !== currentProvider.value)
-const inheritAgentModel = computed(() => chosenProvider.value === (selectedAgent.value?.provider || 'codex'))
+const conversationAssistant = computed(() => detail.value?.run?.snapshot.agent)
+const inheritConversation = computed(() => chosenProvider.value === conversationAssistant.value?.provider)
+const inheritedAssistant = computed(() => {
+  if (inheritConversation.value)
+    return conversationAssistant.value
+  return chosenProvider.value === selectedAgent.value?.provider ? selectedAgent.value : undefined
+})
 const skills = computed(() => chatSkills(state.skills, selectedAgent.value, detail.value ? detail.value.projectId : projectId.value))
 const skillNames = computed(() => skills.value.map(skill => skill.name))
 const projects = computed(() => [{
@@ -433,15 +442,19 @@ async function send(mode: 'queue' | 'steer' = 'queue') {
 
     uploadProgress.value = ''
     const attachmentIds = attachments.value.map(attachment => attachment.id)
+    // A chat can use a different model from its saved agent. Keep the displayed
+    // conversation selection explicit on the wire, including after a reload.
+    const selectedModel = model.value || inheritedAssistant.value?.model || ''
+    const selectedReasoning = reasoning.value || (!model.value ? inheritedAssistant.value?.reasoning : '') || ''
     // Retain the id after a network failure so retry cannot duplicate a message.
-    if (!submission || submission.text !== text || submission.mode !== mode || submission.provider !== chosenProvider.value || submission.model !== model.value || submission.reasoning !== reasoning.value || submission.attachmentIds.join() !== attachmentIds.join()) {
+    if (!submission || submission.text !== text || submission.mode !== mode || submission.provider !== chosenProvider.value || submission.model !== selectedModel || submission.reasoning !== selectedReasoning || submission.attachmentIds.join() !== attachmentIds.join()) {
       submission = {
         id: crypto.randomUUID(),
         text,
         mode,
         provider: chosenProvider.value,
-        model: model.value,
-        reasoning: reasoning.value,
+        model: selectedModel,
+        reasoning: selectedReasoning,
         attachmentIds,
       }
     }
@@ -878,7 +891,50 @@ function key(event: KeyboardEvent) {
               :suspended="suspended"
               :highlighted="typeof route.query.question === 'string' ? route.query.question : undefined"
             />
-            <UiAlert v-if="visibleError && !dismissedError" class="mb-3 flex items-start gap-2">
+            <section
+              v-if="openCodeRegionBlocked && !dismissedError"
+              role="alert"
+              aria-label="OpenCode Privacy settings"
+              class="mb-3 rounded-2xl border border-warning/25 bg-surface p-4 phone:p-3.5"
+            >
+              <div class="flex items-start gap-3">
+                <span class="grid size-8 shrink-0 place-items-center rounded-xl bg-warning/10 text-warning"><Icon :name="Shield" :size="17" /></span>
+                <div class="min-w-0 flex-1">
+                  <h3 class="text-sm font-semibold text-ink">
+                    This model needs a Privacy change
+                  </h3>
+                  <p class="mt-1 text-xs leading-relaxed text-muted">
+                    OpenCode Go requires <strong class="text-ink">Global</strong> regions for this model. Review your workspace’s <strong class="text-ink">Privacy</strong> settings, or choose another model to keep your current settings.
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  :class="iconButton"
+                  class="shrink-0"
+                  aria-label="Dismiss error"
+                  @click="dismissedError = true"
+                >
+                  <Icon :name="X" :size="14" />
+                </button>
+              </div>
+              <div class="mt-3 flex flex-wrap items-center gap-2">
+                <a
+                  href="https://opencode.ai/console/"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  class="inline-flex min-h-9 items-center gap-1.5 rounded-lg bg-accent px-3 text-xs font-semibold text-surface"
+                >OpenCode settings<Icon :name="ArrowUpRight" :size="14" /></a>
+                <UiButton size="small" :disabled="busy" @click="action('pause', { paused: false })">
+                  Retry response
+                </UiButton>
+              </div>
+              <p class="mt-2.5 text-2xs text-muted">
+                To keep your current Privacy settings, <RouterLink :to="{ path: '/chats', query: { agent: detail?.agentId, project: detail?.projectId || undefined } }" class="font-medium text-accent underline">
+                  choose another model in a new conversation
+                </RouterLink>. This conversation and its files stay saved.
+              </p>
+            </section>
+            <UiAlert v-else-if="visibleError && !dismissedError" class="mb-3 flex items-start gap-2">
               <span class="min-w-0 flex-1">{{ visibleError }}</span><button
                 :class="iconButton"
                 class="shrink-0"
@@ -1031,9 +1087,10 @@ function key(event: KeyboardEvent) {
                       v-model:provider="chosenProvider"
                       v-model:model="model"
                       v-model:reasoning="reasoning"
-                      :inherit="inheritAgentModel"
-                      :default-model="inheritAgentModel ? selectedAgent?.model : ''"
-                      :default-reasoning="inheritAgentModel ? selectedAgent?.reasoning : ''"
+                      :inherit="!!inheritedAssistant"
+                      :default-model="inheritedAssistant?.model || ''"
+                      :default-reasoning="inheritedAssistant?.reasoning || ''"
+                      :default-source="inheritConversation ? 'conversation' : 'agent'"
                       :switching="switchingProvider"
                       :disabled="busy"
                     />

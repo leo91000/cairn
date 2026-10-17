@@ -27,10 +27,10 @@ const SEED_BUDGET_BYTES: u64 = 32 * 1024 * 1024 * 1024;
 
 /// The provider's configuration directory inside the conversation home.
 pub(crate) fn provider_home(plan: &Value) -> &'static str {
-    if plan["chat"]["provider"] == "claude" {
-        ".claude"
-    } else {
-        ".codex"
+    match plan["chat"]["provider"].as_str() {
+        Some("claude") => ".claude",
+        Some("opencode") => ".opencode",
+        _ => ".codex",
     }
 }
 

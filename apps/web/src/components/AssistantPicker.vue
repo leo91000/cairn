@@ -32,10 +32,16 @@ const props = withDefaults(defineProps<{
   inherit?: boolean
   defaultModel?: string
   defaultReasoning?: string
+  defaultSource?: 'agent' | 'conversation'
   disabled?: boolean
   switching?: boolean
   variant?: 'pill' | 'field'
-}>(), { defaultModel: '', defaultReasoning: '', variant: 'pill' })
+}>(), {
+  defaultModel: '',
+  defaultReasoning: '',
+  defaultSource: 'agent',
+  variant: 'pill',
+})
 const provider = defineModel<Provider>('provider', { default: 'codex' })
 const model = defineModel<string>('model', { default: '' })
 const reasoning = defineModel<string>('reasoning', { default: '' })
@@ -76,18 +82,21 @@ const models = computed(() => {
   return words ? visible.value.filter(item => `${item.displayName} ${item.model}`.toLowerCase().includes(words)) : visible.value
 })
 const missing = computed(() => !!model.value && !catalog.value.models.some(item => matches(item, model.value)))
+const inheritedLabel = computed(() => props.defaultSource === 'conversation' ? 'Conversation model' : 'Agent default')
+const inheritedDescription = computed(() => props.defaultSource === 'conversation' ? 'keep this conversation’s setting' : 'the agent’s setting')
+const defaultOwner = computed(() => props.inherit && !model.value ? props.defaultSource === 'conversation' ? 'Conversation' : 'Agent' : 'Model')
 const choices = computed(() => [
   ...(!current.value.requiresModel || (props.inherit && props.defaultModel)
     ? [
         {
           value: '',
-          label: props.inherit ? 'Agent default' : `${current.value.label} default`,
+          label: props.inherit ? inheritedLabel.value : `${current.value.label} default`,
           description: (!props.inherit && alias.value?.description) || (fallback.value
-            ? `${fallback.value} · ${props.inherit ? 'the agent’s setting' : `chosen by ${current.value.label}`}`
+            ? `${fallback.value} · ${props.inherit ? inheritedDescription.value : `chosen by ${current.value.label}`}`
             : props.inherit ? 'Follow the agent’s model' : 'Follow provider settings'),
           recommended: !props.inherit && !!alias.value,
           chosen: !model.value,
-          routes: [],
+          routes: props.inherit ? catalog.value.models.find(item => matches(item, props.defaultModel))?.routes?.filter(route => !route.hidden || route.model === props.defaultModel) ?? [] : [],
         },
       ]
     : []),
@@ -140,9 +149,9 @@ function chooseModel(option: { value: string, chosen: boolean }) {
 
 // Switching between routes of one model keeps a reasoning level they share.
 function chooseRoute(value: string) {
+  const effort = effectiveEffort.value
   model.value = value
-  if (reasoning.value && !efforts.value.some(effort => effort.reasoningEffort === reasoning.value))
-    reasoning.value = ''
+  reasoning.value = efforts.value.some(option => option.reasoningEffort === effort) ? effort : ''
 }
 
 function place() {
@@ -309,6 +318,17 @@ onBeforeUnmount(() => removeEventListener('resize', place))
           <h3 :id="`${id}-model`" class="section-label">
             Model
           </h3>
+          <div v-if="provider === 'opencode'" class="flex gap-2.5 rounded-xl border border-line bg-surface px-3 py-2.5 text-2xs">
+            <Icon :name="Info" :size="15" class="mt-0.5 shrink-0 text-accent" />
+            <div>
+              <p class="font-semibold text-ink">
+                Models from your connections
+              </p>
+              <p class="mt-1 text-muted">
+                Access depends on your provider’s plan, balance and Privacy settings. A listed model may still be blocked when you use it.
+              </p>
+            </div>
+          </div>
           <label v-if="visible.length > 6" class="flex items-center gap-2 rounded-lg bg-hover/60 px-3 text-muted focus-within:ring-2 focus-within:ring-accent/30">
             <Icon :name="Search" :size="14" /><span class="sr-only">Search models</span>
             <input
@@ -346,7 +366,7 @@ onBeforeUnmount(() => removeEventListener('resize', place))
                   <span class="flex min-w-0 flex-1 flex-col gap-0.5">
                     <span class="flex flex-wrap items-center gap-2">
                       <span class="text-sm font-semibold">{{ option.label }}</span>
-                      <span v-if="option.recommended" class="rounded-full bg-accent/12 px-2 py-px text-3xs font-semibold text-accent">Recommended</span>
+                      <span v-if="option.recommended" class="rounded-full bg-accent/12 px-2 py-px text-3xs font-semibold text-accent">{{ provider === 'opencode' ? 'Provider default' : 'Recommended' }}</span>
                     </span>
                     <span
                       v-if="option.description"
@@ -372,7 +392,7 @@ onBeforeUnmount(() => removeEventListener('resize', place))
                         :aria-checked="!route"
                         class="effort-chip"
                         :disabled="disabled"
-                        @click="chooseRoute(option.value)"
+                        @click="chooseRoute(selected?.model || option.value)"
                       >
                         <Icon v-if="!route" :name="Check" :size="12" />Auto
                       </button>
@@ -410,7 +430,7 @@ onBeforeUnmount(() => removeEventListener('resize', place))
                       :disabled="disabled"
                       @click="reasoning = ''"
                     >
-                      <Icon v-if="!reasoning" :name="Check" :size="12" />{{ inherit && !model ? 'Agent' : 'Model' }} default{{ defaultEffort ? ` · ${effortLabel(defaultEffort)}` : '' }}
+                      <Icon v-if="!reasoning" :name="Check" :size="12" />{{ defaultOwner }} default{{ defaultEffort ? ` · ${effortLabel(defaultEffort)}` : '' }}
                     </button>
                     <button
                       v-for="effort in efforts"

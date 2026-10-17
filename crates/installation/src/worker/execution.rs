@@ -19,6 +19,7 @@ use tokio_util::sync::CancellationToken;
 
 pub(super) const MAX_CONTROLLER_RECOVERIES: u64 = 3;
 const VM_STOP_WAIT_REASON: &str = "Waiting for the previous VM to stop.";
+const CONTROLLER_CAPACITY_RETRY_MS: i64 = 30_000;
 
 /// Executes a run, records how it ended and releases what it held once its
 /// process is confirmed stopped.
@@ -97,6 +98,9 @@ async fn record_failure(
     // Another conversation took the last room after the scheduler checked:
     // wait again instead of failing.
     if !cancel.is_cancelled() && crate::nodes::placement::is_no_capacity(error) {
+        checkpoint
+            .update(|state| state.capacity_retry_at = Some(now() + CONTROLLER_CAPACITY_RETRY_MS))
+            .await?;
         let patch = json!({
             "status": RunStatus::Queued,
             "recoveryPending": true,
@@ -219,7 +223,11 @@ async fn fence(s: &Service, checkpoint: &Checkpoint) -> Result<bool> {
         "status": RunStatus::Queued,
         "recoveryPending": true,
         "finishedAt": null,
-        "accountWaitReason": VM_STOP_WAIT_REASON,
+        "accountWaitReason": if text(&current, "accountWaitReason").starts_with(super::schedule::CAPACITY_WAIT_REASON) {
+            text(&current, "accountWaitReason")
+        } else {
+            VM_STOP_WAIT_REASON
+        },
     });
     s.store.patch_run(run_id, patch).await?;
     Ok(false)

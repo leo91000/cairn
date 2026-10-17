@@ -223,23 +223,7 @@ impl Server {
             directory: cwd.to_string_lossy().into_owned(),
         };
         let mut stdout = BufReader::new(stdout);
-        let ready = async {
-            loop {
-                let line = read_bounded_line(&mut stdout, 8192).await?;
-                if let Some(start) = line.find("http://127.0.0.1:") {
-                    let address = line[start..]
-                        .chars()
-                        .take_while(|c| c.is_ascii_alphanumeric() || ":./".contains(*c))
-                        .collect::<String>();
-                    return Url::parse(&address).map_err(|_| {
-                        Error::bad_gateway("OpenCode returned an invalid server address.")
-                    });
-                }
-            }
-        };
-        server.url = tokio::time::timeout(Duration::from_secs(45), ready)
-            .await
-            .map_err(|_| Error::gateway_timeout("OpenCode did not start in time."))??;
+        server.url = wait_for_server(&mut stdout).await?;
         server.drains.push(tokio::spawn(async move {
             let _ = tokio::io::copy(&mut stdout, &mut tokio::io::sink()).await;
         }));
@@ -360,6 +344,28 @@ impl Server {
         }));
         Ok(receiver)
     }
+}
+
+async fn wait_for_server(reader: &mut (impl tokio::io::AsyncBufRead + Unpin)) -> Result<Url> {
+    let ready = async {
+        loop {
+            let line = read_bounded_line(reader, 8192).await?;
+            if let Some(start) = line.find("http://127.0.0.1:") {
+                let address = line[start..]
+                    .chars()
+                    .take_while(|c| c.is_ascii_alphanumeric() || ":./".contains(*c))
+                    .collect::<String>();
+                return Url::parse(&address).map_err(|_| {
+                    Error::bad_gateway("OpenCode returned an invalid server address.")
+                });
+            }
+        }
+    };
+    // Restored native state can take longer to initialize on a cold VM. Keep the
+    // wait bounded, while the execution's cancellation still drops the process group.
+    tokio::time::timeout(Duration::from_secs(120), ready)
+        .await
+        .map_err(|_| Error::gateway_timeout("OpenCode did not start in time."))?
 }
 
 async fn read_bounded_line(
@@ -762,6 +768,42 @@ fn provider_name(provider: &Value) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test(start_paused = true)]
+    async fn restored_native_state_can_start_after_the_previous_deadline() {
+        use tokio::io::AsyncWriteExt;
+        let (mut writer, reader) = tokio::io::duplex(256);
+        let output = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_secs(60)).await;
+            writer
+                .write_all(b"opencode server listening on http://127.0.0.1:12345\n")
+                .await
+                .unwrap();
+        });
+        let url = wait_for_server(&mut BufReader::new(reader)).await.unwrap();
+        assert_eq!(url.as_str(), "http://127.0.0.1:12345/");
+        output.await.unwrap();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn native_startup_still_has_a_deadline_and_exits_fail_immediately() {
+        let (_writer, reader) = tokio::io::duplex(256);
+        let started = tokio::time::Instant::now();
+        let error = wait_for_server(&mut BufReader::new(reader))
+            .await
+            .unwrap_err();
+        assert!(error.message.contains("did not start in time"));
+        assert_eq!(started.elapsed(), Duration::from_secs(120));
+
+        let (writer, reader) = tokio::io::duplex(256);
+        drop(writer);
+        let started = tokio::time::Instant::now();
+        let error = wait_for_server(&mut BufReader::new(reader))
+            .await
+            .unwrap_err();
+        assert!(error.message.contains("exited before starting"));
+        assert_eq!(started.elapsed(), Duration::ZERO);
+    }
 
     fn model(name: &str, variants: &[&str]) -> Value {
         json!({

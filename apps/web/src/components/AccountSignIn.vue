@@ -200,6 +200,9 @@ async function close() {
           <p class="text-xs text-muted">
             The key is encrypted on your installation and used only for this model provider. Provider usage isn’t reported here.
           </p>
+          <p class="text-xs text-muted">
+            Model access is checked when you send a message. Your provider’s plan, balance and Privacy settings still apply.
+          </p>
         </template>
         <p v-else class="text-xs text-muted">
           You sign in on {{ providers[chosen].vendor }}’s page. Your password stays there.

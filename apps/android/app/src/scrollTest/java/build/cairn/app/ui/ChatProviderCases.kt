@@ -276,6 +276,177 @@ abstract class ChatProviderCases {
             assertNotEquals(sent[0]["id"], sent[1]["id"])
         }
     }
+
+    @Test
+    fun openCodeConversationKeepsItsModelAndReasoningAcrossRecreation() {
+        withOpenCodeConversation { sent, _, restoration, _ ->
+            compose
+                .onNodeWithTag("model-picker")
+                .assert(hasContentDescription("DeepSeek · effort élevé", substring = true))
+            restoration.emulateSavedInstanceStateRestore()
+            compose
+                .onNodeWithTag("model-picker")
+                .assert(hasContentDescription("DeepSeek · effort élevé", substring = true))
+            compose.onNodeWithTag("model-picker").performClick()
+            compose.onNodeWithText("Modèle de la conversation").assertExists()
+            compose.onNodeWithText("Modèles de vos connexions").assertExists()
+            compose.onNodeWithText("Terminé").performClick()
+            compose.onNode(hasSetTextAction()).performTextInput("Continue avec le même modèle")
+            compose.onNodeWithTag("conversation-send").performClick()
+            compose.waitUntil(10000) { sent.isNotEmpty() }
+            assertEquals("opencode", sent[0]["provider"]?.jsonPrimitive?.content)
+            assertEquals("auto/deepseek-v4-1-flash", sent[0]["model"]?.jsonPrimitive?.content)
+            assertEquals("high", sent[0]["reasoning"]?.jsonPrimitive?.content)
+        }
+    }
+
+    @Test
+    fun openCodePrivacyRefusalOffersRetrySettingsAndANewConversation() {
+        withOpenCodeConversation("OpenCode Go requires Global regions for this model.") {
+            _,
+            retries,
+            _,
+            created ->
+            compose.onNodeWithText("Ce modèle nécessite un réglage Privacy").assertIsDisplayed()
+            compose.onNodeWithText("Réglages OpenCode").assertExists()
+            compose.onNodeWithText("Réessayer la réponse").performClick()
+            compose.waitUntil(10000) { retries.isNotEmpty() }
+            assertEquals(false, retries[0]["paused"]?.jsonPrimitive?.boolean)
+            compose.waitUntil(10000) {
+                compose
+                    .onAllNodes(hasText("Nouvelle conversation") and isEnabled())
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
+            }
+            compose.onNodeWithText("Nouvelle conversation", substring = false).performClick()
+            compose.runOnIdle { assertTrue(created.value) }
+            compose.onNodeWithContentDescription("Masquer l’erreur").performClick()
+            compose.onNodeWithText("Ce modèle nécessite un réglage Privacy").assertDoesNotExist()
+        }
+    }
+
+    private fun withOpenCodeConversation(
+        error: String? = null,
+        exercise:
+            (
+                List<JsonObject>,
+                List<JsonObject>,
+                StateRestorationTester,
+                MutableState<Boolean>,
+            ) -> Unit,
+    ) {
+        MockWebServer().use { server ->
+            val sent = CopyOnWriteArrayList<JsonObject>()
+            val retries = CopyOnWriteArrayList<JsonObject>()
+            val agent =
+                Agent(MAIN_AGENT_ID, "Agent principal", model = "fixture-deep", reasoning = "ultra")
+            val run =
+                Run(
+                    "run",
+                    status = if (error == null) "succeeded" else "failed",
+                    error = error,
+                    snapshot =
+                        Snapshot(
+                            agent =
+                                agent.copy(
+                                    provider = "opencode",
+                                    model = "auto/deepseek-v4-1-flash",
+                                    reasoning = "high",
+                                )
+                        ),
+                )
+            val chat =
+                Chat(
+                    "chat",
+                    title = "Contexte conservé",
+                    runId = run.id,
+                    run = run,
+                    paused = error != null,
+                )
+            server.dispatcher =
+                object : Dispatcher() {
+                    override fun dispatch(request: RecordedRequest): MockResponse {
+                        val path = request.path!!.substringBefore('?')
+                        if (path == "/api/installations/fixture/api/chats/chat/stream") {
+                            val frame =
+                                "event: batch\nid: 0\ndata: ${wireJson.encodeToString(LiveBatch(emptyList(), LiveState(chat = chat, run = run), true, false))}\n\n"
+                            return MockResponse()
+                                .setHeader("Content-Type", "text/event-stream")
+                                .setBody(frame + ": keepalive\n\n".repeat(10000))
+                                .throttleBody(
+                                    frame.toByteArray().size.toLong(),
+                                    1,
+                                    java.util.concurrent.TimeUnit.SECONDS,
+                                )
+                        }
+                        val body =
+                            when (path) {
+                                "/api/installations" -> beaconInstallationsFixture()
+                                "/api/account/session" -> beaconAccountFixture("fixture")
+                                "/api/installations/fixture/api/agents" ->
+                                    wireJson.encodeToString(listOf(agent))
+                                "/api/installations/fixture/api/opencode/models" ->
+                                    """{"models":[{"model":"auto/gpt-5-6-luna","displayName":"GPT 5.6 Luna","isDefault":true},{"model":"auto/deepseek-v4-1-flash","displayName":"DeepSeek","supportedReasoningEfforts":[{"reasoningEffort":"high"}]}]}"""
+                                "/api/installations/fixture/api/chats/chat/messages" -> {
+                                    sent +=
+                                        wireJson
+                                            .parseToJsonElement(request.body.readUtf8())
+                                            .jsonObject
+                                    "{}"
+                                }
+                                "/api/installations/fixture/api/chats/chat/pause" -> {
+                                    retries +=
+                                        wireJson
+                                            .parseToJsonElement(request.body.readUtf8())
+                                            .jsonObject
+                                    "{}"
+                                }
+                                "/api/installations/fixture/api/overview" -> "{}"
+                                else -> "[]"
+                            }
+                        return MockResponse().setBody(body)
+                    }
+                }
+            server.start()
+            val vm =
+                CairnViewModel(
+                    ApplicationProvider.getApplicationContext<Application>(),
+                    ProviderVault(),
+                    beaconOrigin = "",
+                )
+            val restoration = StateRestorationTester(compose)
+            val created = mutableStateOf(false)
+            restoration.setContent {
+                val state by vm.state.collectAsStateWithLifecycle()
+                LaunchedEffect(Unit) {
+                    vm.state.first { it.ready }
+                    if (!vm.state.value.session.authenticated)
+                        vm.connect(server.url("/").toString())
+                }
+                CairnTheme {
+                    if (state.session.authenticated)
+                        ChatScreen(
+                            vm,
+                            state,
+                            "chat",
+                            openChat = {},
+                            openRun = {},
+                            create = { created.value = true },
+                        )
+                }
+            }
+            compose.waitUntil(20000) {
+                compose
+                    .onAllNodes(
+                        hasTestTag("model-picker") and
+                            hasContentDescription("DeepSeek", substring = true)
+                    )
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
+            }
+            exercise(sent, retries, restoration, created)
+        }
+    }
 }
 
 private class ProviderVault : SessionVault {

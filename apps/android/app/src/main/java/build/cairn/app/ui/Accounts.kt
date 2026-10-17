@@ -932,6 +932,11 @@ internal fun AccountSignInSheet(
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
+                        Text(
+                            "L’accès aux modèles est vérifié à l’envoi. L’offre, le solde et les réglages Privacy du fournisseur s’appliquent.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
                     }
                     SignalButton(
                         if (usesKey)

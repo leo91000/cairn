@@ -218,6 +218,13 @@ fn native_error(error: &Value) -> Error {
         .as_u64()
         .or(error["statusCode"].as_u64());
     let message = match status {
+        Some(400)
+            if error["data"]["message"].as_str().is_some_and(|message| {
+                message.contains("This Go model requires Global regions.")
+            }) =>
+        {
+            "OpenCode Go requires Global regions for this model. Review your OpenCode workspace Privacy settings and select Global if appropriate, then resume. To keep your current settings, start a new conversation with another model."
+        }
         Some(401 | 403) => {
             "OpenCode authentication failed. Check the model provider and replace its API key in Connections."
         }
@@ -764,7 +771,10 @@ async fn execute(
         native["permission"] = json!({ "*": "allow" });
     }
     let server = tokio::select! {
-        result = Server::start(config, &home, Path::new(text(&plan, "cwd")), &native, Some(&credentials)) => result?,
+        result = crate::performance::wait(
+            "opencode_startup",
+            Server::start(config, &home, Path::new(text(&plan, "cwd")), &native, Some(&credentials)),
+        ) => result?,
         () = cancel.cancelled() => return Err(Error::bad_gateway("OpenCode execution stopped.")),
     };
     let session = if let Some(id) = plan["sessionId"].as_str() {

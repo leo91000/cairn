@@ -237,6 +237,12 @@ fn eligible_run(db: &Db<'_>, id: &str) -> Result<bool> {
     if run["status"] != RunStatus::Queued || !run["cancelRequestedAt"].is_null() {
         return Ok(false);
     }
+    if RunCheckpoint::load_in(db, id)?
+        .and_then(|checkpoint| checkpoint.capacity_retry_at)
+        .is_some_and(|deadline| deadline > now())
+    {
+        return Ok(false);
+    }
     match crate::conversation_lifecycle::require_active_run(db, id) {
         Ok(()) => Ok(true),
         Err(error) if error.is_conflict() => Ok(false),
@@ -329,7 +335,9 @@ async fn recover_or_wait(s: &Service, run: &Value) -> Result<bool> {
     if let Ok(ready) = recover(s, run).await {
         return Ok(ready);
     }
-    if run["accountWaitReason"] != RECOVERY_WAIT_REASON {
+    if run["accountWaitReason"] != RECOVERY_WAIT_REASON
+        && !text(run, "accountWaitReason").starts_with(CAPACITY_WAIT_REASON)
+    {
         let patch = json!({ "accountWaitReason": RECOVERY_WAIT_REASON });
         s.store.patch_run(text(run, "id"), patch).await?;
     }

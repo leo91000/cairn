@@ -58,6 +58,9 @@ pub struct RunCheckpoint {
     pub last_message: Option<String>,
     #[serde(default, with = "lenient", skip_serializing_if = "Option::is_none")]
     pub controller_recoveries: Option<u64>,
+    /// A controller's capacity refusal delays admission without consuming a recovery attempt.
+    #[serde(default, with = "lenient", skip_serializing_if = "Option::is_none")]
+    pub capacity_retry_at: Option<i64>,
     #[serde(default, with = "nullable", skip_serializing_if = "Option::is_none")]
     pub settled: Nullable<Settled>,
     #[serde(flatten)]
