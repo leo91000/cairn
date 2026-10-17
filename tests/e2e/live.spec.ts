@@ -645,18 +645,28 @@ test('following the latest output resumes a long backlog on the recent window, w
     return line(150).count()
   }).toBe(1)
 
-  // A reader of older messages keeps the replay and its reading offset.
-  await scroller.evaluate(el => el.scrollTop = 300)
+  // A reader of older messages keeps the replay and its place. Reading mid-history
+  // stays clear of older-page prefetching, which shifts the offset to hold the content.
+  await scroller.evaluate(el => el.scrollTop = Math.round(el.scrollHeight / 2))
   await expect(page.getByRole('button', { name: 'Latest activity', exact: true })).toBeVisible()
-  await expect.poll(async () => (await saved())?.top).toBe(300)
+  const top = await scroller.evaluate(el => el.scrollTop)
+  await expect.poll(async () => (await saved())?.top).toBe(top)
   expect((await saved())?.follow).toBe(false)
+  const anchor = await scroller.evaluate((el) => {
+    const edge = el.getBoundingClientRect().top
+    const first = [...el.querySelectorAll('.activity-message')].find(message => message.getBoundingClientRect().top >= edge)
+    return Number(first?.textContent?.match(/Resume line (\d{3})\./)?.[1])
+  })
+  expect(anchor).toBeGreaterThan(0)
+  const anchorTop = async () => (await line(anchor).boundingBox())?.y ?? Number.NaN
+  const before = await anchorTop()
   await page.goto(workspacePath(`${workspace.url}/agents`))
   write(300, 560)
   streams.length = 0
   await page.goto(workspacePath(`${workspace.url}/runs/${run.id}`))
   await expect(line(559)).toBeAttached()
   expect(new URL(streams[0]).searchParams.get('recent')).toBeNull()
-  await expect.poll(() => scroller.evaluate(el => el.scrollTop)).toBe(300)
+  await expect.poll(async () => Math.abs(await anchorTop() - before)).toBeLessThan(2)
   await expect(page.getByRole('button', { name: 'Latest activity', exact: true })).toBeVisible()
 })
 
