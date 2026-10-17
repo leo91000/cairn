@@ -27,9 +27,17 @@ read transaction.
 
 Subscribers pull bounded pages (100 events, approximately 256 KiB of stored text
 and payload; one larger existing event may exceed that budget). A slow client
-does not accumulate a private event queue or block the writer. Rapid updates are
-grouped with a 25 ms delivery interval. A cursor beyond the available history or
-a changed conversation run triggers a reset and replay.
+does not accumulate a private event queue or block the writer. Rapid live updates
+are grouped with a 25 ms delivery interval; stored pages that remain to replay are
+sent without it. A cursor beyond the available history or a changed conversation
+run triggers a reset and replay.
+
+A viewer that follows the latest output adds `recent=1` when it resumes from a
+cursor. If its backlog needs more than one page, the stream answers with the
+recent window as a reset, as when the conversation opens, instead of replaying
+every stored update. Older messages then load from the window's boundary. A
+viewer reading older messages omits the flag and keeps the replay, so its reading
+position stays valid. Servers without this behavior ignore the flag.
 
 Text uses a complete baseline followed by append-only `payload.item.delta`
 updates. Every reconnect establishes its own baseline; replacements send a new
@@ -60,7 +68,7 @@ forwarding. A reverse proxy must preserve streaming and allow keep-alives.
 ## Verification
 
 `crates/installation/tests/live.rs` exercises real HTTP streams: concurrent clients, paginated
-replay, writes during replay, slow readers, rollback, cursor precedence/reset,
+replay, recent-window resumes, writes during replay, slow readers, rollback, cursor precedence/reset,
 server restart, session revocation, invalid requests, metadata-only updates, and
 Unicode text baselines/deltas. The local 25-sample write-to-HTTP measurement was
 26 ms median and 27 ms p95; it excludes provider generation and Internet latency.

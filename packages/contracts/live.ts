@@ -16,6 +16,7 @@ export interface LiveBatch {
   history?: string
   events: RunEvent[]
   state?: LiveState
+  /** Replaces the loaded history: an invalid cursor, another run, or a `recent=1` resume past a long backlog. */
   reset: boolean
   more: boolean
 }

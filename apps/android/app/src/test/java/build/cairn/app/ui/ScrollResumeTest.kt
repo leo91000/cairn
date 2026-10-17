@@ -193,8 +193,9 @@ class ScrollResumeTest {
                 Thread.sleep(300)
                 compose.waitForIdle()
                 assertTrue(visible(60))
+                // Following the latest output accepts the recent window instead of a long replay.
                 assertEquals(
-                    "/api/installations/fixture/api/chats/diagnostic/stream?after=60&history=v1%3Afixture%3A1&window=1",
+                    "/api/installations/fixture/api/chats/diagnostic/stream?after=60&history=v1%3Afixture%3A1&window=1&recent=1",
                     requests[1],
                 )
                 // A reader who scrolled upward must stay at the same offset on resume.

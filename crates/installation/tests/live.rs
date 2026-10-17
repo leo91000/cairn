@@ -86,6 +86,7 @@ impl Fixture {
         Stream {
             response,
             pending: String::new(),
+            received: 0,
         }
     }
 
@@ -143,6 +144,8 @@ fn event_ids(events: &Value) -> Vec<i64> {
 struct Stream {
     response: reqwest::Response,
     pending: String,
+    /// Bytes read from the response body so far.
+    received: usize,
 }
 
 impl Stream {
@@ -172,6 +175,7 @@ impl Stream {
                     .await
                     .unwrap()
                     .expect("unexpected EOF");
+                self.received += chunk.len();
                 self.pending.push_str(std::str::from_utf8(&chunk).unwrap());
             }
         })
@@ -247,20 +251,129 @@ async fn cached_resume_drains_backlog_without_waiting_between_live_batches() {
         )
         .await;
 
-    // 240 pages would impose six seconds of artificial coalescing delays.
-    // Leave ample time for real I/O while catching a delay on every replay page.
-    let received = resumed.through(*expected.last().unwrap()).await;
+    let end = *expected.last().unwrap();
+    let mut received = Vec::new();
+    let mut pages = 0;
+    loop {
+        let (id, batch) = resumed.batch().await;
+        received.extend(event_ids(&batch["events"]));
+        pages += 1;
+        if id >= end {
+            break;
+        }
+    }
     let elapsed = started.elapsed();
-    eprintln!("24,000 cached events replayed in {elapsed:?}");
+    eprintln!("24,000 cached events replayed in {pages} pages and {elapsed:?}");
     assert_eq!(received.len(), expected.len());
     assert!(
         received == expected,
         "cached replay changed the event sequence"
     );
+
+    // Coalescing every page would take at least 25 ms each, whatever the host load.
+    // Real I/O stays below that floor without bounding a loaded test run by a fixed time.
+    let coalescing_floor = Duration::from_millis(25) * pages;
     assert!(
-        elapsed < Duration::from_secs(4),
+        elapsed < coalescing_floor,
         "cached replay waited for live coalescing between backlog pages: {elapsed:?}"
     );
+}
+
+#[tokio::test]
+async fn following_viewer_resumes_a_long_backlog_on_the_recent_window() {
+    let f = Fixture::new().await;
+    f.service
+        .store
+        .patch_run(&f.run, json!({ "trigger": "chat" }))
+        .await
+        .unwrap();
+    let mut chat = f.service.chat_create(json!({})).await.unwrap();
+    chat["runId"] = f.run.clone().into();
+    let chat_id = text(&chat, "id").to_owned();
+    let path = format!("/api/chats/{chat_id}/stream");
+    f.service.store.put("chats", chat).await.unwrap();
+    let mut initial = f.open_path(&format!("{path}?window=1"), None).await;
+    let (cursor, batch) = initial.batch().await;
+    let history = batch["history"].as_str().unwrap().to_owned();
+    drop(initial);
+    let resume = |after: i64| format!("{path}?after={after}&history={history}&window=1&recent=1");
+
+    // A backlog that fits in one page still replays, keeping the cached history.
+    f.append(100).await;
+    let mut short = f.open_path(&resume(cursor), None).await;
+    let (cursor, page) = short.batch().await;
+    assert_eq!(page["reset"], false);
+    assert_eq!(page["more"], false);
+    assert_eq!(event_ids(&page["events"]).len(), 100);
+    drop(short);
+
+    // Small enough to run beside the 24,000-event replay test without contention.
+    f.append(2400).await;
+    let run = f.run.clone();
+    let backlog: Vec<i64> = f
+        .service
+        .store
+        .read(move |db| {
+            Ok(db
+                .events(&run, cursor, 2500)?
+                .iter()
+                .map(|event| event["id"].as_i64().unwrap())
+                .collect())
+        })
+        .await
+        .unwrap();
+    let latest = *backlog.last().unwrap();
+
+    // A reader of older messages keeps the complete replay, so its position stays valid.
+    let started = Instant::now();
+    let mut replay = f
+        .open_path(
+            &format!("{path}?after={cursor}&history={history}&window=1"),
+            None,
+        )
+        .await;
+    assert_eq!(replay.through(latest).await, backlog);
+    let replayed = (started.elapsed(), replay.received);
+    drop(replay);
+
+    let started = Instant::now();
+    let mut resumed = f.open_path(&resume(cursor), None).await;
+    let (id, window) = resumed.batch().await;
+    let recent = (started.elapsed(), resumed.received);
+    eprintln!(
+        "2,400-event backlog: replay {:?} / {} bytes, recent window {:?} / {} bytes",
+        replayed.0, replayed.1, recent.0, recent.1
+    );
+    assert_eq!(id, latest);
+    assert_eq!(window["reset"], true);
+    assert_eq!(window["more"], false);
+    assert_eq!(window["hasOlder"], true);
+    assert_eq!(window["state"]["chat"]["id"], chat_id.as_str());
+    let events = event_ids(&window["events"]);
+    assert_eq!(events, backlog[backlog.len() - 100..]);
+    assert_eq!(window["oldest"], events[0]);
+
+    // Older messages remain available from the window's boundary.
+    let older: Value = reqwest::Client::new()
+        .get(format!(
+            "{}/api/chats/{chat_id}/history?before={}&history={history}",
+            f.url, events[0]
+        ))
+        .header("x-test-relay-token", &f.token)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let previous = event_ids(&older["events"]);
+    assert_eq!(previous, backlog[backlog.len() - 200..backlog.len() - 100]);
+
+    // The viewer then follows live output without another reset.
+    f.append(1).await;
+    let (next, batch) = resumed.batch().await;
+    assert_eq!(batch["reset"], false);
+    assert_eq!(event_ids(&batch["events"]), vec![next]);
 }
 
 #[tokio::test]

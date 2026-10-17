@@ -883,7 +883,7 @@ class DirectTransportTest {
                         build.cairn.app.ui.backgroundWait(final.events),
                     )
                     assertEquals(
-                        "/api/installations/test/api/runs/r1/stream?after=7&history=h1&window=1",
+                        "/api/installations/test/api/runs/r1/stream?after=7&history=h1&window=1&recent=1",
                         server.takeRequest().path,
                     )
                     assertEquals("relay", api.transport.route.value)

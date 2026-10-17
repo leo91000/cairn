@@ -92,6 +92,8 @@ struct Request {
     after: i64,
     expected: Option<String>,
     window: bool,
+    /// The viewer follows the latest output, so a long backlog may become the recent window.
+    recent: bool,
     before: Option<i64>,
 }
 
@@ -133,6 +135,7 @@ fn read_page(db: &Db<'_>, scope: &Scope, request: Request) -> Result<Page> {
         after,
         expected,
         window,
+        recent,
         before,
     } = request;
     let chat = if scope.single_chat() {
@@ -146,7 +149,7 @@ fn read_page(db: &Db<'_>, scope: &Scope, request: Request) -> Result<Page> {
     // Events are append-only and IDs are AUTOINCREMENT. The retained first
     // ID changes on pruning; a new run has a new UUID. No full-history hash.
     let history = format!("v1:{run_id}:{first}");
-    let reset = after > max
+    let mut reset = after > max
         || (after > 0 && after < first)
         || expected.as_ref().is_some_and(|value| *value != history);
     if before.is_some() && reset {
@@ -157,8 +160,8 @@ fn read_page(db: &Db<'_>, scope: &Scope, request: Request) -> Result<Page> {
     // Stop reading rows at the byte budget, rather than allocating an
     // entire page of large historical outputs for every subscriber.
     let start = if reset { 0 } else { after };
-    let tail = before.is_some() || (window && (after == 0 || reset));
-    let (events, has_older) = if tail {
+    let mut tail = before.is_some() || (window && (after == 0 || reset));
+    let (mut events, mut has_older) = if tail {
         db.events_before(run_id, before.unwrap_or(i64::MAX))?
     } else {
         (
@@ -166,6 +169,15 @@ fn read_page(db: &Db<'_>, scope: &Scope, request: Request) -> Result<Page> {
             false,
         )
     };
+
+    // A viewer at the latest output skips a backlog longer than one page: it reopens
+    // on the recent window, and older messages load from the window's boundary.
+    let long_backlog = events.last().is_some_and(|event| event.id < max);
+    if recent && !tail && long_backlog {
+        (events, has_older) = db.events_before(run_id, i64::MAX)?;
+        reset = true;
+        tail = true;
+    }
     let oldest = tail.then(|| events.first().map_or(before.unwrap_or(0), |e| e.id));
     let cursor = events.last().map_or(start, |e| e.id);
     let mut state = State {
@@ -250,10 +262,12 @@ pub async fn http(s: Arc<Service>, kind: &str, id: &str, input: Input) -> Result
         return Err(Error::bad("Invalid history version."));
     }
     let window = input.query.get("window").is_some_and(|v| v == "1");
+    let recent = window && input.query.get("recent").is_some_and(|v| v == "1");
     let request = Request {
         after,
         expected,
         window,
+        recent,
         before: None,
     };
     let first = page(&s, scope.clone(), request).await?;
@@ -301,6 +315,7 @@ impl Subscription {
             after,
             expected,
             window: self.window,
+            recent: false,
             before: None,
         };
         page(&self.s, self.scope.clone(), request).await
@@ -389,6 +404,7 @@ pub async fn history(s: &Service, kind: &str, id: &str, input: &Input) -> Result
         after: 0,
         expected,
         window: true,
+        recent: false,
         before: Some(before),
     };
     let page = page(s, Scope::new(kind, id, ""), request).await?;
