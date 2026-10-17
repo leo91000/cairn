@@ -9,6 +9,7 @@ use std::{
     },
 };
 
+mod discard;
 mod group_commit;
 
 struct Source {

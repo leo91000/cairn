@@ -53,6 +53,7 @@ struct Request {
     segments: Vec<(GuestAddress, usize)>,
     length: usize,
     bytes: Vec<u8>,
+    discard: Option<(u64, usize)>,
 }
 
 impl Request {
@@ -87,7 +88,8 @@ impl Request {
         let mut length = 0usize;
         for descriptor in &descriptors[1..descriptors.len() - 1] {
             if matches!(kind, 0 | 8) && !descriptor.is_write_only()
-                || kind == 1 && descriptor.is_write_only()
+                || matches!(kind, VIRTIO_BLK_T_OUT | VIRTIO_BLK_T_DISCARD)
+                    && descriptor.is_write_only()
             {
                 return Err(error("Invalid block payload direction"));
             }
@@ -115,6 +117,32 @@ impl Request {
         if kind == 4 && length != 0 {
             return Err(error("Flush request has a payload"));
         }
+        let discard = if kind == VIRTIO_BLK_T_DISCARD {
+            if length != 16 {
+                return Err(error("Expected one discard range"));
+            }
+            // Snapshot and validate every range before changing the disk. Never
+            // use guest-owned bytes again after validating them.
+            let mut raw = [0; 16];
+            let mut copied = 0;
+            for (address, count) in &segments {
+                memory
+                    .read_slice(&mut raw[copied..copied + count], *address)
+                    .map_err(error)?;
+                copied += count;
+            }
+            let start = u64::from_le_bytes(raw[..8].try_into().unwrap())
+                .checked_mul(512)
+                .ok_or_else(|| error("Discard sector overflow"))?;
+            let count = u32::from_le_bytes(raw[8..12].try_into().unwrap()) as u64 * 512;
+            if raw[12..] != [0; 4] || count > MAX_BYTES as u64 {
+                return Err(error("Invalid discard flags or length"));
+            }
+            super::device::range(disk_size, start, count as usize)?;
+            Some((start, count as usize))
+        } else {
+            None
+        };
         Ok(Self {
             head,
             status: status.addr(),
@@ -123,6 +151,7 @@ impl Request {
             segments,
             length,
             bytes: Vec::new(),
+            discard,
         })
     }
 
@@ -261,6 +290,10 @@ impl Backend {
             pending_bytes = 0;
             let (status, used) = match request.kind {
                 4 => (u8::from(self.disk.sync().is_err()), 1),
+                VIRTIO_BLK_T_DISCARD => {
+                    let (offset, length) = request.discard.expect("validated discard range");
+                    (u8::from(self.disk.discard(offset, length).is_err()), 1)
+                }
                 8 => (2, 1),
                 _ => (2, 1),
             };
@@ -292,6 +325,7 @@ impl VhostUserBackendMut for Backend {
         (1 << VIRTIO_BLK_F_SEG_MAX)
             | (1 << VIRTIO_BLK_F_BLK_SIZE)
             | (1 << VIRTIO_BLK_F_FLUSH)
+            | (1 << VIRTIO_BLK_F_DISCARD)
             | (1 << VIRTIO_RING_F_EVENT_IDX)
             | (1 << VIRTIO_F_VERSION_1)
             | VhostUserVirtioFeatures::PROTOCOL_FEATURES.bits()
@@ -310,6 +344,9 @@ impl VhostUserBackendMut for Backend {
         config[..8].copy_from_slice(&(self.disk.size() / 512).to_le_bytes());
         config[12..16].copy_from_slice(&(MAX_REQUESTS as u32).to_le_bytes());
         config[20..24].copy_from_slice(&512u32.to_le_bytes());
+        config[36..40].copy_from_slice(&((MAX_BYTES / 512) as u32).to_le_bytes());
+        config[40..44].copy_from_slice(&1u32.to_le_bytes());
+        config[44..48].copy_from_slice(&1u32.to_le_bytes());
         let Some(end) = offset.checked_add(size) else {
             return Vec::new();
         };

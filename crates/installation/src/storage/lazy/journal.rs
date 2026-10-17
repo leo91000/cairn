@@ -45,6 +45,7 @@ pub(super) struct Record {
     pub generation: i64,
     pub start: u64,
     pub end: u64,
+    zero: bool,
     written_at: i64,
     location: Location,
 }
@@ -300,6 +301,7 @@ impl Journal {
                         generation,
                         start,
                         end: start + bytes.len() as u64,
+                        zero: bytes.iter().all(|byte| *byte == 0),
                         written_at: row.get(6).map_err(failure)?,
                         location: Location::Legacy {
                             db: legacy.clone(),
@@ -385,11 +387,12 @@ impl Journal {
                     }
                     break;
                 }
-                let record = Record {
+                let mut record = Record {
                     sequence,
                     generation: *generation,
                     start: start as u64,
                     end: start as u64 + count as u64,
+                    zero: false,
                     written_at,
                     location: Location::Segment {
                         file: file.clone(),
@@ -397,7 +400,7 @@ impl Journal {
                         header,
                     },
                 };
-                record.read(size)?;
+                record.zero = record.read(size)?.iter().all(|byte| *byte == 0);
                 journal.insert(record);
                 previous = sequence;
                 journal.next = journal.next.max(
@@ -542,6 +545,27 @@ impl Journal {
             .collect()
     }
 
+    /// Metadata-only no-op detection. Every recovered frame was authenticated
+    /// before indexing; this hint is in memory and changes no persisted format.
+    pub fn zeroed(&self, start: u64, end: u64, base_zero: bool) -> bool {
+        let mut records = self.overlapping(i64::MAX, start, end);
+        if records.iter().any(|record| !record.zero) {
+            return false;
+        }
+        if base_zero {
+            return true;
+        }
+        records.sort_unstable_by_key(|record| record.start);
+        let mut through = start;
+        for record in records {
+            if record.start > through {
+                return false;
+            }
+            through = through.max(record.end);
+        }
+        through >= end
+    }
+
     pub fn stats(&self) -> Value {
         serde_json::json!({
             "dirtyBytes": self.dirty_bytes,
@@ -618,9 +642,19 @@ impl Journal {
         let checksum = digest(&header[..80], data);
         header[80..].copy_from_slice(&checksum);
         let position = segment.length;
+        let zero = data.iter().all(|byte| *byte == 0);
         let write = (|| {
             segment.file.write_all_at(&header, position)?;
-            segment.file.write_all_at(data, position + HEADER as u64)
+            if zero {
+                // Appends always extend the file. Sparse zeros have precisely
+                // the existing frame bytes/checksums, including on old readers.
+                // Never punch an earlier frame or reclaim before publication.
+                segment
+                    .file
+                    .set_len(position + HEADER as u64 + data.len() as u64)
+            } else {
+                segment.file.write_all_at(data, position + HEADER as u64)
+            }
         })();
         if let Err(error) = write {
             self.failed = true;
@@ -635,6 +669,7 @@ impl Journal {
             generation: self.generation,
             start: offset,
             end: offset + data.len() as u64,
+            zero,
             written_at,
             location: Location::Segment {
                 file: segment.file.clone(),

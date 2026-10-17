@@ -639,6 +639,44 @@ impl LazyDisk {
     }
 }
 
+impl LazyDisk {
+    /// Admit only frames that must actually be appended. Sparse/no-op ranges
+    /// retain their durability barrier without charging fictitious disk space.
+    pub(super) fn discard_with(
+        &self,
+        offset: u64,
+        length: usize,
+        mut write: impl FnMut(u64, &[u8]) -> io::Result<()>,
+    ) -> io::Result<()> {
+        super::device::range(self.size, offset, length)?;
+        let sample = self.metrics.discards.start();
+        let mut position = offset;
+        let end = offset + length as u64;
+        while position < end {
+            // Avoid reading or journaling the sparse tail or a range already
+            // zeroed by a previous trim. Never fetch bytes being discarded.
+            let limit = ((position / BLOCK + 1) * BLOCK).min(end);
+            let count = (limit - position) as usize;
+            let zeroed = {
+                let _publication = self.publication.read().map_err(failure)?;
+                let journal = self.journal.lock().map_err(failure)?;
+                let base = self.base.lock().map_err(failure)?;
+                let base_zero = base["blocks"][(position / BLOCK) as usize]["hash"].is_null();
+                journal.zeroed(position, limit, base_zero)
+            };
+            if !zeroed {
+                write(position, &vec![0; count])?;
+            }
+            position = limit;
+        }
+        // The zero hint may have observed a concurrently staged write. Drain
+        // durable acknowledgements before acknowledging even a no-op discard.
+        self.sync()?;
+        sample.finish(length);
+        Ok(())
+    }
+}
+
 impl Disk for LazyDisk {
     fn size(&self) -> u64 {
         self.size
@@ -662,6 +700,12 @@ impl Disk for LazyDisk {
         self.append_writes(&[DiskWrite { offset, bytes }])?;
         sample.finish(bytes.len());
         Ok(())
+    }
+
+    fn discard(&self, offset: u64, length: usize) -> io::Result<()> {
+        self.discard_with(offset, length, |position, bytes| {
+            self.write_at(position, bytes)
+        })
     }
 
     fn write_batch(&self, writes: &[DiskWrite<'_>]) -> io::Result<()> {

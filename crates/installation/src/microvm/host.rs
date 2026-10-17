@@ -102,7 +102,44 @@ pub async fn assets(state: &Path) -> Result<PathBuf> {
     if !target.join("vmlinux").exists() {
         tokio::fs::copy("/opt/cairn-vm/vmlinux", target.join("vmlinux")).await?;
     }
+    install_control_image(
+        Path::new("/opt/cairn-vm/control.squashfs"),
+        &target.join("control.squashfs"),
+    )
+    .await?;
     Ok(target)
+}
+
+async fn install_control_image(source: &Path, target: &Path) -> Result<()> {
+    use std::io::ErrorKind;
+    match tokio::fs::symlink_metadata(target).await {
+        Ok(metadata) if metadata.is_file() && metadata.permissions().mode() & 0o222 == 0 => {
+            return Ok(());
+        }
+        Ok(_) => return Err(Error::conflict("Invalid guest control image.")),
+        Err(error) if error.kind() == ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
+    let temporary = target.with_extension("squashfs.partial");
+    match tokio::fs::symlink_metadata(&temporary).await {
+        Ok(metadata) if metadata.is_file() => tokio::fs::remove_file(&temporary).await?,
+        Ok(_) => return Err(Error::conflict("Invalid partial guest control image.")),
+        Err(error) if error.kind() == ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
+    tokio::fs::copy(source, &temporary).await?;
+    tokio::fs::set_permissions(&temporary, std::fs::Permissions::from_mode(0o444)).await?;
+    tokio::fs::File::open(&temporary).await?.sync_all().await?;
+    tokio::fs::rename(&temporary, target).await?;
+    tokio::fs::File::open(
+        target
+            .parent()
+            .ok_or_else(|| Error::bad("Missing control directory."))?,
+    )
+    .await?
+    .sync_all()
+    .await?;
+    Ok(())
 }
 
 pub(super) async fn connect(socket: &Path) -> Result<BufReader<UnixStream>> {
@@ -391,4 +428,58 @@ pub async fn settle_attempt(
     )
     .await
     .map(|_| ())
+}
+
+#[cfg(test)]
+mod control_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn control_image_replaces_readonly_partial_and_keeps_installed_bytes_immutable() {
+        let root = tempfile::tempdir().unwrap();
+        let source = root.path().join("source");
+        let target = root.path().join("control.squashfs");
+        let partial = root.path().join("control.squashfs.partial");
+        tokio::fs::write(&source, b"complete").await.unwrap();
+        tokio::fs::write(&partial, b"interrupted").await.unwrap();
+        tokio::fs::set_permissions(&partial, std::fs::Permissions::from_mode(0o444))
+            .await
+            .unwrap();
+        install_control_image(&source, &target).await.unwrap();
+        assert_eq!(tokio::fs::read(&target).await.unwrap(), b"complete");
+        assert_eq!(
+            tokio::fs::metadata(&target)
+                .await
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o222,
+            0
+        );
+        assert!(!partial.exists());
+        tokio::fs::write(&source, b"other runtime").await.unwrap();
+        install_control_image(&source, &target).await.unwrap();
+        assert_eq!(tokio::fs::read(&target).await.unwrap(), b"complete");
+    }
+
+    #[tokio::test]
+    async fn control_image_never_follows_a_final_or_partial_symlink() {
+        let root = tempfile::tempdir().unwrap();
+        let source = root.path().join("source");
+        let target = root.path().join("control.squashfs");
+        let partial = root.path().join("control.squashfs.partial");
+        tokio::fs::write(&source, b"kept").await.unwrap();
+        for link in [&partial, &target] {
+            std::os::unix::fs::symlink(&source, link).unwrap();
+            assert!(install_control_image(&source, &target).await.is_err());
+            assert_eq!(tokio::fs::read(&source).await.unwrap(), b"kept");
+            tokio::fs::remove_file(link).await.unwrap();
+        }
+        assert!(
+            install_control_image(&root.path().join("absent"), &target)
+                .await
+                .is_err()
+        );
+        assert!(!target.exists());
+    }
 }
