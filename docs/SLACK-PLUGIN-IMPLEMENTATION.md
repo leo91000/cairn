@@ -390,3 +390,12 @@ HTTP, Luau and MCP plus the native sleep/scheduler with a prepared completed
 checkpoint; no agent process/VM or live Slack was exercised.
 
 This is a checkpoint, not the complete Slack package or a final whole-PR review.
+
+## Inert draft resources
+
+Owner-only draft resource configuration reuses the declared schema, parent checks,
+revision guards and pagination through an explicit native configuration target.
+Draft metadata and encrypted fields have the root draft's expiration and a separate
+namespace. Live operational paths never fall back to drafts. Discarding the root or
+a parent removes its resource tree without affecting another draft or live app.
+Draft OAuth, activation and both configuration clients remain unfinished.

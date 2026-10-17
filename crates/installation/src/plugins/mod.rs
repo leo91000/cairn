@@ -231,6 +231,29 @@ pub async fn routes(s: &Arc<Service>, input: &Input) -> Result<Value> {
                 .map_or("", |identity| identity.account_id.as_str());
             Box::pin(setup::form(s, id, draft, account, body)).await
         }
+        (
+            _,
+            [
+                "plugins",
+                id,
+                "setup-drafts",
+                draft,
+                "resources",
+                collection,
+            ],
+        ) => resources::setup_routes(s, input, id, draft, collection, None).await,
+        (
+            _,
+            [
+                "plugins",
+                id,
+                "setup-drafts",
+                draft,
+                "resources",
+                collection,
+                resource,
+            ],
+        ) => resources::setup_routes(s, input, id, draft, collection, Some(resource)).await,
         (method, ["plugins", id, "setup-drafts", draft]) => {
             let account = input
                 .identity

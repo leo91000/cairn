@@ -1,9 +1,8 @@
 //! Instance-owned collections. Schema validation and encrypted fields are shared
 //! with instance forms; neither management responses nor Luau can read secrets.
-use super::{
-    connections::{self, Connection},
-    registry,
-};
+mod target;
+
+use super::connections::{self, Connection};
 use crate::{
     config::{id, now},
     error::{Error, Result},
@@ -14,6 +13,8 @@ use crate::{
 use cairn_plugin_api::{Manifest, ResourceCollection};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
+use std::sync::Arc;
+use target::Target;
 
 pub const KIND: &str = "plugin-resources";
 
@@ -64,7 +65,7 @@ fn current(db: &Db<'_>, expected: &Connection) -> Result<()> {
 
 fn parent(
     db: &Db<'_>,
-    connection: &Connection,
+    target: &Target,
     collection: &ResourceCollection,
     input: &Value,
 ) -> Result<Option<String>> {
@@ -73,10 +74,10 @@ fn parent(
         (None, None) => Ok(None),
         (Some(expected), Some(id)) => {
             uuid(id)?;
-            let value = db
-                .get(KIND, id)?
+            let value = target
+                .get(db, id)?
                 .ok_or_else(|| Error::bad("Select a parent resource."))?;
-            if value["connectionId"] != connection.id || value["collection"] != *expected {
+            if value["connectionId"] != target.instance() || value["collection"] != *expected {
                 return Err(Error::bad(
                     "The parent belongs to another instance or collection.",
                 ));
@@ -95,11 +96,22 @@ pub async fn save(
     input: &Value,
     existing: Option<&str>,
 ) -> Result<Value> {
-    let connection = connections::get(s, plugin, instance).await?;
-    let package = registry::active(s, plugin).await?;
-    let collection = declared(&package.manifest, name)?.clone();
+    let target = Target::active(s, plugin, instance).await?;
+    save_for(s, target, name, input, existing).await
+}
+
+async fn save_for(
+    s: &Service,
+    target: Arc<Target>,
+    name: &str,
+    input: &Value,
+    existing: Option<&str>,
+) -> Result<Value> {
+    target.require_revision(input)?;
+    let manifest = target.manifest();
+    let collection = declared(manifest, name)?.clone();
     let previous = match existing {
-        Some(id) => Some(get(s, plugin, instance, &collection.name, id).await?),
+        Some(id) => Some(get_for(s, target.clone(), &collection.name, id).await?),
         None => None,
     };
     if let Some(previous) = &previous
@@ -121,6 +133,7 @@ pub async fn save(
                 "name", "settings", "secrets", "enabled", "parentId", "revision",
             ]
             .contains(&key.as_str())
+                && !(target.is_setup() && key == "setupRevision")
         })
     }) {
         return Err(Error::bad("Invalid resource fields."));
@@ -130,8 +143,13 @@ pub async fn save(
         Some(Value::Bool(enabled)) => *enabled,
         _ => return Err(Error::bad("Resource enabled must be a boolean.")),
     };
-    let mut schema = package.manifest.clone();
+    let mut schema = manifest.clone();
     schema.settings.clone_from(&collection.settings);
+    if target.is_setup() {
+        for field in &mut schema.settings {
+            field["required"] = json!(false);
+        }
+    }
     let settings = connections::settings(&schema, &input["settings"])?;
     let resource_id = previous
         .as_ref()
@@ -155,7 +173,7 @@ pub async fn save(
     }
     let resource = Resource {
         id: resource_id,
-        connection_id: connection.id.clone(),
+        connection_id: target.instance().to_owned(),
         collection: collection.name.clone(),
         parent_id: None,
         name: name.to_owned(),
@@ -169,35 +187,32 @@ pub async fn save(
     let input = input.clone();
     s.store
         .transaction(move |db| {
-            current(db, &connection)?;
+            target.current(db)?;
             if let Some(previous) = &previous {
-                let stored = db.get(KIND, &previous.id)?;
+                let stored = target.get(db, &previous.id)?;
                 if !stored.is_some_and(|stored| stored["revision"] == previous.revision) {
                     return Err(Error::conflict(
                         "The resource changed. Reload before saving.",
                     ));
                 }
             }
-            if previous.is_none()
-                && db
-                    .list(KIND)?
-                    .iter()
-                    .filter(|value| value["connectionId"] == connection.id)
-                    .count()
-                    >= 256
-            {
+            if previous.is_none() && target.list(db)?.len() >= 256 {
                 return Err(Error::too_large(
                     "An instance can have at most 256 resources.",
                 ));
             }
             let mut resource = resource;
-            resource.parent_id = parent(db, &connection, &collection, &input)?;
-            db.set(&format!("mcp-secret:{key}"), &encrypted, None)?;
+            resource.parent_id = parent(db, &target, &collection, &input)?;
+            db.set(
+                &format!("mcp-secret:{key}"),
+                &encrypted,
+                target.expires_at(),
+            )?;
             let value = serde_json::to_value(resource)?;
-            db.put(KIND, &value)?;
+            target.put(db, &value)?;
             db.audit(
                 "plugin.resource.saved",
-                &json!({ "id": value["id"], "connectionId": connection.id }),
+                &json!({ "id": value["id"], "connectionId": target.instance() }),
             )?;
             Ok(value)
         })
@@ -211,19 +226,31 @@ pub async fn get(
     collection: &str,
     resource: &str,
 ) -> Result<Resource> {
-    connections::get(s, plugin, instance).await?;
-    let package = registry::active(s, plugin).await?;
-    declared(&package.manifest, collection)?;
+    let target = Target::active(s, plugin, instance).await?;
+    get_for(s, target, collection, resource).await
+}
+
+async fn get_for(
+    s: &Service,
+    target: Arc<Target>,
+    collection: &str,
+    resource: &str,
+) -> Result<Resource> {
+    declared(target.manifest(), collection)?;
     uuid(resource)?;
-    let value = s
-        .store
-        .get(KIND, resource)
-        .await?
-        .ok_or_else(|| Error::not_found("Resource not found."))?;
-    if value["connectionId"] != instance || value["collection"] != collection {
-        return Err(Error::not_found("Resource not found."));
-    }
-    Ok(serde_json::from_value(value)?)
+    let (collection, resource) = (collection.to_owned(), resource.to_owned());
+    s.store
+        .read(move |db| {
+            target.current(db)?;
+            let value = target
+                .get(db, &resource)?
+                .ok_or_else(|| Error::not_found("Resource not found."))?;
+            if value["connectionId"] != target.instance() || value["collection"] != collection {
+                return Err(Error::not_found("Resource not found."));
+            }
+            Ok(serde_json::from_value(value)?)
+        })
+        .await
 }
 
 pub async fn remove(
@@ -233,17 +260,42 @@ pub async fn remove(
     collection: &str,
     resource: &str,
 ) -> Result<Value> {
-    let resource = get(s, plugin, instance, collection, resource).await?;
-    let connection = connections::get(s, plugin, instance).await?;
+    let target = Target::active(s, plugin, instance).await?;
+    remove_for(s, target, collection, resource, &Value::Null).await
+}
+
+async fn remove_for(
+    s: &Service,
+    target: Arc<Target>,
+    collection: &str,
+    resource: &str,
+    input: &Value,
+) -> Result<Value> {
+    target.require_revision(input)?;
+    let resource = get_for(s, target.clone(), collection, resource).await?;
+    if target.is_setup() && input["revision"] != resource.revision {
+        return Err(Error::conflict(
+            "The resource changed. Reload before deleting.",
+        ));
+    }
     s.store
         .transaction(move |db| {
-            current(db, &connection)?;
-            let records = db.list(KIND)?;
+            target.current(db)?;
+            if target.is_setup()
+                && target
+                    .get(db, &resource.id)?
+                    .is_none_or(|value| value["revision"] != resource.revision)
+            {
+                return Err(Error::conflict(
+                    "The resource changed. Reload before deleting.",
+                ));
+            }
+            let records = target.list(db)?;
             let mut ids = std::collections::HashSet::from([resource.id.clone()]);
             loop {
                 let before = ids.len();
                 for value in &records {
-                    if value["connectionId"] == connection.id
+                    if value["connectionId"] == target.instance()
                         && value["parentId"]
                             .as_str()
                             .is_some_and(|parent| ids.contains(parent))
@@ -256,7 +308,7 @@ pub async fn remove(
                 }
             }
             for value in db.list(super::grants::KIND)? {
-                if value["connectionId"] == connection.id
+                if value["connectionId"] == target.instance()
                     && value["resourceId"]
                         .as_str()
                         .is_some_and(|id| ids.contains(id))
@@ -268,11 +320,11 @@ pub async fn remove(
                 super::routes::remove_resource(db, &id)?;
                 super::oauth::remove_resource(db, &id)?;
                 db.delete(&format!("mcp-secret:{}", secrets_key(&id)))?;
-                db.remove(KIND, &id)?;
+                target.remove(db, &id)?;
             }
             db.audit(
                 "plugin.resource.deleted",
-                &json!({ "id": resource.id, "connectionId": connection.id }),
+                &json!({ "id": resource.id, "connectionId": target.instance() }),
             )?;
             Ok(json!({ "deleted": true }))
         })
@@ -286,20 +338,30 @@ pub async fn list(
     collection: &str,
     cursor: Option<&str>,
 ) -> Result<Value> {
-    connections::get(s, plugin, instance).await?;
-    let package = registry::active(s, plugin).await?;
-    declared(&package.manifest, collection)?;
+    let target = Target::active(s, plugin, instance).await?;
+    list_for(s, target, collection, cursor).await
+}
+
+async fn list_for(
+    s: &Service,
+    target: Arc<Target>,
+    collection: &str,
+    cursor: Option<&str>,
+) -> Result<Value> {
+    declared(target.manifest(), collection)?;
     if let Some(cursor) = cursor {
         uuid(cursor)?;
     }
     let mut values = s
         .store
-        .list(KIND)
+        .read(move |db| {
+            target.current(db)?;
+            target.list(db)
+        })
         .await?
         .into_iter()
         .filter(|value| {
-            value["connectionId"] == instance
-                && value["collection"] == collection
+            value["collection"] == collection
                 && cursor.is_none_or(|cursor| text(value, "id") > cursor)
         })
         .collect::<Vec<_>>();
@@ -463,6 +525,51 @@ pub(crate) fn remove_owned(db: &Db<'_>, instance: &str) -> Result<()> {
             db.delete(&format!("mcp-secret:{}", secrets_key(id)))?;
             db.remove(KIND, id)?;
         }
+    }
+    Ok(())
+}
+
+/// Configuration adapter for the distinct owner-only setup API. Active resource
+/// functions never resolve this target implicitly.
+pub(crate) async fn setup_routes(
+    s: &Service,
+    input: &crate::http::Input,
+    plugin: &str,
+    draft: &str,
+    collection: &str,
+    resource: Option<&str>,
+) -> Result<Value> {
+    let account = input
+        .identity
+        .as_ref()
+        .map_or("", |identity| identity.account_id.as_str());
+    let target = Target::setup(s, plugin, draft, account).await?;
+    match (input.method.as_str(), resource) {
+        ("GET", None) => {
+            list_for(
+                s,
+                target,
+                collection,
+                input.query.get("cursor").map(String::as_str),
+            )
+            .await
+        }
+        ("POST", None) => save_for(s, target, collection, &input.body, None).await,
+        ("GET", Some(id)) => Ok(serde_json::to_value(
+            get_for(s, target, collection, id).await?,
+        )?),
+        ("PUT", Some(id)) => save_for(s, target, collection, &input.body, Some(id)).await,
+        ("DELETE", Some(id)) => remove_for(s, target, collection, id, &input.body).await,
+        _ => Err(Error::method_not_allowed("Method not allowed.")),
+    }
+}
+
+pub(crate) fn remove_setup(db: &Db<'_>, instance: &str) -> Result<()> {
+    for (key, value) in db.keys(&target::setup_prefix(instance))? {
+        let id = text(&value, "id");
+        super::oauth::remove_resource(db, id)?;
+        db.delete(&format!("mcp-secret:{}", secrets_key(id)))?;
+        db.delete(&key)?;
     }
     Ok(())
 }

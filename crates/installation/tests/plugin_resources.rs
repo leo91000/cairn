@@ -224,3 +224,296 @@ async fn revoking_a_resource_during_http_io_prevents_its_result_from_reaching_th
     assert_eq!(pending.await.unwrap().unwrap_err().status, 403);
     server.abort();
 }
+
+#[tokio::test]
+async fn setup_resources_are_owner_only_partial_and_inert_until_activation() {
+    let (_root, s, _) = fixture("return {}", false).await;
+    let app = cairn_installation::http::router(s.clone()).await.unwrap();
+    let request = |method: &str, path: &str, body: Value, role| {
+        let mut request = common::request(method, path)
+            .header("content-type", "application/json")
+            .body(Body::from(body.to_string()))
+            .unwrap();
+        request
+            .extensions_mut()
+            .insert(InstallationIdentity::trusted(role, "fixture-owner"));
+        request
+    };
+    let collection = "/api/plugins/example/setup-drafts";
+    let response = common::send(
+        &app,
+        request(
+            "POST",
+            collection,
+            json!({
+                "name": "Prepare app",
+                "settings": {},
+            }),
+            InstallationRole::Owner,
+        ),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let draft = common::read_json(response).await;
+    let path = format!("{collection}/{}/resources/workspace", text(&draft, "id"));
+    let input = json!({
+        "setupRevision": draft["revision"],
+        "name": "Pending workspace",
+        "settings": {},
+    });
+    let member = common::send(
+        &app,
+        request("POST", &path, input.clone(), InstallationRole::Member),
+    )
+    .await;
+    assert_eq!(member.status(), StatusCode::FORBIDDEN);
+    let response = common::send(&app, request("POST", &path, input, InstallationRole::Owner)).await;
+    assert_eq!(
+        response.status(),
+        StatusCode::OK,
+        "{}",
+        common::read_text(response).await
+    );
+    let resource = common::read_json(response).await;
+    assert_eq!(resource["settings"], json!({}));
+    assert_eq!(resource["secretKeys"], json!([]));
+    let item = format!("{path}/{}", text(&resource, "id"));
+    let response = common::send(
+        &app,
+        request("GET", &path, Value::Null, InstallationRole::Owner),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        common::read_json(response).await["items"],
+        json!([resource])
+    );
+    let live = format!(
+        "/api/plugins/example/connections/{}/resources/workspace",
+        text(&draft, "id")
+    );
+    for method in ["GET", "POST"] {
+        let response = common::send(
+            &app,
+            request(
+                method,
+                &live,
+                json!({
+                    "name": "Must not become live",
+                    "settings": {"externalId": "T111"},
+                    "secrets": {"token": "fixture-resource-token"},
+                }),
+                InstallationRole::Owner,
+            ),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+    let update = json!({
+        "setupRevision": draft["revision"],
+        "revision": resource["revision"],
+        "name": "Connected workspace",
+        "settings": {"externalId": "T111"},
+        "secrets": {"token": "fixture-resource-token"},
+    });
+    let response = common::send(
+        &app,
+        request("PUT", &item, update.clone(), InstallationRole::Owner),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let updated = common::read_json(response).await;
+    assert_eq!(updated["id"], resource["id"]);
+    assert_eq!(updated["secretKeys"], json!(["token"]));
+    assert!(!updated.to_string().contains("fixture-resource-token"));
+    let stale = common::send(&app, request("PUT", &item, update, InstallationRole::Owner)).await;
+    assert_eq!(stale.status(), StatusCode::CONFLICT);
+    let root_path = format!("{collection}/{}", text(&draft, "id"));
+    let deleted = common::send(
+        &app,
+        request(
+            "DELETE",
+            &root_path,
+            json!({
+                "revision": draft["revision"],
+            }),
+            InstallationRole::Owner,
+        ),
+    )
+    .await;
+    assert_eq!(deleted.status(), StatusCode::OK);
+    let missing = common::send(
+        &app,
+        request("GET", &item, Value::Null, InstallationRole::Owner),
+    )
+    .await;
+    assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+    assert!(s.chat_list().await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn setup_resource_parent_trees_never_cross_into_other_drafts_or_live_instances() {
+    let (_root, s, instance) = fixture("return {}", false).await;
+    let package = registry::active(&s, "example").await.unwrap();
+    let mut manifest = serde_json::to_value(&package.manifest).unwrap();
+    manifest["version"] = json!("2");
+    manifest["resources"].as_array_mut().unwrap().push(json!({
+        "name": "channel",
+        "title": "Channels",
+        "singular": "Channel",
+        "parent": "workspace",
+        "settings": [],
+    }));
+    let installed = registry::install(&s, &json!({"manifest": manifest, "source": "return {}"}))
+        .await
+        .unwrap();
+    registry::approve(&s, "example", "2", text(&installed, "digest"))
+        .await
+        .unwrap();
+    let live_parent = resources::save(
+        &s,
+        "example",
+        text(&instance, "id"),
+        "workspace",
+        &json!({
+            "name": "Live workspace",
+            "settings": {"externalId": "T-live"},
+            "secrets": {"token": "live-token-fixture"},
+        }),
+        None,
+    )
+    .await
+    .unwrap();
+    let app = cairn_installation::http::router(s.clone()).await.unwrap();
+    let request = |method: &str, path: &str, value: Value| {
+        let mut request = common::request(method, path)
+            .header("content-type", "application/json")
+            .body(Body::from(value.to_string()))
+            .unwrap();
+        request
+            .extensions_mut()
+            .insert(InstallationIdentity::trusted(
+                InstallationRole::Owner,
+                "fixture-owner",
+            ));
+        request
+    };
+    let collection = "/api/plugins/example/setup-drafts";
+    let mut drafts = Vec::new();
+    let mut parents = Vec::new();
+    for name in ["First", "Second"] {
+        let response = common::send(&app, request("POST", collection, json!({"name": name}))).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let draft = common::read_json(response).await;
+        let path = format!("{collection}/{}/resources/workspace", text(&draft, "id"));
+        let response = common::send(
+            &app,
+            request(
+                "POST",
+                &path,
+                json!({
+                    "setupRevision": draft["revision"],
+                    "name": name,
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        parents.push(common::read_json(response).await);
+        drafts.push(draft);
+    }
+    let channels = format!("{collection}/{}/resources/channel", text(&drafts[0], "id"));
+    for parent in [&parents[1], &live_parent] {
+        let response = common::send(
+            &app,
+            request(
+                "POST",
+                &channels,
+                json!({
+                    "setupRevision": drafts[0]["revision"],
+                    "name": "Foreign parent",
+                    "parentId": parent["id"],
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+    for revision in [Value::Null, json!("stale")] {
+        let response = common::send(
+            &app,
+            request(
+                "POST",
+                &channels,
+                json!({
+                    "setupRevision": revision,
+                    "name": "Stale setup",
+                    "parentId": parents[0]["id"],
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+    }
+    let response = common::send(
+        &app,
+        request(
+            "POST",
+            &channels,
+            json!({
+                "setupRevision": drafts[0]["revision"],
+                "name": "Correct parent",
+                "parentId": parents[0]["id"],
+            }),
+        ),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let child = common::read_json(response).await;
+    assert_eq!(child["parentId"], parents[0]["id"]);
+    let parent_item = format!(
+        "{collection}/{}/resources/workspace/{}",
+        text(&drafts[0], "id"),
+        text(&parents[0], "id")
+    );
+    let deleted = common::send(
+        &app,
+        request(
+            "DELETE",
+            &parent_item,
+            json!({
+                "setupRevision": drafts[0]["revision"],
+                "revision": parents[0]["revision"],
+            }),
+        ),
+    )
+    .await;
+    assert_eq!(deleted.status(), StatusCode::OK);
+    let response = common::send(&app, request("GET", &channels, Value::Null)).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(common::read_json(response).await["items"], json!([]));
+    let other_item = format!(
+        "{collection}/{}/resources/workspace/{}",
+        text(&drafts[1], "id"),
+        text(&parents[1], "id")
+    );
+    assert_eq!(
+        common::send(&app, request("GET", &other_item, Value::Null))
+            .await
+            .status(),
+        StatusCode::OK
+    );
+    assert_eq!(
+        resources::get(
+            &s,
+            "example",
+            text(&instance, "id"),
+            "workspace",
+            text(&live_parent, "id")
+        )
+        .await
+        .unwrap()
+        .settings["externalId"],
+        "T-live"
+    );
+}

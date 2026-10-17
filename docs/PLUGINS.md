@@ -339,7 +339,17 @@ injected by the host. Saved secret values never reach Luau. Editing, deleting or
 expiring the draft during I/O prevents that response reaching the handler. Signed
 public setup challenges retain their pure-Luau scope with no host effects.
 
-OAuth/resources, activation and the web/Android setup journeys remain in the Slack
+Draft resources use the separate owner-only path
+`/<draft>/resources/<collection>` (GET/POST), with `/<resource>` for GET/PUT/DELETE.
+Mutations require `setupRevision`; replacing or deleting a resource also requires
+its `revision`. Missing required fields are allowed while preparing, while supplied
+fields retain the schema and 64 KiB limits. Parents must belong to the same draft
+and declared collection tree. Resources and their encrypted fields expire with the
+draft and are removed on discard/uninstall. They never appear through live instance
+APIs and provide no agent or delegation authority. Both active and draft
+configuration writes recheck their exact loaded package approval before committing.
+
+Draft OAuth, activation and the web/Android setup journeys remain in the Slack
 delivery checklist. These APIs alone do not activate an instance or finish its
 configuration.
 

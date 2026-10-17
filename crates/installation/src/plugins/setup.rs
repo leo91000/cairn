@@ -33,7 +33,7 @@ pub struct SetupDraft {
 }
 
 impl SetupDraft {
-    fn recheck_in(&self, db: &Db<'_>) -> Result<()> {
+    pub(crate) fn recheck_in(&self, db: &Db<'_>) -> Result<()> {
         let saved = db.kv(&format!("{PREFIX}{}", self.id))?;
         if self.expires_at <= now() || saved.as_ref() != Some(&serde_json::to_value(self)?) {
             return Err(missing());
@@ -145,6 +145,18 @@ async fn owned(s: &Service, plugin: &str, draft: &str, account: &str) -> Result<
             Ok(draft)
         })
         .await
+}
+
+/// Explicit owner configuration authority; never an operational fallback.
+pub(crate) async fn configuration(
+    s: &Service,
+    plugin: &str,
+    draft: &str,
+    account: &str,
+) -> Result<(SetupDraft, registry::ApprovedPackage)> {
+    let draft = owned(s, plugin, draft, account).await?;
+    let approved = approved_package(s, &draft).await?;
+    Ok((draft, approved))
 }
 
 pub async fn list(s: &Service, plugin: &str, account: &str) -> Result<Value> {
@@ -371,6 +383,7 @@ pub async fn remove(
 }
 
 fn erase(db: &Db<'_>, draft: &SetupDraft) -> Result<()> {
+    super::resources::remove_setup(db, &draft.id)?;
     db.delete(&format!("{PREFIX}{}", draft.id))?;
     db.delete(&format!(
         "mcp-secret:{}",
