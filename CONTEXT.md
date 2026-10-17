@@ -126,3 +126,30 @@ et n’obtiennent aucun accès général à son interface, ses conversations ou 
 Les conversations créées restent partagées dans Cairn ; les réponses du bot sont
 visibles dans le canal externe autorisé. La délégation reste liée à l’accès courant
 du propriétaire et aux permissions d’agent qu’il a approuvées.
+
+**Instance de plugin** :
+Une configuration d’un plugin par le propriétaire, par exemple un bot Discord ou un
+compte de service 1Password : ses réglages, ses secrets chiffrés, les agents autorisés
+à utiliser ce que le plugin leur apporte et, s’il répond à des personnes, sa
+délégation externe. Aucun agent n’est autorisé par défaut.
+_Avoid_ : connexion (réservé aux comptes des agents de code et à GitHub)
+
+**Contribution d’un plugin** :
+Ce qu’un package déclare dans son manifeste et que Cairn affiche et contrôle : le
+formulaire d’une instance (que le package peut compléter pendant la saisie), les
+commandes et outils donnés aux agents autorisés, leurs instructions, le panneau d’une
+instance et son test. Le code du package ne fait que répondre ; il ne reçoit jamais les
+secrets.
+
+**Transport d’un plugin** :
+La connexion qu’un package entretient lui-même avec un service externe, par exemple la
+Gateway de Discord : un worker dédié par instance pilote un socket que Cairn ouvre vers
+les hôtes déclarés, et remet à Cairn ce que les personnes écrivent. Cairn applique les
+règles d’admission de l’instance avant de garder quoi que ce soit.
+_Avoid_ : transport natif
+
+**Programme déclaré** :
+Un exécutable du serveur qu’un package liste dans son manifeste et que le propriétaire
+approuve avec lui. Cairn le lance sans shell, avec un environnement vide et, au besoin,
+les secrets de l’instance en variables d’environnement. Il s’exécute hors du bac à
+sable Luau.

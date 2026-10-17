@@ -104,6 +104,7 @@ impl Service {
         });
         crate::storage::migration::run(&service).await?;
         service.migrate_agents().await?;
+        crate::plugins::legacy::migrate(&service).await?;
         service.store.transaction(crate::accounts::migrate).await?;
         service
             .store
@@ -714,15 +715,20 @@ fn ensure_removable(db: &Db<'_>, kind: &str, id: &str) -> Result<()> {
     Ok(())
 }
 
-/// Drops an agent's credentials, portrait and 1Password assignments.
+/// Drops an agent's credentials, portrait and plugin grants.
 fn forget_agent(db: &Db<'_>, id: &str) -> Result<()> {
     db.delete(&format!("agent-github:{id}"))?;
     db.delete(&format!("agent-avatar:{id}"))?;
-    for mut account in db.list("onepassword")? {
-        if let Some(agents) = account["agentIds"].as_array_mut() {
-            agents.retain(|agent| agent != id);
+    for mut connection in db.list(crate::plugins::connections::KIND)? {
+        let granted = connection["agentIds"]
+            .as_array()
+            .is_some_and(|agents| agents.iter().any(|agent| agent == id));
+        if granted {
+            if let Some(agents) = connection["agentIds"].as_array_mut() {
+                agents.retain(|agent| agent != id);
+            }
+            db.put(crate::plugins::connections::KIND, &connection)?;
         }
-        db.put("onepassword", &account)?;
     }
     Ok(())
 }

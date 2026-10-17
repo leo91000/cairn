@@ -297,10 +297,12 @@ async fn delete_agent_removes_an_unused_profile_and_preserves_completed_history(
                     &json!({ "status": "ready" }),
                     None,
                 )?;
+                // A plugin instance (such as a 1Password service account) granting it.
                 db.put(
-                    "onepassword",
+                    "plugin-connections",
                     &json!({
                         "id": "fixture-account",
+                        "pluginId": "onepassword",
                         "agentIds": [id, MAIN_AGENT_ID],
                     }),
                 )?;
@@ -318,7 +320,7 @@ async fn delete_agent_removes_an_unused_profile_and_preserves_completed_history(
     }
     assert_eq!(
         s.store
-            .get("onepassword", "fixture-account")
+            .get("plugin-connections", "fixture-account")
             .await
             .unwrap()
             .unwrap()["agentIds"],

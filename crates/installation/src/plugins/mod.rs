@@ -1,12 +1,18 @@
 //! Installation-owned plugins. Every package (bundled or installed) runs in an isolated
 //! Luau worker and reaches Cairn only through capabilities its manifest declares and
 //! the owner approved.
+pub mod agents;
 pub mod capabilities;
 pub mod cli;
 pub mod connections;
-pub mod discord;
+pub mod forms;
+pub mod legacy;
+pub mod panels;
+pub mod programs;
 pub mod registry;
 pub mod runtime;
+pub mod scope;
+pub mod socket;
 pub mod work;
 
 use crate::{
@@ -19,9 +25,14 @@ use axum::{
     extract::{Request, State},
     response::{IntoResponse, Response},
 };
-use cairn_plugin_host::{Denied, Host};
+use cairn_plugin_api::Program;
+use cairn_plugin_host::Host;
 use serde_json::{Value, json};
-use std::sync::{Arc, Mutex};
+use std::{
+    collections::HashMap,
+    path::PathBuf,
+    sync::{Arc, Mutex},
+};
 use tokio::sync::Notify;
 
 pub struct Plugins {
@@ -30,7 +41,9 @@ pub struct Plugins {
     /// Plugin HTTP never follows redirects, so credentials can't leave declared hosts.
     pub http: reqwest::Client,
     test_origin: Mutex<Option<String>>,
+    socket_origin: Mutex<Option<String>>,
     worker: Mutex<Option<std::path::PathBuf>>,
+    programs: Mutex<HashMap<(String, String), PathBuf>>,
 }
 
 impl Default for Plugins {
@@ -43,7 +56,9 @@ impl Default for Plugins {
                 .build()
                 .expect("plugin HTTP client"),
             test_origin: Mutex::new(None),
+            socket_origin: Mutex::new(None),
             worker: Mutex::new(None),
+            programs: Mutex::new(HashMap::new()),
         }
     }
 }
@@ -57,6 +72,16 @@ impl Plugins {
 
     pub(crate) fn test_origin(&self) -> Option<String> {
         self.test_origin.lock().unwrap().clone()
+    }
+
+    /// Tests only: open plugin sockets for declared hosts on a local server (`ws://…`).
+    #[doc(hidden)]
+    pub fn route_sockets_to(&self, origin: Option<String>) {
+        *self.socket_origin.lock().unwrap() = origin;
+    }
+
+    pub(crate) fn socket_origin(&self) -> Option<String> {
+        self.socket_origin.lock().unwrap().clone()
     }
 
     /// Tests only: integration tests run from a test binary, not `cairn`.
@@ -73,42 +98,28 @@ impl Plugins {
         }
     }
 
-    /// Run-scoped CLI commands. Only the built-in 1Password package has one today.
+    /// Tests only: run `plugin`'s declared `program` from another path.
+    #[doc(hidden)]
+    pub fn use_program(&self, plugin: &str, program: &str, path: PathBuf) {
+        self.programs
+            .lock()
+            .unwrap()
+            .insert((plugin.to_owned(), program.to_owned()), path);
+    }
+
+    pub(crate) fn program_path(&self, plugin: &str, program: &Program) -> PathBuf {
+        self.programs
+            .lock()
+            .unwrap()
+            .get(&(plugin.to_owned(), program.name.clone()))
+            .cloned()
+            .unwrap_or_else(|| PathBuf::from(&program.path))
+    }
+
+    /// Run-scoped CLI commands declared by any package the run's agent is granted.
     pub async fn command(&self, s: &Service, bearer: &str, input: &Value) -> Result<Value> {
         crate::project_workspaces::authorize(s, bearer).await?;
-        if input["plugin"] != "onepassword" {
-            return Err(Error::not_found("Plugin command not available."));
-        }
-        let package = registry::builtin("onepassword").expect("bundled plugin");
-        // Host errors never reach the script, but the CLI user should see them.
-        let refused = Mutex::new(None::<Error>);
-        let refused_ref = &refused;
-        let result = self
-            .host
-            .invoke(
-                &self.executable()?,
-                &package.manifest,
-                &package.source,
-                input["arguments"].clone(),
-                |method, args| async move {
-                    if method != "onepassword.read" {
-                        return Err(Denied("forbidden"));
-                    }
-                    crate::onepassword::call(s, bearer, &args)
-                        .await
-                        .map_err(|error| {
-                            let code = capabilities::code(&error);
-                            *refused_ref.lock().unwrap() = Some(error);
-                            Denied(code)
-                        })
-                },
-            )
-            .await;
-        match (result, refused.into_inner().unwrap()) {
-            (Ok(value), _) => Ok(value),
-            (Err(_), Some(error)) => Err(error),
-            (Err(error), None) => Err(Error::bad_gateway(error)),
-        }
+        agents::command(s, bearer, input).await
     }
 
     pub async fn start(self: Arc<Self>, s: Arc<Service>) {
@@ -154,7 +165,26 @@ pub async fn routes(s: &Arc<Service>, input: &Input) -> Result<Value> {
     match (input.method.as_str(), parts.as_slice()) {
         ("GET", ["plugins"]) => {
             let mut catalog = registry::catalog(s).await?;
-            catalog["connections"] = json!(connections::overview(s).await?);
+            let mut overview = connections::overview(s).await?;
+            // Instances of packages without a worker are ready whenever enabled.
+            for connection in &mut overview {
+                let worker = catalog["packages"].as_array().and_then(|packages| {
+                    packages
+                        .iter()
+                        .find(|package| package["id"] == connection["pluginId"])
+                        .and_then(|package| {
+                            serde_json::from_value::<cairn_plugin_api::Manifest>(
+                                package["manifest"].clone(),
+                            )
+                            .ok()
+                        })
+                        .map(|manifest| manifest.needs_worker())
+                });
+                if worker == Some(false) && connection["enabled"] == true {
+                    connection["status"] = json!({ "state": "ready" });
+                }
+            }
+            catalog["connections"] = json!(overview);
             Ok(catalog)
         }
         ("POST", ["plugins", "packages"]) => registry::install(s, body).await,
@@ -165,13 +195,7 @@ pub async fn routes(s: &Arc<Service>, input: &Input) -> Result<Value> {
             registry::activate(s, id, &version()).await
         }
         ("DELETE", ["plugins", "packages", id]) => registry::uninstall(s, id).await,
-        ("POST", ["plugins", id, "discover"]) => {
-            let package = registry::active(s, id).await?;
-            if !package.manifest.permits_capability("transport.discord") {
-                return Err(Error::not_found("This plugin has no setup discovery."));
-            }
-            discord::discover(s, id, body).await
-        }
+        ("POST", ["plugins", id, "form"]) => forms::form(s, id, body).await,
         ("POST", ["plugins", id, "connections"]) => connections::save(s, id, body, None).await,
         ("PUT", ["plugins", id, "connections", connection]) => {
             connections::get(s, id, connection).await?;
@@ -184,12 +208,13 @@ pub async fn routes(s: &Arc<Service>, input: &Input) -> Result<Value> {
             connections::set_enabled(s, id, connection, body).await
         }
         ("POST", ["plugins", id, "connections", connection, "test"]) => {
-            let connection = connections::get(s, id, connection).await?;
-            let package = registry::active(s, id).await?;
-            if !package.manifest.permits_capability("transport.discord") {
-                return Err(Error::not_found("This plugin has no connection test."));
-            }
-            discord::test(s, &connection).await
+            panels::test(s, id, connection).await
+        }
+        ("GET", ["plugins", id, "connections", connection, "view"]) => {
+            panels::view(s, id, connection).await
+        }
+        ("POST", ["plugins", id, "connections", connection, "actions"]) => {
+            panels::action(s, id, connection, body).await
         }
         (
             "POST",

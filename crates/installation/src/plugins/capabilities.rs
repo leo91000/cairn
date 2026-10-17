@@ -1,6 +1,6 @@
 //! Host capabilities exposed to plugin scripts. Each call is checked against the
 //! manifest (by the host crate), then against the live connection here.
-use super::connections::{Connection, authorize, credential, ensure_owner};
+use super::connections::{Connection, authorize, credential, ensure_owner, secret_values};
 use crate::{
     config::{id, now},
     error::{Error, Result},
@@ -11,13 +11,17 @@ use cairn_plugin_api::Manifest;
 use cairn_plugin_host::Denied;
 use futures_util::StreamExt;
 use serde_json::{Map, Value, json};
-use std::time::Duration;
+use std::{sync::Arc, time::Duration};
 
 /// What a handler acts for: its connection and the event being handled.
 pub struct Context {
     pub connection: Connection,
     pub manifest: Manifest,
     pub event: Value,
+    /// The instance's socket, for its transport worker only.
+    pub link: Option<super::socket::Link>,
+    /// An instance being edited: its unsaved credential and secrets.
+    pub draft: Option<Arc<super::forms::Draft>>,
 }
 
 /// Maps host errors to the short codes scripts may see. Messages stay in the host.
@@ -38,25 +42,62 @@ pub async fn call(
     method: &str,
     args: Value,
 ) -> std::result::Result<Value, Denied> {
-    let result = async {
-        ensure_owner(s, &context.connection).await?;
-        let expected = context.connection.clone();
-        s.store.read(move |db| authorize(db, &expected)).await?;
-        match method {
-            "storage.get" | "storage.set" | "storage.delete" | "storage.list" => {
-                storage(s, &context.connection, method, &args).await
-            }
-            "http.request" => http(s, context, &args).await,
-            "timers.after" | "timers.cancel" => timers(s, &context.connection, method, &args).await,
-            "conversations.submit" => super::work::submit(s, context, &args).await,
-            "conversations.check" => super::work::check(s, context, &args).await,
-            "conversations.answer" => super::work::answer(s, context, &args).await,
-            "conversations.cancel" => super::work::cancel(s, context, &args).await,
-            _ => Err(Error::forbidden("Unknown plugin capability.")),
-        }
+    checked(s, context, method, args)
+        .await
+        .map_err(|error| Denied(code(&error)))
+}
+
+/// A long-lived worker's call, after rechecking the owner and the instance.
+pub async fn checked(s: &Service, context: &Context, method: &str, args: Value) -> Result<Value> {
+    ensure_owner(s, &context.connection).await?;
+    let expected = context.connection.clone();
+    s.store.read(move |db| authorize(db, &expected)).await?;
+    match method {
+        "conversations.submit" => super::work::submit(s, context, &args).await,
+        "conversations.check" => super::work::check(s, context, &args).await,
+        "conversations.answer" => super::work::answer(s, context, &args).await,
+        "conversations.cancel" => super::work::cancel(s, context, &args).await,
+        "inbound.accept" => super::work::inbound(s, context, &args).await,
+        "instance.status" => instance_status(s, context, &args).await,
+        _ if method.starts_with("socket.") => super::socket::call(s, context, method, &args).await,
+        _ => effect(s, context, method, args).await,
     }
-    .await;
-    result.map_err(|error| Denied(code(&error)))
+}
+
+/// The package's own view of its connection, shown to the owner.
+async fn instance_status(s: &Service, context: &Context, args: &Value) -> Result<Value> {
+    let state = text(args, "state");
+    let message = text(args, "message");
+    if !matches!(state, "connecting" | "connected")
+        || message.chars().count() > 200
+        || message.chars().any(char::is_control)
+    {
+        return Err(Error::bad(
+            "Report connecting or connected, with a short message.",
+        ));
+    }
+    if state == "connected"
+        && let Some(link) = &context.link
+    {
+        link.send(super::socket::Command::Healthy)?;
+    }
+    let message = (!message.is_empty()).then_some(message);
+    super::connections::status_with(s, &context.connection, state, message).await;
+    Ok(Value::Null)
+}
+
+/// Capabilities that act for an instance rather than for a person: shared by
+/// long-lived workers and one-shot handlers once their scope is authorized.
+pub async fn effect(s: &Service, context: &Context, method: &str, args: Value) -> Result<Value> {
+    match method {
+        "storage.get" | "storage.set" | "storage.delete" | "storage.list" => {
+            storage(s, &context.connection, method, &args).await
+        }
+        "http.request" => http(s, context, &args).await,
+        "timers.after" | "timers.cancel" => timers(s, &context.connection, method, &args).await,
+        "exec.run" => super::programs::run(s, context, &args).await,
+        _ => Err(Error::forbidden("Unknown plugin capability.")),
+    }
 }
 
 fn key(args: &Value) -> Result<String> {
@@ -127,29 +168,31 @@ async fn storage(
         .await
 }
 
-/// Checks a URL against the hosts the plugin declares: HTTPS, default port, no
-/// credentials in the URL. Tests may route it to a local server.
-pub(crate) fn target(s: &Service, manifest: &Manifest, raw: &str) -> Result<String> {
+/// Checks a URL against the hosts the plugin declares: HTTPS (or WSS for sockets),
+/// default port, no credentials in the URL. Tests may route HTTP to a local server.
+pub(crate) fn target(s: &Service, manifest: &Manifest, raw: &str, scheme: &str) -> Result<String> {
     let url = url::Url::parse(raw).map_err(|_| Error::bad("Invalid URL."))?;
     let host = url.host_str().unwrap_or("");
-    if url.scheme() != "https"
+    if url.scheme() != scheme
         || !url.username().is_empty()
         || url.password().is_some()
         || url.port().is_some()
-        || !manifest.hosts.iter().any(|allowed| allowed == host)
+        || !manifest.allows_host(host)
     {
         return Err(Error::forbidden("This host is not declared by the plugin."));
     }
-    Ok(match s.plugins.test_origin() {
-        Some(origin) => format!(
-            "{origin}{}{}",
-            url.path(),
-            url.query()
-                .map(|query| format!("?{query}"))
-                .unwrap_or_default()
-        ),
-        None => url.to_string(),
-    })
+    Ok(
+        match s.plugins.test_origin().filter(|_| scheme == "https") {
+            Some(origin) => format!(
+                "{origin}{}{}",
+                url.path(),
+                url.query()
+                    .map(|query| format!("?{query}"))
+                    .unwrap_or_default()
+            ),
+            None => url.to_string(),
+        },
+    )
 }
 
 /// Builds a multipart body from a JSON part and deliverables of the reply being
@@ -222,6 +265,70 @@ async fn multipart(s: &Service, context: &Context, spec: &Value) -> Result<(Stri
     Ok((format!("multipart/form-data; boundary={boundary}"), body))
 }
 
+/// The instance's credential (`auth = true`), or one of its secret fields
+/// (`auth = { secret, header?, prefix? }`), with the header it goes in. Values never
+/// reach scripts. Instances being edited use their unsaved values.
+pub(crate) async fn authorization(
+    s: &Service,
+    context: &Context,
+    auth: &Value,
+) -> Result<Option<(String, String, String)>> {
+    if *auth == Value::Bool(true) {
+        let rule = context
+            .manifest
+            .credential
+            .as_ref()
+            .ok_or_else(|| Error::forbidden("This plugin declares no credential."))?;
+        let secret = match &context.draft {
+            Some(draft) => draft.credential.clone(),
+            None => credential(s, &context.connection).await?,
+        }
+        .ok_or_else(|| Error::forbidden("This connection has no credential."))?;
+        return Ok(Some((rule.header.clone(), rule.prefix.clone(), secret)));
+    }
+    let Some(rule) = auth.as_object() else {
+        return Ok(None);
+    };
+    let header = rule
+        .get("header")
+        .and_then(Value::as_str)
+        .unwrap_or("authorization");
+    let prefix = rule.get("prefix").and_then(Value::as_str).unwrap_or("");
+    let valid_header = !header.is_empty()
+        && header.len() <= 40
+        && header
+            .bytes()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == b'-')
+        && !matches!(
+            header,
+            "host" | "content-length" | "transfer-encoding" | "cookie"
+        );
+    if !valid_header
+        || prefix.len() > 20
+        || !prefix
+            .bytes()
+            .all(|c| c.is_ascii_alphanumeric() || c == b' ')
+    {
+        return Err(Error::bad("Invalid credential header."));
+    }
+    let key = rule.get("secret").and_then(Value::as_str).unwrap_or("");
+    let secret = secrets(s, context)
+        .await?
+        .get(key)
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+        .ok_or_else(|| Error::forbidden("This instance has no such secret."))?;
+    Ok(Some((header.to_owned(), prefix.to_owned(), secret)))
+}
+
+/// The instance's secret fields: saved, or being edited.
+pub(crate) async fn secrets(s: &Service, context: &Context) -> Result<Map<String, Value>> {
+    match &context.draft {
+        Some(draft) => Ok(draft.secrets.clone()),
+        None => secret_values(s, &context.connection.id).await,
+    }
+}
+
 /// HTTPS to hosts the manifest lists. With `auth = true`, the host adds the
 /// connection's credential using the manifest's rule; scripts never see it.
 async fn http(s: &Service, context: &Context, args: &Value) -> Result<Value> {
@@ -234,7 +341,7 @@ async fn http(s: &Service, context: &Context, args: &Value) -> Result<Value> {
         "DELETE" => reqwest::Method::DELETE,
         _ => return Err(invalid("Unsupported HTTP method.")),
     };
-    let target = target(s, &context.manifest, text(args, "url"))?;
+    let target = target(s, &context.manifest, text(args, "url"), "https")?;
     let mut request = s
         .plugins
         .http
@@ -269,16 +376,8 @@ async fn http(s: &Service, context: &Context, args: &Value) -> Result<Value> {
         }
         request = request.body(body.to_owned());
     }
-    if args["auth"] == true {
-        let rule = context
-            .manifest
-            .credential
-            .as_ref()
-            .ok_or_else(|| Error::forbidden("This plugin declares no credential."))?;
-        let secret = credential(s, &context.connection)
-            .await?
-            .ok_or_else(|| Error::forbidden("This connection has no credential."))?;
-        request = request.header(rule.header.as_str(), format!("{}{secret}", rule.prefix));
+    if let Some((header, prefix, secret)) = authorization(s, context, &args["auth"]).await? {
+        request = request.header(header, format!("{prefix}{secret}"));
     }
     let response = request
         .send()

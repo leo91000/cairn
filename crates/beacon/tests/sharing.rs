@@ -178,7 +178,7 @@ async fn member_cannot_manage_projects_skills_agents_or_installation_settings() 
         (Method::GET, "/agents/00000000-0000-0000-0000-000000000000"),
         (Method::GET, "/nodes"),
         (Method::GET, "/accounts"),
-        (Method::GET, "/onepassword"),
+        (Method::GET, "/plugins"),
         (Method::GET, "/mcps"),
         (Method::GET, "/settings"),
     ] {

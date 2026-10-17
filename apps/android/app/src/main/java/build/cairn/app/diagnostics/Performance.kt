@@ -38,6 +38,8 @@ enum class PerfScreen {
                 "skills",
                 "nodes",
                 "connections",
+                "plugins",
+                "plugins/{id}",
                 "mcps" -> ATELIER
                 "settings" -> SETTINGS
                 else -> OTHER

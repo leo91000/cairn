@@ -1,6 +1,6 @@
 //! Configured plugin connections: an owner delegation (agent, project, people, quota)
 //! plus plugin settings declared by the manifest. Identical for every plugin.
-use super::{discord, registry};
+use super::{forms, registry};
 use crate::{
     config::{id, now},
     error::{Error, Result},
@@ -71,22 +71,58 @@ pub struct Connection {
     /// Hourly limit for each person when anyone can use the connection.
     #[serde(default = "per_person")]
     pub max_per_person_per_hour: u32,
+    /// Agents the owner granted for the package's commands and tools.
+    #[serde(default)]
+    pub agent_ids: Vec<String>,
+    /// Names of the secret fields saved in the vault (values never leave the host).
+    #[serde(default)]
+    pub secret_keys: Vec<String>,
     pub updated_at: i64,
 }
 
 impl Connection {
+    /// An instance being edited, before it is saved: only its plugin, settings and the
+    /// names of its secrets.
+    pub fn draft(id: &str, plugin_id: &str, settings: Value, secret_keys: Vec<String>) -> Self {
+        Self {
+            id: id.to_owned(),
+            plugin_id: plugin_id.to_owned(),
+            name: String::new(),
+            enabled: false,
+            revision: String::new(),
+            settings,
+            agent_id: String::new(),
+            project_id: None,
+            granted_access: Value::Null,
+            owner_access_id: None,
+            access_mode: AccessMode::Allowlist,
+            user_ids: Vec::new(),
+            people: Vec::new(),
+            max_messages_per_hour: 0,
+            max_per_person_per_hour: per_person(),
+            agent_ids: Vec::new(),
+            secret_keys,
+            updated_at: now(),
+        }
+    }
+
     /// Whether this person may use the connection right now.
     pub fn allows(&self, person: &str) -> bool {
         self.access_mode == AccessMode::Everyone || self.user_ids.iter().any(|id| id == person)
     }
+
+    pub fn grants(&self, agent_id: &str) -> bool {
+        self.enabled && self.agent_ids.iter().any(|id| id == agent_id)
+    }
 }
 
 /// An agent anyone may reach: read-only sandbox, one project at most, and no
-/// installation, GitHub, MCP or 1Password access. Checked on save and on every effect.
+/// installation, GitHub, MCP or plugin grants (such as 1Password). Checked on save and
+/// on every effect.
 pub(crate) fn public_safe(db: &Db<'_>, agent_id: &str, access: &Value) -> Result<()> {
     let projects = access["projects"].as_array().map_or(usize::MAX, Vec::len);
-    let secrets = db.list("onepassword")?.iter().any(|account| {
-        account["agentIds"]
+    let secrets = db.list(KIND)?.iter().any(|connection| {
+        connection["agentIds"]
             .as_array()
             .is_some_and(|ids| ids.iter().any(|id| id == agent_id))
     });
@@ -98,7 +134,7 @@ pub(crate) fn public_safe(db: &Db<'_>, agent_id: &str, access: &Value) -> Result
         || secrets
     {
         return Err(Error::bad(
-            "For anyone in the channel, choose an agent with a read-only sandbox, at most one project, and no installation, GitHub, MCP or 1Password access.",
+            "For anyone in the channel, choose an agent with a read-only sandbox, at most one project, and no installation, GitHub, MCP or plugin access such as 1Password.",
         ));
     }
     Ok(())
@@ -127,7 +163,12 @@ pub fn credential_key(id: &str) -> String {
     format!("plugin-credential:{id}")
 }
 
+/// External delegation stays bound to the owner who set it up. Instances that
+/// delegate nothing (no agent answering people) have no owner binding to check.
 pub(crate) async fn ensure_owner(s: &Service, connection: &Connection) -> Result<()> {
+    if connection.agent_id.is_empty() {
+        return Ok(());
+    }
     let current = crate::relay::task_author_policy(s).await?;
     let access_id = current
         .as_ref()
@@ -154,7 +195,7 @@ pub(crate) fn authorize(db: &Db<'_>, expected: &Connection) -> Result<Connection
         if policy(&agent) != current.granted_access {
             return Err(denied());
         }
-        // 1Password grants can change without changing the agent's policy.
+        // Plugin grants can change without changing the agent's policy.
         if current.access_mode == AccessMode::Everyone
             && public_safe(db, &current.agent_id, &current.granted_access).is_err()
         {
@@ -176,17 +217,29 @@ pub(crate) async fn credential(s: &Service, connection: &Connection) -> Result<O
 }
 
 pub(crate) async fn status(s: &Service, connection: &Connection, state: &str) {
+    status_with(s, connection, state, None).await;
+}
+
+/// The instance's live state with an optional message for the owner, e.g. who the
+/// package is signed in as, or why it stopped.
+pub(crate) async fn status_with(
+    s: &Service,
+    connection: &Connection,
+    state: &str,
+    message: Option<&str>,
+) {
     let _ = s
         .store
         .set(
             &format!("plugin-status:{}", connection.id),
-            json!({ "state": state, "updatedAt": now() }),
+            json!({ "state": state, "message": message, "updatedAt": now() }),
             None,
         )
         .await;
 }
 
-/// Validates settings against the manifest schema. Unknown keys are rejected.
+/// Validates settings against the manifest schema. Unknown keys are rejected; secret
+/// fields are saved separately with [`secrets`].
 pub fn settings(manifest: &Manifest, input: &Value) -> Result<Value> {
     let empty = Map::new();
     let input = match input {
@@ -194,58 +247,255 @@ pub fn settings(manifest: &Manifest, input: &Value) -> Result<Value> {
         Value::Null => &empty,
         _ => return Err(Error::bad("Plugin settings must be an object.")),
     };
-    if let Some(key) = input
-        .keys()
-        .find(|key| !manifest.settings.iter().any(|field| field["key"] == **key))
-    {
+    if let Some(key) = input.keys().find(|key| {
+        !manifest
+            .settings
+            .iter()
+            .any(|field| field["key"] == **key && field["type"] != "secret")
+    }) {
         return Err(Error::bad(format!("Unknown plugin setting: {key}.")));
     }
     let mut output = Map::new();
-    for field in &manifest.settings {
+    for field in manifest
+        .settings
+        .iter()
+        .filter(|field| field["type"] != "secret")
+    {
         let key = text(field, "key").to_owned();
-        let title = text(field, "title");
-        let value = input.get(&key).filter(|value| !value.is_null());
+        // An empty choice is no choice, e.g. a dynamic channel reset by the package.
+        let empty = |value: &&Value| {
+            value.is_null() || (text(field, "type") == "select" && value.as_str() == Some(""))
+        };
+        let value = input
+            .get(&key)
+            .filter(|value| !empty(value))
+            .or_else(|| field.get("default").filter(|value| !value.is_null()));
         let Some(value) = value else {
             if field["required"] == true {
-                return Err(Error::bad(format!("Enter {title}.")));
+                return Err(Error::bad(format!("Enter {}.", text(field, "title"))));
             }
             continue;
         };
-        let value = match field["type"].as_str() {
-            Some("string") => {
-                let max = field["maxLength"].as_u64().unwrap_or(200).min(2000) as usize;
-                let value = value
-                    .as_str()
-                    .ok_or_else(|| Error::bad(format!("{title} must be text.")))?;
-                if value.chars().count() > max || value.chars().any(char::is_control) {
-                    return Err(Error::bad(format!("{title} is too long or invalid.")));
-                }
-                if field["required"] == true && value.trim().is_empty() {
-                    return Err(Error::bad(format!("Enter {title}.")));
-                }
-                json!(value.trim())
-            }
-            Some("number") => {
-                let number = value
-                    .as_f64()
-                    .filter(|number| number.is_finite())
-                    .ok_or_else(|| Error::bad(format!("{title} must be a number.")))?;
-                let low = field["minimum"].as_f64().unwrap_or(f64::MIN);
-                let high = field["maximum"].as_f64().unwrap_or(f64::MAX);
-                if number < low || number > high {
-                    return Err(Error::bad(format!("{title} is out of range.")));
-                }
-                value.clone()
-            }
-            _ => json!(
-                value
-                    .as_bool()
-                    .ok_or_else(|| Error::bad(format!("{title} must be on or off.")))?
-            ),
-        };
-        output.insert(key, value);
+        output.insert(key, setting(field, value)?);
     }
     Ok(Value::Object(output))
+}
+
+fn matches_pattern(field: &Value, value: &str) -> bool {
+    field["pattern"]
+        .as_str()
+        .is_none_or(|source| cairn_plugin_api::pattern(source).is_some_and(|re| re.is_match(value)))
+}
+
+/// One checked value. Messages name the field, never the submitted value.
+pub(crate) fn setting(field: &Value, value: &Value) -> Result<Value> {
+    let title = text(field, "title");
+    let invalid = || Error::bad(format!("{title} is too long or invalid."));
+    let kind = text(field, "type");
+    Ok(match kind {
+        "string" | "text" | "url" => {
+            let default_max = if kind == "string" { 200 } else { 2000 };
+            let max = field["maxLength"]
+                .as_u64()
+                .unwrap_or(default_max)
+                .min(10_000) as usize;
+            let value = value
+                .as_str()
+                .ok_or_else(|| Error::bad(format!("{title} must be text.")))?;
+            let multiline = kind == "text";
+            if value.chars().count() > max
+                || value
+                    .chars()
+                    .any(|c| c.is_control() && !(multiline && matches!(c, '\n' | '\t')))
+            {
+                return Err(invalid());
+            }
+            let value = value.trim();
+            if field["required"] == true && value.is_empty() {
+                return Err(Error::bad(format!("Enter {title}.")));
+            }
+            if kind == "url"
+                && !value.is_empty()
+                && !url::Url::parse(value).is_ok_and(|url| matches!(url.scheme(), "https" | "http"))
+            {
+                return Err(Error::bad(format!("{title} must be a web address.")));
+            }
+            if !value.is_empty() && !matches_pattern(field, value) {
+                return Err(Error::bad(format!("{title} has an invalid format.")));
+            }
+            json!(value)
+        }
+        "number" => {
+            let number = value
+                .as_f64()
+                .filter(|number| number.is_finite())
+                .ok_or_else(|| Error::bad(format!("{title} must be a number.")))?;
+            let low = field["minimum"].as_f64().unwrap_or(f64::MIN);
+            let high = field["maximum"].as_f64().unwrap_or(f64::MAX);
+            if number < low || number > high {
+                return Err(Error::bad(format!("{title} is out of range.")));
+            }
+            value.clone()
+        }
+        "boolean" => json!(
+            value
+                .as_bool()
+                .ok_or_else(|| Error::bad(format!("{title} must be on or off.")))?
+        ),
+        // Dynamic choices come from the package's form; the package checks them on save.
+        "select" | "multiselect" if field["dynamic"] == true => {
+            let max = field["maxLength"].as_u64().unwrap_or(200).min(10_000) as usize;
+            let valid = |choice: &Value| {
+                choice.as_str().is_some_and(|choice| {
+                    !choice.is_empty()
+                        && choice.chars().count() <= max
+                        && !choice.chars().any(char::is_control)
+                        && matches_pattern(field, choice)
+                })
+            };
+            if kind == "select" {
+                if !valid(value) {
+                    return Err(Error::bad(format!("Choose {title}.")));
+                }
+                value.clone()
+            } else {
+                let choices = value
+                    .as_array()
+                    .filter(|choices| choices.len() <= 100 && choices.iter().all(valid))
+                    .ok_or_else(|| Error::bad(format!("Choose {title}.")))?;
+                if field["required"] == true && choices.is_empty() {
+                    return Err(Error::bad(format!("Choose {title}.")));
+                }
+                json!(choices)
+            }
+        }
+        "select" | "multiselect" => {
+            let allowed = |choice: &str| {
+                field["options"]
+                    .as_array()
+                    .is_some_and(|options| options.iter().any(|option| option["value"] == choice))
+            };
+            if kind == "select" {
+                let choice = value.as_str().filter(|choice| allowed(choice));
+                json!(choice.ok_or_else(|| Error::bad(format!("Choose {title}.")))?)
+            } else {
+                let choices = value
+                    .as_array()
+                    .ok_or_else(|| Error::bad(format!("Choose {title}.")))?;
+                let mut output = Vec::new();
+                for choice in choices {
+                    let choice = choice.as_str().filter(|choice| allowed(choice));
+                    let choice = choice.ok_or_else(|| Error::bad(format!("Choose {title}.")))?;
+                    if !output.contains(&choice) {
+                        output.push(choice);
+                    }
+                }
+                if field["required"] == true && output.is_empty() {
+                    return Err(Error::bad(format!("Choose {title}.")));
+                }
+                json!(output)
+            }
+        }
+        _ => return Err(invalid()),
+    })
+}
+
+/// Merges submitted secret fields with the saved ones. An empty or missing value keeps
+/// the saved secret; `null` clears an optional one. Errors never echo values.
+pub fn secrets(
+    manifest: &Manifest,
+    input: &Value,
+    saved: &Map<String, Value>,
+) -> Result<Map<String, Value>> {
+    let empty = Map::new();
+    let input = match input {
+        Value::Object(map) => map,
+        Value::Null => &empty,
+        _ => return Err(Error::bad("Plugin secrets must be an object.")),
+    };
+    let fields = manifest
+        .settings
+        .iter()
+        .filter(|field| field["type"] == "secret")
+        .collect::<Vec<_>>();
+    if let Some(key) = input
+        .keys()
+        .find(|key| !fields.iter().any(|field| field["key"] == **key))
+    {
+        return Err(Error::bad(format!("Unknown plugin secret: {key}.")));
+    }
+    let mut output = Map::new();
+    for field in fields {
+        let key = text(field, "key");
+        let title = text(field, "title");
+        let value = match input.get(key) {
+            Some(Value::Null) => None,
+            Some(Value::String(value)) if !value.trim().is_empty() => {
+                let value = value.trim();
+                let max = field["maxLength"].as_u64().unwrap_or(16_384).min(16_384) as usize;
+                if value.len() > max
+                    || value.chars().any(char::is_control)
+                    || !matches_pattern(field, value)
+                {
+                    return Err(Error::bad(format!("Enter a valid {title}.")));
+                }
+                Some(json!(value))
+            }
+            Some(Value::String(_)) | None => saved.get(key).cloned(),
+            Some(_) => return Err(Error::bad(format!("Enter a valid {title}."))),
+        };
+        match value {
+            Some(value) => {
+                output.insert(key.to_owned(), value);
+            }
+            None if field["required"] == true => {
+                return Err(Error::bad(format!("Enter {title}.")));
+            }
+            None => {}
+        }
+    }
+    Ok(output)
+}
+
+pub fn secrets_key(id: &str) -> String {
+    format!("plugin-secrets:{id}")
+}
+
+/// The instance's secret fields, for host-side injection only. Never sent to scripts.
+pub(crate) async fn secret_values(s: &Service, connection_id: &str) -> Result<Map<String, Value>> {
+    Ok(s.vault
+        .get(&secrets_key(connection_id))
+        .await?
+        .and_then(|value| value.get("fields").and_then(Value::as_object).cloned())
+        .unwrap_or_default())
+}
+
+/// Agents granted the package's commands and tools on this instance. Off by default.
+fn agent_grants(manifest: &Manifest, input: &Value) -> Result<Vec<String>> {
+    let agents = match input {
+        Value::Null => return Ok(Vec::new()),
+        Value::Array(agents) => agents,
+        _ => {
+            return Err(Error::bad(
+                "Select the agents allowed to use this instance.",
+            ));
+        }
+    };
+    if manifest.agent_access.is_none() && !agents.is_empty() {
+        return Err(Error::bad("This plugin does not give agents access."));
+    }
+    if agents.len() > 100 {
+        return Err(Error::bad("Select at most 100 agents."));
+    }
+    let mut ids = Vec::new();
+    for agent in agents {
+        let agent = agent.as_str().unwrap_or("");
+        uuid(agent)?;
+        if !ids.iter().any(|id| id == agent) {
+            ids.push(agent.to_owned());
+        }
+    }
+    Ok(ids)
 }
 
 fn labels(value: &Value) -> Vec<Label> {
@@ -269,16 +519,13 @@ pub async fn save(
     existing: Option<&str>,
 ) -> Result<Value> {
     let package = registry::active(s, plugin_id).await?;
-    let manifest = package.manifest;
+    let manifest = package.manifest.clone();
     let owner = crate::relay::task_author_policy(s).await?;
     let name = text(input, "name").trim();
     if name.is_empty() || name.chars().count() > 100 {
         return Err(Error::bad("Enter a connection name."));
     }
-    let settings = settings(&manifest, &input["settings"])?;
-    if manifest.permits_capability("transport.discord") {
-        discord::validate_scope(&settings)?;
-    }
+    let mut settings = settings(&manifest, &input["settings"])?;
     let delegates = manifest.permits_capability("conversations.submit");
     let agent_id = if delegates {
         text(input, "agentId")
@@ -359,6 +606,37 @@ pub async fn save(
     }
     let connection_id = existing.map_or_else(id, str::to_owned);
     uuid(&connection_id)?;
+    let agent_ids = agent_grants(&manifest, &input["agentIds"])?;
+    let saved = match existing {
+        Some(_) => secret_values(s, &connection_id).await?,
+        None => Map::new(),
+    };
+    let secret_fields = secrets(&manifest, &input["secrets"], &saved)?;
+    let secret_keys = secret_fields.keys().cloned().collect::<Vec<_>>();
+    if manifest.instance_form {
+        let credential = match (token.is_empty(), existing) {
+            (false, _) => Some(token.to_owned()),
+            (true, Some(id)) => s
+                .vault
+                .get(&credential_key(id))
+                .await?
+                .map(|value| text(&value, "token").to_owned()),
+            (true, None) => None,
+        };
+        let draft = forms::Draft {
+            credential,
+            secrets: secret_fields.clone(),
+        };
+        settings = forms::submit(s, &package, &connection_id, settings, draft).await?;
+    }
+    let encrypted_secrets = if manifest.secret_settings().next().is_some() {
+        Some(s.vault.encrypt(
+            &secrets_key(&connection_id),
+            &json!({ "fields": secret_fields }),
+        )?)
+    } else {
+        None
+    };
     let encrypted = if token.is_empty() {
         None
     } else {
@@ -383,6 +661,8 @@ pub async fn save(
         people,
         max_messages_per_hour: limit,
         max_per_person_per_hour: per_person,
+        agent_ids,
+        secret_keys,
         updated_at: now(),
     };
     let updating = existing.is_some();
@@ -392,8 +672,13 @@ pub async fn save(
         } else if updating {
             return Err(Error::not_found("Plugin connection not found."));
         }
-        if !updating && db.list(KIND)?.len() >= 16 {
-            return Err(Error::bad("At most sixteen plugin connections can run on this installation."));
+        if !updating && db.list(KIND)?.len() >= 64 {
+            return Err(Error::bad("At most 64 plugin instances can exist on this installation."));
+        }
+        for agent in &connection.agent_ids {
+            if db.get("agents", agent)?.is_none() {
+                return Err(Error::bad("A selected agent no longer exists."));
+            }
         }
         if !connection.agent_id.is_empty() {
             let agent = db.get("agents", &connection.agent_id)?.ok_or_else(|| Error::bad("Agent not found."))?;
@@ -419,6 +704,7 @@ pub async fn save(
             }
         }
         if let Some(encrypted) = encrypted { db.set(&format!("mcp-secret:{}", credential_key(&connection.id)), &encrypted, None)?; }
+        if let Some(encrypted) = encrypted_secrets { db.set(&format!("mcp-secret:{}", secrets_key(&connection.id)), &encrypted, None)?; }
         let value = serde_json::to_value(&connection)?;
         db.put(KIND, &value)?;
         db.audit("plugin.connection.saved", &json!({ "id": connection.id, "plugin": connection.plugin_id }))?;
@@ -445,6 +731,7 @@ pub async fn remove(s: &Service, plugin_id: &str, connection_id: &str) -> Result
         .transaction(move |db| {
             db.remove(KIND, &connection_id)?;
             db.delete(&format!("mcp-secret:{}", credential_key(&connection_id)))?;
+            db.delete(&format!("mcp-secret:{}", secrets_key(&connection_id)))?;
             db.delete(&format!("plugin-status:{connection_id}"))?;
             for kind in OWNED {
                 for value in db.list(kind)? {
