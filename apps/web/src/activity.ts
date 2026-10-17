@@ -80,12 +80,29 @@ export interface ActivityWait {
   observation?: Record<string, unknown> | null
   /** When the conversation resumed. */
   resumedAt?: number
-  /** A message from the user, or another wait, ended it first. */
-  ended?: 'message' | 'replaced'
+  /** A message from the user or a failed turn cancelled it, or another wait replaced it. */
+  ended?: 'cancelled' | 'replaced'
+  /** The agent's reason, for a result that was already available: no wakeup carries it. */
+  reason?: string
 }
+
+/** The text Cairn gives `chat.wait_ready` when `wait_for` finds its condition already met. */
+const immediateResult = 'Wait condition already completed'
 
 // Codex names the workspace server; Claude and OpenCode prefix the tool with it.
 const workspaceWaitTool = /^(?:mcp__)?cairn_workspace(?:__|_|\.)(?:sleep|wait_for)$/
+
+/** A tool call's arguments, which some providers record as JSON text. */
+function toolArguments(value: unknown) {
+  if (typeof value !== 'string')
+    return record(value)
+  try {
+    return record(JSON.parse(value))
+  }
+  catch {
+    return {}
+  }
+}
 
 function isWaitTool(item: Record<string, unknown>) {
   const tool = text(item.tool)
@@ -169,6 +186,12 @@ export function activityEntries(events: RunEvent[], chat = false, groups = new A
   // The wait still pending, by its wakeup ID, so that its result and resumption complete it.
   const waits = new Map<string, ActivityWait>()
   let openWait: ActivityWait | undefined
+  // The current wait call's reason: its tool row is hidden, and an immediate result omits it.
+  // Only that call may lend it, so it resets once used, once a wakeup carries it, and each turn.
+  let waitCall = ''
+  let waitReason = ''
+  // The call whose reason was used: its later updates must not lend it again.
+  let spentCall = ''
   for (const [eventIndex, event] of events.entries()) {
     if (event.type === 'artifact')
       continue
@@ -180,6 +203,8 @@ export function activityEntries(events: RunEvent[], chat = false, groups = new A
         openWait.ended = 'replaced'
       openWait = { wakeup }
       waits.set(wakeup.id, openWait)
+      waitReason = ''
+      spentCall = waitCall
       entries.push({
         kind: 'wait',
         id: `wait:${wakeup.id}`,
@@ -189,17 +214,31 @@ export function activityEntries(events: RunEvent[], chat = false, groups = new A
       continue
     }
 
-    // The condition completed: right away (the agent never waited) or while the conversation waited.
-    if (event.type === 'chat.wait_ready') {
-      const observation = record(event.payload)
-      const immediate = event.text === 'Wait condition already completed'
-      if (immediate && openWait) {
+    // The condition completed right away: the agent never waited, and this call replaced any wait.
+    if (event.type === 'chat.wait_ready' && event.text === immediateResult) {
+      if (openWait) {
         openWait.ended = 'replaced'
         openWait = undefined
       }
 
-      // A later resumption or the live snapshot
-      // identifies the resolved wait when its scheduling is outside the loaded page.
+      const observation = record(event.payload)
+      // Cairn records the reason with the result; older histories only kept it on the call.
+      const reason = text(observation.reason) || waitReason
+      entries.push({
+        kind: 'wait',
+        id: `wait-ready:${event.id}`,
+        time: event.createdAt,
+        wait: { wakeup: null, observation, ...(reason ? { reason } : {}) },
+      })
+      waitReason = ''
+      spentCall = waitCall
+      continue
+    }
+
+    // Polling found the result while the conversation waited. When the scheduling is outside the
+    // loaded page, a later resumption or the live snapshot identifies the wait.
+    if (event.type === 'chat.wait_ready') {
+      const observation = record(event.payload)
       const following = events.slice(eventIndex + 1)
       const boundary = following.findIndex(next => ['chat.user', 'chat.wait', 'chat.sleep'].includes(next.type))
       const continuation = boundary < 0 ? following : following.slice(0, boundary)
@@ -208,7 +247,7 @@ export function activityEntries(events: RunEvent[], chat = false, groups = new A
       const open = openWait?.wakeup?.condition ? openWait.wakeup : undefined
       const legacy = resumed?.payload as unknown as ChatWakeup | undefined
       const pending = pendingWakeup?.condition && pendingWakeup.createdAt <= event.createdAt ? pendingWakeup : undefined
-      const target = immediate ? undefined : open ?? legacy ?? pending
+      const target = open ?? legacy ?? pending
       let wait = target?.id ? waits.get(target.id) : undefined
       if (!wait && target?.id) {
         wait = { wakeup: target }
@@ -262,7 +301,7 @@ export function activityEntries(events: RunEvent[], chat = false, groups = new A
     if (event.type === 'chat.user') {
       // A new message cancels the pending wakeup.
       if (openWait) {
-        openWait.ended = 'message'
+        openWait.ended = 'cancelled'
         openWait = undefined
       }
 
@@ -290,6 +329,13 @@ export function activityEntries(events: RunEvent[], chat = false, groups = new A
 
     const item = record(data.item)
     const type = text(item.type)
+    // A run that ends without succeeding never resumes the wait it scheduled. Only its terminal
+    // status says so: a failed turn may be retried, and the retry keeps the wakeup.
+    if (openWait && !openWait.observation && event.type === 'status' && ['failed', 'cancelled', 'interrupted'].includes(event.text)) {
+      openWait.ended = 'cancelled'
+      openWait = undefined
+    }
+
     // Keep ended children stopped in the history when a later execution starts.
     const ended = ['turn.completed', 'turn.failed'].includes(event.type) || (event.type === 'status' && ['succeeded', 'failed', 'cancelled', 'interrupted'].includes(event.text))
     if (ended) {
@@ -311,6 +357,10 @@ export function activityEntries(events: RunEvent[], chat = false, groups = new A
     }
 
     if (event.type === 'turn.started') {
+      // Item IDs may repeat in a later turn: a new turn's calls start afresh.
+      waitReason = ''
+      waitCall = ''
+      spentCall = ''
       connectionNotices = []
       turn++
     }
@@ -525,8 +575,17 @@ export function activityEntries(events: RunEvent[], chat = false, groups = new A
     }
 
     // A scheduled wait shows as its own card; only a call that failed stays among the tools.
-    if (type === 'mcp_tool_call' && isWaitTool(item) && artifact.status !== 'error')
+    if (type === 'mcp_tool_call' && isWaitTool(item) && artifact.status !== 'error') {
+      // A provider may announce the call before its arguments: keep what the same call said.
+      const reason = text(toolArguments(item.arguments).reason)
+      if (itemId !== spentCall) {
+        if (itemId !== waitCall || reason)
+          waitReason = reason
+        waitCall = itemId
+      }
+
       continue
+    }
 
     const previous = artifacts.get(id)
     if (previous) {

@@ -1,6 +1,7 @@
 import type { Component } from 'vue'
 import type { ChatWakeup } from '../../../packages/contracts/chats'
 import type { ActivityWait } from '../src/activity'
+import type { LiveWait } from '../src/chat-wait'
 import vue from '@vitejs/plugin-vue'
 import { createServer } from 'vite'
 import {
@@ -43,20 +44,20 @@ const wakeup: ChatWakeup = {
 const observation = { state: 'completed', type: 'github_pr_checks', conclusion: 'success' }
 const resolved: ActivityWait = { wakeup, observation }
 
-function render(wait: ActivityWait, live: { wakeup: ChatWakeup | null, paused: boolean }) {
-  return renderToString(createSSRApp({ render: () => h(card, { wait, live }) }))
+function render(wait: ActivityWait, live: Omit<LiveWait, 'settled'>) {
+  return renderToString(createSSRApp({ render: () => h(card, { wait, live: { settled: true, ...live } }) }))
 }
 
 it('an observed result only promises resumption while the wakeup is active', async () => {
   expect(await render(resolved, { wakeup, paused: false })).toContain('Resuming when capacity allows')
   const paused = await render(resolved, { wakeup, paused: true })
-  expect(paused).toContain('Wait paused')
+  expect(paused).toContain('Resumes when you resume the conversation')
   expect(paused).not.toContain('Resuming when capacity allows')
   const cancelled = await render(resolved, { wakeup: null, paused: false })
   expect(cancelled).toContain('Wait cancelled')
   expect(cancelled).not.toContain('Resuming when capacity allows')
-  expect(await render({ ...resolved, ended: 'message' }, { wakeup: null, paused: false })).toContain('Wait cancelled by your message')
-  expect(await render({ ...resolved, ended: 'replaced' }, { wakeup: null, paused: false })).toContain('Replaced by a new wait')
+  expect(await render({ ...resolved, ended: 'cancelled' }, { wakeup: null, paused: false })).toContain('Wait cancelled')
+  expect(await render({ ...resolved, ended: 'replaced' }, { wakeup: null, paused: false })).toContain('Replaced by a later wait call')
 })
 
 it('completed resumptions and immediate results retain their historical outcome', async () => {
