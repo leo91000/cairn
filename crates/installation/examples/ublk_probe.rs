@@ -1,6 +1,6 @@
 //! Disposable qualification harness for the managed ublk and vhost transports.
 //! Only explicitly provided fixture paths are touched.
-use cairn_installation::storage::{self, BlockSource, LazyDisk};
+use cairn_installation::storage::{self, BlockSource, Disk, DiskWrite, LazyDisk};
 use libublk::ctrl::UblkCtrlBuilder;
 use serde_json::json;
 use std::{
@@ -34,6 +34,52 @@ impl BlockSource for FileSource {
         let mut bytes = vec![0; *length];
         self.file.read_exact_at(&mut bytes, *offset)?;
         Ok(bytes)
+    }
+}
+
+/// Private qualification only: hold a discard in the real kernel/backend path
+/// while the harness checks that Firecracker still services its management API.
+struct DiscardGate {
+    disk: Arc<LazyDisk>,
+    metrics: String,
+}
+
+impl Disk for DiscardGate {
+    fn size(&self) -> u64 {
+        self.disk.size()
+    }
+
+    fn read_at(&self, offset: u64, bytes: &mut [u8]) -> io::Result<()> {
+        self.disk.read_at(offset, bytes)
+    }
+
+    fn write_at(&self, offset: u64, bytes: &[u8]) -> io::Result<()> {
+        self.disk.write_at(offset, bytes)
+    }
+
+    fn write_batch(&self, writes: &[DiskWrite<'_>]) -> io::Result<()> {
+        self.disk.write_batch(writes)
+    }
+
+    fn sync(&self) -> io::Result<()> {
+        self.disk.sync()
+    }
+
+    fn discard(&self, offset: u64, length: usize) -> io::Result<()> {
+        let hold = format!("{}.discard-hold", self.metrics);
+        if Path::new(&hold).exists() {
+            fs::write(format!("{}.discard-entered", self.metrics), "")?;
+            while Path::new(&hold).exists() {
+                if Path::new(&format!("{}.managed-stop", self.metrics)).exists() {
+                    return Err(io::Error::new(
+                        io::ErrorKind::Interrupted,
+                        "Fixture stopped",
+                    ));
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        }
+        self.disk.discard(offset, length)
     }
 }
 
@@ -233,7 +279,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .join(uuid::Uuid::new_v4().to_string())
             .join("root");
         fs::create_dir_all(&jail)?;
-        let mounted = storage::ublk::mount_disk(disk, state, &jail, 40001)?;
+        let transport = Arc::new(DiscardGate {
+            disk,
+            metrics: args[5].clone(),
+        });
+        let mounted = storage::ublk::mount_disk(transport, state, &jail, 40001)?;
         fs::write(
             &args[4],
             jail.join("disk.blk")

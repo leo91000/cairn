@@ -143,7 +143,11 @@ internal fun chatDelivery(
         chat?.messages.orEmpty().filter { it.status in setOf("queued", "sending") }.toMutableList()
     if (outgoing != null && messages.none { it.id == outgoing.id }) messages.add(outgoing)
     val active = chat?.run?.active == true
-    val canStart = chat?.paused != true && (chat?.run == null || chat.run.status == "succeeded")
+    // A scheduled wait resumes the task before queued follow-ups start.
+    val canStart =
+        chat?.paused != true &&
+            (chat?.run == null || chat.run.status == "succeeded") &&
+            scheduledWakeup(chat) == null
     val sending = mutableListOf<SendingMessage>()
     val queued = mutableListOf<ChatMessage>()
     messages.forEachIndexed { index, message ->

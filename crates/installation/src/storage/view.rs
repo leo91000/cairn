@@ -59,6 +59,10 @@ impl Disk for DiskView {
         // A flush covers both devices when they share the same journal.
         self.disk.sync()
     }
+
+    fn discard(&self, offset: u64, length: usize) -> io::Result<()> {
+        self.disk.discard(self.translate(offset, length)?, length)
+    }
 }
 
 #[cfg(test)]
@@ -110,6 +114,19 @@ mod tests {
             .unwrap();
         os.sync().unwrap();
         assert_eq!(std::fs::read(&path).unwrap(), b"abcdefghXYklmnZZ");
+    }
+
+    #[test]
+    fn discard_is_translated_without_crossing_into_the_neighbouring_view() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("disk");
+        std::fs::write(&path, b"abcdefghijklmnop").unwrap();
+        let disk: Arc<dyn Disk> = Arc::new(LocalDisk::open(&path, true).unwrap());
+        let view = DiskView::new(disk, 8, 8).unwrap();
+        assert!(view.discard(7, 2).is_err());
+        assert!(view.discard(u64::MAX, 1).is_err());
+        view.discard(1, 6).unwrap();
+        assert_eq!(std::fs::read(path).unwrap(), b"abcdefghi\0\0\0\0\0\0p");
     }
 
     #[derive(Default)]

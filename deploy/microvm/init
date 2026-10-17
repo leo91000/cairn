@@ -36,6 +36,24 @@ printf 'nameserver 1.1.1.1\noptions single-request-reopen\n' > /etc/resolv.conf
 export HOME=/home/node CODEX_HOME=/home/node/.codex
 export CAIRN_TOOLKIT_DIR=/opt/cairn-toolkit PNPM_HOME=/pnpm
 export PATH=/usr/local/bin:/home/node/.local/share/mise/shims:/usr/local/share/mise/shims:/pnpm/bin:/pnpm:/usr/bin:/bin:/usr/sbin:/sbin
+# /mnt is a separate read-only node control disk, preserved below oldroot by
+# pivot_root. Keep the retained image's bridge and tools; only trim is current.
+trim_pid=
+if [ -f /oldroot/mnt/trim.py ]; then
+  /usr/bin/python3 -I -S /oldroot/mnt/trim.py &
+  trim_pid=$!
+  attempts=0
+  while [ ! -f /run/cairn-trim.ready ]; do
+    kill -0 "$trim_pid" 2>/dev/null || exit 1
+    attempts=$((attempts + 1))
+    [ "$attempts" -le 50 ] || exit 1
+    sleep 0.1
+  done
+fi
 /usr/local/bin/cairn guest
+if [ -n "$trim_pid" ]; then
+  kill "$trim_pid" 2>/dev/null || true
+  wait "$trim_pid" 2>/dev/null || true
+fi
 sync
 exec /sbin/reboot -f

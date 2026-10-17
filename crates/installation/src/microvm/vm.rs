@@ -262,13 +262,20 @@ fn firecracker_config(
 ) -> Value {
     // Virtio guests have no PS/2 devices. Keep warnings and errors on the
     // serial console without paying for informational output during boot.
+    let control_device = if drives.len() == 2 {
+        "/dev/vdd"
+    } else {
+        "/dev/vdc"
+    };
     let boot_args = format!(
         concat!(
             "console=ttyS0 loglevel=5 i8042.nokbd i8042.noaux ",
             "reboot=k panic=1 pci=off root=/dev/vda ro ",
-            "init=/sbin/cairn-init ip={}::{}:255.255.255.252:cairn:eth0:off"
+            "init=/bin/sh ip={}::{}:255.255.255.252:cairn:eth0:off ",
+            "-- -c \"set -e; mount -t devtmpfs devtmpfs /dev || true; ",
+            "mount -t squashfs -o ro,nodev,nosuid {} /mnt; exec /mnt/cairn-init\""
         ),
-        network.guest, network.gateway
+        network.guest, network.gateway, control_device
     );
     let mut configured_drives = vec![json!({
         "drive_id": "root",
@@ -277,6 +284,12 @@ fn firecracker_config(
         "is_read_only": true
     })];
     configured_drives.extend_from_slice(drives);
+    configured_drives.push(json!({
+        "drive_id": "control",
+        "path_on_host": "control.squashfs",
+        "is_root_device": false,
+        "is_read_only": true
+    }));
     json!({
         "boot-source": { "kernel_image_path": "vmlinux", "boot_args": boot_args },
         "drives": configured_drives,
@@ -404,6 +417,7 @@ impl Vm {
         let lock = lock_disk(&disk_dir)?;
         let id = crate::config::id();
         let current_kernel = image.join("vmlinux");
+        let current_control = image.join("control.squashfs");
         let image = retained_image(state, image, &disk_dir).await?;
         if disk_dir.join("restore.pending").exists() {
             return Err(Error::conflict("VM restore is incomplete."));
@@ -432,7 +446,7 @@ impl Vm {
             memory_mib: resources.memory_mi_b,
         };
         let result = tokio::select! {
-            result = vm.launch(state, (&image, &current_kernel, startup), &id, &resources, slot, &mut timing) => result,
+            result = vm.launch(state, (&image, &current_kernel, &current_control, startup), &id, &resources, slot, &mut timing) => result,
             () = stop.cancelled() => Err(Error::unavailable("VM preparation stopped.")),
         };
         if let Err(error) = result {
@@ -449,7 +463,7 @@ impl Vm {
     async fn launch(
         &mut self,
         state: &Path,
-        (image, kernel, startup): (&Path, &Path, Startup<'_>),
+        (image, kernel, control, startup): (&Path, &Path, &Path, Startup<'_>),
         id: &str,
         resources: &Resources,
         slot: usize,
@@ -469,6 +483,7 @@ impl Vm {
         );
         tokio::fs::hard_link(image.join("root.ext4"), jail.join("root.ext4")).await?;
         tokio::fs::copy(kernel, jail.join("vmlinux")).await?;
+        tokio::fs::hard_link(control, jail.join("control.squashfs")).await?;
         self.network.create(self.uid).await?;
 
         timing.next("spawn_and_guest_ready");
@@ -487,7 +502,7 @@ impl Vm {
             // it on the first nested VM creation after restore instead.
             let boot_args = config["boot-source"]["boot_args"].as_str().unwrap();
             config["boot-source"]["boot_args"] =
-                format!("{boot_args} kvm.enable_virt_at_load=0").into();
+                format!("kvm.enable_virt_at_load=0 {boot_args}").into();
         }
         if let Startup::Restore(template) = startup {
             snapshots::link(template, jail).await?;
@@ -1050,6 +1065,33 @@ mod tests {
     use super::*;
     use crate::microvm::budget;
     use std::os::unix::process::CommandExt;
+
+    #[test]
+    fn control_disk_bootstrap_keeps_flat_and_paired_guest_device_names() {
+        let network = Network::new(1).unwrap();
+        let resources = crate::nodes::placement::defaults();
+        for (drives, device) in [
+            (vec![json!({"drive_id": "data"})], "/dev/vdc"),
+            (
+                vec![
+                    json!({"drive_id": "data"}),
+                    json!({"drive_id": "conversation"}),
+                ],
+                "/dev/vdd",
+            ),
+        ] {
+            let config = firecracker_config(&network, &resources, 1, &drives);
+            let boot = config["boot-source"]["boot_args"].as_str().unwrap();
+            assert!(boot.contains(&format!("ro,nodev,nosuid {device} /mnt")));
+            assert!(boot.contains("-- -c \"set -e;"));
+            assert!(boot.ends_with("exec /mnt/cairn-init\""));
+            let configured = config["drives"].as_array().unwrap();
+            assert_eq!(configured[1..1 + drives.len()], drives);
+            let control = configured.last().unwrap();
+            assert_eq!(control["path_on_host"], "control.squashfs");
+            assert_eq!(control["is_read_only"], true);
+        }
+    }
 
     #[tokio::test]
     async fn suspension_preserves_fragmented_events_and_defers_inbox_rpc() {
