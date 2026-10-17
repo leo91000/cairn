@@ -3,6 +3,7 @@
 .idea/
 /build/
 /app/build/
+/release-smoke/build/
 local.properties
 *.jks
 *.keystore

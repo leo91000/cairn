@@ -60,6 +60,9 @@ data class ChatWakeup(
     val wakeAt: Long,
     val condition: JsonObject? = null,
     val observation: JsonObject? = null,
+    /** GitHub conditions: when Cairn checks again, and why its last check failed. */
+    val nextCheckAt: Long? = null,
+    val lastError: String? = null,
 )
 
 @Serializable

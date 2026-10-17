@@ -166,6 +166,8 @@ jobs:
           name: cairn-android-device-${{ matrix.shard }}
           path: device-results/
           retention-days: 14
+          # A rerun must replace failed results instead of leaving duplicate named artifacts.
+          overwrite: true
 
   device-report:
     needs: [resolve, device]
@@ -192,12 +194,13 @@ jobs:
           path: device-test-timings.json
           if-no-files-found: ignore
           retention-days: 14
+          overwrite: true
 
   release:
     needs: resolve
     if: needs.resolve.outputs.reuse != 'true'
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@v7.0.1
       - uses: ./.github/actions/setup-pnpm
@@ -217,7 +220,37 @@ jobs:
         run: printf 'CAIRN_ANDROID_VERSION=%s\n' "${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
       - name: Build optimized release
         working-directory: apps/android
-        run: ./gradlew assembleRelease --no-daemon
+        run: ./gradlew :app:assembleRelease :release-smoke:assembleDebug --no-daemon
+      - name: Check the native JNI entry point survived R8
+        run: node scripts/android-release-smoke.mjs guard apps/android/app/build/outputs/apk/release/app-release-unsigned.apk
+      - name: Enable emulator acceleration
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+      - uses: ./.github/actions/setup-android-emulator
+        with:
+          target: default
+          build-packages: ''
+      - name: Execute WebRTC in the minified release APK
+        uses: reactivecircus/android-emulator-runner@a421e43855164a8197daf9d8d40fe71c6996bb0d
+        with:
+          api-level: 36
+          arch: x86_64
+          target: default
+          profile: pixel_6
+          cores: 4
+          ram-size: 4096M
+          script: node scripts/android-release-smoke.mjs run apps/android/app/build/outputs/apk/release/app-release-unsigned.apk apps/android/release-smoke/build/outputs/apk/debug/release-smoke-debug.apk release-smoke-results
+      - name: Attach smoke evidence to the original unsigned APK
+        run: cp release-smoke-results/release-smoke.json apps/android/app/build/outputs/apk/release/
+      - uses: actions/upload-artifact@v7.0.1
+        if: always()
+        with:
+          name: cairn-android-release-smoke
+          path: release-smoke-results/
+          if-no-files-found: ignore
+          retention-days: 14
       # The workflow only succeeds when this build and the device checks pass.
       # A tag signs these exact bytes without compiling them again.
       - name: Record the validated unsigned release

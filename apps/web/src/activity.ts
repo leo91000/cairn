@@ -1,3 +1,4 @@
+import type { ChatWakeup } from '../../../packages/contracts/chats'
 import type { RunEvent } from '../../../packages/contracts/contracts'
 import { describeCommand, expectedCommandOutcome } from './activity-command'
 import { outputSummary } from './activity-data'
@@ -64,6 +65,32 @@ export type ActivityEntry
   | { kind: 'group', id: string, artifacts: ActivityArtifact[] }
   | { kind: 'team', id: string, agents: ActivityArtifact[] }
   | { kind: 'notice', id: string, artifact: ActivityArtifact }
+  | {
+    kind: 'wait'
+    id: string
+    time: number
+    wait: ActivityWait
+  }
+
+/** A durable wait the agent scheduled with `sleep` or `wait_for`, then how it ended. */
+export interface ActivityWait {
+  /** Absent when the condition had already completed and the agent never waited. */
+  wakeup: ChatWakeup | null
+  /** What Cairn observed once the condition completed or the deadline passed. */
+  observation?: Record<string, unknown> | null
+  /** When the conversation resumed. */
+  resumedAt?: number
+  /** A message from the user, or another wait, ended it first. */
+  ended?: 'message' | 'replaced'
+}
+
+// Codex names the workspace server; Claude and OpenCode prefix the tool with it.
+const workspaceWaitTool = /^(?:mcp__)?cairn_workspace(?:__|_|\.)(?:sleep|wait_for)$/
+
+function isWaitTool(item: Record<string, unknown>) {
+  const tool = text(item.tool)
+  return workspaceWaitTool.test(tool) || (text(item.server) === 'cairn_workspace' && ['sleep', 'wait_for'].includes(tool))
+}
 
 function record(value: unknown): Record<string, unknown> {
   return value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {}
@@ -109,7 +136,7 @@ const collaborationTitles: Record<string, string> = {
 }
 
 /** Keep tool updates in their original position and fold actions between messages. */
-export function activityEntries(events: RunEvent[], chat = false, groups = new ActivityGroups()): ActivityEntry[] {
+export function activityEntries(events: RunEvent[], chat = false, groups = new ActivityGroups(), pendingWakeup?: ChatWakeup | null): ActivityEntry[] {
   const entries: ActivityEntry[] = []
   const artifacts = new Map<string, ActivityArtifact>()
   const messages = new Map<string, Extract<ActivityEntry, { kind: 'message' }>>()
@@ -139,10 +166,106 @@ export function activityEntries(events: RunEvent[], chat = false, groups = new A
   let turn = 0
   let via: string | undefined
   let legacyTool: ActivityArtifact | undefined
-  for (const event of events) {
+  // The wait still pending, by its wakeup ID, so that its result and resumption complete it.
+  const waits = new Map<string, ActivityWait>()
+  let openWait: ActivityWait | undefined
+  for (const [eventIndex, event] of events.entries()) {
     if (event.type === 'artifact')
       continue
+    if (event.type === 'chat.sleep' || event.type === 'chat.wait') {
+      const wakeup = record(event.payload) as unknown as ChatWakeup
+      if (!wakeup.id || waits.has(wakeup.id))
+        continue
+      if (openWait)
+        openWait.ended = 'replaced'
+      openWait = { wakeup }
+      waits.set(wakeup.id, openWait)
+      entries.push({
+        kind: 'wait',
+        id: `wait:${wakeup.id}`,
+        time: event.createdAt,
+        wait: openWait,
+      })
+      continue
+    }
+
+    // The condition completed: right away (the agent never waited) or while the conversation waited.
+    if (event.type === 'chat.wait_ready') {
+      const observation = record(event.payload)
+      const immediate = event.text === 'Wait condition already completed'
+      if (immediate && openWait) {
+        openWait.ended = 'replaced'
+        openWait = undefined
+      }
+
+      // A later resumption or the live snapshot
+      // identifies the resolved wait when its scheduling is outside the loaded page.
+      const following = events.slice(eventIndex + 1)
+      const boundary = following.findIndex(next => ['chat.user', 'chat.wait', 'chat.sleep'].includes(next.type))
+      const continuation = boundary < 0 ? following : following.slice(0, boundary)
+      const resumed = continuation.find(next => next.type === 'chat.wakeup'
+        && JSON.stringify(next.payload?.observation) === JSON.stringify(observation))
+      const open = openWait?.wakeup?.condition ? openWait.wakeup : undefined
+      const legacy = resumed?.payload as unknown as ChatWakeup | undefined
+      const pending = pendingWakeup?.condition && pendingWakeup.createdAt <= event.createdAt ? pendingWakeup : undefined
+      const target = immediate ? undefined : open ?? legacy ?? pending
+      let wait = target?.id ? waits.get(target.id) : undefined
+      if (!wait && target?.id) {
+        wait = { wakeup: target }
+        waits.set(target.id, wait)
+        entries.push({
+          kind: 'wait',
+          id: `wait:${target.id}`,
+          time: event.createdAt,
+          wait,
+        })
+      }
+
+      if (wait) {
+        wait.observation = observation
+      }
+      else {
+        entries.push({
+          kind: 'wait',
+          id: `wait-ready:${event.id}`,
+          time: event.createdAt,
+          wait: { wakeup: null, observation },
+        })
+      }
+
+      continue
+    }
+
+    if (event.type === 'chat.wakeup') {
+      const wakeup = record(event.payload) as unknown as ChatWakeup
+      let wait = wakeup.id ? waits.get(wakeup.id) : undefined
+      // Its scheduling may be in an older page of the history.
+      if (!wait) {
+        wait = { wakeup }
+        if (wakeup.id)
+          waits.set(wakeup.id, wait)
+        entries.push({
+          kind: 'wait',
+          id: `wait:${wakeup.id || event.id}`,
+          time: event.createdAt,
+          wait,
+        })
+      }
+
+      wait.observation = wakeup.observation ?? wait.observation ?? null
+      wait.resumedAt = event.createdAt
+      if (wait === openWait)
+        openWait = undefined
+      continue
+    }
+
     if (event.type === 'chat.user') {
+      // A new message cancels the pending wakeup.
+      if (openWait) {
+        openWait.ended = 'message'
+        openWait = undefined
+      }
+
       entries.push({
         kind: 'message',
         role: 'user',
@@ -401,6 +524,10 @@ export function activityEntries(events: RunEvent[], chat = false, groups = new A
       connectionNotices.push(artifact)
     }
 
+    // A scheduled wait shows as its own card; only a call that failed stays among the tools.
+    if (type === 'mcp_tool_call' && isWaitTool(item) && artifact.status !== 'error')
+      continue
+
     const previous = artifacts.get(id)
     if (previous) {
       const durationMs = artifact.kind === 'subagent' ? artifact.durationMs : undefined
@@ -424,6 +551,18 @@ export function activityEntries(events: RunEvent[], chat = false, groups = new A
       entries.push({ kind: 'group', id: `group:${id}`, artifacts: [artifact] })
     if (legacy && event.type === 'item.started')
       legacyTool = Object.assign(artifact, { kind: 'output' as const, title: 'Recorded step', historical: true })
+  }
+
+  const knownWait = pendingWakeup && waits.get(pendingWakeup.id)
+  if (knownWait && pendingWakeup?.observation && knownWait.observation === undefined)
+    knownWait.observation = pendingWakeup.observation
+  if (pendingWakeup && !knownWait) {
+    entries.push({
+      kind: 'wait',
+      id: `wait:${pendingWakeup.id}`,
+      time: pendingWakeup.createdAt,
+      wait: { wakeup: pendingWakeup, ...(pendingWakeup.observation ? { observation: pendingWakeup.observation } : {}) },
+    })
   }
 
   return teamEntries(chat ? chatEntries(entries) : entries, groups)

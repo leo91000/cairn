@@ -1,6 +1,7 @@
 import type { ChatView } from '../../../packages/contracts/chats'
 import type { RunEvent, RunListItem, Task } from '../../../packages/contracts/contracts'
 import type { ActivityEntry } from './activity'
+import { waitTarget } from './chat-wait'
 import { exclusiveSuspensionLabel, isExclusivelySuspended } from './run-status'
 import { chatPath } from './workspace-links'
 
@@ -17,7 +18,7 @@ export function identityColor(key: string) {
 
 export const initial = (name: string) => name.trim().match(/[\p{L}\p{N}]/u)?.[0]?.toUpperCase() ?? '?'
 
-export type FilKind = 'question' | 'failed' | 'failed-mission' | 'review' | 'unread' | 'running' | 'queued' | 'paused' | 'suspended' | 'recent'
+export type FilKind = 'question' | 'failed' | 'failed-mission' | 'review' | 'unread' | 'running' | 'queued' | 'waiting' | 'paused' | 'suspended' | 'recent'
 export interface FilItem {
   key: string
   kind: FilKind
@@ -33,8 +34,17 @@ export interface FilItem {
   chatId?: string
   taskId?: string
   runId?: string
+  /** A waiting conversation's deadline: when it resumes, or at the latest for a condition. */
+  wakeAt?: number
+  /** It waits for a condition, so it may resume before `wakeAt`. */
+  condition?: boolean
 }
-export interface Fil { forYou: FilItem[], live: FilItem[], recent: FilItem[] }
+export interface Fil {
+  forYou: FilItem[]
+  live: FilItem[]
+  waiting: FilItem[]
+  recent: FilItem[]
+}
 
 /** Missions open beside the Fil, as conversations do, rather than in the Atelier. */
 export const filRunPath = (runId: string) => `/fil/runs/${runId}`
@@ -46,7 +56,7 @@ export const isUnread = (item: FilItem) => item.kind === 'unread'
 
 /**
  * What needs the user first (questions, failures, missions to review, then finished work they
- * have not read), then live work, then recent conversations. Only the latest run of each mission
+ * have not read), then live work, waiting conversations, then recent conversations. Only the latest run of each mission
  * counts, and chat runs belong to their conversation. `read` holds marks taken on this page
  * before the server's lists reflect them, by the finish time that was read.
  */
@@ -54,6 +64,7 @@ export function filOf(chats: ChatView[], tasks: Task[], runs: RunListItem[], rea
   const unreadNow = (key: string, finishedAt: number | null | undefined) => !(read[key] >= (finishedAt ?? 0))
   const forYou: FilItem[] = []
   const live: FilItem[] = []
+  const waiting: FilItem[] = []
   const recent: FilItem[] = []
   for (const chat of chats) {
     if (chat.lifecycle && chat.lifecycle !== 'active')
@@ -85,6 +96,15 @@ export function filOf(chats: ChatView[], tasks: Task[], runs: RunListItem[], rea
     }
     else if (chat.status === 'queued') {
       live.push({ ...base, kind: 'queued', subtitle: 'Waiting for a runner' })
+    }
+    else if (chat.wakeup && chat.status === 'succeeded') {
+      waiting.push({
+        ...base,
+        kind: 'waiting',
+        subtitle: waitTarget(chat.wakeup).short,
+        wakeAt: chat.wakeup.wakeAt,
+        condition: !!chat.wakeup.condition,
+      })
     }
     else if (chat.unread && unreadNow(base.key, chat.finishedAt)) {
       forYou.push({
@@ -149,7 +169,12 @@ export function filOf(chats: ChatView[], tasks: Task[], runs: RunListItem[], rea
   const newest = (a: FilItem, b: FilItem) => b.at - a.at
   // What asks for an answer or a decision stays above what only waits to be read.
   const urgency = (a: FilItem, b: FilItem) => Number(isUnread(a)) - Number(isUnread(b)) || newest(a, b)
-  return { forYou: forYou.sort(urgency), live: live.sort(newest), recent: recent.sort(newest) }
+  return {
+    forYou: forYou.sort(urgency),
+    live: live.sort(newest),
+    waiting: waiting.sort((a, b) => a.wakeAt! - b.wakeAt!),
+    recent: recent.sort(newest),
+  }
 }
 
 /**

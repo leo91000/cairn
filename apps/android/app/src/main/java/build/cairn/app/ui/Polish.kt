@@ -285,6 +285,61 @@ internal object CairnIcons {
             lineTo(12f, 12f)
             lineTo(15f, 14f)
         }
+    val Hourglass =
+        line("Hourglass") {
+            moveTo(5f, 2.5f)
+            lineTo(19f, 2.5f)
+            moveTo(5f, 21.5f)
+            lineTo(19f, 21.5f)
+            moveTo(7f, 2.5f)
+            lineTo(7f, 6.5f)
+            lineTo(12f, 12f)
+            lineTo(7f, 17.5f)
+            lineTo(7f, 21.5f)
+            moveTo(17f, 2.5f)
+            lineTo(17f, 6.5f)
+            lineTo(12f, 12f)
+            lineTo(17f, 17.5f)
+            lineTo(17f, 21.5f)
+        }
+    val PullRequest =
+        line("PullRequest") {
+            moveTo(9f, 6f)
+            arcTo(3f, 3f, 0f, true, true, 8.99f, 5.9f)
+            moveTo(21f, 18f)
+            arcTo(3f, 3f, 0f, true, true, 20.99f, 17.9f)
+            moveTo(6f, 9f)
+            lineTo(6f, 21f)
+            moveTo(13f, 6f)
+            lineTo(16f, 6f)
+            quadTo(18f, 6f, 18f, 8f)
+            lineTo(18f, 15f)
+        }
+    val Workflow =
+        line("Workflow") {
+            moveTo(5f, 3f)
+            lineTo(9f, 3f)
+            quadTo(11f, 3f, 11f, 5f)
+            lineTo(11f, 9f)
+            quadTo(11f, 11f, 9f, 11f)
+            lineTo(5f, 11f)
+            quadTo(3f, 11f, 3f, 9f)
+            lineTo(3f, 5f)
+            quadTo(3f, 3f, 5f, 3f)
+            moveTo(15f, 13f)
+            lineTo(19f, 13f)
+            quadTo(21f, 13f, 21f, 15f)
+            lineTo(21f, 19f)
+            quadTo(21f, 21f, 19f, 21f)
+            lineTo(15f, 21f)
+            quadTo(13f, 21f, 13f, 19f)
+            lineTo(13f, 15f)
+            quadTo(13f, 13f, 15f, 13f)
+            moveTo(7f, 11f)
+            lineTo(7f, 15f)
+            quadTo(7f, 17f, 9f, 17f)
+            lineTo(13f, 17f)
+        }
     val Play =
         SignalIcons.solid("Play") {
             moveTo(8f, 5.5f)

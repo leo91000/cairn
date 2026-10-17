@@ -192,7 +192,7 @@ RUN make x86_64_defconfig && scripts/kconfig/merge_config.sh -m .config /tmp/cai
         --disable SCSI --disable ATA --disable BLK_DEV_MD --disable MMC --disable FIREWIRE \
         --disable MODULES --disable DEBUG_INFO --disable DEBUG_INFO_DWARF_TOOLCHAIN_DEFAULT \
     && make olddefconfig \
-    && for option in KVM KVM_INTEL KVM_AMD VMGENID; do grep -qx "CONFIG_${option}=y" .config || exit 1; done \
+    && for option in KVM KVM_INTEL KVM_AMD VMGENID NETFILTER_XT_MATCH_HASHLIMIT; do grep -qx "CONFIG_${option}=y" .config || exit 1; done \
     && make -j8 vmlinux && strip --strip-debug vmlinux \
     && mv vmlinux /tmp/cairn-vmlinux && make clean && mv /tmp/cairn-vmlinux vmlinux
 

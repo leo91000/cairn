@@ -61,7 +61,7 @@ async function main() {
       [tcp, privateHost, 22, control],
       [tcp, privateHost, 2222, control],
       [udp, publicHost, 53, true],
-      [udp, publicHost, 2222, control],
+      [udp, publicHost, 2222, true],
       [udp, privateHost, 53, control],
     ]
     const results = await Promise.all(checks.map(([probe, host, port]) => probe(host, port)))
