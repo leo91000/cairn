@@ -135,7 +135,8 @@ test('a mission finishing outside its output tabs stays unread until the output 
   workspace.service.store.updateRun(done.id, { status: 'succeeded', finishedAt: Date.now(), summary: 'Output waiting to be read' })
   workspace.service.store.event(done.id, 'run.completed', 'Mission completed')
   const unread = async () => (await workspace.api('/api/tasks/activity')).find((run: { id: string }) => run.id === done.id)?.unread
-  await expect(page.getByText('Execution finished', { exact: true }).first()).toBeVisible()
+  // Fixture writes bypass native commit notifications; the live stream recovers them every 15 seconds.
+  await expect(page.getByText('Execution finished', { exact: true }).first()).toBeVisible({ timeout: 20000 })
   expect(await unread()).toBe(true)
   await page.getByRole('button', { name: 'Mission brief', exact: true }).click()
   expect(await unread()).toBe(true)
