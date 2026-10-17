@@ -452,6 +452,15 @@ internal fun ChatPage(
     val currentSubagents = remember(timeline) { currentSubagents(timeline) }
     val subagentBar =
         !fullscreen && currentSubagents.any { it.state(active) == SubagentState.RUNNING }
+    // The plan of the current request stays in sight above the composer while the agent follows
+    // it; only its latest card is live.
+    val following = running && !chat.exclusiveSuspended
+    val requestPlan =
+        remember(timeline, following) { if (following) currentPlan(timeline) else null }
+    val livePlan =
+        remember(timeline, requestPlan) {
+            if (requestPlan == null) null else timeline.lastOrNull { it.plan != null }?.key
+        }
     val working =
         remember(
             live.events,
@@ -1124,6 +1133,7 @@ internal fun ChatPage(
                                                 rendering,
                                                 hideRunning = chat?.run?.status == "running",
                                                 active = active,
+                                                livePlan = livePlan,
                                             )
                                         }
                                     }
@@ -1193,6 +1203,7 @@ internal fun ChatPage(
                                 }
                             }
                         }
+                        if (!fullscreen) requestPlan?.let { PlanBar(it) }
                         if (subagentBar) SubagentBar(currentSubagents, active, openSubagent)
                         openedSubagent?.let { selected ->
                             SubagentSheet(

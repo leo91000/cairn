@@ -34,6 +34,7 @@ import ConversationDeletion from '../components/ConversationDeletion.vue'
 import Icon from '../components/Icon.vue'
 import Modal from '../components/Modal.vue'
 import NodeExecution from '../components/NodeExecution.vue'
+import PlanBar from '../components/PlanBar.vue'
 import QueueStrip from '../components/QueueStrip.vue'
 import SkillTextarea from '../components/SkillTextarea.vue'
 import SubagentBar from '../components/SubagentBar.vue'
@@ -257,6 +258,8 @@ function pasteFiles(event: ClipboardEvent) {
 
 const active = computed(() => !!detail.value?.run && ['queued', 'running'].includes(detail.value.run.status))
 const suspended = computed(() => isExclusivelySuspended(detail.value?.run))
+// The plan of the current request stays in sight beside the composer while the agent follows it.
+const currentPlan = computed(() => runActive.value && !suspended.value ? activity.value?.plan : undefined)
 const retryNotice = useRetryNotice(() => detail.value?.run)
 const scheduled = computed(() => scheduledWakeup(detail.value))
 // The scheduled wait shows as a card in the conversation; these notices explain a run that cannot start.
@@ -981,6 +984,7 @@ function key(event: KeyboardEvent) {
                 </button>
               </div>
             </details>
+            <PlanBar v-if="currentPlan" :plan="currentPlan" />
             <SubagentBar
               v-if="subagentBar"
               :agents="currentSubagents"

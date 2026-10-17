@@ -489,6 +489,17 @@ impl Chat<'_> {
                 self.emit(json!({ "type": "item.updated", "item": item }))
                     .await
             }
+            "turn/plan/updated" => {
+                let id = format!(
+                    "{}:{}:plan",
+                    text(params, "threadId"),
+                    text(params, "turnId")
+                );
+                let mut plan = crate::agent_plan::codex(&id, params);
+                plan["parent_id"] = parent.into();
+                self.emit(json!({ "type": "item.updated", "item": plan }))
+                    .await
+            }
             "turn/started" | "turn/completed" => {
                 let status = if method == "turn/started" {
                     "in_progress"
@@ -649,6 +660,13 @@ impl Chat<'_> {
                 self.item(params["item"].clone(), &kind).await?;
             }
             "item/agentMessage/delta" => self.message_delta(&params).await?,
+            // Each update replaces the turn's whole plan.
+            "turn/plan/updated" => {
+                let id = format!("plan:{}", text(&params, "turnId"));
+                let plan = crate::agent_plan::codex(&id, &params);
+                self.emit(json!({ "type": "item.updated", "item": plan }))
+                    .await?;
+            }
             "error" if params["willRetry"] == true && params["turnId"] == self.turn.as_str() => {
                 // Codex owns this retry. Report its progress without failing the turn.
                 self.emit(json!({
