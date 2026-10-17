@@ -1,15 +1,16 @@
 diff --git a/src/vmm/src/devices/virtio/block/virtio/io/async_io.rs b/src/vmm/src/devices/virtio/block/virtio/io/async_io.rs
 --- a/src/vmm/src/devices/virtio/block/virtio/io/async_io.rs
 +++ b/src/vmm/src/devices/virtio/block/virtio/io/async_io.rs
-@@ -4,6 +4,7 @@
- use std::fmt::Debug;
- use std::fs::File;
- use std::os::fd::RawFd;
-+use std::os::unix::fs::FileTypeExt;
- use std::os::unix::io::AsRawFd;
+@@ -10,7 +10,7 @@
+ use vmm_sys_util::eventfd::EventFd;
  
- use vm_memory::{GuestMemoryBackend, GuestMemoryError};
-@@ -19,6 +20,8 @@
+ use crate::devices::virtio::block::virtio::io::RequestError;
+-use crate::devices::virtio::block::virtio::{IO_URING_NUM_ENTRIES, PendingRequest};
++use crate::devices::virtio::block::virtio::{PendingRequest, IO_URING_NUM_ENTRIES};
+ use crate::io_uring::operation::{Cqe, OpCode, Operation};
+ use crate::io_uring::restriction::Restriction;
+ use crate::io_uring::{IoUring, IoUringError};
+@@ -19,6 +19,8 @@
  
  #[derive(Debug, thiserror::Error, displaydoc::Display)]
  pub enum AsyncIoError {
@@ -18,16 +19,15 @@ diff --git a/src/vmm/src/devices/virtio/block/virtio/io/async_io.rs b/src/vmm/sr
      /// Not implemented
      NotImplemented,
      /// IO: {0}
-@@ -40,6 +43,8 @@
+@@ -40,6 +42,7 @@
      file: File,
      ring: IoUring<WrappedRequest>,
      completion_evt: EventFd,
-+    discard_mode: u32,
 +    discard_pending: bool,
  }
  
  #[derive(Debug)]
-@@ -84,6 +89,7 @@
+@@ -84,6 +87,7 @@
                  Restriction::AllowOpCode(OpCode::Read),
                  Restriction::AllowOpCode(OpCode::Write),
                  Restriction::AllowOpCode(OpCode::Fsync),
@@ -35,52 +35,22 @@ diff --git a/src/vmm/src/devices/virtio/block/virtio/io/async_io.rs b/src/vmm/sr
              ],
              Some(completion_fd),
          )
-@@ -96,19 +102,44 @@
-         let ring =
-             Self::new_ring(&file, completion_evt.as_raw_fd()).map_err(AsyncIoError::IoUring)?;
- 
-+        let discard_mode = Self::discard_mode(&file)?;
-         Ok(AsyncFileEngine {
+@@ -100,10 +104,14 @@
              file,
              ring,
              completion_evt,
-+            discard_mode,
 +            discard_pending: false,
          })
      }
  
-+    fn discard_mode(file: &File) -> Result<u32, AsyncIoError> {
-+        let mut mode =
-+            u32::try_from(libc::FALLOC_FL_PUNCH_HOLE | libc::FALLOC_FL_KEEP_SIZE).unwrap();
-+        if file
-+            .metadata()
-+            .map_err(AsyncIoError::IO)?
-+            .file_type()
-+            .is_block_device()
-+        {
-+            // Linux block/fops.c: NO_HIDE_STALE selects DISCARD rather than
-+            // WRITE_ZEROES. File-backed disks must not receive this block-only flag.
-+            const FALLOC_FL_NO_HIDE_STALE: u32 = 0x04;
-+            mode |= FALLOC_FL_NO_HIDE_STALE;
-+        }
-+        Ok(mode)
-+    }
-+
      pub fn update_file(&mut self, file: File) -> Result<(), AsyncIoError> {
 +        if self.discard_pending {
 +            return Err(AsyncIoError::DiscardBusy);
 +        }
-+        let discard_mode = Self::discard_mode(&file)?;
          let ring = Self::new_ring(&file, self.completion_evt.as_raw_fd())
              .map_err(AsyncIoError::IoUring)?;
  
-         self.file = file;
-         self.ring = ring;
-+        self.discard_mode = discard_mode;
-         Ok(())
-     }
- 
-@@ -128,6 +159,12 @@
+@@ -128,6 +136,12 @@
          count: u32,
          req: PendingRequest,
      ) -> Result<(), RequestError<AsyncIoError>> {
@@ -93,7 +63,7 @@ diff --git a/src/vmm/src/devices/virtio/block/virtio/io/async_io.rs b/src/vmm/sr
          let buf = match mem.get_slice(addr, count as usize) {
              Ok(slice) => slice.ptr_guard_mut().as_ptr(),
              Err(err) => {
-@@ -162,6 +199,12 @@
+@@ -162,6 +176,12 @@
          count: u32,
          req: PendingRequest,
      ) -> Result<(), RequestError<AsyncIoError>> {
@@ -106,7 +76,7 @@ diff --git a/src/vmm/src/devices/virtio/block/virtio/io/async_io.rs b/src/vmm/sr
          let buf = match mem.get_slice(addr, count as usize) {
              Ok(slice) => slice.ptr_guard_mut().as_ptr(),
              Err(err) => {
-@@ -189,6 +232,12 @@
+@@ -189,6 +209,12 @@
      }
  
      pub fn push_flush(&mut self, req: PendingRequest) -> Result<(), RequestError<AsyncIoError>> {
@@ -119,7 +89,7 @@ diff --git a/src/vmm/src/devices/virtio/block/virtio/io/async_io.rs b/src/vmm/sr
          let wrapped_user_data = WrappedRequest::new(req);
  
          self.ring
-@@ -199,8 +248,33 @@
+@@ -199,8 +225,35 @@
              })
      }
  
@@ -138,10 +108,12 @@ diff --git a/src/vmm/src/devices/virtio/block/virtio/io/async_io.rs b/src/vmm/sr
 +                error: AsyncIoError::DiscardBusy,
 +            });
 +        }
++        // Mode 3 is accepted by the VFS for both files and block devices.
++        // Block devices issue WRITE_ZEROES, supported by Cairn's ublk backend.
 +        self.ring
 +            .push(Operation::fallocate(
 +                0,
-+                self.discard_mode,
++                u32::try_from(libc::FALLOC_FL_PUNCH_HOLE | libc::FALLOC_FL_KEEP_SIZE).unwrap(),
 +                range.0,
 +                range.1,
 +                WrappedRequest::new(req),
@@ -155,7 +127,7 @@ diff --git a/src/vmm/src/devices/virtio/block/virtio/io/async_io.rs b/src/vmm/sr
      }
  
      pub fn kick_submission_queue(&mut self) -> Result<(), AsyncIoError> {
-@@ -236,7 +310,13 @@
+@@ -236,7 +289,13 @@
      }
  
      fn do_pop(&mut self) -> Result<Option<Cqe<WrappedRequest>>, AsyncIoError> {

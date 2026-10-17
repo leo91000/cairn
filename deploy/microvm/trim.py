@@ -69,7 +69,7 @@ def trim(target, stopped):
     if target not in TARGETS:
         raise ValueError("Unexpected trim target")
     started = time.monotonic()
-    completed = False
+    invocation_succeeded = False
     process = None
     try:
         # A separate session lets cancellation kill only our maintenance child.
@@ -83,7 +83,9 @@ def trim(target, stopped):
         deadline = started + TIMEOUT
         while process.poll() is None and not stopped() and time.monotonic() < deadline:
             time.sleep(0.25)
-        completed = process.poll() == 0 and not stopped()
+        # FITRIM can hide backend I/O errors; this records only tool success.
+        # Backend discard counters, not this flag, certify durable zeroing.
+        invocation_succeeded = process.poll() == 0 and not stopped()
     except OSError:
         pass
     finally:
@@ -93,7 +95,7 @@ def trim(target, stopped):
     return {
         "operation": "guest_trim",
         "mount": target,
-        "completed": completed,
+        "invocationSucceeded": invocation_succeeded,
         "elapsedMs": round((time.monotonic() - started) * 1000),
     }
 
@@ -131,7 +133,7 @@ def main():
                 break
             result = trim(target, stopped)
             print(json.dumps(result), flush=True)
-            delay = INTERVAL if result["completed"] else ERROR_RETRY
+            delay = INTERVAL if result["invocationSucceeded"] else ERROR_RETRY
             due[target] = time.monotonic() + delay
         # A paired workspace may mount after the first system trim. Detect it
         # promptly instead of delaying its first pass for a whole interval.

@@ -18,7 +18,9 @@ remain unchanged. Anonymous template identity changes with the added control
 drive and its contents; old templates are not reused with the new topology.
 
 Retain Async foreground I/O in the pinned Firecracker build. Submit discard through the existing
-restricted io_uring using block-device fallocate mode 7 or regular-file mode 3.
+restricted io_uring using fallocate mode 3. On block devices Linux issues
+WRITE_ZEROES, which ublk persists through the same authenticated zero operation
+as DISCARD. The reserved NO_HIDE_STALE flag is rejected by the VFS and is not used.
 Fence prior and subsequent requests until discard completion without blocking
 VMM control, even when another paired view or kernel writeback is waiting. Reject maintenance immediately
 when disk headroom is insufficient, preserve completions and bound a request to
@@ -34,6 +36,10 @@ Rollback follows the installation's overall compatibility policy.
 The new cached template uses the same identity fields and a different version;
 a compatible release can cold-boot ordinary disks and skip maintenance. No guest data reset,
 delta dependency graph or eager bucket scan is introduced.
+
+FITRIM may hide backend I/O errors. Guest logs report tool invocation success
+only; backend discard counters establish execution. Observed tool failures retry
+after a minute; hidden backend failures may wait for the normal 30-minute pass.
 
 Trim adds bounded journal work and can increase competing read/write latency;
 measure encoded bytes, cold/warm reads, writes, CPU and host/workload conditions

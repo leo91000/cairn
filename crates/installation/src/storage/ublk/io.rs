@@ -69,7 +69,7 @@ fn decode(
                 bytes: buffer[..length].to_vec(),
             })
         }
-        UBLK_IO_OP_DISCARD if length <= MAX_BATCH_BYTES => {
+        UBLK_IO_OP_DISCARD | UBLK_IO_OP_WRITE_ZEROES if length <= MAX_BATCH_BYTES => {
             Some(Command::Discard { offset, length })
         }
         _ => None,
@@ -188,6 +188,9 @@ pub(super) fn serve(
                         discard_granularity: 512,
                         max_discard_sectors: (MAX_BATCH_BYTES >> 9) as u32,
                         max_discard_segments: 1,
+                        // Block-device hole punching uses WRITE_ZEROES. Both
+                        // operations persist the same authenticated zero ranges.
+                        max_write_zeroes_sectors: (MAX_BATCH_BYTES >> 9) as u32,
                         ..Default::default()
                     },
                     ..Default::default()
@@ -260,6 +263,7 @@ pub(super) fn serve(
                                                     operation,
                                                     libublk::sys::UBLK_IO_OP_FLUSH
                                                         | libublk::sys::UBLK_IO_OP_DISCARD
+                                                        | libublk::sys::UBLK_IO_OP_WRITE_ZEROES
                                                 ) {
                                                     0
                                                 } else {
@@ -331,22 +335,23 @@ mod tests {
     use std::sync::Mutex;
 
     #[test]
-    fn discard_is_bounded_independently_of_the_read_write_payload_buffer() {
+    fn zero_ranges_are_bounded_independently_of_the_read_write_payload_buffer() {
         let size = 32 * 1024 * 1024;
-        assert!(matches!(
-            decode(UBLK_IO_OP_DISCARD, Some(0), MAX_BATCH_BYTES, size, &[]),
-            Some(Command::Discard { .. })
-        ));
-        for (offset, length) in [
-            (Some(size - 512), 1024),
-            (None, 512),
-            (Some(0), MAX_BATCH_BYTES + 512),
-        ] {
-            assert!(decode(UBLK_IO_OP_DISCARD, offset, length, size, &[]).is_none());
+        for operation in [UBLK_IO_OP_DISCARD, UBLK_IO_OP_WRITE_ZEROES] {
+            assert!(matches!(
+                decode(operation, Some(0), MAX_BATCH_BYTES, size, &[]),
+                Some(Command::Discard { .. })
+            ));
+            for (offset, length) in [
+                (Some(size - 512), 1024),
+                (None, 512),
+                (Some(0), MAX_BATCH_BYTES + 512),
+            ] {
+                assert!(decode(operation, offset, length, size, &[]).is_none());
+            }
         }
         assert!(decode(UBLK_IO_OP_READ, Some(0), MAX_BATCH_BYTES, size, &[]).is_none());
         assert!(decode(UBLK_IO_OP_WRITE, Some(0), 512, size, &[]).is_none());
-        assert!(decode(UBLK_IO_OP_WRITE_ZEROES, Some(0), 512, size, &[]).is_none());
     }
 
     struct Ordered(Mutex<Vec<&'static str>>);
@@ -383,42 +388,41 @@ mod tests {
     }
 
     #[test]
-    fn discard_fences_write_batches_and_a_failed_discard_is_not_acknowledged() {
-        let disk = Ordered(Mutex::new(Vec::new()));
-        let (send, receive) = mpsc::channel();
-        let mut replies = Vec::new();
-        for command in [
-            Command::Write {
-                offset: 0,
-                bytes: vec![1; 512],
-            },
-            Command::Discard {
-                offset: 0,
-                length: 512,
-            },
-            Command::Write {
-                offset: 0,
-                bytes: vec![2; 512],
-            },
-            Command::Read {
-                offset: 0,
-                length: 512,
-            },
-            Command::Flush,
-        ] {
-            let (done, reply) = oneshot::channel();
-            send.send(Request { command, done }).unwrap();
-            replies.push(reply);
+    fn zero_ranges_fence_write_batches_and_failures_are_not_acknowledged() {
+        for operation in [UBLK_IO_OP_DISCARD, UBLK_IO_OP_WRITE_ZEROES] {
+            let disk = Ordered(Mutex::new(Vec::new()));
+            let (send, receive) = mpsc::channel();
+            let mut replies = Vec::new();
+            for command in [
+                Command::Write {
+                    offset: 0,
+                    bytes: vec![1; 512],
+                },
+                decode(operation, Some(0), 512, disk.size(), &[]).unwrap(),
+                Command::Write {
+                    offset: 0,
+                    bytes: vec![2; 512],
+                },
+                Command::Read {
+                    offset: 0,
+                    length: 512,
+                },
+                Command::Flush,
+            ] {
+                let (done, reply) = oneshot::channel();
+                send.send(Request { command, done }).unwrap();
+                replies.push(reply);
+            }
+            drop(send);
+            let wake = EventFd::new(libc::EFD_NONBLOCK).unwrap();
+            worker(&disk, &receive, &wake);
+            for (index, reply) in replies.into_iter().enumerate() {
+                assert_eq!(reply.blocking_recv().unwrap().is_err(), index == 1);
+            }
+            assert_eq!(
+                *disk.0.lock().unwrap(),
+                ["write", "discard", "write", "read", "flush"]
+            );
         }
-        drop(send);
-        let wake = EventFd::new(libc::EFD_NONBLOCK).unwrap();
-        worker(&disk, &receive, &wake);
-        for (index, reply) in replies.into_iter().enumerate() {
-            assert_eq!(reply.blocking_recv().unwrap().is_err(), index == 1);
-        }
-        assert_eq!(
-            *disk.0.lock().unwrap(),
-            ["write", "discard", "write", "read", "flush"]
-        );
     }
 }

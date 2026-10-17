@@ -40,12 +40,12 @@ class GuestTrimTests(unittest.TestCase):
         process.poll.return_value = 0
         with patch.object(trim.subprocess, "Popen", return_value=process) as popen:
             result = trim.trim("/data", lambda: False)
-        self.assertTrue(result["completed"])
+        self.assertTrue(result["invocationSucceeded"])
         args, kwargs = popen.call_args
         self.assertEqual(args[0], [trim.BUSYBOX, "fstrim", "-m", "65536", "/data"])
         self.assertTrue(kwargs["start_new_session"])
         self.assertEqual(kwargs["stderr"], subprocess.DEVNULL)
-        self.assertEqual(set(result), {"operation", "mount", "completed", "elapsedMs"})
+        self.assertEqual(set(result), {"operation", "mount", "invocationSucceeded", "elapsedMs"})
         process.wait.assert_not_called()
 
     def test_cancellation_terminates_and_reaps_only_our_child_group(self):
@@ -53,7 +53,7 @@ class GuestTrimTests(unittest.TestCase):
         process.poll.return_value = None
         with patch.object(trim.subprocess, "Popen", return_value=process), patch.object(trim.os, "killpg") as kill:
             result = trim.trim("/data", lambda: True)
-        self.assertFalse(result["completed"])
+        self.assertFalse(result["invocationSucceeded"])
         kill.assert_called_once_with(123, signal.SIGTERM)
         process.wait.assert_called_once_with(timeout=2)
 
@@ -63,14 +63,14 @@ class GuestTrimTests(unittest.TestCase):
         process.wait.side_effect = [subprocess.TimeoutExpired("fixture", 2), 0]
         with patch.object(trim.subprocess, "Popen", return_value=process), patch.object(trim.os, "killpg") as kill, patch.object(trim.time, "monotonic", side_effect=[0, 121, 122]):
             result = trim.trim("/data", lambda: False)
-        self.assertFalse(result["completed"])
+        self.assertFalse(result["invocationSucceeded"])
         self.assertEqual([call.args for call in kill.call_args_list], [(123, signal.SIGTERM), (123, signal.SIGKILL)])
         self.assertEqual(process.wait.call_count, 2)
 
     def test_missing_tool_is_reported_without_child_diagnostics(self):
         with patch.object(trim.subprocess, "Popen", side_effect=OSError("private diagnostic")):
             result = trim.trim("/data", lambda: False)
-        self.assertFalse(result["completed"])
+        self.assertFalse(result["invocationSucceeded"])
         self.assertNotIn("private", str(result))
 
     def test_unknown_mount_is_rejected_before_spawning_any_process(self):

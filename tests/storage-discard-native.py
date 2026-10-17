@@ -87,6 +87,9 @@ def trial(root, data, paired, args):
             record = json.loads(records[0].read_text())
             assert record["owner"]["pid"] == process.pid
             context["deviceId"] = record["deviceId"]
+            queue = Path(f'/sys/class/block/ublkb{record["deviceId"]}/queue')
+            context["hostWriteZeroesMaxBytes"] = int((queue / "write_zeroes_max_bytes").read_text())
+            assert context["hostWriteZeroesMaxBytes"] > 0, "Native Async discard requires block-device WRITE_ZEROES support"
             info = device.stat()
             assert stat.S_ISBLK(info.st_mode)
             expected = Path(f'/sys/class/block/ublkb{record["deviceId"]}/dev').read_text().strip()
@@ -121,12 +124,12 @@ def trial(root, data, paired, args):
                 event = json.loads(line)
             except ValueError:
                 continue
-            if event.get("operation") == "guest_trim" and event.get("completed"):
+            if event.get("operation") == "guest_trim" and event.get("invocationSucceeded"):
                 events.append(event)
         assert {event["mount"] for event in events} == expected_mounts
         performance = [json.loads(context["metrics"].read_text()) for context in contexts]
         assert all(value["discard"]["count"] > 0 and value["discard"]["errors"] == 0 for value in performance)
-        result = {"paired": paired, "liveDataVerified": True, "blockedDiscardControl": timings, "trimEvents": events, "backendPerformance": performance}
+        result = {"paired": paired, "liveDataVerified": True, "blockedDiscardControl": timings, "trimEvents": events, "backendPerformance": performance, "hostWriteZeroesMaxBytes": [context["hostWriteZeroesMaxBytes"] for context in contexts]}
     finally:
         for context in contexts:
             context["hold"].unlink(missing_ok=True)

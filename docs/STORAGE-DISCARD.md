@@ -44,10 +44,12 @@ GC grace period; a successful FITRIM alone does not delete an S3 key.
 
 The pinned Firecracker 1.17.0 source supports discard only with its Sync engine
 upstream. Cairn adds asynchronous `IORING_OP_FALLOCATE` to the existing restricted
-ring and registered file descriptors. Regular files punch a hole with mode 3;
-block devices use mode 7 (`PUNCH_HOLE | KEEP_SIZE | NO_HIDE_STALE`) to request
-DISCARD rather than WRITE_ZEROES, following
-[Linux's block implementation](https://github.com/torvalds/linux/blob/v6.8/block/fops.c#L817).
+ring and registered file descriptors, using mode 3 (`PUNCH_HOLE | KEEP_SIZE`).
+Regular files punch a hole; Linux block devices issue WRITE_ZEROES, which Cairn
+ublk translates to the same durable authenticated zero ranges as DISCARD.
+The reserved `NO_HIDE_STALE` flag is rejected by
+[vfs_fallocate](https://github.com/torvalds/linux/blob/v6.8/fs/open.c#L252)
+before it reaches the block implementation, so it cannot select block discard.
 No userspace worker or additional seccomp syscall is needed.
 
 Discard starts after prior completion receipts are consumed and fences subsequent
@@ -61,15 +63,18 @@ Explicit snapshot/drain operations retain their existing I/O completion barriers
 The vhost frontend negotiates discard only when its backend advertises it.
 Cairn snapshots and validates the range descriptor before touching the disk.
 Discard fences read/write groups, and success waits for the disk operation.
-UBLK handles its payload-free discard separately from the 512 KiB read/write
-buffer. WRITE_ZEROES is not advertised. Volume space admission, faults and journal
+UBLK handles payload-free DISCARD and WRITE_ZEROES separately from the 512 KiB
+read/write buffer, with the same 8 MiB maximum and durability barrier. The guest
+virtio frontend advertises only discard. Volume space admission, faults and journal
 accounting remain conservative, including while trim is running. Discard
 admission returns a retryable failure immediately when headroom is insufficient;
 it does not wait for space or force a storage-pressure pause. Verified no-op
 ranges bypass write admission and budget debits while retaining their durability
 barrier, so a large sparse tail cannot exhaust synthetic quota before reaching
-real deleted bytes. The helper retries
-failed maintenance after 60 seconds.
+real deleted bytes. Backend errors remain visible in discard counters.
+FITRIM can return success after a backend I/O error, so a rejected range may
+wait until the next normal 30-minute pass. The helper retries after 60 seconds
+only when it observes a tool failure, timeout or cancellation.
 
 Background trim consumes CPU and durable journal barriers and can temporarily
 increase foreground latency. The new `performance.discard` counters expose count,
@@ -96,11 +101,16 @@ node asset copy retries its private staging file and installs only synced bytes.
 The root helper starts after the mounts and acknowledges readiness before the
 bridge starts. Its first pass follows a 10-second startup delay. It checks for
 newly mounted targets once per second and trims each mounted ext4 view every
-30 minutes, with a 64 KiB minimum free extent. A failed pass retries after a minute.
+30 minutes, with a 64 KiB minimum free extent. An observed tool failure retries
+after a minute. Ext4 may hide backend discard errors from FITRIM, so its successful
+exit does not certify that all free extents were reclaimed.
 Each child has a 120-second userspace deadline and an owned process group;
 shutdown/timeout terminates and reaps it. Kernel I/O stuck in uninterruptible sleep
 still requires the existing VM teardown path. Filesystem thaw never waits on the
-helper's lock. Logs contain only fixed mount names, completion and elapsed time.
+helper's lock. Logs contain only fixed mount names, `invocationSucceeded` and
+elapsed time. This flag records successful tool invocation; backend counters and
+errors establish actual discard execution. Hidden backend failures are retried
+on the next normal pass, and do not invalidate previously acknowledged writes.
 
 Ship the full node image, including patched Firecracker, control disk and backend.
 The normal node restart performs the accepted cold restart of running guests.
@@ -198,5 +208,7 @@ FITRIM on both mounts. It verifies kernel-device and private-registry removal
 before deleting fixtures. `ublk_probe` supports only private fixture markers
 `METRICS.discard-hold` and `METRICS.discard-entered`; managed-stop also releases a
 held fixture request. This opt-in fault injection is absent from production code.
-The qualification measures responsiveness during a controlled stall, not normal
+The harness also requires the ublk device to advertise host WRITE_ZEROES, the
+Linux block-device ABI used by Async hole punching. The qualification measures
+responsiveness during a controlled stall, not normal
 read/write latency or S3 performance.

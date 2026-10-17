@@ -135,7 +135,7 @@ def trial(root, data, paired, maintenance, args):
                             events.append(json.loads(line))
                         except ValueError:
                             pass
-                completed = {event.get("mount") for event in events if event.get("operation") == "guest_trim" and event.get("completed")}
+                completed = {event.get("mount") for event in events if event.get("operation") == "guest_trim" and event.get("invocationSucceeded")}
                 expected = {"/oldroot/run/data", "/data"} if paired else {"/oldroot/run/data"}
                 if maintenance and completed == expected and "CAIRN_LIVE_DATA_VERIFIED" in text:
                     break
