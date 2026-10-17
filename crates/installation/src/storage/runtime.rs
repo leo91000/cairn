@@ -1338,8 +1338,29 @@ mod tests {
         );
     }
 
+    #[test]
+    fn disk_pressure_waits_without_acknowledging_or_losing_writes_and_resumes() {
+        // Other tests deliberately hold the process-global admission mutex.
+        // Keep the discard deadline and pressure recovery in an isolated process.
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "storage::runtime::tests::disk_pressure_recovery_child",
+                "--ignored",
+            ])
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
     #[tokio::test]
-    async fn disk_pressure_waits_without_acknowledging_or_losing_writes_and_resumes() {
+    #[ignore = "isolated process-global admission and pressure recovery child"]
+    async fn disk_pressure_recovery_child() {
         let root = tempfile::tempdir().unwrap();
         let directory = root.path().join("disks/conversation");
         let policy = Policy {

@@ -26,7 +26,9 @@ COPY crates/plugin-host/Cargo.toml ./crates/plugin-host/Cargo.toml
 COPY crates/plugin-runtime/Cargo.toml ./crates/plugin-runtime/Cargo.toml
 # A separate dependency layer survives application edits in remote BuildKit
 # caches. Cargo cache mounts alone do not persist on fresh GitHub runners.
-RUN --mount=type=cache,id=cargo-registry,target=/usr/local/cargo/registry \
+# Cargo's package lock lives outside this mount. Serialize registry writers
+# across build stages, including the independently pinned Firecracker toolchain.
+RUN --mount=type=cache,id=cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
     mkdir -p crates/installation/src crates/installation/examples crates/beacon/src crates/protocol/src crates/plugin-api/src crates/plugin-host/src crates/plugin-runtime/src \
     && printf '' > crates/plugin-api/src/lib.rs \
     && printf '' > crates/plugin-host/src/lib.rs \
@@ -44,7 +46,7 @@ COPY plugins ./plugins
 COPY crates/installation ./crates/installation
 COPY crates/protocol ./crates/protocol
 COPY deploy/nodes ./deploy/nodes
-RUN --mount=type=cache,id=cargo-registry,target=/usr/local/cargo/registry \
+RUN --mount=type=cache,id=cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
     touch crates/installation/src/main.rs crates/installation/src/lib.rs crates/protocol/src/lib.rs \
     crates/plugin-api/src/lib.rs crates/plugin-host/src/lib.rs crates/plugin-runtime/src/lib.rs && \
     cargo build --locked --release --bin cairn --features ublk && cp target/release/cairn /usr/local/bin/cairn
@@ -61,7 +63,7 @@ COPY crates/protocol/Cargo.toml ./crates/protocol/Cargo.toml
 COPY crates/plugin-api/Cargo.toml ./crates/plugin-api/Cargo.toml
 COPY crates/plugin-host/Cargo.toml ./crates/plugin-host/Cargo.toml
 COPY crates/plugin-runtime/Cargo.toml ./crates/plugin-runtime/Cargo.toml
-RUN --mount=type=cache,id=cargo-registry,target=/usr/local/cargo/registry \
+RUN --mount=type=cache,id=cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
     mkdir -p crates/installation/src crates/installation/examples crates/beacon/src crates/protocol/src crates/plugin-api/src crates/plugin-host/src crates/plugin-runtime/src \
     && printf '' > crates/plugin-api/src/lib.rs \
     && printf '' > crates/plugin-host/src/lib.rs \
@@ -77,7 +79,7 @@ COPY crates/beacon ./crates/beacon
 COPY crates/protocol ./crates/protocol
 COPY deploy/installations ./deploy/installations
 COPY deploy/nodes ./deploy/nodes
-RUN --mount=type=cache,id=cargo-registry,target=/usr/local/cargo/registry \
+RUN --mount=type=cache,id=cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
     touch crates/beacon/src/main.rs crates/beacon/src/lib.rs crates/protocol/src/lib.rs \
     && cargo build --locked --release --bin cairn-beacon \
     && cp target/release/cairn-beacon /usr/local/bin/cairn-beacon
@@ -115,7 +117,7 @@ RUN git apply /tmp/firecracker.patch
 # Native CI runs the async engine tests; build sandboxes may deny io_uring.
 COPY deploy/microvm/firecracker-discard.patch /tmp/firecracker-discard.patch
 RUN git apply /tmp/firecracker-discard.patch
-RUN --mount=type=cache,id=cargo-registry,target=/usr/local/cargo/registry \
+RUN --mount=type=cache,id=cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,id=firecracker-git,target=/usr/local/cargo/git \
     cargo test --locked -p vmm --lib test_discard_range \
     && cargo test --locked -p vmm --lib test_parse_discard \
