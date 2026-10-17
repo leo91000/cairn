@@ -624,6 +624,87 @@ fn shortened_subagent_activity_preserves_a_redacted_prompt_and_report() {
 }
 
 #[tokio::test]
+async fn codex_plan_updates_show_as_one_plan_per_turn() {
+    let root = TempDir::new().unwrap();
+    let home = prepare(&root);
+    let config = config(&root);
+    let plan = plan(&root, "fixture:plan");
+    let (tx, mut rx) = mpsc::channel(256);
+    let task = tokio::spawn(async move {
+        chat_process::run(&config, &home, plan, tx, CancellationToken::new()).await
+    });
+    let mut events = Vec::new();
+    while let Some(event) = rx.recv().await {
+        events.push(event);
+    }
+    task.await.unwrap().unwrap();
+
+    let plans: Vec<_> = events
+        .iter()
+        .filter(|e| e["item"]["type"] == "todo_list")
+        .collect();
+    assert_eq!(plans.len(), 3);
+    // Every update replaces the same plan of the turn.
+    assert!(plans.iter().all(|e| e["type"] == "item.updated"));
+    assert!(
+        plans
+            .iter()
+            .all(|e| e["item"]["id"] == plans[0]["item"]["id"])
+    );
+    assert_eq!(
+        plans[0]["item"]["explanation"],
+        "Data model first, then the middleware."
+    );
+    let states = |event: &Value| -> Vec<String> {
+        event["item"]["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|step| step["status"].as_str().unwrap().to_owned())
+            .collect()
+    };
+    assert_eq!(
+        states(plans[1]),
+        vec!["completed", "in_progress", "pending", "pending"]
+    );
+    assert_eq!(plans[1]["item"]["items"][3]["text"], "Run the checks");
+    assert!(states(plans[2]).iter().all(|state| state == "completed"));
+}
+
+#[test]
+fn shortened_plans_keep_step_states() {
+    let event = json!({
+        "type": "item.updated",
+        "item": {
+            "id": "plan:turn",
+            "type": "todo_list",
+            "explanation": "Data model first.",
+            "items": [
+                {
+                    "text": "Add the migration",
+                    "status": "completed",
+                    "completed": true,
+                },
+                {
+                    "text": "Refresh tokens",
+                    "status": "in_progress",
+                    "completed": false,
+                    "active_text": "Refreshing tokens",
+                },
+            ],
+        },
+    });
+
+    let shortened = cairn_installation::run_output::compact_activity(&event, &[]);
+
+    let item = &shortened["item"];
+    assert_eq!(item["explanation"], "Data model first.");
+    assert_eq!(item["items"][0]["status"], "completed");
+    assert_eq!(item["items"][1]["status"], "in_progress");
+    assert_eq!(item["items"][1]["active_text"], "Refreshing tokens");
+}
+
+#[tokio::test]
 async fn subagent_lifecycle_handles_early_activity_nested_spawns_and_interruption() {
     let root = TempDir::new().unwrap();
     let home = prepare(&root);

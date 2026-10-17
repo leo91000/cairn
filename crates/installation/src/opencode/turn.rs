@@ -188,7 +188,15 @@ pub fn chat_item(part: &Value) -> Option<Value> {
                 "error" => "failed",
                 _ => "in_progress",
             };
-            if part["tool"] == "bash" {
+            if part["tool"] == "todowrite" {
+                // The list counts once the call succeeds; it is announced before its arguments.
+                if status != "completed" {
+                    return None;
+                }
+                let mut plan = crate::agent_plan::todos(id, &state["input"]);
+                plan["status"] = status.into();
+                plan
+            } else if part["tool"] == "bash" {
                 json!({
                     "id": id,
                     "type": "command_execution",
@@ -890,6 +898,48 @@ fn question_id(session: &str, native: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn todowrite_shows_as_the_agent_plan_once_it_succeeds() {
+        let todos = json!([
+            {
+                "id": "1",
+                "content": "Check the workspace",
+                "status": "completed",
+                "priority": "high",
+            },
+            {
+                "id": "2",
+                "content": "Write a changelog",
+                "status": "cancelled",
+                "priority": "low",
+            },
+        ]);
+        let part = |status: &str| {
+            json!({
+                "id": "prt_1",
+                "type": "tool",
+                "tool": "todowrite",
+                "state": {
+                    "status": status,
+                    "input": { "todos": todos },
+                    "output": "[]",
+                },
+            })
+        };
+
+        // A call still running, or one that failed, did not change the plan.
+        assert!(chat_item(&part("running")).is_none());
+        assert!(chat_item(&part("error")).is_none());
+        let item = chat_item(&part("completed")).unwrap();
+
+        assert_eq!(item["type"], "todo_list");
+        assert_eq!(item["status"], "completed");
+        assert_eq!(item["items"][0]["text"], "Check the workspace");
+        assert_eq!(item["items"][0]["completed"], true);
+        assert_eq!(item["items"][1]["status"], "cancelled");
+        assert!(item.get("result").is_none());
+    }
 
     #[test]
     fn wire_ids_use_the_native_six_byte_timestamp() {

@@ -312,6 +312,84 @@ test('working subagents stay in sight beside the composer and open as a drawer o
   }
 })
 
+test('the agent plan shows once where it was written, then each change where it happened', async ({ page, workspace }) => {
+  const chat = await workspace.api('/api/chats', 'POST', {})
+  await workspace.api(`/api/chats/${chat.id}/messages`, 'POST', { id: randomUUID(), text: 'fixture:plan' })
+  await expect.poll(async () => (await workspace.api(`/api/chats/${chat.id}`)).run?.status, { timeout: 15000 }).toBe('succeeded')
+  await page.goto(workspacePath(`/chats/${chat.id}`))
+  await authenticateWorkspace(page)
+  const plan = page.getByTestId('agent-plan')
+  await expect(plan).toHaveCount(1)
+  // A finished plan folds into its summary.
+  const header = plan.locator(':scope > button')
+  await expect(header).toContainText('Plan complete')
+  await expect(header).toContainText('4 steps')
+  await expect(header).toHaveAttribute('aria-expanded', 'false')
+  await header.click()
+  await expect(plan).toContainText('Data model first, then the middleware.')
+  await expect(plan.getByTestId('plan-step')).toHaveCount(4)
+  await expect(plan.locator('[data-testid="plan-step"][data-state="done"]')).toHaveCount(4)
+  const updates = page.getByTestId('plan-update')
+  await expect(updates).toHaveCount(2)
+  await expect(updates.first()).toContainText('Explore the auth middleware')
+  await expect(updates.first()).toContainText('Add the session expiry migration')
+  await expect(updates.first()).toContainText('Run the checks')
+  await expect(updates.first()).toContainText('1/4')
+  await expect(updates.last()).toContainText('4/4')
+  await expect(page.getByText('Updated the plan')).toHaveCount(0)
+  await expect(page.getByTestId('plan-bar')).toHaveCount(0)
+  for (const colorScheme of ['light', 'dark'] as const) {
+    await page.emulateMedia({ colorScheme })
+    for (const width of [1280, 390]) {
+      await page.setViewportSize({ width, height: 844 })
+      await plan.scrollIntoViewIfNeeded()
+      await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth - innerWidth)).toBeLessThanOrEqual(1)
+      await page.screenshot({ path: test.info().outputPath(`agent-plan-${colorScheme}-${width}.png`), animations: 'disabled' })
+    }
+  }
+})
+
+test('the plan of the current request stays beside the composer while the agent follows it', async ({ page, workspace }) => {
+  test.setTimeout(60000)
+  const chat = await workspace.api('/api/chats', 'POST', {})
+  try {
+    await workspace.api(`/api/chats/${chat.id}/messages`, 'POST', { id: randomUUID(), text: 'fixture:plan-working' })
+    await expect.poll(async () => (await workspace.api(`/api/chats/${chat.id}`)).run?.status, { timeout: 15000 }).toBe('running')
+    await page.setViewportSize({ width: 1280, height: 844 })
+    await page.goto(workspacePath(`/chats/${chat.id}`))
+    await authenticateWorkspace(page)
+    const bar = page.getByTestId('plan-bar')
+    await expect(bar).toContainText('Add the session expiry migration')
+    await expect(bar).toContainText('1/4')
+    await expect(bar).toHaveAccessibleName(/^Plan, 1 of 4 done\. Add the session expiry migration\. Show the plan$/)
+    await expect(page.getByTestId('agent-plan')).toContainText('Live')
+    await bar.click()
+    const popover = page.getByTestId('plan-popover')
+    await expect(popover).toContainText('1 of 4 done')
+    await expect(popover).toContainText('Data model first, then the middleware.')
+    await expect(popover.locator('[data-testid="plan-step"][data-state="active"]')).toContainText('Add the session expiry migration')
+    await expect(page.getByRole('textbox', { name: 'Message', exact: true })).toBeInViewport()
+    await page.screenshot({ path: test.info().outputPath('plan-bar-1280.png'), animations: 'disabled' })
+    await page.keyboard.press('Escape')
+    await expect(popover).toHaveCount(0)
+    await expect(bar).toBeFocused()
+
+    await page.setViewportSize({ width: 390, height: 844 })
+    await expect(bar).toContainText('Add the session expiry migration')
+    await bar.click()
+    await expect(popover).toBeVisible()
+    await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth - innerWidth)).toBeLessThanOrEqual(1)
+    await page.screenshot({ path: test.info().outputPath('plan-bar-390.png'), animations: 'disabled' })
+    // Pressing elsewhere closes it.
+    await page.getByRole('textbox', { name: 'Message', exact: true }).click()
+    await expect(popover).toHaveCount(0)
+  }
+  finally {
+    await workspace.api(`/api/chats/${chat.id}/stop`, 'POST', {})
+    await expect.poll(async () => (await workspace.api(`/api/chats/${chat.id}`)).run?.status).not.toBe('running')
+  }
+})
+
 test('early and nested subagents keep one row and their own steps', async ({ page, workspace }) => {
   const chat = await workspace.api('/api/chats', 'POST', {})
   await workspace.api(`/api/chats/${chat.id}/messages`, 'POST', { id: randomUUID(), text: 'fixture:subagents-lifecycle' })
