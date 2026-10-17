@@ -5,7 +5,7 @@ use super::{
     host::{self, call, connect, import, valid_runtime_name},
     mcp,
     network::Network,
-    plan::{CHAT_INBOX, ENTRYPOINT, HOME, Import, Plan},
+    plan::{CHAT_INBOX, HOME, Import, Plan},
     protocol::{Event, GuestRequest, GuestStatus, Reply},
     wire,
 };
@@ -810,8 +810,7 @@ impl Vm {
             }
             if plan.command().is_none() && !status.codex_ready {
                 timing.next("current_entrypoint");
-                let target = Path::new(ENTRYPOINT).parent().unwrap().to_str().unwrap();
-                host::import(socket, &state.join("entrypoint"), target).await?;
+                host::prepare_entrypoint(socket, state, &status).await?;
             }
             run(socket, plan, state, timing).await
         };
@@ -853,8 +852,7 @@ impl Vm {
         let mut timing = Operation::new("vm_codex_warm", self.id(), "clock");
         self.synchronize_clock().await?;
         timing.next("current_entrypoint");
-        let target = Path::new(ENTRYPOINT).parent().unwrap().to_str().unwrap();
-        host::import(&self.socket, &state.join("entrypoint"), target).await?;
+        host::prepare_entrypoint(&self.socket, state, &status).await?;
         // Any uncertain outcome retires this VM; execute cannot silently start
         // a second native process over databases opened by the first one.
         self.warmed = true;
