@@ -67,7 +67,7 @@ docker compose restart manager
 The restart uses the usual execution recovery; do it at a suitable maintenance
 window. No automatic migration of browser accounts, grants or installations is
 provided. Alternatively, reinstall with fresh volumes and claim the new
-installation. **Discarding old volumes discards their data**: retain backups
+installation. **Discarding old volumes discards their data**: retain the original volumes
 until the replacement has been verified. The one-command installer includes local
 S3 setup; this manual Compose procedure still needs existing S3 configuration.
 
@@ -117,7 +117,7 @@ credentials and recovery proofs. Stop the manager, back up the entire private
 `installation-relay` directory outside the deployment volumes, remove that
 directory, and run `cairn claim` with `CAIRN_BEACON_ORIGIN`. This creates a new
 beacon installation ID while preserving existing data volumes.
-Retain backups until access has been verified. Use this **Revoke and forget**
+Retain the original identity and data until access has been verified. Use this **Revoke and forget**
 path after machine-token theft too: the thief may rotate first, making the old
 local token unusable for `cairn rotate-token`.
 
@@ -140,10 +140,10 @@ This deliberately restores the old local-access behavior. The private relay
 identity file can stay on disk; the old image ignores it. Detach the installation
 in the beacon app to revoke its relay identity if abandoning the migration.
 
-The beacon Postgres migrations are separate and remain applied: do not run an
-older beacon binary against that database without its matching backup. If a
-later installation release has changed SQLite, follow the image-and-backup
-rollback rule below instead of assuming this procedure is still sufficient.
+The Beacon Postgres migrations are separate and remain applied. Do not run an
+older binary against incompatible migrated data. If a later installation release
+has changed SQLite incompatibly, preserve active data and apply a reviewed
+forward fix; image rollback cannot reverse the migration.
 
 ## Additional execution nodes
 
@@ -495,9 +495,10 @@ unchanged. Existing memberships receive access identifiers automatically.
 An upgraded manager cannot reconnect to an older beacon binary that lacks
 `/api/relay/{installation}/task-authors`: its 404 defers scheduled admissions
 and keeps the relay offline. Keep the upgraded Beacon while rolling
-back an installation. Rolling back Beacon requires its matching
-Postgres backup and compatible managers; older managers also restore the previous
-task-author/public-link rules, so suspend shared access during that rollback.
+back an installation. Rolling back Beacon requires confirmation that the older binary and managers
+can read the current database. Use a forward fix for incompatible migrations.
+Older managers also restore the previous task-author/public-link rules, so
+suspend shared access during any compatible rollback.
 
 Upgrade every shared installation: older binaries do not enforce the task-author
 policy. Upgraded installations require the beacon task-author endpoint before
