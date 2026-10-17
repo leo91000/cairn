@@ -52,6 +52,7 @@ fun SettingsScreen(vm: CairnViewModel, state: Workspace) {
         NotificationSettings(vm)
         PerformanceSettings(vm)
         if (state.isOwner) {
+            ConversationRetentionSettings(vm)
             settings?.let { info ->
                 Panel {
                     Text("Connecter un assistant", style = MaterialTheme.typography.titleLarge)
