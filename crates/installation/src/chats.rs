@@ -655,17 +655,51 @@ impl Service {
     }
 
     pub async fn chat_send(&self, id: &str, input: Value) -> Result<Value> {
+        self.chat_send_as(id, input, None).await
+    }
+
+    pub async fn chat_send_as(
+        &self,
+        id: &str,
+        input: Value,
+        identity: Option<&crate::auth::InstallationIdentity>,
+    ) -> Result<Value> {
         let values = parse("message", input)?;
+        let actor = match identity {
+            Some(identity) => {
+                Some(crate::plugins::requesters::account(self, &identity.account_id).await?)
+            }
+            None => None,
+        };
         let id = id.to_owned();
         let result = self
             .store
-            .transaction(move |db| send(db, &id, values, None))
+            .transaction(move |db| {
+                crate::plugins::requesters::capture(db, &id, &values, actor.as_ref(), false)?;
+                send(db, &id, values, None)
+            })
             .await?;
         self.worker.notify();
         Ok(result)
     }
 
     pub async fn chat_edit(&self, id: &str, message: &str, input: Option<Value>) -> Result<Value> {
+        self.chat_edit_as(id, message, input, None).await
+    }
+
+    pub async fn chat_edit_as(
+        &self,
+        id: &str,
+        message: &str,
+        input: Option<Value>,
+        identity: Option<&crate::auth::InstallationIdentity>,
+    ) -> Result<Value> {
+        let actor = match identity {
+            Some(identity) if input.is_some() => {
+                Some(crate::plugins::requesters::account(self, &identity.account_id).await?)
+            }
+            _ => None,
+        };
         let (id, message) = (id.to_owned(), message.to_owned());
         let values = input
             .map(|mut input| {
@@ -675,7 +709,14 @@ impl Service {
             .transpose()?;
         let result = self
             .store
-            .transaction(move |db| edit(db, &id, &message, values))
+            .transaction(move |db| {
+                let attribution = values
+                    .as_ref()
+                    .cloned()
+                    .unwrap_or_else(|| json!({"id": message}));
+                crate::plugins::requesters::capture(db, &id, &attribution, actor.as_ref(), true)?;
+                edit(db, &id, &message, values)
+            })
             .await?;
         self.worker.notify();
         Ok(result)

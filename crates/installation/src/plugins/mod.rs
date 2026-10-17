@@ -12,6 +12,7 @@ pub mod oauth;
 pub mod panels;
 pub mod programs;
 pub mod registry;
+pub(crate) mod requesters;
 pub mod resources;
 pub mod runtime;
 pub mod scope;
@@ -162,7 +163,7 @@ pub(crate) async fn command_response(s: &Service, request: Request) -> Result<Re
     Ok(response)
 }
 
-/// Owner-only management API (enforced by the HTTP layer for `/api/plugins`).
+/// Owner management, plus authenticated accounts' own personal OAuth flows.
 pub async fn routes(s: &Arc<Service>, input: &Input) -> Result<Value> {
     let parts = input
         .path
@@ -227,7 +228,7 @@ pub async fn routes(s: &Arc<Service>, input: &Input) -> Result<Value> {
                 "POST" => {
                     oauth::start(s, id, instance, collection, resource, name, account, body).await
                 }
-                "GET" => oauth::status(s, id, instance, collection, resource, name).await,
+                "GET" => oauth::status(s, id, instance, collection, resource, name, account).await,
                 "DELETE" => {
                     oauth::revoke(s, id, instance, collection, resource, name, account).await
                 }

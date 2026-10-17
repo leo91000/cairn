@@ -360,9 +360,10 @@ existing resource rules.
 
 The `oauth` capability declares up to eight providers for resource collections.
 The host captures token responses; scripts receive neither authorization codes,
-client secrets, access tokens nor refresh tokens. This first management API is
-for resources connected by the owner. Personal authorizations and setup-draft
-interfaces are separate work in the Slack delivery checklist.
+client secrets, access tokens nor refresh tokens. Providers connect either an
+owner-managed resource or the authenticated requester's personal account.
+Setup drafts and the client configuration interfaces remain in the Slack delivery
+checklist.
 
 ```json
 {
@@ -400,7 +401,7 @@ seconds. Metadata captures only identity strings ending in `id` or `name`, into
 declared nonsecret text fields, without overlapping token paths. Existing identity
 values cannot be silently replaced by a different OAuth workspace.
 
-Owner management uses this prefix:
+Authorization management uses this prefix:
 `/api/plugins/<plugin>/connections/<instance>/resources/<collection>/<resource>/oauth/<provider>`.
 
 - POST `{scopes: [...]}` starts authorization with a distinct subset of declared
@@ -413,7 +414,7 @@ Owner management uses this prefix:
   Direct: `/api/plugin-oauth/<instance>/callback`; Beacon:
   `/api/public/installations/<installation>/plugin-oauth/<instance>/callback`.
 - POST `/finish` appended to that prefix, with
-  `{state}`, must come from the initiating owner. It returns `pending`, `denied`
+  `{state}`, must come from the initiating account. It returns `pending`, `denied`
   or `authorized`. The code is consumed before the exchange, including failures;
   start again after an uncertain result. GET of the prefix returns safe status,
   granted `scopes`, `requestedScopes` and `expiresAt`. Provider grants can be
@@ -429,6 +430,37 @@ uncertain renewal requires reconnection, rather than replaying the old token.
 Owner access, approval, resource identity and authorization revision are checked
 again around I/O. Resource-granted calls also recheck the agent before issuing a
 new provider request after a slow renewal.
+
+#### Personal providers
+
+Add `"personal": {"subject": "/authed_user/id"}` to a provider whose token
+response identifies a person. The host captures this nonsecret subject alongside
+the encrypted credentials. The provider must also declare resource identity
+metadata, and that identity must match an already configured resource. Personal
+authorization cannot create or change the owner's workspace identity.
+
+The same management prefix then addresses only the authenticated Cairn account's
+authorization. Members can start, finish, inspect and disconnect their own
+authorization; owner-connected providers still require the current owner. Each
+authorization is bound to the account's current installation access, independently
+of the owner. Removing and reinviting a member requires a new authorization.
+Responses include the verified `subject`, never tokens. Disconnect before linking
+a different external person. Disconnecting one person leaves others connected and
+fences code exchanges already in flight.
+
+Resource-granted tools and commands select personal credentials from the current
+chat turn's authenticated author. The host records this authority atomically with
+the message; an input's claimed account, the conversation's first author and the
+installation owner cannot supply a fallback. Tool calls recheck the author, turn,
+membership, agent grant and authorization around network operations. Retrying
+another person's message ID cannot transfer its authority. Steering another
+person's active turn is refused; queue a new turn to use your own permissions.
+Editing a queued message reattributes it to the authenticated editor.
+
+This checkpoint supports authenticated Cairn chat authors. External identities,
+scheduled automation authorities and their account-linking flows remain in the
+Slack delivery checklist; they cannot use a personal credential implicitly.
+Unattributed in-process submissions and owner panels cannot use personal providers.
 
 Protocol references checked on 2026-10-17: [Slack OAuth](https://docs.slack.dev/authentication/installing-with-oauth/),
 [PKCE](https://docs.slack.dev/authentication/using-pkce/) and

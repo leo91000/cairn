@@ -131,7 +131,7 @@ pub async fn command(s: &Service, bearer: &str, input: &Value) -> Result<Value> 
     }
     let scope = match &command.operation {
         Some(operation) => {
-            super::grants::authorize(s, &agent_id, &package, operation, &json!(values)).await?
+            super::grants::authorize(s, &run, &package, operation, &json!(values)).await?
         }
         None => Scope::Agent {
             agent_id,
@@ -209,9 +209,7 @@ pub async fn call_tool(
         return Err(Error::bad(format!("Invalid input for {name}.")));
     }
     let scope = match &tool.operation {
-        Some(operation) => {
-            super::grants::authorize(s, &agent_id, &package, operation, input).await?
-        }
+        Some(operation) => super::grants::authorize(s, &run, &package, operation, input).await?,
         None => {
             let instances = instances
                 .into_iter()

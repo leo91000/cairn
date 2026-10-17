@@ -395,6 +395,31 @@ fn owner_operation(method: &str, path: &str) -> bool {
         .collect::<Vec<_>>();
     let read = matches!(method, "GET" | "HEAD");
     match segments.as_slice() {
+        // The handler checks each provider's audience. Members can manage only
+        // their own personal authorization, never an owner-connected resource.
+        [
+            "plugins",
+            _,
+            "connections",
+            _,
+            "resources",
+            _,
+            _,
+            "oauth",
+            _,
+        ] => !matches!(method, "GET" | "HEAD" | "POST" | "DELETE"),
+        [
+            "plugins",
+            _,
+            "connections",
+            _,
+            "resources",
+            _,
+            _,
+            "oauth",
+            _,
+            "finish",
+        ] => method != "POST",
         // Storage configuration lives under nodes; credentials also include
         // MCP connection flows and per-agent GitHub tokens below.
         [

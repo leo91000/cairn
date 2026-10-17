@@ -31,9 +31,13 @@ the web/Android journeys. Tests assert observable behavior at those interfaces.
     state before I/O; uncertain responses require reconnection. Local disconnect
     invalidates pending exchanges. Resource identity and requested/granted scopes
     remain distinct. Targeted tests cover these paths through actual HTTP/Luau.
-  - Personal actor binding, configuration drafts, provider revocation/token exchange
-    and both client interfaces remain unfinished. This does not complete OAuth or
-    the Slack package.
+  - Personal OAuth management is isolated by authenticated Cairn account and its
+    installation-access revision, with a host-captured external subject and verified
+    resource identity. Tools/commands use the current authenticated Cairn chat
+    author; message-ID replay and cross-author steering cannot transfer authority.
+  - External identity linking, configuration drafts, provider revocation/token
+    exchange and both client interfaces remain unfinished. This does not complete
+    OAuth or the Slack package.
 - [ ] Socket acknowledgement/liveness/replacement, authenticated files.
 - [ ] Slack Luau package: setup, protocol, conversations and native surfaces.
 - [ ] Collaboration/productivity tools with exact scopes and profiles.
@@ -77,3 +81,29 @@ crate tests; workspace Clippy with warnings denied; `pnpm check` (511 tests,
 typecheck, lint and build). This remains a draft checkpoint. Personal OAuth,
 configuration drafts, the Slack package, web/Android journeys and every other
 unchecked item above still have to be delivered; green CI does not complete them.
+
+## Personal-account OAuth checkpoint
+
+The owner OAuth checkpoint's Quality failure was a scheduling assumption in the
+skills snapshot test. A delayed writer reproduced the same failure with a coherent
+old snapshot. The corrected test accepts either complete version, checks the
+description against it and verifies the immutable bundle and a subsequent snapshot.
+The active skills suite passes (16 tests; one performance test intentionally ignored).
+
+Personal provider management now binds OAuth to the authenticated account,
+installation-access revision, external subject and configured resource identity.
+Code exchange cannot be finished by a different account, and per-person disconnect
+invalidates in-flight exchanges without changing other people's authorizations.
+The native chat interface records the sender alongside each message, so granted
+MCP/CLI operations use only their current turn's author. Unattributed submissions,
+owner panels, task scheduling and external plugin messages receive no personal
+fallback. External identity linking and the remaining delivery checklist are still
+required before this becomes the complete Slack integration.
+
+Local checkpoint validation: 160 selected installation/Beacon integration tests
+pass across plugins, native chat/sleep/lifecycle, HTTP, MCP, skills and real direct
+peers; one explicit performance benchmark remains ignored. All 25 plugin-crate
+tests pass. `pnpm check` passes (511 tests, lint, typecheck and production build),
+as does workspace Clippy with warnings denied. No Slack app or device journey was
+exercised. Final storage/compatibility measurements and independent review remain
+open with the full contract.

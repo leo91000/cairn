@@ -10,7 +10,7 @@ use cairn_installation::{
 };
 use serde_json::{Value, json};
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     path::PathBuf,
     sync::{
         Arc,
@@ -36,6 +36,13 @@ fn request(method: &str, path: &str, body: Value, account: Option<&str>) -> axum
 }
 
 async fn fixture(pkce: bool) -> (TempDir, Arc<Service>, String, String, String, axum::Router) {
+    configured_fixture(pkce, false).await
+}
+
+async fn configured_fixture(
+    pkce: bool,
+    personal: bool,
+) -> (TempDir, Arc<Service>, String, String, String, axum::Router) {
     let root = TempDir::new().unwrap();
     std::fs::create_dir_all(root.path().join("home")).unwrap();
     let mut config = common::config(root.path());
@@ -91,6 +98,12 @@ async fn fixture(pkce: bool) -> (TempDir, Arc<Service>, String, String, String, 
             "accessToken": "/access_token", "refreshToken": "/refresh_token", "expiresIn": "/expires_in", "scope": "/scope"
         });
     }
+    if personal {
+        manifest["oauth"][0]["personal"] = json!({"subject": "/authed_user/id"});
+        manifest["commands"] = json!([{
+            "name": "read", "operation": "read", "arguments": [{"name": "resource", "flag": "--resource", "required": true}]
+        }]);
+    }
     let source = r#"local function read(resource)
         return cairn.http.request({url = 'https://api.example.test/messages',
             auth = {resource = resource, oauth = 'bot'}})
@@ -98,7 +111,8 @@ async fn fixture(pkce: bool) -> (TempDir, Arc<Service>, String, String, String, 
     return {action = function(event)
         local response = read(event.payload.resource)
         return {notice = response.json.ok and 'Authorized' or 'Denied'}
-    end, tool = function(event) return read(event.input.resource).json end}"#;
+    end, tool = function(event) return read(event.input.resource).json end,
+    command = function(event) return read(event.arguments.resource).json end}"#;
     let package = registry::install(&s, &json!({"manifest": manifest, "source": source}))
         .await
         .unwrap();
@@ -122,7 +136,7 @@ async fn fixture(pkce: bool) -> (TempDir, Arc<Service>, String, String, String, 
         "example",
         instance,
         "workspace",
-        &json!({"name": "Engineering"}),
+        &json!({"name": "Engineering", "settings": if personal {json!({"externalId": "T111"})} else {json!({})}}),
         None,
     )
     .await
@@ -343,66 +357,68 @@ async fn concurrent_calls_share_one_refresh_and_reuse_only_the_rotated_token() {
 
 #[tokio::test]
 async fn disconnect_during_code_exchange_prevents_authorization_from_being_restored() {
-    let (_root, s, instance, _resource, path, app) = fixture(false).await;
-    let started = begin(&app, &path).await;
-    let entered = Arc::new(tokio::sync::Notify::new());
-    let release = Arc::new(tokio::sync::Notify::new());
-    let entering = entered.clone();
-    let releasing = release.clone();
-    let provider = axum::Router::new().route("/token", axum::routing::post(move || {
+    for personal in [false, true] {
+        let (_root, s, instance, _resource, path, app) = configured_fixture(false, personal).await;
+        let started = begin(&app, &path).await;
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let entering = entered.clone();
+        let releasing = release.clone();
+        let provider = axum::Router::new().route("/token", axum::routing::post(move || {
         let entered = entering.clone(); let release = releasing.clone();
         async move {
             entered.notify_one(); release.notified().await;
-            axum::Json(json!({"access_token": "revoked-fixture", "scope": "messages:read", "team": {"id": "T111"}}))
+            axum::Json(json!({"access_token": "revoked-fixture", "scope": "messages:read", "team": {"id": "T111"}, "authed_user": {"id": "U111"}}))
         }
     }));
-    let (origin, server) = common::serve_locally(provider).await;
-    s.plugins.route_http_to(Some(origin));
-    let callback = format!(
-        "/api/plugin-oauth/{instance}/callback?state={}&code=fixture",
-        text(&started, "state")
-    );
-    assert_eq!(
-        common::send(&app, request("GET", &callback, Value::Null, None))
+        let (origin, server) = common::serve_locally(provider).await;
+        s.plugins.route_http_to(Some(origin));
+        let callback = format!(
+            "/api/plugin-oauth/{instance}/callback?state={}&code=fixture",
+            text(&started, "state")
+        );
+        assert_eq!(
+            common::send(&app, request("GET", &callback, Value::Null, None))
+                .await
+                .status(),
+            StatusCode::OK
+        );
+        let pending_app = app.clone();
+        let finish = format!("{path}/finish");
+        let pending = tokio::spawn(async move {
+            common::send(
+                &pending_app,
+                request(
+                    "POST",
+                    &finish,
+                    json!({"state": started["state"]}),
+                    Some("fixture-owner"),
+                ),
+            )
+            .await
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(3), entered.notified())
+            .await
+            .unwrap();
+        assert_eq!(
+            common::send(
+                &app,
+                request("DELETE", &path, Value::Null, Some("fixture-owner"))
+            )
             .await
             .status(),
-        StatusCode::OK
-    );
-    let pending_app = app.clone();
-    let finish = format!("{path}/finish");
-    let pending = tokio::spawn(async move {
-        common::send(
-            &pending_app,
-            request(
-                "POST",
-                &finish,
-                json!({"state": started["state"]}),
-                Some("fixture-owner"),
-            ),
-        )
-        .await
-    });
-    tokio::time::timeout(std::time::Duration::from_secs(3), entered.notified())
-        .await
-        .unwrap();
-    assert_eq!(
-        common::send(
+            StatusCode::OK
+        );
+        release.notify_one();
+        assert_eq!(pending.await.unwrap().status(), StatusCode::CONFLICT);
+        let response = common::send(
             &app,
-            request("DELETE", &path, Value::Null, Some("fixture-owner"))
+            request("GET", &path, Value::Null, Some("fixture-owner")),
         )
-        .await
-        .status(),
-        StatusCode::OK
-    );
-    release.notify_one();
-    assert_eq!(pending.await.unwrap().status(), StatusCode::CONFLICT);
-    let response = common::send(
-        &app,
-        request("GET", &path, Value::Null, Some("fixture-owner")),
-    )
-    .await;
-    assert_eq!(common::read_json(response).await["status"], "disconnected");
-    server.abort();
+        .await;
+        assert_eq!(common::read_json(response).await["status"], "disconnected");
+        server.abort();
+    }
 }
 
 #[tokio::test]
@@ -765,5 +781,388 @@ async fn missing_or_invalid_provider_identity_cannot_create_a_resource_authoriza
         .await;
         assert_eq!(common::read_json(status).await["status"], "disconnected");
     }
+    server.abort();
+}
+
+fn member_request(method: &str, path: &str, body: Value, account: &str) -> axum::extract::Request {
+    let mut request = request(method, path, body, None);
+    request
+        .extensions_mut()
+        .insert(InstallationIdentity::trusted(
+            InstallationRole::Member,
+            account,
+        ));
+    request
+}
+
+#[tokio::test]
+async fn personal_oauth_isolated_by_verified_account_and_provider_subject() {
+    let (_root, s, instance, resource, path, app) = configured_fixture(false, true).await;
+    let policy = Arc::new(std::sync::Mutex::new(json!({
+        "owner": {"account_id": "fixture-owner", "access_id": "fixture-owner"},
+        "members": [
+            {"account_id": "alice", "access_id": "alice-membership-1"},
+            {"account_id": "bob", "access_id": "bob-membership-1"}
+        ]
+    })));
+    let policy_ref = policy.clone();
+    let authority = axum::Router::new().route(
+        "/api/relay/00000000-0000-4000-8000-000000000055/task-authors",
+        axum::routing::get(move || {
+            let policy = policy_ref.lock().unwrap().clone();
+            async move { axum::Json(policy) }
+        }),
+    );
+    let (authority_origin, authority_server) = common::serve_locally(authority).await;
+    let identity_path = s.config.data_dir.join("installation-relay/identity.json");
+    let mut identity: Value =
+        serde_json::from_slice(&std::fs::read(&identity_path).unwrap()).unwrap();
+    identity["origin"] = json!(authority_origin);
+    std::fs::write(&identity_path, serde_json::to_vec(&identity).unwrap()).unwrap();
+
+    let provider = axum::Router::new().route(
+        "/token",
+        axum::routing::post(
+            |axum::Form(form): axum::Form<HashMap<String, String>>| async move {
+                let (subject, token) = match form["code"].as_str() {
+                    "alice-code" => ("U111", "personal-alice-fixture"),
+                    "bob-code" => ("U222", "personal-bob-fixture"),
+                    code => panic!("Unexpected fixture code: {code}"),
+                };
+                axum::Json(json!({"access_token": token, "scope": "messages:read",
+                "team": {"id": "T111"}, "authed_user": {"id": subject}}))
+            },
+        ),
+    );
+    let provider = provider.route(
+        "/messages",
+        axum::routing::get(|headers: axum::http::HeaderMap| async move {
+            let subject = match headers["authorization"].to_str().unwrap() {
+                "Bearer personal-alice-fixture" => "U111",
+                "Bearer personal-bob-fixture" => "U222",
+                _ => panic!("unexpected personal authorization"),
+            };
+            axum::Json(json!({"subject": subject}))
+        }),
+    );
+    let (origin, server) = common::serve_locally(provider).await;
+    s.plugins.route_http_to(Some(origin));
+    for (account, code, subject) in [("alice", "alice-code", "U111"), ("bob", "bob-code", "U222")] {
+        let started = common::send(
+            &app,
+            member_request("POST", &path, json!({"scopes": ["messages:read"]}), account),
+        )
+        .await;
+        assert_eq!(
+            started.status(),
+            StatusCode::OK,
+            "{}",
+            common::read_text(started).await
+        );
+        let started = common::read_json(started).await;
+        let state = json!({"state": started["state"]});
+        let finish = format!("{path}/finish");
+        let thief = if account == "alice" { "bob" } else { "alice" };
+        assert_eq!(
+            common::send(&app, member_request("POST", &finish, state.clone(), thief))
+                .await
+                .status(),
+            StatusCode::FORBIDDEN
+        );
+        let callback = format!(
+            "/api/plugin-oauth/{instance}/callback?state={}&code={code}",
+            text(&started, "state")
+        );
+        assert_eq!(
+            common::send(&app, request("GET", &callback, Value::Null, None))
+                .await
+                .status(),
+            StatusCode::OK
+        );
+        let finished = common::send(&app, member_request("POST", &finish, state, account)).await;
+        assert_eq!(
+            finished.status(),
+            StatusCode::OK,
+            "{}",
+            common::read_text(finished).await
+        );
+        let finished = common::read_json(finished).await;
+        assert_eq!(finished["status"], "authorized");
+        assert_eq!(finished["subject"], subject);
+        assert!(!finished.to_string().contains("personal-"));
+    }
+    for (account, subject) in [("alice", "U111"), ("bob", "U222")] {
+        let status = common::read_json(
+            common::send(&app, member_request("GET", &path, Value::Null, account)).await,
+        )
+        .await;
+        assert_eq!(status["subject"], subject);
+    }
+    let owner_status = common::read_json(
+        common::send(
+            &app,
+            request("GET", &path, Value::Null, Some("fixture-owner")),
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(owner_status["status"], "disconnected");
+    let grants = format!(
+        "/api/plugins/example/connections/{instance}/resources/workspace/{resource}/grants"
+    );
+    let granted = common::send(
+        &app,
+        request(
+            "POST",
+            &grants,
+            json!({"agentId": MAIN_AGENT_ID, "profile": "read"}),
+            Some("fixture-owner"),
+        ),
+    )
+    .await;
+    assert_eq!(granted.status(), StatusCode::OK);
+    for (account, subject) in [("alice", "U111"), ("bob", "U222")] {
+        let chat = s
+            .chat_create(json!({"agentId": MAIN_AGENT_ID}))
+            .await
+            .unwrap();
+        let message_path = format!("/api/chats/{}/messages", text(&chat, "id"));
+        let message = json!({"id": cairn_installation::config::id(), "text": "Read with my own authorization"});
+        assert_eq!(
+            common::send(
+                &app,
+                member_request("POST", &message_path, message.clone(), account)
+            )
+            .await
+            .status(),
+            StatusCode::OK
+        );
+        s.chat_tick(&HashSet::new()).await.unwrap();
+        let detail = s.chat_detail(text(&chat, "id")).await.unwrap();
+        let run = s
+            .store
+            .patch_run(
+                text(&detail["run"], "id"),
+                json!({"status": "running", "isolated": true}),
+            )
+            .await
+            .unwrap();
+        let configuration = s.mcps.run_configuration(&s, &run).await.unwrap();
+        let bearer = text(&configuration["env"], "CAIRN_MCP_RUN_TOKEN");
+        let result = agents::call_tool(&s, bearer, "example_read", &json!({"resource": resource}))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(result["subject"], subject);
+        let other = if account == "alice" { "bob" } else { "alice" };
+        let retry = common::send(&app, member_request("POST", &message_path, message, other)).await;
+        assert_eq!(
+            retry.status(),
+            StatusCode::CONFLICT,
+            "reusing a message ID transferred its requester"
+        );
+        let steer = common::send(&app, member_request("POST", &message_path,
+            json!({"id": cairn_installation::config::id(), "text": "act as me", "mode": "steer"}), other)).await;
+        assert_eq!(
+            steer.status(),
+            StatusCode::CONFLICT,
+            "another participant inherited the running turn's personal identity"
+        );
+        if account == "bob" {
+            let own_steer = common::send(&app, member_request("POST", &message_path,
+                json!({"id": cairn_installation::config::id(), "text": "continue", "mode": "steer"}), account)).await;
+            assert_eq!(own_steer.status(), StatusCode::OK);
+        }
+    }
+    let action = panels::action(
+        &s,
+        "example",
+        &instance,
+        &json!({"action": "read", "payload": {"resource": resource}}),
+    )
+    .await;
+    assert!(
+        action.is_err(),
+        "an owner panel inherited a personal authorization"
+    );
+    let revoked = common::send(&app, member_request("DELETE", &path, Value::Null, "alice")).await;
+    assert_eq!(revoked.status(), StatusCode::OK);
+    let bob = common::read_json(
+        common::send(&app, member_request("GET", &path, Value::Null, "bob")).await,
+    )
+    .await;
+    assert_eq!(bob["status"], "authorized");
+    assert_eq!(bob["subject"], "U222");
+    policy.lock().unwrap()["members"] = json!([]);
+    let removed = common::send(&app, member_request("GET", &path, Value::Null, "bob")).await;
+    assert_eq!(removed.status(), StatusCode::FORBIDDEN);
+    policy.lock().unwrap()["members"] =
+        json!([{ "account_id": "bob", "access_id": "bob-membership-2" }]);
+    let rejoined = common::read_json(
+        common::send(&app, member_request("GET", &path, Value::Null, "bob")).await,
+    )
+    .await;
+    assert_eq!(
+        rejoined["status"], "reconnect",
+        "rejoining restored the revoked membership's token"
+    );
+    server.abort();
+    authority_server.abort();
+}
+
+#[tokio::test]
+async fn personal_tools_use_only_the_authenticated_author_of_the_current_chat_turn() {
+    let (_root, s, instance, resource, path, app) = configured_fixture(false, true).await;
+    let calls = Arc::new(AtomicUsize::new(0));
+    let calls_ref = calls.clone();
+    let provider = axum::Router::new()
+        .route(
+            "/token",
+            axum::routing::post(|| async {
+                axum::Json(
+                    json!({"access_token": "personal-owner-fixture", "scope": "messages:read",
+                "team": {"id": "T111"}, "authed_user": {"id": "U111"}}),
+                )
+            }),
+        )
+        .route(
+            "/messages",
+            axum::routing::get(move |headers: axum::http::HeaderMap| {
+                let calls = calls_ref.clone();
+                async move {
+                    assert_eq!(headers["authorization"], "Bearer personal-owner-fixture");
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    axum::Json(json!({"actor": "U111"}))
+                }
+            }),
+        );
+    let (origin, server) = common::serve_locally(provider).await;
+    s.plugins.route_http_to(Some(origin));
+    let started = begin(&app, &path).await;
+    let callback = format!(
+        "/api/plugin-oauth/{instance}/callback?state={}&code=owner-code",
+        text(&started, "state")
+    );
+    assert_eq!(
+        common::send(&app, request("GET", &callback, Value::Null, None))
+            .await
+            .status(),
+        StatusCode::OK
+    );
+    let finished = common::send(
+        &app,
+        request(
+            "POST",
+            &format!("{path}/finish"),
+            json!({"state": started["state"]}),
+            Some("fixture-owner"),
+        ),
+    )
+    .await;
+    assert_eq!(finished.status(), StatusCode::OK);
+    let grants = format!(
+        "/api/plugins/example/connections/{instance}/resources/workspace/{resource}/grants"
+    );
+    let granted = common::send(
+        &app,
+        request(
+            "POST",
+            &grants,
+            json!({"agentId": MAIN_AGENT_ID, "profile": "read"}),
+            Some("fixture-owner"),
+        ),
+    )
+    .await;
+    assert_eq!(granted.status(), StatusCode::OK);
+    let input = json!({"resource": resource});
+    // In-process submissions have no authenticated human, even when a claimed
+    // installation has an owner and that owner authorized this personal provider.
+    let untrusted = s
+        .chat_create(json!({"agentId": MAIN_AGENT_ID}))
+        .await
+        .unwrap();
+    s.chat_send(
+        text(&untrusted, "id"),
+        json!({"id": cairn_installation::config::id(), "text": "unattributed"}),
+    )
+    .await
+    .unwrap();
+    s.chat_tick(&HashSet::new()).await.unwrap();
+    let detail = s.chat_detail(text(&untrusted, "id")).await.unwrap();
+    let run = s
+        .store
+        .patch_run(
+            text(&detail["run"], "id"),
+            json!({"status": "running", "isolated": true}),
+        )
+        .await
+        .unwrap();
+    let configuration = s.mcps.run_configuration(&s, &run).await.unwrap();
+    let bearer = text(&configuration["env"], "CAIRN_MCP_RUN_TOKEN");
+    assert!(
+        agents::call_tool(&s, bearer, "example_read", &input)
+            .await
+            .is_err()
+    );
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+
+    let chat = s
+        .chat_create(json!({"agentId": MAIN_AGENT_ID}))
+        .await
+        .unwrap();
+    let message_path = format!("/api/chats/{}/messages", text(&chat, "id"));
+    let sent = common::send(&app, request("POST", &message_path,
+        json!({"id": cairn_installation::config::id(), "text": "attributed", "requester": {"account": "another-account"}}), Some("fixture-owner"))).await;
+    assert_eq!(
+        sent.status(),
+        StatusCode::OK,
+        "{}",
+        common::read_text(sent).await
+    );
+    s.chat_tick(&HashSet::new()).await.unwrap();
+    let detail = s.chat_detail(text(&chat, "id")).await.unwrap();
+    let run = s
+        .store
+        .patch_run(
+            text(&detail["run"], "id"),
+            json!({"status": "running", "isolated": true}),
+        )
+        .await
+        .unwrap();
+    let configuration = s.mcps.run_configuration(&s, &run).await.unwrap();
+    let bearer = text(&configuration["env"], "CAIRN_MCP_RUN_TOKEN");
+    let result = agents::call_tool(&s, bearer, "example_read", &input)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(result, json!({"actor": "U111"}));
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    let command = s
+        .plugins
+        .command(
+            &s,
+            bearer,
+            &json!({
+                "plugin": "example", "command": "read", "args": ["--resource", resource]
+            }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(command["value"], json!({"actor": "U111"}));
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+    // A changed turn invalidates the old run token and the requester's authority.
+    s.store
+        .patch_run(
+            text(&run, "id"),
+            json!({"chatExecution": {"messageId": "another-turn"}}),
+        )
+        .await
+        .unwrap();
+    assert!(
+        agents::call_tool(&s, bearer, "example_read", &input)
+            .await
+            .is_err()
+    );
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
     server.abort();
 }

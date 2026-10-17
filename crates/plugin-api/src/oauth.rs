@@ -25,6 +25,13 @@ fn scope_separator() -> String {
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct OAuthPersonal {
+    /// Verified external person identifier from the host-only token response.
+    pub subject: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct OAuth {
     pub name: String,
     pub title: String,
@@ -48,6 +55,8 @@ pub struct OAuth {
     /// Nonsecret identity fields only; leaves must be `id` or `name`.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub metadata: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub personal: Option<OAuthPersonal>,
 }
 
 fn pointer(value: &str) -> bool {
@@ -157,6 +166,30 @@ pub(crate) fn validate(manifest: &Manifest) -> Result<(), &'static str> {
                 .all(|path| pointer(path) && seen.insert(path))
             {
                 return Err("OAuth token response fields must be distinct JSON pointers.");
+            }
+        }
+        if let Some(personal) = &provider.personal {
+            let subject = &personal.subject;
+            let overlaps_secret = std::iter::once(&provider.token)
+                .chain(provider.refresh_token_response.iter())
+                .any(|response| {
+                    std::iter::once(&response.access_token)
+                        .chain(response.refresh_token.iter())
+                        .any(|secret| {
+                            subject == secret
+                                || subject.starts_with(&format!("{secret}/"))
+                                || secret.starts_with(&format!("{subject}/"))
+                        })
+                });
+            if provider.metadata.is_empty()
+                || !pointer(subject)
+                || !matches!(subject.rsplit('/').next(), Some("id" | "sub"))
+                || subject.split('/').any(|part| {
+                    part.contains("token") || part.contains("secret") || part.contains("credential")
+                })
+                || overlaps_secret
+            {
+                return Err("Personal OAuth requires a nonsecret subject and resource identity.");
             }
         }
         if provider.metadata.len() > 8

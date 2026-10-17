@@ -14,7 +14,7 @@ mod webhooks;
 
 pub use arguments::{parse_arguments, usage};
 pub use form::validate_form_result;
-pub use oauth::{OAuth, OAuthTokenResponse};
+pub use oauth::{OAuth, OAuthPersonal, OAuthTokenResponse};
 pub use operations::{Operation, Profile, RequestRule};
 pub use resources::ResourceCollection;
 pub use settings::validate_settings_schema;

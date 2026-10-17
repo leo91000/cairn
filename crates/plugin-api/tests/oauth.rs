@@ -44,6 +44,30 @@ fn packages_declare_host_managed_oauth_with_scopes_and_nested_token_responses() 
     let other_provider: Manifest = serde_json::from_value(other_provider).unwrap();
     other_provider.validate().unwrap();
 
+    let mut personal = value.clone();
+    personal["oauth"][0]["personal"] = json!({"subject": "/authed_user/id"});
+    let personal_manifest: Manifest = serde_json::from_value(personal.clone()).unwrap();
+    personal_manifest.validate().unwrap();
+    for subject in [
+        "/authed_user/access_token/id",
+        "/authed_user/access_token",
+        "/profile/name",
+    ] {
+        let mut invalid = personal.clone();
+        invalid["oauth"][0]["personal"]["subject"] = json!(subject);
+        let manifest: Manifest = serde_json::from_value(invalid).unwrap();
+        assert!(
+            manifest.validate().is_err(),
+            "accepted unsafe personal subject {subject}"
+        );
+    }
+    personal["oauth"][0]["metadata"] = json!({});
+    let manifest: Manifest = serde_json::from_value(personal).unwrap();
+    assert!(
+        manifest.validate().is_err(),
+        "personal credentials lack a resource identity binding"
+    );
+
     for (field, invalid) in [
         ("tokenUrl", json!("https://unapproved.test/token")),
         (

@@ -241,9 +241,18 @@ async fn chat_routes(s: &Arc<Service>, input: &Input, route: Route<'_>) -> Resul
         ("POST", ["chats", id, "restore"]) => s.chat_restore(id).await?,
         ("POST", ["chats"]) => s.chat_create(input.body.clone()).await?,
         ("GET", ["chats", id]) => chat_detail(s, id).await?,
-        ("POST", ["chats", id, "messages"]) => s.chat_send(id, input.body.clone()).await?,
+        ("POST", ["chats", id, "messages"]) => {
+            s.chat_send_as(id, input.body.clone(), input.identity.as_ref())
+                .await?
+        }
         ("PUT", ["chats", id, "messages", message]) => {
-            s.chat_edit(id, message, Some(input.body.clone())).await?
+            s.chat_edit_as(
+                id,
+                message,
+                Some(input.body.clone()),
+                input.identity.as_ref(),
+            )
+            .await?
         }
         ("DELETE", ["chats", id, "messages", message]) => s.chat_edit(id, message, None).await?,
         ("POST", ["chats", id, "questions", question, "answer"]) => {

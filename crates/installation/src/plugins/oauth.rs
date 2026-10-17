@@ -1,6 +1,10 @@
 //! OAuth code capture and exchange are host operations. Anonymous callbacks can
-//! only deposit one code; the initiating owner must finish through the account API.
-use super::{capabilities, connections, registry, resources};
+//! only deposit one code; the initiating account must finish through the account API.
+use super::{
+    capabilities, connections, registry,
+    requesters::{self, Actor},
+    resources,
+};
 use crate::{
     auth::{digest, hex_digest, token},
     config::{id, now},
@@ -28,6 +32,13 @@ const TTL: i64 = 600_000;
 
 const EXPIRED: &str =
     "Authorization expired or changed. Start again from the plugin configuration.";
+
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct Personal {
+    actor: Actor,
+    subject: String,
+}
 
 #[derive(Default)]
 pub struct Authorizations {
@@ -70,6 +81,10 @@ struct Pending {
     expires_at: i64,
     code: Option<String>,
     denied: bool,
+    #[serde(default)]
+    actor: Option<Actor>,
+    #[serde(default)]
+    epoch: Option<Value>,
 }
 
 #[derive(Clone, Deserialize, Serialize)]
@@ -93,6 +108,8 @@ struct Authorization {
     tokens: Tokens,
     #[serde(default)]
     refreshing: bool,
+    #[serde(default)]
+    personal: Option<Personal>,
 }
 
 pub(crate) struct Reference {
@@ -101,14 +118,23 @@ pub(crate) struct Reference {
     owner_access: String,
     plugin: String,
     digest: String,
+    actor: Option<Actor>,
 }
 
 fn pending_key(state: &str) -> String {
     format!("plugin-oauth-pending:{}", hex_digest(state))
 }
 
-fn authorization_key(resource: &str, provider: &str) -> String {
-    format!("plugin-oauth:{resource}:{provider}")
+fn authorization_key(resource: &str, provider: &str, actor: Option<&Actor>) -> String {
+    let base = format!("plugin-oauth:{resource}:{provider}");
+    match actor {
+        Some(actor) => format!("{base}:personal:{}", hex_digest(&actor.account)),
+        None => base,
+    }
+}
+
+fn epoch_key(authorization: &str) -> String {
+    stored_key(&format!("{authorization}:epoch"))
 }
 
 fn stored_key(key: &str) -> String {
@@ -140,6 +166,21 @@ async fn owner(s: &Service, account: &str) -> Result<String> {
     Ok(owner.access_id)
 }
 
+async fn authority(
+    s: &Service,
+    provider: &OAuth,
+    account: &str,
+) -> Result<(String, Option<Actor>)> {
+    if provider.personal.is_none() {
+        return Ok((owner(s, account).await?, None));
+    }
+    let policy = crate::relay::task_author_policy(s)
+        .await?
+        .ok_or_else(|| Error::forbidden("The installation has no verified membership."))?;
+    let actor = requesters::account(s, account).await?;
+    Ok((policy.owner.access_id, Some(actor)))
+}
+
 fn current(db: &Db<'_>, pending: &Pending) -> Result<Value> {
     let instance = db
         .get(connections::KIND, &pending.instance)?
@@ -153,6 +194,12 @@ fn current(db: &Db<'_>, pending: &Pending) -> Result<Value> {
         || pending.expires_at <= now()
     {
         return Err(expired());
+    }
+    if pending.actor.is_some() {
+        let key = authorization_key(&pending.resource, &pending.provider, pending.actor.as_ref());
+        if db.kv(&epoch_key(&key))? != pending.epoch {
+            return Err(expired());
+        }
     }
     Ok(resource)
 }
@@ -202,11 +249,24 @@ pub async fn start(
     account: &str,
     input: &Value,
 ) -> Result<Value> {
-    let owner_access = owner(s, account).await?;
     let connection = connections::get(s, plugin, instance).await?;
     let resource = resources::get(s, plugin, instance, collection, resource).await?;
     let package = registry::active(s, plugin).await?;
     let provider = provider(&package.manifest, name, collection)?;
+    let (owner_access, actor) = authority(s, provider, account).await?;
+    if actor.is_some()
+        && !provider.metadata.keys().any(|key| {
+            resource
+                .settings
+                .get(key)
+                .and_then(Value::as_str)
+                .is_some_and(|value| !value.is_empty())
+        })
+    {
+        return Err(Error::conflict(
+            "Connect the resource identity before personal OAuth.",
+        ));
+    }
     let input: Start = serde_json::from_value(input.clone())
         .map_err(|_| Error::bad("Choose the OAuth scopes to authorize."))?;
     let mut scopes = input.scopes;
@@ -254,6 +314,12 @@ pub async fn start(
                 .append_pair("code_challenge", &digest(verifier));
         }
     }
+    let auth_key = authorization_key(&resource.id, name, actor.as_ref());
+    let epoch = if actor.is_some() {
+        s.store.kv(&epoch_key(&auth_key)).await?
+    } else {
+        None
+    };
     let pending = Pending {
         account: account.into(),
         owner_access,
@@ -270,6 +336,8 @@ pub async fn start(
         expires_at: now() + TTL,
         code: None,
         denied: false,
+        actor,
+        epoch,
     };
     let key = pending_key(&state);
     let encrypted = s.vault.encrypt(&key, &serde_json::to_value(&pending)?)?;
@@ -471,7 +539,9 @@ pub async fn finish(
     account: &str,
     input: &Value,
 ) -> Result<Value> {
-    let owner_access = owner(s, account).await?;
+    let package = registry::active(s, plugin).await?;
+    let provider = provider(&package.manifest, name, collection)?.clone();
+    let (owner_access, actor) = authority(s, &provider, account).await?;
     let state = text(input, "state");
     if state.len() != 43 {
         return Err(expired());
@@ -484,16 +554,15 @@ pub async fn finish(
         || pending.instance != instance
         || pending.resource != resource
         || pending.provider != name
+        || pending.actor != actor
     {
         return Err(Error::forbidden(
             "This authorization belongs to another requester or resource.",
         ));
     }
-    let package = registry::active(s, plugin).await?;
     if package.digest != pending.digest {
         return Err(expired());
     }
-    let provider = provider(&package.manifest, name, collection)?.clone();
     let expected = pending.clone();
     let key_claim = key.clone();
     let claimed = s
@@ -552,7 +621,22 @@ pub async fn finish(
             "OAuth returned no declared resource identity.",
         ));
     }
-    if owner(s, account).await? != pending.owner_access
+    let personal = match (&provider.personal, &actor) {
+        (Some(personal), Some(actor)) => {
+            let subject = response
+                .pointer(&personal.subject)
+                .and_then(Value::as_str)
+                .filter(|s| !s.is_empty() && s.len() <= 256 && !s.chars().any(char::is_control))
+                .ok_or_else(|| Error::bad_gateway("OAuth returned no valid personal identity."))?;
+            Some(Personal {
+                actor: actor.clone(),
+                subject: subject.into(),
+            })
+        }
+        (None, None) => None,
+        _ => return Err(expired()),
+    };
+    if authority(s, &provider, account).await? != (pending.owner_access.clone(), actor)
         || registry::active(s, plugin).await?.digest != pending.digest
     {
         return Err(expired());
@@ -566,9 +650,10 @@ pub async fn finish(
         requested_scopes: pending.scopes.clone(),
         tokens,
         refreshing: false,
+        personal,
     };
     let result = summary(&authorization);
-    let auth_key = authorization_key(resource, name);
+    let auth_key = authorization_key(resource, name, pending.actor.as_ref());
     let encrypted = s
         .vault
         .encrypt(&auth_key, &serde_json::to_value(&authorization)?)?;
@@ -581,8 +666,25 @@ pub async fn finish(
         .ok_or_else(|| Error::not_found("OAuth resource collection is unavailable."))?
         .settings
         .clone();
+    let vault = s.vault.clone();
     s.store.transaction(move |db| {
         let mut resource = current(db, &pending)?;
+        if let Some(personal) = &authorization.personal {
+            // Personal authorization proves a person within an already configured
+            // resource. It cannot create or change the owner's workspace identity.
+            if metadata.iter().any(|(key, value)| resource["settings"].get(key) != Some(value)) {
+                return Err(Error::conflict("Personal OAuth belongs to another resource identity."));
+            }
+            if let Some(previous) = db.kv(&stored_key(&auth_key))? {
+                let previous: Authorization = serde_json::from_value(vault.decrypt(&auth_key, &previous)?)?;
+                if previous.personal.is_some_and(|p| p.subject != personal.subject) {
+                    return Err(Error::conflict("Disconnect before linking another personal identity."));
+                }
+            }
+            db.set(&epoch_key(&auth_key), &json!(id()), None)?;
+            db.set(&stored_key(&auth_key), &encrypted, None)?;
+            return Ok(());
+        }
         for (key, value) in metadata {
             let previous = resource["settings"].get(&key).and_then(Value::as_str);
             let different_identity = previous.is_some_and(|old| !old.is_empty() && old != value.as_str().unwrap());
@@ -610,13 +712,18 @@ pub async fn finish(
 }
 
 fn summary(authorization: &Authorization) -> Value {
-    json!({
+    let mut result = json!({
         "status": if authorization.refreshing {"reconnect"} else {"authorized"},
         "scopes": authorization.tokens.scopes, "requestedScopes": authorization.requested_scopes,
         "expiresAt": authorization.tokens.expires_at,
-    })
+    });
+    if let Some(personal) = &authorization.personal {
+        result["subject"] = json!(personal.subject);
+    }
+    result
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn status(
     s: &Service,
     plugin: &str,
@@ -624,12 +731,18 @@ pub async fn status(
     collection: &str,
     resource: &str,
     name: &str,
+    account: &str,
 ) -> Result<Value> {
     let resource = resources::get(s, plugin, instance, collection, resource).await?;
     let connection = connections::get(s, plugin, instance).await?;
     let package = registry::active(s, plugin).await?;
-    provider(&package.manifest, name, collection)?;
-    let Some(value) = s.vault.get(&authorization_key(&resource.id, name)).await? else {
+    let provider = provider(&package.manifest, name, collection)?;
+    let (_, actor) = authority(s, provider, account).await?;
+    let Some(value) = s
+        .vault
+        .get(&authorization_key(&resource.id, name, actor.as_ref()))
+        .await?
+    else {
         return Ok(json!({"status": "disconnected"}));
     };
     let authorization: Authorization = serde_json::from_value(value)?;
@@ -638,6 +751,11 @@ pub async fn status(
         .map(|policy| policy.owner.access_id);
     let mut summary = summary(&authorization);
     if owner_access.as_deref() != Some(&authorization.owner_access)
+        || authorization
+            .personal
+            .as_ref()
+            .map(|personal| &personal.actor)
+            != actor.as_ref()
         || authorization.instance_revision != connection.revision
         || authorization.digest != package.digest
         || authorization
@@ -664,15 +782,23 @@ pub async fn revoke(
     name: &str,
     account: &str,
 ) -> Result<Value> {
-    owner(s, account).await?;
-    status(s, plugin, instance, collection, resource, name).await?;
+    let package = registry::active(s, plugin).await?;
+    let provider = provider(&package.manifest, name, collection)?;
+    let (_, actor) = authority(s, provider, account).await?;
+    status(s, plugin, instance, collection, resource, name, account).await?;
     let resource = resources::get(s, plugin, instance, collection, resource).await?;
-    let key = authorization_key(&resource.id, name);
+    let key = authorization_key(&resource.id, name, actor.as_ref());
     s.store
         .transaction(move |db| {
             let mut current = db.get(resources::KIND, &resource.id)?.ok_or_else(expired)?;
             if current["revision"] != resource.revision {
                 return Err(expired());
+            }
+            if actor.is_some() {
+                // A per-person generation fences code exchanges without changing
+                // the shared resource or anyone else's authorization.
+                db.set(&epoch_key(&key), &json!(id()), None)?;
+                return db.delete(&stored_key(&key));
             }
             // Also invalidate exchanges that have already consumed their pending
             // state but have not yet returned from the provider.
@@ -694,7 +820,18 @@ pub(crate) async fn credential(
     let resource = resources::reference(s, context, resource).await?;
     let selected = &resource.resource;
     let provider = provider(&context.manifest, name, &selected.collection)?;
-    let key = authorization_key(&selected.id, name);
+    let actor = if provider.personal.is_some() {
+        let requester = context
+            .resource_grant
+            .as_ref()
+            .and_then(|grant| grant.requester.as_ref())
+            .ok_or_else(|| Error::forbidden("Personal OAuth requires a verified run requester."))?;
+        requesters::recheck(s, requester).await?;
+        Some(requester.actor.clone())
+    } else {
+        None
+    };
+    let key = authorization_key(&selected.id, name, actor.as_ref());
     let _lock = s.plugins.oauth.lock(&key).await;
     let value = s
         .vault
@@ -702,6 +839,16 @@ pub(crate) async fn credential(
         .await?
         .ok_or_else(|| Error::forbidden("Connect this resource through OAuth first."))?;
     let mut authorization: Authorization = serde_json::from_value(value)?;
+    if authorization
+        .personal
+        .as_ref()
+        .map(|personal| &personal.actor)
+        != actor.as_ref()
+    {
+        return Err(Error::forbidden(
+            "This OAuth authorization belongs to another requester.",
+        ));
+    }
     let owner_access = crate::relay::task_author_policy(s)
         .await?
         .map(|p| p.owner.access_id);
@@ -724,6 +871,9 @@ pub(crate) async fn credential(
         return Err(Error::forbidden(
             "The last OAuth renewal was interrupted. Reconnect this resource.",
         ));
+    }
+    if let Some(grant) = &context.resource_grant {
+        super::grants::recheck(s, grant).await?;
     }
     if authorization
         .tokens
@@ -753,6 +903,9 @@ pub(crate) async fn credential(
             })
             .await?;
         resources::recheck(s, context, &resource).await?;
+        if let Some(grant) = &context.resource_grant {
+            super::grants::recheck(s, grant).await?;
+        }
         let fields = BTreeMap::from([
             ("grant_type", "refresh_token".into()),
             ("refresh_token", refresh),
@@ -785,6 +938,14 @@ pub(crate) async fn credential(
                 ));
             }
         }
+        if let (Some(declared), Some(personal)) = (&provider.personal, &authorization.personal)
+            && let Some(subject) = response.pointer(&declared.subject).filter(|v| !v.is_null())
+            && subject.as_str() != Some(&personal.subject)
+        {
+            return Err(Error::forbidden(
+                "OAuth renewed a different personal identity.",
+            ));
+        }
         resources::recheck(s, context, &resource).await?;
         let check = Reference {
             key: key.clone(),
@@ -792,6 +953,7 @@ pub(crate) async fn credential(
             owner_access: authorization.owner_access.clone(),
             plugin: context.connection.plugin_id.clone(),
             digest: authorization.digest.clone(),
+            actor: actor.clone(),
         };
         recheck(s, &check).await?;
         authorization.tokens = tokens;
@@ -821,6 +983,7 @@ pub(crate) async fn credential(
             owner_access: authorization.owner_access,
             plugin: context.connection.plugin_id.clone(),
             digest: authorization.digest,
+            actor,
         },
     ))
 }
@@ -835,6 +998,13 @@ pub(crate) async fn recheck(s: &Service, reference: &Reference) -> Result<()> {
     if owner_access.as_deref() != Some(&reference.owner_access) {
         return Err(Error::forbidden(
             "OAuth no longer belongs to the current owner.",
+        ));
+    }
+    if let Some(actor) = &reference.actor
+        && requesters::account(s, &actor.account).await? != *actor
+    {
+        return Err(Error::forbidden(
+            "The personal OAuth requester's access changed.",
         ));
     }
     let current = s.vault.get(&reference.key).await?;

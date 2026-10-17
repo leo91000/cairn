@@ -341,15 +341,17 @@ pub struct Authorization {
     pub scopes: BTreeMap<String, String>,
     grant: Grant,
     reference: resources::Reference,
+    pub(crate) requester: Option<super::requesters::RunRequester>,
 }
 
 pub async fn authorize(
     s: &Service,
-    agent: &str,
+    run: &Value,
     package: &Package,
     name: &str,
     input: &Value,
 ) -> Result<Scope> {
+    let agent = text(&run["snapshot"]["agent"], "id");
     let denied =
         || Error::forbidden("This agent is not granted that resource operation and scope.");
     let operation = package
@@ -407,12 +409,16 @@ pub async fn authorize(
         scopes,
         grant,
         reference,
+        requester: super::requesters::for_run(s, run).await?,
     };
     recheck(s, &authorization).await?;
     Ok(Scope::ResourceAgent(Box::new(authorization)))
 }
 
 pub async fn recheck(s: &Service, authorization: &Authorization) -> Result<()> {
+    if let Some(requester) = &authorization.requester {
+        super::requesters::recheck(s, requester).await?;
+    }
     let owner = crate::relay::task_author_policy(s).await?;
     if !owner.is_some_and(|owner| owner.owner.access_id == authorization.grant.owner_access_id) {
         return Err(Error::forbidden(

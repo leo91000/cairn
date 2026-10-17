@@ -567,7 +567,7 @@ async fn history_reads_do_not_block_sending_a_message() {
     let (_root, _fixture, service) = app().await;
     let chat = service.chat_create(json!({})).await.unwrap();
     let app = cairn_installation::http::router(service).await.unwrap();
-    let identity = InstallationIdentity::trusted(InstallationRole::Owner, "reading-account");
+    let identity = InstallationIdentity::trusted(InstallationRole::Owner, "fixture-owner");
 
     // Reads made by navigation, pagination and background refresh share this account.
     for _ in 0..300 {

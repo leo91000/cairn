@@ -146,6 +146,13 @@ L’accord d’une personne pour qu’un plugin agisse avec son identité et les
 qu’elle lui a confiés sur un service externe. Cette autorisation reste propre à
 cette personne et ne la rend pas membre de l’installation Cairn.
 
+**Demandeur d’un tour** :
+L’identité vérifiée de la personne dont le message déclenche le tour courant d’une
+conversation. Ses autorisations personnelles accompagnent ce tour ; elles ne
+viennent ni du premier participant du fil ni du propriétaire de l’installation.
+Une demande sans identité vérifiée ne reçoit aucune autorisation personnelle par
+défaut.
+
 **Consultation éphémère d’un plugin** :
 Une consultation dont les résultats et réponses restent réservés au demandeur, sans être
 conservés dans une conversation partagée ou un historique. Elle peut être assistée
