@@ -284,6 +284,17 @@ abstract class ChatProviderCases {
                 .onNodeWithTag("model-picker")
                 .assert(hasContentDescription("DeepSeek · effort élevé", substring = true))
             restoration.emulateSavedInstanceStateRestore()
+            // Recreation reconnects the live conversation asynchronously. Wait for
+            // its persisted settings, rather than asserting the initial agent fallback.
+            compose.waitUntil(10000) {
+                compose
+                    .onAllNodes(
+                        hasTestTag("model-picker") and
+                            hasContentDescription("DeepSeek · effort élevé", substring = true)
+                    )
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
+            }
             compose
                 .onNodeWithTag("model-picker")
                 .assert(hasContentDescription("DeepSeek · effort élevé", substring = true))
@@ -292,6 +303,12 @@ abstract class ChatProviderCases {
             compose.onNodeWithText("Modèles de vos connexions").assertExists()
             compose.onNodeWithText("Terminé").performClick()
             compose.onNode(hasSetTextAction()).performTextInput("Continue avec le même modèle")
+            compose.waitUntil(10000) {
+                compose
+                    .onAllNodes(hasTestTag("conversation-send") and isEnabled())
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
+            }
             compose.onNodeWithTag("conversation-send").performClick()
             compose.waitUntil(10000) { sent.isNotEmpty() }
             assertEquals("opencode", sent[0]["provider"]?.jsonPrimitive?.content)
