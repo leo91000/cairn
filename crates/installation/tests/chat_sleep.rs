@@ -84,7 +84,7 @@ impl Fixture {
 
     async fn finish(&self) {
         self.service.store.patch_run(&self.run, json!({
-            "status": "succeeded", "sessionId": "saved-session", "workspace": "/saved/workspace",
+            "status": "succeeded", "recoveryPending": false, "sessionId": "saved-session", "workspace": "/saved/workspace",
         })).await.unwrap();
     }
 
@@ -386,7 +386,56 @@ async fn failed_paused_turn_cannot_replay_its_wakeup_after_manual_resume() {
 }
 
 #[tokio::test]
-async fn sleep_rejects_invalid_inputs_non_chat_runs_and_pending_user_messages() {
+async fn queued_follow_ups_start_after_the_continuation_of_an_earlier_wait() {
+    let f = Fixture::new().await;
+    let follow_up = id();
+    f.service
+        .chat_send(
+            &f.chat,
+            json!({ "id": follow_up, "text": "Then update the changelog" }),
+        )
+        .await
+        .unwrap();
+    let wake = f.schedule().await;
+    f.finish().await;
+
+    let held = f.tick().await;
+    assert_eq!(held["run"]["status"], "succeeded");
+    assert_eq!(held["wakeup"], wake);
+    assert_eq!(held["messages"][1]["status"], "queued");
+
+    f.due().await;
+    let resumed = f.tick().await;
+    assert_eq!(resumed["run"]["chatExecution"]["messageId"], wake["id"]);
+    assert_eq!(resumed["messages"][1]["status"], "queued");
+
+    f.finish().await;
+    let next = f.tick().await;
+    assert_eq!(next["run"]["chatExecution"]["messageId"], follow_up);
+    assert_eq!(next["messages"][1]["status"], "sending");
+}
+
+#[tokio::test]
+async fn queued_follow_ups_are_not_held_by_a_wakeup_that_cannot_resume() {
+    let f = Fixture::new().await;
+    let follow_up = id();
+    f.service
+        .chat_send(&f.chat, json!({ "id": follow_up, "text": "Next request" }))
+        .await
+        .unwrap();
+    f.schedule().await;
+    f.finish().await;
+    let mut chat = f.service.get("chats", &f.chat).await.unwrap();
+    chat["sessionRestartRequested"] = true.into();
+    f.service.store.put("chats", chat).await.unwrap();
+
+    let detail = f.tick().await;
+    assert_eq!(detail["run"]["chatExecution"]["messageId"], follow_up);
+    assert!(detail["wakeup"].is_null());
+}
+
+#[tokio::test]
+async fn sleep_rejects_invalid_inputs_non_chat_runs_and_pending_steering() {
     let f = Fixture::new().await;
     for input in [
         json!({ "seconds": 0, "reason": "CI" }),
@@ -399,7 +448,10 @@ async fn sleep_rejects_invalid_inputs_non_chat_runs_and_pending_user_messages() 
     }
     assert!(f.service.chat_detail(&f.chat).await.unwrap()["wakeup"].is_null());
     f.service
-        .chat_send(&f.chat, json!({ "id": id(), "text": "New instruction" }))
+        .chat_send(
+            &f.chat,
+            json!({ "id": id(), "text": "New instruction", "mode": "steer" }),
+        )
         .await
         .unwrap();
     assert!(

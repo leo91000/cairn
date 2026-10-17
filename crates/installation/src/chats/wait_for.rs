@@ -29,7 +29,8 @@ pub fn tool() -> Value {
             wake immediately; success waits for all required checks. Never use this for local background processes that need this VM. \
             Run dependencies require the existing installation grant; GitHub uses the agent's existing connection. \
             One wait is stored per conversation. Identical repeated requests preserve the deadline; \
-            a different request replaces the previous wait, including sleep. A new user message, stop, deletion, \
+            a different request replaces the previous wait, including sleep. Queued follow-ups start after the continuation. \
+            A new user message, stop, deletion, \
             terminal turn failure or manual run resume cancels the wait; queue pause holds it.",
         "inputSchema": {
             "type": "object",
@@ -126,7 +127,7 @@ fn registering(db: &Db<'_>, bearer: &str, input: &Value) -> Result<(Value, Value
     let chat = chat_for_run(db, text(&run, "id"))?
         .ok_or_else(|| Error::conflict("Waiting requires an interactive conversation."))?;
     require_active(&chat)?;
-    if chat["paused"] == true || sleep::has_pending_input(db, &chat)? {
+    if chat["paused"] == true || sleep::has_unhandled_input(db, &chat)? {
         return Err(Error::conflict(
             "Handle pending user input before registering a wait.",
         ));
