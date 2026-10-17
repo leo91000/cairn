@@ -17,6 +17,7 @@ pub mod resources;
 pub mod routes;
 pub mod runtime;
 pub mod scope;
+pub mod setup;
 pub mod socket;
 pub(crate) mod turns;
 pub mod webhooks;
@@ -208,6 +209,33 @@ pub async fn routes(s: &Arc<Service>, input: &Input) -> Result<Value> {
         }
         ("DELETE", ["plugins", "packages", id]) => registry::uninstall(s, id).await,
         ("POST", ["plugins", id, "form"]) => forms::form(s, id, body).await,
+        ("GET", ["plugins", id, "setup-drafts"]) => {
+            let account = input
+                .identity
+                .as_ref()
+                .map_or("", |identity| identity.account_id.as_str());
+            setup::list(s, id, account).await
+        }
+        ("POST", ["plugins", id, "setup-drafts"]) => {
+            let account = input
+                .identity
+                .as_ref()
+                .map_or("", |identity| identity.account_id.as_str());
+            setup::save(s, id, account, body, None).await
+        }
+        (method, ["plugins", id, "setup-drafts", draft]) => {
+            let account = input
+                .identity
+                .as_ref()
+                .map_or("", |identity| identity.account_id.as_str());
+            match method {
+                "GET" => setup::get(s, id, draft, account).await,
+                "PATCH" => setup::save(s, id, account, body, Some(draft)).await,
+                "DELETE" => setup::remove(s, id, draft, account, body).await,
+                _ => Err(Error::method_not_allowed("Method not allowed.")),
+            }
+        }
+
         (
             method,
             [

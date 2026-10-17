@@ -282,7 +282,7 @@ Offline installations return 503; the relay deadline is 2.8 seconds.
 
 The direct route is `/api/plugin-webhooks/<instance>/<endpoint>`. The instance
 must be enabled and its package approved. This route has no Cairn account authority.
-Its fresh `webhook` handler receives `{endpoint, method, headers, body, instance}`;
+Its fresh `webhook` handler receives `{endpoint, method, headers, body, instance, setup}`;
 `body` is the original UTF-8 text. It returns `{status, body, headers?}` where `body`
 is text and only `content-type` is accepted in response headers. Ordinary cookies
 and authorization headers are never exposed to the script. Limits are 128 KiB of
@@ -297,6 +297,35 @@ sender can retry. Requests retain only identity and routing. Use this result whe
 deciding whether to acknowledge a signed HTTP or socket delivery. The shorter
 `inbound.accept` returns true only for a newly accepted event. Neither API bypasses
 the instance's admission rules or grants public requests conversation control.
+
+### Setup drafts
+
+Owner-only `/api/plugins/<plugin>/setup-drafts` supports POST and GET (a list of
+`{items, nextCursor: null}`). Append `/<draft>` for GET, PATCH or DELETE. POST
+accepts `{name, settings?, secrets?}`; PATCH additionally requires the last
+`revision`, as does DELETE. Missing required fields are allowed during setup;
+provided fields still use the manifest's validation. Secret values remain encrypted
+and responses expose only their names. PATCH keeps the draft ID and original expiry.
+
+Drafts expire after 24 hours, with at most 32 live drafts per installation. They
+belong to the current owner's account and installation-access revision and never
+start workers or grant agents access. Changing the approved package makes the
+draft `review_needed`: the owner can inspect or discard it, but cannot edit it or
+use its public endpoint. Uninstalling the package deletes its drafts and secrets;
+reinstalling identical files does not restore them or an in-flight creation.
+
+A webhook can declare `"setup": {"match": {"/type": "url_verification"}}`.
+Between one and eight JSON pointer selectors must all match string values. A
+signed JSON request matching that declaration can use the draft's stable direct
+or Beacon route before activation. Its handler receives `setup = true`; only
+pure Luau computation is available, including `cairn.json`. Every host capability
+is refused. Signature verification precedes the live owner check; expired,
+deleted, revoked or changed drafts cannot return a challenge. Other events are
+refused before invoking the package. Live instances receive `setup = false`.
+
+Draft form execution, OAuth/resources, activation and the web/Android setup
+journeys remain in the Slack delivery checklist. This API alone does not activate
+an instance or finish its configuration.
 
 ### Resource collections
 

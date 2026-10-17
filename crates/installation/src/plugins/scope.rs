@@ -19,6 +19,8 @@ pub enum Scope {
     Instance(Box<Connection>),
     /// A signed public request. It has no Cairn account or owner authority.
     Ingress(Box<Connection>),
+    /// A signed setup challenge. Pure Luau only, with no operational capabilities.
+    Setup(Box<super::setup::SetupDraft>),
     ResourceAgent(Box<super::grants::Authorization>),
     /// The owner editing an instance, before it is saved: its form. Only `http` and
     /// `exec`, with the draft's credential and secrets.
@@ -39,6 +41,7 @@ impl Scope {
             | Scope::Draft(connection, _) => {
                 vec![summary(connection)]
             }
+            Scope::Setup(draft) => vec![summary(&draft.connection())],
             Scope::Agent { instances, .. } => instances.iter().map(summary).collect(),
             Scope::ResourceAgent(authorization) => vec![summary(&authorization.connection)],
         }
@@ -59,6 +62,18 @@ pub fn summary(connection: &Connection) -> Value {
 /// it enabled and still granting the agent.
 async fn current(s: &Service, scope: &Scope, args: &Value) -> Result<Connection> {
     let requested = args["instance"].as_str();
+    if let Scope::Setup(expected) = scope {
+        if requested.is_some_and(|id| id != expected.id) {
+            return Err(Error::forbidden(
+                "Another setup draft is not available here.",
+            ));
+        }
+        let draft = super::setup::load(s, &expected.id).await?;
+        if draft.revision != expected.revision {
+            return Err(Error::forbidden("Setup changed. Retry its challenge."));
+        }
+        return Ok(draft.connection());
+    }
     if let Scope::ResourceAgent(authorization) = scope {
         if requested.is_some_and(|id| id != authorization.connection.id) {
             return Err(Error::forbidden("Another instance is not available here."));
@@ -73,7 +88,7 @@ async fn current(s: &Service, scope: &Scope, args: &Value) -> Result<Connection>
         return Ok((**connection).clone());
     }
     let expected = match scope {
-        Scope::Draft(..) | Scope::ResourceAgent(_) => unreachable!(),
+        Scope::Draft(..) | Scope::ResourceAgent(_) | Scope::Setup(_) => unreachable!(),
         Scope::Instance(connection) | Scope::Ingress(connection) => {
             if requested.is_some_and(|id| id != connection.id) {
                 return Err(Error::forbidden("Another instance is not available here."));
@@ -99,7 +114,7 @@ async fn current(s: &Service, scope: &Scope, args: &Value) -> Result<Connection>
     let granted = match scope {
         Scope::Instance(_) | Scope::Draft(..) => true,
         Scope::Ingress(_) => connection.enabled,
-        Scope::ResourceAgent(_) => unreachable!(),
+        Scope::ResourceAgent(_) | Scope::Setup(_) => unreachable!(),
         Scope::Agent { agent_id, .. } => connection.grants(agent_id),
     };
     if !unchanged || !granted {
@@ -118,6 +133,11 @@ pub async fn call(
     method: &str,
     args: &Value,
 ) -> Result<Value> {
+    if matches!(scope, Scope::Setup(_)) {
+        return Err(Error::forbidden(
+            "Setup challenges cannot use operational capabilities.",
+        ));
+    }
     let connection = current(s, scope, args).await?;
     if registry::active(s, &package.manifest.id).await?.digest != package.digest {
         return Err(Error::forbidden("The plugin approval changed."));

@@ -257,3 +257,583 @@ async fn slow_request_body_is_bounded_by_the_acknowledgement_deadline() {
     .unwrap();
     assert_eq!(response.status(), StatusCode::GATEWAY_TIMEOUT);
 }
+
+#[tokio::test]
+async fn setup_drafts_offer_a_stable_signed_challenge_without_admitting_work() {
+    use axum::response::IntoResponse;
+    use cairn_installation::auth::{InstallationIdentity, InstallationRole};
+    let (_root, app, s, original_path) =
+        fixture_with("return {}", &["storage", "inbound"], json!({})).await;
+    let original = registry::active(&s, "inbox").await.unwrap();
+    let mut manifest = serde_json::to_value(&original.manifest).unwrap();
+    manifest["version"] = json!("2");
+    manifest["settings"].as_array_mut().unwrap().push(json!({
+        "key": "clientId",
+        "title": "Client ID",
+        "type": "string",
+        "required": true,
+    }));
+    manifest["webhooks"][0]["setup"] = json!({ "match": { "/type": "url_verification" } });
+    let source = r#"return { webhook = function(event)
+        local body = cairn.json.decode(event.body)
+        local allowed = pcall(function() cairn.storage.set('unexpected', 'work') end)
+        if allowed then return {status = 500, body = 'Setup acquired operational capabilities'} end
+        return {status = 200, body = cairn.json.encode({challenge = body.challenge}),
+            headers = {['content-type'] = 'application/json'}}
+    end }"#;
+    let package = registry::install(
+        &s,
+        &json!({
+            "manifest": manifest,
+            "source": source,
+        }),
+    )
+    .await
+    .unwrap();
+    registry::approve(&s, "inbox", "2", text(&package, "digest"))
+        .await
+        .unwrap();
+    let owner_request = |method: &str, path: &str, body: serde_json::Value| {
+        let mut request = common::request(method, path)
+            .header("content-type", "application/json")
+            .body(axum::Json(body).into_response().into_body())
+            .unwrap();
+        request
+            .extensions_mut()
+            .insert(InstallationIdentity::trusted(
+                InstallationRole::Owner,
+                "fixture-owner",
+            ));
+        request
+    };
+    let collection = "/api/plugins/inbox/setup-drafts";
+    let response = common::send(
+        &app,
+        owner_request(
+            "POST",
+            collection,
+            json!({
+                "name": "Incomplete setup",
+                "settings": {},
+                "secrets": {"signingSecret": SECRET},
+            }),
+        ),
+    )
+    .await;
+    assert_eq!(
+        response.status(),
+        StatusCode::OK,
+        "{}",
+        common::read_text(response).await
+    );
+    let draft = common::read_json(response).await;
+    assert_eq!(draft["status"], "setup");
+    assert!(draft["expiresAt"].as_i64().unwrap() > now());
+    assert!(
+        !draft.to_string().contains(SECRET),
+        "setup response disclosed a secret"
+    );
+    let id = text(&draft, "id");
+    let path = format!("/api/plugin-webhooks/{id}/events");
+    let resource = format!("{collection}/{id}");
+    let mut member = owner_request("GET", &resource, json!({}));
+    member
+        .extensions_mut()
+        .insert(InstallationIdentity::trusted(
+            InstallationRole::Member,
+            "alice",
+        ));
+    assert_eq!(
+        common::send(&app, member).await.status(),
+        StatusCode::FORBIDDEN
+    );
+    let mut another_account = owner_request("GET", &resource, json!({}));
+    another_account
+        .extensions_mut()
+        .insert(InstallationIdentity::trusted(
+            InstallationRole::Owner,
+            "other-owner",
+        ));
+    assert_eq!(
+        common::send(&app, another_account).await.status(),
+        StatusCode::NOT_FOUND
+    );
+    let response = common::send(&app, owner_request("GET", collection, json!({}))).await;
+    assert_eq!(
+        response.status(),
+        StatusCode::OK,
+        "setup could not be resumed from its owner list"
+    );
+    let listing = common::read_json(response).await;
+    assert_eq!(listing["items"].as_array().unwrap().len(), 1);
+    assert_eq!(listing["items"][0]["id"], id);
+    assert!(!listing.to_string().contains(SECRET));
+    let response = common::send(
+        &app,
+        owner_request(
+            "PATCH",
+            &resource,
+            json!({
+                "revision": draft["revision"],
+                "name": "Configured app",
+                "settings": {"clientId": "app-fixture"},
+            }),
+        ),
+    )
+    .await;
+    assert_eq!(
+        response.status(),
+        StatusCode::OK,
+        "{}",
+        common::read_text(response).await
+    );
+    let updated = common::read_json(response).await;
+    assert_eq!(updated["id"], id, "editing setup changed its callback URL");
+    assert_ne!(updated["revision"], draft["revision"]);
+    assert_eq!(updated["secretKeys"], json!(["signingSecret"]));
+    let response = common::send(
+        &app,
+        owner_request(
+            "PATCH",
+            &resource,
+            json!({
+                "revision": draft["revision"],
+                "name": "Outdated edit",
+                "settings": {},
+            }),
+        ),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    let policy = Arc::new(std::sync::Mutex::new(json!({
+        "owner": {"account_id": "fixture-owner", "access_id": "fixture-owner"},
+        "members": [],
+    })));
+    let checks = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let pause = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let pause_at = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let pause_ref = pause.clone();
+    let entered_ref = entered.clone();
+    let release_ref = release.clone();
+    let policy_ref = policy.clone();
+    let checks_ref = checks.clone();
+    let pause_at_ref = pause_at.clone();
+    let authority = Router::new().route(
+        "/api/relay/00000000-0000-4000-8000-000000000055/task-authors",
+        axum::routing::get(move || {
+            let ordinal = checks_ref.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+            let policy = policy_ref.lock().unwrap().clone();
+            let paused = pause_ref.swap(false, std::sync::atomic::Ordering::SeqCst)
+                || pause_at_ref.load(std::sync::atomic::Ordering::SeqCst) == ordinal;
+            let (entered, release) = (entered_ref.clone(), release_ref.clone());
+            async move {
+                if paused {
+                    entered.notify_one();
+                    release.notified().await;
+                }
+                axum::Json(policy)
+            }
+        }),
+    );
+    let (origin, authority_server) = common::serve_locally(authority).await;
+    let identity_path = s.config.data_dir.join("installation-relay/identity.json");
+    let mut identity: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&identity_path).unwrap()).unwrap();
+    identity["origin"] = json!(origin);
+    std::fs::write(&identity_path, serde_json::to_vec(&identity).unwrap()).unwrap();
+    let challenge = json!({"type": "url_verification", "challenge": "setup-proof"}).to_string();
+    let mut invalid = signed(&path, now() / 1000, &challenge);
+    invalid.headers_mut().insert(
+        "x-example-signature",
+        "v0=0000000000000000000000000000000000000000000000000000000000000000"
+            .parse()
+            .unwrap(),
+    );
+    assert_eq!(
+        common::send(&app, invalid).await.status(),
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(
+        checks.load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "unauthenticated setup traffic reached the owner authority"
+    );
+    let response = common::send(&app, signed(&path, now() / 1000, &challenge)).await;
+    assert_eq!(
+        response.status(),
+        StatusCode::OK,
+        "{}",
+        common::read_text(response).await
+    );
+    assert_eq!(
+        common::read_json(response).await,
+        json!({"challenge": "setup-proof"})
+    );
+    let operational = json!({
+        "type": "event_callback",
+        "id": "work",
+        "author": {"id": "alice"},
+        "body": {"text": "Start work"},
+    })
+    .to_string();
+    let response = common::send(&app, signed(&path, now() / 1000, &operational)).await;
+    assert_eq!(
+        response.status(),
+        StatusCode::CONFLICT,
+        "setup acknowledged operational work"
+    );
+    assert!(s.chat_list().await.unwrap().is_empty());
+    let response = common::send(&app, owner_request("GET", &resource, json!({}))).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        common::read_json(response).await["settings"]["clientId"],
+        "app-fixture"
+    );
+    let response = common::send(
+        &app,
+        owner_request(
+            "DELETE",
+            &resource,
+            json!({"revision": updated["revision"]}),
+        ),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let response = common::send(&app, signed(&path, now() / 1000, &challenge)).await;
+    assert_eq!(
+        response.status(),
+        StatusCode::NOT_FOUND,
+        "deleted setup retained a public endpoint"
+    );
+    let create = |name: &str| {
+        owner_request(
+            "POST",
+            collection,
+            json!({
+                "name": name,
+                "settings": {},
+                "secrets": {"signingSecret": SECRET},
+            }),
+        )
+    };
+    let response = common::send(&app, create("Expired setup")).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let expired = common::read_json(response).await;
+    let expired_id = text(&expired, "id");
+    // Prepared expired storage, avoiding a one-day wall-clock delay. Observable
+    // assertions stay at the owner and signed public HTTP boundaries.
+    for key in [
+        format!("plugin-setup:{expired_id}"),
+        format!("mcp-secret:plugin-secrets:{expired_id}"),
+    ] {
+        let value = s.store.kv(&key).await.unwrap().unwrap();
+        s.store.set(&key, value, Some(now() - 1)).await.unwrap();
+    }
+    assert_eq!(
+        common::send(
+            &app,
+            owner_request("GET", &format!("{collection}/{expired_id}"), json!({}))
+        )
+        .await
+        .status(),
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(
+        common::send(
+            &app,
+            signed(
+                &format!("/api/plugin-webhooks/{expired_id}/events"),
+                now() / 1000,
+                &challenge
+            )
+        )
+        .await
+        .status(),
+        StatusCode::NOT_FOUND
+    );
+    let mut first = serde_json::Value::Null;
+    for index in 0..32 {
+        let response = common::send(&app, create(&format!("Old setup {index}"))).await;
+        assert_eq!(
+            response.status(),
+            StatusCode::OK,
+            "{}",
+            common::read_text(response).await
+        );
+        let value = common::read_json(response).await;
+        if index == 0 {
+            first = value;
+        }
+    }
+    assert_eq!(
+        common::send(&app, create("Over capacity")).await.status(),
+        StatusCode::TOO_MANY_REQUESTS
+    );
+    policy.lock().unwrap()["owner"]["access_id"] = json!("replacement-owner-access");
+    let old_id = text(&first, "id");
+    assert_eq!(
+        common::send(
+            &app,
+            signed(
+                &format!("/api/plugin-webhooks/{old_id}/events"),
+                now() / 1000,
+                &challenge
+            )
+        )
+        .await
+        .status(),
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(
+        common::send(
+            &app,
+            owner_request("GET", &format!("{collection}/{old_id}"), json!({}))
+        )
+        .await
+        .status(),
+        StatusCode::NOT_FOUND
+    );
+    let response = common::send(&app, owner_request("GET", collection, json!({}))).await;
+    assert_eq!(common::read_json(response).await["items"], json!([]));
+    let response = common::send(&app, create("Replacement owner's setup")).await;
+    assert_eq!(
+        response.status(),
+        StatusCode::OK,
+        "revoked drafts exhausted the new owner's capacity"
+    );
+    let replacement = common::read_json(response).await;
+    let response = common::send(&app, owner_request("GET", collection, json!({}))).await;
+    let listed = common::read_json(response).await;
+    assert_eq!(listed["items"].as_array().unwrap().len(), 1);
+    assert_eq!(listed["items"][0]["id"], replacement["id"]);
+    registry::activate(&s, "inbox", "1").await.unwrap();
+    let obsolete_id = text(&replacement, "id");
+    let obsolete_path = format!("{collection}/{obsolete_id}");
+    assert_eq!(
+        common::send(
+            &app,
+            signed(
+                &format!("/api/plugin-webhooks/{obsolete_id}/events"),
+                now() / 1000,
+                &challenge
+            )
+        )
+        .await
+        .status(),
+        StatusCode::NOT_FOUND
+    );
+    let response = common::send(&app, owner_request("GET", &obsolete_path, json!({}))).await;
+    assert_eq!(
+        response.status(),
+        StatusCode::OK,
+        "owner could not discard setup after the package changed"
+    );
+    assert_eq!(common::read_json(response).await["status"], "review_needed");
+    let response = common::send(&app, owner_request("GET", collection, json!({}))).await;
+    let obsolete = common::read_json(response).await;
+    assert_eq!(obsolete["items"][0]["id"], obsolete_id);
+    assert_eq!(obsolete["items"][0]["status"], "review_needed");
+    assert_eq!(
+        common::send(
+            &app,
+            owner_request(
+                "PATCH",
+                &obsolete_path,
+                json!({
+                    "name": "Cannot reuse old setup",
+                    "revision": replacement["revision"],
+                    "settings": {},
+                })
+            )
+        )
+        .await
+        .status(),
+        StatusCode::CONFLICT
+    );
+    assert_eq!(
+        common::send(
+            &app,
+            owner_request(
+                "DELETE",
+                &obsolete_path,
+                json!({
+                    "revision": replacement["revision"],
+                })
+            )
+        )
+        .await
+        .status(),
+        StatusCode::OK
+    );
+    let response = common::send(&app, create("Setup before uninstall")).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let removed_setup = common::read_json(response).await;
+    let original_instance = original_path.split('/').nth(3).unwrap();
+    connections::remove(&s, "inbox", original_instance)
+        .await
+        .unwrap();
+    registry::uninstall(&s, "inbox").await.unwrap();
+    let reinstalled = registry::install(
+        &s,
+        &json!({
+            "manifest": original.manifest,
+            "source": original.source.main,
+        }),
+    )
+    .await
+    .unwrap();
+    registry::approve(&s, "inbox", "1", text(&reinstalled, "digest"))
+        .await
+        .unwrap();
+    let old_setup_path = format!("{collection}/{}", text(&removed_setup, "id"));
+    let response = common::send(&app, owner_request("GET", &old_setup_path, json!({}))).await;
+    assert_eq!(
+        response.status(),
+        StatusCode::NOT_FOUND,
+        "reinstall revived an uninstalled setup"
+    );
+    let response = common::send(&app, owner_request("GET", collection, json!({}))).await;
+    assert_eq!(common::read_json(response).await["items"], json!([]));
+    pause.store(true, std::sync::atomic::Ordering::SeqCst);
+    let request = create("Creation spanning an uninstall");
+    let pending_app = app.clone();
+    let pending = tokio::spawn(async move { common::send(&pending_app, request).await });
+    tokio::time::timeout(std::time::Duration::from_secs(2), entered.notified())
+        .await
+        .unwrap();
+    registry::uninstall(&s, "inbox").await.unwrap();
+    let installed_again = registry::install(
+        &s,
+        &json!({
+            "manifest": original.manifest,
+            "source": original.source.main,
+        }),
+    )
+    .await
+    .unwrap();
+    registry::approve(&s, "inbox", "1", text(&installed_again, "digest"))
+        .await
+        .unwrap();
+    release.notify_one();
+    let response = pending.await.unwrap();
+    assert_eq!(
+        response.status(),
+        StatusCode::CONFLICT,
+        "in-flight creation survived an uninstall/reinstall"
+    );
+    let response = common::send(&app, owner_request("GET", collection, json!({}))).await;
+    assert_eq!(common::read_json(response).await["items"], json!([]));
+
+    let setup_package = registry::install(
+        &s,
+        &json!({
+            "manifest": manifest,
+            "source": source,
+        }),
+    )
+    .await
+    .unwrap();
+    registry::approve(&s, "inbox", "2", text(&setup_package, "digest"))
+        .await
+        .unwrap();
+
+    // Hold the former owner's authority response while a replacement owner saves
+    // their own setup. The delayed request cannot retire those newer records.
+    pause.store(true, std::sync::atomic::Ordering::SeqCst);
+    let request = create("Former owner creation");
+    let pending_app = app.clone();
+    let former_owner = tokio::spawn(async move { common::send(&pending_app, request).await });
+    tokio::time::timeout(std::time::Duration::from_secs(2), entered.notified())
+        .await
+        .unwrap();
+    policy.lock().unwrap()["owner"]["access_id"] = json!("latest-owner-access");
+    let response = common::send(&app, create("Current owner's setup")).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let current_setup = common::read_json(response).await;
+    release.notify_one();
+    let response = former_owner.await.unwrap();
+    assert_eq!(
+        response.status(),
+        StatusCode::CONFLICT,
+        "a former owner's save survived a newer owner's write"
+    );
+    let current_path = format!("{collection}/{}", text(&current_setup, "id"));
+    let response = common::send(&app, owner_request("GET", &current_path, json!({}))).await;
+    assert_eq!(
+        response.status(),
+        StatusCode::OK,
+        "a former owner's cleanup erased the current owner's setup"
+    );
+    assert_eq!(
+        common::read_json(response).await["secretKeys"],
+        json!(["signingSecret"])
+    );
+    let current_webhook = format!("/api/plugin-webhooks/{}/events", text(&current_setup, "id"));
+    let response = common::send(&app, signed(&current_webhook, now() / 1000, &challenge)).await;
+    assert_eq!(
+        response.status(),
+        StatusCode::OK,
+        "a former owner's cleanup erased the current owner's signing secret"
+    );
+    assert_eq!(
+        common::read_json(response).await,
+        json!({"challenge": "setup-proof"})
+    );
+    // Suspend the final post-handler authority check, then invalidate setup.
+    for change in ["edit", "delete", "expire"] {
+        let response = common::send(&app, create("Final challenge check")).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let draft = common::read_json(response).await;
+        let draft_id = text(&draft, "id");
+        let owner_path = format!("{collection}/{draft_id}");
+        let public_path = format!("/api/plugin-webhooks/{draft_id}/events");
+        pause_at.store(
+            checks.load(std::sync::atomic::Ordering::SeqCst) + 2,
+            std::sync::atomic::Ordering::SeqCst,
+        );
+        let request = signed(&public_path, now() / 1000, &challenge);
+        let pending_app = app.clone();
+        let pending_challenge =
+            tokio::spawn(async move { common::send(&pending_app, request).await });
+        tokio::time::timeout(std::time::Duration::from_secs(2), entered.notified())
+            .await
+            .unwrap();
+        match change {
+            "edit" | "delete" => {
+                let request = owner_request(
+                    if change == "edit" { "PATCH" } else { "DELETE" },
+                    &owner_path,
+                    json!({
+                        "revision": draft["revision"],
+                        "name": "Changed before challenge completes",
+                        "settings": {},
+                    }),
+                );
+                assert_eq!(common::send(&app, request).await.status(), StatusCode::OK);
+            }
+            "expire" => {
+                for key in [
+                    format!("plugin-setup:{draft_id}"),
+                    format!("mcp-secret:plugin-secrets:{draft_id}"),
+                ] {
+                    let value = s.store.kv(&key).await.unwrap().unwrap();
+                    s.store.set(&key, value, Some(now() - 1)).await.unwrap();
+                }
+            }
+            _ => unreachable!(),
+        }
+        release.notify_one();
+        let response = pending_challenge.await.unwrap();
+        assert!(
+            matches!(
+                response.status(),
+                StatusCode::NOT_FOUND | StatusCode::CONFLICT | StatusCode::FORBIDDEN
+            ),
+            "{change} during final owner check allowed challenge: {}",
+            response.status()
+        );
+    }
+    authority_server.abort();
+}

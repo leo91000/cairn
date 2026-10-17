@@ -5,6 +5,7 @@ use crate::{
     config::now,
     error::{Error, Result},
     service::Service,
+    store::Db,
     validation::text,
 };
 use cairn_plugin_api::{
@@ -36,6 +37,29 @@ pub struct Package {
     pub source: Sources,
     pub builtin: bool,
     pub digest: String,
+}
+
+/// The exact approval which selected these loaded files. A delayed configuration
+/// write must not survive uninstall/reinstallation of otherwise identical files.
+pub(crate) struct ApprovedPackage {
+    pub package: Package,
+    record: Option<Value>,
+}
+
+impl ApprovedPackage {
+    pub(crate) fn recheck_in(&self, db: &Db<'_>) -> Result<()> {
+        if let Some(expected) = &self.record
+            && db
+                .get(KIND, &format!("package:{}", self.package.manifest.id))?
+                .as_ref()
+                != Some(expected)
+        {
+            return Err(Error::conflict(
+                "The package approval changed. Retry with its current version.",
+            ));
+        }
+        Ok(())
+    }
 }
 
 /// What the owner approves: the manifest and every Luau file, by path.
@@ -219,8 +243,15 @@ async fn record(s: &Service, id: &str) -> Result<Value> {
 
 /// The package a connection runs: bundled, or the approved active installed version.
 pub async fn active(s: &Service, id: &str) -> Result<Package> {
+    Ok(approved(s, id).await?.package)
+}
+
+pub(crate) async fn approved(s: &Service, id: &str) -> Result<ApprovedPackage> {
     if let Some(package) = builtin(id) {
-        return Ok(package);
+        return Ok(ApprovedPackage {
+            package,
+            record: None,
+        });
     }
     let record = record(s, id).await?;
     let version = record["active"]
@@ -232,7 +263,10 @@ pub async fn active(s: &Service, id: &str) -> Result<Package> {
             "This plugin changed since it was approved. Review it in Plugins.",
         ));
     }
-    Ok(package)
+    Ok(ApprovedPackage {
+        package,
+        record: Some(record),
+    })
 }
 
 fn summary(package: &Package) -> Value {
@@ -407,6 +441,7 @@ async fn set_active(
         ));
     }
     record["active"] = json!(version);
+    record["revision"] = json!(crate::config::id());
     record["updatedAt"] = json!(now());
     let (plugin, action) = (
         id.to_owned(),
@@ -461,6 +496,7 @@ pub async fn uninstall(s: &Service, id: &str) -> Result<Value> {
     s.store
         .transaction(move |db| {
             db.remove(KIND, &format!("package:{plugin}"))?;
+            super::setup::forget_plugin_in(db, &plugin)?;
             db.audit("plugin.package.uninstalled", &json!({ "plugin": plugin }))
         })
         .await?;

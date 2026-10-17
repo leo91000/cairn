@@ -134,6 +134,12 @@ compte de service 1Password : ses réglages, ses secrets chiffrés, les agents a
 délégation externe. Aucun agent n’est autorisé par défaut.
 _Avoid_ : connexion (réservé aux comptes des agents de code et à GitHub)
 
+**Brouillon de configuration d’un plugin** :
+Une configuration temporaire préparée par le propriétaire avant d’activer une
+instance. Elle garde une identité stable pendant la mise en place auprès du
+service externe, sans donner d’accès aux agents ni accepter du travail. Elle
+expire si le propriétaire ne termine pas la configuration.
+
 **Contribution d’un plugin** :
 Ce qu’un package déclare dans son manifeste et que Cairn affiche et contrôle : le
 formulaire d’une instance (que le package peut compléter pendant la saisie), les

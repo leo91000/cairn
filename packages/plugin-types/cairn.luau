@@ -29,7 +29,8 @@
 --   form              the owner edits an instance (instanceForm)
 --                     { values, credential, secrets, instance?, changed?, submit }
 --                     -> FormResult; http and exec use the draft's credential and secrets
---   webhook           a verified signed public POST         {endpoint, method, headers, body, instance}
+--   webhook           a verified signed public POST         {endpoint, method, headers, body, instance, setup}
+--                     setup=true accepts only declared setup challenges; all host capabilities are refused
 --                     -> {status, body: string, headers?: {["content-type"]: string}}
 --                     Original UTF-8 body; 128 KiB input, 64 KiB response, 2.5 s total.
 -- `instances` are those the agent is granted: { id, name, enabled, settings, secrets }

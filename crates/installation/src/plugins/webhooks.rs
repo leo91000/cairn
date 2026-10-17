@@ -3,6 +3,7 @@
 use super::{
     connections, registry,
     scope::{self, Scope},
+    setup,
 };
 use crate::{
     config::now,
@@ -103,18 +104,31 @@ async fn receive(
     if !public_path(request.uri().path()) {
         return Err(Error::not_found("Webhook not found."));
     }
-    let value = s
-        .store
-        .get(connections::KIND, instance)
-        .await?
-        .ok_or_else(|| Error::not_found("Webhook not found."))?;
-    let connection: connections::Connection = serde_json::from_value(value)?;
-    let expected = connection.clone();
-    s.store
-        .read(move |db| connections::authorize(db, &expected))
-        .await?;
-    connections::ensure_owner(s, &connection).await?;
+    let saved = s.store.get(connections::KIND, instance).await?;
+    let draft = if saved.is_none() {
+        Some(setup::lookup(s, instance).await?)
+    } else {
+        None
+    };
+    let connection = match saved {
+        Some(value) => {
+            let connection: connections::Connection = serde_json::from_value(value)?;
+            let expected = connection.clone();
+            s.store
+                .read(move |db| connections::authorize(db, &expected))
+                .await?;
+            connections::ensure_owner(s, &connection).await?;
+            connection
+        }
+        None => draft.as_ref().unwrap().connection(),
+    };
     let package = registry::active(s, &connection.plugin_id).await?;
+    if draft
+        .as_ref()
+        .is_some_and(|draft| draft.digest != package.digest)
+    {
+        return Err(Error::not_found("Setup draft is unavailable or expired."));
+    }
     let webhook = package
         .manifest
         .webhooks
@@ -151,22 +165,44 @@ async fn receive(
             headers.insert(name.to_string(), json!(value.to_str().unwrap_or_default()));
         }
     }
+    if draft.is_some() {
+        let challenge: Value = serde_json::from_slice(&bytes)
+            .map_err(|_| Error::bad("Setup challenges require JSON."))?;
+        if !webhook.setup.as_ref().is_some_and(|setup| {
+            setup.selectors.iter().all(|(pointer, expected)| {
+                challenge.pointer(pointer).and_then(Value::as_str) == Some(expected)
+            })
+        }) {
+            return Err(Error::conflict(
+                "Only declared setup challenges are accepted before activation.",
+            ));
+        }
+    }
+    if let Some(expected) = &draft {
+        let current = setup::load(s, instance).await?;
+        if current.revision != expected.revision {
+            return Err(Error::conflict("Setup changed. Retry its challenge."));
+        }
+    }
     let expected = connection.clone();
+    let setup_scope = draft.map(|draft| Scope::Setup(Box::new(draft)));
     let payload = json!({
-        "endpoint": endpoint, "method": "POST", "headers": headers, "body": body,
+        "endpoint": endpoint,
+        "method": "POST",
+        "headers": headers,
+        "body": body,
         "instance": scope::summary(&connection),
+        "setup": setup_scope.is_some(),
     });
-    let value = scope::invoke(
-        s,
-        &package,
-        "webhook",
-        payload,
-        &Scope::Ingress(Box::new(connection)),
-    )
-    .await?;
-    s.store
-        .read(move |db| connections::authorize(db, &expected))
-        .await?;
+    let scope = setup_scope.unwrap_or_else(|| Scope::Ingress(Box::new(connection)));
+    // A one-shot handler includes capability RPC futures. Keep its state on the
+    // heap so nested public HTTP delivery does not grow the caller's stack.
+    let value = Box::pin(scope::invoke(s, &package, "webhook", payload, &scope)).await?;
+    if !matches!(scope, Scope::Setup(_)) {
+        s.store
+            .read(move |db| connections::authorize(db, &expected))
+            .await?;
+    }
     let active = registry::active(s, &package.manifest.id).await?;
     if active.digest != package.digest {
         return Err(Error::forbidden("The plugin approval changed."));

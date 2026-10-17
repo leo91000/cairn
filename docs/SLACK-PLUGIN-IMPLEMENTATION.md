@@ -15,7 +15,8 @@ the web/Android journeys. Tests assert observable behavior at those interfaces.
   - Installation tests 8/8 and Beacon relay test 1/1 pass against actual HTTP/worker
     interfaces. Includes queue saturation, exact signed bytes, isolated public
     authority, disabled instances, malformed responses and a slow-body deadline.
-  - Setup-only expiring drafts remain in the OAuth/configuration slice below.
+  - Expiring owner-bound setup drafts now accept only declared signed challenges;
+    their forms/OAuth/activation and both client journeys remain below.
 - [ ] Generic resources, routes, granular grants and declarative collections UI.
   - Native collection CRUD, encrypted fields, parent references, revision checks,
     cascade cleanup and resource credentials implemented; three worker/HTTP tests pass.
@@ -303,3 +304,63 @@ including a saved wait whose earlier grant has been reduced; they do not claim a
 successful `wait_for` registration by a source agent without installation access.
 The owner explicitly cancels the future work before the later reset succeeds.
 A fresh full checkpoint review follows this correction.
+
+
+## Setup challenge checkpoint
+
+Quality and Storage passed on `37290ef4`. The next slice adds a separate,
+24-hour owner-bound setup record with a stable UUID, encrypted secret fields,
+partial manifest validation, revision checks and a transactional limit of 32.
+Owner HTTP can create, resume, edit and discard it. No live instance, grant,
+delegation or worker is created. Only signed JSON requests matching the package's
+declared setup selectors run pure Luau; every host capability is refused.
+
+The actual HTTP/Luau journey first reproduces missing setup support, missing
+owner listing, unauthenticated owner-authority calls, revoked-owner capacity
+exhaustion, inaccessible obsolete drafts, revival after reinstall and in-flight
+creation across uninstall/reinstall. Each has failing/passing evidence. The
+corrected path verifies signatures before contacting the owner authority, retires
+obsolete owner records before quota checks, keeps obsolete drafts inspectable and
+discardable, deletes drafts/secrets at uninstall and checks the exact current
+approval again in the write transaction. It also tests secret non-disclosure,
+stale edits, expiration, ownership, challenge results and refusal of work.
+
+The additive native KV namespace uses the existing JSON/TTL and encrypted-secret
+envelope. Installed package approval records gain an opaque revision ignored by
+older readers; existing records without it remain readable. The optional manifest
+setup declaration is a new package contract: old manifest validators reject such
+packages. Whole-PR compatibility qualification and reproducible storage measurements
+remain mandatory before marking the PR ready. No database-version or compatibility
+epoch decision is inferred from this isolated slice. Setup form execution, URLs,
+OAuth/resources, activation, clients and the complete Slack package remain open.
+
+The first independent Standards/Spec checkpoint review identifies a delayed
+former-owner save deleting the replacement owner's drafts during quota cleanup.
+The owner HTTP barrier reproduces the stale request returning 200. The corrected
+write compares the whole bounded draft snapshot captured before checking owner
+authority; any intervening setup write requires a reload. The replacement owner's
+draft and signing secret are exercised through owner and signed public HTTP.
+Focused revalidation and a fresh full checkpoint review follow the correction.
+
+The selected regression also exposes a stack overflow at the first public HTTP
+delivery in the existing reset journey. It passes with all parent source restored;
+removing the new setup routes alone does not fix it. Moving the one-shot webhook
+invocation future to the heap fixes the same unmodified journey at its default
+thread stack size. No test stack limit was increased, and temporary probes were
+removed. The full selected plugin regression is rerun with that boundary change.
+
+The second independent review finds a stale snapshot after the final live-owner
+check. Holding that HTTP response reproduces a successful challenge despite an
+intervening edit. Draft reads now recheck exact stored metadata/expiry after owner
+I/O; operational loads also recheck the captured approval in that same native
+read. The authority-barrier journey covers edit, deletion and prepared expiry
+during the post-handler check. Final focused regression and a fresh complete
+checkpoint review are required on this corrected state.
+
+The third Spec review identifies a different package capture between the initial
+draft lookup and the webhook's loaded source. The loaded package is now compared
+directly with the captured draft digest before its signature/selectors are used.
+This closes an A/B activation interleaving supported by static control-flow
+analysis; the precise interleaving has no deterministic HTTP-barrier regression
+here. Existing sequential approval-change and full HTTP/worker cases are rerun,
+and another fresh complete review assesses the final binding.

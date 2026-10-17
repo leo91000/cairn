@@ -7,6 +7,16 @@ use serde::{Deserialize, Serialize};
 pub struct Webhook {
     pub name: String,
     pub signature: WebhookSignature,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub setup: Option<WebhookSetup>,
+}
+
+/// Signed JSON challenges accepted before activation. Every selector must match.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct WebhookSetup {
+    #[serde(rename = "match")]
+    pub selectors: std::collections::BTreeMap<String, String>,
 }
 
 /// HMAC-SHA256, encoded as a hexadecimal digest with an optional prefix.
@@ -71,6 +81,23 @@ pub(crate) fn validate(manifest: &Manifest) -> Result<(), &'static str> {
             })
         {
             return Err("Plugin manifest has an invalid public endpoint signature rule.");
+        }
+        if let Some(setup) = &webhook.setup
+            && (setup.selectors.is_empty()
+                || setup.selectors.len() > 8
+                || setup.selectors.iter().any(|(pointer, value)| {
+                    !pointer.starts_with('/')
+                        || !short(pointer, 128)
+                        || pointer.chars().any(char::is_control)
+                        || !short(value, 256)
+                        || value.chars().any(char::is_control)
+                        || pointer
+                            .split('~')
+                            .skip(1)
+                            .any(|part| !part.starts_with(['0', '1']))
+                }))
+        {
+            return Err("Declare one to eight JSON pointer selectors for setup challenges.");
         }
         names.push(webhook.name.as_str());
     }

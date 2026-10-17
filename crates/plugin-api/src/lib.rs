@@ -20,7 +20,7 @@ pub use resources::ResourceCollection;
 pub use settings::validate_settings_schema;
 pub use sources::{MAX_MODULES, MAX_SOURCE_BYTES, Sources, module_path, resolve};
 pub use view::{validate_action_result, validate_view};
-pub use webhooks::{Webhook, WebhookSignature, WebhookTimestamp};
+pub use webhooks::{Webhook, WebhookSetup, WebhookSignature, WebhookTimestamp};
 
 /// Worker protocol and manifest version. Manifests must declare exactly this one.
 pub const API_VERSION: u32 = 2;
