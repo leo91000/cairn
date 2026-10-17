@@ -27,11 +27,11 @@ import ActivityContent from './ActivityContent.vue'
 import AgentActions from './AgentActions.vue'
 import ArtifactRail from './ArtifactRail.vue'
 import ArtifactViewer from './ArtifactViewer.vue'
-import ChatAttachments from './ChatAttachments.vue'
 import ChatNotice from './ChatNotice.vue'
 import ChatOutcome from './ChatOutcome.vue'
 import ChatWaitCard from './ChatWaitCard.vue'
 import Icon from './Icon.vue'
+import MessageAttachments from './MessageAttachments.vue'
 import SubagentTeam from './SubagentTeam.vue'
 import UiButton from './UiButton.vue'
 import WorkingIndicator from './WorkingIndicator.vue'
@@ -358,20 +358,27 @@ defineExpose({
                   <ArtifactRail :items="entry.files" @open="artifactViewer = $event.id" />
                 </div>
                 <!-- Conversations and runs follow the Android reader: a tonal bubble for you, plain text for the agent. -->
-                <article v-else-if="entry.kind === 'message' && entry.role === 'user'" class="activity-message chat-message ml-auto! my-3 w-fit max-w-[90%] rounded-2xl rounded-br-sm bg-variant px-4 py-3">
+                <!-- As on Android, attachments sit above the bubble, right-aligned and outside it. -->
+                <article v-else-if="entry.kind === 'message' && entry.role === 'user'" class="activity-message chat-message ml-auto! my-3 flex w-fit max-w-[90%] flex-col items-end gap-1.5">
                   <span class="sr-only">You</span>
-                  <p class="whitespace-pre-wrap text-lg leading-normal">
-                    <template v-for="(segment, index) in mentionSegments(entry.text, skillNames)" :key="index">
-                      <span
-                        v-if="segment.skill"
-                        class="rounded bg-accent/12 px-0.5 font-medium text-accent"
-                        :title="`Skill ${segment.skill}`"
-                        v-text="segment.text"
-                      /><span v-else v-text="segment.text" />
-                    </template>
-                  </p>
-                  <ChatAttachments v-if="entry.attachments?.length" :attachments="entry.attachments" class="mt-3!" />
-                  <p class="mt-1.5! mb-0! flex justify-end gap-2 text-2xs text-muted">
+                  <MessageAttachments v-if="entry.attachments?.length" :attachments="entry.attachments" />
+                  <div v-if="entry.text" class="user-bubble w-fit max-w-full rounded-2xl rounded-br-sm bg-variant px-4 py-3">
+                    <p class="whitespace-pre-wrap text-lg leading-normal">
+                      <template v-for="(segment, index) in mentionSegments(entry.text, skillNames)" :key="index">
+                        <span
+                          v-if="segment.skill"
+                          class="rounded bg-accent/12 px-0.5 font-medium text-accent"
+                          :title="`Skill ${segment.skill}`"
+                          v-text="segment.text"
+                        /><span v-else v-text="segment.text" />
+                      </template>
+                    </p>
+                    <p class="mt-1.5! mb-0! flex justify-end gap-2 text-2xs text-muted">
+                      <span v-if="entry.delivery" role="status">{{ entry.delivery }}</span>
+                      <time :datetime="new Date(entry.time).toISOString()" :title="new Date(entry.time).toLocaleString()">{{ new Date(entry.time).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) }}</time>
+                    </p>
+                  </div>
+                  <p v-else class="m-0! flex justify-end gap-2 text-2xs text-muted">
                     <span v-if="entry.delivery" role="status">{{ entry.delivery }}</span>
                     <time :datetime="new Date(entry.time).toISOString()" :title="new Date(entry.time).toLocaleString()">{{ new Date(entry.time).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) }}</time>
                   </p>

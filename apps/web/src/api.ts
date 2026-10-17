@@ -9,6 +9,7 @@ import { reactive, watch } from 'vue'
 import { beaconOrigin, installationHost } from './beacon-location'
 import { clearHistoryCache } from './history-cache'
 import { InstallationTransport } from './installation-transport'
+import { observeTransport } from './transport-observation'
 
 // Resolve the beacon context before any shared view reads its local cache.
 export const beaconEntry = typeof document !== 'undefined' && document.getElementById('app')?.hasAttribute('data-beacon')
@@ -76,32 +77,99 @@ export function redirect(url: string) {
   }
 }
 
+function apiHeaders(options: RequestInit) {
+  return {
+    ...(options.body === undefined
+      ? {}
+      : { 'Content-Type': 'application/json' }),
+    'X-CSRF-Token': state.csrf,
+    ...options.headers,
+  } as Record<string, string>
+}
+
+// Installation API paths go through the installation transport (direct or relay).
+function transportPath(url: string) {
+  const path = state.installationId && url.startsWith(apiUrl('/')) ? url.slice(apiUrl('').length) : undefined
+  return path && !/^\/tokens(?:\/|$)/.test(path) ? path : undefined
+}
+
+async function apiResponse(url: string, options: RequestInit) {
+  const requestOptions = { ...options, headers: apiHeaders(options) }
+  const path = transportPath(url)
+  return path
+    ? await installationTransport.request(path, url, requestOptions)
+    : await fetch(url, requestOptions)
+}
+
+function failure(status: number, data: any) {
+  if (status === 401)
+    state.authenticated = false
+  return new ApiError(data?.error || 'Request failed. Please try again.', status)
+}
+
 async function requestApi<T = any>(
   url: string,
   options: RequestInit = {},
 ): Promise<T> {
-  const requestOptions = {
-    ...options,
-    headers: {
-      ...(options.body === undefined
-        ? {}
-        : { 'Content-Type': 'application/json' }),
-      'X-CSRF-Token': state.csrf,
-      ...options.headers,
-    },
-  }
-  const path = state.installationId && url.startsWith(apiUrl('/')) ? url.slice(apiUrl('').length) : undefined
-  const response = path && !/^\/tokens(?:\/|$)/.test(path)
-    ? await installationTransport.request(path, url, requestOptions)
-    : await fetch(url, requestOptions)
+  const response = await apiResponse(url, options)
   const data = await response.json()
-  if (!response.ok) {
-    if (response.status === 401)
-      state.authenticated = false
-    throw new ApiError(data.error || 'Request failed. Please try again.', response.status)
-  }
+  if (!response.ok)
+    throw failure(response.status, data)
 
   return data
+}
+
+/** A binary installation resource, through the same transport and credentials as `api()`. */
+export async function apiBlob(url: string, options: RequestInit = {}): Promise<Blob> {
+  const response = await apiResponse(apiUrl(url), options)
+  if (!response.ok)
+    throw failure(response.status, await response.json().catch(() => null))
+  return response.blob()
+}
+
+/**
+ * Uploads a file body like `api()` and reports progress. File bodies never use the direct channel
+ * (it only carries string bodies), so `api()` would use `fetch` with these same headers.
+ */
+export function apiUpload<T = any>(url: string, body: Blob, options: { method?: string, headers?: Record<string, string>, onProgress?: (fraction: number) => void } = {}): Promise<T> {
+  const target = apiUrl(url)
+  const method = options.method ?? 'PUT'
+  const headers = apiHeaders({ body, headers: options.headers })
+  if (typeof XMLHttpRequest === 'undefined')
+    return requestApi<T>(target, { method, headers, body })
+  return new Promise<T>((resolve, reject) => {
+    const request = new XMLHttpRequest()
+    request.open(method, target)
+    for (const [name, value] of Object.entries(headers))
+      request.setRequestHeader(name, value)
+    request.upload.onprogress = (event) => {
+      if (event.lengthComputable && event.total > 0)
+        options.onProgress?.(event.loaded / event.total)
+    }
+
+    request.onerror = () => reject(new TypeError('Upload failed. Check your connection and try again.'))
+    request.onabort = () => reject(new DOMException('Upload cancelled.', 'AbortError'))
+    request.onload = () => {
+      let data: any = null
+      try {
+        data = JSON.parse(request.responseText)
+      }
+      catch {}
+
+      if (request.status < 200 || request.status >= 300) {
+        reject(failure(request.status, data))
+        return
+      }
+
+      const route = request.getResponseHeader('x-cairn-transport')
+      const path = transportPath(target)
+      if (path && (route === 'direct' || route === 'relay'))
+        observeTransport(route, path, method)
+      resolve(data)
+    }
+
+    request.send(body)
+  })
 }
 
 export function api<T = any>(url: string, options: RequestInit = {}): Promise<T> {

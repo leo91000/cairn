@@ -6,6 +6,7 @@ import type {
   ChatDetail,
   ChatMessage,
 } from '../../../../packages/contracts/chats'
+import type { DraftState } from '../attachments'
 import {
   computed,
   inject,
@@ -18,19 +19,28 @@ import {
 import { useRoute, useRouter } from 'vue-router'
 import { latestArtifacts } from '../../../../packages/contracts/artifacts'
 import { MAIN_AGENT_ID } from '../../../../packages/contracts/constants'
-import { api, state } from '../api'
+import { api, apiUpload, state } from '../api'
+import { reuseAttachmentKey } from '../attachment-media'
+import {
+  isImage,
+  MAX_ATTACHMENTS,
+  MAX_MESSAGE_SIZE,
+  validateSelection,
+} from '../attachments'
 import { chatDelivery, chatSleepNotice, chatWaitNotice } from '../chat-delivery'
 import { chatList as chats, publishChats } from '../chat-list'
 import { waitStatus } from '../chat-wait'
 import ActivityFeed from '../components/ActivityFeed.vue'
 import AgentAvatar from '../components/AgentAvatar.vue'
 import AssistantPicker from '../components/AssistantPicker.vue'
-import ChatAttachments from '../components/ChatAttachments.vue'
+import AttachMenu from '../components/AttachMenu.vue'
 import ChatQuestions from '../components/ChatQuestions.vue'
 import ChatSwitcher from '../components/ChatSwitcher.vue'
+import ComposerAttachments from '../components/ComposerAttachments.vue'
 import ConnectionSheet from '../components/ConnectionSheet.vue'
 import ConversationDeletion from '../components/ConversationDeletion.vue'
 import Icon from '../components/Icon.vue'
+import MessageAttachments from '../components/MessageAttachments.vue'
 import Modal from '../components/Modal.vue'
 import NodeExecution from '../components/NodeExecution.vue'
 import QueueStrip from '../components/QueueStrip.vue'
@@ -172,20 +182,23 @@ const submitting = ref(false)
 const editing = ref<string | null>(null)
 const agentId = ref(typeof route.query.agent === 'string' ? route.query.agent : MAIN_AGENT_ID)
 const projectId = ref(typeof route.query.project === 'string' ? route.query.project : '')
-const fileInput = ref<HTMLInputElement>()
 const attachments = ref<ChatAttachment[]>([])
 const previews = ref<Record<string, string>>({})
+// Per-item upload state (A'): uploading during send, failed (retried by the next send), or rejected locally.
+const attachmentStates = ref<Record<string, DraftState>>({})
 const files = new Map<string, File>()
 const uploaded = new Set<string>()
 const dragging = ref(0)
-const uploadProgress = ref('')
 const hasDraft = computed(() => !!draft.value.trim() || attachments.value.length > 0)
-const canSend = computed(() => !inactive.value && (!route.params.id || (detail.value?.id === route.params.id || detail.value?.slug === route.params.id)) && !live.error.value && (!!draft.value.trim() || attachments.value.length > 0))
+// Rejected files must be removed before sending; nothing is sent while a file uploads.
+const attachmentsBlocked = computed(() => Object.values(attachmentStates.value).some(item => item.status === 'rejected' || item.status === 'uploading'))
+const canSend = computed(() => !inactive.value && (!route.params.id || (detail.value?.id === route.params.id || detail.value?.slug === route.params.id)) && !live.error.value && (!!draft.value.trim() || attachments.value.length > 0) && !attachmentsBlocked.value)
 
 function removeAttachment(id: string) {
   if (previews.value[id])
     URL.revokeObjectURL(previews.value[id])
   delete previews.value[id]
+  delete attachmentStates.value[id]
   files.delete(id)
   uploaded.delete(id)
   attachments.value = attachments.value.filter(attachment => attachment.id !== id)
@@ -199,44 +212,60 @@ function clearAttachments() {
 function addFiles(selected: File[]) {
   if (busy.value)
     return
-  if (attachments.value.length + selected.length > 8) {
-    error.value = 'Attach up to 8 files per message.'
-    return
-  }
-
-  if (selected.some(file => file.size > 10 * 1024 * 1024)) {
-    error.value = 'Files must be 10 MB or smaller.'
-    return
-  }
-
-  if ([...attachments.value, ...selected].reduce((total, file) => total + file.size, 0) > 40 * 1024 * 1024) {
-    error.value = 'Attachments must total at most 40 MB per message.'
+  const selection = validateSelection(attachments.value.map(attachment => ({ size: attachment.size, rejected: attachmentStates.value[attachment.id]?.status === 'rejected' })), selected)
+  if (selection.error) {
+    error.value = selection.error
     return
   }
 
   error.value = ''
-  for (const file of selected) {
+  for (const [index, file] of selected.entries()) {
     const id = crypto.randomUUID()
-    const image = ['image/png', 'image/jpeg', 'image/webp', 'image/gif'].includes(file.type)
-    files.set(id, file)
-    if (image)
-      previews.value[id] = URL.createObjectURL(file)
-    attachments.value.push({
+    const attachment: ChatAttachment = {
       id,
       name: file.name || 'pasted-image.png',
       size: file.size,
-      kind: image ? 'image' : 'file',
+      kind: ['image/png', 'image/jpeg', 'image/webp', 'image/gif'].includes(file.type) ? 'image' : 'file',
       mediaType: file.type,
       chatId: '',
-    })
+    }
+    const rejected = selection.rejected[index]
+    // A rejected file is shown with its reason but never uploaded.
+    if (rejected)
+      attachmentStates.value[id] = { status: 'rejected', error: rejected }
+    else
+      files.set(id, file)
+    if (isImage(attachment))
+      previews.value[id] = URL.createObjectURL(file)
+    attachments.value.push(attachment)
   }
 }
 
-function pickFiles(event: Event) {
-  const input = event.target as HTMLInputElement
-  addFiles(Array.from(input.files ?? []))
-  input.value = ''
+// C': an attachment already sent in this chat goes back into the draft as the same record; it has
+// no local file, so sending does not upload it again.
+function reuseAttachment(attachment: ChatAttachment) {
+  if (busy.value || !detail.value || attachment.chatId !== detail.value.id)
+    return
+  if (!attachments.value.some(item => item.id === attachment.id)) {
+    if (attachments.value.length >= MAX_ATTACHMENTS) {
+      error.value = `Attach up to ${MAX_ATTACHMENTS} files per message.`
+      return
+    }
+
+    const total = attachments.value.reduce((sum, item) => sum + (attachmentStates.value[item.id]?.status === 'rejected' ? 0 : item.size), 0)
+    if (total + attachment.size > MAX_MESSAGE_SIZE) {
+      error.value = 'Attachments must total at most 40 MB per message.'
+      return
+    }
+
+    error.value = ''
+    attachments.value.push({ ...attachment })
+  }
+
+  textarea.value?.focus()
 }
+
+provide(reuseAttachmentKey, { chatId: () => detail.value?.id, reuse: reuseAttachment })
 
 function dropFiles(event: DragEvent) {
   dragging.value = 0
@@ -410,17 +439,35 @@ async function send(mode: 'queue' | 'steer' = 'queue') {
   try {
     const chat = detail.value ?? createdChat ?? await api<Chat>('/chats', { method: 'POST', body: JSON.stringify({ agentId: agentId.value, projectId: projectId.value || null }) })
     createdChat = chat
-    for (const [index, attachment] of attachments.value.entries()) {
-      const file = files.get(attachment.id)
-      if (!file || uploaded.has(attachment.id))
-        continue
-      uploadProgress.value = `Uploading ${index + 1} of ${attachments.value.length}…`
-      const saved = await api<ChatAttachment>(`/chats/${chat.id}/attachments/${attachment.id}?name=${encodeURIComponent(attachment.name)}`, { method: 'PUT', headers: { 'Content-Type': 'application/octet-stream' }, body: file })
-      Object.assign(attachment, saved)
-      uploaded.add(attachment.id)
-    }
+    // Items without a local file (reused or already sent records) are never uploaded again.
+    const pendingUploads = attachments.value.filter(attachment => files.has(attachment.id) && !uploaded.has(attachment.id))
+    for (const attachment of pendingUploads)
+      attachmentStates.value[attachment.id] = { status: 'uploading' }
+    const results = await Promise.allSettled(pendingUploads.map(async (attachment) => {
+      try {
+        const saved = await apiUpload<ChatAttachment>(`/chats/${chat.id}/attachments/${attachment.id}?name=${encodeURIComponent(attachment.name)}`, files.get(attachment.id)!, {
+          headers: { 'Content-Type': 'application/octet-stream' },
+          onProgress: (progress) => {
+            const current = attachmentStates.value[attachment.id]
+            if (current?.status === 'uploading')
+              current.progress = progress
+          },
+        })
+        Object.assign(attachment, saved)
+        uploaded.add(attachment.id)
+        delete attachmentStates.value[attachment.id]
+      }
+      catch (e) {
+        // The item stays in the draft; the next send retries it.
+        if (attachments.value.some(item => item.id === attachment.id))
+          attachmentStates.value[attachment.id] = { status: 'failed', error: (e as Error).message || 'Upload failed.' }
+        throw e
+      }
+    }))
+    // Failed items show their error on the tile; the message waits for the next send.
+    if (results.some(result => result.status === 'rejected'))
+      return
 
-    uploadProgress.value = ''
     const attachmentIds = attachments.value.map(attachment => attachment.id)
     // Retain the id after a network failure so retry cannot duplicate a message.
     if (!submission || submission.text !== text || submission.mode !== mode || submission.provider !== chosenProvider.value || submission.model !== model.value || submission.reasoning !== reasoning.value || submission.attachmentIds.join() !== attachmentIds.join()) {
@@ -471,7 +518,6 @@ async function send(mode: 'queue' | 'steer' = 'queue') {
   finally {
     busy.value = false
     submitting.value = false
-    uploadProgress.value = ''
   }
 }
 
@@ -905,7 +951,7 @@ function key(event: KeyboardEvent) {
                 <p class="whitespace-pre-wrap wrap-anywhere">
                   {{ message.text }}
                 </p>
-                <ChatAttachments v-if="message.attachments?.length" :attachments="message.attachments" />
+                <MessageAttachments v-if="message.attachments?.length" :attachments="message.attachments" class="mt-2 items-start!" />
                 <button class="mt-2 text-accent" @click="draft = message.text; textarea?.focus()">
                   Copy to message
                 </button>
@@ -973,18 +1019,15 @@ function key(event: KeyboardEvent) {
                     <Icon :name="X" :size="14" />
                   </button>
                 </div>
-                <ChatAttachments
+                <ComposerAttachments
                   v-if="attachments.length"
                   :attachments="attachments"
                   :previews="previews"
-                  removable
+                  :states="attachmentStates"
                   :disabled="busy"
-                  class="mb-3!"
+                  class="mb-1.5"
                   @remove="removeAttachment"
                 />
-                <div v-if="uploadProgress" class="mb-2 text-xs text-accent" role="status">
-                  {{ uploadProgress }}
-                </div>
                 <SkillTextarea
                   ref="textarea"
                   v-model="draft"
@@ -997,25 +1040,11 @@ function key(event: KeyboardEvent) {
                 />
                 <div class="flex items-center justify-between gap-2 pt-2">
                   <div class="flex min-w-0 flex-1 items-center gap-1">
-                    <input
-                      ref="fileInput"
-                      type="file"
-                      multiple
-                      class="hidden"
-                      aria-label="Attach files"
-                      :disabled="busy"
-                      @change="pickFiles"
-                    >
-                    <button
-                      type="button"
-                      :class="iconButton"
-                      aria-label="Add images or files"
-                      title="Add images or files · up to 8 files, 10 MB each"
-                      :disabled="busy || attachments.length >= 8"
-                      @click="fileInput?.click()"
-                    >
-                      <Icon :name="Paperclip" :size="18" />
-                    </button>
+                    <AttachMenu
+                      :trigger-class="iconButton"
+                      :disabled="busy || attachments.length >= MAX_ATTACHMENTS"
+                      @files="addFiles"
+                    />
                     <AssistantPicker
                       v-model:provider="chosenProvider"
                       v-model:model="model"
