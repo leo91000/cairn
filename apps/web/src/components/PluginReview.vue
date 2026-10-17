@@ -79,7 +79,7 @@ async function uninstall() {
         {{ error }}
       </UiAlert>
       <div v-if="manifest" class="flex items-start gap-3.5">
-        <PluginMark :plugin="entry.id" :size="44" />
+        <PluginMark :plugin="entry.id" :brand="manifest.brand" :size="44" />
         <div class="min-w-0">
           <p class="text-sm font-semibold">
             {{ manifest.name }} <span class="font-normal text-muted">{{ manifest.version }}</span>
@@ -138,11 +138,26 @@ async function uninstall() {
           <Icon :name="Globe" :size="13" class="mt-px" />Can reach only {{ manifest.hosts.join(', ') }}, over HTTPS, without following redirects.
         </p>
         <p v-if="manifest.credential" class="mt-1.5 flex items-start gap-2 text-2xs leading-relaxed text-muted">
-          <Icon :name="KeyRound" :size="13" class="mt-px" />Each connection’s {{ manifest.credential.label }} is added by Cairn to its requests ({{ manifest.credential.header }} header). The plugin never sees it.
+          <Icon :name="KeyRound" :size="13" class="mt-px" />Each instance’s {{ manifest.credential.label }} is added by Cairn to its requests ({{ manifest.credential.header }} header). The plugin never sees it.
+        </p>
+        <p
+          v-for="program in manifest.programs ?? []"
+          :key="program.name"
+          class="mt-1.5 flex items-start gap-2 rounded-lg bg-warning-surface px-2.5 py-2 text-2xs leading-relaxed text-warning"
+        >
+          <Icon :name="TriangleAlert" :size="13" class="mt-px shrink-0" /><span>Runs <code>{{ program.path }}</code> on this server, outside the Luau sandbox, with the files and network that program can reach.<template v-if="program.description"> {{ program.description }}</template></span>
+        </p>
+        <p v-if="manifest.agentAccess" class="mt-1.5 flex items-start gap-2 text-2xs leading-relaxed text-muted">
+          <Icon :name="KeyRound" :size="13" class="mt-px" /><span>Agents you authorize on an instance get {{ manifest.commands?.length ?? 0 }} command{{ manifest.commands?.length === 1 ? '' : 's' }} and {{ manifest.tools?.length ?? 0 }} tool{{ manifest.tools?.length === 1 ? '' : 's' }}<template v-if="manifest.instructions">, and instructions in their prompt</template>. Nothing is granted by default.</span>
         </p>
         <p class="mt-1.5 flex items-start gap-2 text-2xs leading-relaxed text-muted">
-          <Icon :name="ShieldCheck" :size="13" class="mt-px" />Runs in Cairn’s Luau sandbox: no files, processes or other network access. Editing it on disk requires a new approval.
+          <Icon :name="ShieldCheck" :size="13" class="mt-px" />The script runs in Cairn’s Luau sandbox: no files, processes or other network access of its own. Editing any of its files on disk requires a new approval.
         </p>
+        <ul v-if="version?.files?.length" class="mt-2 grid gap-0.5 font-mono text-3xs text-muted" aria-label="Package files">
+          <li v-for="file in version.files" :key="file.path">
+            {{ file.path }} · {{ Math.max(1, Math.ceil(file.bytes / 1024)) }} KB
+          </li>
+        </ul>
       </section>
     </div>
     <footer class="modal-actions sticky bottom-0 flex items-center justify-between gap-2.5 border-t border-line bg-surface px-6.5 py-4.5 phone:flex-wrap phone:px-5 phone:py-4">

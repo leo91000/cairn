@@ -1,10 +1,9 @@
-//! One supervisor per enabled connection: a long-lived plugin worker, the plugin's
-//! native transport if any, and a pump that delivers queued events, due timers and
-//! completed replies to the script.
+//! One supervisor per enabled connection: a long-lived plugin worker, a second one
+//! driving the package's socket if it has one, and a pump that delivers queued
+//! events, due timers and completed replies to the script.
 use super::{
     capabilities::{self, Context},
-    connections::{self, Connection, ensure_owner, status},
-    discord,
+    connections::{self, Connection, ensure_owner, status, status_with},
     registry::{self, Package},
     work::{self, DELIVERIES, EVENTS},
 };
@@ -96,20 +95,11 @@ async fn run(
             result = serve(&s, &connection, &package, &stop) => result,
         };
         if let Err(error) = result {
-            let permanent = matches!(error.status, 401 | 403);
-            status(
-                &s,
-                &connection,
-                if permanent {
-                    "needs_review"
-                } else {
-                    "disconnected"
-                },
-            )
-            .await;
-            if permanent {
+            if matches!(error.status, 401 | 403) {
+                status_with(&s, &connection, "needs_review", Some(&error.message)).await;
                 return;
             }
+            status(&s, &connection, "disconnected").await;
         }
         tokio::select! {
             () = stop.cancelled() => return,
@@ -136,9 +126,13 @@ async fn serve(
         session.stop().await;
         return Err(error);
     }
+    // Packages with their own connection report its state; others are ready now.
     let transport = async {
-        if package.manifest.permits_capability("transport.discord") {
-            discord::transport(s, connection, stop).await
+        if package.manifest.permits_capability("socket") {
+            super::socket::run(s, connection, package, stop).await
+        } else if package.manifest.permits_capability("inbound") {
+            stop.cancelled().await;
+            Ok(())
         } else {
             status(s, connection, "connected").await;
             stop.cancelled().await;
@@ -386,6 +380,8 @@ async fn dispatch(
         connection: connection.clone(),
         manifest: session.manifest().clone(),
         event: event.clone(),
+        link: None,
+        draft: None,
     };
     let context = &context;
     session

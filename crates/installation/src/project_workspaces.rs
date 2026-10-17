@@ -242,16 +242,6 @@ async fn call_tool(s: &Service, bearer: &str, name: &str, args: &Value) -> Resul
             let result = crate::nodes::moves::request_by_agent(s, &run, args).await;
             ToolResult::from_result(result, summary)
         }
-        "onepassword" => {
-            let result = if args["operation"] == "read" {
-                Err(Error::bad(
-                    "Read secrets through the Cairn plugin CLI and pipe them directly to the consuming command.",
-                ))
-            } else {
-                crate::onepassword::call(s, bearer, args).await
-            };
-            ToolResult::from_result(result, summary)
-        }
         "report_outcome" => {
             ToolResult::from_result(crate::outcome::report(s, bearer, args).await, |_| {
                 "Outcome saved.".into()
@@ -285,7 +275,12 @@ async fn call_tool(s: &Service, bearer: &str, name: &str, args: &Value) -> Resul
                 )
             },
         ),
-        _ => Err(Error::not_found("Unknown workspace operation.")),
+        _ => match crate::plugins::agents::call_tool(s, bearer, name, args).await {
+            Ok(Some(value)) => ToolResult::from_result(Ok(value), summary),
+            Ok(None) => Err(Error::not_found("Unknown workspace operation.")),
+            Err(error) if error.status == 401 => Err(error),
+            Err(error) => ToolResult::from_result(Err(error), summary),
+        },
     }
 }
 
@@ -299,14 +294,13 @@ pub async fn rpc(s: &Service, bearer: &str, method: &str, params: &Value) -> Res
     if method != "tools/list" {
         return Err(Error::not_found("Unknown workspace operation."));
     }
-    let tools = vec![
+    let mut tools = vec![
         open_project_tool(),
         crate::artifacts::tool(),
         crate::nodes::moves::list_tool(),
         crate::nodes::moves::tool(),
         crate::artifacts::sharing::tool(),
         crate::outcome::tool(),
-        crate::onepassword::tool(),
         crate::chats::sleep::tool(),
         crate::chats::wait_for::tool(),
         crate::nodes::exclusive::acquire_tool(),
@@ -314,5 +308,18 @@ pub async fn rpc(s: &Service, bearer: &str, method: &str, params: &Value) -> Res
         crate::nodes::exclusive::status_tool(),
         crate::nodes::exclusive::renew_tool(),
     ];
+    // Package tools never shadow Cairn's own.
+    // Listing stays available without a live run; calls authorize on their own.
+    let granted = crate::plugins::agents::tools(s, bearer)
+        .await
+        .unwrap_or_default();
+    for tool in granted {
+        if !tools
+            .iter()
+            .any(|existing| existing["name"] == tool["name"])
+        {
+            tools.push(tool);
+        }
+    }
     Ok(json!({ "tools": tools }))
 }

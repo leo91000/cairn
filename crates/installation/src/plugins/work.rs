@@ -2,7 +2,7 @@
 //! queue plugins consume, conversation submission and correlated replies.
 use super::{
     capabilities::Context,
-    connections::{AccessMode, Connection, authorize, ensure_owner, label},
+    connections::{AccessMode, Connection, Label, authorize, ensure_owner, external_id, label},
 };
 use crate::{
     config::{id, now},
@@ -18,10 +18,27 @@ use serde_json::{Value, json};
 pub const EVENTS: &str = "plugin-events";
 pub const DELIVERIES: &str = "plugin-deliveries";
 
+/// Event names the host sends itself; packages can't admit messages under them.
+pub const RESERVED: &[&str] = &[
+    "start",
+    "socket",
+    "timer",
+    "reply",
+    "progress",
+    "question",
+    "access_requested",
+    "view",
+    "action",
+    "test",
+    "form",
+    "command",
+    "tool",
+];
+
 /// A message a transport received for a connection, already scoped by the transport.
 pub struct Inbound {
-    /// The event plugins receive: `message`, or `interaction` for buttons and similar.
-    pub kind: &'static str,
+    /// The event plugins receive: `message`, or e.g. `interaction` for buttons.
+    pub kind: String,
     /// The platform's message ID, used for deduplication and replies.
     pub id: String,
     pub author: super::connections::Label,
@@ -81,10 +98,9 @@ pub async fn accept(s: &Service, connection: &Connection, inbound: Inbound) -> R
         .transaction(move |db| {
             let current = authorize(db, &expected)?;
             let author = json!({ "id": inbound.author.id, "name": label(&inbound.author.name) });
-            let base = merge(
-                &inbound.context,
-                &json!({ "id": inbound.id, "author": author }),
-            );
+            // The host's identity fields always win over the package's own.
+            let identity = json!({ "id": inbound.id, "author": author });
+            let base = merge(&inbound.context, &identity);
             if !current.allows(&inbound.author.id) {
                 if current.access_mode == AccessMode::Requests && inbound.kind == "message" {
                     request(db, &current, &inbound.author, &base)?;
@@ -106,8 +122,8 @@ pub async fn accept(s: &Service, connection: &Connection, inbound: Inbound) -> R
             enqueue(
                 db,
                 &current,
-                inbound.kind,
-                &merge(&base, &inbound.body),
+                &inbound.kind,
+                &merge(&merge(&inbound.context, &inbound.body), &identity),
                 Some(&inbound.author.id),
             )?;
             db.set(&dedupe, &json!(true), Some(now() + 30 * 86_400_000))?;
@@ -164,9 +180,60 @@ fn request(
     )
 }
 
-/// Events that act for a person: what they wrote, or a button they pressed.
+/// Events that act for a person: what they wrote or a button they pressed, admitted
+/// through `inbound.accept`.
 fn personal(event: &Value) -> bool {
-    matches!(event["name"].as_str(), Some("message" | "interaction"))
+    event["authorId"].is_string()
+        && event["name"]
+            .as_str()
+            .is_some_and(|name| !RESERVED.contains(&name))
+}
+
+fn size(value: &Value) -> usize {
+    serde_json::to_string(value).map_or(usize::MAX, |json| json.len())
+}
+
+/// `inbound.accept`: a message the package received through its own connection
+/// (a socket, or polling with timers). Admission rules apply before anything is kept.
+/// Returns whether it was queued for the package.
+pub(crate) async fn inbound(s: &Service, context: &Context, args: &Value) -> Result<Value> {
+    let kind = match text(args, "kind") {
+        "" => "message",
+        kind => kind,
+    };
+    let valid_kind = kind.len() <= 40
+        && kind.starts_with(|c: char| c.is_ascii_lowercase())
+        && kind
+            .bytes()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == b'_')
+        && !RESERVED.contains(&kind);
+    let id = text(args, "id");
+    let author = &args["author"];
+    let extra = args.get("context").cloned().unwrap_or_else(|| json!({}));
+    let body = args.get("body").cloned().unwrap_or_else(|| json!({}));
+    if !valid_kind
+        || id.is_empty()
+        || id.len() > 200
+        || id.chars().any(char::is_control)
+        || !external_id(text(author, "id"))
+        || !extra.is_object()
+        || !body.is_object()
+        || size(&extra) > 8192
+        || size(&body) > 262_144
+    {
+        return Err(Error::bad("Invalid inbound message."));
+    }
+    let inbound = Inbound {
+        kind: kind.to_owned(),
+        id: id.to_owned(),
+        author: Label {
+            id: text(author, "id").to_owned(),
+            name: label(text(author, "name")),
+        },
+        context: extra,
+        body,
+    };
+    Ok(json!(accept(s, &context.connection, inbound).await?))
 }
 
 fn binding(connection: &Connection, author: &str, thread: &str, shared: bool) -> String {
@@ -251,7 +318,7 @@ async fn download(
     }
     let mut downloaded = Vec::new();
     for file in files {
-        let target = super::capabilities::target(s, manifest, text(&file, "url"))?;
+        let target = super::capabilities::target(s, manifest, text(&file, "url"), "https")?;
         let response = s
             .plugins
             .http

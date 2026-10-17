@@ -1,4 +1,6 @@
-//! Run-scoped secret access over the private VM channel. stdout belongs to the pipe.
+//! `cairn plugin <plugin> <command> [arguments…]` inside conversations, over the
+//! private VM channel. The installation parses the arguments against the package's
+//! declared command. Secret output belongs to the pipe: written exactly, nothing else.
 use crate::{
     error::{Error, Result},
     validation::text,
@@ -6,51 +8,23 @@ use crate::{
 use serde_json::{Value, json};
 use std::io::Write;
 
+const USAGE: &str = "Use cairn plugin <plugin> <command> [arguments], for example cairn plugin onepassword accounts.";
+
 pub fn arguments(args: &[String]) -> Result<Value> {
-    if args.first().map(String::as_str) != Some("onepassword") {
-        return Err(Error::bad(
-            "Use cairn plugin onepassword accounts|vaults|items|fields|read [--account ID] [--vault ID] [--item ID] [op://reference].",
-        ));
-    }
-    let operation = args
-        .get(1)
-        .ok_or_else(|| Error::bad("Missing 1Password operation."))?;
-    if !["accounts", "vaults", "items", "fields", "read"].contains(&operation.as_str()) {
-        return Err(Error::bad("Unknown 1Password operation."));
-    }
-    let mut input = json!({
-        "operation": operation
+    let plugin = args.first().filter(|plugin| {
+        !plugin.is_empty()
+            && plugin.len() <= 80
+            && plugin
+                .bytes()
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == b'-')
     });
-    let mut index = 2;
-    while index < args.len() {
-        let key = match args[index].as_str() {
-            "--account" => "accountId",
-            "--vault" => "vault",
-            "--item" => "item",
-            reference if reference.starts_with("op://") && operation == "read" => {
-                if input.get("reference").is_some() {
-                    return Err(Error::bad("Only one secret reference is allowed."));
-                }
-                input["reference"] = reference.into();
-                index += 1;
-                continue;
-            }
-            _ => return Err(Error::bad("Unknown plugin command argument.")),
-        };
-        if input.get(key).is_some() {
-            return Err(Error::bad("Duplicate plugin command argument."));
-        }
-        index += 1;
-        input[key] = args
-            .get(index)
-            .ok_or_else(|| Error::bad("Missing plugin command argument."))?
-            .clone()
-            .into();
-        index += 1;
-    }
+    let (Some(plugin), Some(command)) = (plugin, args.get(1)) else {
+        return Err(Error::bad(USAGE));
+    };
     Ok(json!({
-        "plugin": "onepassword",
-        "arguments": input
+        "plugin": plugin,
+        "command": command,
+        "args": &args[2..],
     }))
 }
 
@@ -72,20 +46,56 @@ pub async fn run(args: &[String]) -> Result<()> {
         .send()
         .await
         .map_err(|_| Error::unavailable("Plugin channel unavailable."))?;
-    if !response.status().is_success() {
-        return Err(Error::bad_gateway(
-            "Plugin command failed. Check the active run, account grant and secret reference.",
-        ));
-    }
+    let status = response.status();
     let value: Value = response
         .json()
         .await
         .map_err(|_| Error::bad_gateway("Invalid plugin response."))?;
-    let output = if input["arguments"]["operation"] == "read" {
-        text(&value, "value").to_owned()
-    } else {
-        format!("{}\n", serde_json::to_string(&value)?)
+    if !status.is_success() {
+        // Host messages are written for people and never contain secret values.
+        let message = value["error"]
+            .as_str()
+            .unwrap_or("Plugin command failed. Check the active run and its grants.");
+        return Err(Error::bad_gateway(message.to_owned()));
+    }
+    let output = match text(&value, "output") {
+        "secret" => text(&value, "value").to_owned(),
+        "text" => format!("{}\n", text(&value, "value")),
+        _ => format!("{}\n", serde_json::to_string(&value["value"])?),
     };
     std::io::stdout().lock().write_all(output.as_bytes())?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::arguments;
+    use serde_json::json;
+
+    fn words(values: &[&str]) -> Vec<String> {
+        values.iter().map(|value| (*value).to_owned()).collect()
+    }
+
+    #[test]
+    fn commands_carry_their_words_unparsed() {
+        assert_eq!(
+            arguments(&words(&[
+                "onepassword",
+                "read",
+                "--account",
+                "a1",
+                "op://v/i/f"
+            ]))
+            .unwrap(),
+            json!({ "plugin": "onepassword", "command": "read", "args": ["--account", "a1", "op://v/i/f"] })
+        );
+        for invalid in [
+            vec![],
+            vec!["onepassword"],
+            vec!["../x", "read"],
+            vec!["One", "read"],
+        ] {
+            assert!(arguments(&words(&invalid)).is_err(), "{invalid:?}");
+        }
+    }
 }

@@ -522,6 +522,21 @@ private fun WorkspaceApp(
                                     ConnectionsScreen(vm, state) { nav.navigate("run/$it") }
                                 }
                             if (state.isOwner)
+                                composable("plugins") {
+                                    PluginsScreen(vm, state) {
+                                        nav.navigate("plugins/${segment(it)}")
+                                    }
+                                }
+                            if (state.isOwner)
+                                composable("plugins/{id}") { entry ->
+                                    PluginScreen(
+                                        vm,
+                                        state,
+                                        entry.arguments?.getString("id").orEmpty(),
+                                        openChat = { nav.navigate("chat/$it") },
+                                    )
+                                }
+                            if (state.isOwner)
                                 composable("nodes") {
                                     NodesScreen(vm, state) { nav.navigate("run/$it") }
                                 }
