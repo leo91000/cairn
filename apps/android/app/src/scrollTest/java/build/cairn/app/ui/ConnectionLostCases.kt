@@ -344,6 +344,9 @@ abstract class ConnectionLostCases {
                 assertNull(vm.state.value.error)
                 compose.onNodeWithText("Connexion perdue · reconnexion…").assertDoesNotExist()
                 compose.onNodeWithText("Installation hors ligne").assertExists()
+                compose.mainClock.advanceTimeBy(6000)
+                waitFor { vm.state.value.notice == null }
+                compose.onNodeWithText("Connexion impossible. Réessayez.").assertDoesNotExist()
             } finally {
                 models.clear()
             }

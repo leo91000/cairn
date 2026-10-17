@@ -208,7 +208,7 @@ private fun CairnAppContent(
                 Page {
                     if (pushReenrollmentRequired) PushReenrollmentNotice()
                     InstallationHeader(state, openConnection = { connection = true })
-                    ConnectionFeedbackNotice()
+                    ConnectionLostNotice(state.connectionLost)
                     Heading(
                         "Installation hors ligne",
                         "Les exécutions continuent sur votre installation. Réessayez lorsqu’elle sera connectée.",
@@ -220,6 +220,7 @@ private fun CairnAppContent(
                     TextButton(onClick = { vm.perform { logout() } }) { Text("Se déconnecter") }
                     state.error?.let { ErrorNotice(it, vm::clearMessage) }
                 }
+                SnackbarHost(snackbar, Modifier.align(Alignment.BottomCenter))
             }
             if (connection) ConnectionSheet(vm, state, close = { connection = false })
         } else
