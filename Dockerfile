@@ -112,9 +112,14 @@ RUN curl -fsSL https://codeload.github.com/firecracker-microvm/firecracker/tar.g
     && rm /tmp/firecracker-source.tar.gz
 COPY deploy/microvm/firecracker-shared-memory.patch /tmp/firecracker.patch
 RUN git apply /tmp/firecracker.patch
+# Native CI runs the async engine tests; build sandboxes may deny io_uring.
+COPY deploy/microvm/firecracker-discard.patch /tmp/firecracker-discard.patch
+RUN git apply /tmp/firecracker-discard.patch
 RUN --mount=type=cache,id=cargo-registry,target=/usr/local/cargo/registry \
     --mount=type=cache,id=firecracker-git,target=/usr/local/cargo/git \
     cargo test --locked -p vmm --lib test_discard_range \
+    && cargo test --locked -p vmm --lib test_parse_discard \
+    && cargo test --locked -p vmm --lib test_new_all_features \
     && cargo build --locked --release --bin firecracker --target x86_64-unknown-linux-musl \
     && cp build/cargo_target/x86_64-unknown-linux-musl/release/firecracker /usr/local/bin/firecracker
 
@@ -133,7 +138,7 @@ ARG TARGETARCH
 RUN test -n "$CODEX_VERSION" && test -n "$GH_VERSION"
 ENV NODE_ENV=production HOST=0.0.0.0 PORT=4310 DATA_DIR=/data AGENT_HOME=/home/node WORKSPACE_ROOTS=/workspaces
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl wget git git-lfs openssh-client python3 awscli build-essential bubblewrap socat \
-    zip unzip xz-utils zstd bzip2 rsync file less tree sqlite3 postgresql-client \
+    zip unzip xz-utils zstd bzip2 rsync file less tree sqlite3 postgresql-client util-linux \
     dnsutils iproute2 iputils-ping netcat-openbsd procps lsof strace patch diffutils \
     pkg-config libssl-dev libffi-dev ninja-build poppler-utils imagemagick ffmpeg \
     && rm -rf /var/lib/apt/lists/*
@@ -192,7 +197,7 @@ RUN make x86_64_defconfig && scripts/kconfig/merge_config.sh -m .config /tmp/cai
         --disable SCSI --disable ATA --disable BLK_DEV_MD --disable MMC --disable FIREWIRE \
         --disable MODULES --disable DEBUG_INFO --disable DEBUG_INFO_DWARF_TOOLCHAIN_DEFAULT \
     && make olddefconfig \
-    && for option in KVM KVM_INTEL KVM_AMD VMGENID NETFILTER_XT_MATCH_HASHLIMIT; do grep -qx "CONFIG_${option}=y" .config || exit 1; done \
+    && for option in KVM KVM_INTEL KVM_AMD VMGENID NETFILTER_XT_MATCH_HASHLIMIT SQUASHFS SQUASHFS_XZ; do grep -qx "CONFIG_${option}=y" .config || exit 1; done \
     && make -j8 vmlinux && strip --strip-debug vmlinux \
     && mv vmlinux /tmp/cairn-vmlinux && make clean && mv /tmp/cairn-vmlinux vmlinux
 
@@ -208,6 +213,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends e2fsprogs zstd 
 RUN --mount=from=guest,target=/rootfs,ro truncate -s 8G /root.ext4 && mkfs.ext4 -q -F -d /rootfs /root.ext4 \
     && zstd -T2 -3 /root.ext4 -o /root.ext4.zst && rm /root.ext4
 
+# Independent of retained conversation images. The node attaches this immutable
+# maintenance binary and init to both old and new guests without rewriting them.
+FROM debian:bookworm-slim AS guest-control
+RUN apt-get update && apt-get install -y --no-install-recommends squashfs-tools busybox-static && rm -rf /var/lib/apt/lists/*
+RUN mkdir /control && cp /bin/busybox /control/busybox
+COPY deploy/microvm/trim.py /control/trim.py
+COPY --chmod=755 deploy/microvm/init /control/cairn-init
+RUN mksquashfs /control /control.squashfs -comp xz -processors 2 -noappend -all-root -no-progress
+
 FROM runtime AS final
 USER root
 RUN apt-get update && apt-get install -y --no-install-recommends iptables e2fsprogs util-linux fuse3 \
@@ -222,6 +236,7 @@ COPY --from=guest-kernel /kernel/vmlinux /opt/cairn-vm/vmlinux
 COPY --from=guest-kernel /kernel/.config /opt/cairn-vm/kernel.config
 COPY --from=guest-kernel /kernel/COPYING /opt/cairn-vm/KERNEL-COPYING
 COPY --from=guest-kernel /kernel/LICENSES /opt/cairn-vm/kernel-licenses
+COPY --from=guest-control /control.squashfs /opt/cairn-vm/control.squashfs
 COPY --from=guest-disk /root.ext4.zst /opt/cairn-vm/root.ext4.zst
 COPY --chmod=755 deploy/microvm/init deploy/microvm/docker deploy/microvm/install-docker /opt/cairn-vm/
 COPY --chmod=755 deploy/nodes /opt/cairn-node

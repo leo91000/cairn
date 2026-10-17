@@ -44,7 +44,36 @@ pub(super) fn enable_io_flusher() -> io::Result<()> {
 enum Command {
     Read { offset: u64, length: usize },
     Write { offset: u64, bytes: Vec<u8> },
+    Discard { offset: u64, length: usize },
     Flush,
+}
+
+fn decode(
+    operation: u32,
+    offset: Option<u64>,
+    length: usize,
+    size: u64,
+    buffer: &[u8],
+) -> Option<Command> {
+    use libublk::sys::*;
+    if operation == UBLK_IO_OP_FLUSH {
+        return Some(Command::Flush);
+    }
+    let offset = offset?;
+    super::super::device::range(size, offset, length).ok()?;
+    match operation {
+        UBLK_IO_OP_READ if length <= IO_BYTES as usize => Some(Command::Read { offset, length }),
+        UBLK_IO_OP_WRITE if length <= IO_BYTES as usize && length <= buffer.len() => {
+            Some(Command::Write {
+                offset,
+                bytes: buffer[..length].to_vec(),
+            })
+        }
+        UBLK_IO_OP_DISCARD if length <= MAX_BATCH_BYTES => {
+            Some(Command::Discard { offset, length })
+        }
+        _ => None,
+    }
 }
 
 struct Request {
@@ -105,6 +134,9 @@ fn worker(disk: &dyn Disk, receiver: &mpsc::Receiver<Request>, wake: &EventFd) {
                             disk.read_at(offset, &mut bytes).map(|()| bytes)
                         }
                         Command::Flush => disk.sync().map(|()| Vec::new()),
+                        Command::Discard { offset, length } => {
+                            disk.discard(offset, length).map(|()| Vec::new())
+                        }
                         Command::Write { .. } => unreachable!(),
                     };
                     let _ = request.done.send(result);
@@ -138,7 +170,8 @@ pub(super) fn serve(
             move |dev: &mut UblkDev| {
                 dev.tgt.dev_size = size;
                 dev.tgt.params = libublk::sys::ublk_params {
-                    types: libublk::sys::UBLK_PARAM_TYPE_BASIC,
+                    types: libublk::sys::UBLK_PARAM_TYPE_BASIC
+                        | libublk::sys::UBLK_PARAM_TYPE_DISCARD,
                     basic: libublk::sys::ublk_param_basic {
                         // Writes are durable even without FUA; retain flush support
                         // so Firecracker's fsync barrier reaches the journal.
@@ -149,6 +182,12 @@ pub(super) fn serve(
                         io_min_shift: 9,
                         max_sectors: IO_BYTES >> 9,
                         dev_sectors: size >> 9,
+                        ..Default::default()
+                    },
+                    discard: libublk::sys::ublk_param_discard {
+                        discard_granularity: 512,
+                        max_discard_sectors: (MAX_BATCH_BYTES >> 9) as u32,
+                        max_discard_segments: 1,
                         ..Default::default()
                     },
                     ..Default::default()
@@ -204,23 +243,8 @@ pub(super) fn serve(
                                 let length = usize::try_from(descriptor.nr_sectors)
                                     .unwrap_or(usize::MAX)
                                     .saturating_mul(512);
-                                let valid = length <= IO_BYTES as usize
-                                    && offset
-                                        .and_then(|offset| offset.checked_add(length as u64))
-                                        .is_some_and(|end| end <= size);
-                                let command = match operation {
-                                    libublk::sys::UBLK_IO_OP_READ if valid => {
-                                        offset.map(|offset| Command::Read { offset, length })
-                                    }
-                                    libublk::sys::UBLK_IO_OP_WRITE if valid => {
-                                        offset.map(|offset| Command::Write {
-                                            offset,
-                                            bytes: buffer.as_slice()[..length].to_vec(),
-                                        })
-                                    }
-                                    libublk::sys::UBLK_IO_OP_FLUSH => Some(Command::Flush),
-                                    _ => None,
-                                };
+                                let command =
+                                    decode(operation, offset, length, size, buffer.as_slice());
                                 let result = if let Some(command) = command {
                                     let (done, completion) = oneshot::channel();
                                     if sender.try_send(Request { command, done }).is_err() {
@@ -232,7 +256,11 @@ pub(super) fn serve(
                                                     buffer.as_mut_slice()[..length]
                                                         .copy_from_slice(&bytes);
                                                 }
-                                                if operation == libublk::sys::UBLK_IO_OP_FLUSH {
+                                                if matches!(
+                                                    operation,
+                                                    libublk::sys::UBLK_IO_OP_FLUSH
+                                                        | libublk::sys::UBLK_IO_OP_DISCARD
+                                                ) {
                                                     0
                                                 } else {
                                                     length as i32
@@ -294,4 +322,103 @@ pub(super) fn serve(
         .join()
         .map_err(|_| io::Error::other("ublk journal worker panicked"))??;
     result.map(|_| ())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use libublk::sys::*;
+    use std::sync::Mutex;
+
+    #[test]
+    fn discard_is_bounded_independently_of_the_read_write_payload_buffer() {
+        let size = 32 * 1024 * 1024;
+        assert!(matches!(
+            decode(UBLK_IO_OP_DISCARD, Some(0), MAX_BATCH_BYTES, size, &[]),
+            Some(Command::Discard { .. })
+        ));
+        for (offset, length) in [
+            (Some(size - 512), 1024),
+            (None, 512),
+            (Some(0), MAX_BATCH_BYTES + 512),
+        ] {
+            assert!(decode(UBLK_IO_OP_DISCARD, offset, length, size, &[]).is_none());
+        }
+        assert!(decode(UBLK_IO_OP_READ, Some(0), MAX_BATCH_BYTES, size, &[]).is_none());
+        assert!(decode(UBLK_IO_OP_WRITE, Some(0), 512, size, &[]).is_none());
+        assert!(decode(UBLK_IO_OP_WRITE_ZEROES, Some(0), 512, size, &[]).is_none());
+    }
+
+    struct Ordered(Mutex<Vec<&'static str>>);
+
+    impl Disk for Ordered {
+        fn size(&self) -> u64 {
+            32 * 1024 * 1024
+        }
+
+        fn read_at(&self, _: u64, bytes: &mut [u8]) -> io::Result<()> {
+            self.0.lock().unwrap().push("read");
+            bytes.fill(0);
+            Ok(())
+        }
+
+        fn write_at(&self, _: u64, _: &[u8]) -> io::Result<()> {
+            panic!("expected batch")
+        }
+
+        fn write_batch(&self, _: &[DiskWrite<'_>]) -> io::Result<()> {
+            self.0.lock().unwrap().push("write");
+            Ok(())
+        }
+
+        fn discard(&self, _: u64, _: usize) -> io::Result<()> {
+            self.0.lock().unwrap().push("discard");
+            Err(io::Error::other("injected sync failure"))
+        }
+
+        fn sync(&self) -> io::Result<()> {
+            self.0.lock().unwrap().push("flush");
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn discard_fences_write_batches_and_a_failed_discard_is_not_acknowledged() {
+        let disk = Ordered(Mutex::new(Vec::new()));
+        let (send, receive) = mpsc::channel();
+        let mut replies = Vec::new();
+        for command in [
+            Command::Write {
+                offset: 0,
+                bytes: vec![1; 512],
+            },
+            Command::Discard {
+                offset: 0,
+                length: 512,
+            },
+            Command::Write {
+                offset: 0,
+                bytes: vec![2; 512],
+            },
+            Command::Read {
+                offset: 0,
+                length: 512,
+            },
+            Command::Flush,
+        ] {
+            let (done, reply) = oneshot::channel();
+            send.send(Request { command, done }).unwrap();
+            replies.push(reply);
+        }
+        drop(send);
+        let wake = EventFd::new(libc::EFD_NONBLOCK).unwrap();
+        worker(&disk, &receive, &wake);
+        for (index, reply) in replies.into_iter().enumerate() {
+            assert_eq!(reply.blocking_recv().unwrap().is_err(), index == 1);
+        }
+        assert_eq!(
+            *disk.0.lock().unwrap(),
+            ["write", "discard", "write", "read", "flush"]
+        );
+    }
 }

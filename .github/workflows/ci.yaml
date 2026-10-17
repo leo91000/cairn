@@ -154,6 +154,7 @@ jobs:
           cargo build --locked -p cairn-beacon --bin cairn-beacon --example network_stun_server
       - name: Validate node supervisor and S3 recovery
         run: |
+          python3 scripts/tests/guest_trim_test.py
           python3 scripts/tests/guest_projects_test.py
           python3 scripts/tests/node_supervisor_test.py
           python3 scripts/tests/installation_installer_test.py

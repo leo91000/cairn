@@ -550,6 +550,12 @@ impl Volume {
     }
 }
 
+#[derive(Clone, Copy)]
+enum WriteAdmission {
+    Wait,
+    BestEffort,
+}
+
 impl Disk for Volume {
     fn size(&self) -> u64 {
         self.disk.size()
@@ -569,7 +575,32 @@ impl Disk for Volume {
     }
 
     fn write_at(&self, offset: u64, bytes: &[u8]) -> io::Result<()> {
-        self.admit_write(bytes.len(), 1, || self.disk.write_at(offset, bytes))
+        self.admit_write(bytes.len(), 1, WriteAdmission::Wait, || {
+            self.disk.write_at(offset, bytes)
+        })
+    }
+
+    fn discard(&self, offset: u64, length: usize) -> io::Result<()> {
+        super::device::range(self.size(), offset, length)?;
+        if self.stop.is_cancelled() {
+            return Err(io::Error::new(io::ErrorKind::Interrupted, "Disk stopped"));
+        }
+        // The shared loop determines no-op ranges before asking for write
+        // admission. An empty sparse tail must not debit the node's quota.
+        let result = self.disk.discard_with(offset, length, |position, bytes| {
+            self.admit_write(bytes.len(), 1, WriteAdmission::BestEffort, || {
+                self.disk.write_at(position, bytes)
+            })
+        });
+        if result.as_ref().is_err_and(|error| {
+            !matches!(
+                error.kind(),
+                io::ErrorKind::Interrupted | io::ErrorKind::WouldBlock
+            )
+        }) {
+            self.fault.store(true, Ordering::SeqCst);
+        }
+        result
     }
 
     fn write_batch(&self, writes: &[DiskWrite<'_>]) -> io::Result<()> {
@@ -582,7 +613,9 @@ impl Disk for Volume {
                 .filter(|total| *total <= 8 * 1024 * 1024)
                 .ok_or_else(|| io::Error::other("Disk write batch exceeds its byte limit"))
         })?;
-        self.admit_write(bytes, writes.len(), || self.disk.write_batch(writes))
+        self.admit_write(bytes, writes.len(), WriteAdmission::Wait, || {
+            self.disk.write_batch(writes)
+        })
     }
 
     fn sync(&self) -> io::Result<()> {
@@ -599,6 +632,7 @@ impl Volume {
         &self,
         bytes: usize,
         frames: usize,
+        admission: WriteAdmission,
         write: impl FnOnce() -> io::Result<()>,
     ) -> io::Result<()> {
         let sample = self.disk.start_write_admission();
@@ -638,6 +672,15 @@ impl Volume {
                     sample.finish(bytes);
                 }
                 return result;
+            }
+            if matches!(admission, WriteAdmission::BestEffort) {
+                // The VMM handles native discard on its control thread. Routine
+                // maintenance must not wait for a space-pressure pause that
+                // requires that same thread to service the management API.
+                return Err(io::Error::new(
+                    io::ErrorKind::WouldBlock,
+                    "Discard deferred for disk space",
+                ));
             }
             self.pressure.store(true, Ordering::SeqCst);
             drop(guard);
@@ -1234,6 +1277,68 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn sparse_discard_never_charges_quota_and_reaches_later_deleted_bytes() {
+        const BLOCK: u64 = 4 * 1024 * 1024;
+        let root = tempfile::tempdir().unwrap();
+        let directory = root.path().join("disks/conversation");
+        let manifest = json!({
+            "version": 1,
+            "size": 16 * BLOCK,
+            "blockSize": BLOCK,
+            "blocks": (0..16).map(|index| json!({
+                "offset": index * BLOCK,
+                "size": BLOCK,
+                "hash": null
+            })).collect::<Vec<_>>()
+        });
+        let context = json!({
+            "master": "http://127.0.0.1:1/",
+            "grant": "test",
+            "policy": Policy::default()
+        });
+        let disk = create(&directory.join("lazy"), &manifest, &context)
+            .await
+            .unwrap();
+        disk.write_at(15 * BLOCK + 1024, b"deleted").unwrap();
+        drop(disk);
+        let volume = load(&directory).await.unwrap();
+        let budget = crate::microvm::budget::Budget {
+            slots: 1,
+            limits: crate::nodes::Resources {
+                cpu: 1,
+                memory_mi_b: 2048,
+                disk_mi_b: 128,
+            },
+        };
+        std::fs::write(
+            root.path().join(crate::microvm::budget::FILE),
+            serde_json::to_vec(&budget).unwrap(),
+        )
+        .unwrap();
+        crate::microvm::budget::disk_bytes(root.path()).unwrap();
+        // Charging the empty prefix as writes exhausts this quota before the
+        // final block is reached. Only that block needs a zero frame.
+        volume.discard(0, volume.size() as usize).unwrap();
+        let mut bytes = [1; 7];
+        volume.read_at(15 * BLOCK + 1024, &mut bytes).unwrap();
+        assert_eq!(bytes, [0; 7]);
+        let accounting = volume.disk.accounting().unwrap();
+        let charged = crate::microvm::budget::disk_bytes(root.path()).unwrap();
+        for _ in 0..8 {
+            volume.discard(0, volume.size() as usize).unwrap();
+        }
+        assert_eq!(volume.disk.accounting().unwrap(), accounting);
+        assert!(crate::microvm::budget::disk_bytes(root.path()).unwrap() <= charged);
+        assert!(!volume.fault.load(Ordering::SeqCst));
+        assert!(!volume.pressure.load(Ordering::SeqCst));
+        volume.stop.cancel();
+        assert_eq!(
+            volume.discard(0, 4096).unwrap_err().kind(),
+            io::ErrorKind::Interrupted
+        );
+    }
+
+    #[tokio::test]
     async fn disk_pressure_waits_without_acknowledging_or_losing_writes_and_resumes() {
         let root = tempfile::tempdir().unwrap();
         let directory = root.path().join("disks/conversation");
@@ -1268,6 +1373,19 @@ mod tests {
         disk.set_context(&context).unwrap();
         drop(disk);
         let volume = open(&directory).unwrap();
+        let sparse = volume.disk.accounting().unwrap();
+        volume.discard(0, 4096).unwrap();
+        assert_eq!(volume.disk.accounting().unwrap(), sparse);
+        volume.disk.write_at(0, b"deleted").unwrap();
+        let dirty_before = volume.disk.accounting().unwrap()["dirtyBytes"].clone();
+        let started = std::time::Instant::now();
+        assert_eq!(
+            volume.discard(0, 4096).unwrap_err().kind(),
+            io::ErrorKind::WouldBlock
+        );
+        assert!(started.elapsed() < std::time::Duration::from_secs(1));
+        assert!(!volume.fault.load(Ordering::SeqCst));
+        assert!(!volume.pressure.load(Ordering::SeqCst));
         let writer = {
             let volume = volume.clone();
             tokio::task::spawn_blocking(move || volume.write_at(3, b"retained"))
@@ -1275,7 +1393,10 @@ mod tests {
         tokio::time::sleep(std::time::Duration::from_millis(150)).await;
         assert!(!writer.is_finished());
         assert_eq!(volume.status().unwrap()["waitingFor"], "disk-space");
-        assert_eq!(volume.disk.accounting().unwrap()["dirtyBytes"], 0);
+        assert_eq!(
+            volume.disk.accounting().unwrap()["dirtyBytes"],
+            dirty_before
+        );
         let policy = Policy {
             reserve_mi_b: 64,
             reserve_percent: 1,
