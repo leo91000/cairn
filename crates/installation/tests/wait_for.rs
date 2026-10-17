@@ -635,6 +635,62 @@ async fn queued_follow_ups_do_not_prevent_registering_a_wait() {
 }
 
 #[tokio::test]
+async fn newly_queued_input_during_the_initial_probe_cannot_be_held_by_a_wait() {
+    for replacing_wakeup in [false, true] {
+        let f = Fixture::new().await;
+        let earlier = id();
+        f.s.chat_send(
+            &f.chat,
+            json!({ "id": earlier, "text": "Earlier follow-up" }),
+        )
+        .await
+        .unwrap();
+        if replacing_wakeup {
+            sleep::schedule(
+                &f.s,
+                &f.token,
+                &json!({ "seconds": 420, "reason": "Earlier wait" }),
+            )
+            .await
+            .unwrap();
+        }
+        f.github_state("in_progress", None, 350);
+        let s = f.s.clone();
+        let token = f.token.clone();
+        let condition = f.github_condition();
+        let request = tokio::spawn(async move {
+            wait_for::schedule(
+                &s,
+                &token,
+                &json!({
+                    "condition": condition,
+                    "reason": "Old plan",
+                    "timeoutSeconds": 420,
+                }),
+            )
+            .await
+        });
+        common::eventually(
+            Duration::from_secs(3),
+            Duration::from_millis(10),
+            || async { (!f.calls().is_empty()).then_some(()) },
+        )
+        .await;
+        f.s.chat_send(
+            &f.chat,
+            json!({ "id": id(), "text": "New instruction during the probe" }),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(request.await.unwrap().unwrap_err().status, 409);
+        assert!(f.s.chat_detail(&f.chat).await.unwrap()["wakeup"].is_null());
+        f.finish().await;
+        assert_eq!(f.tick().await["run"]["chatExecution"]["messageId"], earlier);
+    }
+}
+
+#[tokio::test]
 async fn delivered_steering_input_during_the_initial_probe_cannot_be_overwritten() {
     let f = Fixture::new().await;
     f.github_state("in_progress", None, 350);
