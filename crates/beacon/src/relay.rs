@@ -948,6 +948,65 @@ enum Capability {
         permit: OwnedSemaphorePermit,
     },
     PublicArtifact(String),
+    PublicWebhook(String),
+}
+
+pub(super) async fn public_webhook(
+    State(service): State<Service>,
+    Path((installation, instance, endpoint)): Path<(String, String, String)>,
+    axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
+    request: Request,
+) -> Result<Response, ApiError> {
+    tokio::time::timeout(Duration::from_millis(2800), async {
+        let target = format!("/api/plugin-webhooks/{instance}/{endpoint}");
+        if uuid::Uuid::parse_str(&installation).is_err()
+            || !cairn_protocol::plugin_webhook_path(&target)
+        {
+            return Err(ApiError::Http(
+                StatusCode::NOT_FOUND,
+                "Plugin endpoint not found",
+            ));
+        }
+        super::consume_limit(
+            &service.pool,
+            &format!(
+                "public-webhook:{}",
+                super::network::rate_limit_address(peer.ip())
+            ),
+            300,
+        )
+        .await?;
+        let claimed: Option<(String,)> =
+            query_as("SELECT id FROM installations WHERE id = $1 AND owner_id IS NOT NULL")
+                .bind(&installation)
+                .fetch_optional(&service.pool)
+                .await?;
+        if claimed.is_none() {
+            return Err(ApiError::Http(
+                StatusCode::NOT_FOUND,
+                "Plugin endpoint not found",
+            ));
+        }
+        let tunnel = service
+            .relay
+            .connections
+            .lock()
+            .unwrap()
+            .get(&installation)
+            .cloned();
+        send(
+            &service,
+            tunnel,
+            0,
+            String::new(),
+            Capability::PublicWebhook(target.clone()),
+            &target,
+            request,
+        )
+        .await
+    })
+    .await
+    .map_err(|_| ApiError::Http(StatusCode::GATEWAY_TIMEOUT, "Plugin endpoint timed out"))?
 }
 
 // Only an beacon availability page may render inline; relayed HTML stays
@@ -1041,6 +1100,10 @@ async fn send(
 ) -> Result<Response, ApiError> {
     let streaming = cairn_protocol::stream_path(target);
     let public_file = matches!(capability, Capability::PublicArtifact(_));
+    let public_webhook = match &capability {
+        Capability::PublicWebhook(path) => Some(path.clone()),
+        _ => None,
+    };
     let browser_session = matches!(capability, Capability::Account(_))
         .then(|| digest(super::session_token(request.headers())));
 
@@ -1062,7 +1125,7 @@ async fn send(
             "Streaming requires relay protocol 2",
         ));
     }
-    let slots = if public_file {
+    let slots = if public_file || public_webhook.is_some() {
         &tunnel.public_slots
     } else {
         &tunnel.slots
@@ -1111,7 +1174,10 @@ async fn send(
     let headers = request
         .headers()
         .iter()
-        .filter(|(name, _)| cairn_protocol::request_header(name.as_str()))
+        .filter(|(name, _)| {
+            cairn_protocol::request_header(name.as_str())
+                || (public_webhook.is_some() && cairn_protocol::webhook_header(name.as_str()))
+        })
         .filter_map(|(name, value)| {
             value
                 .to_str()
@@ -1134,6 +1200,7 @@ async fn send(
             Some(permit),
         ),
         Capability::PublicArtifact(token) => (Role::Member, None, Some(token), None, None),
+        Capability::PublicWebhook(_) => (Role::Member, None, None, None, None),
     };
     let api_request = ApiRequest {
         id: uuid::Uuid::new_v4().to_string(),
@@ -1141,6 +1208,7 @@ async fn send(
         role,
         mcp_scopes,
         public_artifact,
+        public_webhook: public_webhook.clone(),
         method: request.method().to_string(),
         path: target.to_owned(),
         headers,
@@ -1149,12 +1217,17 @@ async fn send(
         body: if public_file {
             Vec::new()
         } else {
-            to_bytes(request.into_body(), MAX_BODY)
-                .await
-                .map_err(|_| {
-                    ApiError::Http(StatusCode::PAYLOAD_TOO_LARGE, "API request is too large")
-                })?
-                .to_vec()
+            to_bytes(
+                request.into_body(),
+                if public_webhook.is_some() {
+                    128 * 1024
+                } else {
+                    MAX_BODY
+                },
+            )
+            .await
+            .map_err(|_| ApiError::Http(StatusCode::PAYLOAD_TOO_LARGE, "API request is too large"))?
+            .to_vec()
         },
     };
     // Revoke before dispatch even when the caller suspended its upload after

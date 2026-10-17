@@ -126,6 +126,11 @@ pub(crate) async fn call(
     method: &str,
     args: &Value,
 ) -> Result<Value> {
+    if args["auth"].get("resource").is_some() {
+        return Err(Error::forbidden(
+            "Resource credentials are only available to HTTP requests.",
+        ));
+    }
     let link = context
         .link
         .as_ref()

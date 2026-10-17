@@ -11,7 +11,7 @@ use cairn_plugin_api::Manifest;
 use cairn_plugin_host::Denied;
 use futures_util::StreamExt;
 use serde_json::{Map, Value, json};
-use std::{sync::Arc, time::Duration};
+use std::{collections::BTreeMap, sync::Arc, time::Duration};
 
 /// What a handler acts for: its connection and the event being handled.
 pub struct Context {
@@ -57,7 +57,9 @@ pub async fn checked(s: &Service, context: &Context, method: &str, args: Value) 
         "conversations.check" => super::work::check(s, context, &args).await,
         "conversations.answer" => super::work::answer(s, context, &args).await,
         "conversations.cancel" => super::work::cancel(s, context, &args).await,
-        "inbound.accept" => super::work::inbound(s, context, &args).await,
+        "inbound.accept" | "inbound.deliver" => {
+            super::work::inbound(s, context, &args, method == "inbound.deliver").await
+        }
         "instance.status" => instance_status(s, context, &args).await,
         _ if method.starts_with("socket.") => super::socket::call(s, context, method, &args).await,
         _ => effect(s, context, method, args).await,
@@ -94,6 +96,9 @@ pub async fn effect(s: &Service, context: &Context, method: &str, args: Value) -
             storage(s, &context.connection, method, &args).await
         }
         "http.request" => http(s, context, &args).await,
+        "resources.get" | "resources.list" => {
+            super::resources::call(s, context, method, &args).await
+        }
         "timers.after" | "timers.cancel" => timers(s, &context.connection, method, &args).await,
         "exec.run" => super::programs::run(s, context, &args).await,
         _ => Err(Error::forbidden("Unknown plugin capability.")),
@@ -312,12 +317,24 @@ pub(crate) async fn authorization(
         return Err(Error::bad("Invalid credential header."));
     }
     let key = rule.get("secret").and_then(Value::as_str).unwrap_or("");
-    let secret = secrets(s, context)
-        .await?
-        .get(key)
-        .and_then(Value::as_str)
-        .map(str::to_owned)
-        .ok_or_else(|| Error::forbidden("This instance has no such secret."))?;
+    let secret = if let Some(resource) = rule.get("resource") {
+        if context.draft.is_some() {
+            return Err(Error::forbidden(
+                "Resource credentials are only available to saved HTTP requests.",
+            ));
+        }
+        let resource = resource
+            .as_str()
+            .ok_or_else(|| Error::bad("Name a resource."))?;
+        super::resources::credential(s, context, resource, key).await?
+    } else {
+        secrets(s, context)
+            .await?
+            .get(key)
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+            .ok_or_else(|| Error::forbidden("This instance has no such secret."))?
+    };
     Ok(Some((header.to_owned(), prefix.to_owned(), secret)))
 }
 
@@ -342,6 +359,12 @@ async fn http(s: &Service, context: &Context, args: &Value) -> Result<Value> {
         _ => return Err(invalid("Unsupported HTTP method.")),
     };
     let target = target(s, &context.manifest, text(args, "url"), "https")?;
+    let resource = match args["auth"].get("resource") {
+        Some(value) => {
+            Some(super::resources::reference(s, context, value.as_str().unwrap_or_default()).await?)
+        }
+        None => None,
+    };
     let mut request = s
         .plugins
         .http
@@ -362,7 +385,25 @@ async fn http(s: &Service, context: &Context, args: &Value) -> Result<Value> {
             request = request.header(name, value);
         }
     }
-    if let Some(spec) = args.get("multipart").filter(|value| value.is_object()) {
+    if let Some(form) = args.get("form").filter(|value| !value.is_null()) {
+        if !form
+            .as_object()
+            .is_some_and(|form| form.len() <= 50 && form.values().all(Value::is_string))
+            || ["json", "body", "multipart"]
+                .iter()
+                .any(|key| args.get(*key).is_some_and(|value| !value.is_null()))
+        {
+            return Err(invalid(
+                "Use form text fields without another request body.",
+            ));
+        }
+        let fields: BTreeMap<String, String> = serde_json::from_value(form.clone())?;
+        let encoded = serde_urlencoded::to_string(&fields).map_err(Error::internal)?;
+        if encoded.len() > 262_144 {
+            return Err(Error::too_large("Request body is too large."));
+        }
+        request = request.form(&fields);
+    } else if let Some(spec) = args.get("multipart").filter(|value| value.is_object()) {
         let (kind, body) = multipart(s, context, spec).await?;
         request = request.header("content-type", kind).body(body);
     } else if let Some(body) = args.get("json").filter(|value| !value.is_null()) {
@@ -403,6 +444,9 @@ async fn http(s: &Service, context: &Context, args: &Value) -> Result<Value> {
         body.extend_from_slice(&chunk);
     }
     let json = serde_json::from_slice::<Value>(&body).ok();
+    if let Some(resource) = &resource {
+        super::resources::recheck(s, context, resource).await?;
+    }
     Ok(json!({
         "status": status,
         "headers": headers,

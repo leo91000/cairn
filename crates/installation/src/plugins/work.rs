@@ -33,6 +33,7 @@ pub const RESERVED: &[&str] = &[
     "form",
     "command",
     "tool",
+    "webhook",
 ];
 
 /// A message a transport received for a connection, already scoped by the transport.
@@ -84,13 +85,28 @@ pub(crate) fn enqueue(
 
 /// Fast durable ingress. Messages from people who aren't allowed are discarded before
 /// their content is stored; approval mode records only who asked.
+#[derive(Clone, Copy, PartialEq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Admission {
+    Accepted,
+    Duplicate,
+    Denied,
+    Requested,
+    Busy,
+}
+
 pub async fn accept(s: &Service, connection: &Connection, inbound: Inbound) -> Result<bool> {
+    Ok(deliver(s, connection, inbound).await? == Admission::Accepted)
+}
+
+/// An HTTP or socket transport must only acknowledge temporary saturation as a retry.
+pub async fn deliver(s: &Service, connection: &Connection, inbound: Inbound) -> Result<Admission> {
     // Allowlists only change with a new revision (or shrink), so this snapshot is a
     // superset: strangers are dropped without touching storage or owner authority.
     if connection.access_mode == AccessMode::Allowlist
         && !connection.user_ids.contains(&inbound.author.id)
     {
-        return Ok(false);
+        return Ok(Admission::Denied);
     }
     ensure_owner(s, connection).await?;
     let expected = connection.clone();
@@ -103,13 +119,13 @@ pub async fn accept(s: &Service, connection: &Connection, inbound: Inbound) -> R
             let base = merge(&inbound.context, &identity);
             if !current.allows(&inbound.author.id) {
                 if current.access_mode == AccessMode::Requests && inbound.kind == "message" {
-                    request(db, &current, &inbound.author, &base)?;
+                    return request(db, &current, &inbound.author, &base);
                 }
-                return Ok(false);
+                return Ok(Admission::Denied);
             }
             let dedupe = format!("plugin-seen:{}:{}", current.id, inbound.id);
             if db.kv(&dedupe)?.is_some() {
-                return Ok(false);
+                return Ok(Admission::Duplicate);
             }
             let pending = db
                 .list(EVENTS)?
@@ -117,7 +133,7 @@ pub async fn accept(s: &Service, connection: &Connection, inbound: Inbound) -> R
                 .filter(|value| value["connectionId"] == current.id)
                 .count();
             if pending >= 50 {
-                return Ok(false);
+                return Ok(Admission::Busy);
             }
             enqueue(
                 db,
@@ -127,7 +143,7 @@ pub async fn accept(s: &Service, connection: &Connection, inbound: Inbound) -> R
                 Some(&inbound.author.id),
             )?;
             db.set(&dedupe, &json!(true), Some(now() + 30 * 86_400_000))?;
-            Ok(true)
+            Ok(Admission::Accepted)
         })
         .await
 }
@@ -138,7 +154,7 @@ fn request(
     connection: &Connection,
     author: &super::connections::Label,
     payload: &Value,
-) -> Result<()> {
+) -> Result<Admission> {
     let requests = db.list("plugin-requests")?;
     if let Some(mut existing) = requests
         .iter()
@@ -150,7 +166,11 @@ fn request(
             existing["updatedAt"] = json!(now());
             db.put("plugin-requests", &existing)?;
         }
-        return Ok(());
+        return Ok(if existing["status"] == "pending" {
+            Admission::Requested
+        } else {
+            Admission::Denied
+        });
     }
     if requests
         .iter()
@@ -158,7 +178,16 @@ fn request(
         .count()
         >= 50
     {
-        return Ok(());
+        return Ok(Admission::Busy);
+    }
+    if db
+        .list(EVENTS)?
+        .iter()
+        .filter(|value| value["connectionId"] == connection.id)
+        .count()
+        >= 50
+    {
+        return Ok(Admission::Busy);
     }
     db.put(
         "plugin-requests",
@@ -177,7 +206,8 @@ fn request(
     db.audit(
         "plugin.access.requested",
         &json!({ "connectionId": connection.id }),
-    )
+    )?;
+    Ok(Admission::Requested)
 }
 
 /// Events that act for a person: what they wrote or a button they pressed, admitted
@@ -196,7 +226,12 @@ fn size(value: &Value) -> usize {
 /// `inbound.accept`: a message the package received through its own connection
 /// (a socket, or polling with timers). Admission rules apply before anything is kept.
 /// Returns whether it was queued for the package.
-pub(crate) async fn inbound(s: &Service, context: &Context, args: &Value) -> Result<Value> {
+pub(crate) async fn inbound(
+    s: &Service,
+    context: &Context,
+    args: &Value,
+    detailed: bool,
+) -> Result<Value> {
     let kind = match text(args, "kind") {
         "" => "message",
         kind => kind,
@@ -233,7 +268,12 @@ pub(crate) async fn inbound(s: &Service, context: &Context, args: &Value) -> Res
         context: extra,
         body,
     };
-    Ok(json!(accept(s, &context.connection, inbound).await?))
+    let result = deliver(s, &context.connection, inbound).await?;
+    Ok(if detailed {
+        json!({"status": result})
+    } else {
+        json!(result == Admission::Accepted)
+    })
 }
 
 fn binding(connection: &Connection, author: &str, thread: &str, shared: bool) -> String {

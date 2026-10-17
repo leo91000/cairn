@@ -17,6 +17,7 @@ pub struct InstallationIdentity {
     pub account_id: String,
     pub mcp_scopes: Option<Vec<String>>,
     pub public_artifact: Option<String>,
+    pub public_webhook: Option<String>,
     oauth_binding: String,
 }
 
@@ -30,6 +31,7 @@ impl InstallationIdentity {
             account_id: account_id.to_owned(),
             mcp_scopes: None,
             public_artifact: None,
+            public_webhook: None,
             oauth_binding: format!("cairn-account:{account_id}"),
         }
     }

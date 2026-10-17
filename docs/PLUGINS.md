@@ -250,6 +250,112 @@ not yet a marketplace guarantee: a public catalogue still needs signed packages,
 OS-level isolation of workers and an update policy. No Codex plugin catalog is
 enabled or downloaded.
 
+### Signed public HTTP
+
+The `webhooks` capability declares POST endpoints authenticated in the installation
+with HMAC-SHA256 over the original bytes. Each declaration names a secret setting,
+signature header, optional digest prefix, and template containing `{{body}}` once.
+An optional signed Unix timestamp uses `{{timestamp}}` and a declared header with
+`maxAgeSeconds` (1–600). The host checks timestamp age, rejects ambiguous duplicate
+signature headers, and compares the digest in constant time before starting Luau.
+
+```json
+{
+  "webhooks": [{
+    "name": "events",
+    "signature": {
+      "secret": "signingSecret",
+      "header": "x-provider-signature",
+      "prefix": "v0=",
+      "template": "v0:{{timestamp}}:{{body}}",
+      "timestamp": { "header": "x-provider-timestamp", "maxAgeSeconds": 300 }
+    }
+  }]
+}
+```
+
+Beacon relays the public route
+`/api/public/installations/<installation>/plugins/<instance>/<endpoint>` without
+storing its body. It forwards provider signature/retry headers and binds the request
+to the exact installation route, excluding browser credentials and proxy headers.
+Offline installations return 503; the relay deadline is 2.8 seconds.
+
+The direct route is `/api/plugin-webhooks/<instance>/<endpoint>`. The instance
+must be enabled and its package approved. This route has no Cairn account authority.
+Its fresh `webhook` handler receives `{endpoint, method, headers, body, instance}`;
+`body` is the original UTF-8 text. It returns `{status, body, headers?}` where `body`
+is text and only `content-type` is accepted in response headers. Ordinary cookies
+and authorization headers are never exposed to the script. Limits are 128 KiB of
+request body, 16 KiB of headers, 64 KiB of response body and 2.5 seconds for the
+whole operation, including body reading and worker startup. A failed or timed-out
+handler is an error response, never an empty successful acknowledgement.
+
+`cairn.inbound.deliver(message)` returns `{status}`: `accepted`, `duplicate`,
+`denied`, `requested` or `busy`. `accepted` means the event and its deduplication
+marker were committed together; `busy` means they were not committed and the
+sender can retry. Requests retain only identity and routing. Use this result when
+deciding whether to acknowledge a signed HTTP or socket delivery. The shorter
+`inbound.accept` returns true only for a newly accepted event. Neither API bypasses
+the instance's admission rules or grants public requests conversation control.
+
+### Resource collections
+
+The `resources` capability declares related collections in `resources`:
+`{name, title, singular, parent?, delegation?, settings}`. Each collection uses the
+same field schema as instance forms; parent declarations must form an acyclic tree.
+Resources belong to exactly one instance. Parent references cannot cross instances
+or name an unrelated collection. Each instance can keep at most 256 resources;
+values and encrypted secrets are bounded to 64 KiB each.
+
+Owner management uses
+`/api/plugins/<plugin>/connections/<instance>/resources/<collection>`: POST creates,
+GET lists `{items, nextCursor}` in pages of 100. Append `/<resource>` for GET, PUT
+and DELETE. PUT includes the last `revision`; concurrent/stale edits return 409.
+Secret fields are submitted separately; blank keeps the existing secret. Responses
+contain `secretKeys` (names), never values. Deleting a parent deletes its descendants
+and encrypted secrets atomically; removing the instance also removes its resources.
+
+`cairn.resources.list{collection, cursor?}` and `get{collection, resource}` read
+metadata. HTTP can select a secret using
+`auth = {resource = id, secret = key, header = "authorization", prefix = "Bearer "}`.
+Cairn verifies the resource and every parent before use and after I/O; paused,
+removed or changed resources cannot deliver a result. The package never receives
+the credential. Resource access by agents requires a separate resource grant.
+
+### Resource grants and operations
+
+`operations` declares `{name, collection, profile, scopes?, requests?}`. Profiles
+are `read`, `contribute` and `manage`, in increasing order. Each request fixes
+`{method, host, path, bindings?}`; a trailing `*` permits a path prefix. A binding
+maps a request field to an admitted input scope (for example `channel` to
+`channel`) or to a non-secret resource setting (`team_id` to `resource.externalId`).
+The host verifies it in query/JSON/form arguments, rejects duplicates and
+ambiguous raw/multipart bodies, and never relies on the script to enforce that
+request's method, endpoint or bound fields.
+
+A command or tool declares `operation` and must require a `resource` plus every
+declared scope as text arguments. The host selects the resource and operation
+before running Luau; the event includes `operation`. Resource-scoped handlers may
+read their selected resource and make only that operation's approved HTTP requests
+with its credential. They cannot switch instances, use root-instance credentials,
+run a program or bypass admission through another capability.
+
+The owner manages rules at
+`/api/plugins/<plugin>/connections/<instance>/resources/<collection>/<resource>/grants`:
+POST creates and GET lists; DELETE of `/<grant>` revokes. A rule has `agentId`, an
+optional `profile`, extra `operations`, `deniedOperations`, and `scopes` mapping
+input names to allowed values. Exclusions override the profile within a rule;
+multiple rules grant the union of what they allow. Scoped rules do not authorize
+operations that omit those scopes. Nothing is granted by default, including to
+Main agent or through instance-level grants. Tools list only operations the
+agent can use. CLI and MCP share the same checks.
+
+Rules are bound to the verified current owner's access, and rechecked alongside
+instance, resource/parent revisions and approval before capabilities and before
+returning results. Deleting resources removes their rules. Agents reachable by
+anyone cannot receive resource credentials; adding such a delegation also checks
+existing resource rules.
+
 ## Contributions
 
 A package ships a whole integration without changing Cairn. The manifest says

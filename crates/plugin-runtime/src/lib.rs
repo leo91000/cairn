@@ -57,6 +57,11 @@ cairn.socket = {
 }
 cairn.inbound = {
     accept = function(message) return call("inbound.accept", message) end,
+    deliver = function(message) return call("inbound.deliver", message) end,
+}
+cairn.resources = {
+    get = function(options) return call("resources.get", options) end,
+    list = function(options) return call("resources.list", options) end,
 }
 cairn.instance = {
     status = function(state, message) call("instance.status", { state = state, message = message }) end,

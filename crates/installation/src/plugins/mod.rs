@@ -6,13 +6,16 @@ pub mod capabilities;
 pub mod cli;
 pub mod connections;
 pub mod forms;
+pub mod grants;
 pub mod legacy;
 pub mod panels;
 pub mod programs;
 pub mod registry;
+pub mod resources;
 pub mod runtime;
 pub mod scope;
 pub mod socket;
+pub mod webhooks;
 pub mod work;
 
 use crate::{
@@ -199,6 +202,121 @@ pub async fn routes(s: &Arc<Service>, input: &Input) -> Result<Value> {
         }
         ("DELETE", ["plugins", "packages", id]) => registry::uninstall(s, id).await,
         ("POST", ["plugins", id, "form"]) => forms::form(s, id, body).await,
+        (
+            "POST",
+            [
+                "plugins",
+                id,
+                "connections",
+                connection,
+                "resources",
+                collection,
+            ],
+        ) => resources::save(s, id, connection, collection, body, None).await,
+        (
+            "GET",
+            [
+                "plugins",
+                id,
+                "connections",
+                connection,
+                "resources",
+                collection,
+            ],
+        ) => {
+            resources::list(
+                s,
+                id,
+                connection,
+                collection,
+                input.query.get("cursor").map(String::as_str),
+            )
+            .await
+        }
+        (
+            "GET",
+            [
+                "plugins",
+                id,
+                "connections",
+                connection,
+                "resources",
+                collection,
+                resource,
+            ],
+        ) => Ok(serde_json::to_value(
+            resources::get(s, id, connection, collection, resource).await?,
+        )?),
+        (
+            "PUT",
+            [
+                "plugins",
+                id,
+                "connections",
+                connection,
+                "resources",
+                collection,
+                resource,
+            ],
+        ) => resources::save(s, id, connection, collection, body, Some(resource)).await,
+        (
+            "DELETE",
+            [
+                "plugins",
+                id,
+                "connections",
+                connection,
+                "resources",
+                collection,
+                resource,
+            ],
+        ) => resources::remove(s, id, connection, collection, resource).await,
+        (
+            "POST",
+            [
+                "plugins",
+                id,
+                "connections",
+                connection,
+                "resources",
+                collection,
+                resource,
+                "grants",
+            ],
+        ) => {
+            let account = input
+                .identity
+                .as_ref()
+                .map_or("", |identity| identity.account_id.as_str());
+            grants::create(s, id, connection, collection, resource, account, body).await
+        }
+        (
+            "GET",
+            [
+                "plugins",
+                id,
+                "connections",
+                connection,
+                "resources",
+                collection,
+                resource,
+                "grants",
+            ],
+        ) => grants::list(s, id, connection, collection, resource).await,
+        (
+            "DELETE",
+            [
+                "plugins",
+                id,
+                "connections",
+                connection,
+                "resources",
+                collection,
+                resource,
+                "grants",
+                grant,
+            ],
+        ) => grants::remove(s, id, connection, collection, resource, grant).await,
         ("POST", ["plugins", id, "connections"]) => connections::save(s, id, body, None).await,
         ("PUT", ["plugins", id, "connections", connection]) => {
             connections::get(s, id, connection).await?;

@@ -4,7 +4,7 @@
 use super::{
     capabilities::{self, Context},
     connections::{self, Connection},
-    registry::Package,
+    registry::{self, Package},
 };
 use crate::{
     error::{Error, Result},
@@ -17,6 +17,9 @@ use std::sync::{Arc, Mutex};
 pub enum Scope {
     /// The owner, through one instance: views, actions and tests.
     Instance(Box<Connection>),
+    /// A signed public request. It has no Cairn account or owner authority.
+    Ingress(Box<Connection>),
+    ResourceAgent(Box<super::grants::Authorization>),
     /// The owner editing an instance, before it is saved: its form. Only `http` and
     /// `exec`, with the draft's credential and secrets.
     Draft(Box<Connection>, Arc<super::forms::Draft>),
@@ -31,10 +34,13 @@ impl Scope {
     /// What the script receives about the instances it may use. Never secret values.
     pub fn instances(&self) -> Vec<Value> {
         match self {
-            Scope::Instance(connection) | Scope::Draft(connection, _) => {
+            Scope::Instance(connection)
+            | Scope::Ingress(connection)
+            | Scope::Draft(connection, _) => {
                 vec![summary(connection)]
             }
             Scope::Agent { instances, .. } => instances.iter().map(summary).collect(),
+            Scope::ResourceAgent(authorization) => vec![summary(&authorization.connection)],
         }
     }
 }
@@ -53,6 +59,13 @@ pub fn summary(connection: &Connection) -> Value {
 /// it enabled and still granting the agent.
 async fn current(s: &Service, scope: &Scope, args: &Value) -> Result<Connection> {
     let requested = args["instance"].as_str();
+    if let Scope::ResourceAgent(authorization) = scope {
+        if requested.is_some_and(|id| id != authorization.connection.id) {
+            return Err(Error::forbidden("Another instance is not available here."));
+        }
+        super::grants::recheck(s, authorization).await?;
+        return Ok(authorization.connection.clone());
+    }
     if let Scope::Draft(connection, _) = scope {
         if requested.is_some_and(|id| id != connection.id) {
             return Err(Error::forbidden("Another instance is not available here."));
@@ -60,8 +73,8 @@ async fn current(s: &Service, scope: &Scope, args: &Value) -> Result<Connection>
         return Ok((**connection).clone());
     }
     let expected = match scope {
-        Scope::Draft(..) => unreachable!(),
-        Scope::Instance(connection) => {
+        Scope::Draft(..) | Scope::ResourceAgent(_) => unreachable!(),
+        Scope::Instance(connection) | Scope::Ingress(connection) => {
             if requested.is_some_and(|id| id != connection.id) {
                 return Err(Error::forbidden("Another instance is not available here."));
             }
@@ -85,6 +98,8 @@ async fn current(s: &Service, scope: &Scope, args: &Value) -> Result<Connection>
     let unchanged = connection.revision == expected.revision;
     let granted = match scope {
         Scope::Instance(_) | Scope::Draft(..) => true,
+        Scope::Ingress(_) => connection.enabled,
+        Scope::ResourceAgent(_) => unreachable!(),
         Scope::Agent { agent_id, .. } => connection.grants(agent_id),
     };
     if !unchanged || !granted {
@@ -104,6 +119,12 @@ pub async fn call(
     args: &Value,
 ) -> Result<Value> {
     let connection = current(s, scope, args).await?;
+    if registry::active(s, &package.manifest.id).await?.digest != package.digest {
+        return Err(Error::forbidden("The plugin approval changed."));
+    }
+    if let Scope::ResourceAgent(authorization) = scope {
+        return super::grants::call(s, package, authorization, method, args).await;
+    }
     let draft = match scope {
         Scope::Draft(_, draft) => Some(draft.clone()),
         _ => None,
@@ -113,6 +134,13 @@ pub async fn call(
             "An instance being edited can only use http and exec.",
         ));
     }
+    if matches!(scope, Scope::Agent { .. })
+        && (method.starts_with("resources.") || args["auth"].get("resource").is_some())
+    {
+        return Err(Error::forbidden(
+            "This operation requires a resource grant.",
+        ));
+    }
     let context = Context {
         connection,
         manifest: package.manifest.clone(),
@@ -120,6 +148,10 @@ pub async fn call(
         link: None,
         draft,
     };
+    if matches!(scope, Scope::Ingress(_)) && matches!(method, "inbound.accept" | "inbound.deliver")
+    {
+        return capabilities::checked(s, &context, method, args.clone()).await;
+    }
     if ["conversations.", "inbound.", "instance.", "socket."]
         .iter()
         .any(|family| method.starts_with(family))
@@ -167,6 +199,21 @@ pub async fn invoke(
             },
         )
         .await;
+    if result.is_ok() {
+        match scope {
+            Scope::Agent { instances, .. } => {
+                for instance in instances {
+                    current(s, scope, &json!({"instance": instance.id})).await?;
+                }
+            }
+            _ => {
+                current(s, scope, &Value::Null).await?;
+            }
+        }
+        if registry::active(s, &package.manifest.id).await?.digest != package.digest {
+            return Err(Error::forbidden("The plugin approval changed."));
+        }
+    }
     match (result, refused.into_inner().unwrap()) {
         (Ok(value), _) => Ok(value),
         (Err(error), _) if error.starts_with(cairn_plugin_api::REJECTED) => {

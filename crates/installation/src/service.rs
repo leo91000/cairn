@@ -719,6 +719,11 @@ fn ensure_removable(db: &Db<'_>, kind: &str, id: &str) -> Result<()> {
 fn forget_agent(db: &Db<'_>, id: &str) -> Result<()> {
     db.delete(&format!("agent-github:{id}"))?;
     db.delete(&format!("agent-avatar:{id}"))?;
+    for grant in db.list(crate::plugins::grants::KIND)? {
+        if grant["agentId"] == id {
+            db.remove(crate::plugins::grants::KIND, text(&grant, "id"))?;
+        }
+    }
     for mut connection in db.list(crate::plugins::connections::KIND)? {
         let granted = connection["agentIds"]
             .as_array()

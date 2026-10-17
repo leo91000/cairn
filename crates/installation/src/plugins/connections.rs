@@ -22,6 +22,7 @@ pub const OWNED: &[&str] = &[
     "plugin-activity",
     "plugin-storage",
     "plugin-timers",
+    "plugin-resource-grants",
 ];
 
 #[derive(Clone, Copy, Default, Deserialize, PartialEq, Eq, Serialize)]
@@ -132,6 +133,7 @@ pub(crate) fn public_safe(db: &Db<'_>, agent_id: &str, access: &Value) -> Result
         || access["mcps"] != json!([])
         || projects > 1
         || secrets
+        || super::grants::agent_has_grants(db, agent_id)?
     {
         return Err(Error::bad(
             "For anyone in the channel, choose an agent with a read-only sandbox, at most one project, and no installation, GitHub, MCP or plugin access such as 1Password.",
@@ -730,6 +732,7 @@ pub async fn remove(s: &Service, plugin_id: &str, connection_id: &str) -> Result
     s.store
         .transaction(move |db| {
             db.remove(KIND, &connection_id)?;
+            super::resources::remove_owned(db, &connection_id)?;
             db.delete(&format!("mcp-secret:{}", credential_key(&connection_id)))?;
             db.delete(&format!("mcp-secret:{}", secrets_key(&connection_id)))?;
             db.delete(&format!("plugin-status:{connection_id}"))?;

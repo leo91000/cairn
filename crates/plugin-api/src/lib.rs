@@ -4,15 +4,21 @@ use serde_json::Value;
 
 mod arguments;
 mod form;
+mod operations;
+mod resources;
 mod settings;
 mod sources;
 mod view;
+mod webhooks;
 
 pub use arguments::{parse_arguments, usage};
 pub use form::validate_form_result;
+pub use operations::{Operation, Profile, RequestRule};
+pub use resources::ResourceCollection;
 pub use settings::validate_settings_schema;
 pub use sources::{MAX_MODULES, MAX_SOURCE_BYTES, Sources, module_path, resolve};
 pub use view::{validate_action_result, validate_view};
+pub use webhooks::{Webhook, WebhookSignature, WebhookTimestamp};
 
 /// Worker protocol and manifest version. Manifests must declare exactly this one.
 pub const API_VERSION: u32 = 2;
@@ -45,6 +51,14 @@ pub const CAPABILITIES: &[(&str, &str)] = &[
         "Hand messages it receives to Cairn, which keeps only those from people you allow",
     ),
     (
+        "webhooks",
+        "Receive signed public HTTP requests through Beacon or your installation's own HTTPS endpoint",
+    ),
+    (
+        "resources",
+        "Manage the resource collections declared by the package; secrets remain in Cairn",
+    ),
+    (
         "exec",
         "Run the programs listed by the package on this server, outside the Luau sandbox, with the secrets you enter",
     ),
@@ -62,7 +76,8 @@ pub fn capability(method: &str) -> Option<&'static str> {
         }
         "exec.run" => "exec",
         "socket.connect" | "socket.send" | "socket.close" | "socket.timer" => "socket",
-        "inbound.accept" => "inbound",
+        "inbound.accept" | "inbound.deliver" => "inbound",
+        "resources.get" | "resources.list" => "resources",
         _ => return None,
     };
     CAPABILITIES
@@ -137,6 +152,8 @@ pub struct Command {
     pub output: Output,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub arguments: Vec<Argument>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operation: Option<String>,
 }
 
 /// A tool listed by the run's Cairn MCP server. Input is checked against the schema.
@@ -146,6 +163,8 @@ pub struct Tool {
     pub name: String,
     pub description: String,
     pub input_schema: Value,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operation: Option<String>,
 }
 
 /// Agents the owner grants on each instance may run the package's commands and tools.
@@ -219,6 +238,13 @@ pub struct Manifest {
     /// guidance while the owner edits an instance, and checks it before it is saved.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub instance_form: bool,
+    /// Public endpoints. The host verifies the original bytes before invoking `webhook`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub webhooks: Vec<Webhook>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub resources: Vec<ResourceCollection>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub operations: Vec<Operation>,
 }
 
 pub(crate) fn slug(value: &str, max: usize) -> bool {
@@ -330,6 +356,9 @@ impl Manifest {
             return Err("Plugin manifest has an invalid credential rule.");
         }
         validate_settings_schema(&self.settings)?;
+        webhooks::validate(self)?;
+        resources::validate(self)?;
+        operations::validate(self)?;
         if let Some(instances) = &self.instances
             && [&instances.singular, &instances.plural]
                 .iter()

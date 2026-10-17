@@ -29,6 +29,9 @@
 --   form              the owner edits an instance (instanceForm)
 --                     { values, credential, secrets, instance?, changed?, submit }
 --                     -> FormResult; http and exec use the draft's credential and secrets
+--   webhook           a verified signed public POST         {endpoint, method, headers, body, instance}
+--                     -> {status, body: string, headers?: {["content-type"]: string}}
+--                     Original UTF-8 body; 128 KiB input, 64 KiB response, 2.5 s total.
 -- `instances` are those the agent is granted: { id, name, enabled, settings, secrets }
 -- (secret field names only). Pass `instance = id` to capability calls when several.
 -- Each handler runs to completion under a deadline and a 16 MB memory limit.
@@ -46,6 +49,7 @@ export type HttpRequest = {
     -- content-type, accept, user-agent or x-* only.
     headers: { [string]: string }?,
     json: Json?,
+    form: { [string]: string }?, -- URL encoded text fields, exclusive with other body types
     body: string?,
     -- multipart/form-data: a JSON part plus deliverables of the reply being handled.
     multipart: {
@@ -55,7 +59,7 @@ export type HttpRequest = {
     }?,
     -- true adds the instance's credential using the manifest's "credential" rule; a
     -- table adds a secret field to one header. The script never sees the value.
-    auth: (boolean | { secret: string, header: string?, prefix: string? })?,
+    auth: (boolean | { secret: string, header: string?, prefix: string?, resource: string? })?,
     -- The instance to act for, in commands and tools granted several.
     instance: string?,
 }
@@ -94,6 +98,19 @@ export type Inbound = {
     author: Author,
     context: { [string]: Json }?, -- routing the package needs; kept for requests too
     body: { [string]: Json }?, -- what the person wrote; kept only for allowed people
+}
+
+export type Resource = {
+    id: string,
+    connectionId: string,
+    collection: string,
+    parentId: string?,
+    name: string,
+    enabled: boolean,
+    revision: string,
+    settings: { [string]: Json },
+    secretKeys: { string }, -- names only; auth.resource injects a value in HTTP
+    updatedAt: number,
 }
 
 export type HttpResponse = {
@@ -147,7 +164,16 @@ export type Cairn = {
     },
     -- capability "inbound": Cairn keeps it only if the person is allowed (approval mode
     -- records a request without content). Returns whether it was queued.
-    inbound: { accept: (message: Inbound) -> boolean },
+    inbound: {
+        accept: (message: Inbound) -> boolean,
+        -- Use the precise result before acknowledging external delivery. "busy" is
+        -- temporary; "requested" stores identity/routing only, never message content.
+        deliver: (message: Inbound) -> {status: "accepted" | "duplicate" | "denied" | "requested" | "busy"},
+    },
+    resources: {
+        get: (options: {collection: string, resource: string, instance: string?}) -> Resource,
+        list: (options: {collection: string, cursor: string?, instance: string?}) -> {items: {Resource}, nextCursor: string?},
+    },
     -- With "socket" or "inbound": the state the owner sees, "connecting" or "connected".
     instance: { status: (state: string, message: string?) -> () },
     json: { decode: (text: string) -> Json, encode: (value: Json) -> string },

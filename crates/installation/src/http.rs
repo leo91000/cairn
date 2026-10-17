@@ -322,6 +322,21 @@ fn check_security(
 /// credentials and remain independent of beacon-account availability.
 fn authenticate_installation(request: &Request) -> Result<()> {
     let path = request.uri().path();
+    if let Some(bound) = request
+        .extensions()
+        .get::<InstallationIdentity>()
+        .and_then(|identity| identity.public_webhook.as_ref())
+    {
+        if bound == path
+            && crate::plugins::webhooks::public_path(path)
+            && request.method() == "POST"
+        {
+            return Ok(());
+        }
+        return Err(Error::forbidden(
+            "This public request only permits its signed plugin endpoint.",
+        ));
+    }
     let machine = path == "/health"
         || path == "/internal/deployment-lease"
         || path.starts_with("/internal/nodes/")
@@ -330,6 +345,7 @@ fn authenticate_installation(request: &Request) -> Result<()> {
         || path.starts_with("/internal/execution/")
         || path == "/mcp-workspace"
         || path == "/plugin-command"
+        || crate::plugins::webhooks::public_path(path)
         || path == "/mcp-installation"
         || path.starts_with("/mcp-gateway/");
     if machine {
@@ -603,6 +619,9 @@ async fn raw_route(app: &App, path: &str, request: Request) -> Result<Route> {
         }
         ["", "api", "shared-artifacts", token] => {
             crate::artifacts::sharing::http(s, token, request).await?
+        }
+        ["", "api", "plugin-webhooks", instance, endpoint] => {
+            crate::plugins::webhooks::http(s, instance, endpoint, request).await?
         }
         ["", "api", "runs", run, rest @ ..] => {
             let active = (*run).to_owned();
