@@ -1793,14 +1793,43 @@ async fn controller_capacity_rejection_waits_and_retries_without_an_agent_sessio
         // recovery budget intended for interrupted native agent sessions.
         fixture.stop(false).await;
         fixture.start().await;
-        eventually(
-            Duration::from_secs(20),
-            Duration::from_millis(30),
-            async || (rejections.load(Ordering::SeqCst) >= 5).then_some(()),
-        )
-        .await;
+        let previous_rejections = rejections.load(Ordering::SeqCst);
+        tokio::time::sleep(Duration::from_millis(1200)).await;
+        assert_eq!(
+            rejections.load(Ordering::SeqCst),
+            previous_rejections,
+            "Capacity wait must survive restart without relaunching immediately"
+        );
+        for _ in 0..4 {
+            fixture.stop(false).await;
+            let mut saved = fixture.checkpoint(run_id).await;
+            saved["capacityRetryAt"] = (cairn_installation::config::now() - 1).into();
+            s.store
+                .set(&format!("run-checkpoint:{run_id}"), saved, None)
+                .await
+                .unwrap();
+            let previous = rejections.load(Ordering::SeqCst);
+            fixture.start().await;
+            eventually(
+                Duration::from_secs(10),
+                Duration::from_millis(30),
+                async || (rejections.load(Ordering::SeqCst) > previous).then_some(()),
+            )
+            .await;
+            fixture
+                .until(run_id, |run| run["status"] == RunStatus::Queued)
+                .await;
+        }
         assert!(controller.plans.lock().await.is_empty());
+        fixture.stop(false).await;
+        let mut saved = fixture.checkpoint(run_id).await;
+        saved["capacityRetryAt"] = (cairn_installation::config::now() - 1).into();
+        s.store
+            .set(&format!("run-checkpoint:{run_id}"), saved, None)
+            .await
+            .unwrap();
         busy.store(false, Ordering::SeqCst);
+        fixture.start().await;
         let completed = fixture.until_finished(run_id).await;
         assert_eq!(completed["status"], RunStatus::Succeeded, "{completed}");
         assert_eq!(completed["workspace"], workspace);

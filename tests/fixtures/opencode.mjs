@@ -14,6 +14,12 @@ if (process.argv.includes('--version')) {
 async function main() {
   const root = path.join(process.env.XDG_DATA_HOME, 'opencode')
   await mkdir(root, { recursive: true })
+  if (JSON.parse(process.env.OPENCODE_CONFIG_CONTENT || '{}').fixtureStartupHang) {
+    await writeFile(path.join(root, 'startup.pid'), `${process.pid}`)
+    setInterval(() => {}, 1000)
+    return
+  }
+
   const file = path.join(root, 'fixture-sessions.json')
   const sessions = JSON.parse(await readFile(file, 'utf8').catch(() => '{}'))
   const streams = new Set()
@@ -172,6 +178,28 @@ async function main() {
 
     if (body.includes('fixture:opencode-error')) {
       emit('session.error', { sessionID: session.id, error: { name: 'APIError', data: { statusCode: 401, message: 'Sensitive provider detail' } } })
+      return
+    }
+
+    if (body.includes('fixture:opencode-region') || body.includes('fixture:opencode-unknown-error')) {
+      const message = body.includes('fixture:opencode-region')
+        ? 'Upstream request failed: This Go model requires Global regions. Select Global in your workspace\'s Privacy settings to use it.'
+        : 'Sensitive provider detail'
+      const failed = {
+        info: {
+          id: id('msg'),
+          sessionID: session.id,
+          parentID: input.messageID,
+          role: 'assistant',
+          error: { name: 'APIError', data: { statusCode: 400, message, responseBody: 'Sensitive provider detail' } },
+          time: { created: Date.now(), completed: Date.now() },
+        },
+        parts: [],
+      }
+      session.messages.push(failed)
+      await persist()
+      emit('message.updated', { info: failed.info })
+      emit('session.error', { sessionID: session.id, error: failed.info.error })
       return
     }
 

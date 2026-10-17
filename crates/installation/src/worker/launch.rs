@@ -186,7 +186,9 @@ impl Execution<'_> {
 
     async fn mark_running(&mut self) -> Result<()> {
         let s = self.s;
-        self.checkpoint.persist().await?;
+        self.checkpoint
+            .update(|state| state.capacity_retry_at = None)
+            .await?;
         let account_name = match self.account.as_ref() {
             Some(account) => s.accounts.get(s, &account.account_id).await?["name"].clone(),
             None => Value::Null,

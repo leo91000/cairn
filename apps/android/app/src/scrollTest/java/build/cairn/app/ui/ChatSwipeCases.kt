@@ -13,6 +13,10 @@ import androidx.lifecycle.ViewModelStore
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.test.core.app.ApplicationProvider
 import build.cairn.app.data.*
+import build.cairn.app.diagnostics.PerfOperation
+import build.cairn.app.diagnostics.PerfScreen
+import build.cairn.app.diagnostics.Performance
+import build.cairn.app.diagnostics.UploadCadence
 import java.io.File
 import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.flow.first
@@ -42,7 +46,12 @@ abstract class ChatSwipeCases {
 
     @Test
     fun automaticPerformanceSharingUsesBeaconWithoutConversationContent() = withChats {
+        // Another UI instance may already have consumed the process-wide interval.
+        Performance.uploadCadence.tryAcquire()
         open("Chat récent")
+        compose.runOnIdle {
+            Performance.store.timing(PerfOperation.MARKDOWN, PerfScreen.CHAT, 1_000_000, true)
+        }
         compose.waitUntil(20_000) { telemetryReports.isNotEmpty() }
         val text = telemetryReports.single()
         val report = wireJson.parseToJsonElement(text).jsonObject
@@ -442,6 +451,7 @@ abstract class ChatSwipeCases {
                 )
             this.vm = vm
             val models = ViewModelStore().apply { put("fixture", vm) }
+            val uploadCadence = UploadCadence()
             var mounted by mutableStateOf(true)
             try {
                 restoration.setContent {
@@ -451,14 +461,18 @@ abstract class ChatSwipeCases {
                             vm.state.first { it.ready }
                             vm.connect(server.url("/").toString())
                         }
-                        CairnTheme {
-                            CairnApp(
-                                vm = vm,
-                                targetChat = incomingChat,
-                                targetCacheScope =
-                                    if (state.installation != null) vm.api.cacheScope else "",
-                                consumedTarget = { incomingChat = "" },
-                            )
+                        CompositionLocalProvider(
+                            LocalPerformanceUploadCadence provides uploadCadence
+                        ) {
+                            CairnTheme {
+                                CairnApp(
+                                    vm = vm,
+                                    targetChat = incomingChat,
+                                    targetCacheScope =
+                                        if (state.installation != null) vm.api.cacheScope else "",
+                                    consumedTarget = { incomingChat = "" },
+                                )
+                            }
                         }
                     }
                 }

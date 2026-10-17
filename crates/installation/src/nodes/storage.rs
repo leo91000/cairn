@@ -49,7 +49,7 @@ pub async fn monitor(s: Arc<Service>) {
         }
         // Cache pressure is retried on the next tick.
         let _ = super::publication::maintain_local_cache(&s).await;
-        let Ok(runs) = s.store.read(|db| db.active()).await else {
+        let Ok(runs) = s.store.read(monitored_runs).await else {
             continue;
         };
         for run in runs
@@ -60,6 +60,37 @@ pub async fn monitor(s: Arc<Service>) {
             let _ = refresh(&s, run).await;
         }
     }
+}
+
+/// Retained VMs can write filesystem metadata after the completed-turn boundary.
+/// Their journals still pin physical slots even when the last published status was clean.
+fn monitored_runs(db: &mut Db<'_>) -> Result<Vec<Value>> {
+    let mut runs = db.active()?;
+    let mut seen: std::collections::HashSet<String> =
+        runs.iter().map(|run| text(run, "id").to_owned()).collect();
+    for node in db.list("nodes")? {
+        if node["revoked"] == true {
+            continue;
+        }
+        for id in node["retainedRuns"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .take(2)
+            .filter_map(Value::as_str)
+        {
+            if seen.contains(id) {
+                continue;
+            }
+            if let Some(run) = db.run(id)?
+                && super::owner_node(&run) == text(&node, "id")
+            {
+                seen.insert(id.to_owned());
+                runs.push(run);
+            }
+        }
+    }
+    Ok(runs)
 }
 
 /// Records the node's journal status, and the publication it has acknowledged.

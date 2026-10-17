@@ -475,9 +475,13 @@ internal fun ChatPage(
     val currentProvider = chat?.run?.snapshot?.agent?.provider ?: selectedAgent?.provider ?: "codex"
     val chosenProvider = provider.ifBlank { currentProvider }
     val switchingProvider = chat?.run != null && chosenProvider != currentProvider
-    val inheritAgentModel = chosenProvider == (selectedAgent?.provider ?: "codex")
-    val defaultModel = if (inheritAgentModel) selectedAgent?.model.orEmpty() else ""
-    val defaultReasoning = if (inheritAgentModel) selectedAgent?.reasoning.orEmpty() else ""
+    val conversationAssistant = chat?.run?.snapshot?.agent
+    val inheritConversation = chosenProvider == conversationAssistant?.provider
+    val inheritedAssistant =
+        if (inheritConversation) conversationAssistant
+        else selectedAgent?.takeIf { it.provider == chosenProvider }
+    val defaultModel = inheritedAssistant?.model.orEmpty()
+    val defaultReasoning = inheritedAssistant?.reasoning.orEmpty()
     fun chooseProvider(value: String) {
         provider = value
         model = ""
@@ -568,12 +572,16 @@ internal fun ChatPage(
                     if (it.attachment.id == uploaded.id) it.copy(attachment = uploaded) else it
                 }
             }
+            val selectedModel = model.ifBlank { defaultModel }
+            val selectedReasoning = reasoning.ifBlank {
+                if (model.isBlank()) defaultReasoning else ""
+            }
             val content = buildJsonObject {
                 put("text", draft.trim())
                 put("mode", mode)
                 put("provider", chosenProvider)
-                put("model", model)
-                put("reasoning", reasoning)
+                put("model", selectedModel)
+                put("reasoning", selectedReasoning)
                 put(
                     "attachmentIds",
                     wireJson.encodeToJsonElement(attachments.map { it.attachment.id }),
@@ -591,8 +599,8 @@ internal fun ChatPage(
                         submissionId,
                         chatId,
                         draft.trim(),
-                        model,
-                        reasoning,
+                        selectedModel,
+                        selectedReasoning,
                         mode,
                         "sending",
                         System.currentTimeMillis(),
@@ -927,7 +935,14 @@ internal fun ChatPage(
                             )
                         }
                     }
-                if (error != null && !errorDismissed)
+                if (error != null && !errorDismissed && isOpenCodePrivacyError(error))
+                    OpenCodePrivacyNotice(
+                        enabled = !state.busy,
+                        retry = { chat?.let { setPaused(it, false) } },
+                        create = create,
+                        dismiss = { errorDismissed = true },
+                    )
+                else if (error != null && !errorDismissed)
                     Row(
                         Modifier.fillMaxWidth().padding(start = 20.dp, end = 8.dp),
                         verticalAlignment = Alignment.CenterVertically,
@@ -1395,7 +1410,8 @@ internal fun ChatPage(
                                                 reasoning,
                                                 defaultModel,
                                                 defaultReasoning,
-                                                inherit = inheritAgentModel,
+                                                inherit = inheritedAssistant != null,
+                                                conversationDefault = inheritConversation,
                                                 enabled = !state.busy,
                                                 refresh = { vm.refreshModels(chosenProvider) },
                                                 provider = chosenProvider,
