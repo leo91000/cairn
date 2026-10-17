@@ -312,6 +312,29 @@ internal fun presentActivity(event: RunEvent): ActivityPresentation {
                     },
                 subtitle = item.string("server"),
             )
+        // Codex's other subagent tools; spawning, waiting and listing fold into the subagents.
+        "collab_tool_call" ->
+            base.copy(
+                kind = ActivityKind.TOOL,
+                title =
+                    mapOf(
+                        "sendInput" to "Instructions envoyées à un sous-agent",
+                        "sendMessage" to "Message envoyé à un sous-agent",
+                        "followupTask" to "Nouvelle tâche confiée à un sous-agent",
+                        "resumeAgent" to "Sous-agent relancé",
+                        "interruptAgent" to "Sous-agent interrompu",
+                        "closeAgent" to "Sous-agent fermé",
+                    )[item.string("tool")] ?: "Échange avec un sous-agent",
+                subtitle = item.string("prompt").lineSequence().first(),
+                output = item.string("prompt"),
+            )
+        // Its subagent is outside the loaded history.
+        "subagent_message" ->
+            base.copy(
+                kind = ActivityKind.TOOL,
+                title = "Message d’un sous-agent",
+                output = item.string("text"),
+            )
         else -> {
             // Statuses keep their text as the title; a payload only adds metadata.
             val plain =

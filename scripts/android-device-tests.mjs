@@ -10,6 +10,7 @@ import path from 'node:path'
 import process from 'node:process'
 import { createInterface } from 'node:readline'
 import { promisify } from 'node:util'
+import { waitForDeviceReady } from './android-device-ready.mjs'
 
 const exec = promisify(execFile)
 
@@ -174,7 +175,7 @@ function adb(args, options = {}) {
   return exec(binary, args, { maxBuffer: 64 * 1024 * 1024, encoding: options.encoding ?? 'utf8', timeout: options.timeout ?? 120000 })
 }
 
-function instrument(args, onLine) {
+export function instrument(args, onLine) {
   const binary = process.env.ANDROID_HOME ? path.join(process.env.ANDROID_HOME, 'platform-tools/adb') : 'adb'
   const child = spawn(binary, ['shell', 'am', 'instrument', '-r', '-w', ...args, runner], { stdio: ['ignore', 'pipe', 'inherit'] })
   const lines = []
@@ -320,6 +321,8 @@ async function run(options) {
   await adb(['install', '-r', '-t', '-g', options.apk], { timeout: 300000 })
   await adb(['install', '-r', '-t', '-g', options.testApk], { timeout: 300000 })
   console.log(`Installed both APKs in ${((Date.now() - installStarted) / 1000).toFixed(1)}s`)
+
+  await waitForDeviceReady({ adb, output: path.join(options.output, 'readiness.json') })
 
   const all = await listTests(options)
   const timings = options.timings ? JSON.parse(await readFile(options.timings, 'utf8')) : {}

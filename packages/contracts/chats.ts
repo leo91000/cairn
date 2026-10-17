@@ -40,6 +40,9 @@ export interface ChatWakeup {
     headSha: string
   }
   observation?: Record<string, unknown> | null
+  /** GitHub conditions: when Cairn checks again, and why its last check failed. */
+  nextCheckAt?: number
+  lastError?: string
   id: string
   messageId: string
   reason: string
@@ -86,6 +89,12 @@ export interface ChatView extends Chat {
   agentName: string
   projectName: string | null
   status: Run['status'] | 'idle'
+  /** When the agent's latest turn ended. */
+  finishedAt?: number | null
+  /** The agent finished a turn the signed-in account has not opened since. */
+  unread?: boolean
+  /** The opening of the agent's final message, while unread. */
+  preview?: string | null
 }
 export interface ChatDetail extends ChatView {
   questions: ChatQuestion[]

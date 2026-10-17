@@ -58,6 +58,13 @@ const html = computed(() => {
     code.innerHTML = highlight(code.textContent || '', language)
   }
 
+  for (const table of container.querySelectorAll('table')) {
+    const scroll = document.createElement('div')
+    scroll.className = 'markdown-table'
+    table.replaceWith(scroll)
+    scroll.append(table)
+  }
+
   if (props.compactLinks) {
     // Reports often contain bare artifact paths. Link only this known route,
     // leaving existing links and code untouched, and retain the viewer handler.

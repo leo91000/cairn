@@ -29,15 +29,17 @@ class HistoryCacheMeasurementTest {
             }
         val process =
             ManagementFactory.getOperatingSystemMXBean() as com.sun.management.OperatingSystemMXBean
-        for (count in listOf(200, 1250)) {
-            val root = directory.newFolder("events-$count")
+        for ((count, scoped) in listOf(200 to false, 1250 to false, 1250 to true)) {
+            val root = directory.newFolder("events-$count-$scoped")
             fun cache() = HistoryCache(root, { _, bytes -> bytes }, { _, bytes -> bytes })
             val value =
                 CachedHistory(
                     1250,
                     "v1:measurement:1",
                     LiveState(),
-                    events.takeLast(count),
+                    events.takeLast(count).map {
+                        if (scoped) it.copy(runId = "12345678-1234-1234-1234-123456789abc") else it
+                    },
                     oldest = events.takeLast(count).first().id,
                     hasOlder = count < 1250,
                 )
@@ -58,7 +60,7 @@ class HistoryCacheMeasurementTest {
             val cold = median { cache().read("measurement") }
             assertEquals(count, cache().read("measurement")!!.events.size)
             println(
-                "HISTORY_CACHE events=$count bytes=${root.resolve("measurement").length()} writeMs=$write warmMs=$warm coldMs=$cold processCpuMs=${(process.processCpuTime - cpu) / 1_000_000.0}"
+                "HISTORY_CACHE events=$count scoped=$scoped bytes=${root.resolve("measurement").length()} writeMs=$write warmMs=$warm coldMs=$cold processCpuMs=${(process.processCpuTime - cpu) / 1_000_000.0}"
             )
         }
     }

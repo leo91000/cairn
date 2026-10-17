@@ -1,6 +1,7 @@
 import { readFile, writeFile } from 'node:fs/promises'
 import path from 'node:path'
 import process from 'node:process'
+import { smokeProbe } from './android-release-smoke.mjs'
 import { updateManifest } from './android-release.mjs'
 
 export const artifactName = 'validated-android-release'
@@ -35,10 +36,20 @@ async function buildManifest(directory, tag) {
   return updateManifest(tag || `v${metadata.elements[0].versionName}`, apk, metadata)
 }
 
+function verifySmokeEvidence(smoke, digest) {
+  if (smoke?.probe !== smokeProbe || smoke.sha256 !== digest
+    || !/^\d+$/.test(smoke.api) || !smoke.abi) {
+    throw new Error('Missing or mismatched release WebRTC smoke evidence')
+  }
+
+  return smoke
+}
+
 export async function recordBuild(directory, config) {
   const manifest = await buildManifest(directory, config.tag)
   const evidence = {
-    schema: 1,
+    schema: 2,
+    releaseSmoke: verifySmokeEvidence(JSON.parse(await readFile(path.join(directory, 'release-smoke.json'), 'utf8')), manifest.sha256),
     beaconOrigin: fixedOrigin(config.beaconOrigin),
     firebaseConfiguration: firebaseBuildConfiguration(config.firebaseConfiguration),
     repository: config.repository.toLowerCase(),
@@ -60,12 +71,14 @@ export async function verifyBuild(directory, config) {
   const evidence = JSON.parse(await readFile(path.join(directory, 'validation.json'), 'utf8'))
   const manifest = await buildManifest(directory, config.tag)
   if (JSON.stringify(evidence.firebaseConfiguration) !== JSON.stringify(firebaseBuildConfiguration(config.firebaseConfiguration))
-    || evidence.schema !== 1 || evidence.beaconOrigin !== beaconOrigin || evidence.repository !== config.repository.toLowerCase()
+    || evidence.schema !== 2 || evidence.beaconOrigin !== beaconOrigin || evidence.repository !== config.repository.toLowerCase()
     || evidence.commit !== config.commit || evidence.runId !== config.runId
     || evidence.versionName !== manifest.versionName || evidence.versionCode !== manifest.versionCode
     || evidence.sha256 !== manifest.sha256 || evidence.size !== manifest.size) {
     throw new Error('Android build evidence does not match this release')
   }
+
+  verifySmokeEvidence(evidence.releaseSmoke, manifest.sha256)
 
   return evidence
 }

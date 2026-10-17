@@ -63,6 +63,7 @@ class CacheMissReproductionTest {
                         n.toLong(),
                         "chat.user",
                         if (n == 40) "Message témoin" else "Message %03d".format(n),
+                        runId = "fixture",
                     )
                 val accepted = if (paged) 40 else 2
                 val events =
@@ -85,8 +86,9 @@ class CacheMissReproductionTest {
                                             put("exit_code", 0)
                                         }
                                 ),
+                                runId = "fixture",
                             ),
-                            RunEvent(2, 2, "chat.user", "Message témoin"),
+                            RunEvent(2, 2, "chat.user", "Message témoin", runId = "fixture"),
                         )
                 val batch =
                     wireJson.encodeToString(

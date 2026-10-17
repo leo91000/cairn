@@ -42,6 +42,7 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import build.cairn.app.data.RunEvent
 import kotlinx.coroutines.delay
+import kotlinx.serialization.json.JsonPrimitive
 
 /**
  * What the working indicator says: the step in progress, or the last one reached. [waiting] lists
@@ -52,17 +53,25 @@ internal data class WorkingStep(
     val detail: String,
     val since: Long?,
     val waiting: List<String>? = null,
+    /** The agent only waits for its subagents. */
+    val subagents: Boolean = false,
 )
 
 /** The background tasks an idle agent waits for, and when it announced them. */
 internal data class BackgroundWait(val tasks: List<String>, val since: Long)
 
-/** Events that show the agent active again after it announced a background wait. */
-private fun RunEvent.resumesWork() =
-    type == "chat.user" ||
+/**
+ * Events that show the agent active again after it announced a background wait. Its subagents
+ * working in the background are what it waits for.
+ */
+private fun RunEvent.resumesWork(): Boolean {
+    val item = item()
+    val subagent = item.string("type") == "subagent" || item?.get("parent_id") is JsonPrimitive
+    return type == "chat.user" ||
         type == "thread.started" ||
         type.startsWith("turn.") ||
-        type.startsWith("item.")
+        (type.startsWith("item.") && !subagent)
+}
 
 /**
  * The background tasks the agent waits for, when its latest announcement still holds: the agent
@@ -111,14 +120,26 @@ internal fun workingStep(events: List<RunEvent>, agent: String, fallbackStart: L
     val turnStart = events.indexOfLast { it.type == "chat.user" }
     val turn = if (turnStart >= 0) events.drop(turnStart + 1) else events
     val since = events.getOrNull(turnStart)?.createdAt?.takeIf { it > 0 } ?: fallbackStart
-    val latest =
-        turn
-            .asReversed()
-            .asSequence()
-            .filter { !it.isMessage() }
-            .map(::presentActivity)
-            .firstOrNull { it.kind != ActivityKind.NOTICE }
+    // Subagent steps belong to their subagent; the agent's own latest step decides.
+    val subagents = subagentTimeline(events)
+    val latestEvent = turn.lastOrNull {
+        !it.isMessage() &&
+            (it.id in subagents.anchors ||
+                (it.id !in subagents.captured && presentActivity(it).kind != ActivityKind.NOTICE))
+    }
+    val working =
+        turn.mapNotNull { subagents.anchors[it.id] }.filter { it.state == SubagentState.RUNNING }
     val name = agent.ifBlank { "L’agent" }
+    if (latestEvent != null && latestEvent.id in subagents.anchors && working.isNotEmpty())
+        return WorkingStep(
+            if (working.size == 1) "En attente d’un sous-agent"
+            else "En attente de ${working.size} sous-agents",
+            working.joinToString(" · ") { it.name },
+            since,
+            subagents = true,
+        )
+
+    val latest = latestEvent?.let(::presentActivity)
     return when {
         latest == null -> WorkingStep("$name travaille", "", since)
         latest.state == "En cours" && !latest.failed ->

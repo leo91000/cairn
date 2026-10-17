@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto'
 import {
   mkdtemp,
   readFile,
@@ -13,6 +14,7 @@ import {
   it,
 } from 'vitest'
 import { artifactName, recordBuild, verifyBuild } from '../android-build.mjs'
+import { smokeProbe } from '../android-release-smoke.mjs'
 import { androidVersion } from '../android-release.mjs'
 import { AndroidValidationPendingError, resolveAndroidRelease, trustedAndroidRun } from '../resolve-android-release.mjs'
 
@@ -41,6 +43,12 @@ async function fixture(directory, context = config) {
     applicationId: 'build.cairn.app',
     elements: [{ ...androidVersion(context.tag), outputFile: 'app-release-unsigned.apk' }],
   }))
+  await writeFile(path.join(directory, 'release-smoke.json'), JSON.stringify({
+    probe: smokeProbe,
+    sha256: createHash('sha256').update('compiled APK bytes').digest('hex'),
+    api: '36',
+    abi: 'x86_64',
+  }))
   return recordBuild(directory, context)
 }
 
@@ -56,6 +64,21 @@ afterEach(async () => {
 })
 
 describe('validated Android build reuse', () => {
+  it('requires smoke evidence for the exact unsigned APK and rejects legacy or missing validation', async () => {
+    const directory = await temporaryBuild()
+    const evidencePath = path.join(directory, 'validation.json')
+    const evidence = JSON.parse(await readFile(evidencePath, 'utf8'))
+    for (const releaseSmoke of [undefined, { ...evidence.releaseSmoke, sha256: 'b'.repeat(64) }, { ...evidence.releaseSmoke, probe: 'dex-only' }]) {
+      await writeFile(evidencePath, JSON.stringify({ ...evidence, releaseSmoke }))
+      await expect(verifyBuild(directory, config)).rejects.toThrow('smoke evidence')
+    }
+
+    await writeFile(path.join(directory, 'release-smoke.json'), JSON.stringify({ ...evidence.releaseSmoke, sha256: 'b'.repeat(64) }))
+    await expect(recordBuild(directory, config)).rejects.toThrow('smoke evidence')
+    await rm(path.join(directory, 'release-smoke.json'))
+    await expect(recordBuild(directory, config)).rejects.toThrow()
+  })
+
   it('binds the compiled APK to its repository, commit, run and release version', async () => {
     const directory = await temporaryBuild()
     expect(await verifyBuild(directory, config)).toMatchObject({ commit: config.commit, runId: 123, versionName: '0.31.0' })
@@ -94,7 +117,7 @@ describe('validated Android build reuse', () => {
     const metadata = JSON.parse(await readFile(metadataPath, 'utf8'))
     await writeFile(metadataPath, JSON.stringify({ ...metadata, applicationId: 'another.app' }))
     await expect(verifyBuild(directory, config)).rejects.toThrow()
-    for (const change of [{ schema: 2 }, { size: 0 }, { sha256: 'b'.repeat(64) }, { versionCode: 1 }]) {
+    for (const change of [{ schema: 1 }, { size: 0 }, { sha256: 'b'.repeat(64) }, { versionCode: 1 }]) {
       const evidence = await fixture(directory)
       await writeFile(path.join(directory, 'validation.json'), JSON.stringify({ ...evidence, ...change }))
       await expect(verifyBuild(directory, config)).rejects.toThrow('evidence')

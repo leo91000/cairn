@@ -207,13 +207,30 @@ than reusing another slot’s network. Disk ownership is protected by an exclusi
 one writable disk cannot be opened by two attempts. Console and execution output
 are bounded independently of the guest disk.
 
-Per-guest firewall rules permit outgoing TCP on all ports to public destinations
-and DNS (UDP 53). SSH works on standard and custom ports; other UDP is blocked.
-They reject private/reserved destinations and access to the controller itself;
-new inbound connections are not forwarded into guests. This allows public SSH
-servers and Git over HTTPS or SSH. The manager is never reached over the network:
-run-scoped MCP uses the vsock channel above. Additional outbound protocols require
-an explicit network-policy change. Firecracker does not
+Per-guest firewall rules permit outgoing TCP and UDP on all ports to public
+IPv4 destinations (including STUN, QUIC and DNS). Before either allow rule, they
+reject spoofed source addresses and private/reserved destinations: unspecified,
+RFC1918, shared-address space, loopback, link-local/metadata, protocol assignments,
+benchmarking, documentation, deprecated 6to4 relay, multicast and reserved space.
+The controller itself is denied on every address by its INPUT fence, including
+its public addresses. IPv6 remains disabled on the runner network.
+
+New UDP traffic shares one token bucket per VM across every destination and port,
+including DNS: **50 packets/second, burst 100**, keyed by the checked source IP in
+a slot-specific `hashlimit` table. Unreplied datagrams remain conntrack `NEW` and
+consume tokens too; excess packets are dropped silently. Replied
+`ESTABLISHED,RELATED` UDP traffic bypasses this new-flow limit. This bounds flow
+creation, not bandwidth or the packet rate of established exchanges. Table expiry
+is 10 seconds, longer than the two seconds needed to refill a depleted bucket;
+teardown removes the slot's rules and bucket. A missing `hashlimit` module fails
+VM network creation instead of opening unrestricted UDP.
+
+Only conntrack `ESTABLISHED,RELATED` replies addressed to the guest are forwarded
+back. A separate inbound DROP applies even with a permissive host FORWARD policy;
+other VM taps cannot use the reply exception. Public SSH and Git over HTTPS or SSH
+remain available. The manager is never reached over the network: run-scoped MCP
+uses the vsock channel above. See [the public UDP decision](adr/0044-public-outbound-udp.md).
+Firecracker does not
 remove the need to patch host kernel, firmware, guest kernel and the VMM; follow
 upstream production guidance.
 
@@ -248,6 +265,18 @@ and `pnpm check`. The real KVM test runs with `node tests/runner-smoke.mjs IMAGE
 the Docker host. It uses synthetic credentials and temporary storage to exercise
 kernel isolation, the authentication relay, a `cairn_workspace` call through the
 MCP channel, live steering, Docker and disk reuse.
+The runner smoke also executes `tests/fixtures/vm-udp-policy.py` in a real guest:
+a public STUN Binding Success Response with matching transaction and mapped address,
+all denied IPv4 ranges and both gateway/public controller addresses, a spoofed
+source, routed unsolicited UDP with FORWARD set to ACCEPT, and a 1,000-tuple burst
+to an isolated peer. It records actual firewall counters, confirms drops beyond
+the 100-token burst, continued established replies, and refill for new traffic.
+The peer's synthetic public subnet is internal to Docker and has no external
+routing; the burst never targets an Internet server. The STUN probe does use the
+Internet (`stun.l.google.com:19302`), so qualification requires outer-host UDP
+access too. `CAIRN_UDP_ONLY=1 node tests/runner-smoke.mjs IMAGE` runs only this
+network qualification and its fixture setup. Unit tests alone are not KVM evidence.
+
 Use `VM_TEST_ROOT=/var/tmp` when `/tmp` is a small memory filesystem.
 
 The September 11 hardware check on the production VPS completed the first probe,

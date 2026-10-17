@@ -1,7 +1,7 @@
 import type { ChatDetail, ChatMessage } from '../../../packages/contracts/chats'
 import type { Run, RunEvent } from '../../../packages/contracts/contracts'
 import { describe, expect, it } from 'vitest'
-import { chatDelivery, chatSleepNotice, chatWaitNotice } from '../src/chat-delivery'
+import { chatDelivery, chatWaitNotice, scheduledWakeup } from '../src/chat-delivery'
 
 function message(id: string, overrides: Partial<ChatMessage> = {}): ChatMessage {
   return {
@@ -49,17 +49,13 @@ describe('chat delivery presentation', () => {
       createdAt: 1,
       wakeAt: 420001,
     }
-    expect(chatSleepNotice(detail)?.message).toContain('Wait for CI · Automatic resume from')
-    expect(chatSleepNotice(detail)?.account).toBeNull()
-    detail.wakeup.condition = { type: 'run_finished', runId: 'target' }
-    expect(chatSleepNotice(detail)?.message).toContain('when a result is available or the wait deadline')
-    expect(chatSleepNotice(detail)?.message).not.toContain('Automatic resume from')
+    expect(scheduledWakeup(detail)).toBe(detail.wakeup)
     expect(chatDelivery(detail, []).sending).toEqual([])
     for (const status of ['running', 'queued', 'failed'] as const)
-      expect(chatSleepNotice({ ...detail, run: { ...detail.run!, status } })).toBeNull()
-    expect(chatSleepNotice({ ...detail, paused: true })).toBeNull()
-    expect(chatSleepNotice({ ...detail, lifecycle: 'trash' })).toBeNull()
-    expect(chatSleepNotice({ ...detail, wakeup: null })).toBeNull()
+      expect(scheduledWakeup({ ...detail, run: { ...detail.run!, status } })).toBeNull()
+    expect(scheduledWakeup({ ...detail, paused: true })).toBeNull()
+    expect(scheduledWakeup({ ...detail, lifecycle: 'trash' })).toBeNull()
+    expect(scheduledWakeup({ ...detail, wakeup: null })).toBeNull()
   })
   it('explains a required Claude reconnection without claiming the queued agent has started', () => {
     const detail = chat([message('first', { status: 'sending' })], {

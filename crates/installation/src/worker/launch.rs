@@ -436,9 +436,6 @@ impl Execution<'_> {
         drop(auth_broker);
         drop(mcp_channel);
         self.checkpoint.update(|c| c.process = Some(None)).await?;
-        if workspace.isolated() {
-            recovery::fence(s, &s.store.run(&self.id).await?).await?;
-        }
         let saved = self.checkpoint.snapshot().await;
         if s.shutdown.is_cancelled() && !self.cancel.is_cancelled() && !saved.completed() {
             return Err(Error::conflict("Worker is restarting"));
@@ -474,6 +471,12 @@ impl Execution<'_> {
             return Err(Error::unavailable(
                 "VM controller failed while running this attempt. The saved conversation and workspace have been preserved.",
             ));
+        }
+
+        // Preserve the controller's outcome before cleanup can fail. Failed
+        // attempts are fenced by execution::execute before release or recovery.
+        if workspace.isolated() {
+            recovery::fence(s, &s.store.run(&self.id).await?).await?;
         }
 
         if let Some(session) = session.as_ref()

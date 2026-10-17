@@ -8,6 +8,10 @@
   Distinguish local measurements from production network latency.
 - For persisted-format changes or releases, follow the reviewed compatibility
   contract in [production releases](docs/PRODUCTION-CAIRN.md#installation-data-compatibility).
+- Keep the web and Android apps at feature parity: a user-facing feature added or changed in
+  `apps/web` ships in `apps/android` in the same change, and vice versa. Use native
+  presentation, and record the feature and any platform difference in
+  [web parity](apps/android/docs/WEB-PARITY.md).
 - Separate logical steps with blank lines. Give complex expressions descriptive
   intermediate names when that makes the flow easier to follow. Avoid arbitrary
   function-size limits or extracting helpers solely to reduce line counts.
