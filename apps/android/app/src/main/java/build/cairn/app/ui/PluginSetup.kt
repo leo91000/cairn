@@ -29,6 +29,7 @@ internal fun PluginSetup(
     changed: suspend () -> Unit,
     activated: suspend () -> Unit,
 ) {
+    var resources by remember(initial.id) { mutableStateOf(PluginResourceActivity()) }
     var draft by remember(initial.id) { mutableStateOf(initial) }
     var name by remember(initial.id) { mutableStateOf(initial.name) }
     var values by
@@ -56,6 +57,7 @@ internal fun PluginSetup(
             token.isNotBlank() ||
             secrets.values.any { it.isNotBlank() }
     val available = draft.status == "setup" && !expired
+    val resourceWork = resources.busy || resources.pending || resources.editing
     fun refresh(changed: String? = null) {
         if (manifest.instanceForm) {
             changedField = changed
@@ -146,7 +148,12 @@ internal fun PluginSetup(
                     FormError(
                         "Cette configuration a expiré ou le package doit être approuvé. Fermez-la puis actualisez le plugin."
                     )
-                Field("Nom", name, { name = it }, enabled = !state.busy && available)
+                Field(
+                    "Nom",
+                    name,
+                    { name = it },
+                    enabled = !state.busy && !resourceWork && available,
+                )
                 manifest.credential?.let { credential ->
                     OutlinedTextField(
                         token,
@@ -163,7 +170,12 @@ internal fun PluginSetup(
                         visualTransformation = PasswordVisualTransformation(),
                         keyboardOptions = InputKeyboards.Password,
                         singleLine = true,
-                        enabled = !state.busy && available,
+                        enabled =
+                            !state.busy &&
+                                !resources.busy &&
+                                !resources.pending &&
+                                !resources.editing &&
+                                available,
                         placeholder = {
                             if (draft.credential) Text("Enregistré · laissez vide pour le garder")
                         },
@@ -182,7 +194,7 @@ internal fun PluginSetup(
                         refresh()
                     },
                     draft.secretKeys,
-                    enabled = !state.busy && available,
+                    enabled = !state.busy && !resourceWork && available,
                     options = completion?.options.orEmpty(),
                     errors = completion?.errors.orEmpty(),
                     refresh = { refresh(it) },
@@ -194,7 +206,12 @@ internal fun PluginSetup(
                 }
                 SignalButton(
                     "Enregistrer la configuration",
-                    enabled = !state.busy && !completing && available && name.isNotBlank(),
+                    enabled =
+                        !state.busy &&
+                            !resourceWork &&
+                            !completing &&
+                            available &&
+                            name.isNotBlank(),
                 ) {
                     vm.perform {
                         draft =
@@ -244,6 +261,7 @@ internal fun PluginSetup(
                         manifest,
                         PluginResourceLocation(initial.pluginId, draft.id, draft.revision),
                         enabled = available && !dirty && !completing && !state.busy,
+                        stateChanged = { resources = it },
                     )
                 if (manifest.agentAccess != null) {
                     Text(
@@ -256,12 +274,18 @@ internal fun PluginSetup(
                     )
                     state.agents.forEach { agent ->
                         Toggle(agent.name, agent.id in granted) { selected ->
-                            if (!state.busy && available)
+                            if (
+                                !state.busy &&
+                                    !resources.busy &&
+                                    !resources.pending &&
+                                    !resources.editing &&
+                                    available
+                            )
                                 granted = if (selected) granted + agent.id else granted - agent.id
                         }
                     }
                 }
-                if (manifest.delegates && !state.busy)
+                if (manifest.delegates && !state.busy && !resourceWork && available)
                     Choice(
                         "Agent des conversations entrantes",
                         agentId,
@@ -275,13 +299,14 @@ internal fun PluginSetup(
                         style = MaterialTheme.typography.bodySmall,
                     )
                 Toggle("Démarrer immédiatement", enabled) {
-                    if (!state.busy && available) enabled = it
+                    if (!state.busy && !resourceWork && available) enabled = it
                 }
                 SignalButton(
                     "Activer l’instance",
                     enabled =
                         available &&
                             !state.busy &&
+                            !resourceWork &&
                             !dirty &&
                             !completing &&
                             (!manifest.instanceForm ||

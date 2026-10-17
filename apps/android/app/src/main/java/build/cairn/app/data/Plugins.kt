@@ -151,6 +151,7 @@ data class PluginOAuthConsent(
     val state: String,
     val url: String,
     val expiresAt: Long,
+    val redirectUri: String? = null,
 )
 
 /** The member directory exposes labels and only the current person's status. */

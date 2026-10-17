@@ -530,3 +530,31 @@ synthetic at the public HTTP boundary; Android shares the same HTTP protocol wit
 an explicit member navigation case. Neither proves a live Slack installation.
 Owner-resource OAuth controls, scoped resource forms, routes/profiles/grants and
 all remaining Slack lots are still required; this checkpoint does not finish Q1–Q20.
+
+## Owner resource authorization interface checkpoint
+
+The generic web and Android resource managers now expose shared owner OAuth for
+both inert setup resources and active instances. Explicit scopes and a consent
+link remain in screen memory. An empty override uses the instance’s configured
+callback (Beacon when no direct origin was configured). The effective callback URL
+is shown before opening provider consent; a direct HTTPS override is available.
+Connecting grants no agent access. Personal providers remain in the separate
+personal-account directory and cannot be connected before activation.
+
+Root saving and activation wait for every resource's writes, editor and pending
+consent. Providers on one resource serialize consent and disconnection because
+they share its revision; providers on different resources remain independent.
+Refreshing retains previously visible resource pages and their open consent
+widgets, including after sibling insertion or deletion. An older pagination
+response cannot overwrite a newer authorization refresh or its resource revision.
+Finished or disconnected authorizations refresh resource metadata and revisions;
+setup mutations carry their exact root revision. Disconnection removes local
+credentials and invalidates pending sign-ins, while provider-side revocation still
+belongs to the remaining OAuth work.
+
+The client journeys use actual setup/resource CRUD and activation in the browser
+with synthetic provider completion at the public HTTP boundary. Shared Compose
+journeys use their HTTP fixture; native OAuth tests independently exercise real
+provider exchanges and setup provenance. This remains an incremental interface
+checkpoint. Routes, profiles/grants, scoped forms, every remaining Slack lot and
+final qualification in the delivery checklist remain required.

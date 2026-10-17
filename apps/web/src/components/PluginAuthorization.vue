@@ -17,8 +17,11 @@ const props = defineProps<{
   scopes: string[]
   initial: PluginOAuthStatus
   enabled: boolean
+  setupRevision?: string
+  directOrigin?: string
+  blocked?: boolean
 }>()
-const emit = defineEmits<{ changed: [] }>()
+const emit = defineEmits<{ changed: [], state: [value: { busy: boolean, pending: boolean }] }>()
 const authorization = ref(props.initial)
 const selected = ref((props.initial.requestedScopes ?? props.initial.scopes ?? []).filter(scope => props.scopes.includes(scope)))
 // Consent state and URL stay in this window's memory; credentials never reach it.
@@ -33,6 +36,9 @@ const connected = computed(() => authorization.value.status === 'authorized')
 const reconnect = computed(() => authorization.value.status === 'reconnect')
 watch(() => props.initial, value => authorization.value = value)
 watch(() => props.scopes, scopes => selected.value = selected.value.filter(scope => scopes.includes(scope)))
+watch(() => [busy.value, disconnecting.value, Boolean(consent.value)], () => {
+  emit('state', { busy: busy.value || disconnecting.value, pending: Boolean(consent.value) })
+}, { immediate: true, flush: 'sync' })
 watch(consent, (value) => {
   clearTimeout(expiry)
   if (value) {
@@ -44,7 +50,7 @@ watch(consent, (value) => {
 })
 
 async function action(operation: () => Promise<void>) {
-  if (busy.value)
+  if (busy.value || props.blocked)
     return
   busy.value = true
   error.value = ''
@@ -65,7 +71,14 @@ async function start() {
   if (!props.enabled || !selected.value.length)
     return
   await action(async () => {
-    const value = await api<PluginOAuthConsent>(props.path, { method: 'POST', body: JSON.stringify({ scopes: selected.value }) })
+    const value = await api<PluginOAuthConsent>(props.path, {
+      method: 'POST',
+      body: JSON.stringify({
+        scopes: selected.value,
+        ...(props.setupRevision && { setupRevision: props.setupRevision }),
+        ...(props.directOrigin?.trim() && { directOrigin: props.directOrigin.trim() }),
+      }),
+    })
     const url = new URL(value.url)
     if (url.protocol !== 'https:' || url.username || url.password)
       throw new Error('The provider returned an invalid authorization link.')
@@ -105,7 +118,10 @@ async function finish() {
 
 async function disconnect() {
   await action(async () => {
-    await api(props.path, { method: 'DELETE' })
+    await api(props.path, {
+      method: 'DELETE',
+      ...(props.setupRevision && { body: JSON.stringify({ setupRevision: props.setupRevision }) }),
+    })
     if (!active)
       return
     consent.value = undefined
@@ -119,6 +135,7 @@ onBeforeUnmount(() => {
   active = false
   clearTimeout(expiry)
   consent.value = undefined
+  emit('state', { busy: false, pending: false })
 })
 </script>
 
@@ -136,7 +153,7 @@ onBeforeUnmount(() => {
     <p v-if="!enabled" class="text-xs text-muted">
       This resource is paused or unavailable. You can still disconnect your saved authorization.
     </p>
-    <fieldset class="grid min-w-0 gap-2" :disabled="busy || !enabled || Boolean(consent)">
+    <fieldset class="grid min-w-0 gap-2" :disabled="busy || blocked || !enabled || Boolean(consent)">
       <legend class="mb-2 text-xs font-semibold">
         Permissions to authorize
       </legend>
@@ -159,17 +176,20 @@ onBeforeUnmount(() => {
         target="_blank"
         rel="noopener noreferrer"
       >Open authorization page</a>
+      <p v-if="consent.redirectUri" class="break-words text-xs text-muted">
+        Callback URL: {{ consent.redirectUri }}
+      </p>
       <p class="text-xs text-muted">
         Return here after authorizing. If you leave this page, start authorization again.
       </p>
-      <UiButton :disabled="busy" @click="finish">
+      <UiButton :disabled="busy || blocked" @click="finish">
         Check authorization
       </UiButton>
     </template>
-    <UiButton v-else :disabled="busy || !enabled || !selected.length" @click="start">
+    <UiButton v-else :disabled="busy || blocked || !enabled || !selected.length" @click="start">
       {{ connected || reconnect ? 'Reconnect' : 'Connect' }}
     </UiButton>
-    <UiButton v-if="consent || authorization.status !== 'disconnected'" :disabled="busy" @click="disconnecting = true">
+    <UiButton v-if="consent || authorization.status !== 'disconnected'" :disabled="busy || blocked" @click="disconnecting = true">
       Disconnect
     </UiButton>
   </div>
@@ -185,7 +205,7 @@ onBeforeUnmount(() => {
         <UiButton :disabled="busy" @click="disconnecting = false">
           Cancel
         </UiButton>
-        <UiButton :disabled="busy" @click="disconnect">
+        <UiButton :disabled="busy || blocked" @click="disconnect">
           Disconnect
         </UiButton>
       </div>

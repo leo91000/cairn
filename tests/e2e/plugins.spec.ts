@@ -540,3 +540,312 @@ test('personal plugin accounts select scopes and complete only their own authori
   await expect(account.getByText('Not connected', { exact: true })).toBeVisible()
   await expect(page.getByRole('button', { name: 'Refresh', exact: true })).toBeEnabled()
 })
+
+test('owner resource OAuth gates setup until every consent settles and remains manageable after activation', async ({ page, workspace }) => {
+  test.setTimeout(90000)
+  await useRelayForHttpMocks(page)
+  const owner = {
+    name: 'owner',
+    title: 'Workspace authorization',
+    collection: 'workspace',
+    authorizationUrl: 'https://provider.example.test/authorize',
+    tokenUrl: 'https://provider.example.test/token',
+    clientId: 'clientId',
+    redirectOriginSetting: 'callbackOrigin',
+    pkce: true,
+    scopes: ['messages:read', 'messages:write'],
+    token: { accessToken: '/access_token', scope: '/scope' },
+    metadata: { externalId: '/team/id' },
+  }
+  const manifest = {
+    id: 'owner-ui',
+    name: 'Owner service',
+    version: '1',
+    apiVersion: 2,
+    description: 'Shared resource consent.',
+    capabilities: ['resources', 'oauth', 'http'],
+    hosts: ['provider.example.test'],
+    settings: [{
+      key: 'clientId',
+      title: 'Client ID',
+      type: 'string',
+      required: true,
+    }, { key: 'callbackOrigin', title: 'Callback origin', type: 'url' }],
+    resources: [{
+      name: 'workspace',
+      title: 'Workspaces',
+      singular: 'Workspace',
+      settings: [{ key: 'externalId', title: 'Workspace ID', type: 'string' }],
+    }],
+    oauth: [owner, {
+      ...owner,
+      name: 'personal',
+      title: 'Personal access',
+      personal: { subject: '/authed_user/id' },
+    }],
+  }
+  const installed = await workspace.api('/api/plugins/packages', 'POST', { manifest, source: 'return {}' })
+  await workspace.api('/api/plugins/packages/owner-ui/approve', 'POST', { version: '1', digest: installed.digest })
+  const draft = await workspace.api('/api/plugins/owner-ui/setup-drafts', 'POST', { name: 'Shared service', settings: { clientId: 'fixture-client', callbackOrigin: 'https://saved.example.test' } })
+  const root = `/plugins/owner-ui/setup-drafts/${draft.id}`
+  const engineering = await workspace.api(`/api${root}/resources/workspace`, 'POST', { setupRevision: draft.revision, name: 'Engineering', settings: { externalId: 'T111' } })
+  const sales = await workspace.api(`/api${root}/resources/workspace`, 'POST', { setupRevision: draft.revision, name: 'Sales', settings: { externalId: 'T222' } })
+  // Two actual resources are exposed as separate HTTP pages to exercise paging
+  // without creating a hundred unrelated authorization widgets in this journey.
+  await page.route('**/plugins/owner-ui/*/*/resources/workspace*', async (route) => {
+    const url = new URL(route.request().url())
+    if (route.request().method() !== 'GET' || !url.pathname.endsWith('/resources/workspace'))
+      return route.continue()
+    const base = url.pathname.slice(url.pathname.indexOf('/plugins/'))
+    const later = url.searchParams.has('cursor')
+    const item = await workspace.api(`/api${base}/${later ? sales.id : engineering.id}`)
+    await route.fulfill({ json: { items: [item], nextCursor: later ? null : engineering.id } })
+  })
+  const approved = new Set<string>()
+  const authorized = new Set<string>()
+  const writes: Array<{ method: string, path: string, body: any }> = []
+  const status = (id: string) => authorized.has(id)
+    ? { status: 'authorized', scopes: ['messages:read'], requestedScopes: ['messages:read'] }
+    : { status: 'disconnected' }
+  // Native setup/resource CRUD and activation are real. Provider consent is synthetic;
+  // the native OAuth tests separately cover capture, exchange, provenance and promotion.
+  await page.route('**/plugins/owner-ui/*/*/resources/workspace/*/oauth/owner**', async (route) => {
+    const request = route.request()
+    const path = new URL(request.url()).pathname
+    const id = path.split('/resources/workspace/')[1].split('/')[0]
+    const base = path.slice(path.indexOf('/plugins/'), path.indexOf('/oauth/'))
+    const body = request.postData() ? request.postDataJSON() : {}
+    if (request.method() !== 'GET')
+      writes.push({ method: request.method(), path, body })
+    if (request.method() === 'GET')
+      return route.fulfill({ json: status(id) })
+    if (path.endsWith('/finish') && !approved.has(id))
+      return route.fulfill({ json: { status: 'pending' } })
+    if (path.endsWith('/finish') || request.method() === 'DELETE') {
+      if (request.method() === 'DELETE')
+        authorized.delete(id)
+      else
+        authorized.add(id)
+      // Exercise the public client's refresh after OAuth changes resource revision.
+      const current = await workspace.api(`/api${base}`)
+      await workspace.api(`/api${base}`, 'PUT', {
+        revision: current.revision,
+        name: current.name,
+        settings: current.settings,
+        ...(path.includes('/setup-drafts/') && { setupRevision: draft.revision }),
+      })
+      return route.fulfill({ json: status(id) })
+    }
+
+    return route.fulfill({
+      json: {
+        state: id.replaceAll('-', '').padEnd(43, 'x'),
+        url: `https://provider.example.test/authorize?resource=${id}`,
+        redirectUri: `${body.directOrigin ?? draft.settings.callbackOrigin}/callback`,
+        expiresAt: Date.now() + 60000,
+      },
+    })
+  })
+  await page.context().route('https://provider.example.test/**', async (route) => {
+    approved.add(new URL(route.request().url()).searchParams.get('resource')!)
+    await route.fulfill({ contentType: 'text/html', body: '<p>Workspace authorized. Return to Cairn.</p>' })
+  })
+  await page.goto(workspacePath('/plugins/owner-ui'))
+  await signIn(page)
+  await page.getByRole('button', { name: 'Continue Shared service', exact: true }).click()
+  const setup = page.getByRole('dialog', { name: 'Set up Owner service' })
+  const first = setup.getByRole('article', { name: 'Engineering', exact: true })
+  const second = setup.getByRole('article', { name: 'Sales', exact: true })
+  await expect(first.getByRole('button', { name: 'Connect', exact: true })).toBeDisabled()
+  await expect(setup.getByText('Personal access', { exact: true })).not.toBeVisible()
+  await first.getByRole('checkbox', { name: 'messages:read', exact: true }).check()
+  await first.getByLabel('Direct HTTPS origin (optional)').fill('https://cairn.example.test')
+  await first.getByRole('button', { name: 'Connect', exact: true }).click()
+  await expect(first.getByRole('link', { name: 'Open authorization page' })).toBeVisible()
+  await expect(first.getByText('Callback URL: https://cairn.example.test/callback', { exact: true })).toBeVisible()
+  await setup.getByRole('button', { name: 'More workspaces', exact: true }).click()
+  await second.getByRole('checkbox', { name: 'messages:read', exact: true }).check()
+  await second.getByRole('button', { name: 'Connect', exact: true }).click()
+  await expect(second.getByRole('link', { name: 'Open authorization page' })).toBeVisible()
+  await expect(second.getByText('Callback URL: https://saved.example.test/callback', { exact: true })).toBeVisible()
+  await setup.getByRole('button', { name: 'Refresh resources', exact: true }).click()
+  await expect(setup.getByRole('button', { name: 'Refresh resources', exact: true })).toBeEnabled()
+  await expect(second.getByRole('link', { name: 'Open authorization page' })).toBeVisible()
+  const starts = writes.filter(item => item.method === 'POST' && !item.path.endsWith('/finish'))
+  expect(starts.map(item => item.body)).toEqual([
+    { scopes: ['messages:read'], setupRevision: draft.revision, directOrigin: 'https://cairn.example.test' },
+    { scopes: ['messages:read'], setupRevision: draft.revision },
+  ])
+  await expect(setup.getByRole('button', { name: 'Save setup', exact: true })).toBeDisabled()
+  await expect(setup.getByRole('button', { name: 'Activate instance', exact: true })).toBeDisabled()
+  await expect(first.getByRole('button', { name: 'Edit Engineering', exact: true })).toBeDisabled()
+  await first.getByRole('button', { name: 'Check authorization', exact: true }).click()
+  await expect(first.getByText('Finish authorizing in your browser.')).toBeVisible()
+  const opened = page.context().waitForEvent('page')
+  await first.getByRole('link', { name: 'Open authorization page' }).click()
+  const provider = await opened
+  await expect(provider.getByText('Workspace authorized. Return to Cairn.')).toBeVisible()
+  await provider.close()
+  await first.getByRole('button', { name: 'Check authorization', exact: true }).click()
+  await expect(first.getByText('Connected', { exact: true })).toBeVisible()
+  await expect(setup.getByRole('button', { name: 'Refresh resources', exact: true })).toBeEnabled()
+  await expect(first.getByRole('button', { name: 'Refresh authorization', exact: true })).toBeEnabled()
+  // Settling one consent must not clear another resource's pending state.
+  await expect(second.getByRole('button', { name: 'Disconnect', exact: true })).toBeVisible()
+  await expect(setup.getByRole('button', { name: 'Activate instance', exact: true })).toBeDisabled()
+  await second.getByRole('button', { name: 'Disconnect', exact: true }).click()
+  await page.getByRole('dialog', { name: 'Disconnect Workspace authorization?' }).getByRole('button', { name: 'Disconnect', exact: true }).click()
+  await expect(second.getByText('Not connected', { exact: true })).toBeVisible()
+  expect(writes.find(item => item.method === 'DELETE')?.body).toEqual({ setupRevision: draft.revision })
+  await expect(setup.getByRole('button', { name: 'Activate instance', exact: true })).toBeEnabled()
+  await setup.getByRole('button', { name: 'Activate instance', exact: true }).click()
+  await expect(setup).not.toBeVisible()
+  const live = page.getByRole('article', { name: 'Shared service', exact: true }).getByRole('article', { name: 'Engineering', exact: true })
+  await expect(live.getByText('Connected', { exact: true })).toBeVisible()
+  await live.getByRole('button', { name: 'Disconnect', exact: true }).click()
+  await page.getByRole('dialog', { name: 'Disconnect Workspace authorization?' }).getByRole('button', { name: 'Disconnect', exact: true }).click()
+  await expect(live.getByText('Not connected', { exact: true })).toBeVisible()
+  expect(writes.filter(item => item.method === 'DELETE').at(-1)?.body).toEqual({})
+  const resources = await workspace.api(`/api/plugins/owner-ui/connections/${draft.id}/resources/workspace`)
+  expect(resources.items.map((item: any) => item.id).sort()).toEqual([engineering.id, sales.id].sort())
+  await page.screenshot({ path: test.info().outputPath('owner-resource-authorization.png'), fullPage: true })
+})
+
+async function resourceAuthorizationFixture(page: import('@playwright/test').Page, workspace: import('./fixtures').Workspace, id: string, withPages = false) {
+  await useRelayForHttpMocks(page)
+  const provider = {
+    title: 'First authorization',
+    collection: 'workspace',
+    authorizationUrl: 'https://provider.example.test/authorize',
+    tokenUrl: 'https://provider.example.test/token',
+    clientId: 'clientId',
+    pkce: true,
+    scopes: ['messages:read'],
+    token: { accessToken: '/access_token', scope: '/scope' },
+  }
+  const manifest = {
+    id,
+    name: id,
+    version: '1',
+    apiVersion: 2,
+    description: 'Resource authorization coordination.',
+    capabilities: ['resources', 'oauth', 'http'],
+    hosts: ['provider.example.test'],
+    settings: [{ key: 'clientId', title: 'Client ID', type: 'string' }],
+    resources: [{ name: 'workspace', title: 'Workspaces', singular: 'Workspace' }],
+    oauth: [{ ...provider, name: 'owner' }, { ...provider, name: 'other', title: 'Second authorization' }],
+  }
+  const installed = await workspace.api('/api/plugins/packages', 'POST', { manifest, source: 'return {}' })
+  await workspace.api(`/api/plugins/packages/${id}/approve`, 'POST', { version: '1', digest: installed.digest })
+  const instance = await workspace.api(`/api/plugins/${id}/connections`, 'POST', { name: 'Application', settings: { clientId: 'fixture-client' }, enabled: true })
+  const root = `/plugins/${id}/connections/${instance.id}/resources/workspace`
+  const engineering = await workspace.api(`/api${root}`, 'POST', { name: 'Engineering' })
+  const intro = withPages ? await workspace.api(`/api${root}`, 'POST', { name: 'Intro' }) : undefined
+  const sales = withPages ? await workspace.api(`/api${root}`, 'POST', { name: 'Sales' }) : undefined
+  const authorized = new Set<string>()
+  const starts: string[] = []
+  await page.route(`**/plugins/${id}/connections/*/resources/workspace/*/oauth/**`, async (route) => {
+    const request = route.request()
+    const parts = new URL(request.url()).pathname.split('/resources/workspace/')[1].split('/')
+    const [resource, , providerName, finish] = parts
+    const key = `${resource}/${providerName}`
+    const status = () => authorized.has(key) ? { status: 'authorized', scopes: ['messages:read'], requestedScopes: ['messages:read'] } : { status: 'disconnected' }
+    if (request.method() === 'GET')
+      return route.fulfill({ json: status() })
+    if (finish === 'finish' || request.method() === 'DELETE') {
+      if (request.method() === 'DELETE')
+        authorized.delete(key)
+      else
+        authorized.add(key)
+      const current = await workspace.api(`/api${root}/${resource}`)
+      await workspace.api(`/api${root}/${resource}`, 'PUT', { name: current.name, revision: current.revision, settings: current.settings })
+      return route.fulfill({ json: status() })
+    }
+
+    starts.push(providerName)
+    return route.fulfill({ json: { state: key.replaceAll('-', '').replaceAll('/', '').padEnd(43, 'x'), url: 'https://provider.example.test/authorize', expiresAt: Date.now() + 60000 } })
+  })
+  return {
+    root,
+    engineering,
+    intro,
+    sales,
+    starts,
+  }
+}
+
+test('shared providers on one resource serialize their revision-changing authorization', async ({ page, workspace }) => {
+  const id = 'owner-provider-lock'
+  const fixture = await resourceAuthorizationFixture(page, workspace, id)
+  await page.goto(workspacePath(`/plugins/${id}`))
+  await signIn(page)
+  const resource = page.getByRole('article', { name: 'Engineering', exact: true })
+  const first = resource.getByRole('region', { name: 'First authorization', exact: true })
+  const second = resource.getByRole('region', { name: 'Second authorization', exact: true })
+  await first.getByRole('checkbox', { name: 'messages:read', exact: true }).check()
+  await second.getByRole('checkbox', { name: 'messages:read', exact: true }).check()
+  await expect(second.getByRole('button', { name: 'Connect', exact: true })).toBeEnabled()
+  await first.getByRole('button', { name: 'Connect', exact: true }).click()
+  await expect(first.getByRole('button', { name: 'Check authorization', exact: true })).toBeVisible()
+  await expect(second.getByRole('button', { name: 'Connect', exact: true })).toBeDisabled()
+  expect(fixture.starts).toEqual(['owner'])
+  await first.getByRole('button', { name: 'Check authorization', exact: true }).click()
+  await expect(first.getByText('Connected', { exact: true })).toBeVisible()
+  await second.getByRole('checkbox', { name: 'messages:read', exact: true }).check()
+  await second.getByRole('button', { name: 'Connect', exact: true }).click()
+  await expect(first.getByRole('button', { name: 'Reconnect', exact: true })).toBeDisabled()
+  await expect(first.getByRole('button', { name: 'Disconnect', exact: true })).toBeDisabled()
+  await second.getByRole('button', { name: 'Disconnect', exact: true }).click()
+  await page.getByRole('dialog', { name: 'Disconnect Second authorization?' }).getByRole('button', { name: 'Disconnect', exact: true }).click()
+  await expect(second.getByRole('checkbox', { name: 'messages:read', exact: true })).toBeEnabled()
+  await expect(second.getByRole('button', { name: 'Connect', exact: true })).toBeVisible()
+  await expect(first.getByText('Connected', { exact: true })).toBeVisible()
+  expect(fixture.starts).toEqual(['owner', 'other'])
+})
+
+test('a late resource page cannot duplicate a newer authorization refresh', async ({ page, workspace }) => {
+  const id = 'owner-page-generation'
+  const fixture = await resourceAuthorizationFixture(page, workspace, id, true)
+  let removed = false
+  let entered!: () => void
+  let release!: () => void
+  const started = new Promise<void>((resolve) => {
+    entered = resolve
+  })
+  const held = new Promise<void>((resolve) => {
+    release = resolve
+  })
+  await page.route(`**/plugins/${id}/connections/*/resources/workspace*`, async (route) => {
+    const url = new URL(route.request().url())
+    if (route.request().method() !== 'GET' || !url.pathname.endsWith('/resources/workspace'))
+      return route.continue()
+    if (url.searchParams.has('cursor')) {
+      const oldSales = await workspace.api(`/api${fixture.root}/${fixture.sales.id}`)
+      entered()
+      await held
+      return route.fulfill({ json: { items: [oldSales] } })
+    }
+
+    const engineering = await workspace.api(`/api${fixture.root}/${fixture.engineering.id}`)
+    const sibling = await workspace.api(`/api${fixture.root}/${removed ? fixture.sales.id : fixture.intro.id}`)
+    return route.fulfill({ json: { items: [engineering, sibling], nextCursor: removed ? null : 'fixture-cursor' } })
+  })
+  try {
+    await page.goto(workspacePath(`/plugins/${id}`))
+    await signIn(page)
+    const first = page.getByRole('article', { name: 'Engineering', exact: true }).getByRole('region', { name: 'First authorization', exact: true })
+    await first.getByRole('checkbox', { name: 'messages:read', exact: true }).check()
+    await first.getByRole('button', { name: 'Connect', exact: true }).click()
+    await page.getByRole('button', { name: 'More workspaces', exact: true }).click()
+    await started
+    await workspace.api(`/api${fixture.root}/${fixture.intro.id}`, 'DELETE', { revision: fixture.intro.revision })
+    removed = true
+    await first.getByRole('button', { name: 'Check authorization', exact: true }).click()
+    await expect(page.getByRole('article', { name: 'Sales', exact: true })).toHaveCount(1)
+    release()
+    await expect(page.getByRole('button', { name: 'Refresh resources', exact: true })).toBeEnabled()
+    await expect(page.getByRole('article', { name: 'Sales', exact: true })).toHaveCount(1)
+    await expect(page.getByRole('article', { name: 'Intro', exact: true })).toHaveCount(0)
+  }
+  finally { release() }
+})

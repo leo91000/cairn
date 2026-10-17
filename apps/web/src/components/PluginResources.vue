@@ -14,6 +14,7 @@ import {
 import { api } from '../api'
 import { fieldSettings, fieldValues } from '../plugins'
 import PluginFields from './PluginFields.vue'
+import PluginResourceAuthorization from './PluginResourceAuthorization.vue'
 import UiAlert from './UiAlert.vue'
 import UiButton from './UiButton.vue'
 
@@ -24,7 +25,7 @@ const props = defineProps<{
   setupRevision?: string
   disabled?: boolean
 }>()
-const emit = defineEmits<{ state: [value: { busy: boolean, editing: boolean }] }>()
+const emit = defineEmits<{ state: [value: { busy: boolean, editing: boolean, pending: boolean }] }>()
 const path = computed(() => `/plugins/${props.plugin}/${props.setupRevision ? 'setup-drafts' : 'connections'}/${props.instance}/resources`)
 const pages = ref<Record<string, PluginPage<PluginResource>>>({})
 const editing = ref<{ collection: PluginResourceCollection, resource?: PluginResource }>()
@@ -34,27 +35,68 @@ const enabled = ref(true)
 const values = ref<Record<string, any>>({})
 const secrets = ref<Record<string, string>>({})
 const busy = ref(false)
+const loading = ref(false)
 const error = ref('')
 const removing = ref<PluginResource>()
+const authorizations = ref<Record<string, { busy: boolean, pending: boolean }>>({})
+const oauthBusy = computed(() => Object.values(authorizations.value).some(value => value.busy))
+const oauthPending = computed(() => Object.values(authorizations.value).some(value => value.pending))
+const oauthLocked = computed(() => oauthBusy.value || oauthPending.value)
 let generation = 0
 
-watch(() => [busy.value, Boolean(editing.value)], () => {
-  emit('state', { busy: busy.value, editing: Boolean(editing.value) })
+function authorizationKey(resource: PluginResource, provider: string) {
+  return `${path.value}/${resource.collection}/${resource.id}/oauth/${provider}@${resource.revision}@${props.setupRevision ?? ''}`
+}
+
+function authorizationBlocked(resource: PluginResource, provider: string) {
+  const own = authorizationKey(resource, provider)
+  const prefix = `${path.value}/${resource.collection}/${resource.id}/oauth/`
+  return Object.entries(authorizations.value).some(([key, activity]) => key !== own && key.startsWith(prefix) && (activity.busy || activity.pending))
+}
+
+function authorizationState(key: string, value: { busy: boolean, pending: boolean }) {
+  const next = { ...authorizations.value }
+  if (value.busy || value.pending)
+    next[key] = value
+  else
+    delete next[key]
+  authorizations.value = next
+}
+
+watch(() => [busy.value, loading.value, Boolean(editing.value || removing.value), oauthBusy.value, oauthPending.value], () => {
+  emit('state', { busy: busy.value || loading.value || oauthBusy.value, editing: Boolean(editing.value || removing.value), pending: oauthPending.value })
 }, { immediate: true, flush: 'sync' })
 
 async function load() {
   const current = ++generation
+  loading.value = true
   try {
-    const entries = await Promise.all((props.manifest.resources ?? []).map(async collection => [
-      collection.name,
-      await api<PluginPage<PluginResource>>(`${path.value}/${collection.name}`),
-    ] as const))
+    const entries = await Promise.all((props.manifest.resources ?? []).map(async (collection) => {
+      // A refresh must retain later-page widgets and their memory-only consents.
+      const remaining = new Set((pages.value[collection.name]?.items ?? []).map(item => item.id))
+      const items: PluginResource[] = []
+      let page = await api<PluginPage<PluginResource>>(`${path.value}/${collection.name}`)
+      for (;;) {
+        items.push(...page.items)
+        for (const item of page.items)
+          remaining.delete(item.id)
+        if (!remaining.size || !page.nextCursor)
+          break
+        page = await api<PluginPage<PluginResource>>(`${path.value}/${collection.name}?cursor=${encodeURIComponent(page.nextCursor)}`)
+      }
+
+      return [collection.name, { items, nextCursor: page.nextCursor }] as const
+    }))
     if (current === generation)
       pages.value = Object.fromEntries(entries)
   }
   catch (e) {
     if (current === generation)
       error.value = (e as Error).message
+  }
+  finally {
+    if (current === generation)
+      loading.value = false
   }
 }
 
@@ -74,11 +116,13 @@ async function action(operation: () => Promise<void>) {
 
 async function more(collection: string) {
   await action(async () => {
+    const current = generation
     const cursor = pages.value[collection]?.nextCursor
     if (!cursor)
       return
     const page = await api<PluginPage<PluginResource>>(`${path.value}/${collection}?cursor=${encodeURIComponent(cursor)}`)
-    pages.value[collection] = { items: [...pages.value[collection].items, ...page.items], nextCursor: page.nextCursor }
+    if (current === generation)
+      pages.value[collection] = { items: [...pages.value[collection].items, ...page.items], nextCursor: page.nextCursor }
   })
 }
 
@@ -148,13 +192,13 @@ watch(path, () => {
 onBeforeUnmount(() => {
   generation++
   secrets.value = {}
-  emit('state', { busy: false, editing: false })
+  emit('state', { busy: false, editing: false, pending: false })
 })
 </script>
 
 <template>
   <div class="grid min-w-0 gap-5" aria-label="Resources">
-    <UiButton size="small" :disabled="busy" @click="load">
+    <UiButton size="small" :disabled="busy || loading" @click="load">
       Refresh resources
     </UiButton>
     <UiAlert v-if="error">
@@ -170,7 +214,7 @@ onBeforeUnmount(() => {
         <h3 class="text-sm! font-bold">
           {{ collection.title }}
         </h3>
-        <UiButton size="small" :disabled="busy || disabled" @click="edit(collection)">
+        <UiButton size="small" :disabled="busy || loading || disabled || oauthLocked" @click="edit(collection)">
           Add {{ collection.singular.toLowerCase() }}
         </UiButton>
       </header>
@@ -193,7 +237,7 @@ onBeforeUnmount(() => {
         <div class="flex gap-2">
           <UiButton
             size="small"
-            :disabled="busy || disabled"
+            :disabled="busy || loading || disabled || oauthLocked"
             :aria-label="`Edit ${resource.name}`"
             @click="edit(collection, resource)"
           >
@@ -201,13 +245,24 @@ onBeforeUnmount(() => {
           </UiButton>
           <UiButton
             size="small"
-            :disabled="busy || disabled"
+            :disabled="busy || loading || disabled || oauthLocked"
             :aria-label="`Delete ${resource.name}`"
             @click="removing = resource"
           >
             Delete
           </UiButton>
         </div>
+        <PluginResourceAuthorization
+          v-for="provider in (manifest.oauth ?? []).filter(provider => provider.collection === collection.name && !provider.personal)"
+          :key="authorizationKey(resource, provider.name)"
+          :path="`${path}/${collection.name}/${resource.id}/oauth/${provider.name}`"
+          :provider="provider"
+          :enabled="!disabled && !busy && !loading && !editing"
+          :blocked="authorizationBlocked(resource, provider.name)"
+          :setup-revision="setupRevision"
+          @state="authorizationState(authorizationKey(resource, provider.name), $event)"
+          @changed="load"
+        />
         <div v-if="removing?.id === resource.id" class="grid gap-2 rounded-lg bg-inset p-3" role="alert">
           <p class="text-xs">
             Delete {{ resource.name }} and its child resources? Their saved credentials and access rules will be removed.
@@ -216,7 +271,7 @@ onBeforeUnmount(() => {
             <UiButton size="small" :disabled="busy" @click="removing = undefined">
               Cancel
             </UiButton>
-            <UiButton size="small" :disabled="busy || disabled" @click="remove">
+            <UiButton size="small" :disabled="busy || loading || disabled || oauthLocked" @click="remove">
               Confirm delete
             </UiButton>
           </div>
@@ -225,7 +280,7 @@ onBeforeUnmount(() => {
       <UiButton
         v-if="pages[collection.name]?.nextCursor"
         size="small"
-        :disabled="busy"
+        :disabled="busy || loading"
         @click="more(collection.name)"
       >
         More {{ collection.title.toLowerCase() }}
@@ -238,11 +293,11 @@ onBeforeUnmount(() => {
       >
         <label>Name<input
           v-model="name"
-          :disabled="busy || disabled"
+          :disabled="busy || loading || disabled || oauthLocked"
           required
           maxlength="100"
         ></label>
-        <label v-if="collection.parent">Parent<select v-model="parent" :disabled="busy || disabled" required>
+        <label v-if="collection.parent">Parent<select v-model="parent" :disabled="busy || loading || disabled || oauthLocked" required>
           <option value="">Choose a parent</option>
           <option v-for="item in pages[collection.parent]?.items" :key="item.id" :value="item.id">{{ item.name }}</option>
         </select></label>
@@ -251,19 +306,19 @@ onBeforeUnmount(() => {
           v-model:secrets="secrets"
           :fields="(collection.settings ?? []).map(field => setupRevision ? { ...field, required: false } : field)"
           :saved="editing.resource?.secretKeys"
-          :disabled="busy || disabled"
+          :disabled="busy || loading || disabled || oauthLocked"
         />
         <label class="flex flex-row! items-center gap-2!"><input
           v-model="enabled"
           type="checkbox"
           class="w-auto!"
-          :disabled="busy || disabled"
+          :disabled="busy || loading || disabled || oauthLocked"
         >Enabled</label>
         <div class="flex gap-2">
           <UiButton type="button" :disabled="busy" @click="close">
             Cancel
           </UiButton>
-          <UiButton type="submit" variant="primary" :disabled="busy || disabled">
+          <UiButton type="submit" variant="primary" :disabled="busy || loading || disabled || oauthLocked">
             Save {{ collection.singular.toLowerCase() }}
           </UiButton>
         </div>

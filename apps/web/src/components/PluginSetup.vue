@@ -37,7 +37,8 @@ const agentIds = ref<string[]>([])
 const completion = ref<FormResult>()
 const completing = ref(false)
 const busy = ref(false)
-const resources = ref({ busy: false, editing: false })
+const resources = ref({ busy: false, editing: false, pending: false })
+const resourceWork = computed(() => resources.value.busy || resources.value.editing || resources.value.pending)
 const error = ref('')
 const formFailure = ref('')
 const formReady = ref(!props.manifest.instanceForm)
@@ -121,7 +122,7 @@ async function action(operation: () => Promise<void>) {
 }
 
 async function save() {
-  if (completing.value || resources.value.busy)
+  if (completing.value || resourceWork.value)
     return
   await action(async () => {
     draft.value = await api<PluginSetupDraft>(path, {
@@ -144,7 +145,7 @@ async function save() {
 }
 
 async function activate() {
-  if (dirty.value || completing.value || resources.value.busy || resources.value.editing)
+  if (dirty.value || completing.value || resourceWork.value)
     return
   await action(async () => {
     const agent = state.agents.find(agent => agent.id === agentId.value)
@@ -191,12 +192,12 @@ onBeforeUnmount(() => {
       <UiAlert v-if="!available">
         This setup expired or its package needs review. Close it and reload the plugin page.
       </UiAlert>
-      <label>Name<input v-model="name" :disabled="busy || !available" maxlength="100"></label>
+      <label>Name<input v-model="name" :disabled="busy || resourceWork || !available" maxlength="100"></label>
       <label v-if="manifest.credential">{{ manifest.credential.label }}<input
         v-model="token"
         type="password"
         autocomplete="new-password"
-        :disabled="busy || !available"
+        :disabled="busy || resourceWork || !available"
         :aria-invalid="Boolean(completion?.errors?.credential)"
         :aria-describedby="completion?.errors?.credential ? credentialErrorId : undefined"
         :placeholder="draft.credential ? 'Saved — leave blank to keep' : ''"
@@ -216,7 +217,7 @@ onBeforeUnmount(() => {
           v-model:secrets="secrets"
           :fields="(manifest.settings ?? []).map(field => ({ ...field, required: false }))"
           :saved="draft.secretKeys"
-          :disabled="busy || !available"
+          :disabled="busy || resourceWork || !available"
           :options="completion?.options"
           :errors="completion?.errors"
           @refresh="typed"
@@ -235,7 +236,7 @@ onBeforeUnmount(() => {
         {{ message }}
       </p>
       <div class="flex flex-wrap items-center gap-3">
-        <UiButton :disabled="busy || completing || resources.busy || !name.trim() || !available" @click="save">
+        <UiButton :disabled="busy || completing || resourceWork || !name.trim() || !available" @click="save">
           Save setup
         </UiButton>
         <span class="text-xs text-muted" role="status">{{ completing ? 'Checking settings…' : dirty ? 'Unsaved changes' : 'All changes saved' }}</span>
@@ -265,11 +266,11 @@ onBeforeUnmount(() => {
             type="checkbox"
             class="w-auto!"
             :value="agent.id"
-            :disabled="busy || !available"
+            :disabled="busy || resourceWork || !available"
           >{{ agent.name }}
         </label>
       </section>
-      <label v-if="delegates(manifest)">Agent for incoming conversations<select v-model="agentId" :disabled="busy || !available">
+      <label v-if="delegates(manifest)">Agent for incoming conversations<select v-model="agentId" :disabled="busy || resourceWork || !available">
         <option value="">Choose a dedicated agent</option>
         <option v-for="agent in eligible" :key="agent.id" :value="agent.id">{{ agent.name }}</option>
       </select><small>People must be approved before their messages are accepted. You can configure people and limits after activation.</small></label>
@@ -277,10 +278,10 @@ onBeforeUnmount(() => {
         v-model="enabled"
         type="checkbox"
         class="w-auto!"
-        :disabled="busy || !available"
+        :disabled="busy || resourceWork || !available"
       >Start immediately</label>
       <div class="flex flex-wrap justify-end gap-2 border-t border-line pt-4">
-        <UiButton :disabled="busy || dirty || completing || resources.busy || resources.editing || !available || !formReady || Object.keys(completion?.errors ?? {}).length > 0 || (delegates(manifest) && !agentId)" variant="primary" @click="activate">
+        <UiButton :disabled="busy || dirty || completing || resourceWork || !available || !formReady || Object.keys(completion?.errors ?? {}).length > 0 || (delegates(manifest) && !agentId)" variant="primary" @click="activate">
           Activate instance
         </UiButton>
       </div>

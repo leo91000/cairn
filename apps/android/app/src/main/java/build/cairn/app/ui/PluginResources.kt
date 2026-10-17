@@ -6,6 +6,7 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import build.cairn.app.data.*
+import java.util.concurrent.atomic.AtomicInteger
 import kotlinx.serialization.json.*
 
 /** Selects a management namespace explicitly; a setup never resolves a live instance. */
@@ -19,6 +20,12 @@ internal data class PluginResourceLocation(
             "/plugins/${segment(plugin)}/${if (setupRevision == null) "connections" else "setup-drafts"}/${segment(instance)}/resources"
 }
 
+internal data class PluginResourceActivity(
+    val busy: Boolean = false,
+    val editing: Boolean = false,
+    val pending: Boolean = false,
+)
+
 @Composable
 internal fun PluginResources(
     vm: CairnViewModel,
@@ -26,6 +33,7 @@ internal fun PluginResources(
     manifest: PluginManifest,
     location: PluginResourceLocation,
     enabled: Boolean = true,
+    stateChanged: (PluginResourceActivity) -> Unit = {},
 ) {
     var pages by
         remember(location.plugin, location.instance) {
@@ -37,23 +45,71 @@ internal fun PluginResources(
         }
     var removing by
         remember(location.plugin, location.instance) { mutableStateOf<PluginResource?>(null) }
+    var authorizations by
+        remember(location.plugin, location.instance) {
+            mutableStateOf(mapOf<String, PluginAuthorizationActivity>())
+        }
+    var loading by remember(location.plugin, location.instance) { mutableStateOf(false) }
+    val loads = remember(location.plugin, location.instance) { AtomicInteger() }
+    val oauthBusy = authorizations.values.any { it.busy }
+    val oauthPending = authorizations.values.any { it.pending }
+    val controlsEnabled = enabled && !state.busy && !loading && !oauthBusy && !oauthPending
+    LaunchedEffect(loading, oauthBusy, oauthPending, editing, removing) {
+        stateChanged(
+            PluginResourceActivity(
+                loading || oauthBusy,
+                editing != null || removing != null,
+                oauthPending,
+            )
+        )
+    }
+    DisposableEffect(location.plugin, location.instance) {
+        onDispose {
+            loads.incrementAndGet()
+            stateChanged(PluginResourceActivity())
+        }
+    }
     suspend fun load() {
-        pages =
-            manifest.resources.associate { collection ->
-                collection.name to
-                    vm.api.get<PluginPage<PluginResource>>(
-                        "${location.path}/${segment(collection.name)}"
-                    )
-            }
+        val request = loads.incrementAndGet()
+        loading = true
+        try {
+            val refreshed =
+                manifest.resources.associate { collection ->
+                    // Keep the previously visible IDs so later-page consent stays composed.
+                    val remaining =
+                        pages[collection.name]?.items.orEmpty().map { it.id }.toMutableSet()
+                    val items = mutableListOf<PluginResource>()
+                    var page =
+                        vm.api.get<PluginPage<PluginResource>>(
+                            "${location.path}/${segment(collection.name)}"
+                        )
+                    while (true) {
+                        items += page.items
+                        remaining.removeAll(page.items.map { it.id }.toSet())
+                        val cursor = page.nextCursor
+                        if (remaining.isEmpty() || cursor == null) break
+                        page =
+                            vm.api.get(
+                                "${location.path}/${segment(collection.name)}?cursor=${segment(cursor)}"
+                            )
+                    }
+                    collection.name to PluginPage(items.toList(), page.nextCursor)
+                }
+            if (request == loads.get()) pages = refreshed
+        } finally {
+            if (request == loads.get()) loading = false
+        }
     }
     suspend fun more(collection: String) {
+        val request = loads.get()
         val page = pages[collection] ?: return
         val cursor = page.nextCursor ?: return
         val next =
             vm.api.get<PluginPage<PluginResource>>(
                 "${location.path}/${segment(collection)}?cursor=${segment(cursor)}"
             )
-        pages = pages + (collection to PluginPage(page.items + next.items, next.nextCursor))
+        if (request == loads.get())
+            pages = pages + (collection to PluginPage(page.items + next.items, next.nextCursor))
     }
     LaunchedEffect(location) {
         try {
@@ -63,46 +119,79 @@ internal fun PluginResources(
         }
     }
     Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-        TextButton(onClick = { vm.perform { load() } }, enabled = !state.busy) {
+        TextButton(onClick = { vm.perform { load() } }, enabled = !state.busy && !loading) {
             Text("Actualiser les ressources")
         }
         manifest.resources.forEach { collection ->
             Text(collection.title, style = MaterialTheme.typography.titleSmall)
             pages[collection.name]?.items?.forEach { resource ->
-                SignalCard(Modifier.fillMaxWidth()) {
-                    Text(resource.name, style = MaterialTheme.typography.titleSmall)
-                    Text(
-                        if (location.setupRevision != null) "Préparé"
-                        else if (resource.enabled) "Activé" else "En pause",
-                        style = MaterialTheme.typography.bodySmall,
-                    )
-                    resource.parentId?.let { parent ->
+                key(resource.id) {
+                    SignalCard(Modifier.fillMaxWidth()) {
+                        Text(resource.name, style = MaterialTheme.typography.titleSmall)
                         Text(
-                            pages[collection.parent]?.items?.find { it.id == parent }?.name
-                                ?: "Ressource parente",
+                            if (location.setupRevision != null) "Préparé"
+                            else if (resource.enabled) "Activé" else "En pause",
                             style = MaterialTheme.typography.bodySmall,
                         )
-                    }
-                    Row {
-                        TextButton(
-                            onClick = {
-                                vm.perform {
-                                    collection.parent?.let { parent ->
-                                        while (pages[parent]?.nextCursor != null) more(parent)
+                        resource.parentId?.let { parent ->
+                            Text(
+                                pages[collection.parent]?.items?.find { it.id == parent }?.name
+                                    ?: "Ressource parente",
+                                style = MaterialTheme.typography.bodySmall,
+                            )
+                        }
+                        Row {
+                            TextButton(
+                                onClick = {
+                                    vm.perform {
+                                        collection.parent?.let { parent ->
+                                            while (pages[parent]?.nextCursor != null) more(parent)
+                                        }
+                                        editing = collection to resource
                                     }
-                                    editing = collection to resource
+                                },
+                                enabled = controlsEnabled,
+                            ) {
+                                Text("Modifier ${resource.name}")
+                            }
+                            TextButton(
+                                onClick = { removing = resource },
+                                enabled = controlsEnabled,
+                            ) {
+                                Text("Supprimer ${resource.name}")
+                            }
+                        }
+                        val authorizationPath =
+                            "${location.path}/${segment(collection.name)}/${segment(resource.id)}/oauth/"
+                        manifest.oauth
+                            .filter { it.collection == collection.name && it.personal == null }
+                            .forEach { provider ->
+                                val path = "$authorizationPath${segment(provider.name)}"
+                                val identity =
+                                    "$path@${resource.revision}@${location.setupRevision.orEmpty()}"
+                                key(identity) {
+                                    PluginResourceAuthorization(
+                                        vm,
+                                        path,
+                                        provider,
+                                        location.setupRevision,
+                                        enabled && !state.busy && !loading && editing == null,
+                                        blocked =
+                                            authorizations.any { (other, activity) ->
+                                                other != identity &&
+                                                    other.startsWith(authorizationPath) &&
+                                                    (activity.busy || activity.pending)
+                                            },
+                                        stateChanged = { activity ->
+                                            authorizations =
+                                                if (activity.busy || activity.pending)
+                                                    authorizations + (identity to activity)
+                                                else authorizations - identity
+                                        },
+                                        changed = { load() },
+                                    )
                                 }
-                            },
-                            enabled = enabled && !state.busy,
-                        ) {
-                            Text("Modifier ${resource.name}")
-                        }
-                        TextButton(
-                            onClick = { removing = resource },
-                            enabled = enabled && !state.busy,
-                        ) {
-                            Text("Supprimer ${resource.name}")
-                        }
+                            }
                     }
                 }
             }
@@ -111,14 +200,14 @@ internal fun PluginResources(
             if (pages[collection.name]?.nextCursor != null)
                 TextButton(
                     onClick = { vm.perform { more(collection.name) } },
-                    enabled = !state.busy,
+                    enabled = !state.busy && !loading,
                 ) {
                     Text("Voir plus · ${collection.title}")
                 }
             SignalButton(
                 "Ajouter · ${collection.singular}",
                 height = 40.dp,
-                enabled = enabled && !state.busy,
+                enabled = controlsEnabled,
             ) {
                 vm.perform {
                     collection.parent?.let { parent ->
@@ -222,7 +311,12 @@ private fun ResourceEditor(
             }
         },
     ) {
-        Field("Nom · ${collection.singular}", name, { name = it }, enabled = !state.busy)
+        Field(
+            "Nom · ${collection.singular}",
+            name,
+            { name = it },
+            enabled = !state.busy,
+        )
         if (collection.parent != null && !state.busy)
             Choice("Parent", parent, parents.map { it.id to it.name }) { parent = it }
         PluginFields(
