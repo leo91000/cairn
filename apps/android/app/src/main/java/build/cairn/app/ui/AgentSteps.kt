@@ -283,7 +283,7 @@ internal fun AgentActions(
 }
 
 @Composable
-private fun StepRow(step: AgentStep, last: Boolean, open: () -> Unit) {
+internal fun StepRow(step: AgentStep, last: Boolean, open: () -> Unit) {
     val p = step.lead
     val tint =
         when {
@@ -386,7 +386,7 @@ private fun StepRow(step: AgentStep, last: Boolean, open: () -> Unit) {
 
 /** Full detail of one step: command, output, diff or structured result, and the raw source. */
 @Composable
-private fun StepSheet(step: AgentStep, index: Int, total: Int, close: () -> Unit) {
+internal fun StepSheet(step: AgentStep, index: Int, total: Int, close: () -> Unit) {
     ModalBottomSheet(
         onDismissRequest = close,
         sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),

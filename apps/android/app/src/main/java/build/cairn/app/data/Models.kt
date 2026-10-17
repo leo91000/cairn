@@ -190,6 +190,8 @@ data class RunEvent(
     val payload: Map<String, JsonElement>? = null,
     // Presentation identity survives newer wire event IDs and encrypted cache restores.
     val displayId: Long? = null,
+    // A conversation streams several runs; item IDs such as a subagent's are scoped to their run.
+    val runId: String = "",
 )
 
 @Serializable

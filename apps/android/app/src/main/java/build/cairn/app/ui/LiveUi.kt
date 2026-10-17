@@ -328,20 +328,31 @@ private fun StatusPill(content: @Composable RowScope.() -> Unit) {
 
 /**
  * A page that ends inside the oldest activity group extends it, and its first event (the natural
- * key) changes. Reuse the key the group already had, so the list keeps anchoring on that row.
+ * key) changes. Teams can also gain an earlier member. Reuse the key the group already had, so the
+ * list keeps anchoring on that row.
  */
 internal class TimelineKeys {
     private var history: String? = null
     private var owners = mapOf<Long, String>()
     private var fullPositions = mapOf<Long, Int>()
+    private var teamKeys = SubagentTeamKeys()
 
     fun stabilize(history: String?, input: List<TimelineEntry>): List<TimelineEntry> {
         if (history != this.history) {
             this.history = history
             owners = emptyMap()
             fullPositions = emptyMap()
+            teamKeys = SubagentTeamKeys()
         }
-        val entries = regroup(input)
+        val identities =
+            teamKeys.stabilize(input.filter { it.agents.isNotEmpty() }.map { it.agents }).iterator()
+        val entries =
+            regroup(
+                input.map { entry ->
+                    if (entry.agents.isEmpty()) entry
+                    else entry.copy(key = "team:${identities.next()}")
+                }
+            )
         val used =
             entries.filter { !it.key.startsWith("activity:") }.mapTo(mutableSetOf()) { it.key }
         val keys = arrayOfNulls<String>(entries.size)
@@ -517,6 +528,8 @@ internal data class TimelineEntry(
     val via: String = "",
     /** Persisted events folded into each activity; item IDs may repeat in later turns. */
     val sourceIds: Map<Long, List<Long>> = emptyMap(),
+    /** Subagents started one after another work as a team, shown apart from the agent's steps. */
+    val agents: List<Subagent> = emptyList(),
     /** A scheduled wait, shown as one card from its scheduling to its resumption. */
     val wait: ActivityWait? = null,
 )
@@ -531,9 +544,17 @@ internal fun timelineEntries(
         val folded = mutableListOf<RunEvent>()
         val sources = mutableListOf<MutableList<Long>>()
         val positions = mutableMapOf<String, Int>()
+        val subagents = subagentTimeline(events)
         var legacyTool: Int? = null
         for (event in events) {
             if (event.type == "artifact") continue
+            if (event.id in subagents.captured) {
+                if (event.id in subagents.anchors) {
+                    folded.add(event)
+                    sources.add(mutableListOf(event.id))
+                }
+                continue
+            }
             if (event.type == "turn.started") {
                 positions.clear()
                 legacyTool = null
@@ -584,7 +605,9 @@ internal fun timelineEntries(
             folded.mapIndexed { index, event -> event.id to sources[index].toList() }.toMap()
         val result = mutableListOf<TimelineEntry>()
         var activity = mutableListOf<RunEvent>()
+        var team: Int? = null
         fun flushActivity() {
+            team = null
             if (activity.isNotEmpty()) {
                 result.add(
                     TimelineEntry(
@@ -736,6 +759,27 @@ internal fun timelineEntries(
                 via = route.string("providerName")
                 if (chat) continue
             }
+            val agent = subagents.anchors[event.id]
+            if (agent != null) {
+                val index = team
+                if (index == null) {
+                    flushActivity()
+                    result.add(
+                        TimelineEntry(
+                            "team:${agent.id}",
+                            listOf(event),
+                            false,
+                            agents = listOf(agent),
+                        )
+                    )
+                    team = result.lastIndex
+                } else {
+                    val entry = result[index]
+                    result[index] =
+                        entry.copy(events = entry.events + event, agents = entry.agents + agent)
+                }
+                continue
+            }
             if (event.isMessage()) {
                 flushActivity()
                 result.add(
@@ -767,6 +811,7 @@ internal fun timelineEntries(
                     if (activity.size == MAX_ACTIVITY_GROUP_SIZE) {
                         flushActivity()
                     }
+                    team = null
                     activity.add(event)
                 }
             }
@@ -854,8 +899,11 @@ internal fun TimelineRow(
     rendering: MarkdownRendering? = null,
     /** While the agent works, its step in progress is shown by the working indicator instead. */
     hideRunning: Boolean = false,
+    /** The run is still active, so its subagents may still report. */
+    active: Boolean = false,
 ) {
     if (entry.files.isNotEmpty()) ArtifactStrip(vm, entry.files)
+    else if (entry.agents.isNotEmpty()) SubagentTeam(entry.agents, active, identity = entry.key)
     else if (entry.message)
         CompositionLocalProvider(LocalMarkdownRendering provides rendering) {
             EventRow(
