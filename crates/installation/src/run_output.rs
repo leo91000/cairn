@@ -153,13 +153,25 @@ pub fn compact_activity(event: &Value, secrets: &[String]) -> Value {
                 .flatten()
                 .take(16)
                 .map(|task| {
-                    json!({
+                    let mut step = json!({
                         "text": activity_preview(&task["text"], 256, secrets),
                         "completed": task["completed"] == true,
-                    })
+                    });
+                    for (key, limit) in [("status", 32), ("active_text", 256)] {
+                        if let Some(value) = task.get(key) {
+                            step[key] = activity_preview(value, limit, secrets);
+                        }
+                    }
+                    step
                 })
                 .collect();
             item.insert("items".into(), tasks.into());
+            if let Some(explanation) = source.get("explanation") {
+                item.insert(
+                    "explanation".into(),
+                    activity_preview(explanation, 1024, secrets),
+                );
+            }
         }
         "subagent" => {
             for (key, limit) in [

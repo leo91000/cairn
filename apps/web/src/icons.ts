@@ -15,6 +15,7 @@ export const Check = 'i-lucide-check' as const
 export const CheckCircle2 = 'i-lucide-circle-check' as const
 export const ChevronDown = 'i-lucide-chevron-down' as const
 export const ChevronRight = 'i-lucide-chevron-right' as const
+export const ChevronUp = 'i-lucide-chevron-up' as const
 export const CircleAlert = 'i-lucide-circle-alert' as const
 export const CircleCheck = 'i-lucide-circle-check' as const
 export const CircleX = 'i-lucide-circle-x' as const

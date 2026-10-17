@@ -1,7 +1,15 @@
 import type { ChatWakeup } from '../../../packages/contracts/chats'
 import type { RunEvent } from '../../../packages/contracts/contracts'
+import type { AgentPlan, PlanChange, PlanProgress } from './agent-plan'
 import { describeCommand, expectedCommandOutcome } from './activity-command'
 import { outputSummary } from './activity-data'
+import {
+  continuesPlan,
+  planChange,
+  planProgress,
+  planSteps,
+  samePlan,
+} from './agent-plan'
 
 export const MAX_ACTIVITY_GROUP_SIZE = 30
 
@@ -65,6 +73,17 @@ export type ActivityEntry
   | { kind: 'group', id: string, artifacts: ActivityArtifact[] }
   | { kind: 'team', id: string, agents: ActivityArtifact[] }
   | { kind: 'notice', id: string, artifact: ActivityArtifact }
+  /** The agent's plan, kept up to date by its later updates. */
+  | { kind: 'plan', id: string, plan: AgentPlan }
+  /** Where an update changed the plan, with its progress afterwards. */
+  | {
+    kind: 'plan-update'
+    id: string
+    planId: string
+    time: number
+    change: PlanChange
+    progress: PlanProgress
+  }
   | {
     kind: 'wait'
     id: string
@@ -182,6 +201,8 @@ export function activityEntries(events: RunEvent[], chat = false, groups = new A
 
   let turn = 0
   let via: string | undefined
+  // The plan its updates change, until the agent finishes it or writes another one.
+  let plan: Extract<ActivityEntry, { kind: 'plan' }> | undefined
   let legacyTool: ActivityArtifact | undefined
   // The wait still pending, by its wakeup ID, so that its result and resumption complete it.
   const waits = new Map<string, ActivityWait>()
@@ -299,6 +320,8 @@ export function activityEntries(events: RunEvent[], chat = false, groups = new A
     }
 
     if (event.type === 'chat.user') {
+      // A new request gets its own plan, even when the agent carries the previous list over.
+      plan = undefined
       // A new message cancels the pending wakeup.
       if (openWait) {
         openWait.ended = 'cancelled'
@@ -379,6 +402,50 @@ export function activityEntries(events: RunEvent[], chat = false, groups = new A
     const parent = parentArtifact?.subagent
     if (type === 'subagent_message' && parent) {
       parent.message = text(item.text)
+      continue
+    }
+
+    // The agent's own plan shows apart from its tools. A call that failed did not change it.
+    if (type === 'todo_list' && !parent) {
+      const steps = planSteps(item)
+      if (!steps.length || text(item.status) === 'failed')
+        continue
+      if (plan && samePlan(plan.plan.steps, steps))
+        continue
+      const explanation = text(item.explanation)
+      if (!plan || !continuesPlan(plan.plan.steps, steps)) {
+        plan = {
+          kind: 'plan',
+          id: `plan:${event.runId}:${event.id}`,
+          plan: {
+            steps,
+            explanation,
+            time: event.createdAt,
+            updatedAt: event.createdAt,
+          },
+        }
+        entries.push(plan)
+        continue
+      }
+
+      const change = planChange(plan.plan.steps, steps)
+      plan.plan = {
+        ...plan.plan,
+        steps,
+        explanation: explanation || plan.plan.explanation,
+        updatedAt: event.createdAt,
+      }
+      if (change) {
+        entries.push({
+          kind: 'plan-update',
+          id: `plan-update:${event.runId}:${event.id}`,
+          planId: plan.id,
+          time: event.createdAt,
+          change,
+          progress: planProgress(steps),
+        })
+      }
+
       continue
     }
 
@@ -487,7 +554,7 @@ export function activityEntries(events: RunEvent[], chat = false, groups = new A
     else if (type === 'todo_list') {
       artifact.kind = 'plan'
       artifact.title = 'Updated the plan'
-      artifact.tasks = (Array.isArray(item.items) ? item.items : []).map(value => ({ text: text(record(value).text), completed: record(value).completed === true }))
+      artifact.tasks = planSteps(item).map(step => ({ text: step.text, completed: step.state === 'done' }))
       artifact.subtitle = `${artifact.tasks.filter(task => task.completed).length} of ${artifact.tasks.length} complete`
     }
     else if (type === 'reasoning') {

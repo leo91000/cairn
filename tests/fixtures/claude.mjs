@@ -276,6 +276,43 @@ else {
       return
     }
 
+    // Claude Code rewrites the whole list with each TodoWrite call.
+    if (prompt.includes('fixture:plan')) {
+      const write = (id, todos) => {
+        out({
+          type: 'assistant',
+          message: {
+            id: `plan-${id}`,
+            content: [{
+              type: 'tool_use',
+              id,
+              name: 'TodoWrite',
+              input: { todos },
+            }],
+          },
+        })
+        out({
+          type: 'user',
+          message: {
+            role: 'user',
+            content: [{ type: 'tool_result', tool_use_id: id, content: 'Todos have been modified successfully.' }],
+          },
+        })
+      }
+
+      const todo = (content, status, activeForm) => ({ content, status, activeForm })
+      write('todo-1', [
+        todo('Explore the auth middleware', 'in_progress', 'Exploring the auth middleware'),
+        todo('Add the session expiry migration', 'pending', 'Adding the migration'),
+      ])
+      write('todo-2', [
+        todo('Explore the auth middleware', 'completed', 'Exploring the auth middleware'),
+        todo('Add the session expiry migration', 'in_progress', 'Adding the migration'),
+      ])
+      complete('Plan followed', false, correlation)
+      return
+    }
+
     if (prompt.includes('fixture:stopped-background')) {
       const snapshotFirst = prompt.includes('snapshot-first')
       const failedStop = prompt.includes('failed-stop')

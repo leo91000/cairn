@@ -15,6 +15,7 @@ It does not assert pixel equality between a browser and Material components.
 | Delivery | Initial send and initiating run message appear in transcript; only waiting follow-ups appear in queue, held behind a scheduled wait; acknowledgements deduplicate optimistic messages; question responses use server privacy redaction | Six presentation regressions; existing message/network cases |
 | Queue and questions | Queue strip next to the composer (first follow-up visible, expandable), pause/resume, edit/remove/steer, option/free-text/private answers | Chat journey; network/Compose suite |
 | Subagents | Subagents started together form a team card in the conversation and the run log (state, current step or report, elapsed time); each opens its full activity (prompt, steps, report, nested teams) in a sheet with one tab per teammate; a bar above the composer keeps working subagents in sight and replaces the working indicator when the agent only waits for them | `SubagentsTest` mirrors the web subagent cases; `SubagentViewsTest` |
+| Agent plan | The plan Codex, Claude Code and OpenCode keep while they work (one `todo_list` item whatever its source) shows as a card where the agent first wrote it, kept current and folded once finished; each later change leaves a line naming the steps finished, started, added or dropped; while the agent follows the current request's plan, a bar above the composer shows its progress and the step in progress, and opens the whole plan with its explanation | `AgentPlanTest` mirrors `agent-plan.test.ts`; `PlanViewsTest`; browser plan journeys in `chats.spec.ts` |
 | Completion | Quiet task outcome below final reply, expandable reason/evidence, explicit blocked/input state, attribution; routine session rows hidden in chat; failures remain visible | Presentation/activity cases; device evidence expansion |
 | Task workspace | Missions list merging tasks and activity: readable schedules, recent run history, direct run, filters and search; mission sheet (detail pane on wide windows) with next dates, success rate and history opening each run; the full run log stays under Atelier › Journal | Native UI, workspace and Signal journeys; device mission screens |
 | Task management | Create/edit/duplicate/delete/archive/restore, schedules/timezones/tags, agent/project/model/limits, pause/resume/run, original brief | Workspace journey; device editor; existing task form |
@@ -38,6 +39,8 @@ coverage used, not a claim that every production account/provider was exercised.
   windows. Chat and run readers hide the global phone navigation to maximize room.
 - A subagent's activity opens in a bottom sheet on every window size, where the wide web
   layout shows a side panel. A team row opens that sheet directly instead of expanding inline.
+- The plan bar opens the whole plan in a bottom sheet, where the web shows it in a popover
+  above the bar.
 - Android document/photo pickers and system share/save/selection replace browser
   upload/download/clipboard controls. External OAuth uses Custom Tabs.
 - Installing a plugin package uses « Continuer sur le web ». Reviewing files and

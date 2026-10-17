@@ -166,6 +166,11 @@ fun RunScreen(
                 live.state?.artifacts.orEmpty(),
             )
         }
+    val livePlan =
+        remember(timeline, run?.status) {
+            if (run?.status != "running" || currentPlan(timeline) == null) null
+            else timeline.lastOrNull { it.plan != null }?.key
+        }
     var menu by remember { mutableStateOf(false) }
     var details by rememberSaveable(id) { mutableStateOf(false) }
     var fullscreen by rememberSaveable(id) { mutableStateOf(false) }
@@ -393,6 +398,7 @@ fun RunScreen(
                                         rendering,
                                         hideRunning = current.status == "running",
                                         active = current.active,
+                                        livePlan = livePlan,
                                     )
                                 }
                                 if (!current.active)

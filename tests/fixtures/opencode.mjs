@@ -240,6 +240,46 @@ async function main() {
       return
     }
 
+    // OpenCode announces todowrite before its arguments, then rewrites the whole list.
+    if (body.includes('fixture:plan')) {
+      const todos = {
+        id: id('prt'),
+        sessionID: session.id,
+        messageID: id('msg'),
+        type: 'tool',
+        tool: 'todowrite',
+        state: { status: 'pending', input: {} },
+      }
+      emit('message.part.updated', { part: todos })
+      todos.state = {
+        status: 'completed',
+        input: {
+          todos: [
+            {
+              id: '1',
+              content: 'Check the workspace',
+              status: 'in_progress',
+              priority: 'high',
+            },
+            {
+              id: '2',
+              content: 'Prepare the status panel',
+              status: 'pending',
+              priority: 'medium',
+            },
+            {
+              id: '3',
+              content: 'Write a changelog',
+              status: 'cancelled',
+              priority: 'low',
+            },
+          ],
+        },
+        output: '[]',
+      }
+      emit('message.part.updated', { part: todos })
+    }
+
     const tool = {
       id: id('prt'),
       sessionID: session.id,

@@ -197,9 +197,10 @@ describe('conversation activity', () => {
   })
   it('groups actions between assistant messages and updates commands in place', () => {
     const entries = activityEntries(events)
-    expect(entries.map(entry => entry.kind)).toEqual(['message', 'group', 'message', 'group', 'message'])
+    // The plan shows apart from the tools.
+    expect(entries.map(entry => entry.kind)).toEqual(['message', 'plan', 'group', 'message', 'group', 'message'])
     const groups = entries.filter(entry => entry.kind === 'group')
-    expect(groups[0].artifacts.map(item => item.kind)).toEqual(['plan', 'search', 'search', 'read', 'read', 'browse', 'command'])
+    expect(groups[0].artifacts.map(item => item.kind)).toEqual(['search', 'search', 'read', 'read', 'browse', 'command'])
     expect(groups[1].artifacts.map(item => item.kind)).toEqual(['files', 'command', 'tool'])
     expect(groups[1].artifacts[1]).toMatchObject({ status: 'done', subtitle: 'pnpm test -- sibling-functions && pnpm typecheck' })
     expect(groups[1].artifacts[0].blocks[0].language).toBe('diff')
