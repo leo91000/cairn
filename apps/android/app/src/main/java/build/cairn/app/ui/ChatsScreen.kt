@@ -1582,7 +1582,7 @@ internal fun ChatPage(
 }
 
 @Composable
-private fun QuestionDialog(
+internal fun QuestionDialog(
     vm: CairnViewModel,
     state: Workspace,
     question: ChatQuestion,
@@ -1609,6 +1609,7 @@ private fun QuestionDialog(
             topBar = { TopAppBar(title = { Text("Votre réponse") }) },
         ) { padding ->
             Column(Modifier.padding(padding).fillMaxSize()) {
+                ConnectionFeedbackNotice()
                 Box(Modifier.weight(1f)) {
                     Page {
                         Text(

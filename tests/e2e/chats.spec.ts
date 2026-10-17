@@ -1193,3 +1193,29 @@ test('deletion from another client removes the open transcript', async ({ page, 
   await page.reload()
   await expect(page.locator('.activity-message').getByText(message, { exact: true })).toHaveCount(0)
 })
+
+test('a failed fresh-session action keeps its confirmation available for retry', async ({ page, workspace }) => {
+  await useRelayForHttpMocks(page)
+  const chat = await workspace.api('/api/chats', 'POST', {})
+  const original = workspace.service.store.runs().find(run => run.status === 'succeeded')!
+  const run = workspace.service.store.addRun({
+    ...original,
+    id: randomUUID(),
+    status: 'failed',
+    trigger: 'chat',
+  })
+  workspace.service.store.put('chats', { ...chat, runId: run.id, restoredAt: Date.now() })
+  await page.goto(workspacePath(`/chats/${chat.id}`))
+  await authenticateWorkspace(page)
+  await page.getByRole('button', { name: 'Start a fresh agent session', exact: true }).click()
+  let attempts = 0
+  await page.route(`**/chats/${chat.id}/new-session`, async (route) => {
+    attempts++
+    await route.fulfill({ status: 503, json: { error: 'Installation request timed out.' } })
+  })
+  const confirmation = page.getByRole('dialog', { name: 'Start a fresh agent session?', exact: true })
+  await confirmation.getByRole('button', { name: 'Confirm new session', exact: true }).click()
+  await expect(confirmation.getByRole('status').filter({ hasText: 'Connection unavailable. Please try again.' })).toBeVisible()
+  await expect(confirmation).toBeVisible()
+  expect(attempts).toBe(1)
+})

@@ -256,6 +256,7 @@ fun MissionsScreen(vm: CairnViewModel, state: Workspace, openRun: (String) -> Un
                         .padding(horizontal = 20.dp)
                         .padding(bottom = 24.dp)
                 ) {
+                    ConnectionFeedbackNotice()
                     MissionDetail(vm, state, selected, latest[selected.id], actions, sheet = true)
                 }
             }

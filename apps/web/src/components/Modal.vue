@@ -7,6 +7,7 @@ import {
   ref,
   useId,
 } from 'vue'
+import { state } from '../api'
 import { X } from '../icons'
 import { iconButton } from '../ui'
 import Icon from './Icon.vue'
@@ -68,6 +69,14 @@ onBeforeUnmount(() => {
             <Icon :name="X" :size="20" />
           </button>
         </header>
+        <p
+          v-if="state.toast || state.connectionLost"
+          role="status"
+          aria-live="polite"
+          class="m-0 border-b border-line px-6.5 py-2 text-xs text-muted phone:px-5"
+        >
+          {{ state.toast || 'Connection lost · reconnecting…' }}
+        </p>
         <slot />
       </div>
     </dialog>

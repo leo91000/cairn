@@ -256,3 +256,27 @@ test('statuses come from the server: stale, unknown and expired accounts stay un
   await claude.getByRole('button', { name: /^Unknown,/ }).click()
   await expect(page.getByRole('dialog', { name: 'Unknown' })).toContainText('Runs can still use this account.')
 })
+
+test('a failed account removal keeps its confirmation and temporary failure feedback', async ({ page, workspace }) => {
+  await useRelayForHttpMocks(page)
+  const account = await seedCodexAccount(workspace, 'Removal retry', limits(20, 30))
+  await workspace.api('/api/accounts/refresh', 'POST')
+  await signIn(page)
+  await page.getByRole('region', { name: 'Codex accounts' }).getByRole('button', { name: /^Removal retry,/ }).click()
+  await page.getByRole('dialog', { name: 'Removal retry', exact: true }).getByRole('button', { name: 'Remove', exact: true }).click()
+  let attempts = 0
+  await page.route(`**/accounts/${account.id}`, async (route) => {
+    if (route.request().method() === 'DELETE') {
+      attempts++
+      await route.fulfill({ status: 503, json: { error: 'Installation busy.' } })
+    }
+    else {
+      await route.continue()
+    }
+  })
+  const confirmation = page.getByRole('dialog', { name: 'Remove Removal retry?', exact: true })
+  await confirmation.getByRole('button', { name: 'Remove account', exact: true }).click()
+  await expect(confirmation.getByRole('status').filter({ hasText: 'Connection unavailable. Please try again.' })).toBeVisible()
+  await expect(confirmation).toBeVisible()
+  expect(attempts).toBe(1)
+})

@@ -173,11 +173,17 @@ export function useAccounts() {
       apiKey,
     }))),
     reconnect: (id: string) => action(() => api<SignIn>(`/accounts/${id}/sign-in`, json('POST'))),
-    submitCode: (code: string) => action(() => api('/accounts/sign-in/code', json('POST', { code }))),
+    submitCode: (code: string) => action(async () => {
+      await api('/accounts/sign-in/code', json('POST', { code }))
+      return true
+    }),
     cancel: () => action(() => api('/accounts/sign-in', json('DELETE'))),
     update: (id: string, patch: Partial<Pick<Account, 'name' | 'enabled' | 'maxConcurrentRuns'>>) => action(() => api<Account>(`/accounts/${id}`, json('PATCH', patch))),
     reorder: (provider: Provider, ids: string[]) => action(async () => apply(await api<Accounts>('/accounts/order', json('POST', { provider, ids })))),
-    remove: (id: string) => action(() => api(`/accounts/${id}`, json('DELETE'))),
+    remove: (id: string) => action(async () => {
+      await api(`/accounts/${id}`, json('DELETE'))
+      return true
+    }),
   }
 }
 

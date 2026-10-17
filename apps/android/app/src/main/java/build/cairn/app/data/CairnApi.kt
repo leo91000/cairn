@@ -2,6 +2,7 @@ package build.cairn.app.data
 
 import build.cairn.app.diagnostics.PerfOperation
 import build.cairn.app.diagnostics.Performance
+import java.io.FileNotFoundException
 import java.io.IOException
 import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
@@ -24,6 +25,10 @@ import okhttp3.Request
 import okhttp3.RequestBody.Companion.asRequestBody
 import okhttp3.RequestBody.Companion.toRequestBody
 import okhttp3.Response
+import okhttp3.ResponseBody
+import okio.Buffer
+import okio.ForwardingSource
+import okio.buffer
 
 val wireJson = Json {
     ignoreUnknownKeys = true
@@ -35,6 +40,9 @@ val wireJson = Json {
 class ApiException(val status: Int, message: String, val explained: Boolean = true) :
     IOException(message)
 
+/** Marks I/O from the HTTP transport; local document and disk errors remain actionable. */
+class ConnectionException(cause: IOException) : IOException(cause.message, cause)
+
 // Beacon's relay answers these when it cannot reach the installation for a moment.
 private val relayUnavailable =
     setOf(
@@ -42,6 +50,7 @@ private val relayUnavailable =
         "Installation busy",
         "Installation busy or unavailable",
         "Installation request timed out",
+        "Installation response timed out",
         "Installation connection lost",
     )
 
@@ -52,8 +61,9 @@ private val relayUnavailable =
 fun isConnectionFailure(error: Throwable): Boolean =
     when (error) {
         is ApiException ->
-            error.status in 502..504 && (!error.explained || error.message in relayUnavailable)
-        is IOException -> true
+            error.status in 502..504 &&
+                (!error.explained || error.message?.removeSuffix(".") in relayUnavailable)
+        is ConnectionException -> true
         else -> false
     }
 
@@ -359,12 +369,14 @@ class CairnApi(
         call.enqueue(
             object : Callback {
                 override fun onFailure(call: Call, e: IOException) {
-                    if (continuation.isActive) continuation.resumeWithException(e)
+                    // A staged upload can disappear before OkHttp opens its local file.
+                    val failure = if (e is FileNotFoundException) e else ConnectionException(e)
+                    if (continuation.isActive) continuation.resumeWithException(failure)
                 }
 
                 override fun onResponse(call: Call, response: Response) {
                     try {
-                        val result = response.use(consume)
+                        val result = response.withConnectionErrors().use(consume)
                         if (continuation.isActive) continuation.resume(result)
                     } catch (e: Exception) {
                         if (continuation.isActive) continuation.resumeWithException(e)
@@ -373,6 +385,30 @@ class CairnApi(
             }
         )
     }
+}
+
+/** Only response reads are network I/O; a consumer may also write to local storage. */
+private fun Response.withConnectionErrors(): Response {
+    val original = body
+    val input =
+        object : ForwardingSource(original.source()) {
+                override fun read(sink: Buffer, byteCount: Long): Long =
+                    try {
+                        super.read(sink, byteCount)
+                    } catch (error: IOException) {
+                        throw ConnectionException(error)
+                    }
+            }
+            .buffer()
+    val wrapped =
+        object : ResponseBody() {
+            override fun contentType() = original.contentType()
+
+            override fun contentLength() = original.contentLength()
+
+            override fun source() = input
+        }
+    return newBuilder().body(wrapped).build()
 }
 
 /** Imports, skill batches and staged uploads may clone or transfer several megabytes. */

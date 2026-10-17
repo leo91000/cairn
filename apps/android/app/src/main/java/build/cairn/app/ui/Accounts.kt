@@ -477,6 +477,7 @@ internal fun AccountSheet(
                 .padding(bottom = 24.dp),
             verticalArrangement = Arrangement.spacedBy(16.dp),
         ) {
+            ConnectionFeedbackNotice()
             Row(verticalAlignment = Alignment.CenterVertically) {
                 if (account.activeRunIds.isNotEmpty())
                     WorkingAvatar(account.name, account.id, 48.dp)
@@ -1117,6 +1118,7 @@ internal fun AccountSignInSheet(
                     }
                 }
             }
+            ConnectionFeedbackNotice()
             state.error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
         }
     }

@@ -126,9 +126,18 @@ constructor(
 
     private val mutable = MutableStateFlow(Workspace())
     val state = mutable.asStateFlow()
-    private var connection: CairnApi? = null
-    private var routeCollection: kotlinx.coroutines.Job? = null
     private var recovery: kotlinx.coroutines.Job? = null
+    private var connection: CairnApi? = null
+        set(value) {
+            if (field !== value) {
+                recovery?.cancel()
+                recovery = null
+                mutable.update { it.copy(connectionLost = false) }
+            }
+            field = value
+        }
+
+    private var routeCollection: kotlinx.coroutines.Job? = null
     private var accountConnection: CairnApi? = null
     private var emailChallenge: String? = null
     val api: CairnApi
@@ -176,7 +185,7 @@ constructor(
                     error = "Session expirée. Reconnectez-vous.",
                 )
             }
-        } else if (isConnectionFailure(error) && state.value.installation?.online == true) {
+        } else if (isConnectionFailure(error) && state.value.installation != null) {
             connectionLost()
         } else {
             mutable.update { it.copy(error = error.message ?: "Connexion impossible. Réessayez.") }
@@ -276,7 +285,7 @@ constructor(
             var failure: Exception? = null
             while (true) {
                 delay(wait)
-                if (connection !== target || !state.value.session.authenticated) break
+                if (connection !== target || !state.value.session.authenticated) return@launch
                 try {
                     target.request("GET", "/overview")
                     break
@@ -290,22 +299,38 @@ constructor(
                 wait = (wait * 2).coerceAtMost(10_000L)
             }
 
-            mutable.update { it.copy(connectionLost = false) }
             if (connection !== target || !state.value.session.authenticated) return@launch
-            if (failure != null) report(failure) else perform { refresh() }
+            mutable.update { it.copy(connectionLost = false) }
+            if (failure != null) {
+                recovery = null
+                report(failure)
+                return@launch
+            }
+
+            // A successful probe must still reload after any user action finishes.
+            state.first { !it.busy }
+            if (connection !== target || !state.value.session.authenticated) return@launch
+            recovery = null
+            perform(userAction = false) {
+                refresh()
+                if (connection === target) mutable.update { it.copy(connectionLost = false) }
+            }
         }
     }
 
-    fun perform(block: suspend CairnViewModel.() -> Unit) {
+    fun perform(block: suspend CairnViewModel.() -> Unit) =
+        perform(userAction = true, block = block)
+
+    private fun perform(userAction: Boolean, block: suspend CairnViewModel.() -> Unit) {
         if (mutable.value.busy) return
-        mutable.update { it.copy(busy = true, error = null) }
+        mutable.update { it.copy(busy = true, error = if (userAction) null else it.error) }
         viewModelScope.launch {
             try {
                 block()
             } catch (e: Exception) {
                 report(e)
                 // The connection notice is quiet; still tell the user this action did not happen.
-                if (state.value.connectionLost && isConnectionFailure(e))
+                if (userAction && state.value.connectionLost && isConnectionFailure(e))
                     notify("Connexion impossible. Réessayez.")
             } finally {
                 mutable.update { it.copy(busy = false, ready = true) }

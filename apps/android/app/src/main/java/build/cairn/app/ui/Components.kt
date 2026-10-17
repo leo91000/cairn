@@ -189,6 +189,25 @@ fun ConnectionLostNotice(visible: Boolean) {
     }
 }
 
+/** Inline feedback for windows and pages that cannot show the workspace snackbar. */
+internal data class ConnectionFeedback(val lost: Boolean = false, val notice: String? = null)
+
+internal val LocalConnectionFeedback = compositionLocalOf { ConnectionFeedback() }
+
+@Composable
+internal fun ConnectionFeedbackNotice() {
+    val feedback = LocalConnectionFeedback.current
+    ConnectionLostNotice(feedback.lost)
+    feedback.notice?.let {
+        Text(
+            it,
+            modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite },
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+    }
+}
+
 internal fun statusLabel(value: String): String =
     when (value) {
         "suspended-exclusive" -> "Suspendue (exclusivité)"
@@ -334,6 +353,7 @@ fun Editor(
                 verticalArrangement = Arrangement.spacedBy(16.dp),
             ) {
                 if (busy) LinearProgressIndicator(Modifier.fillMaxWidth())
+                ConnectionFeedbackNotice()
                 if (error != null) Text(error, color = MaterialTheme.colorScheme.error)
                 content()
             }
@@ -356,6 +376,7 @@ fun Confirm(
         text = {
             Column {
                 Text(description)
+                ConnectionFeedbackNotice()
                 if (error != null) Text(error, color = MaterialTheme.colorScheme.error)
             }
         },

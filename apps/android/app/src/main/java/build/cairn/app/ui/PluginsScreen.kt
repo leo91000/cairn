@@ -1357,6 +1357,7 @@ private fun PluginReview(
                 verticalArrangement = Arrangement.spacedBy(14.dp),
             ) {
                 if (state.busy) LinearProgressIndicator(Modifier.fillMaxWidth())
+                ConnectionFeedbackNotice()
                 state.error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
                 if (manifest != null)
                     Row(verticalAlignment = Alignment.Top) {
