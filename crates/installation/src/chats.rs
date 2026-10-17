@@ -665,17 +665,25 @@ impl Service {
         identity: Option<&crate::auth::InstallationIdentity>,
     ) -> Result<Value> {
         let values = parse("message", input)?;
+
         let actor = match identity {
             Some(identity) => {
                 Some(crate::plugins::requesters::account(self, &identity.account_id).await?)
             }
             None => None,
         };
+
         let id = id.to_owned();
         let result = self
             .store
             .transaction(move |db| {
-                crate::plugins::requesters::capture(db, &id, &values, actor.as_ref(), false)?;
+                crate::plugins::requesters::capture(
+                    db,
+                    &id,
+                    &values,
+                    actor.as_ref(),
+                    crate::plugins::requesters::Capture::New,
+                )?;
                 send(db, &id, values, None)
             })
             .await?;
@@ -714,7 +722,13 @@ impl Service {
                     .as_ref()
                     .cloned()
                     .unwrap_or_else(|| json!({"id": message}));
-                crate::plugins::requesters::capture(db, &id, &attribution, actor.as_ref(), true)?;
+                crate::plugins::requesters::capture(
+                    db,
+                    &id,
+                    &attribution,
+                    actor.as_ref(),
+                    crate::plugins::requesters::Capture::Edit,
+                )?;
                 edit(db, &id, &message, values)
             })
             .await?;

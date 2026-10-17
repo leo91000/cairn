@@ -14,7 +14,7 @@ use std::{
     path::PathBuf,
     sync::{
         Arc,
-        atomic::{AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     },
 };
 use tempfile::TempDir;
@@ -834,15 +834,30 @@ async fn personal_oauth_isolated_by_verified_account_and_provider_subject() {
             },
         ),
     );
+    let hold_read = Arc::new(AtomicBool::new(false));
+    let read_entered = Arc::new(tokio::sync::Notify::new());
+    let release_read = Arc::new(tokio::sync::Notify::new());
+    let held = hold_read.clone();
+    let entered = read_entered.clone();
+    let release = release_read.clone();
     let provider = provider.route(
         "/messages",
-        axum::routing::get(|headers: axum::http::HeaderMap| async move {
-            let subject = match headers["authorization"].to_str().unwrap() {
-                "Bearer personal-alice-fixture" => "U111",
-                "Bearer personal-bob-fixture" => "U222",
-                _ => panic!("unexpected personal authorization"),
-            };
-            axum::Json(json!({"subject": subject}))
+        axum::routing::get(move |headers: axum::http::HeaderMap| {
+            let held = held.clone();
+            let entered = entered.clone();
+            let release = release.clone();
+            async move {
+                if held.swap(false, Ordering::SeqCst) {
+                    entered.notify_one();
+                    release.notified().await;
+                }
+                let subject = match headers["authorization"].to_str().unwrap() {
+                    "Bearer personal-alice-fixture" => "U111",
+                    "Bearer personal-bob-fixture" => "U222",
+                    _ => panic!("unexpected personal authorization"),
+                };
+                axum::Json(json!({"subject": subject}))
+            }
         }),
     );
     let (origin, server) = common::serve_locally(provider).await;
@@ -968,6 +983,86 @@ async fn personal_oauth_isolated_by_verified_account_and_provider_subject() {
             StatusCode::CONFLICT,
             "another participant inherited the running turn's personal identity"
         );
+        let question = "a".repeat(64);
+        s.question_receive(
+            text(&run, "id"),
+            json!({
+                "id": question, "blocking": false,
+                "fields": [{"id": "choice", "title": "Continue?", "options": []}]
+            }),
+        )
+        .await
+        .unwrap();
+        let answer_path = format!(
+            "/api/chats/{}/questions/{question}/answer",
+            text(&chat, "id")
+        );
+        let answer =
+            json!({"id": cairn_installation::config::id(), "answers": {"choice": ["Yes"]}});
+        let foreign_answer = common::send(
+            &app,
+            member_request("POST", &answer_path, answer.clone(), other),
+        )
+        .await;
+        assert_eq!(
+            foreign_answer.status(),
+            StatusCode::CONFLICT,
+            "a question answer bypassed cross-author steering checks"
+        );
+        assert_eq!(
+            common::send(
+                &app,
+                member_request("POST", &answer_path, answer.clone(), account)
+            )
+            .await
+            .status(),
+            StatusCode::OK
+        );
+        s.chat_edit(text(&chat, "id"), text(&answer, "id"), None)
+            .await
+            .unwrap();
+        if account == "alice" {
+            hold_read.store(true, Ordering::SeqCst);
+            let pending_service = s.clone();
+            let pending_bearer = bearer.to_owned();
+            let pending_input = json!({"resource": resource});
+            let pending = tokio::spawn(async move {
+                agents::call_tool(
+                    &pending_service,
+                    &pending_bearer,
+                    "example_read",
+                    &pending_input,
+                )
+                .await
+            });
+            tokio::time::timeout(std::time::Duration::from_secs(3), read_entered.notified())
+                .await
+                .unwrap();
+            let controlled = common::send(
+                &app,
+                request("POST", &answer_path, answer.clone(), Some("fixture-owner")),
+            )
+            .await;
+            assert_eq!(
+                controlled.status(),
+                StatusCode::OK,
+                "the owner lost conversation control"
+            );
+            release_read.notify_one();
+            assert!(
+                pending.await.unwrap().is_err(),
+                "a result from the suspended personal authority escaped to the plugin"
+            );
+            assert!(
+                agents::call_tool(&s, bearer, "example_read", &json!({"resource": resource}))
+                    .await
+                    .is_err(),
+                "owner control inherited the original requester's personal authorization"
+            );
+            s.chat_edit(text(&chat, "id"), text(&answer, "id"), None)
+                .await
+                .unwrap();
+        }
         if account == "bob" {
             let own_steer = common::send(&app, member_request("POST", &message_path,
                 json!({"id": cairn_installation::config::id(), "text": "continue", "mode": "steer"}), account)).await;

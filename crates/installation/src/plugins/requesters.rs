@@ -8,7 +8,7 @@ use crate::{
     validation::text,
 };
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{Value, json};
 
 #[derive(Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -45,38 +45,76 @@ fn recorded(db: &Db<'_>, chat: &str, message: &str) -> Result<Option<Actor>> {
         .map_err(Error::from)
 }
 
+pub(crate) fn control_prefix(chat: &str) -> String {
+    format!("plugin-requester-suspended:{chat}:")
+}
+
+fn control_key(chat: &str, run: &Value) -> String {
+    format!(
+        "{}{}:{}",
+        control_prefix(chat),
+        text(run, "id"),
+        text(&run["chatExecution"], "messageId")
+    )
+}
+
+fn suspended(db: &Db<'_>, chat: &str, run: &Value) -> Result<bool> {
+    Ok(db.kv(&control_key(chat, run))?.is_some())
+}
+
+#[derive(Clone, Copy)]
+pub(crate) enum Capture {
+    New,
+    Edit,
+    /// Current-owner control may proceed, but suspends personal authority for
+    /// the running turn instead of inheriting its original requester's token.
+    OwnerAnswer,
+}
+
 /// Called in the same transaction as the message write. Reusing another
 /// requester's message ID cannot transfer authority, even with identical text.
 pub(crate) fn capture(
     db: &Db<'_>,
     chat: &str,
     message: &Value,
-    actor: Option<&Actor>,
-    replacing: bool,
+    mut actor: Option<&Actor>,
+    kind: Capture,
 ) -> Result<()> {
     let message_id = text(message, "id");
-    if !replacing
+    if message["mode"] == "steer"
+        && let Some(chat) = db.get("chats", chat)?
+        && let Some(run) = db.run(text(&chat, "runId"))?
+        && RunStatus::of(&run).is_some_and(RunStatus::is_active)
+    {
+        let current = if suspended(db, text(&chat, "id"), &run)? {
+            None
+        } else {
+            recorded(
+                db,
+                text(&chat, "id"),
+                text(&run["chatExecution"], "messageId"),
+            )?
+        };
+        if current.as_ref() != actor {
+            if !matches!(kind, Capture::OwnerAnswer) {
+                return Err(Error::conflict(
+                    "Queue this message to use your own permissions on the next turn.",
+                ));
+            }
+            db.set(&control_key(text(&chat, "id"), &run), &json!(true), None)?;
+            db.audit(
+                "chat.personal_authority.suspended",
+                &json!({"chatId": chat["id"], "runId": run["id"]}),
+            )?;
+            actor = None;
+        }
+    }
+    if !matches!(kind, Capture::Edit)
         && db.messages(chat)?.iter().any(|m| m["id"] == message_id)
         && recorded(db, chat, message_id)?.as_ref() != actor
     {
         return Err(Error::conflict(
             "This message belongs to another requester.",
-        ));
-    }
-    if message["mode"] == "steer"
-        && let Some(chat) = db.get("chats", chat)?
-        && let Some(run) = db.run(text(&chat, "runId"))?
-        && RunStatus::of(&run).is_some_and(RunStatus::is_active)
-        && recorded(
-            db,
-            text(&chat, "id"),
-            text(&run["chatExecution"], "messageId"),
-        )?
-        .as_ref()
-            != actor
-    {
-        return Err(Error::conflict(
-            "Queue this message to use your own permissions on the next turn.",
         ));
     }
     match actor {
@@ -100,6 +138,7 @@ pub(crate) async fn for_run(s: &Service, run: &Value) -> Result<Option<RunReques
         // Scheduled work and external principals need their own explicit authority.
         return Ok(None);
     }
+    let run = run.clone();
     let requester = s
         .store
         .read(move |db| {
@@ -107,6 +146,9 @@ pub(crate) async fn for_run(s: &Service, run: &Value) -> Result<Option<RunReques
                 return Ok(None);
             };
             let chat_id = text(&chat, "id");
+            if suspended(db, chat_id, &run)? {
+                return Ok(None);
+            }
             Ok(recorded(db, chat_id, &message)?.map(|actor| RunRequester {
                 actor,
                 run: run_id,
@@ -136,6 +178,7 @@ pub(crate) async fn recheck(s: &Service, requester: &RunRequester) -> Result<()>
             if run["status"] != RunStatus::Running
                 || !run["cancelRequestedAt"].is_null()
                 || run["chatExecution"]["messageId"] != requester.message
+                || suspended(db, &requester.chat, &run)?
                 || !db
                     .get("chats", &requester.chat)?
                     .is_some_and(|chat| chat["runId"] == requester.run)

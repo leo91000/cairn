@@ -100,10 +100,17 @@ owner panels, task scheduling and external plugin messages receive no personal
 fallback. External identity linking and the remaining delivery checklist are still
 required before this becomes the complete Slack integration.
 
-Local checkpoint validation: 160 selected installation/Beacon integration tests
-pass across plugins, native chat/sleep/lifecycle, HTTP, MCP, skills and real direct
+Local checkpoint validation: 170 selected installation/Beacon integration tests
+pass across plugins, native chat/sleep/lifecycle/durability, HTTP, MCP, skills and real direct
 peers; one explicit performance benchmark remains ignored. All 25 plugin-crate
 tests pass. `pnpm check` passes (511 tests, lint, typecheck and production build),
 as does workspace Clippy with warnings denied. No Slack app or device journey was
 exercised. Final storage/compatibility measurements and independent review remain
 open with the full contract.
+
+The native question-answer path also participates in requester checks. A test first
+showed another participant's answer joining a personal turn (HTTP 200); it now
+refuses that transfer (409). The owner retains question control from Cairn, while
+that intervention suspends personal authority for the turn and rejects stale
+in-flight authorizations. A later turn obtains its own authority. Conversation
+purge removes both attribution and suspension records.

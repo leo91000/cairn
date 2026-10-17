@@ -456,6 +456,10 @@ membership, agent grant and authorization around network operations. Retrying
 another person's message ID cannot transfer its authority. Steering another
 person's active turn is refused; queue a new turn to use your own permissions.
 Editing a queued message reattributes it to the authenticated editor.
+Question answers follow the same check. The current installation owner can still
+answer another person's question from Cairn; doing so suspends personal credentials
+for that turn, including calls already in flight. The original author and their
+authorization remain unchanged, and a new turn can use its own requester again.
 
 This checkpoint supports authenticated Cairn chat authors. External identities,
 scheduled automation authorities and their account-linking flows remain in the

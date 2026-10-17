@@ -225,6 +225,7 @@ fn forget(db: &Db<'_>, cid: &str, run: &str) -> Result<()> {
         crate::chats::question_prefix(cid),
         format!("chat-attachment:{cid}:"),
         crate::plugins::requesters::prefix(cid),
+        crate::plugins::requesters::control_prefix(cid),
     ] {
         for (key, value) in db.keys(&prefix)? {
             if let Some(token) = value["publicToken"].as_str() {

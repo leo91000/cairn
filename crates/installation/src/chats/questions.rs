@@ -223,11 +223,49 @@ impl Service {
     }
 
     pub async fn question_answer(&self, chat_id: &str, id: &str, input: Value) -> Result<Value> {
+        self.question_answer_as(chat_id, id, input, None).await
+    }
+
+    pub async fn question_answer_as(
+        &self,
+        chat_id: &str,
+        id: &str,
+        input: Value,
+        identity: Option<&crate::auth::InstallationIdentity>,
+    ) -> Result<Value> {
+        use crate::{
+            auth::InstallationRole,
+            plugins::requesters::{self, Capture},
+        };
+
         let input = parse_as::<AnswerInput>("answer", input)?;
+
+        let actor = match identity {
+            Some(identity) => Some(requesters::account(self, &identity.account_id).await?),
+            None => None,
+        };
+        let owner_control =
+            if let Some(identity) = identity.filter(|i| i.role == InstallationRole::Owner) {
+                crate::relay::task_author_policy(self)
+                    .await?
+                    .is_some_and(|policy| policy.owner.account_id == identity.account_id)
+            } else {
+                false
+            };
+
         let (chat_id, id) = (chat_id.to_owned(), id.to_owned());
         let question = self
             .store
-            .transaction(move |db| answer(db, &chat_id, &id, &input))
+            .transaction(move |db| {
+                let message = json!({"id": input.id, "mode": "steer"});
+                let kind = if owner_control {
+                    Capture::OwnerAnswer
+                } else {
+                    Capture::New
+                };
+                requesters::capture(db, &chat_id, &message, actor.as_ref(), kind)?;
+                answer(db, &chat_id, &id, &input)
+            })
             .await?;
         self.worker.notify();
         Ok(serde_json::to_value(question)?)
