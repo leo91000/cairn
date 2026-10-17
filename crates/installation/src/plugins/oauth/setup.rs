@@ -147,3 +147,72 @@ pub(crate) async fn routes(
         _ => Err(Error::method_not_allowed("Method not allowed.")),
     }
 }
+
+/// Finished owner authorizations become operational only within activation's
+/// transaction, after the exact setup tree and all required fields are checked.
+pub(crate) fn activate_in(
+    db: &Db<'_>,
+    vault: &crate::vault::Vault,
+    manifest: &Manifest,
+    draft: &super::super::setup::SetupDraft,
+    connection: &connections::Connection,
+    resource: &resources::Resource,
+) -> Result<()> {
+    for provider in manifest.oauth.iter().filter(|provider| {
+        provider.collection == resource.collection && provider.personal.is_none()
+    }) {
+        let key = authorization_key(&resource.id, &provider.name, None);
+        let stored = stored_key(&key);
+        if let Some(encrypted) = db.kv(&stored)? {
+            if connection.settings.get(&provider.client_id)
+                != draft.settings.get(&provider.client_id)
+            {
+                return Err(Error::conflict(
+                    "The OAuth application changed. Save the final settings and reconnect before activating.",
+                ));
+            }
+            let mut authorization: Authorization =
+                serde_json::from_value(vault.decrypt(&key, &encrypted)?)?;
+            if authorization
+                .setup
+                .as_deref()
+                .map(serde_json::to_value)
+                .transpose()?
+                != Some(serde_json::to_value(draft)?)
+                || authorization.personal.is_some()
+                || authorization.owner_access != draft.owner_access_id
+                || authorization.instance_revision != draft.revision
+                || authorization.digest != draft.digest
+                || authorization.refreshing
+                || authorization
+                    .metadata
+                    .iter()
+                    .any(|(key, value)| resource.settings.get(key) != Some(value))
+                || (authorization
+                    .tokens
+                    .expires_at
+                    .is_some_and(|expiry| expiry <= now())
+                    && authorization.tokens.refresh.is_none())
+            {
+                return Err(Error::conflict(
+                    "Reconnect or disconnect stale setup OAuth before activating.",
+                ));
+            }
+            authorization.setup = None;
+            authorization
+                .instance_revision
+                .clone_from(&connection.revision);
+            let encrypted = vault.encrypt(&key, &serde_json::to_value(&authorization)?)?;
+            db.set(&stored, &encrypted, None)?;
+        }
+    }
+    // No pending consent is promoted. A consumed exchange is fenced by removal
+    // of its root; an unconsumed code/state is deleted in the same commit.
+    for (index, key) in db.keys(&setup_pending_prefix(&resource.id))? {
+        if let Some(key) = key.as_str() {
+            db.delete(&stored_key(key))?;
+        }
+        db.delete(&index)?;
+    }
+    Ok(())
+}

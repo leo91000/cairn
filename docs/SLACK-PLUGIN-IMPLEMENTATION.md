@@ -431,3 +431,32 @@ must not reach the token provider. Older unfinished consent without this proof
 requires a new authorization flow. The expiry tracer also checks the encrypted
 pending/final record becomes unavailable at its prepared root deadline, independently
 of endpoint refusal; it is not a physical disk-erasure measurement.
+
+## Atomic setup activation
+
+Owner activation prepares the ordinary instance validators without publishing a
+temporary connection. Its final form retains the saved UUID and setup URLs and may
+supply derived required fields. The final transaction checks the exact owner,
+approval, root and complete resource snapshot, validates required fields/secrets
+and parents, publishes original IDs, promotes finished owner OAuth, clears draft
+credential TTLs and consumes only setup metadata. Pending consent is discarded;
+late provider completion cannot restore setup authority. Failures roll back the
+entire transition and leave the draft available.
+
+The first owner HTTP/provider tracer reproduced the missing activation endpoint
+(404) and then exercised retained IDs and actual Luau OAuth injection. A second
+tracer reproduced premature required-field validation before derived form values.
+Held form responses cover root/resource edit/delete, prepared expiry, reapproval,
+owner-access replacement and a winning concurrent activation. Separate prepared
+lifetime tests observe root/resource/OAuth credentials after the original deadline,
+not a full-day wait or physical disk erasure. No client UI, device, live Slack or
+agent VM was exercised. Both configuration clients and all remaining Slack lots
+remain required; this is not final whole-PR qualification.
+
+The first independent activation review found that a form-derived OAuth client ID
+could differ from the app which issued the saved tokens. The actual owner/provider
+tracer reproduced promotion under the different client (HTTP 200). Activation now
+refuses that transition transactionally while preserving the draft authorization.
+Saving the final client ID and completing fresh consent allows activation; unrelated
+derived fields remain supported. Both fresh review axes must cover the complete
+corrected checkpoint before it is committed.

@@ -562,20 +562,66 @@ fn labels(value: &Value) -> Vec<Label> {
         .collect()
 }
 
+/// Validation is shared by ordinary saves and atomic activation. A setup source
+/// retains its UUID and secrets without creating a temporary live connection.
+pub(crate) enum SaveSource<'a> {
+    New,
+    Existing(&'a str),
+    Setup(&'a super::setup::SetupDraft),
+}
+
+pub(crate) struct Prepared {
+    pub(crate) connection: Connection,
+    encrypted: Option<Value>,
+    encrypted_secrets: Option<Value>,
+    updating: bool,
+}
+
 pub async fn save(
     s: &Service,
     plugin_id: &str,
     input: &Value,
     existing: Option<&str>,
 ) -> Result<Value> {
-    let package = registry::active(s, plugin_id).await?;
+    let approved = registry::approved(s, plugin_id).await?;
+    let source = existing.map_or(SaveSource::New, SaveSource::Existing);
+    let prepared = prepare(s, &approved.package, input, source).await?;
+    let result = s
+        .store
+        .transaction(move |db| {
+            approved.recheck_in(db)?;
+            prepared.persist_in(db)
+        })
+        .await?;
+    s.plugins.changed.notify_one();
+    Ok(result)
+}
+
+pub(crate) async fn prepare(
+    s: &Service,
+    package: &registry::Package,
+    input: &Value,
+    source: SaveSource<'_>,
+) -> Result<Prepared> {
+    let (existing, setup, updating) = match source {
+        SaveSource::New => (None, None, false),
+        SaveSource::Existing(id) => (Some(id), None, true),
+        SaveSource::Setup(draft) => (Some(draft.id.as_str()), Some(draft), false),
+    };
+    let plugin_id = package.manifest.id.as_str();
     let manifest = package.manifest.clone();
     let owner = crate::relay::task_author_policy(s).await?;
     let name = text(input, "name").trim();
     if name.is_empty() || name.chars().count() > 100 {
         return Err(Error::bad("Enter a connection name."));
     }
-    let mut settings = settings(&manifest, &input["settings"])?;
+    let mut form_schema = manifest.clone();
+    if manifest.instance_form {
+        for field in &mut form_schema.settings {
+            field["required"] = json!(false);
+        }
+    }
+    let mut settings = settings(&form_schema, &input["settings"])?;
     let resource_routes = manifest
         .resources
         .iter()
@@ -665,6 +711,17 @@ pub async fn save(
     }
     let connection_id = existing.map_or_else(id, str::to_owned);
     uuid(&connection_id)?;
+    if setup.is_some()
+        && manifest.credential.is_some()
+        && s.vault
+            .get(&credential_key(&connection_id))
+            .await?
+            .is_none()
+    {
+        return Err(Error::bad(
+            "Configure the plugin credential before activation.",
+        ));
+    }
     let agent_ids = agent_grants(&manifest, &input["agentIds"])?;
     let saved = match existing {
         Some(_) => secret_values(s, &connection_id).await?,
@@ -685,10 +742,14 @@ pub async fn save(
         let draft = forms::Draft {
             credential,
             secrets: secret_fields.clone(),
-            setup: None,
-            urls: None,
+            setup: setup.cloned().map(Box::new),
+            urls: if setup.is_some() {
+                Some(forms::setup_urls(s, &package.manifest, &connection_id, input).await?)
+            } else {
+                None
+            },
         };
-        settings = forms::submit(s, &package, &connection_id, settings, draft).await?;
+        settings = forms::submit(s, package, &connection_id, settings, draft).await?;
     }
     let encrypted_secrets = if manifest.secret_settings().next().is_some() {
         Some(s.vault.encrypt(
@@ -706,7 +767,7 @@ pub async fn save(
                 .encrypt(&credential_key(&connection_id), &json!({ "token": token }))?,
         )
     };
-    let mut connection = Connection {
+    let connection = Connection {
         id: connection_id,
         plugin_id: plugin_id.to_owned(),
         name: name.to_owned(),
@@ -727,70 +788,79 @@ pub async fn save(
         secret_keys,
         updated_at: now(),
     };
-    let updating = existing.is_some();
-    let result = s
-        .store
-        .transaction(move |db| {
-            if let Some(current) = db.get(KIND, &connection.id)? {
-                if current["pluginId"] != connection.plugin_id {
-                    return Err(Error::not_found("Plugin connection not found."));
-                }
-            } else if updating {
+    Ok(Prepared {
+        connection,
+        encrypted,
+        encrypted_secrets,
+        updating,
+    })
+}
+
+impl Prepared {
+    pub(crate) fn persist_in(self, db: &Db<'_>) -> Result<Value> {
+        let Self {
+            mut connection,
+            encrypted,
+            encrypted_secrets,
+            updating,
+        } = self;
+        if let Some(current) = db.get(KIND, &connection.id)? {
+            if !updating || current["pluginId"] != connection.plugin_id {
                 return Err(Error::not_found("Plugin connection not found."));
             }
-            if !updating && db.list(KIND)?.len() >= 64 {
-                return Err(Error::bad(
-                    "At most 64 plugin instances can exist on this installation.",
-                ));
+        } else if updating {
+            return Err(Error::not_found("Plugin connection not found."));
+        }
+        if !updating && db.list(KIND)?.len() >= 64 {
+            return Err(Error::bad(
+                "At most 64 plugin instances can exist on this installation.",
+            ));
+        }
+        for agent in &connection.agent_ids {
+            if db.get("agents", agent)?.is_none() {
+                return Err(Error::bad("A selected agent no longer exists."));
             }
-            for agent in &connection.agent_ids {
-                if db.get("agents", agent)?.is_none() {
-                    return Err(Error::bad("A selected agent no longer exists."));
-                }
-            }
-            if !connection.agent_id.is_empty() {
-                connection.granted_access = delegation_access(
-                    db,
-                    &connection.agent_id,
-                    connection.project_id.as_deref(),
-                    connection.access_mode,
-                )?;
-            }
-            if connection.access_mode != AccessMode::Requests {
-                for request in db.list("plugin-requests")? {
-                    if request["connectionId"] == connection.id
-                        && request["routeId"].is_null()
-                        && request["status"] == "pending"
-                    {
-                        db.remove("plugin-requests", text(&request, "id"))?;
-                    }
-                }
-            }
-            if let Some(encrypted) = encrypted {
-                db.set(
-                    &format!("mcp-secret:{}", credential_key(&connection.id)),
-                    &encrypted,
-                    None,
-                )?;
-            }
-            if let Some(encrypted) = encrypted_secrets {
-                db.set(
-                    &format!("mcp-secret:{}", secrets_key(&connection.id)),
-                    &encrypted,
-                    None,
-                )?;
-            }
-            let value = serde_json::to_value(&connection)?;
-            db.put(KIND, &value)?;
-            db.audit(
-                "plugin.connection.saved",
-                &json!({ "id": connection.id, "plugin": connection.plugin_id }),
+        }
+        if !connection.agent_id.is_empty() {
+            connection.granted_access = delegation_access(
+                db,
+                &connection.agent_id,
+                connection.project_id.as_deref(),
+                connection.access_mode,
             )?;
-            Ok(value)
-        })
-        .await?;
-    s.plugins.changed.notify_one();
-    Ok(result)
+        }
+        if connection.access_mode != AccessMode::Requests {
+            for request in db.list("plugin-requests")? {
+                if request["connectionId"] == connection.id
+                    && request["routeId"].is_null()
+                    && request["status"] == "pending"
+                {
+                    db.remove("plugin-requests", text(&request, "id"))?;
+                }
+            }
+        }
+        if let Some(encrypted) = encrypted {
+            db.set(
+                &format!("mcp-secret:{}", credential_key(&connection.id)),
+                &encrypted,
+                None,
+            )?;
+        }
+        if let Some(encrypted) = encrypted_secrets {
+            db.set(
+                &format!("mcp-secret:{}", secrets_key(&connection.id)),
+                &encrypted,
+                None,
+            )?;
+        }
+        let value = serde_json::to_value(&connection)?;
+        db.put(KIND, &value)?;
+        db.audit(
+            "plugin.connection.saved",
+            &json!({ "id": connection.id, "plugin": connection.plugin_id }),
+        )?;
+        Ok(value)
+    }
 }
 
 /// Loads a connection and checks it belongs to the plugin named in the route.

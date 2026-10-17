@@ -365,9 +365,28 @@ consent from a version without that proof must be started again. Discarding a re
 setup consent states. Safe identity metadata updates stay in the draft namespace;
 active OAuth endpoints and operational credential lookup refuse setup provenance.
 
-Activation and the web/Android setup journeys remain in the Slack delivery
-checklist. These APIs alone do not activate an instance or finish its configuration;
-provider-side revocation and the other pending OAuth functions are also unfinished.
+The owner activates a saved draft with POST `/<draft>/activate`: `{revision,
+enabled, agentIds?, agentId?, projectId?, accessMode?, userIds?, people?,
+maxMessagesPerHour?, maxPerPersonPerHour?, directOrigin?}`. Name, settings,
+credentials and secrets come from the persisted draft; update them with PATCH
+before activation. The final `form` invocation has `submit = true`, the same stable
+`instance` ID and `setup` addresses. It may supply derived required values before
+full schema validation. Ordinary instance saves use the same validators.
+
+Activation requires complete root/resource fields and secrets, valid parent trees,
+current owner/approval and unchanged root/resources after form I/O. One transaction
+publishes the live instance and resources with their original IDs, promotes only
+finished owner OAuth by clearing setup provenance and rebinding its instance
+revision, removes credential expirations and consumes setup metadata. A final form
+cannot change a connected provider's client ID while retaining that authorization:
+save the final configuration and complete fresh consent first. Pending
+consent is discarded; an already-consumed exchange cannot publish late tokens.
+Failure preserves the draft and starts no worker. A successful retry against the
+consumed draft returns not found/conflict rather than creating a second instance.
+Workers are notified only after commit. No agent is granted by default.
+
+The web/Android setup journeys, provider-side revocation and the other pending
+OAuth functions remain in the Slack delivery checklist.
 
 ### Resource collections
 

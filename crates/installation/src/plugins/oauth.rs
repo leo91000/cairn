@@ -32,6 +32,7 @@ use tokio::sync::{Mutex, OwnedMutexGuard};
 mod external;
 mod setup;
 
+pub(crate) use setup::activate_in as activate_setup_in;
 pub(crate) use setup::routes as setup_routes;
 
 pub(crate) use external::call;

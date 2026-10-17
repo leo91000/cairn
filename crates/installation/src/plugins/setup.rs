@@ -14,6 +14,10 @@ use serde_json::{Value, json};
 const PREFIX: &str = "plugin-setup:";
 const LIFETIME: i64 = 86_400_000;
 
+mod activation;
+
+pub(crate) use activation::activate;
+
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SetupDraft {

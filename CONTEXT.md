@@ -138,7 +138,9 @@ _Avoid_ : connexion (réservé aux comptes des agents de code et à GitHub)
 Une configuration temporaire préparée par le propriétaire avant d’activer une
 instance. Elle garde une identité stable pendant la mise en place auprès du
 service externe, sans donner d’accès aux agents ni accepter du travail. Elle
-expire si le propriétaire ne termine pas la configuration.
+expire si le propriétaire ne termine pas la configuration. L’activation valide la
+configuration complète puis publie l’instance, ses ressources et les autorisations
+préparées dans une seule transaction, en conservant leurs identifiants.
 
 **Contribution d’un plugin** :
 Ce qu’un package déclare dans son manifeste et que Cairn affiche et contrôle : le

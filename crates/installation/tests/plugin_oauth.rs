@@ -1579,9 +1579,14 @@ async fn draft_fixture(
     personal: bool,
 ) -> (TempDir, Arc<Service>, Value, Value, String, axum::Router) {
     let (root, s, _live, _resource, _path, app) = configured_fixture(false, personal).await;
+    let (draft, resource, oauth) = create_setup(&app).await;
+    (root, s, draft, resource, oauth, app)
+}
+
+async fn create_setup(app: &axum::Router) -> (Value, Value, String) {
     let collection = "/api/plugins/example/setup-drafts";
     let response = common::send(
-        &app,
+        app,
         request(
             "POST",
             collection,
@@ -1598,7 +1603,7 @@ async fn draft_fixture(
     let draft = common::read_json(response).await;
     let resources = format!("{collection}/{}/resources/workspace", text(&draft, "id"));
     let response = common::send(
-        &app,
+        app,
         request(
             "POST",
             &resources,
@@ -1614,7 +1619,7 @@ async fn draft_fixture(
     let resource = common::read_json(response).await;
     let item = format!("{resources}/{}", text(&resource, "id"));
     let oauth = format!("{item}/oauth/bot");
-    (root, s, draft, resource, oauth, app)
+    (draft, resource, oauth)
 }
 
 #[tokio::test]
@@ -1954,6 +1959,29 @@ async fn setup_oauth_requires_its_owner_and_refuses_personal_providers() {
     assert_eq!(response.status(), StatusCode::FORBIDDEN);
 }
 
+async fn prepare_draft_expiry(s: &Service, draft: &Value, resource: &Value, deadline: i64) {
+    let key = format!("plugin-setup:{}", text(draft, "id"));
+    let mut saved = s.store.kv(&key).await.unwrap().unwrap();
+    saved["expiresAt"] = json!(deadline);
+    saved["createdAt"] = json!(deadline - 86_400_000);
+    s.store.set(&key, saved, Some(deadline)).await.unwrap();
+    for key in [
+        format!("mcp-secret:plugin-secrets:{}", text(draft, "id")),
+        format!(
+            "plugin-setup-resource:{}:{}",
+            text(draft, "id"),
+            text(resource, "id")
+        ),
+        format!(
+            "mcp-secret:plugin-resource-secrets:{}",
+            text(resource, "id")
+        ),
+    ] {
+        let value = s.store.kv(&key).await.unwrap().unwrap();
+        s.store.set(&key, value, Some(deadline)).await.unwrap();
+    }
+}
+
 #[tokio::test]
 async fn setup_consent_and_authorization_expire_with_their_prepared_draft() {
     for phase in ["pending", "authorized"] {
@@ -1961,26 +1989,7 @@ async fn setup_consent_and_authorization_expire_with_their_prepared_draft() {
         // Prepare a coherent persisted draft near the end of its 24-hour lifetime.
         // HTTP still performs the real consent, callback, exchange and expiry checks.
         let deadline = cairn_installation::config::now() + 5000;
-        let key = format!("plugin-setup:{}", text(&draft, "id"));
-        let mut saved = s.store.kv(&key).await.unwrap().unwrap();
-        saved["expiresAt"] = json!(deadline);
-        saved["createdAt"] = json!(deadline - 86_400_000);
-        s.store.set(&key, saved, Some(deadline)).await.unwrap();
-        for key in [
-            format!("mcp-secret:plugin-secrets:{}", text(&draft, "id")),
-            format!(
-                "plugin-setup-resource:{}:{}",
-                text(&draft, "id"),
-                text(&resource, "id")
-            ),
-            format!(
-                "mcp-secret:plugin-resource-secrets:{}",
-                text(&resource, "id")
-            ),
-        ] {
-            let value = s.store.kv(&key).await.unwrap().unwrap();
-            s.store.set(&key, value, Some(deadline)).await.unwrap();
-        }
+        prepare_draft_expiry(&s, &draft, &resource, deadline).await;
         let response = common::send(
             &app,
             request(
@@ -2160,4 +2169,426 @@ async fn replacing_the_approval_invalidates_old_setup_consent_even_when_the_same
             server.abort();
         }
     }
+}
+
+#[tokio::test]
+async fn owner_activation_promotes_setup_identity_resources_and_oauth_in_one_commit() {
+    let (_root, s, draft, resource, oauth, app) = draft_fixture(false).await;
+    let deadline = cairn_installation::config::now() + 5000;
+    prepare_draft_expiry(&s, &draft, &resource, deadline).await;
+    let instance = text(&draft, "id");
+    let root_path = format!("/api/plugins/example/setup-drafts/{instance}");
+    let activation = format!("{root_path}/activate");
+    let provider = axum::Router::new()
+        .route("/token", axum::routing::post(|| async {
+            axum::Json(json!({"access_token": "promoted-bot-fixture", "scope": "messages:read", "team": {"id": "T111"}}))
+        }))
+        .route("/messages", axum::routing::get(|headers: axum::http::HeaderMap| async move {
+            assert_eq!(headers["authorization"], "Bearer promoted-bot-fixture");
+            axum::Json(json!({"ok": true}))
+        }));
+    let (origin, server) = common::serve_locally(provider).await;
+    s.plugins.route_http_to(Some(origin));
+    let response = common::send(
+        &app,
+        request(
+            "POST",
+            &oauth,
+            json!({
+                "setupRevision": draft["revision"], "scopes": ["messages:read"]
+            }),
+            Some("fixture-owner"),
+        ),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let started = common::read_json(response).await;
+    let callback = format!(
+        "/api/plugin-oauth/{instance}/callback?state={}&code=fixture",
+        text(&started, "state")
+    );
+    assert_eq!(
+        common::send(&app, request("GET", &callback, Value::Null, None))
+            .await
+            .status(),
+        StatusCode::OK
+    );
+    assert_eq!(
+        common::send(
+            &app,
+            request(
+                "POST",
+                &format!("{oauth}/finish"),
+                json!({"state": started["state"]}),
+                Some("fixture-owner")
+            )
+        )
+        .await
+        .status(),
+        StatusCode::OK
+    );
+    // A second unfinished consent must be discarded rather than promoted.
+    let response = common::send(
+        &app,
+        request(
+            "POST",
+            &oauth,
+            json!({
+                "setupRevision": draft["revision"], "scopes": ["messages:read"],
+            }),
+            Some("fixture-owner"),
+        ),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let unfinished = common::read_json(response).await;
+    let response = common::send(
+        &app,
+        request(
+            "POST",
+            &activation,
+            json!({"revision": draft["revision"], "enabled": true}),
+            Some("fixture-owner"),
+        ),
+    )
+    .await;
+    assert_eq!(
+        response.status(),
+        StatusCode::OK,
+        "{}",
+        common::read_text(response).await
+    );
+    let active = common::read_json(response).await;
+    assert_eq!(active["id"], draft["id"]);
+    assert_eq!(active["name"], draft["name"]);
+    assert_eq!(active["enabled"], true);
+    assert_eq!(active["agentIds"], json!([]));
+    assert!(!active.to_string().contains("secret-fixture"));
+    let live_resource = format!(
+        "/api/plugins/example/connections/{instance}/resources/workspace/{}",
+        text(&resource, "id")
+    );
+    let response = common::send(
+        &app,
+        request("GET", &live_resource, Value::Null, Some("fixture-owner")),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let promoted = common::read_json(response).await;
+    assert_eq!(promoted["id"], resource["id"]);
+    assert_eq!(promoted["settings"]["externalId"], "T111");
+    let remaining = (deadline - cairn_installation::config::now()).max(0) as u64;
+    tokio::time::sleep(std::time::Duration::from_millis(remaining + 30)).await;
+    let discarded_callback = format!(
+        "/api/plugin-oauth/{instance}/callback?state={}&code=fixture",
+        text(&unfinished, "state")
+    );
+    assert_eq!(
+        common::send(&app, request("GET", &discarded_callback, Value::Null, None))
+            .await
+            .status(),
+        StatusCode::CONFLICT
+    );
+    let response = common::send(
+        &app,
+        request(
+            "GET",
+            &format!("{live_resource}/oauth/bot"),
+            Value::Null,
+            Some("fixture-owner"),
+        ),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(common::read_json(response).await["status"], "authorized");
+    assert_eq!(
+        panels::action(
+            &s,
+            "example",
+            instance,
+            &json!({"action": "read", "payload": {"resource": resource["id"]}})
+        )
+        .await
+        .unwrap()["notice"],
+        "Authorized"
+    );
+    assert_eq!(
+        common::send(
+            &app,
+            request("GET", &root_path, Value::Null, Some("fixture-owner"))
+        )
+        .await
+        .status(),
+        StatusCode::NOT_FOUND
+    );
+    let again = common::send(
+        &app,
+        request(
+            "POST",
+            &activation,
+            json!({"revision": draft["revision"], "enabled": true}),
+            Some("fixture-owner"),
+        ),
+    )
+    .await;
+    assert!(matches!(
+        again.status(),
+        StatusCode::NOT_FOUND | StatusCode::CONFLICT
+    ));
+    server.abort();
+}
+
+#[tokio::test]
+async fn activation_during_exchange_cannot_import_late_setup_tokens() {
+    let (_root, s, draft, resource, oauth, app) = draft_fixture(false).await;
+    let response = common::send(
+        &app,
+        request(
+            "POST",
+            &oauth,
+            json!({
+                "setupRevision": draft["revision"], "scopes": ["messages:read"],
+            }),
+            Some("fixture-owner"),
+        ),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let started = common::read_json(response).await;
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let (read_entered, read_release) = (entered.clone(), release.clone());
+    let provider = axum::Router::new().route("/token", axum::routing::post(move || {
+        let (entered, release) = (read_entered.clone(), read_release.clone());
+        async move {
+            entered.notify_one();
+            release.notified().await;
+            axum::Json(json!({"access_token": "late-setup-fixture", "scope": "messages:read", "team": {"id": "T111"}}))
+        }
+    }));
+    let (origin, server) = common::serve_locally(provider).await;
+    s.plugins.route_http_to(Some(origin));
+    let callback = format!(
+        "/api/plugin-oauth/{}/callback?state={}&code=fixture",
+        text(&draft, "id"),
+        text(&started, "state")
+    );
+    assert_eq!(
+        common::send(&app, request("GET", &callback, Value::Null, None))
+            .await
+            .status(),
+        StatusCode::OK
+    );
+    let pending_app = app.clone();
+    let pending_request = request(
+        "POST",
+        &format!("{oauth}/finish"),
+        json!({"state": started["state"]}),
+        Some("fixture-owner"),
+    );
+    let pending = tokio::spawn(async move { common::send(&pending_app, pending_request).await });
+    tokio::time::timeout(std::time::Duration::from_secs(3), entered.notified())
+        .await
+        .unwrap();
+    let activation = format!(
+        "/api/plugins/example/setup-drafts/{}/activate",
+        text(&draft, "id")
+    );
+    let response = common::send(
+        &app,
+        request(
+            "POST",
+            &activation,
+            json!({"revision": draft["revision"], "enabled": true}),
+            Some("fixture-owner"),
+        ),
+    )
+    .await;
+    assert_eq!(
+        response.status(),
+        StatusCode::OK,
+        "{}",
+        common::read_text(response).await
+    );
+    release.notify_one();
+    let response = pending.await.unwrap();
+    assert!(matches!(
+        response.status(),
+        StatusCode::NOT_FOUND | StatusCode::CONFLICT | StatusCode::FORBIDDEN
+    ));
+    let status = format!(
+        "/api/plugins/example/connections/{}/resources/workspace/{}/oauth/bot",
+        text(&draft, "id"),
+        text(&resource, "id")
+    );
+    let response = common::send(
+        &app,
+        request("GET", &status, Value::Null, Some("fixture-owner")),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(common::read_json(response).await["status"], "disconnected");
+    server.abort();
+}
+
+#[tokio::test]
+async fn final_form_cannot_promote_oauth_from_a_different_client_app() {
+    let (_root, s, _live, _resource, _path, app) = fixture(false).await;
+    let package = registry::active(&s, "example").await.unwrap();
+    let mut manifest = serde_json::to_value(&package.manifest).unwrap();
+    manifest["version"] = json!("2");
+    manifest["instanceForm"] = json!(true);
+    let source = package.source.main.replacen(
+        "return {action = function(event)",
+        "return {form = function(event) return {values = {clientId = 'derived-client-fixture'}} end, action = function(event)",
+        1,
+    );
+    let package = registry::install(&s, &json!({"manifest": manifest, "source": source}))
+        .await
+        .unwrap();
+    registry::approve(&s, "example", "2", text(&package, "digest"))
+        .await
+        .unwrap();
+    let (draft, resource, oauth) = create_setup(&app).await;
+    let calls = Arc::new(AtomicUsize::new(0));
+    let observed = calls.clone();
+    let provider = axum::Router::new().route("/token", axum::routing::post(move |headers: axum::http::HeaderMap| {
+        let observed = observed.clone();
+        async move {
+            let call = observed.fetch_add(1, Ordering::SeqCst);
+            let client = if call == 0 {"client-fixture"} else {"derived-client-fixture"};
+            let basic = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, format!("{client}:client-secret-fixture"));
+            assert_eq!(headers["authorization"], format!("Basic {basic}"));
+            axum::Json(json!({"access_token": "app-bound-access-fixture", "refresh_token": "app-bound-refresh-fixture", "scope": "messages:read", "team": {"id": "T111"}}))
+        }
+    }));
+    let (origin, server) = common::serve_locally(provider).await;
+    s.plugins.route_http_to(Some(origin));
+    let consent = |revision: Value| {
+        request(
+            "POST",
+            &oauth,
+            json!({"setupRevision": revision, "scopes": ["messages:read"]}),
+            Some("fixture-owner"),
+        )
+    };
+    let authorize = |state: &Value| {
+        request(
+            "POST",
+            &format!("{oauth}/finish"),
+            json!({"state": state}),
+            Some("fixture-owner"),
+        )
+    };
+    let response = common::send(&app, consent(draft["revision"].clone())).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let started = common::read_json(response).await;
+    let callback = format!(
+        "/api/plugin-oauth/{}/callback?state={}&code=fixture",
+        text(&draft, "id"),
+        text(&started, "state")
+    );
+    assert_eq!(
+        common::send(&app, request("GET", &callback, Value::Null, None))
+            .await
+            .status(),
+        StatusCode::OK
+    );
+    assert_eq!(
+        common::send(&app, authorize(&started["state"]))
+            .await
+            .status(),
+        StatusCode::OK
+    );
+    let root = format!("/api/plugins/example/setup-drafts/{}", text(&draft, "id"));
+    let activation = format!("{root}/activate");
+    let response = common::send(
+        &app,
+        request(
+            "POST",
+            &activation,
+            json!({"revision": draft["revision"], "enabled": true}),
+            Some("fixture-owner"),
+        ),
+    )
+    .await;
+    assert_eq!(
+        response.status(),
+        StatusCode::CONFLICT,
+        "old client authorization was promoted: {}",
+        common::read_text(response).await
+    );
+    assert!(
+        s.store
+            .get("plugin-connections", text(&draft, "id"))
+            .await
+            .unwrap()
+            .is_none()
+    );
+    let response = common::send(
+        &app,
+        request("GET", &oauth, Value::Null, Some("fixture-owner")),
+    )
+    .await;
+    assert_eq!(
+        common::read_json(response).await["status"],
+        "authorized",
+        "failed activation discarded the usable draft consent"
+    );
+    let response = common::send(&app, request("PATCH", &root, json!({
+        "revision": draft["revision"], "name": draft["name"], "settings": {"clientId": "derived-client-fixture"},
+    }), Some("fixture-owner"))).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let updated = common::read_json(response).await;
+    let response = common::send(&app, consent(updated["revision"].clone())).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let restarted = common::read_json(response).await;
+    let callback = format!(
+        "/api/plugin-oauth/{}/callback?state={}&code=fixture",
+        text(&draft, "id"),
+        text(&restarted, "state")
+    );
+    assert_eq!(
+        common::send(&app, request("GET", &callback, Value::Null, None))
+            .await
+            .status(),
+        StatusCode::OK
+    );
+    assert_eq!(
+        common::send(&app, authorize(&restarted["state"]))
+            .await
+            .status(),
+        StatusCode::OK
+    );
+    let response = common::send(
+        &app,
+        request(
+            "POST",
+            &activation,
+            json!({"revision": updated["revision"], "enabled": true}),
+            Some("fixture-owner"),
+        ),
+    )
+    .await;
+    assert_eq!(
+        response.status(),
+        StatusCode::OK,
+        "{}",
+        common::read_text(response).await
+    );
+    let live = common::read_json(response).await;
+    assert_eq!(live["settings"]["clientId"], "derived-client-fixture");
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+    let status = format!(
+        "/api/plugins/example/connections/{}/resources/workspace/{}/oauth/bot",
+        text(&draft, "id"),
+        text(&resource, "id")
+    );
+    let response = common::send(
+        &app,
+        request("GET", &status, Value::Null, Some("fixture-owner")),
+    )
+    .await;
+    assert_eq!(common::read_json(response).await["status"], "authorized");
+    server.abort();
 }

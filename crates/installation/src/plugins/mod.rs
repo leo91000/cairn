@@ -224,6 +224,13 @@ pub async fn routes(s: &Arc<Service>, input: &Input) -> Result<Value> {
                 .map_or("", |identity| identity.account_id.as_str());
             setup::save(s, id, account, body, None).await
         }
+        ("POST", ["plugins", id, "setup-drafts", draft, "activate"]) => {
+            let account = input
+                .identity
+                .as_ref()
+                .map_or("", |identity| identity.account_id.as_str());
+            Box::pin(setup::activate(s, id, draft, account, body)).await
+        }
         ("POST", ["plugins", id, "setup-drafts", draft, "form"]) => {
             let account = input
                 .identity

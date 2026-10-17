@@ -591,3 +591,65 @@ pub(crate) fn setup_resource_in(
     }
     Ok(value)
 }
+
+/// Promote a complete, unchanged setup tree. All reads and writes belong to the
+/// activation transaction, so incomplete fields cannot publish a partial app.
+pub(crate) fn activate_setup_in(
+    db: &Db<'_>,
+    vault: &crate::vault::Vault,
+    target: &Target,
+    expected: &[Value],
+    connection: &Connection,
+) -> Result<()> {
+    let draft = target
+        .setup_snapshot()
+        .ok_or_else(|| Error::forbidden("A setup target is required."))?;
+    if target.list(db)? != expected {
+        return Err(Error::conflict(
+            "Setup resources changed. Reload before activating.",
+        ));
+    }
+    let mut prepared = Vec::new();
+    for value in expected {
+        let mut resource: Resource = serde_json::from_value(value.clone())?;
+        let collection = declared(target.manifest(), &resource.collection)?;
+        if resource.connection_id != draft.id || db.get(KIND, &resource.id)?.is_some() {
+            return Err(Error::conflict("Setup resource identity changed."));
+        }
+        let parent_id = parent(db, target, collection, value)?;
+        if parent_id != resource.parent_id {
+            return Err(Error::conflict("Setup resource parent changed."));
+        }
+        let mut schema = target.manifest().clone();
+        schema.settings.clone_from(&collection.settings);
+        resource.settings = connections::settings(&schema, &resource.settings)?;
+        let key = secrets_key(&resource.id);
+        let stored = format!("mcp-secret:{key}");
+        let encrypted = db
+            .kv(&stored)?
+            .ok_or_else(|| Error::conflict("Setup resource secrets expired."))?;
+        let saved = vault.decrypt(&key, &encrypted)?;
+        let fields = saved["fields"]
+            .as_object()
+            .ok_or_else(|| Error::conflict("Setup resource secrets are unavailable."))?;
+        let fields = connections::secrets(&schema, &Value::Null, fields)?;
+        resource.secret_keys = fields.keys().cloned().collect();
+        resource.revision = id();
+        resource.updated_at = now();
+        prepared.push((resource, stored, encrypted));
+    }
+    for (resource, stored, encrypted) in prepared {
+        super::oauth::activate_setup_in(
+            db,
+            vault,
+            target.manifest(),
+            draft,
+            connection,
+            &resource,
+        )?;
+        db.set(&stored, &encrypted, None)?;
+        db.put(KIND, &serde_json::to_value(&resource)?)?;
+        target.remove(db, &resource.id)?;
+    }
+    Ok(())
+}
