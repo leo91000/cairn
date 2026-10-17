@@ -67,7 +67,7 @@ docker compose restart manager
 The restart uses the usual execution recovery; do it at a suitable maintenance
 window. No automatic migration of browser accounts, grants or installations is
 provided. Alternatively, reinstall with fresh volumes and claim the new
-installation. **Discarding old volumes discards their data**: retain backups
+installation. **Discarding old volumes discards their data**: retain the original volumes
 until the replacement has been verified. The one-command installer includes local
 S3 setup; this manual Compose procedure still needs existing S3 configuration.
 
@@ -117,7 +117,7 @@ credentials and recovery proofs. Stop the manager, back up the entire private
 `installation-relay` directory outside the deployment volumes, remove that
 directory, and run `cairn claim` with `CAIRN_BEACON_ORIGIN`. This creates a new
 beacon installation ID while preserving existing data volumes.
-Retain backups until access has been verified. Use this **Revoke and forget**
+Retain the original identity and data until access has been verified. Use this **Revoke and forget**
 path after machine-token theft too: the thief may rotate first, making the old
 local token unusable for `cairn rotate-token`.
 
@@ -140,10 +140,10 @@ This deliberately restores the old local-access behavior. The private relay
 identity file can stay on disk; the old image ignores it. Detach the installation
 in the beacon app to revoke its relay identity if abandoning the migration.
 
-The beacon Postgres migrations are separate and remain applied: do not run an
-older beacon binary against that database without its matching backup. If a
-later installation release has changed SQLite, follow the image-and-backup
-rollback rule below instead of assuming this procedure is still sufficient.
+The Beacon Postgres migrations are separate and remain applied. Do not run an
+older binary against incompatible migrated data. If a later installation release
+has changed SQLite incompatibly, preserve active data and apply a reviewed
+forward fix; image rollback cannot reverse the migration.
 
 ## Additional execution nodes
 
@@ -314,7 +314,7 @@ own HTTPS origin. Additional nodes still need a direct private route to port 431
 
 The production workflow targets the **beacon Compose service**, never the old
 public installation manager. The [release runbook](PRODUCTION-CAIRN.md) covers
-release checks, backups and rollback. The [configuration reference](PRODUCTION-CAIRN-SETUP.md)
+release checks and failure recovery. The [configuration reference](PRODUCTION-CAIRN-SETUP.md)
 covers environment setup, DNS, Resend, OAuth and co-location.
 
 Main and same-repository PRs build both installation and beacon images. All
@@ -333,11 +333,11 @@ Main, PR and manual workflows never deploy.
 
 The GitHub `production` environment uses `CAIRN_RELEASE_COOLIFY_TOKEN`, a
 restricted release SSH identity and pinned host key, and the Coolify/Beacon
-variables listed in the [production setup](PRODUCTION-CAIRN-SETUP.md#automatic-recovery-host).
+variables listed in the [production setup](PRODUCTION-CAIRN-SETUP.md#read-only-release-verification-host).
 Follow that setup's credential transition before removing required reviewers;
 the legacy `COOLIFY_TOKEN` environment secret must be deleted so historical
-workflows cannot bypass recovery. Routine stable releases then deploy automatically
-after backup, isolated restore and encrypted off-host retention succeed.
+workflows cannot bypass current checks. Routine stable releases deploy automatically
+after installation data compatibility verification; they create no backups.
 The obsolete `CAIRN_PUBLIC_URL` and standalone-manager deployment target are no
 longer used by the CLI. The script refuses a manager/runner Compose target.
 
@@ -350,28 +350,19 @@ verify the pair. Only beacon is restarted. It waits up to ten minutes for
 `/health` to report the tested image's commit/runtime identity and
 `/install/release` to approve the paired installation image. Reused PR images
 report the tested merge commit with the released tree. Existing installations
-update through their host timer; the check does not wait for every installation.
-A failed beacon rollout needs operator rollback of the previous digest and
-matching Postgres backup; see [rollback](PRODUCTION-CAIRN.md#backups-and-rollback).
+update through their host timer; the release job also verifies the configured host has both approved images and
+execution readiness. See [failed releases](PRODUCTION-CAIRN.md#failed-releases)
+for operator intervention; do not roll back an incompatible data migration.
 
 Retained VM disks keep their original guest OS and tools. Only approve an
-installation image if the previous release can still read its database, or
-prepare matching stopped backups before approving it.
+installation image automatically if both versions can read the persisted data.
+Review incompatible forward migrations separately.
 
-## Backups
+## Persisted data
 
-Back up **all four volumes together**. Stop the manager first so SQLite and Git
-worktrees are consistent, make encrypted volume backups with your server backup
-system, then restart it. Credentials in the home volume make those backups secrets.
-For a live SQLite-only snapshot, Node's `node:sqlite` backup API can create a
-consistent database backup, but that does not include working directories or CLI
-accounts and is not a complete recovery point.
-
-Restore into fresh volumes while the manager is stopped, preserve UID/GID 1000,
-and start the same image version that created the backup. Check beacon claim/relay access, profiles,
-tasks, global/project skills, and worktree paths. Database schema versions newer
-than the application are rejected rather than silently downgraded. Roll back the
-image and its matching backup together when a future migration requires it.
+The release system does not create or retain backups. Image rollback cannot undo
+an incompatible data migration. Keep active volumes and credentials intact;
+recover incompatible migrations with a reviewed forward fix.
 
 Finished-run events expire after 30 days and audit entries after 90 days. Expired
 OAuth/session records are removed hourly. Run summaries and preserved worktrees
@@ -504,9 +495,10 @@ unchanged. Existing memberships receive access identifiers automatically.
 An upgraded manager cannot reconnect to an older beacon binary that lacks
 `/api/relay/{installation}/task-authors`: its 404 defers scheduled admissions
 and keeps the relay offline. Keep the upgraded Beacon while rolling
-back an installation. Rolling back Beacon requires its matching
-Postgres backup and compatible managers; older managers also restore the previous
-task-author/public-link rules, so suspend shared access during that rollback.
+back an installation. Rolling back Beacon requires confirmation that the older binary and managers
+can read the current database. Use a forward fix for incompatible migrations.
+Older managers also restore the previous task-author/public-link rules, so
+suspend shared access during any compatible rollback.
 
 Upgrade every shared installation: older binaries do not enforce the task-author
 policy. Upgraded installations require the beacon task-author endpoint before

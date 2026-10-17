@@ -49,7 +49,7 @@ installer regenerates its Compose defaults; reapply reviewed budgets afterwards.
 
 The installation host needs Linux x86-64, systemd, Docker Engine/Compose,
 Python 3, curl, working `/dev/kvm`, `/dev/net/tun`, `/dev/fuse`, and at least
-16 GiB free **in addition to** Postgres/backups and conversation disks. See
+16 GiB free **in addition to** Postgres and conversation disks. See
 [installation prerequisites](INSTALLATION.md). KVM is for the installation,
 not the beacon process. Do not give the beacon container privileged mode,
 KVM, the Docker socket or installation volumes.
@@ -279,9 +279,9 @@ so. Do not enable the proxy's access logs without first updating `/privacy`
 Start the new service only after Léo's approval. Verify `/health` reports the
 expected tested commit, `/install/release` reports the paired digest, `/` and
 `/claim` serve the SPA with framing protection, and an email-code sign-in works.
-Back up Postgres before subsequent updates using the
-[release runbook](PRODUCTION-CAIRN.md#backups-and-rollback). Automatic checksum-checked
-migrations run on startup; do not reuse a historical development database.
+Use the compatibility checks and failure procedure in the
+[release runbook](PRODUCTION-CAIRN.md#failed-releases) for subsequent updates.
+Releases create no backups. Automatic checksum-checked migrations run on startup; do not reuse a historical development database.
 
 Configure GitHub's **production** environment:
 
@@ -298,12 +298,12 @@ Configure GitHub's **production** environment:
 
 Keep the environment's deployment branch/tag policy restricted to the intended
 release refs. Routine stable tags deploy automatically, without required
-reviewers, after encrypted recovery preparation and off-host upload succeed.
+reviewers, after data compatibility checks succeed.
 Enable this only after the host helper, SSH identity and new workflow are installed;
-approve any older pending release separately after its own recovery preparation.
+approve any older pending release separately after its own compatibility checks.
 Use a fresh `CAIRN_RELEASE_COOLIFY_TOKEN` credential for this workflow, then remove
 the old environment secret `COOLIFY_TOKEN` before removing required reviewers.
-Historical workflows lack the recovery steps and must no longer have a usable
+Historical workflows lack the current release checks and must no longer have a usable
 deployment credential when rerun. Keep the new token in the operator password
 manager as well as the production environment secret.
 Remove the obsolete `CAIRN_PUBLIC_URL` deployment variable; the CLI no longer
@@ -318,53 +318,35 @@ its build identity and approved installation release. No automatic beacon
 rollback is attempted after a failed rollout; use the
 [rollback procedure](PRODUCTION-CAIRN.md#backups-and-rollback).
 
-### Automatic recovery host
+### Read-only release verification host
 
-The host needs Python 3, systemd, Docker and `age` (Ubuntu package `age`). Install
-`deploy/beacon/release-backup.py` and `deploy/beacon/postgres-backup.sh` as
-root-owned files under `/opt/cairn-release/`. The CI identity must not be able to
-modify them or their configuration. Create `/etc/cairn-release-backup.json`, mode
-0600, with this host's actual Compose project and recovery recipient:
+The host needs Python 3 and Docker. Install `deploy/beacon/release-verify.py`
+as the root-owned `/opt/cairn-release/release-verify.py`. The CI identity must
+not be able to modify the helper or its configuration. Create
+`/etc/cairn-release.json`, mode 0600:
 
 ```json
-{
-  "project": "actual-beacon-compose-project",
-  "installation_project": "cairn-installation",
-  "origin": "https://cairn.build",
-  "directory": "/var/backups/cairn/releases",
-  "helper": "/opt/cairn-release/postgres-backup.sh",
-  "recipient": "/etc/cairn-release-backup-recipient.pub"
-}
+{ "installation_project": "cairn-installation" }
 ```
 
-Create the backup directory as root, mode 0700. The recipient is the operator's
-recovery SSH public key, not the separate CI SSH public key. Retain its matching
-private key for the lifetime of the backups, including after key rotation.
-Authorize the CI key with this forced command and all SSH forwarding disabled:
+Authorize the dedicated CI key with all SSH forwarding disabled:
 
 ```text
-restrict,command="sudo -n --preserve-env=SSH_ORIGINAL_COMMAND /usr/bin/python3 /opt/cairn-release/release-backup.py" ssh-ed25519 <dedicated-CI-public-key>
+restrict,command="sudo -n --preserve-env=SSH_ORIGINAL_COMMAND /usr/bin/python3 /opt/cairn-release/release-verify.py" ssh-ed25519 <dedicated-CI-public-key>
 ```
 
-The host account needs passwordless permission for that exact root-owned helper.
-The helper accepts only `prepare <stable-tag> <random-id>`, `download <id>` and
-`verify <immutable-digest>`. It cannot open a shell or download plaintext dumps.
-Preparation runs under systemd, with an exclusive lock, timeout and final Beacon
-recovery even if the SSH client disconnects. It refuses to resume an old Beacon
-beside a replacement. Normal installation updates remain owned by their supervisor.
+The account needs passwordless permission only for that exact root-owned helper.
+It accepts only `verify <immutable-digest>`; it checks both running images and
+manager execution readiness. It cannot stop containers, create or download
+backups, or open a shell. Installation updates remain owned by their supervisor.
 
-Download a `production-recovery-<tag>-<id>` artifact from its Actions run. Verify
-the encrypted file's SHA-256 against `release.json`, then decrypt privately:
-
-```sh
-umask 077
-age --decrypt -i /private/recovery-ssh-key -o beacon.dump beacon.dump.age
-```
-
-Follow the [rollback procedure](PRODUCTION-CAIRN.md#backups-and-rollback) with the
-previous immutable image pair recorded in the same metadata. The workflow stops
-when installation data compatibility epochs differ and need a separate stopped backup;
-this exception cannot be bypassed by an approval click.
+When replacing the former backup helper, update its forced SSH command and exact
+sudoers rule together, validate sudoers, and test the read-only verifier. Remove
+`/opt/cairn-release/release-backup.py`, `postgres-backup.sh`,
+`/etc/cairn-release-backup.json` and its recipient file after the switch.
+Remove release backup archives from the host, local operator copies and GitHub
+Actions recovery artifacts. Keep deployment SSH credentials: they authenticate
+readiness verification and are independent of the removed backup encryption key.
 
 ## Install and claim on the same server
 
