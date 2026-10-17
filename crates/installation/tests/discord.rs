@@ -527,6 +527,7 @@ async fn sockets_reach_only_declared_hosts_from_the_transport_worker() {
         event: json!({ "name": "socket" }),
         link: Some(link.clone()),
         draft: None,
+        resource_grant: None,
     };
     for url in [
         "wss://gateway.discord.gg.attacker.example",
@@ -924,6 +925,7 @@ async fn same_credential_reserves_the_last_session_start_across_instances() {
         event: json!({ "name": "socket" }),
         link: Some(link.clone()),
         draft: None,
+        resource_grant: None,
     };
     let (first, second) = (context(first), context(second));
     let send = json!({ "text": "{\"token\":\"{{secret}}\"}", "auth": true, "pace": 5000,

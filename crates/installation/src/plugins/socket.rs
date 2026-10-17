@@ -299,6 +299,7 @@ pub async fn deliver(
         event: json!({ "name": "socket", "revision": connection.revision }),
         link: Some(link.clone()),
         draft: None,
+        resource_grant: None,
     };
     let refused = Mutex::new(None::<Error>);
     let (context_ref, refused_ref) = (&context, &refused);

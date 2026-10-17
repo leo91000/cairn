@@ -382,6 +382,7 @@ async fn dispatch(
         event: event.clone(),
         link: None,
         draft: None,
+        resource_grant: None,
     };
     let context = &context;
     session

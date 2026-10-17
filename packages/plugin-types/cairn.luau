@@ -59,7 +59,8 @@ export type HttpRequest = {
     }?,
     -- true adds the instance's credential using the manifest's "credential" rule; a
     -- table adds a secret field to one header. The script never sees the value.
-    auth: (boolean | { secret: string, header: string?, prefix: string?, resource: string? })?,
+    auth: (boolean | { secret: string, header: string?, prefix: string?, resource: string? }
+        | { resource: string, oauth: string })?, -- host-managed bearer token; saved HTTP only
     -- The instance to act for, in commands and tools granted several.
     instance: string?,
 }

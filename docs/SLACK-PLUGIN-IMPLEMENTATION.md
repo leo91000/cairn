@@ -24,6 +24,16 @@ the web/Android journeys. Tests assert observable behavior at those interfaces.
     journey passes, including revocation and agent deletion. More identity, profile
     and concurrency cases remain, along with routing and both collection interfaces.
 - [ ] Generic OAuth, secure token capture/rotation and personal identity binding.
+  - Owner-connected resource OAuth: declared scopes/endpoints, confidential and
+    PKCE clients, encrypted single-use callback capture, same-owner completion,
+    direct/Beacon callback and nested token response mapping implemented.
+  - Automatic renewal serializes concurrent callers and persists consumed refresh
+    state before I/O; uncertain responses require reconnection. Local disconnect
+    invalidates pending exchanges. Resource identity and requested/granted scopes
+    remain distinct. Targeted tests cover these paths through actual HTTP/Luau.
+  - Personal actor binding, configuration drafts, provider revocation/token exchange
+    and both client interfaces remain unfinished. This does not complete OAuth or
+    the Slack package.
 - [ ] Socket acknowledgement/liveness/replacement, authenticated files.
 - [ ] Slack Luau package: setup, protocol, conversations and native surfaces.
 - [ ] Collaboration/productivity tools with exact scopes and profiles.
@@ -47,3 +57,23 @@ crate tests, workspace Clippy with warnings denied, and `pnpm check` (511 tests,
 typecheck, lint and build) pass. No Android UI was changed or device-tested here.
 Full final validation, compatibility/storage review and independent review remain
 required before the PR can be marked ready.
+
+## Owner-resource OAuth checkpoint
+
+This adds host-managed OAuth for owner-connected resources, including encrypted
+code capture, exact requester/resource/approval binding, confidential and PKCE
+clients, nested token mappings, identity validation, cumulative scope diagnostics,
+serialized rotation and local disconnection. The callback is available through
+Beacon and direct HTTPS and cannot acquire account authority. Revoking a run's
+resource grant during renewal prevents the following provider request.
+
+The foundation CI failure was an undeclared Reqwest `form` feature in
+`cairn-installation`: workspace feature unification hid it locally. The dependency
+is now explicit and the isolated installation library compiles.
+
+Local validation: 91 selected installation/Beacon integration tests, including 25
+real direct-peer cases and nine OAuth cases across installation/Beacon; 25 plugin
+crate tests; workspace Clippy with warnings denied; `pnpm check` (511 tests,
+typecheck, lint and build). This remains a draft checkpoint. Personal OAuth,
+configuration drafts, the Slack package, web/Android journeys and every other
+unchecked item above still have to be delivered; green CI does not complete them.

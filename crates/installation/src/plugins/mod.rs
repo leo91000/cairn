@@ -8,6 +8,7 @@ pub mod connections;
 pub mod forms;
 pub mod grants;
 pub mod legacy;
+pub mod oauth;
 pub mod panels;
 pub mod programs;
 pub mod registry;
@@ -49,6 +50,7 @@ pub struct Plugins {
     programs: Mutex<HashMap<(String, String), PathBuf>>,
     /// When each paced key (e.g. a bot token's Identify budget) may send next.
     paces: socket::pacing::Paces,
+    oauth: oauth::Authorizations,
 }
 
 impl Default for Plugins {
@@ -65,6 +67,7 @@ impl Default for Plugins {
             worker: Mutex::new(None),
             programs: Mutex::new(HashMap::new()),
             paces: socket::pacing::Paces::default(),
+            oauth: oauth::Authorizations::default(),
         }
     }
 }
@@ -202,6 +205,56 @@ pub async fn routes(s: &Arc<Service>, input: &Input) -> Result<Value> {
         }
         ("DELETE", ["plugins", "packages", id]) => registry::uninstall(s, id).await,
         ("POST", ["plugins", id, "form"]) => forms::form(s, id, body).await,
+        (
+            method,
+            [
+                "plugins",
+                id,
+                "connections",
+                instance,
+                "resources",
+                collection,
+                resource,
+                "oauth",
+                name,
+            ],
+        ) => {
+            let account = input
+                .identity
+                .as_ref()
+                .map_or("", |identity| identity.account_id.as_str());
+            match method {
+                "POST" => {
+                    oauth::start(s, id, instance, collection, resource, name, account, body).await
+                }
+                "GET" => oauth::status(s, id, instance, collection, resource, name).await,
+                "DELETE" => {
+                    oauth::revoke(s, id, instance, collection, resource, name, account).await
+                }
+                _ => Err(Error::method_not_allowed("Method not allowed.")),
+            }
+        }
+        (
+            "POST",
+            [
+                "plugins",
+                id,
+                "connections",
+                instance,
+                "resources",
+                collection,
+                resource,
+                "oauth",
+                name,
+                "finish",
+            ],
+        ) => {
+            let account = input
+                .identity
+                .as_ref()
+                .map_or("", |identity| identity.account_id.as_str());
+            oauth::finish(s, id, instance, collection, resource, name, account, body).await
+        }
         (
             "POST",
             [

@@ -22,6 +22,8 @@ pub struct Context {
     pub link: Option<super::socket::Link>,
     /// An instance being edited: its unsaved credential and secrets.
     pub draft: Option<Arc<super::forms::Draft>>,
+    /// A slow credential renewal must not let a revoked run start a new request.
+    pub resource_grant: Option<Arc<super::grants::Authorization>>,
 }
 
 /// Maps host errors to the short codes scripts may see. Messages stay in the host.
@@ -278,6 +280,11 @@ pub(crate) async fn authorization(
     context: &Context,
     auth: &Value,
 ) -> Result<Option<(String, String, String)>> {
+    if auth.get("oauth").is_some() {
+        return Err(Error::forbidden(
+            "OAuth credentials require a saved resource HTTP request.",
+        ));
+    }
     if *auth == Value::Bool(true) {
         let rule = context
             .manifest
@@ -417,8 +424,37 @@ async fn http(s: &Service, context: &Context, args: &Value) -> Result<Value> {
         }
         request = request.body(body.to_owned());
     }
-    if let Some((header, prefix, secret)) = authorization(s, context, &args["auth"]).await? {
+    let oauth = if let Some(name) = args["auth"].get("oauth") {
+        if context.draft.is_some()
+            || !context.manifest.permits_capability("oauth")
+            || args["auth"].as_object().is_none_or(|auth| auth.len() != 2)
+        {
+            return Err(Error::forbidden(
+                "Use an OAuth provider and resource on a saved instance.",
+            ));
+        }
+        let (token, reference) = super::oauth::credential(
+            s,
+            context,
+            text(&args["auth"], "resource"),
+            name.as_str().unwrap_or(""),
+        )
+        .await?;
+        request = request.bearer_auth(token);
+        Some(reference)
+    } else {
+        None
+    };
+    if oauth.is_none()
+        && let Some((header, prefix, secret)) = authorization(s, context, &args["auth"]).await?
+    {
         request = request.header(header, format!("{prefix}{secret}"));
+    }
+    if let Some(grant) = &context.resource_grant {
+        super::grants::recheck(s, grant).await?;
+    }
+    if let Some(oauth) = &oauth {
+        super::oauth::recheck(s, oauth).await?;
     }
     let response = request
         .send()
@@ -446,6 +482,9 @@ async fn http(s: &Service, context: &Context, args: &Value) -> Result<Value> {
     let json = serde_json::from_slice::<Value>(&body).ok();
     if let Some(resource) = &resource {
         super::resources::recheck(s, context, resource).await?;
+    }
+    if let Some(oauth) = &oauth {
+        super::oauth::recheck(s, oauth).await?;
     }
     Ok(json!({
         "status": status,

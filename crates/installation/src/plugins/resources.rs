@@ -17,8 +17,9 @@ use serde_json::{Map, Value, json};
 
 pub const KIND: &str = "plugin-resources";
 
+#[derive(Clone)]
 pub(crate) struct Reference {
-    resource: Resource,
+    pub(crate) resource: Resource,
     revisions: Vec<(String, String)>,
 }
 
@@ -264,6 +265,7 @@ pub async fn remove(
                 }
             }
             for id in ids {
+                super::oauth::remove_resource(db, &id)?;
                 db.delete(&format!("mcp-secret:{}", secrets_key(&id)))?;
                 db.remove(KIND, &id)?;
             }
@@ -449,6 +451,7 @@ pub(crate) fn remove_owned(db: &Db<'_>, instance: &str) -> Result<()> {
     for value in db.list(KIND)? {
         if value["connectionId"] == instance {
             let id = text(&value, "id");
+            super::oauth::remove_resource(db, id)?;
             db.delete(&format!("mcp-secret:{}", secrets_key(id)))?;
             db.remove(KIND, id)?;
         }

@@ -56,6 +56,7 @@ fn a_busy_member_upload_is_rejected_and_drained_before_its_next_small_frame() {
         mcp_scopes: None,
         public_artifact: None,
         public_webhook: None,
+        public_oauth: None,
         method: "POST".into(),
         path: "/api/chats".into(),
         headers: Vec::new(),

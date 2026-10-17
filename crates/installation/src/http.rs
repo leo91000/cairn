@@ -325,6 +325,18 @@ fn authenticate_installation(request: &Request) -> Result<()> {
     if let Some(bound) = request
         .extensions()
         .get::<InstallationIdentity>()
+        .and_then(|identity| identity.public_oauth.as_ref())
+    {
+        if bound == path && cairn_protocol::plugin_oauth_path(path) && request.method() == "GET" {
+            return Ok(());
+        }
+        return Err(Error::forbidden(
+            "This public request only permits its OAuth callback.",
+        ));
+    }
+    if let Some(bound) = request
+        .extensions()
+        .get::<InstallationIdentity>()
         .and_then(|identity| identity.public_webhook.as_ref())
     {
         if bound == path
@@ -346,6 +358,7 @@ fn authenticate_installation(request: &Request) -> Result<()> {
         || path == "/mcp-workspace"
         || path == "/plugin-command"
         || crate::plugins::webhooks::public_path(path)
+        || cairn_protocol::plugin_oauth_path(path)
         || path == "/mcp-installation"
         || path.starts_with("/mcp-gateway/");
     if machine {
@@ -622,6 +635,9 @@ async fn raw_route(app: &App, path: &str, request: Request) -> Result<Route> {
         }
         ["", "api", "plugin-webhooks", instance, endpoint] => {
             crate::plugins::webhooks::http(s, instance, endpoint, request).await?
+        }
+        ["", "api", "plugin-oauth", instance, "callback"] => {
+            crate::plugins::oauth::callback(s, instance, request).await?
         }
         ["", "api", "runs", run, rest @ ..] => {
             let active = (*run).to_owned();

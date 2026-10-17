@@ -949,6 +949,73 @@ enum Capability {
     },
     PublicArtifact(String),
     PublicWebhook(String),
+    PublicOAuth(String),
+}
+
+pub(super) async fn public_oauth(
+    State(service): State<Service>,
+    Path((installation, instance)): Path<(String, String)>,
+    axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
+    request: Request,
+) -> Result<Response, ApiError> {
+    tokio::time::timeout(Duration::from_millis(2800), async {
+        let path = format!("/api/plugin-oauth/{instance}/callback");
+        if uuid::Uuid::parse_str(&installation).is_err()
+            || !cairn_protocol::plugin_oauth_path(&path)
+        {
+            return Err(ApiError::Http(
+                StatusCode::NOT_FOUND,
+                "OAuth callback not found",
+            ));
+        }
+        let query = request.uri().query().unwrap_or("");
+        if query.len() > 16_384 {
+            return Err(ApiError::Http(
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "OAuth callback is too large",
+            ));
+        }
+        let target = format!("{path}?{query}");
+        super::consume_limit(
+            &service.pool,
+            &format!(
+                "public-oauth:{}",
+                super::network::rate_limit_address(peer.ip())
+            ),
+            120,
+        )
+        .await?;
+        let claimed: Option<(String,)> =
+            query_as("SELECT id FROM installations WHERE id = $1 AND owner_id IS NOT NULL")
+                .bind(&installation)
+                .fetch_optional(&service.pool)
+                .await?;
+        if claimed.is_none() {
+            return Err(ApiError::Http(
+                StatusCode::NOT_FOUND,
+                "OAuth callback not found",
+            ));
+        }
+        let tunnel = service
+            .relay
+            .connections
+            .lock()
+            .unwrap()
+            .get(&installation)
+            .cloned();
+        send(
+            &service,
+            tunnel,
+            0,
+            String::new(),
+            Capability::PublicOAuth(path),
+            &target,
+            request,
+        )
+        .await
+    })
+    .await
+    .map_err(|_| ApiError::Http(StatusCode::GATEWAY_TIMEOUT, "OAuth callback timed out"))?
 }
 
 pub(super) async fn public_webhook(
@@ -1104,6 +1171,10 @@ async fn send(
         Capability::PublicWebhook(path) => Some(path.clone()),
         _ => None,
     };
+    let public_oauth = match &capability {
+        Capability::PublicOAuth(path) => Some(path.clone()),
+        _ => None,
+    };
     let browser_session = matches!(capability, Capability::Account(_))
         .then(|| digest(super::session_token(request.headers())));
 
@@ -1125,7 +1196,7 @@ async fn send(
             "Streaming requires relay protocol 2",
         ));
     }
-    let slots = if public_file || public_webhook.is_some() {
+    let slots = if public_file || public_webhook.is_some() || public_oauth.is_some() {
         &tunnel.public_slots
     } else {
         &tunnel.slots
@@ -1200,7 +1271,9 @@ async fn send(
             Some(permit),
         ),
         Capability::PublicArtifact(token) => (Role::Member, None, Some(token), None, None),
-        Capability::PublicWebhook(_) => (Role::Member, None, None, None, None),
+        Capability::PublicWebhook(_) | Capability::PublicOAuth(_) => {
+            (Role::Member, None, None, None, None)
+        }
     };
     let api_request = ApiRequest {
         id: uuid::Uuid::new_v4().to_string(),
@@ -1209,12 +1282,13 @@ async fn send(
         mcp_scopes,
         public_artifact,
         public_webhook: public_webhook.clone(),
+        public_oauth: public_oauth.clone(),
         method: request.method().to_string(),
         path: target.to_owned(),
         headers,
         // GET/HEAD public capabilities have no request payload. Do not let an
         // anonymous slow upload hold a slot before it enters the deadline loop.
-        body: if public_file {
+        body: if public_file || public_oauth.is_some() {
             Vec::new()
         } else {
             to_bytes(

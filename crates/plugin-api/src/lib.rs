@@ -4,6 +4,7 @@ use serde_json::Value;
 
 mod arguments;
 mod form;
+mod oauth;
 mod operations;
 mod resources;
 mod settings;
@@ -13,6 +14,7 @@ mod webhooks;
 
 pub use arguments::{parse_arguments, usage};
 pub use form::validate_form_result;
+pub use oauth::{OAuth, OAuthTokenResponse};
 pub use operations::{Operation, Profile, RequestRule};
 pub use resources::ResourceCollection;
 pub use settings::validate_settings_schema;
@@ -57,6 +59,10 @@ pub const CAPABILITIES: &[(&str, &str)] = &[
     (
         "resources",
         "Manage the resource collections declared by the package; secrets remain in Cairn",
+    ),
+    (
+        "oauth",
+        "Connect declared resources through OAuth; Cairn exchanges, encrypts and refreshes tokens without exposing them to the plugin",
     ),
     (
         "exec",
@@ -245,6 +251,8 @@ pub struct Manifest {
     pub resources: Vec<ResourceCollection>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub operations: Vec<Operation>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub oauth: Vec<OAuth>,
 }
 
 pub(crate) fn slug(value: &str, max: usize) -> bool {
@@ -339,7 +347,9 @@ impl Manifest {
         if self.hosts.len() > 10 || !self.hosts.iter().all(|host| hostname(host)) {
             return Err("Plugin manifest lists invalid hosts.");
         }
-        let network = self.permits_capability("http") || self.permits_capability("socket");
+        let network = self.permits_capability("http")
+            || self.permits_capability("socket")
+            || self.permits_capability("oauth");
         if self.hosts.is_empty() == network {
             return Err("Plugin manifest must list hosts exactly when it requests http or socket.");
         }
@@ -359,6 +369,7 @@ impl Manifest {
         webhooks::validate(self)?;
         resources::validate(self)?;
         operations::validate(self)?;
+        oauth::validate(self)?;
         if let Some(instances) = &self.instances
             && [&instances.singular, &instances.plural]
                 .iter()

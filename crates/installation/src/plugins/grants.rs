@@ -333,6 +333,7 @@ impl Catalog {
     }
 }
 
+#[derive(Clone)]
 pub struct Authorization {
     pub connection: Connection,
     pub resource: Resource,
@@ -396,6 +397,7 @@ pub async fn authorize(
         event: Value::Null,
         link: None,
         draft: None,
+        resource_grant: None,
     };
     let reference = resources::reference(s, &context, &resource.id).await?;
     let authorization = Authorization {
@@ -451,6 +453,7 @@ pub async fn recheck(s: &Service, authorization: &Authorization) -> Result<()> {
         event: Value::Null,
         link: None,
         draft: None,
+        resource_grant: None,
     };
     resources::recheck(s, &context, &authorization.reference).await
 }
@@ -565,6 +568,7 @@ pub async fn call(
                 event: Value::Null,
                 link: None,
                 draft: None,
+                resource_grant: Some(std::sync::Arc::new(authorization.clone())),
             };
             capabilities::effect(s, &context, method, args.clone()).await?
         }

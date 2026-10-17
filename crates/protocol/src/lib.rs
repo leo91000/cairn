@@ -61,6 +61,9 @@ pub struct ApiRequest {
     /// Anonymous ingress is bound to this exact route, with no account authority.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub public_webhook: Option<String>,
+    /// Anonymous OAuth code capture only; never an account or exchange capability.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub public_oauth: Option<String>,
     pub method: String,
     pub path: String,
     pub headers: Vec<(String, String)>,
@@ -232,6 +235,16 @@ pub fn plugin_webhook_path(path: &str) -> bool {
         && endpoint
             .bytes()
             .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+}
+
+pub fn plugin_oauth_path(path: &str) -> bool {
+    let Some(instance) = path
+        .strip_prefix("/api/plugin-oauth/")
+        .and_then(|p| p.strip_suffix("/callback"))
+    else {
+        return false;
+    };
+    plugin_webhook_path(&format!("/api/plugin-webhooks/{instance}/callback"))
 }
 
 /// Preserve provider signature and retry headers on anonymous ingress only. Hop,

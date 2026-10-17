@@ -356,6 +356,84 @@ returning results. Deleting resources removes their rules. Agents reachable by
 anyone cannot receive resource credentials; adding such a delegation also checks
 existing resource rules.
 
+### Host-managed resource OAuth
+
+The `oauth` capability declares up to eight providers for resource collections.
+The host captures token responses; scripts receive neither authorization codes,
+client secrets, access tokens nor refresh tokens. This first management API is
+for resources connected by the owner. Personal authorizations and setup-draft
+interfaces are separate work in the Slack delivery checklist.
+
+```json
+{
+  "name": "bot",
+  "title": "Connect workspace",
+  "collection": "workspace",
+  "authorizationUrl": "https://api.example.com/authorize",
+  "tokenUrl": "https://api.example.com/token",
+  "clientId": "clientId",
+  "clientSecret": "clientSecret",
+  "scopes": ["messages:read", "messages:write"],
+  "token": {
+    "accessToken": "/access_token",
+    "refreshToken": "/refresh_token",
+    "expiresIn": "/expires_in",
+    "scope": "/scope"
+  },
+  "metadata": { "externalId": "/team/id" }
+}
+```
+
+Both endpoints use HTTPS on declared hosts, without redirects. `clientId` names
+an instance text setting; `clientSecret` names a secret setting. `pkce: true` adds
+S256 PKCE and permits a public client without `clientSecret`. Confidential clients
+use HTTP Basic authentication at the token endpoint. A provider supporting both
+may declare both. Slack's PKCE switch changes the app to a public client; do not
+enable it silently in a server app.
+
+`scopeParameter` defaults to `scope` and may name another nonreserved parameter,
+such as `user_scope`. `scopeSeparator`
+defaults to a space and can be a comma. Response mappings are bounded JSON
+pointers; `refreshTokenResponse` may declare a different shape for renewals, such
+as a nested initial token and a root-level refresh response. Optional expiry is in
+seconds. Metadata captures only identity strings ending in `id` or `name`, into
+declared nonsecret text fields, without overlapping token paths. Existing identity
+values cannot be silently replaced by a different OAuth workspace.
+
+Owner management uses this prefix:
+`/api/plugins/<plugin>/connections/<instance>/resources/<collection>/<resource>/oauth/<provider>`.
+
+- POST `{scopes: [...]}` starts authorization with a distinct subset of declared
+  scopes. Returns `url`, `state`, `redirectUri` and `expiresAt`. State expires after
+  ten minutes and binds requester, owner access, package approval and resource and
+  instance revisions. Optional `directOrigin` selects the owner's exposed HTTPS
+  origin; otherwise the redirect uses Beacon automatically.
+- The public GET callback only captures one code, encrypted, and returns constant
+  plain text. It grants no account authority and cannot exchange credentials.
+  Direct: `/api/plugin-oauth/<instance>/callback`; Beacon:
+  `/api/public/installations/<installation>/plugin-oauth/<instance>/callback`.
+- POST `/finish` appended to that prefix, with
+  `{state}`, must come from the initiating owner. It returns `pending`, `denied`
+  or `authorized`. The code is consumed before the exchange, including failures;
+  start again after an uncertain result. GET of the prefix returns safe status,
+  granted `scopes`, `requestedScopes` and `expiresAt`. Provider grants can be
+  cumulative; extra token scopes do not grant any Cairn agent permissions.
+- DELETE of the prefix disconnects locally, invalidates in-flight exchanges and
+  prevents late responses from restoring credentials. This does not revoke the
+  token at its provider. Resource and instance deletion also erase credentials.
+
+Saved HTTP calls use `auth = {resource = id, oauth = "bot"}`. Cairn injects a bearer
+token and renews it near expiry. Concurrent calls share a renewal; the consumed
+refresh state is persisted before sending a single-use token. An interrupted or
+uncertain renewal requires reconnection, rather than replaying the old token.
+Owner access, approval, resource identity and authorization revision are checked
+again around I/O. Resource-granted calls also recheck the agent before issuing a
+new provider request after a slow renewal.
+
+Protocol references checked on 2026-10-17: [Slack OAuth](https://docs.slack.dev/authentication/installing-with-oauth/),
+[PKCE](https://docs.slack.dev/authentication/using-pkce/) and
+[token rotation](https://docs.slack.dev/authentication/using-token-rotation/).
+
 ## Contributions
 
 A package ships a whole integration without changing Cairn. The manifest says

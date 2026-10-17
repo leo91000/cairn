@@ -147,6 +147,7 @@ pub async fn call(
         event: Value::Null,
         link: None,
         draft,
+        resource_grant: None,
     };
     if matches!(scope, Scope::Ingress(_)) && matches!(method, "inbound.accept" | "inbound.deliver")
     {
