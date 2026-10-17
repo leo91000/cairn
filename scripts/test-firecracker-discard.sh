@@ -5,8 +5,8 @@ set -euo pipefail
 repository=$(cd -- "$(dirname -- "$0")/.." && pwd)
 source_commit=95f868c8e345b1cc8faccd1a3c910b4989dc3f58
 source_sha256=27280787407229c412901dfcf74cd378f1336010e71050aba43ace51cd4a0f4f
-rg -q "$source_commit" "$repository/Dockerfile"
-rg -q "$source_sha256" "$repository/Dockerfile"
+grep -Fq -- "$source_commit" "$repository/Dockerfile"
+grep -Fq -- "$source_sha256" "$repository/Dockerfile"
 fixture=$(mktemp -d "${TMPDIR:-/tmp}/cairn-firecracker-discard.XXXXXXXX")
 trap 'rm -rf -- "$fixture"' EXIT
 curl -fsSL "https://codeload.github.com/firecracker-microvm/firecracker/tar.gz/$source_commit" -o "$fixture/source.tar.gz"
