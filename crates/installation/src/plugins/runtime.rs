@@ -320,11 +320,7 @@ async fn follow(
             Ok(value) if !value["retryAfter"].is_number() => {
                 s.store
                     .set(
-                        &format!(
-                            "plugin-question-seen:{}:{}",
-                            connection.id,
-                            text(&question, "id")
-                        ),
+                        &work::question_seen_key(connection, delivery, &question),
                         json!(true),
                         Some(now() + 30 * 86_400_000),
                     )

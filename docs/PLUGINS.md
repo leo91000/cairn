@@ -391,7 +391,9 @@ Shared threads still share a conversation, while each admitted message records i
 own external subject. Answer and cancel calls must include `delivery`, the issuing
 turn's `deliveryId`, and come from that turn's author under the same route authority.
 Old buttons, another participant and another route cannot control the current turn.
-Question notifications are limited to their issuing turn. Resuming an interrupted
+Question notifications are limited to their issuing turn. Reusing an agent's
+question ID in a later turn produces a new notification for that turn's author;
+old controls cannot answer it. Resuming an interrupted
 turn also requires its original authority; another author must start a new turn.
 The complete reset and external setup journeys remain in the Slack delivery checklist.
 

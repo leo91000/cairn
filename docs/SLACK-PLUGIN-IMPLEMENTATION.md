@@ -28,6 +28,9 @@ the web/Android journeys. Tests assert observable behavior at those interfaces.
     resource/route/owner/package revisions fence accepted work. Access requests
     and people approvals stay local to their route. External turns retain their
     own subject, and stale or cross-author answer/stop controls are refused.
+  - Shared turns may reuse a question ID. Notification deduplication belongs to
+    the issuing delivery, so a later author's question remains visible and an
+    earlier turn's controls cannot answer it. Explicit new-turn/reset remains open.
 - [ ] Generic OAuth, secure token capture/rotation and personal identity binding.
   - Owner-connected resource OAuth: declared scopes/endpoints, confidential and
     PKCE clients, encrypted single-use callback capture, same-owner completion,
@@ -169,3 +172,14 @@ journeys, the independent external consent, replay and interrupted-exchange case
 and 50 direct-peer/authorization cases. All 25 plugin-crate tests and `pnpm check`
 (511 web tests, lint, typecheck and production build) pass. Final full validation
 and independent review remain required after the remaining implementation lots.
+
+The next question-notification tracer first sent Alice's question and then hid
+Bob's question because both used the same ID. The acknowledgement is now scoped
+to the issuing delivery. The real-worker/HTTP journey receives both notifications
+once, keeps one shared conversation, and refuses an old turn's answer button.
+An existing Discord test caught an old optional question being republished after
+the initial fix. Requiring the issuing turn for every instance fixes that case too.
+All 166 selected installation/Beacon cases outside the direct-peer suites pass,
+including the 13 route journeys; the 50 direct cases pass across the parallel run
+and isolated recheck. One WebRTC opening timed out in the parallel run before any
+application exchange; that case passes alone. `pnpm check` passes again (511 tests).

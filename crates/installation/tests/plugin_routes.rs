@@ -1976,3 +1976,192 @@ async fn an_interrupted_external_code_exchange_is_never_replayed() {
     session.stop().await;
     server.abort();
 }
+
+#[tokio::test]
+async fn repeated_question_ids_are_delivered_for_their_own_shared_turn() {
+    let (_root, s, instance, resource, app) = fixture().await;
+    let original = registry::active(&s, "router").await.unwrap();
+    let mut manifest = serde_json::to_value(&original.manifest).unwrap();
+    manifest["version"] = json!("2");
+    let source = original.source.main.replacen(
+        "tool = function(event)",
+        r#"
+        question = function(event)
+            return cairn.http.request({
+                url = 'https://api.example.test/question-result', method = 'POST', json = event
+            })
+        end,
+        tool = function(event)"#,
+        1,
+    );
+    let package = registry::install(
+        &s,
+        &json!({
+            "manifest": manifest,
+            "source": source,
+        }),
+    )
+    .await
+    .unwrap();
+    registry::approve(&s, "router", "2", text(&package, "digest"))
+        .await
+        .unwrap();
+
+    let (results, mut received) = tokio::sync::mpsc::unbounded_channel();
+    let upstream = axum::Router::new().route(
+        "/question-result",
+        axum::routing::post(move |axum::Json(value): axum::Json<Value>| {
+            results.send(value).unwrap();
+            async { axum::Json(json!({ "ok": true })) }
+        }),
+    );
+    let (origin, server) = common::serve_locally(upstream).await;
+    s.plugins.route_http_to(Some(origin));
+    let agent = s
+        .agent(
+            json!({
+                "name": "Scoped",
+                "access": { "projects": [], "installation": false, "github": false },
+            }),
+            None,
+        )
+        .await
+        .unwrap();
+    create_route(
+        &app,
+        &instance,
+        &resource,
+        json!({
+            "name": "Channel",
+            "enabled": true,
+            "match": { "channel": "C1" },
+            "agentId": agent["id"],
+            "userIds": ["alice", "bob"],
+        }),
+    )
+    .await;
+    let package = registry::active(&s, "router").await.unwrap();
+    let connection = connections::get(&s, "router", &instance).await.unwrap();
+    let mut session = s
+        .plugins
+        .host
+        .start(
+            &PathBuf::from(env!("CARGO_BIN_EXE_cairn")),
+            &package.manifest,
+            &package.source,
+        )
+        .await
+        .unwrap();
+    let question = "b".repeat(64);
+    let mut previous_chat = None;
+    let mut previous_delivery = None;
+    for person in ["alice", "bob"] {
+        assert_eq!(
+            deliver(
+                &app,
+                &instance,
+                json!({
+                    "id": format!("message-{person}"),
+                    "resource": resource,
+                    "author": { "id": person },
+                    "context": { "channel": "C1", "thread": "thread" },
+                    "body": { "text": "Continue this thread" },
+                })
+            )
+            .await
+            .1["status"],
+            "accepted"
+        );
+        runtime::pump(&s, &connection, &mut session).await.unwrap();
+        s.chat_tick(&std::collections::HashSet::new())
+            .await
+            .unwrap();
+        let chat = s.chat_list().await.unwrap()[0].clone();
+        if let Some(previous) = &previous_chat {
+            assert_eq!(chat["id"], *previous);
+        }
+        previous_chat = Some(chat["id"].clone());
+        let detail = s.chat_detail(text(&chat, "id")).await.unwrap();
+        let run = s
+            .store
+            .patch_run(
+                text(&detail["run"], "id"),
+                json!({
+                    "status": "running",
+                    "isolated": true,
+                }),
+            )
+            .await
+            .unwrap();
+        let delivery = run["chatExecution"]["messageId"].clone();
+        s.chat_acknowledge(text(&run, "id"), text(&run["chatExecution"], "messageId"))
+            .await
+            .unwrap();
+        s.question_receive(
+            text(&run, "id"),
+            json!({
+                "id": question,
+                "blocking": false,
+                "fields": [{ "id": "choice", "title": "Continue?", "options": [] }],
+            }),
+        )
+        .await
+        .unwrap();
+        runtime::pump(&s, &connection, &mut session).await.unwrap();
+        let notification = tokio::time::timeout(std::time::Duration::from_secs(2), received.recv())
+            .await
+            .unwrap_or_else(|_| panic!("the question was hidden in {person}'s turn"))
+            .unwrap();
+        assert_eq!(notification["deliveryId"], delivery);
+        assert_eq!(notification["userId"], person);
+        assert_eq!(notification["question"]["id"], question);
+        runtime::pump(&s, &connection, &mut session).await.unwrap();
+        assert!(
+            received.try_recv().is_err(),
+            "the same turn received its question twice"
+        );
+
+        if let Some(previous) = &previous_delivery {
+            assert_eq!(
+                deliver(
+                    &app,
+                    &instance,
+                    json!({
+                        "id": "old-question-control",
+                        "kind": "interaction",
+                        "resource": resource,
+                        "author": { "id": "alice" },
+                        "context": { "channel": "C1", "thread": "thread" },
+                        "body": { "chat": chat["id"], "delivery": previous, "question": question },
+                    })
+                )
+                .await
+                .1["status"],
+                "accepted"
+            );
+            runtime::pump(&s, &connection, &mut session).await.unwrap();
+            let current = s.chat_detail(text(&chat, "id")).await.unwrap();
+            assert_eq!(current["questions"][0]["status"], "pending");
+            assert_eq!(current["questions"][0]["turnId"], delivery);
+        }
+        previous_delivery = Some(delivery);
+        s.store
+            .set(
+                &format!("run-checkpoint:{}", text(&run, "id")),
+                json!({
+                    "completed": true,
+                    "launched": true,
+                }),
+                None,
+            )
+            .await
+            .unwrap();
+        s.store
+            .patch_run(text(&run, "id"), json!({ "status": "succeeded" }))
+            .await
+            .unwrap();
+        runtime::pump(&s, &connection, &mut session).await.unwrap();
+    }
+    session.stop().await;
+    server.abort();
+}

@@ -1020,6 +1020,19 @@ fn step(item: &Value) -> String {
     }
 }
 
+pub(crate) fn question_seen_key(
+    connection: &Connection,
+    delivery: &Value,
+    question: &Value,
+) -> String {
+    format!(
+        "plugin-question-seen:{}:{}:{}",
+        connection.id,
+        text(delivery, "id"),
+        text(question, "id"),
+    )
+}
+
 /// Questions the agent is waiting on in this conversation.
 pub async fn questions(s: &Service, expected: &Connection, delivery: &Value) -> Result<Vec<Value>> {
     let expected = super::routes::bound(s, expected, &delivery["routing"]).await?;
@@ -1040,15 +1053,9 @@ pub async fn questions(s: &Service, expected: &Connection, delivery: &Value) -> 
                 .into_iter()
                 .map(|(_, question)| question)
                 .filter(|question| question["status"] == "pending" && question["runId"] == run)
-                .filter(|question| {
-                    connection.routing.is_none() || question["turnId"] == delivery["id"]
-                })
+                .filter(|question| question["turnId"] == delivery["id"])
                 .filter_map(|question| {
-                    match db.kv(&format!(
-                        "plugin-question-seen:{}:{}",
-                        connection.id,
-                        text(&question, "id")
-                    )) {
+                    match db.kv(&question_seen_key(&connection, &delivery, &question)) {
                         Ok(None) => Some(Ok(question)),
                         Ok(Some(_)) => None,
                         Err(error) => Some(Err(error)),
