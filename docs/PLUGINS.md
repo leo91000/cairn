@@ -335,6 +335,10 @@ The CLI expects an active conversation VM with the current Cairn binary and gues
 channel; VMs started by an earlier binary must restart to use it. Non-VM development
 commands do not acquire a new manager network route.
 
+Existing 1Password accounts migrate to plugin instances at startup. This is a data
+compatibility break (epoch 2); follow the [migration and rollback plan](PLUGIN-V2-MIGRATION.md)
+before deploying the first plugin API v2 release.
+
 ## Discord
 
 The bundled Discord package (`plugins/discord/`) is an ordinary package: a bot is
