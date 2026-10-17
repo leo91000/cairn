@@ -14,8 +14,8 @@ use crate::{
 };
 use cairn_plugin_host::{Denied, Session};
 use futures_util::{SinkExt, StreamExt};
-use serde_json::{Value, json};
-use std::{sync::Mutex, time::Duration};
+use serde_json::{Map, Value, json};
+use std::{collections::BTreeMap, sync::Mutex, time::Duration};
 use tokio::{net::TcpStream, sync::mpsc, time::Instant};
 use tokio_tungstenite::{
     MaybeTlsStream, WebSocketStream, connect_async_with_config,
@@ -28,23 +28,36 @@ use tokio_tungstenite::{
 };
 use tokio_util::sync::CancellationToken;
 
-/// Largest frame a package sends or receives.
+/// Largest message a package sends, or receives as text.
 pub const MAX_MESSAGE: usize = 1_048_576;
+/// Largest message read from the wire. Above `MAX_MESSAGE`, the package receives only
+/// the JSON fields it asked for (`oversized`), so a large payload never drops the
+/// connection.
+const MAX_WIRE: usize = 16 * 1_048_576;
 const MAX_BACKOFF: Duration = Duration::from_secs(60);
+const MAX_TIMERS: usize = 8;
 
 /// What a transport worker's capability calls ask the host to do. Applied in order
 /// once the running handler returns.
+#[derive(Debug)]
 pub enum Command {
     Connect {
         url: String,
         header: Header,
+        /// Wait at least this long first, e.g. 1–5 s after an invalid session.
+        after: Duration,
+        /// JSON fields (`d.id`) kept from messages too large to deliver whole.
+        oversized: Vec<String>,
     },
     Send(String),
     Close(u16),
-    Every {
-        every: Duration,
-        first: Duration,
+    /// A named timer of the current connection: once after `at`, then every `every`.
+    Timer {
+        name: String,
+        at: Duration,
+        every: Option<Duration>,
     },
+    Cancel(String),
     /// The package reported its connection usable: reconnect quickly next time.
     Healthy,
 }
@@ -90,7 +103,35 @@ pub(crate) async fn call(
                     .map(|(header, prefix, secret)| (header, format!("{prefix}{secret}"))),
                 None => None,
             };
-            link.send(Command::Connect { url, header })?;
+            let after = args["after"].as_f64().unwrap_or(0.0);
+            if !(0.0..=86_400.0).contains(&after) {
+                return Err(Error::bad("Connect after 0 seconds to one day."));
+            }
+            let oversized = args["oversized"]
+                .as_array()
+                .map_or_else(Vec::new, Clone::clone);
+            if oversized.len() > 16
+                || !oversized.iter().all(|path| {
+                    path.as_str().is_some_and(|path| {
+                        !path.is_empty()
+                            && path.len() <= 80
+                            && path.split('.').count() <= 4
+                            && path.split('.').all(|key| !key.is_empty())
+                    })
+                })
+            {
+                return Err(Error::bad("Name at most 16 fields such as d.id."));
+            }
+            link.send(Command::Connect {
+                url,
+                header,
+                after: Duration::from_secs_f64(after),
+                oversized: oversized
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .map(str::to_owned)
+                    .collect(),
+            })?;
         }
         "socket.send" => {
             let mut message = args["text"]
@@ -100,6 +141,11 @@ pub(crate) async fn call(
             if message.len() > MAX_MESSAGE {
                 return Err(Error::too_large("Socket messages are limited to 1 MB."));
             }
+            let pace = args["pace"].as_f64().unwrap_or(0.0);
+            if !(0.0..=60_000.0).contains(&pace) {
+                return Err(Error::bad("Pace sends up to 60 seconds apart."));
+            }
+            let mut key = format!("{}\n{}", context.manifest.id, context.connection.id);
             // `{{secret}}` marks where the host puts the credential, JSON-escaped.
             if let Some(auth) = enabled(args.get("auth")) {
                 if !message.contains("{{secret}}") {
@@ -108,8 +154,19 @@ pub(crate) async fn call(
                 let (_, _, secret) = capabilities::authorization(s, context, auth)
                     .await?
                     .ok_or_else(|| Error::forbidden("This instance has no credential."))?;
+                // Paced sends with one credential share a budget across instances,
+                // e.g. one Discord Identify per bot token every five seconds.
+                key = format!("{}\n{secret}", context.manifest.id);
                 let escaped = serde_json::to_string(&secret)?;
                 message = message.replace("{{secret}}", &escaped[1..escaped.len() - 1]);
+            }
+            if pace > 0.0 {
+                s.plugins
+                    .pace(
+                        &crate::auth::hex_digest(&key),
+                        Duration::from_secs_f64(pace / 1000.0),
+                    )
+                    .await;
             }
             link.send(Command::Send(message))?;
         }
@@ -120,20 +177,33 @@ pub(crate) async fn call(
             }
             link.send(Command::Close(code as u16))?;
         }
-        "socket.every" => {
-            let every = args["ms"].as_f64().unwrap_or(-1.0);
-            if every != 0.0 && !(100.0..=3_600_000.0).contains(&every) {
+        "socket.timer" => {
+            let name = text(args, "name");
+            if name.is_empty()
+                || name.len() > 40
+                || !name.bytes().all(|c| {
+                    c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, b'_' | b'-')
+                })
+            {
+                return Err(Error::bad("Name timers with lowercase letters and digits."));
+            }
+            if args["cancel"] == true {
+                link.send(Command::Cancel(name.to_owned()))?;
+                return Ok(Value::Null);
+            }
+            let at = args["at"].as_f64().unwrap_or(-1.0);
+            let every = args["every"].as_f64();
+            if !(0.0..=86_400_000.0).contains(&at)
+                || every.is_some_and(|every| !(100.0..=3_600_000.0).contains(&every))
+            {
                 return Err(Error::bad(
-                    "Ticks run every 100 ms to 1 hour, or 0 to stop.",
+                    "Timers fire within a day, and repeat every 100 ms to 1 hour.",
                 ));
             }
-            let first = args["first"]
-                .as_f64()
-                .unwrap_or(every)
-                .clamp(0.0, 3_600_000.0);
-            link.send(Command::Every {
-                every: Duration::from_millis(every as u64),
-                first: Duration::from_millis(first as u64),
+            link.send(Command::Timer {
+                name: name.to_owned(),
+                at: Duration::from_secs_f64(at / 1000.0),
+                every: every.map(|every| Duration::from_secs_f64(every / 1000.0)),
             })?;
         }
         _ => return Err(Error::forbidden("Unknown plugin capability.")),
@@ -187,10 +257,19 @@ type Socket = WebSocketStream<MaybeTlsStream<TcpStream>>;
 /// A header the host adds when connecting: name and value.
 type Header = Option<(String, String)>;
 
+struct Pending {
+    at: Instant,
+    url: String,
+    header: Header,
+    oversized: Vec<String>,
+}
+
 struct State {
     socket: Option<Socket>,
-    tick: Option<(Instant, Duration)>,
-    connect: Option<(Instant, String, Header)>,
+    /// The connection's named timers: when each fires next, and its period.
+    timers: BTreeMap<String, (Instant, Option<Duration>)>,
+    connect: Option<Pending>,
+    oversized: Vec<String>,
     last_attempt: Option<Instant>,
     backoff: Duration,
 }
@@ -198,8 +277,37 @@ struct State {
 enum Wake {
     Stop,
     Frame(Option<std::result::Result<Message, tokio_tungstenite::tungstenite::Error>>),
-    Tick,
+    Timer,
     Connect,
+}
+
+/// Only the named fields of an oversized JSON message, e.g. `op`, `s` and `d.id`.
+fn project(message: &str, paths: &[String]) -> Option<String> {
+    if paths.is_empty() {
+        return None;
+    }
+    let value: Value = serde_json::from_str(message).ok()?;
+    let mut output = Value::Object(Map::new());
+    for path in paths {
+        let pointer = format!("/{}", path.replace('.', "/"));
+        let Some(found) = value.pointer(&pointer) else {
+            continue;
+        };
+        let keys = path.split('.').collect::<Vec<_>>();
+        let mut target = &mut output;
+        for key in &keys[..keys.len() - 1] {
+            target = target
+                .as_object_mut()?
+                .entry((*key).to_owned())
+                .or_insert_with(|| Value::Object(Map::new()));
+        }
+        target
+            .as_object_mut()?
+            .insert(keys[keys.len() - 1].to_owned(), found.clone());
+    }
+    serde_json::to_string(&output)
+        .ok()
+        .filter(|text| text.len() <= MAX_MESSAGE)
 }
 
 fn closed(code: Option<u16>, reason: &str, error: Option<&str>) -> Value {
@@ -210,12 +318,22 @@ impl State {
     /// Applies the handler's commands. A failed send ends the socket like a remote close.
     async fn apply(&mut self, command: Command) -> Option<Value> {
         match command {
-            Command::Connect { url, header } => {
+            Command::Connect {
+                url,
+                header,
+                after,
+                oversized,
+            } => {
                 // Reconnections slow down until the package reports a healthy connection.
-                let at = self.last_attempt.map_or_else(Instant::now, |last| {
+                let paced = self.last_attempt.map_or_else(Instant::now, |last| {
                     (last + self.backoff).max(Instant::now())
                 });
-                self.connect = Some((at, url, header));
+                self.connect = Some(Pending {
+                    at: paced.max(Instant::now() + after),
+                    url,
+                    header,
+                    oversized,
+                });
             }
             Command::Send(message) => {
                 let socket = self.socket.as_mut()?;
@@ -233,25 +351,38 @@ impl State {
                     let _ = tokio::time::timeout(Duration::from_secs(2), socket.close(Some(frame)))
                         .await;
                 }
-                self.tick = None;
+                self.timers.clear();
             }
-            Command::Every { every, first } => {
-                self.tick = (!every.is_zero()).then(|| (Instant::now() + first, every));
+            Command::Timer { name, at, every } => {
+                if self.timers.len() < MAX_TIMERS || self.timers.contains_key(&name) {
+                    self.timers.insert(name, (Instant::now() + at, every));
+                }
+            }
+            Command::Cancel(name) => {
+                self.timers.remove(&name);
             }
             Command::Healthy => self.backoff = Duration::from_secs(1),
         }
         None
     }
 
+    /// Timers belong to one connection: they stop when it closes.
     fn drop_socket(&mut self) {
         self.socket = None;
-        self.tick = None;
+        self.timers.clear();
     }
 
     async fn open(&mut self, s: &Service) -> Value {
-        let Some((_, url, header)) = self.connect.take() else {
+        let Some(Pending {
+            url,
+            header,
+            oversized,
+            ..
+        }) = self.connect.take()
+        else {
             return Value::Null;
         };
+        self.oversized = oversized;
         self.last_attempt = Some(Instant::now());
         self.backoff = (self.backoff * 2).min(MAX_BACKOFF);
         self.drop_socket();
@@ -277,8 +408,8 @@ impl State {
             request.headers_mut().insert(name, value);
         }
         let config = WebSocketConfig::default()
-            .max_message_size(Some(MAX_MESSAGE))
-            .max_frame_size(Some(MAX_MESSAGE));
+            .max_message_size(Some(MAX_WIRE))
+            .max_frame_size(Some(MAX_WIRE));
         match tokio::time::timeout(
             Duration::from_secs(15),
             connect_async_with_config(request, Some(config), false),
@@ -324,8 +455,9 @@ async fn serve(
     let (link, mut commands) = Link::channel();
     let mut state = State {
         socket: None,
-        tick: None,
+        timers: BTreeMap::new(),
         connect: None,
+        oversized: Vec::new(),
         last_attempt: None,
         backoff: Duration::from_secs(1),
     };
@@ -357,12 +489,12 @@ async fn serve(
                 continue;
             }
         }
-        let tick_at = state.tick.map(|(at, _)| at);
-        let connect_at = state.connect.as_ref().map(|(at, _, _)| *at);
+        let timer_at = state.timers.values().map(|(at, _)| *at).min();
+        let connect_at = state.connect.as_ref().map(|pending| pending.at);
         let wake = tokio::select! {
             () = stop.cancelled() => Wake::Stop,
             frame = async { state.socket.as_mut().expect("socket").next().await }, if state.socket.is_some() => Wake::Frame(frame),
-            () = tokio::time::sleep_until(tick_at.unwrap_or_else(Instant::now)), if tick_at.is_some() => Wake::Tick,
+            () = tokio::time::sleep_until(timer_at.unwrap_or_else(Instant::now)), if timer_at.is_some() => Wake::Timer,
             () = tokio::time::sleep_until(connect_at.unwrap_or_else(Instant::now)), if connect_at.is_some() => Wake::Connect,
         };
         event = match wake {
@@ -372,13 +504,36 @@ async fn serve(
                 }
                 return Ok(());
             }
-            Wake::Tick => {
-                if let Some((at, every)) = state.tick.as_mut() {
-                    *at = Instant::now() + *every;
-                }
-                Some(json!({ "type": "tick" }))
+            Wake::Timer => {
+                let now = Instant::now();
+                let due = state
+                    .timers
+                    .iter()
+                    .filter(|(_, (at, _))| *at <= now)
+                    .min_by_key(|(_, (at, _))| *at)
+                    .map(|(name, _)| name.clone());
+                due.map(|name| {
+                    match state.timers.get(&name).and_then(|(_, every)| *every) {
+                        Some(every) => {
+                            state
+                                .timers
+                                .insert(name.clone(), (now + every, Some(every)));
+                        }
+                        None => {
+                            state.timers.remove(&name);
+                        }
+                    }
+                    json!({ "type": "tick", "name": name })
+                })
             }
             Wake::Connect => Some(state.open(s).await),
+            Wake::Frame(Some(Ok(Message::Text(message)))) if message.len() > MAX_MESSAGE => {
+                Some(json!({
+                    "type": "message",
+                    "oversized": message.len(),
+                    "text": project(message.as_str(), &state.oversized),
+                }))
+            }
             Wake::Frame(Some(Ok(Message::Text(message)))) => {
                 Some(json!({ "type": "message", "text": message.as_str() }))
             }

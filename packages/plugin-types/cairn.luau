@@ -14,8 +14,10 @@
 --   timer             a timer scheduled with cairn.timers    { id, name, payload }
 --   start             when Cairn starts the worker           { connectionId, settings }
 --   socket            capability "socket", in the transport worker: { type = "start", instance,
---                     settings } | { type = "open" } | { type = "message", text } |
---                     { type = "tick" } | { type = "close", code?, reason, error? }
+--                     settings } | { type = "open" } | { type = "message", text?, oversized? } |
+--                     { type = "tick", name } | { type = "close", code?, reason, error? }
+--                     (`oversized`: the message's size; `text` then holds only the fields
+--                     named in `connect`'s `oversized`)
 -- One-shot handlers, each in a fresh worker:
 --   command           `cairn plugin <id> <command> …`        { command, arguments, agent, instances }
 --                     return text for `text`/`secret` commands, any JSON otherwise
@@ -120,10 +122,21 @@ export type Cairn = {
     -- `{{secret}}` in sent text becomes the credential (auth = true) or a secret field.
     -- Commands apply once the handler returns.
     socket: {
-        connect: (request: { url: string, auth: (boolean | { secret: string, header: string?, prefix: string? })? }) -> (),
-        send: (text: string, options: { auth: (boolean | { secret: string })? }?) -> (),
+        -- `after`: seconds to wait first (one day at most). `oversized`: JSON fields such
+        -- as "d.id" kept from messages over 1 MB instead of dropping the connection.
+        connect: (request: {
+            url: string,
+            auth: (boolean | { secret: string, header: string?, prefix: string? })?,
+            after: number?,
+            oversized: { string }?,
+        }) -> (),
+        -- `pace` (ms): sends with the same credential wait for each other across instances.
+        send: (text: string, options: { auth: (boolean | { secret: string })?, pace: number? }?) -> (),
         close: (code: number?) -> (),
-        every: (ms: number, first: number?) -> (),
+        -- Named timers of the current connection, delivered as { type = "tick", name }.
+        every: (name: string, ms: number, first: number?) -> (),
+        after: (name: string, ms: number) -> (),
+        cancel: (name: string) -> (),
     },
     -- capability "inbound": Cairn keeps it only if the person is allowed (approval mode
     -- records a request without content). Returns whether it was queued.
