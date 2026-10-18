@@ -5,9 +5,14 @@ use std::{collections::HashMap, sync::LazyLock};
 static SCHEMAS: LazyLock<Value> = LazyLock::new(|| {
     let mut schemas: Value =
         serde_json::from_str(include_str!("../schemas/inputs.json")).expect("checked schemas");
-    let catalog: Value = serde_json::from_str(include_str!("../schemas/mcp-tools.json"))
+    let catalog: Value = serde_json::from_str(include_str!("../schemas/mcp-operations.json"))
         .expect("checked MCP schemas");
     for tool in catalog.as_array().unwrap() {
+        schemas[format!("mcp:{}", text(tool, "name"))] = tool["inputSchema"].clone();
+    }
+    let tools: Value = serde_json::from_str(include_str!("../schemas/mcp-tools.json"))
+        .expect("checked MCP tool schemas");
+    for tool in tools.as_array().unwrap() {
         schemas[format!("mcp:{}", text(tool, "name"))] = tool["inputSchema"].clone();
     }
     schemas

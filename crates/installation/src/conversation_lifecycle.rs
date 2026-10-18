@@ -287,11 +287,26 @@ impl Service {
     }
 
     pub async fn chat_trash(&self, id: &str, confirmed: bool) -> Result<Value> {
+        self.chat_trash_authorized(id, confirmed, |_| Ok(())).await
+    }
+
+    pub(crate) async fn chat_trash_authorized<F>(
+        &self,
+        id: &str,
+        confirmed: bool,
+        authorize: F,
+    ) -> Result<Value>
+    where
+        F: FnOnce(&Db<'_>) -> Result<()> + Send + 'static,
+    {
         crate::validation::uuid(id)?;
         let id = id.to_owned();
         let result = self
             .store
-            .transaction(move |db| trash(db, &id, confirmed))
+            .transaction(move |db| {
+                authorize(db)?;
+                trash(db, &id, confirmed)
+            })
             .await?;
         if let Some(run) = result["runId"].as_str() {
             match self.worker.cancel(self, run).await {
@@ -305,6 +320,13 @@ impl Service {
     }
 
     pub async fn chat_restore(&self, id: &str) -> Result<Value> {
+        self.chat_restore_authorized(id, |_| Ok(())).await
+    }
+
+    pub(crate) async fn chat_restore_authorized<F>(&self, id: &str, authorize: F) -> Result<Value>
+    where
+        F: FnOnce(&Db<'_>) -> Result<()> + Send + 'static,
+    {
         let _process_lock = storage_lock(&self.config.data_dir)?;
         crate::validation::uuid(id)?;
         let _guard = self
@@ -312,7 +334,12 @@ impl Service {
             .try_lock()
             .map_err(|_| Error::conflict("A storage operation is in progress. Retry shortly."))?;
         let id = id.to_owned();
-        self.store.transaction(move |db| restore(db, &id)).await
+        self.store
+            .transaction(move |db| {
+                authorize(db)?;
+                restore(db, &id)
+            })
+            .await
     }
 }
 
@@ -420,7 +447,7 @@ impl Service {
     }
 }
 
-fn request_new_session(db: &Db<'_>, id: &str) -> Result<Value> {
+pub(crate) fn request_new_session(db: &Db<'_>, id: &str) -> Result<Value> {
     let mut chat = required(db.get("chats", id)?, "Chat not found")?;
     require_active(&chat)?;
     let run = required(db.run(text(&chat, "runId"))?, "Run not found")?;

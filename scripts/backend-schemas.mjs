@@ -28,7 +28,7 @@ await writeFile('crates/installation/schemas/inputs.json', `${JSON.stringify(Obj
 
 // Keep both owner interfaces aligned, including the distinction between creation
 // defaults and partial updates that must preserve existing node restrictions.
-const tools = JSON.parse(await readFile('crates/installation/schemas/mcp-tools.json', 'utf8'))
+const tools = JSON.parse(await readFile('crates/installation/schemas/mcp-operations.json', 'utf8'))
 for (const [name, schema] of Object.entries({ save_agent: agentInput, update_agent: agentUpdate })) {
   const tool = tools.find(tool => tool.name === name)
   if (!tool)
@@ -37,4 +37,21 @@ for (const [name, schema] of Object.entries({ save_agent: agentInput, update_age
   properties.access = z.toJSONSchema(schema).properties.access
 }
 
-await writeFile('crates/installation/schemas/mcp-tools.json', `${JSON.stringify(tools, null, 2)}\n`)
+for (const tool of tools) {
+  if (tool.name === 'create_chat')
+    tool.inputSchema = z.toJSONSchema(chatInput)
+  if (['send_chat_message', 'edit_chat_message'].includes(tool.name)) {
+    const message = z.toJSONSchema(chatMessageInput, { unrepresentable: 'any' })
+    if (tool.name === 'edit_chat_message') {
+      delete message.properties.id
+      message.required = message.required.filter(key => key !== 'id')
+    }
+
+    tool.inputSchema.properties.message = message
+  }
+
+  if (tool.name === 'answer_chat_question')
+    tool.inputSchema.properties.answer = z.toJSONSchema(questionAnswerInput)
+}
+
+await writeFile('crates/installation/schemas/mcp-operations.json', `${JSON.stringify(tools, null, 2)}\n`)

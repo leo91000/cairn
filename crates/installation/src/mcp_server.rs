@@ -1,3 +1,7 @@
+mod chat_files;
+mod chat_tools;
+pub mod code_mode;
+
 use crate::{
     error::{Error, Result, required},
     http::{App, Input},
@@ -37,10 +41,10 @@ const CACHEABLE: [&str; 5] = [
 // result both as structured data and as escaped text for older clients.
 const RUN_PAGE_BYTES: usize = 256 * 1024;
 
-/// An entry of the management tool catalog (`schemas/mcp-tools.json`).
+/// An entry of the management operation catalog (`schemas/mcp-operations.json`).
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct CatalogTool {
+struct CatalogOperation {
     name: String,
     description: String,
     scope: String,
@@ -49,8 +53,8 @@ struct CatalogTool {
     input_schema: Value,
 }
 
-static CATALOG: LazyLock<Vec<CatalogTool>> =
-    LazyLock::new(|| serde_json::from_str(include_str!("../schemas/mcp-tools.json")).unwrap());
+static CATALOG: LazyLock<Vec<CatalogOperation>> =
+    LazyLock::new(|| serde_json::from_str(include_str!("../schemas/mcp-operations.json")).unwrap());
 
 #[derive(Serialize)]
 struct TextContent {
@@ -449,18 +453,17 @@ struct ToolAnnotations {
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
-struct ToolDescriptor {
+struct OperationDescriptor {
     name: &'static str,
     description: &'static str,
     title: String,
     input_schema: &'static Value,
-    output_schema: Value,
     #[serde(rename = "_meta")]
     meta: Value,
     annotations: ToolAnnotations,
 }
 
-pub(crate) fn catalog() -> Vec<Value> {
+pub(crate) fn operations() -> Vec<Value> {
     CATALOG
         .iter()
         .map(|tool| {
@@ -470,16 +473,11 @@ pub(crate) fn catalog() -> Vec<Value> {
                 || scope == "run"
                 || name.starts_with("update_")
                 || name == "save_skill";
-            serde_json::to_value(ToolDescriptor {
+            serde_json::to_value(OperationDescriptor {
                 name,
                 description: &tool.description,
                 title: name.replace('_', " "),
                 input_schema: &tool.input_schema,
-                output_schema: json!({
-                    "type": "object",
-                    "properties": { "result": {} },
-                    "required": ["result"],
-                }),
                 meta: json!({ "securitySchemes": [{ "type": "oauth2", "scopes": [scope] }] }),
                 annotations: ToolAnnotations {
                     read_only_hint: scope == "read",
@@ -492,46 +490,43 @@ pub(crate) fn catalog() -> Vec<Value> {
         .collect()
 }
 
+pub(crate) fn catalog() -> Vec<Value> {
+    serde_json::from_str(include_str!("../schemas/mcp-tools.json")).unwrap()
+}
+
 async fn call(
     s: &Arc<Service>,
     scopes: Option<&[String]>,
     name: &str,
     args: Value,
 ) -> Result<Value> {
+    let scopes =
+        scopes.ok_or_else(|| Error::unauthorized("A verified beacon MCP grant is required."))?;
+    code_mode::call(
+        s,
+        code_mode::Authorization::Public(scopes.to_vec()),
+        name,
+        args,
+    )
+    .await
+}
+
+pub(crate) async fn operation(
+    s: &Arc<Service>,
+    scopes: &[String],
+    name: &str,
+    args: Value,
+) -> Result<Value> {
     let tool = CATALOG
         .iter()
         .find(|tool| tool.name == name)
-        .ok_or_else(|| Error::not_found("Unknown tool"))?;
+        .ok_or_else(|| Error::not_found("Unknown operation"))?;
     let scope = tool.scope.as_str();
-    let operation = async {
-        if let Some(scopes) = scopes {
-            if !scopes.iter().any(|allowed| allowed == scope) {
-                return Err(Error::forbidden(format!("The {scope} scope is required.")));
-            }
-        } else {
-            return Err(Error::unauthorized(
-                "A verified beacon MCP grant is required.",
-            ));
-        }
-        let args = parse(&format!("mcp:{name}"), args)?;
-        invoke(s, name, args, None).await
+    if !scopes.iter().any(|allowed| allowed == scope) {
+        return Err(Error::forbidden(format!("The {scope} scope is required.")));
     }
-    .await;
-    let result = match operation {
-        Ok(result) => ToolResult::success(result.to_string(), json!({ "result": result })),
-        Err(error) => {
-            let mut result = ToolResult::failure(&error.message);
-            if [401, 403].contains(&error.status) {
-                let challenge = format!(
-                    "Bearer error=\"insufficient_scope\", error_description=\"The {scope} scope is required\", scope=\"{scope}\", resource_metadata=\"{}\"",
-                    resource_metadata(s).await
-                );
-                result.meta = Some(json!({ "mcp/www_authenticate": challenge }));
-            }
-            result
-        }
-    };
-    Ok(serde_json::to_value(result)?)
+    let args = parse(&format!("mcp:{name}"), args)?;
+    invoke(s, name, args, None).await
 }
 
 fn run_record_preview(record: Value, fields: &[&str]) -> Result<(Value, usize)> {
@@ -673,6 +668,28 @@ pub(crate) async fn invoke(
 ) -> Result<Value> {
     let authorize = crate::installation_mcp::management_authorization(bearer);
     match name {
+        "list_chat_artifacts"
+        | "read_chat_artifact"
+        | "set_chat_artifact_visibility"
+        | "list_chat_attachments"
+        | "read_chat_attachment"
+        | "upload_chat_attachment" => chat_files::invoke(s, name, args, bearer).await,
+        "read_chat_content"
+        | "list_chat_questions"
+        | "answer_chat_question"
+        | "restore_chat"
+        | "restart_chat_session"
+        | "resume_chat"
+        | "list_chats"
+        | "get_chat"
+        | "create_chat"
+        | "send_chat_message"
+        | "edit_chat_message"
+        | "delete_chat_message"
+        | "rename_chat"
+        | "set_chat_paused"
+        | "stop_chat"
+        | "delete_chat" => chat_tools::invoke(s, name, args, bearer).await,
         "list_agents" => Ok(s.store.list("agents").await?.into()),
         "list_projects" => Ok(s.store.list("projects").await?.into()),
         "list_tasks" => Ok(s.store.list("tasks").await?.into()),
