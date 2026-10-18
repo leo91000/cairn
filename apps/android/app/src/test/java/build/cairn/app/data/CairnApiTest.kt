@@ -1,6 +1,7 @@
 package build.cairn.app.data
 
 import kotlinx.coroutines.test.runTest
+import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.encodeToJsonElement
 import okhttp3.Cookie
 import okhttp3.HttpUrl.Companion.toHttpUrl
@@ -20,6 +21,21 @@ class MemoryVault : SessionVault {
 }
 
 class CairnApiTest {
+    @Test
+    fun `plugin preparation preserves a null form response`() = runTest {
+        MockWebServer().use { server ->
+            server.enqueue(MockResponse().setBody("null"))
+            server.start()
+            val api = CairnApi(server.url("/"), MemoryVault())
+            api.csrf = "fixture-csrf"
+            assertEquals(JsonNull, api.pluginOperation("/plugins/optional/form"))
+            val request = server.takeRequest()
+            assertEquals("POST", request.method)
+            assertEquals("/api/plugins/optional/form", request.path)
+            assertEquals(1, server.requestCount)
+        }
+    }
+
     @Test
     fun `transport failures are marked while local download errors remain actionable`() = runTest {
         val server = MockWebServer()

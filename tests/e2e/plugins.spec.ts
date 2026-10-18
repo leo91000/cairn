@@ -173,22 +173,8 @@ test('Discord bots are set up through the package’s own form and keep the toke
   await expect(page.getByText('No bots yet. Add one to start using this plugin.')).toBeVisible()
 })
 
-test('installed packages wait for review and connect through a generated form', async ({ page, workspace }) => {
+test('TOML packages wait for review and connect through a generated form', async ({ page, workspace }) => {
   test.setTimeout(90000)
-  const manifest = {
-    id: 'notes',
-    name: 'Team notes',
-    version: '1.0.0',
-    description: 'Keeps a note for each team.',
-    apiVersion: 2,
-    capabilities: ['storage', 'timers'],
-    settings: [{
-      key: 'team',
-      title: 'Team',
-      type: 'string',
-      required: true,
-    }],
-  }
   // Split into a module, loaded with require.
   const source = 'local notes = require("./notes")\nreturn { start = function(event) cairn.storage.set("started", notes.started) end }'
   const module = 'return { started = true }'
@@ -197,7 +183,23 @@ test('installed packages wait for review and connect through a generated form', 
   await page.getByRole('button', { name: 'Install package' }).click()
   const install = page.getByRole('dialog', { name: 'Install a plugin package' })
   await install.getByLabel('Package files').setInputFiles([
-    { name: 'manifest.json', mimeType: 'application/json', buffer: Buffer.from(JSON.stringify(manifest)) },
+    {
+      name: 'manifest.toml',
+      mimeType: 'text/plain',
+      buffer: Buffer.from(`
+id = "notes"
+name = "Team notes"
+version = "1.0.0"
+description = "Keeps a note for each team."
+apiVersion = 2
+capabilities = ["storage", "timers"]
+[[settings]]
+key = "team"
+title = "Team"
+type = "string"
+required = true
+`),
+    },
     { name: 'main.luau', mimeType: 'text/plain', buffer: Buffer.from(source) },
     { name: 'notes.luau', mimeType: 'text/plain', buffer: Buffer.from(module) },
   ])
@@ -1115,4 +1117,71 @@ test('resource access refreshes uncertain writes without automatically repeating
   await access.getByRole('button', { name: 'Refresh rules', exact: true }).click()
   await expect(access.getByText('No access rules yet.', { exact: true })).toBeVisible()
   expect(writes).toBe(2)
+})
+
+test('program releases can be checked, installed and restored independently of plugin accounts', async ({ page }) => {
+  await useRelayForHttpMocks(page)
+  const release = (version: string) => ({
+    version,
+    url: `https://cache.agilebits.com/${version}.zip`,
+    format: 'zip',
+    executable: 'op',
+  })
+  const installed = (version: string) => ({ release: release(version), archiveSha256: 'a'.repeat(64), binarySha256: 'b'.repeat(64) })
+  const program = {
+    name: 'op',
+    installer: 'programs/op.luau',
+    installed: installed('2.39.0'),
+    previous: null as ReturnType<typeof installed> | null,
+    candidate: null as ReturnType<typeof release> | null,
+    digest: null as string | null,
+  }
+  const actions: string[] = []
+  let polls = 0
+  await page.route('**/api/plugins/packages/operations/program-job', route => route.fulfill({
+    json: ++polls % 2 ? { state: 'running' } : { state: 'completed', result: program },
+  }))
+  await page.route('**/api/plugins/onepassword/programs**', async (route) => {
+    const action = new URL(route.request().url()).pathname.split('/').at(-1)
+    if (route.request().method() === 'POST') {
+      actions.push(action!)
+      if (action === 'check') {
+        program.candidate = release('2.41.0')
+        program.digest = 'reviewed-release'
+      }
+      else if (action === 'install') {
+        expect(route.request().postDataJSON()).toEqual({ digest: 'reviewed-release' })
+        program.previous = program.installed
+        program.installed = installed('2.41.0')
+        program.candidate = null
+        program.digest = null
+      }
+      else if (action === 'rollback') {
+        program.installed = program.previous!
+        program.previous = null
+      }
+
+      await route.fulfill({ json: { operation: 'program-job' } })
+    }
+    else {
+      await route.fulfill({ json: { programs: [program] } })
+    }
+  })
+  await page.goto(workspacePath('/plugins/onepassword'))
+  await signIn(page)
+  const programs = page.getByRole('region', { name: 'Installed programs' })
+  await expect(programs.getByText('op · Version 2.39.0')).toBeVisible()
+  await programs.getByRole('button', { name: 'Check op for updates' }).click()
+  await expect(programs.getByText(/HTTPS provenance/)).toBeVisible()
+  await programs.getByRole('button', { name: 'Install op 2.41.0' }).click()
+  await expect(programs.getByText('op · Version 2.41.0')).toBeVisible()
+  await programs.getByRole('button', { name: 'Restore op 2.39.0' }).click()
+  await expect(programs.getByText('op · Version 2.39.0')).toBeVisible()
+  expect(actions).toEqual(['check', 'install', 'rollback'])
+  expect(polls).toBe(6)
+
+  // First use and updates from another client also change the authoritative lock.
+  program.installed = installed('2.42.0')
+  await expect(programs.getByText('op · Version 2.42.0')).toBeVisible({ timeout: 12000 })
+  expect(actions).toEqual(['check', 'install', 'rollback'])
 })

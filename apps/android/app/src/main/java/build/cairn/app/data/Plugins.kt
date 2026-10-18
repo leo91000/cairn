@@ -77,7 +77,38 @@ fun PluginManifest.unshownFormErrors(errors: Map<String, String>): List<String> 
 @Serializable data class PluginInstances(val singular: String = "", val plural: String = "")
 
 @Serializable
-data class PluginProgram(val name: String = "", val path: String = "", val description: String = "")
+data class PluginProgram(
+    val name: String = "",
+    val path: String = "",
+    val description: String = "",
+    val installer: String = "",
+)
+
+@Serializable
+data class ProgramRelease(
+    val version: String = "",
+    val url: String = "",
+    val sha256: String? = null,
+)
+
+@Serializable
+data class InstalledProgram(
+    val release: ProgramRelease = ProgramRelease(),
+    val archiveSha256: String = "",
+    val binarySha256: String = "",
+)
+
+@Serializable
+data class ProgramInstallation(
+    val name: String = "",
+    val installer: String = "",
+    val installed: InstalledProgram? = null,
+    val previous: InstalledProgram? = null,
+    val candidate: ProgramRelease? = null,
+    val digest: String? = null,
+)
+
+@Serializable data class ProgramInstallations(val programs: List<ProgramInstallation> = emptyList())
 
 @Serializable data class PluginAgentAccess(val description: String = "")
 

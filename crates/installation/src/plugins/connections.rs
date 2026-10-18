@@ -583,9 +583,22 @@ pub async fn save(
     input: &Value,
     existing: Option<&str>,
 ) -> Result<Value> {
+    let owner = std::sync::Arc::new(super::operations::Owner::current(s).await?);
+    save_owned(s, plugin_id, input, existing, owner).await
+}
+
+pub(crate) async fn save_owned(
+    s: &Service,
+    plugin_id: &str,
+    input: &Value,
+    existing: Option<&str>,
+    owner: std::sync::Arc<super::operations::Owner>,
+) -> Result<Value> {
+    owner.recheck(s).await?;
     let approved = registry::approved(s, plugin_id).await?;
     let source = existing.map_or(SaveSource::New, SaveSource::Existing);
-    let prepared = prepare(s, &approved.package, input, source).await?;
+    let prepared = prepare(s, &approved.package, input, source, Some(owner.clone())).await?;
+    owner.recheck(s).await?;
     let result = s
         .store
         .transaction(move |db| {
@@ -602,6 +615,7 @@ pub(crate) async fn prepare(
     package: &registry::Package,
     input: &Value,
     source: SaveSource<'_>,
+    request_owner: Option<std::sync::Arc<super::operations::Owner>>,
 ) -> Result<Prepared> {
     let (existing, setup, updating) = match source {
         SaveSource::New => (None, None, false),
@@ -743,6 +757,7 @@ pub(crate) async fn prepare(
             credential,
             secrets: secret_fields.clone(),
             setup: setup.cloned().map(Box::new),
+            owner: request_owner,
             urls: if setup.is_some() {
                 Some(forms::setup_urls(s, &package.manifest, &connection_id, input).await?)
             } else {

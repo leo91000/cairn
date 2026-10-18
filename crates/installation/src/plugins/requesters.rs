@@ -292,28 +292,31 @@ pub(crate) async fn recheck(s: &Service, requester: &RunRequester) -> Result<()>
         }
     }
     let requester = requester.clone();
-    s.store
-        .read(move |db| {
-            let run = db
-                .run(&requester.run)?
-                .ok_or_else(|| Error::forbidden("The requester's run was removed."))?;
-            if run["status"] != RunStatus::Running
-                || !run["cancelRequestedAt"].is_null()
-                || run["chatExecution"]["messageId"] != requester.message
-                || suspended(db, &requester.chat, &run)? != requester.suspended
-                || !db
-                    .get("chats", &requester.chat)?
-                    .is_some_and(|chat| chat["runId"] == requester.run)
-                || recorded(db, &requester.chat, &requester.message)?.as_ref()
-                    != Some(&requester.principal)
-            {
-                return Err(Error::forbidden(
-                    "The requester's execution changed or stopped.",
-                ));
-            }
-            Ok(())
-        })
-        .await
+    s.store.read(move |db| recheck_in(db, &requester)).await
+}
+
+/// Local authority fences can share a snapshot with resource and credential checks.
+pub(crate) fn recheck_in(db: &Db<'_>, requester: &RunRequester) -> Result<()> {
+    if let Principal::External(actor) = &requester.principal {
+        external_in(db, actor)?;
+    }
+    let run = db
+        .run(&requester.run)?
+        .ok_or_else(|| Error::forbidden("The requester's run was removed."))?;
+    if run["status"] != RunStatus::Running
+        || !run["cancelRequestedAt"].is_null()
+        || run["chatExecution"]["messageId"] != requester.message
+        || suspended(db, &requester.chat, &run)? != requester.suspended
+        || !db
+            .get("chats", &requester.chat)?
+            .is_some_and(|chat| chat["runId"] == requester.run)
+        || recorded(db, &requester.chat, &requester.message)?.as_ref() != Some(&requester.principal)
+    {
+        return Err(Error::forbidden(
+            "The requester's execution changed or stopped.",
+        ));
+    }
+    Ok(())
 }
 
 /// Owner intervention suspends personal credentials, while retaining the original

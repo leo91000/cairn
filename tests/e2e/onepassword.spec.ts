@@ -20,7 +20,7 @@ test('1Password service accounts are plugin instances with private tokens and ex
   // The package declares what agents get; Cairn renders it.
   const usage = page.getByRole('complementary', { name: 'How agents use it' })
   await expect(usage.getByText('cairn plugin onepassword read --account <account> <reference>')).toBeVisible()
-  await expect(usage.getByText('/usr/local/bin/op')).toBeVisible()
+  await expect(usage.getByText('op', { exact: true })).toBeVisible()
   for (const width of [1440, 390]) {
     await page.setViewportSize({ width, height: 844 })
     await expectSingleScroll(page)

@@ -609,3 +609,42 @@ existing assertion deadlines are unchanged.
 
 The integration includes `main` at `19c47868`. This is a CI correction checkpoint;
 resource routes, scoped forms and all other unchecked Slack items remain pending.
+
+
+## Integration with package-owned program installers
+
+The integration with `main` at `870c49c8` retains JSON and TOML package manifests,
+package-owned Luau installers, tracked preparation and program check/install/restore
+on both clients. Setup, resource, OAuth and grant interfaces remain available.
+Ordinary instance forms follow tracked preparation while retaining their existing
+normalization of optional guidance. An HTTP `null` response passes through the
+preparation helper unchanged on web and Android; it does not become an invalid
+operation envelope. Dedicated HTTP/client regressions cover this boundary.
+
+Cold executable preparation rechecks the caller's instance/grants and the loaded
+package approval before reading credentials, then again before spawning after
+credential I/O. A revoked command cannot start a provider program and merely hide
+its result afterwards. Tracked package approval captures the initiating authenticated
+owner and exact access grant; both remain required after installation I/O before
+publishing activation. Approval records are merged inside the publishing transaction
+to preserve other approvals completed during preparation. Native regressions hold
+the publisher download while revoking an agent or replacing owner access, including
+replacement access for the same account, and check stale authenticated admission.
+
+The same captured owner now accompanies ordinary forms, views, tests, actions and
+saves through synchronous or tracked execution. Setup forms retain their separate
+draft-owner proof. Program management rechecks its initiating owner and active
+package after waiting and I/O, before publishing a candidate, update or restore;
+package approval uses its reviewed but not-yet-active package instead. Inert
+runtime preparation does not grant permission to execute or activate its result.
+
+Agent scopes also retain the issuing run's host-only bearer. Instance grants and
+resource grants recheck that live execution proof; a stopped, expired or revoked
+run cannot start a new program or provider request after preparation or OAuth
+renewal. HTTP effects recheck caller authority after credential I/O before sending.
+Native regressions observe the actual executable marker, installed release and
+provider request count while revoking those authorities at controlled barriers.
+
+This integration still requires fresh checkpoint qualification after resolving the
+merge. Its prior checkpoint results do not qualify the new source, and all unchecked
+Slack deliveries above remain required before final whole-PR validation.

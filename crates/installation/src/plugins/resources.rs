@@ -471,21 +471,27 @@ pub(crate) async fn recheck(
     reference: &Reference,
 ) -> Result<()> {
     let connection = context.connection.clone();
-    let revisions = reference.revisions.clone();
+    let reference = reference.clone();
     s.store
-        .read(move |db| {
-            current(db, &connection)?;
-            for (id, revision) in revisions {
-                let value = db.get(KIND, &id)?;
-                if !value
-                    .is_some_and(|value| value["revision"] == revision && value["enabled"] == true)
-                {
-                    return Err(Error::forbidden("The resource changed during the request."));
-                }
-            }
-            Ok(())
-        })
+        .read(move |db| recheck_in(db, &connection, &reference))
         .await
+}
+
+pub(crate) fn recheck_in(
+    db: &Db<'_>,
+    connection: &Connection,
+    reference: &Reference,
+) -> Result<()> {
+    current(db, connection)?;
+    for (id, revision) in &reference.revisions {
+        if !db
+            .get(KIND, id)?
+            .is_some_and(|value| value["revision"] == *revision && value["enabled"] == true)
+        {
+            return Err(Error::forbidden("The resource changed during the request."));
+        }
+    }
+    Ok(())
 }
 
 pub(crate) async fn credential(

@@ -23,6 +23,14 @@ impl Default for Host {
 }
 
 impl Host {
+    /// A different event budget using the same bounded worker pool.
+    pub fn with_deadline(&self, deadline: Duration) -> Self {
+        Self {
+            slots: self.slots.clone(),
+            deadline,
+        }
+    }
+
     /// `concurrency` bounds live workers; `deadline` bounds loading and each event.
     pub fn with_limits(concurrency: usize, deadline: Duration) -> Self {
         Self {

@@ -1010,11 +1010,14 @@ async fn waiting_for_identify_keeps_heartbeats_and_the_worker_alive() {
         let (s, package, stop) = (s.clone(), package.clone(), stop.clone());
         workers.spawn(async move { socket::run(&s, &connection, &package, &stop).await });
     }
+    let started = tokio::time::Instant::now();
+    let mut events = Vec::new();
     let evidence = tokio::time::timeout(Duration::from_secs(15), async {
         let mut identifies = Vec::new();
         let mut beats = [0; 2];
         while identifies.len() < 2 {
             let (id, op, at) = received.recv().await.unwrap();
+            events.push((id, op, at.duration_since(started).as_millis()));
             if op == 1 {
                 beats[id] += 1;
             }
@@ -1036,7 +1039,7 @@ async fn waiting_for_identify_keeps_heartbeats_and_the_worker_alive() {
     }
     upstream.await.unwrap();
     server.abort();
-    evidence.unwrap();
+    evidence.unwrap_or_else(|error| panic!("{error}; (socket, opcode, elapsed ms): {events:?}"));
 }
 
 #[tokio::test]

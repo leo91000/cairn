@@ -16,12 +16,14 @@ use serde_json::{Map, Value, json};
 use std::{
     collections::BTreeMap,
     path::{Path, PathBuf},
+    sync::OnceLock,
 };
 
 const KIND: &str = "plugin-packages";
 
 /// `plugins/<id>/`: manifest and Luau files, embedded by `build.rs`.
 type Bundled = (
+    &'static str,
     &'static str,
     &'static str,
     &'static [(&'static str, &'static str)],
@@ -115,10 +117,8 @@ pub(crate) async fn require_digest(s: &Service, plugin: &str, digest: &str) -> R
     Ok(())
 }
 
-fn package(manifest: &str, source: Sources, builtin: bool) -> Result<Package> {
-    let manifest: Manifest =
-        serde_json::from_str(manifest).map_err(|_| Error::bad("Invalid plugin manifest."))?;
-    manifest.validate().map_err(Error::bad)?;
+fn package(format: &str, manifest: &str, source: Sources, builtin: bool) -> Result<Package> {
+    let manifest = Manifest::parse(format, manifest).map_err(Error::bad)?;
     source.validate().map_err(|message| {
         if source.size() > MAX_SOURCE_BYTES {
             Error::too_large(message)
@@ -126,9 +126,16 @@ fn package(manifest: &str, source: Sources, builtin: bool) -> Result<Package> {
             Error::bad(message)
         }
     })?;
+    for program in &manifest.programs {
+        if !program.installer.is_empty() && !source.modules.contains_key(&program.installer) {
+            return Err(Error::bad(
+                "A program installer must name a Luau file in the package.",
+            ));
+        }
+    }
     if !builtin
         && (RESERVED.contains(&manifest.id.as_str())
-            || BUILTIN.iter().any(|(id, _, _)| *id == manifest.id))
+            || BUILTIN.iter().any(|(id, _, _, _)| *id == manifest.id))
     {
         return Err(Error::bad("This plugin ID belongs to a built-in plugin."));
     }
@@ -141,22 +148,31 @@ fn package(manifest: &str, source: Sources, builtin: bool) -> Result<Package> {
 }
 
 pub fn builtin(id: &str) -> Option<Package> {
-    BUILTIN
-        .iter()
-        .find(|(name, _, _)| *name == id)
-        .map(|(_, manifest, files)| {
-            let mut source = Sources::default();
-            for (path, text) in *files {
-                if *path == "main.luau" {
-                    source.main = (*text).to_owned();
-                } else {
-                    source
-                        .modules
-                        .insert((*path).to_owned(), (*text).to_owned());
-                }
-            }
-            package(manifest, source, true).expect("bundled plugin")
+    // Embedded bytes cannot change before a process restart. Parsing and hashing
+    // them on every capability check can delay a transport worker's heartbeats.
+    static PACKAGES: OnceLock<Vec<Package>> = OnceLock::new();
+    PACKAGES
+        .get_or_init(|| {
+            BUILTIN
+                .iter()
+                .map(|(_, format, manifest, files)| {
+                    let mut source = Sources::default();
+                    for (path, text) in *files {
+                        if *path == "main.luau" {
+                            source.main = (*text).to_owned();
+                        } else {
+                            source
+                                .modules
+                                .insert((*path).to_owned(), (*text).to_owned());
+                        }
+                    }
+                    package(format, manifest, source, true).expect("bundled plugin")
+                })
+                .collect()
         })
+        .iter()
+        .find(|package| package.manifest.id == id)
+        .cloned()
 }
 
 /// Files of a package as the owner reviews them: path and size, `main.luau` first.
@@ -201,13 +217,24 @@ fn read_version(s: &Service, id: &str, version: &str) -> Result<Package> {
     if !std::fs::symlink_metadata(&directory).is_ok_and(|metadata| metadata.is_dir()) {
         return Err(Error::not_found("Plugin version not found."));
     }
-    let manifest = read_limited(&directory.join("manifest.json"), 65_536)?;
+    let json = directory.join("manifest.json");
+    let toml = directory.join("manifest.toml");
+    let (format, path) = match (json.try_exists()?, toml.try_exists()?) {
+        (true, false) => ("json", json),
+        (false, true) => ("toml", toml),
+        _ => {
+            return Err(Error::bad(
+                "A package must contain exactly one manifest.json or manifest.toml.",
+            ));
+        }
+    };
+    let manifest = read_limited(&path, 65_536)?;
     let mut source = Sources {
         main: read_limited(&directory.join("main.luau"), MAX_SOURCE_BYTES as u64)?,
         modules: BTreeMap::new(),
     };
     read_modules(&directory, "", &mut source)?;
-    let package = package(&manifest, source, false)?;
+    let package = package(format, &manifest, source, false)?;
     if package.manifest.id != id || package.manifest.version != version {
         return Err(Error::bad(
             "Plugin folder names must match the manifest ID and version.",
@@ -315,7 +342,7 @@ fn summary(package: &Package) -> Value {
 /// Everything the owner reviews: requested capabilities, hosts and approval state.
 pub async fn catalog(s: &Service) -> Result<Value> {
     let mut packages = Vec::new();
-    for (id, _, _) in BUILTIN {
+    for (id, _, _, _) in BUILTIN {
         let package = builtin(id).expect("bundled plugin");
         packages.push(json!({
             "id": id,
@@ -327,7 +354,7 @@ pub async fn catalog(s: &Service) -> Result<Value> {
         }));
     }
     for id in entries(&root(s)) {
-        if BUILTIN.iter().any(|(name, _, _)| *name == id) {
+        if BUILTIN.iter().any(|(name, _, _, _)| *name == id) {
             continue;
         }
         let record = record(s, &id).await?;
@@ -381,7 +408,16 @@ pub async fn catalog(s: &Service) -> Result<Value> {
 /// `modules` maps paths such as `lib/rest.luau` to their text. It stays inactive until
 /// approved.
 pub async fn install(s: &Service, input: &Value) -> Result<Value> {
-    let manifest = serde_json::to_string(&input["manifest"])?;
+    let format = input["manifestFormat"].as_str().unwrap_or("json");
+    let manifest = match &input["manifest"] {
+        Value::String(source) => source.clone(),
+        Value::Object(_) if format == "json" => serde_json::to_string(&input["manifest"])?,
+        _ => {
+            return Err(Error::bad(
+                "Supply a JSON manifest object or JSON/TOML text with manifestFormat.",
+            ));
+        }
+    };
     let empty = Map::new();
     let modules = match &input["modules"] {
         Value::Null => &empty,
@@ -398,7 +434,7 @@ pub async fn install(s: &Service, input: &Value) -> Result<Value> {
             .ok_or_else(|| Error::bad("Package modules must map file paths to text."))?;
         source.modules.insert(path.clone(), text.to_owned());
     }
-    let package = package(&manifest, source, false)?;
+    let package = package(format, &manifest, source, false)?;
     if !segment(&package.manifest.version) {
         return Err(Error::bad("Use a simple version such as 1.2.0."));
     }
@@ -412,6 +448,26 @@ pub async fn install(s: &Service, input: &Value) -> Result<Value> {
             Error::bad("The plugin source did not load. main.luau must return a table of handlers, and every require must name a package file.")
         })?;
     session.stop().await;
+    for program in package
+        .manifest
+        .programs
+        .iter()
+        .filter(|program| !program.installer.is_empty())
+    {
+        let session = s
+            .plugins
+            .host
+            .start(
+                &s.plugins.executable()?,
+                &package.manifest,
+                super::program_installation::source(&package, program),
+            )
+            .await
+            .map_err(|_| {
+                Error::bad("Program installers must load and export resolve and install functions.")
+            })?;
+        session.stop().await;
+    }
     let directory = root(s)
         .join(&package.manifest.id)
         .join(&package.manifest.version);
@@ -456,27 +512,36 @@ async fn set_active(
     id: &str,
     version: &str,
     reviewed_digest: Option<&str>,
+    owner: &super::operations::Owner,
 ) -> Result<Value> {
     if builtin(id).is_some() {
         return Err(Error::bad("Built-in plugins are updated with Cairn."));
     }
+    owner.recheck(s).await?;
     let package = read_version(s, id, version)?;
-    let mut record = record(s, id).await?;
+    let record = record(s, id).await?;
     if let Some(reviewed_digest) = reviewed_digest {
         if package.digest != reviewed_digest {
             return Err(Error::conflict(
                 "This version changed while you reviewed it. Reload Plugins and review it again.",
             ));
         }
-        record["approvals"][version] = json!(package.digest);
     } else if record["approvals"][version] != package.digest {
         return Err(Error::forbidden(
             "Approve this version before activating it.",
         ));
     }
-    record["active"] = json!(version);
-    record["revision"] = json!(crate::config::id());
-    record["updatedAt"] = json!(now());
+    // Approval has been checked before any installer is allowed network or file effects.
+    super::program_installation::prepare(s, &package, Some(owner)).await?;
+    owner.recheck(s).await?;
+    let current = read_version(s, id, version)?;
+    if current.digest != package.digest {
+        return Err(Error::conflict(
+            "The plugin changed during program preparation. Review it again.",
+        ));
+    }
+    let approve = reviewed_digest.is_some();
+    let digest = package.digest.clone();
     let (plugin, action) = (
         id.to_owned(),
         if reviewed_digest.is_some() {
@@ -488,6 +553,20 @@ async fn set_active(
     let version = version.to_owned();
     s.store
         .transaction(move |db| {
+            // Merge into the live record in the same transaction: preparation
+            // must not overwrite approvals committed while it was waiting.
+            let key = format!("package:{plugin}");
+            let mut record = db
+                .get(KIND, &key)?
+                .unwrap_or_else(|| json!({"id": key, "pluginId": plugin, "approvals": {}}));
+            if approve {
+                record["approvals"][&version] = json!(digest);
+            } else if record["approvals"][&version] != digest {
+                return Err(Error::forbidden("This version is no longer approved."));
+            }
+            record["active"] = json!(version);
+            record["revision"] = json!(crate::config::id());
+            record["updatedAt"] = json!(now());
             db.put(KIND, &record)?;
             db.audit(
                 &format!("plugin.package.{action}"),
@@ -499,14 +578,54 @@ async fn set_active(
     Ok(summary(&package))
 }
 
+/// Installer-backed activation is tracked without holding a relay request open.
+/// Ordinary packages keep the existing synchronous response contract.
+pub async fn activate_request(
+    s: &std::sync::Arc<Service>,
+    id: &str,
+    version: &str,
+    reviewed_digest: Option<&str>,
+    account: &str,
+) -> Result<Value> {
+    let owner = super::operations::Owner::for_account(s, account).await?;
+    if builtin(id).is_some() {
+        return set_active(s, id, version, reviewed_digest, &owner).await;
+    }
+    let package = read_version(s, id, version)?;
+    if !package
+        .manifest
+        .programs
+        .iter()
+        .any(|program| !program.installer.is_empty())
+    {
+        return set_active(s, id, version, reviewed_digest, &owner).await;
+    }
+    if reviewed_digest.is_some_and(|digest| digest != package.digest) {
+        return Err(Error::conflict(
+            "This version changed while you reviewed it. Reload Plugins.",
+        ));
+    }
+    let (service, id, version, digest) = (
+        s.clone(),
+        id.to_owned(),
+        version.to_owned(),
+        reviewed_digest.map(str::to_owned),
+    );
+    s.plugins.operations.start(s.clone(), async move {
+        set_active(&service, &id, &version, digest.as_deref(), &owner).await
+    })
+}
+
 /// Records the owner's approval of this exact version and runs it.
 pub async fn approve(s: &Service, id: &str, version: &str, digest: &str) -> Result<Value> {
-    set_active(s, id, version, Some(digest)).await
+    let owner = super::operations::Owner::current(s).await?;
+    set_active(s, id, version, Some(digest), &owner).await
 }
 
 /// Switches to another previously approved version, e.g. to roll back an update.
 pub async fn activate(s: &Service, id: &str, version: &str) -> Result<Value> {
-    set_active(s, id, version, None).await
+    let owner = super::operations::Owner::current(s).await?;
+    set_active(s, id, version, None, &owner).await
 }
 
 pub async fn uninstall(s: &Service, id: &str) -> Result<Value> {

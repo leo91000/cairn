@@ -43,6 +43,10 @@ cairn.conversations = {
 cairn.exec = {
     run = function(request) return call("exec.run", request) end,
 }
+cairn.download = function(request) return call("download", request) end
+cairn.archive = {
+    executable = function(request) return call("archive.executable", request) end,
+}
 cairn.socket = {
     connect = function(request) call("socket.connect", request) end,
     send = function(text, options)
@@ -371,7 +375,7 @@ pub fn worker() -> Result<(), String> {
         write_frame(&mut std::io::stdout().lock(), &Frame::Failure)?;
         return Err("Plugin API version is incompatible.".into());
     }
-    let budget = Duration::from_millis(deadline_ms.clamp(10, 120_000));
+    let budget = Duration::from_millis(deadline_ms.clamp(10, 180_000));
     let sources = Sources {
         main: source,
         modules,

@@ -59,16 +59,35 @@ pub(crate) async fn approved(
     args: Value,
 ) -> Result<Value> {
     super::registry::require_digest(s, &context.manifest.id, digest).await?;
-    let result = checked(s, context, method, args).await?;
+    let result = checked_approval(s, context, Some(digest), method, args).await?;
     super::registry::require_digest(s, &context.manifest.id, digest).await?;
     Ok(result)
 }
 
 /// A long-lived worker's call, after rechecking the owner and the instance.
 pub async fn checked(s: &Service, context: &Context, method: &str, args: Value) -> Result<Value> {
+    checked_approval(s, context, None, method, args).await
+}
+
+async fn checked_approval(
+    s: &Service,
+    context: &Context,
+    digest: Option<&str>,
+    method: &str,
+    args: Value,
+) -> Result<Value> {
     ensure_owner(s, &context.connection).await?;
     let expected = context.connection.clone();
     s.store.read(move |db| authorize(db, &expected)).await?;
+    let execution_digest = match digest {
+        Some(digest) => Some(digest.to_owned()),
+        None if method == "exec.run" => Some(
+            super::registry::active(s, &context.manifest.id)
+                .await?
+                .digest,
+        ),
+        None => None,
+    };
     let result = match method {
         "conversations.submit" => super::work::submit(s, context, &args).await,
         "conversations.check" => super::work::check(s, context, &args).await,
@@ -81,7 +100,18 @@ pub async fn checked(s: &Service, context: &Context, method: &str, args: Value) 
         "instance.status" => instance_status(s, context, &args).await,
         _ if method.starts_with("oauth.") => super::oauth::call(s, context, method, &args).await,
         _ if method.starts_with("socket.") => super::socket::call(s, context, method, &args).await,
-        _ => effect(s, context, method, args).await,
+        _ => {
+            effect(s, context, method, args, || async {
+                ensure_owner(s, &context.connection).await?;
+                if let Some(digest) = &execution_digest {
+                    super::registry::require_digest(s, &context.manifest.id, digest).await?;
+                }
+                let expected = context.connection.clone();
+                s.store.read(move |db| authorize(db, &expected)).await?;
+                Ok(())
+            })
+            .await
+        }
     }?;
     if context.connection.routing.is_some() {
         ensure_owner(s, &context.connection).await?;
@@ -115,17 +145,27 @@ async fn instance_status(s: &Service, context: &Context, args: &Value) -> Result
 
 /// Capabilities that act for an instance rather than for a person: shared by
 /// long-lived workers and one-shot handlers once their scope is authorized.
-pub async fn effect(s: &Service, context: &Context, method: &str, args: Value) -> Result<Value> {
+pub async fn effect<F, Fut>(
+    s: &Service,
+    context: &Context,
+    method: &str,
+    args: Value,
+    authorize: F,
+) -> Result<Value>
+where
+    F: Fn() -> Fut,
+    Fut: std::future::Future<Output = Result<()>>,
+{
     match method {
         "storage.get" | "storage.set" | "storage.delete" | "storage.list" => {
             storage(s, &context.connection, method, &args).await
         }
-        "http.request" => http(s, context, &args).await,
+        "http.request" => http(s, context, &args, authorize).await,
         "resources.get" | "resources.list" => {
             super::resources::call(s, context, method, &args).await
         }
         "timers.after" | "timers.cancel" => timers(s, &context.connection, method, &args).await,
-        "exec.run" => super::programs::run(s, context, &args).await,
+        "exec.run" => super::programs::run(s, context, &args, authorize).await,
         _ => Err(Error::forbidden("Unknown plugin capability.")),
     }
 }
@@ -386,7 +426,11 @@ pub(crate) async fn secrets(s: &Service, context: &Context) -> Result<Map<String
 
 /// HTTPS to hosts the manifest lists. With `auth = true`, the host adds the
 /// connection's credential using the manifest's rule; scripts never see it.
-async fn http(s: &Service, context: &Context, args: &Value) -> Result<Value> {
+async fn http<F, Fut>(s: &Service, context: &Context, args: &Value, authorize: F) -> Result<Value>
+where
+    F: Fn() -> Fut,
+    Fut: std::future::Future<Output = Result<()>>,
+{
     let invalid = |message: &str| Error::bad(message.to_owned());
     let method = match args["method"].as_str().unwrap_or("GET") {
         "GET" => reqwest::Method::GET,
@@ -486,6 +530,32 @@ async fn http(s: &Service, context: &Context, args: &Value) -> Result<Value> {
     }
     if let Some(oauth) = &oauth {
         super::oauth::recheck(s, oauth).await?;
+    }
+    // Credential renewal and owner verification can both wait on the network.
+    // Retire the caller's proof after that I/O, before starting another request.
+    authorize().await?;
+    if resource.is_some() || oauth.is_some() || context.resource_grant.is_some() {
+        let connection = context.connection.clone();
+        let resource = resource.clone();
+        let oauth = oauth.clone();
+        let grant = context.resource_grant.clone();
+        let vault = s.vault.clone();
+        // No network lookup follows this snapshot: a late owner check must not
+        // revive a disconnected credential or a revoked run/resource grant.
+        s.store
+            .transaction(move |db| {
+                if let Some(grant) = &grant {
+                    super::grants::recheck_in(db, grant)?;
+                }
+                if let Some(resource) = &resource {
+                    super::resources::recheck_in(db, &connection, resource)?;
+                }
+                if let Some(oauth) = &oauth {
+                    super::oauth::recheck_in(&vault, db, oauth)?;
+                }
+                Ok(())
+            })
+            .await?;
     }
     let response = request
         .send()

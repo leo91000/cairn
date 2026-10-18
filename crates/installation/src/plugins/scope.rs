@@ -16,7 +16,7 @@ use std::sync::{Arc, Mutex};
 
 pub enum Scope {
     /// The owner, through one instance: views, actions and tests.
-    Instance(Box<Connection>),
+    Instance(Box<Connection>, Arc<super::operations::Owner>),
     /// A signed public request. It has no Cairn account or owner authority.
     Ingress(Box<Connection>),
     /// A signed setup challenge. Pure Luau only, with no operational capabilities.
@@ -29,6 +29,8 @@ pub enum Scope {
     Agent {
         agent_id: String,
         instances: Vec<Connection>,
+        /// Host-only proof of the issuing run, never included in plugin payloads.
+        bearer: String,
     },
 }
 
@@ -36,7 +38,7 @@ impl Scope {
     /// What the script receives about the instances it may use. Never secret values.
     pub fn instances(&self) -> Vec<Value> {
         match self {
-            Scope::Instance(connection)
+            Scope::Instance(connection, _)
             | Scope::Ingress(connection)
             | Scope::Draft(connection, _) => {
                 vec![summary(connection)]
@@ -61,6 +63,15 @@ pub fn summary(connection: &Connection) -> Value {
 /// Rereads the target instance. Owner scopes need it unchanged; agent scopes also need
 /// it enabled and still granting the agent.
 async fn current(s: &Service, scope: &Scope, args: &Value) -> Result<Connection> {
+    match scope {
+        Scope::Instance(_, owner) => owner.recheck(s).await?,
+        Scope::Draft(_, values) => {
+            if let Some(owner) = &values.owner {
+                owner.recheck(s).await?;
+            }
+        }
+        _ => {}
+    }
     let requested = args["instance"].as_str();
     if let Scope::Setup(expected) = scope {
         if requested.is_some_and(|id| id != expected.id) {
@@ -95,7 +106,7 @@ async fn current(s: &Service, scope: &Scope, args: &Value) -> Result<Connection>
     }
     let expected = match scope {
         Scope::Draft(..) | Scope::ResourceAgent(_) | Scope::Setup(_) => unreachable!(),
-        Scope::Instance(connection) | Scope::Ingress(connection) => {
+        Scope::Instance(connection, _) | Scope::Ingress(connection) => {
             if requested.is_some_and(|id| id != connection.id) {
                 return Err(Error::forbidden("Another instance is not available here."));
             }
@@ -110,15 +121,25 @@ async fn current(s: &Service, scope: &Scope, args: &Value) -> Result<Connection>
             None => return Err(Error::bad("Name the instance to use.")),
         },
     };
+    let id = expected.id.clone();
+    let bearer = match scope {
+        Scope::Agent { bearer, .. } => Some(bearer.clone()),
+        _ => None,
+    };
     let value = s
         .store
-        .get(connections::KIND, &expected.id)
+        .read(move |db| {
+            if let Some(bearer) = bearer {
+                crate::project_workspaces::authorize_in(db, &bearer)?;
+            }
+            db.get(connections::KIND, &id)
+        })
         .await?
         .ok_or_else(|| Error::forbidden("The instance was removed."))?;
     let connection: Connection = serde_json::from_value(value)?;
     let unchanged = connection.revision == expected.revision;
     let granted = match scope {
-        Scope::Instance(_) | Scope::Draft(..) => true,
+        Scope::Instance(..) | Scope::Draft(..) => true,
         Scope::Ingress(_) => connection.enabled,
         Scope::ResourceAgent(_) | Scope::Setup(_) => unreachable!(),
         Scope::Agent { agent_id, .. } => connection.grants(agent_id),
@@ -193,7 +214,11 @@ pub async fn call(
             "Conversations and connections belong to the instance's worker.",
         ));
     }
-    let result = capabilities::effect(s, &context, method, args.clone()).await?;
+    let result = capabilities::effect(s, &context, method, args.clone(), || async {
+        current(s, scope, args).await?;
+        registry::require_digest(s, &package.manifest.id, &package.digest).await
+    })
+    .await?;
     // Revocation or a changed secret during slow I/O must not deliver its result.
     let bound_form = matches!(scope, Scope::Draft(_, values) if values.setup.is_some());
     if (matches!(scope, Scope::Agent { .. }) || bound_form)
@@ -215,9 +240,13 @@ pub async fn invoke(
 ) -> Result<Value> {
     let refused = Mutex::new(None::<Error>);
     let refused_ref = &refused;
-    let result = s
-        .plugins
-        .host
+    let preparing = super::program_installation::needs_preparation(s, package).then(|| {
+        s.plugins
+            .host
+            .with_deadline(std::time::Duration::from_secs(180))
+    });
+    let host = preparing.as_ref().unwrap_or(&s.plugins.host);
+    let result = host
         .invoke(
             &s.plugins.executable()?,
             &package.manifest,

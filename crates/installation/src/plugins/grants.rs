@@ -350,6 +350,7 @@ pub struct Authorization {
     grant: Grant,
     reference: resources::Reference,
     pub(crate) requester: Option<super::requesters::RunRequester>,
+    bearer: String,
 }
 
 pub async fn authorize(
@@ -358,6 +359,7 @@ pub async fn authorize(
     package: &Package,
     name: &str,
     input: &Value,
+    bearer: &str,
 ) -> Result<Scope> {
     let agent = text(&run["snapshot"]["agent"], "id");
     let denied =
@@ -418,12 +420,14 @@ pub async fn authorize(
         grant,
         reference,
         requester: super::requesters::for_run(s, run).await?,
+        bearer: bearer.to_owned(),
     };
     recheck(s, &authorization).await?;
     Ok(Scope::ResourceAgent(Box::new(authorization)))
 }
 
 pub async fn recheck(s: &Service, authorization: &Authorization) -> Result<()> {
+    crate::project_workspaces::authorize(s, &authorization.bearer).await?;
     if let Some(requester) = &authorization.requester {
         super::requesters::recheck(s, requester).await?;
     }
@@ -433,72 +437,84 @@ pub async fn recheck(s: &Service, authorization: &Authorization) -> Result<()> {
             "The resource grant changed or was revoked.",
         ));
     }
+    let authorization = authorization.clone();
+    s.store
+        .transaction(move |db| recheck_in(db, &authorization))
+        .await
+}
+
+pub(crate) fn recheck_in(db: &Db<'_>, authorization: &Authorization) -> Result<()> {
+    if let Some(requester) = &authorization.requester {
+        super::requesters::recheck_in(db, requester)?;
+    }
     let expected = authorization.connection.clone();
     let grant = authorization.grant.clone();
     let resource = authorization.resource.clone();
     let requester = authorization.requester.clone();
     let reference = authorization.reference.clone();
     let scopes = authorization.scopes.clone();
-    s.store
-        .read(move |db| {
-            connections::authorize(db, &expected)?;
-            if let Some(requester) = requester
-                && let super::requesters::Principal::External(actor) = requester.principal
-            {
-                let origin = db
-                    .get(connections::KIND, &actor.connection_id)?
-                    .ok_or_else(|| Error::forbidden("The requester's instance was removed."))?;
-                // A source route constrains operations on that integration. Other
-                // integrations still require the agent's own explicit grants.
-                if origin["pluginId"] == expected.plugin_id {
-                    let within_resource = actor.binding.resources.iter()
-                        .any(|(id, _)| id == &resource.id)
-                        || reference.revisions.iter()
-                            .any(|(id, _)| id == &actor.binding.resource);
-                    let route = db
-                        .get(super::routes::KIND, &actor.binding.id)?
-                        .ok_or_else(|| Error::forbidden("The requester's route was removed."))?;
-                    let within_scopes = scopes.iter().all(|(key, value)| {
-                        route["match"].get(key).is_none_or(|selected| selected == value)
-                    });
-                    if expected.id != actor.connection_id || !within_resource || !within_scopes {
-                        return Err(Error::forbidden(
-                            "This operation is outside the requester's admitted resource and source scope.",
-                        ));
-                    }
-                }
-            }
-            if db.get("agents", &grant.agent_id)?.is_none()
-                || !db
-                    .get(KIND, &grant.id)?
-                    .is_some_and(|value| value["revision"] == grant.revision)
-            {
+    let bearer = authorization.bearer.clone();
+    crate::project_workspaces::authorize_in(db, &bearer)?;
+    connections::authorize(db, &expected)?;
+    if let Some(requester) = requester
+        && let super::requesters::Principal::External(actor) = requester.principal
+    {
+        let origin = db
+            .get(connections::KIND, &actor.connection_id)?
+            .ok_or_else(|| Error::forbidden("The requester's instance was removed."))?;
+        // A source route constrains operations on that integration. Other
+        // integrations still require the agent's own explicit grants.
+        if origin["pluginId"] == expected.plugin_id {
+            let within_resource = actor
+                .binding
+                .resources
+                .iter()
+                .any(|(id, _)| id == &resource.id)
+                || reference
+                    .revisions
+                    .iter()
+                    .any(|(id, _)| id == &actor.binding.resource);
+            let route = db
+                .get(super::routes::KIND, &actor.binding.id)?
+                .ok_or_else(|| Error::forbidden("The requester's route was removed."))?;
+            let within_scopes = scopes.iter().all(|(key, value)| {
+                route["match"]
+                    .get(key)
+                    .is_none_or(|selected| selected == value)
+            });
+            if expected.id != actor.connection_id || !within_resource || !within_scopes {
                 return Err(Error::forbidden(
-                    "The resource grant changed or was revoked.",
+                    "This operation is outside the requester's admitted resource and source scope.",
                 ));
             }
-            if !db
-                .get(resources::KIND, &resource.id)?
-                .is_some_and(|value| value["revision"] == resource.revision)
-            {
-                return Err(Error::forbidden(
-                    "The resource changed during the operation.",
-                ));
-            }
-            Ok(())
-        })
-        .await?;
-    let context = Context {
-        connection: authorization.connection.clone(),
-        manifest: registry::active(s, &authorization.connection.plugin_id)
-            .await?
-            .manifest,
-        event: Value::Null,
-        link: None,
-        draft: None,
-        resource_grant: None,
-    };
-    resources::recheck(s, &context, &authorization.reference).await
+        }
+    }
+    if db.get("agents", &grant.agent_id)?.is_none()
+        || !db
+            .get(KIND, &grant.id)?
+            .is_some_and(|value| value["revision"] == grant.revision)
+    {
+        return Err(Error::forbidden(
+            "The resource grant changed or was revoked.",
+        ));
+    }
+    if !db
+        .get(resources::KIND, &resource.id)?
+        .is_some_and(|value| value["revision"] == resource.revision)
+    {
+        return Err(Error::forbidden(
+            "The resource changed during the operation.",
+        ));
+    }
+    for (id, revision) in &reference.revisions {
+        if !db
+            .get(resources::KIND, id)?
+            .is_some_and(|value| value["revision"] == *revision && value["enabled"] == true)
+        {
+            return Err(Error::forbidden("The resource changed during the request."));
+        }
+    }
+    Ok(())
 }
 
 fn request_permitted(authorization: &Authorization, args: &Value) -> bool {
@@ -613,7 +629,11 @@ pub async fn call(
                 draft: None,
                 resource_grant: Some(std::sync::Arc::new(authorization.clone())),
             };
-            capabilities::effect(s, &context, method, args.clone()).await?
+            capabilities::effect(s, &context, method, args.clone(), || async {
+                recheck(s, authorization).await?;
+                registry::require_digest(s, &package.manifest.id, &package.digest).await
+            })
+            .await?
         }
         _ => return Err(denied()),
     };

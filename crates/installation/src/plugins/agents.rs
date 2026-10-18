@@ -131,11 +131,12 @@ pub async fn command(s: &Service, bearer: &str, input: &Value) -> Result<Value> 
     }
     let scope = match &command.operation {
         Some(operation) => {
-            super::grants::authorize(s, &run, &package, operation, &json!(values)).await?
+            super::grants::authorize(s, &run, &package, operation, &json!(values), bearer).await?
         }
         None => Scope::Agent {
             agent_id,
             instances,
+            bearer: bearer.to_owned(),
         },
     };
     let payload = json!({
@@ -209,7 +210,9 @@ pub async fn call_tool(
         return Err(Error::bad(format!("Invalid input for {name}.")));
     }
     let scope = match &tool.operation {
-        Some(operation) => super::grants::authorize(s, &run, &package, operation, input).await?,
+        Some(operation) => {
+            super::grants::authorize(s, &run, &package, operation, input, bearer).await?
+        }
         None => {
             let instances = instances
                 .into_iter()
@@ -221,6 +224,7 @@ pub async fn call_tool(
             Scope::Agent {
                 agent_id,
                 instances,
+                bearer: bearer.to_owned(),
             }
         }
     };

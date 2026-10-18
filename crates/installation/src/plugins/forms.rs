@@ -23,6 +23,7 @@ pub struct Draft {
     pub secrets: Map<String, Value>,
     pub setup: Option<Box<super::setup::SetupDraft>>,
     pub urls: Option<Value>,
+    pub(crate) owner: Option<Arc<super::operations::Owner>>,
 }
 
 /// A credential entered during setup; incomplete drafts may omit it.
@@ -117,6 +118,16 @@ async fn run(
 /// `POST /api/plugins/{id}/form`: `{ instance?, settings, secrets?, token?, changed? }`
 /// → `{ options, values, errors, view }`.
 pub async fn form(s: &Service, plugin_id: &str, input: &Value) -> Result<Value> {
+    let owner = Arc::new(super::operations::Owner::current(s).await?);
+    form_owned(s, plugin_id, input, owner).await
+}
+
+pub(crate) async fn form_owned(
+    s: &Service,
+    plugin_id: &str,
+    input: &Value,
+    owner: Arc<super::operations::Owner>,
+) -> Result<Value> {
     let package = registry::active(s, plugin_id).await?;
     let manifest = &package.manifest;
     if !manifest.instance_form {
@@ -152,6 +163,7 @@ pub async fn form(s: &Service, plugin_id: &str, input: &Value) -> Result<Value> 
         secrets: secrets(manifest, &input["secrets"], saved),
         setup: None,
         urls: None,
+        owner: Some(owner),
     };
     let changed = input["changed"].as_str().filter(|key| {
         *key == "credential" || manifest.settings.iter().any(|field| field["key"] == *key)
@@ -214,6 +226,7 @@ pub(crate) async fn setup_form(
         secrets: secrets(&package.manifest, &input["secrets"], saved),
         setup: Some(Box::new(setup)),
         urls: Some(urls),
+        owner: None,
     };
     run(s, package, Some(&instance), settings, draft, changed, false).await
 }

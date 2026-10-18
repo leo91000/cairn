@@ -154,6 +154,7 @@ struct Authorization {
     setup: Option<Box<super::setup::SetupDraft>>,
 }
 
+#[derive(Clone)]
 pub(crate) struct Reference {
     key: String,
     revision: String,
@@ -1445,15 +1446,29 @@ pub(crate) async fn recheck(s: &Service, reference: &Reference) -> Result<()> {
             "The personal OAuth requester's access changed.",
         ));
     }
+    let reference = reference.clone();
+    let vault = s.vault.clone();
+    s.store
+        .transaction(move |db| recheck_in(&vault, db, &reference))
+        .await
+}
+
+pub(crate) fn recheck_in(
+    vault: &crate::vault::Vault,
+    db: &Db<'_>,
+    reference: &Reference,
+) -> Result<()> {
     if let Some((key, value)) = &reference.subject_link
-        && s.store.kv(key).await?.as_ref() != Some(value)
+        && db.kv(key)?.as_ref() != Some(value)
     {
         return Err(Error::forbidden(
             "The external identity was unlinked during the request.",
         ));
     }
-    let current = s.vault.get(&reference.key).await?;
-    if !current.is_some_and(|value| value["revision"] == reference.revision) {
+    if !vault
+        .get_in(db, &reference.key)?
+        .is_some_and(|value| value["revision"] == reference.revision)
+    {
         return Err(Error::forbidden(
             "OAuth was revoked or replaced during the request.",
         ));

@@ -102,7 +102,12 @@ export interface Manifest {
   settings?: SettingField[]
   instances?: { singular: string, plural: string }
   brand?: { color: string, path?: string }
-  programs?: { name: string, path: string, description?: string }[]
+  programs?: {
+    name: string
+    path?: string
+    installer?: string
+    description?: string
+  }[]
   agentAccess?: { description?: string }
   commands?: PluginCommand[]
   tools?: { name: string, description: string }[]
@@ -242,6 +247,29 @@ export function fieldSettings(fields: SettingField[], values: Record<string, any
   return Object.fromEntries(fields.filter(field => field.type !== 'secret')
     .filter(field => values[field.key] !== '' && values[field.key] !== undefined && values[field.key] !== null)
     .map(field => [field.key, field.type === 'number' ? Number(values[field.key]) : values[field.key]]))
+}
+
+export interface ProgramRelease {
+  version: string
+  url: string
+  sha256?: string
+  format: 'zip' | 'binary'
+  executable: string
+}
+
+export interface InstalledProgram {
+  release: ProgramRelease
+  archiveSha256: string
+  binarySha256: string
+}
+
+export interface ProgramState {
+  name: string
+  installer: string
+  installed?: InstalledProgram | null
+  previous?: InstalledProgram | null
+  candidate?: ProgramRelease | null
+  digest?: string | null
 }
 
 export interface PackageVersion {

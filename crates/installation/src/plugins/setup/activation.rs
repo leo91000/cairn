@@ -52,6 +52,7 @@ pub(crate) async fn activate(
         target.package(),
         &values,
         connections::SaveSource::Setup(&draft),
+        None,
     )
     .await?;
     // The final form may make network requests. It must not finish a former

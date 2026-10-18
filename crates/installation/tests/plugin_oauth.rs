@@ -4,7 +4,9 @@ use axum::{http::StatusCode, response::IntoResponse};
 use cairn_installation::{
     auth::{InstallationIdentity, InstallationRole},
     config::MAIN_AGENT_ID,
-    plugins::{agents, connections, panels, registry, resources},
+    plugins::{
+        agents, capabilities, connections, grants, panels, registry, resources, scope::Scope,
+    },
     service::Service,
     validation::text,
 };
@@ -617,14 +619,15 @@ async fn an_uncertain_refresh_result_is_not_retried_with_the_consumed_token() {
 }
 
 #[tokio::test]
-async fn revoking_an_agent_during_oauth_refresh_prevents_the_following_resource_request() {
-    let (_root, s, instance, resource, path, app) = fixture(false).await;
-    let started = begin(&app, &path).await;
-    let entered = Arc::new(tokio::sync::Notify::new());
-    let release = Arc::new(tokio::sync::Notify::new());
-    let entering = entered.clone();
-    let releasing = release.clone();
-    let provider = axum::Router::new().route("/token", axum::routing::post(move |axum::Form(form): axum::Form<HashMap<String, String>>| {
+async fn revoking_access_during_oauth_refresh_prevents_the_following_resource_request() {
+    for revoked in ["grant", "run"] {
+        let (_root, s, instance, resource, path, app) = fixture(false).await;
+        let started = begin(&app, &path).await;
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let entering = entered.clone();
+        let releasing = release.clone();
+        let provider = axum::Router::new().route("/token", axum::routing::post(move |axum::Form(form): axum::Form<HashMap<String, String>>| {
         let entered = entering.clone(); let release = releasing.clone();
         async move {
             if form["grant_type"] == "refresh_token" {
@@ -635,107 +638,113 @@ async fn revoking_an_agent_during_oauth_refresh_prevents_the_following_resource_
             }
         }
     }));
-    let reads = Arc::new(AtomicUsize::new(0));
-    let provider_reads = reads.clone();
-    let provider = provider.route(
-        "/messages",
-        axum::routing::get(move || {
-            provider_reads.fetch_add(1, Ordering::SeqCst);
-            async { axum::Json(json!({"ok": true})) }
-        }),
-    );
-    let (origin, server) = common::serve_locally(provider).await;
-    s.plugins.route_http_to(Some(origin));
-    let callback = format!(
-        "/api/plugin-oauth/{instance}/callback?state={}&code=fixture",
-        text(&started, "state")
-    );
-    assert_eq!(
-        common::send(&app, request("GET", &callback, Value::Null, None))
+        let reads = Arc::new(AtomicUsize::new(0));
+        let provider_reads = reads.clone();
+        let provider = provider.route(
+            "/messages",
+            axum::routing::get(move || {
+                provider_reads.fetch_add(1, Ordering::SeqCst);
+                async { axum::Json(json!({"ok": true})) }
+            }),
+        );
+        let (origin, server) = common::serve_locally(provider).await;
+        s.plugins.route_http_to(Some(origin));
+        let callback = format!(
+            "/api/plugin-oauth/{instance}/callback?state={}&code=fixture",
+            text(&started, "state")
+        );
+        assert_eq!(
+            common::send(&app, request("GET", &callback, Value::Null, None))
+                .await
+                .status(),
+            StatusCode::OK
+        );
+        assert_eq!(
+            common::send(
+                &app,
+                request(
+                    "POST",
+                    &format!("{path}/finish"),
+                    json!({"state": started["state"]}),
+                    Some("fixture-owner")
+                )
+            )
             .await
             .status(),
-        StatusCode::OK
-    );
-    assert_eq!(
-        common::send(
+            StatusCode::OK
+        );
+        let grants = format!(
+            "/api/plugins/example/connections/{instance}/resources/workspace/{resource}/grants"
+        );
+        let grant = common::send(
             &app,
             request(
                 "POST",
-                &format!("{path}/finish"),
-                json!({"state": started["state"]}),
-                Some("fixture-owner")
-            )
+                &grants,
+                json!({"agentId": MAIN_AGENT_ID, "profile": "read"}),
+                Some("fixture-owner"),
+            ),
         )
-        .await
-        .status(),
-        StatusCode::OK
-    );
-    let grants = format!(
-        "/api/plugins/example/connections/{instance}/resources/workspace/{resource}/grants"
-    );
-    let grant = common::send(
-        &app,
-        request(
-            "POST",
-            &grants,
-            json!({"agentId": MAIN_AGENT_ID, "profile": "read"}),
-            Some("fixture-owner"),
-        ),
-    )
-    .await;
-    assert_eq!(grant.status(), StatusCode::OK);
-    let grant = common::read_json(grant).await;
-    let task = s
+        .await;
+        assert_eq!(grant.status(), StatusCode::OK);
+        let grant = common::read_json(grant).await;
+        let task = s
         .task(
             json!({"name": "Read messages", "prompt": "Read messages", "agentId": MAIN_AGENT_ID}),
             None,
         )
         .await
         .unwrap();
-    let run = s.enqueue(text(&task, "id"), "manual", None).await.unwrap();
-    let run = s
-        .store
-        .patch_run(
-            text(&run, "id"),
-            json!({"status": "running", "isolated": true}),
-        )
-        .await
-        .unwrap();
-    let config = s.mcps.run_configuration(&s, &run).await.unwrap();
-    let bearer = text(&config["env"], "CAIRN_MCP_RUN_TOKEN").to_owned();
-    let calling = s.clone();
-    let mut pending = tokio::spawn(async move {
-        agents::call_tool(
-            &calling,
-            &bearer,
-            "example_read",
-            &json!({"resource": resource}),
-        )
-        .await
-    });
-    tokio::select! {
-        () = entered.notified() => {},
-        result = &mut pending => panic!("The call ended before reaching the token service: {result:?}"),
-        () = tokio::time::sleep(std::time::Duration::from_secs(3)) => panic!("Token service was not called"),
+        let run = s.enqueue(text(&task, "id"), "manual", None).await.unwrap();
+        let run = s
+            .store
+            .patch_run(
+                text(&run, "id"),
+                json!({"status": "running", "isolated": true}),
+            )
+            .await
+            .unwrap();
+        let config = s.mcps.run_configuration(&s, &run).await.unwrap();
+        let bearer = text(&config["env"], "CAIRN_MCP_RUN_TOKEN").to_owned();
+        let calling = s.clone();
+        let mut pending = tokio::spawn(async move {
+            agents::call_tool(
+                &calling,
+                &bearer,
+                "example_read",
+                &json!({"resource": resource}),
+            )
+            .await
+        });
+        tokio::select! {
+            () = entered.notified() => {},
+            result = &mut pending => panic!("The call ended before reaching the token service: {result:?}"),
+            () = tokio::time::sleep(std::time::Duration::from_secs(3)) => panic!("Token service was not called"),
+        }
+        if revoked == "grant" {
+            let revoke = format!("{grants}/{}", text(&grant, "id"));
+            assert_eq!(
+                common::send(
+                    &app,
+                    request("DELETE", &revoke, Value::Null, Some("fixture-owner"))
+                )
+                .await
+                .status(),
+                StatusCode::OK
+            );
+        } else {
+            s.mcps.revoke_run(&s, text(&run, "id")).await.unwrap();
+        }
+        release.notify_one();
+        let result = pending.await.unwrap();
+        assert_eq!(
+            reads.load(Ordering::SeqCst),
+            0,
+            "sent a new resource request after {revoked} access was revoked"
+        );
+        assert!(result.is_err());
+        server.abort();
     }
-    let revoke = format!("{grants}/{}", text(&grant, "id"));
-    assert_eq!(
-        common::send(
-            &app,
-            request("DELETE", &revoke, Value::Null, Some("fixture-owner"))
-        )
-        .await
-        .status(),
-        StatusCode::OK
-    );
-    release.notify_one();
-    assert!(pending.await.unwrap().is_err());
-    assert_eq!(
-        reads.load(Ordering::SeqCst),
-        0,
-        "sent a new resource request after the agent's grant was revoked"
-    );
-    server.abort();
 }
 
 #[tokio::test]
@@ -1527,6 +1536,154 @@ async fn personal_oauth_isolated_by_verified_account_and_provider_subject() {
     assert!(disconnected["items"].as_array().unwrap().is_empty());
     server.abort();
     authority_server.abort();
+}
+
+#[tokio::test]
+async fn disconnect_during_the_final_authority_check_prevents_a_personal_request() {
+    let (_root, s, instance, resource, path, app) = configured_fixture(false, true).await;
+    let calls = Arc::new(AtomicUsize::new(0));
+    let calls_ref = calls.clone();
+    let provider = axum::Router::new()
+        .route(
+            "/token",
+            axum::routing::post(|| async {
+                axum::Json(
+                    json!({"access_token": "personal-owner-fixture", "scope": "messages:read",
+                "team": {"id": "T111"}, "authed_user": {"id": "U111"}}),
+                )
+            }),
+        )
+        .route(
+            "/messages",
+            axum::routing::get(move |headers: axum::http::HeaderMap| {
+                let calls = calls_ref.clone();
+                async move {
+                    assert_eq!(headers["authorization"], "Bearer personal-owner-fixture");
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    axum::Json(json!({"actor": "U111"}))
+                }
+            }),
+        );
+    let (origin, server) = common::serve_locally(provider).await;
+    s.plugins.route_http_to(Some(origin));
+    let started = begin(&app, &path).await;
+    let callback = format!(
+        "/api/plugin-oauth/{instance}/callback?state={}&code=owner-code",
+        text(&started, "state")
+    );
+    assert_eq!(
+        common::send(&app, request("GET", &callback, Value::Null, None))
+            .await
+            .status(),
+        StatusCode::OK
+    );
+    let finished = common::send(
+        &app,
+        request(
+            "POST",
+            &format!("{path}/finish"),
+            json!({"state": started["state"]}),
+            Some("fixture-owner"),
+        ),
+    )
+    .await;
+    assert_eq!(finished.status(), StatusCode::OK);
+    let grants = format!(
+        "/api/plugins/example/connections/{instance}/resources/workspace/{resource}/grants"
+    );
+    let granted = common::send(
+        &app,
+        request(
+            "POST",
+            &grants,
+            json!({"agentId": MAIN_AGENT_ID, "profile": "read"}),
+            Some("fixture-owner"),
+        ),
+    )
+    .await;
+    assert_eq!(granted.status(), StatusCode::OK);
+    let chat = s
+        .chat_create(json!({"agentId": MAIN_AGENT_ID}))
+        .await
+        .unwrap();
+    let sent = common::send(
+        &app,
+        request(
+            "POST",
+            &format!("/api/chats/{}/messages", text(&chat, "id")),
+            json!({"id": cairn_installation::config::id(), "text": "Read messages"}),
+            Some("fixture-owner"),
+        ),
+    )
+    .await;
+    assert_eq!(sent.status(), StatusCode::OK);
+    s.chat_tick(&HashSet::new()).await.unwrap();
+    let detail = s.chat_detail(text(&chat, "id")).await.unwrap();
+    let run = s
+        .store
+        .patch_run(
+            text(&detail["run"], "id"),
+            json!({"status": "running", "isolated": true}),
+        )
+        .await
+        .unwrap();
+    let configuration = s.mcps.run_configuration(&s, &run).await.unwrap();
+    let bearer = text(&configuration["env"], "CAIRN_MCP_RUN_TOKEN");
+    let package = registry::active(&s, "example").await.unwrap();
+    let Scope::ResourceAgent(authorization) = grants::authorize(
+        &s,
+        &run,
+        &package,
+        "read",
+        &json!({"resource": resource}),
+        bearer,
+    )
+    .await
+    .unwrap() else {
+        panic!("Expected a native resource authorization")
+    };
+    let authorization: Arc<grants::Authorization> = Arc::from(authorization);
+    let context = capabilities::Context {
+        connection: authorization.connection.clone(),
+        manifest: package.manifest,
+        event: Value::Null,
+        link: None,
+        draft: None,
+        resource_grant: Some(authorization.clone()),
+    };
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let (calling, entering, releasing) = (s.clone(), entered.clone(), release.clone());
+    let mut pending = tokio::spawn(async move {
+        capabilities::effect(&calling, &context, "http.request",
+            json!({"url": "https://api.example.test/messages", "auth": {"resource": resource, "oauth": "bot"}}),
+            || async {
+                // A final caller check may await Beacon after OAuth was loaded.
+                entering.notify_one();
+                releasing.notified().await;
+                grants::recheck(&calling, &authorization).await
+            }).await
+    });
+    tokio::select! {
+        () = entered.notified() => {},
+        result = &mut pending => panic!("Ended before final authority check: {result:?}"),
+        () = tokio::time::sleep(std::time::Duration::from_secs(3)) => panic!("Final authority check was not reached"),
+    }
+    let disconnected = common::send(
+        &app,
+        request("DELETE", &path, Value::Null, Some("fixture-owner")),
+    )
+    .await;
+    assert_eq!(disconnected.status(), StatusCode::OK);
+    release.notify_one();
+    let result = pending.await.unwrap();
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        0,
+        "A disconnected personal credential reached the provider"
+    );
+    assert!(result.is_err());
+    server.abort();
 }
 
 #[tokio::test]

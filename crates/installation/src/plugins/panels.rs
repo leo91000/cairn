@@ -12,6 +12,9 @@ use crate::{
 };
 use cairn_plugin_api::{validate_action_result, validate_view};
 use serde_json::{Value, json};
+use std::sync::Arc;
+
+use super::operations::Owner;
 
 fn action_name(name: &str) -> bool {
     !name.is_empty()
@@ -28,12 +31,22 @@ fn fits(value: &Value, max: usize) -> bool {
 
 /// `{ view }`: the instance's panel, or `null` when the package declares none.
 pub async fn view(s: &Service, plugin_id: &str, connection_id: &str) -> Result<Value> {
+    let owner = Arc::new(Owner::current(s).await?);
+    view_owned(s, plugin_id, connection_id, owner).await
+}
+
+pub(crate) async fn view_owned(
+    s: &Service,
+    plugin_id: &str,
+    connection_id: &str,
+    owner: Arc<Owner>,
+) -> Result<Value> {
     let connection = connections::get(s, plugin_id, connection_id).await?;
     let package = registry::active(s, plugin_id).await?;
     if !package.manifest.instance_view {
         return Ok(json!({ "view": null }));
     }
-    let scope = Scope::Instance(Box::new(connection));
+    let scope = Scope::Instance(Box::new(connection), owner);
     let payload = json!({ "instance": scope.instances()[0] });
     let view = scope::invoke(s, &package, "view", payload, &scope).await?;
     validate_view(&view).map_err(Error::bad_gateway)?;
@@ -48,6 +61,17 @@ pub async fn action(
     connection_id: &str,
     input: &Value,
 ) -> Result<Value> {
+    let owner = Arc::new(Owner::current(s).await?);
+    action_owned(s, plugin_id, connection_id, input, owner).await
+}
+
+pub(crate) async fn action_owned(
+    s: &Service,
+    plugin_id: &str,
+    connection_id: &str,
+    input: &Value,
+    owner: Arc<Owner>,
+) -> Result<Value> {
     let connection = connections::get(s, plugin_id, connection_id).await?;
     let package = registry::active(s, plugin_id).await?;
     let name = text(input, "action");
@@ -59,7 +83,7 @@ pub async fn action(
     if !fits(&payload, 4096) || !values.is_object() || !fits(&values, 16_384) {
         return Err(Error::bad("The action input is too large or invalid."));
     }
-    let scope = Scope::Instance(Box::new(connection));
+    let scope = Scope::Instance(Box::new(connection), owner);
     let event = json!({
         "action": name,
         "payload": payload,
@@ -73,12 +97,22 @@ pub async fn action(
 
 /// `{ ok, message }` from the package's `test` handler.
 pub async fn test(s: &Service, plugin_id: &str, connection_id: &str) -> Result<Value> {
+    let owner = Arc::new(Owner::current(s).await?);
+    test_owned(s, plugin_id, connection_id, owner).await
+}
+
+pub(crate) async fn test_owned(
+    s: &Service,
+    plugin_id: &str,
+    connection_id: &str,
+    owner: Arc<Owner>,
+) -> Result<Value> {
     let connection = connections::get(s, plugin_id, connection_id).await?;
     let package = registry::active(s, plugin_id).await?;
     if !package.manifest.instance_test {
         return Err(Error::not_found("This plugin has no connection test."));
     }
-    let scope = Scope::Instance(Box::new(connection));
+    let scope = Scope::Instance(Box::new(connection), owner);
     let payload = json!({ "instance": scope.instances()[0] });
     let result = scope::invoke(s, &package, "test", payload, &scope).await?;
     let message = result["message"]

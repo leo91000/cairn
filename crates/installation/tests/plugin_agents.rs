@@ -38,6 +38,7 @@ async fn fixture() -> Fixture {
     let mut config = common::config(root.path());
     config.runner_url = "http://runner:4311".into();
     let s = Service::new(config).await.unwrap();
+    common::relay_fixture::claimed(&s).await.unwrap();
     s.plugins
         .use_worker(PathBuf::from(env!("CARGO_BIN_EXE_cairn")));
     let program = root.path().join("op");

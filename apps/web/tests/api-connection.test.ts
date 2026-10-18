@@ -246,3 +246,12 @@ it('recovers Beacon account reads independently while installation recovery is s
   await expect(settings).resolves.toEqual({})
   expect(client.state.connectionLost).toBe(false)
 })
+
+it('preserves a nullable plugin form response through preparation', async () => {
+  request.mockImplementation((url: string) => url.endsWith('/plugins/optional/form') ? json(null) : successful(url))
+  const { pluginOperation } = await import('../src/plugin-operations')
+  await expect(pluginOperation('/plugins/optional/form', { settings: {} })).resolves.toBeNull()
+  const forms = request.mock.calls.filter(([url]) => url.endsWith('/plugins/optional/form'))
+  expect(forms).toHaveLength(1)
+  expect(forms[0][1].method).toBe('POST')
+})

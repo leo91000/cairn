@@ -52,12 +52,24 @@ async fn read_limited(mut reader: impl AsyncRead + Unpin, limit: usize) -> Resul
 
 /// `exec.run{ program, args?, env?, stdin?, timeout? }` → `{ status, stdout, stderr }`.
 /// `env` values are text or `{ secret = "<setting key>" }` from the instance's secrets.
-pub async fn run(s: &Service, context: &Context, args: &Value) -> Result<Value> {
+pub async fn run<F, Fut>(
+    s: &Service,
+    context: &Context,
+    args: &Value,
+    authorize: F,
+) -> Result<Value>
+where
+    F: Fn() -> Fut,
+    Fut: std::future::Future<Output = Result<()>>,
+{
     let manifest = &context.manifest;
     let program = manifest
         .program(text(args, "program"))
         .ok_or_else(|| Error::forbidden("This program is not declared by the plugin."))?;
-    let path = s.plugins.program_path(&manifest.id, program);
+    let path = super::program_installation::executable(s, manifest, program).await?;
+    // Cold preparation can include a download or wait for another installer.
+    // Recheck the caller before loading any current credential.
+    authorize().await?;
     let arguments = match &args["args"] {
         Value::Null => Vec::new(),
         Value::Array(items) => items
@@ -127,6 +139,9 @@ pub async fn run(s: &Service, context: &Context, args: &Value) -> Result<Value> 
         .as_u64()
         .unwrap_or(MAX_SECONDS)
         .clamp(1, MAX_SECONDS);
+    // Secret loading is I/O too. A changed instance must not launch with either
+    // an obsolete credential or a replacement credential from its new revision.
+    authorize().await?;
     let mut child = command.spawn().map_err(|_| {
         Error::unavailable("The program could not start. Is it installed on this server?")
     })?;

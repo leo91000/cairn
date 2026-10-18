@@ -92,6 +92,21 @@ export type PersonalOAuthStatus = {
 
 export type PersonalOAuthConsent = { url: string, redirectUri: string, expiresAt: number }
 
+-- An installer's resolve(input) returns an exact release. Its install(input)
+-- receives the same release and returns the opaque executable handle below.
+export type ProgramRelease = {
+    version: string,
+    url: string,
+    sha256: string?,
+    format: "zip" | "binary",
+    executable: string,
+}
+export type ProgramPlatform = { os: string, arch: string }
+export type ProgramResolveInput = { platform: ProgramPlatform }
+export type ProgramInstallInput = { platform: ProgramPlatform, release: ProgramRelease }
+export type DownloadHandle = { id: string, sha256: string }
+export type ExecutableHandle = { id: string }
+
 -- A view component. Tones: "neutral" | "info" | "success" | "warning" | "danger".
 export type Component = { type: string, [string]: Json }
 
@@ -151,6 +166,16 @@ export type Cairn = {
     http: { request: (request: HttpRequest) -> HttpResponse },
     -- capability "exec".
     exec: { run: (request: ExecRequest) -> ExecResult },
+    -- Installer install(input) only. Download the exact URL/checksum selected by
+    -- resolve; no credentials, arbitrary paths or downloaded bytes enter Luau.
+    download: (request: { url: string, sha256: string? }) -> DownloadHandle,
+    archive: {
+        executable: (request: {
+            archive: string, -- DownloadHandle.id
+            format: "zip" | "binary",
+            path: string, -- the release's executable entry
+        }) -> ExecutableHandle,
+    },
     -- capability "socket", in the transport worker only. WSS to declared hosts;
     -- `{{secret}}` in sent text becomes the credential (auth = true) or a secret field.
     -- Commands apply once the handler returns.
