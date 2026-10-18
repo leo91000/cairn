@@ -431,9 +431,10 @@ and [Codex authentication](https://learn.chatgpt.com/docs/auth) for the underlyi
 
 ## Automatic CLI updates
 
-The historical [standalone CLI update workflow](CLI-UPDATES.md) is explicitly
-disabled. Installations update tools through fully validated paired image
-releases and their host timer, with runtime verification and rollback. CI
+The historical standalone CLI updater has been removed; see
+[tool versions and retired standalone updates](CLI-UPDATES.md) for old timer
+retirement instructions. Installations update tools through fully validated
+paired image releases and their host timer, with runtime verification and rollback. CI
 application images also resolve current stable
 Codex/GitHub CLI versions before building and validating them.
 
