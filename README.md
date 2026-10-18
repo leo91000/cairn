@@ -31,6 +31,8 @@ and run history stay on your installation.
 There is no external telemetry or font/CDN dependency. Storage and VM performance
 timings stay in local service logs; disk I/O counters are available in storage status.
 
+Inactive conversations are permanently deleted after 7 days by default. The installation owner can change the delay or disable automatic deletion in web and Android settings. See [conversation retention](docs/CONVERSATION-RETENTION.md).
+
 Appearance is available from the top bar, the sign-in screen, and **Settings → Appearance**.
 [Theme implementation and browser QA](docs/THEMES.md) cover the palette and checks.
 

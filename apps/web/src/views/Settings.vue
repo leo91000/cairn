@@ -18,6 +18,7 @@ import {
 } from '../api'
 import { accountSettingsUrl, beaconOrigin, installationHost } from '../beacon-location'
 import AccountConfirmation from '../components/AccountConfirmation.vue'
+import ConversationRetentionSettings from '../components/ConversationRetentionSettings.vue'
 import Icon from '../components/Icon.vue'
 import Modal from '../components/Modal.vue'
 import StorageSettings from '../components/StorageSettings.vue'
@@ -262,6 +263,7 @@ async function copy(value: string) {
               No external clients have access yet.
             </p>
           </section>
+          <ConversationRetentionSettings />
           <section class="panel border-b border-line overflow-hidden settings-section mb-5.5 px-0 py-7 phone:py-5">
             <h2>Worker environment</h2>
             <dl class="settings-facts grid grid-cols-[160px_1fr] gap-[17px] text-xs phone:grid-cols-[95px_minmax(0,_1fr)] phone:text-xs mx-0 my-[25px]">

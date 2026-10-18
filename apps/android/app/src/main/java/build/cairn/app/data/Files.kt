@@ -14,6 +14,37 @@ import kotlinx.serialization.Serializable
 @Serializable
 data class DraftAttachment(val attachment: ChatAttachment, val localPath: String? = null)
 
+const val MAX_ATTACHMENT_BYTES = 10L * 1024 * 1024
+const val MAX_MESSAGE_ATTACHMENT_BYTES = 40L * 1024 * 1024
+
+/** Reuse keeps the existing record while enforcing the same draft limits as picked files. */
+fun reuseAttachment(
+    draft: List<DraftAttachment>,
+    attachment: ChatAttachment,
+): List<DraftAttachment> {
+    if (draft.any { it.attachment.id == attachment.id }) return draft
+
+    require(draft.size < 8) { "Vous pouvez joindre jusqu’à 8 fichiers." }
+    require(draft.sumOf { it.attachment.size } + attachment.size <= MAX_MESSAGE_ATTACHMENT_BYTES) {
+        "Les pièces jointes ne peuvent pas dépasser 40 Mo par message."
+    }
+    return draft + DraftAttachment(attachment)
+}
+
+/** A file refused before upload, shown in the composer until it is removed. */
+@Serializable
+data class RejectedAttachment(
+    val id: String,
+    val name: String,
+    val mediaType: String,
+    val reason: String,
+)
+
+class AttachmentRejected(val rejected: RejectedAttachment) : Exception(rejected.reason)
+
+private fun tooLarge(size: Long?) =
+    if (size == null) "Trop lourd (plus de 10 Mo)" else "Trop lourd (${fileSize(size)} > 10 Mo)"
+
 class Files(private val context: Context) {
     private val cacheLock = Any()
     private var generation = 0L
@@ -39,12 +70,25 @@ class Files(private val context: Context) {
                 if (mime.startsWith("image/"))
                     "image.${mime.substringAfter('/').substringBefore('+')}"
                 else "pièce-jointe"
+            var reportedSize: Long? = null
             context.contentResolver
-                .query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)
+                .query(
+                    uri,
+                    arrayOf(OpenableColumns.DISPLAY_NAME, OpenableColumns.SIZE),
+                    null,
+                    null,
+                    null,
+                )
                 ?.use {
-                    if (it.moveToFirst()) name = it.getString(0).orEmpty().ifBlank { name }
+                    if (it.moveToFirst()) {
+                        name = it.getString(0).orEmpty().ifBlank { name }
+                        if (!it.isNull(1)) reportedSize = it.getLong(1)
+                    }
                 }
             val id = UUID.randomUUID().toString()
+            fun rejected(size: Long?) =
+                AttachmentRejected(RejectedAttachment(id, name, mime, tooLarge(size)))
+            if ((reportedSize ?: 0) > MAX_ATTACHMENT_BYTES) throw rejected(reportedSize)
             val file = File(root, "$id-upload")
             try {
                 var total = 0L
@@ -58,9 +102,7 @@ class Files(private val context: Context) {
                                 val count = input.read(buffer)
                                 if (count < 0) break
                                 total += count
-                                require(total <= 10L * 1024 * 1024) {
-                                    "Chaque pièce jointe doit faire au maximum 10 Mo."
-                                }
+                                if (total > MAX_ATTACHMENT_BYTES) throw rejected(null)
                                 output.write(buffer, 0, count)
                             }
                         }

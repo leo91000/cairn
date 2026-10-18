@@ -9,7 +9,9 @@ import {
   Trash2,
   Zap,
 } from '../icons'
+import AttachmentThumb from './AttachmentThumb.vue'
 import Icon from './Icon.vue'
+import MessageAttachments from './MessageAttachments.vue'
 import Modal from './Modal.vue'
 
 // Follow-ups waiting for the agent, drawn at the top of the composer as on Android. The next
@@ -75,12 +77,23 @@ function then(action: (message: ChatMessage) => void) {
       >
         <button
           type="button"
-          class="min-w-0 flex-1 rounded-xl py-1.5 text-left hover:bg-hover/50"
+          class="flex min-w-0 flex-1 items-center gap-2.5 rounded-xl py-1.5 text-left hover:bg-hover/50"
           :aria-label="`Queued message options: ${preview(message)}`"
           @click="selected = message.id"
         >
-          <span class="line-clamp-2 text-base text-ink wrap-anywhere">{{ preview(message) }}</span>
-          <span v-if="note(message)" class="block text-2xs text-muted">{{ note(message) }}</span>
+          <span v-if="message.attachments?.length" class="flex shrink-0 -space-x-2" aria-hidden="true">
+            <span
+              v-for="attachment in message.attachments.slice(0, 3)"
+              :key="attachment.id"
+              class="block size-8 overflow-hidden rounded-lg ring-2 ring-surface"
+            >
+              <AttachmentThumb :attachment="attachment" decorative />
+            </span>
+          </span>
+          <span class="min-w-0 flex-1">
+            <span class="line-clamp-2 text-base text-ink wrap-anywhere">{{ preview(message) }}</span>
+            <span v-if="note(message)" class="block text-2xs text-muted">{{ note(message) }}</span>
+          </span>
         </button>
         <button
           v-if="index === 0 && steerable(message)"
@@ -114,7 +127,8 @@ function then(action: (message: ChatMessage) => void) {
       <p class="mt-3! mb-2! text-xs text-muted">
         {{ headline }}
       </p>
-      <p class="mb-2! max-h-55 overflow-auto rounded-[14px] bg-variant p-3 text-base whitespace-pre-wrap wrap-anywhere">
+      <MessageAttachments v-if="chosen.attachments?.length" :attachments="chosen.attachments" class="mb-2" />
+      <p v-if="chosen.text || !chosen.attachments?.length" class="mb-2! max-h-55 overflow-auto rounded-[14px] bg-variant p-3 text-base whitespace-pre-wrap wrap-anywhere">
         {{ preview(chosen) }}
       </p>
       <button

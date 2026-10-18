@@ -9,8 +9,10 @@ It does not assert pixel equality between a browser and Material components.
 | Area | Native Android implementation | Validation |
 | --- | --- | --- |
 | Navigation | Since 0.32.0: Fil / Missions / Atelier floating dock with an always-available new-conversation button (rail on large windows), universal search with direct actions; no workspace-owner decorations | Workspace and Signal journeys; device review |
+| Conversation retention | Owner setting shared with web: 7 days by default, custom whole days or 0 to disable, confirmation explaining permanent deletion of existing conversations. Android uses French native number input and dialog; web uses Settings → Installation. | Backend lifecycle tests; settings browser journey; `ConversationRetentionTest` / `ConversationRetentionDeviceTest` |
 | Conversations | Fil home grouped by what needs the user, live work, conversations waiting to resume and recent conversations; one card per scheduled wait in the conversation; conversations and missions opened from it read in one pager that swipes in the Fil's order, a mission run adding a Mission tab; compact chooser from the conversation title with search and date groups; agent/project chosen on screen for a new conversation | Chat and Signal journeys; device switching/search |
 | Composer | Native expanding text field, attachments, model/reasoning controls, preserved drafts when switching chats, send/queue/steer/stop, IME insets | Chat journey; device keyboard and enlarged text |
+| Attachments | ＋ opens the attach sheet (recent photos, camera, photo picker, files). The draft shows a horizontal tray: image thumbnails and file cards with a coloured type badge and the name shortened in the middle, upload progress per file, upload failures retried on the next send, and refused files (over 10 MB, or 40 MB per message) that block sending until removed. Sent and queued messages show their files above the bubble: an image mosaic (+N beyond four), document cards picturing a PDF's first page or a text file's opening lines, and one-line cards with page or line counts. Tapping opens a full-screen viewer that pages through the message's files with a filmstrip; a long press saves, shares, copies an image or attaches the file again. The file families, their colours and the server `?preview` / `?summary` endpoints are shared with the web (`apps/web/src/attachments.ts`) | `AttachmentPresentationTest` mirrors the web family table; `AttachmentViewsTest`; `ImagePasteCases` |
 | OpenCode model access | Web and Android keep the current conversation’s model and reasoning after opening/reloading; catalog explains provider access checks and labels provider defaults. A regional Privacy refusal offers OpenCode settings, retry in the same session, or a new conversation while preserving the failed one. Android uses French native controls and Custom Tabs. | OpenCode browser journeys; shared ChatProvider cases on JVM/device; pinned-native session resume and startup deadline/cancellation tests |
 | Delivery | Initial send and initiating run message appear in transcript; only waiting follow-ups appear in queue, held behind a scheduled wait; acknowledgements deduplicate optimistic messages; question responses use server privacy redaction | Six presentation regressions; existing message/network cases |
 | Queue and questions | Withdraw an obsolete question without answering (web: “No longer needed”; Android: “Ce n’est plus utile”); provider closures and completed task outcomes remove pending prompts on both clients. Agent tools list and withdraw questions in the current conversation. Queue strip next to the composer (first follow-up visible, expandable), pause/resume, edit/remove/steer, option/free-text/private answers | Chat journey; `QuestionWithdrawalTest` / `QuestionWithdrawalDeviceTest`; network/Compose suite |
@@ -24,7 +26,7 @@ It does not assert pixel equality between a browser and Material components.
 | Projects | Remote branch or committed local snapshot, path and base branch, starting revision in run details | Contract decoding; form/API comparison |
 | Skills and MCPs | Skill content/files, scopes and validation, MCP configuration/authentication/discovery/tool restrictions | Existing API and MCP/Compose cases; form/API comparison |
 | Connections and access | OAuth, GitHub, Codex and Claude Code accounts/usage, token grants, authorization, logout and encrypted sessions | Existing network/authorization/cache suite |
-| Plugins | Catalogue, instances, manifest-driven settings and secrets, agent grants, version/file review and approval, declarative panels/actions/tests, native Discord setup and delegation/access/activity, 1Password instances | `PluginsJourneyTest`, shared `PluginsCases` / `PluginsDeviceTest`; browser plugin journeys |
+| Plugins | Catalogue, instances, manifest-driven settings and secrets, agent grants, version/file review and approval, declarative panels/actions/tests, native Discord setup and delegation/access/activity, 1Password instances; JSON/TOML manifest review and package-owned program check/install/restore (file uploads remain on web) | `PluginsJourneyTest`, shared `PluginsCases` / `PluginsDeviceTest`; browser plugin journeys |
 | Artifacts | Authenticated previews, versions, groups, images/PDF/Markdown, save/share and deep links from replies | Chat journey; artifact and link gesture regressions |
 | Reading | Wrapped long text/URLs, selectable native Markdown, history pagination, stable reading anchors during drag/streaming, jump to latest | Markdown/history suite; real device gesture tests |
 | Live catch-up | Following the latest output, a resume past a backlog longer than one page reopens on the recent window; older messages load on scroll. Reading older messages keeps the complete replay and the reading position. Stored backlog pages bypass the live coalescing delay | Backend recent-window, cached-resume, reconnect and history/reset tests; web connection test; Android `LiveTest`, `ScrollResumeTest` and `RecentWindowResumeTest` |
@@ -44,6 +46,18 @@ coverage used, not a claim that every production account/provider was exercised.
   above the bar.
 - Android document/photo pickers and system share/save/selection replace browser
   upload/download/clipboard controls. External OAuth uses Custom Tabs.
+- Attachments: the attach sheet lists recent photos from the device (asked for only when the
+  user taps the tile; Android 14 limited access is supported), which browsers cannot offer; the
+  web menu has Photos, Camera and Files. File actions use a long press on Android and a ⋯ menu
+  on the web. Message images keep a fixed mosaic size on Android so the history does not move
+  while pictures load. Both viewers zoom images: pinch and pan on Android; an
+  actual-size toggle with scrolling on the web. Web sharing prepares the original
+  while the menu or viewer is open, then enables Share for a fresh user gesture.
+  Both apps fetch original attachments through the authenticated binary stream
+  route, including files up to the 10 MiB attachment limit when using Beacon.
+  They fall back to the original download route on older installations.
+  Thumbnail formats follow platform decoders: SVGs have a placeholder on Android
+  and open in its full-screen viewer; browsers may show placeholders for HEIC.
 - Installing a plugin package uses « Continuer sur le web ». Reviewing files and
   versions, approving packages, editing instances and configuring Discord are native.
 - Foreground updates use SSE. Background question notifications retain the

@@ -25,6 +25,7 @@ import PersonAvatar from '../components/PersonAvatar.vue'
 import PluginFields from '../components/PluginFields.vue'
 import PluginInstancePanel from '../components/PluginInstancePanel.vue'
 import PluginMark from '../components/PluginMark.vue'
+import PluginPrograms from '../components/PluginPrograms.vue'
 import PluginReview from '../components/PluginReview.vue'
 import PluginView from '../components/PluginView.vue'
 import UiAlert from '../components/UiAlert.vue'
@@ -42,6 +43,7 @@ import {
   X,
   Zap,
 } from '../icons'
+import { pluginOperation } from '../plugin-operations'
 import {
   capabilityLabels,
   commandUsage,
@@ -179,15 +181,12 @@ async function complete(changed?: string) {
   const ask = ++asked
   completing.value = true
   try {
-    const result = await api<FormResult>(`/plugins/${id.value}/form`, {
-      method: 'POST',
-      body: JSON.stringify({
-        instance: editing.value?.id,
-        settings: settings(),
-        secrets: Object.fromEntries(Object.entries(secrets.value).filter(([, value]) => value.trim())),
-        ...(form.value.token ? { token: form.value.token } : {}),
-        ...(changed ? { changed } : {}),
-      }),
+    const result = await pluginOperation<FormResult>(`/plugins/${id.value}/form`, {
+      instance: editing.value?.id,
+      settings: settings(),
+      secrets: Object.fromEntries(Object.entries(secrets.value).filter(([, value]) => value.trim())),
+      ...(form.value.token ? { token: form.value.token } : {}),
+      ...(changed ? { changed } : {}),
     })
     if (ask !== asked)
       return
@@ -251,7 +250,7 @@ async function save() {
       enabled: form.value.enabled,
     }
     const path = `/plugins/${id.value}/connections${editing.value ? `/${editing.value.id}` : ''}`
-    await api(path, { method: editing.value ? 'PUT' : 'POST', body: JSON.stringify(body) })
+    await pluginOperation(path, body, editing.value ? 'PUT' : 'POST')
     form.value.token = ''
     secrets.value = {}
     editing.value = undefined
@@ -269,7 +268,7 @@ async function post(connection: PluginConnection, path: string, body?: unknown) 
 
 async function test(connection: PluginConnection) {
   await action(async () => {
-    const result = await api<{ message?: string }>(`/plugins/${id.value}/connections/${connection.id}/test`, { method: 'POST' })
+    const result = await pluginOperation<{ message?: string }>(`/plugins/${id.value}/connections/${connection.id}/test`)
     notify(`${connection.name}: ${result.message || 'it works'}`)
   })
 }
@@ -573,7 +572,7 @@ onBeforeUnmount(() => {
               Programs
             </h3>
             <p v-for="program in manifest.programs" :key="program.name" class="text-2xs text-muted">
-              <b class="font-mono text-ink">{{ program.path }}</b><template v-if="program.description">
+              <b class="font-mono text-ink">{{ program.path || program.name }}</b><template v-if="program.description">
                 · {{ program.description }}
               </template>
             </p>
@@ -581,6 +580,13 @@ onBeforeUnmount(() => {
         </aside>
       </div>
     </template>
+
+    <PluginPrograms
+      v-if="entry?.active && manifest?.programs?.some(program => program.installer)"
+      :key="`${id}:${entry.active}`"
+      :plugin="id"
+      class="mt-5"
+    />
 
     <PluginReview
       v-if="reviewing && entry"

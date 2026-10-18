@@ -7,8 +7,6 @@
 package build.cairn.app.ui
 
 import androidx.activity.compose.BackHandler
-import androidx.activity.compose.rememberLauncherForActivityResult
-import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.content.contentReceiver
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
@@ -356,6 +354,11 @@ internal fun ChatPage(
     var model by rememberSaveable(id) { mutableStateOf(savedDraft.model) }
     var reasoning by rememberSaveable(id) { mutableStateOf(savedDraft.reasoning) }
     var attachments by rememberForm(savedDraft.attachments)
+    // Per-file states of the composer: refused before upload, uploading, or failed to upload.
+    var rejected by rememberForm(savedDraft.rejected)
+    val uploadProgress = remember(id) { mutableStateMapOf<String, Float>() }
+    val uploadErrors = remember(id) { mutableStateMapOf<String, String>() }
+    var attaching by rememberSaveable(id) { mutableStateOf(false) }
     var editing by rememberSaveable(id) { mutableStateOf(savedDraft.editing) }
     var submissionId by rememberSaveable(id) { mutableStateOf(savedDraft.submissionId) }
     var submissionKey by rememberSaveable(id) { mutableStateOf(savedDraft.submissionKey) }
@@ -383,6 +386,7 @@ internal fun ChatPage(
                     submissionId,
                     submissionKey,
                     provider,
+                    rejected,
                 )
     }
     SideEffect { persistDraft() }
@@ -521,34 +525,65 @@ internal fun ChatPage(
     val delivery = chatDelivery(chat, live.events, outgoing)
     val pending = delivery.queued
     val questions = chat?.questions.orEmpty().filter { it.status == "pending" }
-    fun attach(uris: List<android.net.Uri>, mediaType: String? = null) {
+    // Files over the limits stay visible as refused cards; the others join the draft.
+    fun attach(
+        uris: List<android.net.Uri>,
+        mediaType: String? = null,
+        staged: () -> Unit = {},
+    ) {
         if (uris.isNotEmpty())
             vm.perform {
-                require(attachments.size + uris.size <= 8) {
-                    "Vous pouvez joindre jusqu’à 8 fichiers."
-                }
-                val staged = mutableListOf<DraftAttachment>()
                 try {
-                    uris.forEach { staged.add(files.stage(it, mediaType)) }
-                    require(
-                        (attachments + staged).sumOf { it.attachment.size } <= 40L * 1024 * 1024
-                    ) {
-                        "Les pièces jointes doivent totaliser au maximum 40 Mo."
+                    require(attachments.size + uris.size <= 8) {
+                        "Vous pouvez joindre jusqu’à 8 fichiers."
                     }
-                    attachments = attachments + staged
-                } catch (e: Exception) {
-                    files.discard(staged)
-                    throw e
+                    val accepted = mutableListOf<DraftAttachment>()
+                    val refused = mutableListOf<RejectedAttachment>()
+                    var total = attachments.sumOf { it.attachment.size }
+                    try {
+                        for (uri in uris) {
+                            val draft =
+                                try {
+                                    files.stage(uri, mediaType)
+                                } catch (e: AttachmentRejected) {
+                                    refused += e.rejected
+                                    continue
+                                }
+                            if (total + draft.attachment.size > MAX_MESSAGE_ATTACHMENT_BYTES) {
+                                files.discard(listOf(draft))
+                                refused +=
+                                    RejectedAttachment(
+                                        draft.attachment.id,
+                                        draft.attachment.name,
+                                        draft.attachment.mediaType,
+                                        "Dépasse 40 Mo pour le message",
+                                    )
+                                continue
+                            }
+                            total += draft.attachment.size
+                            accepted += draft
+                        }
+                    } catch (e: Exception) {
+                        files.discard(accepted)
+                        throw e
+                    }
+                    attachments = attachments + accepted
+                    rejected = rejected + refused
+                } finally {
+                    staged()
                 }
             }
     }
-    val picker =
-        rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) {
-            attach(it)
-        }
+    fun removeAttachment(key: String) {
+        vm.files.discard(attachments.filter { it.attachment.id == key })
+        attachments = attachments.filter { it.attachment.id != key }
+        uploadErrors.remove(key)
+    }
     fun clearDraft() {
         vm.files.discard(attachments)
         attachments = emptyList()
+        rejected = emptyList()
+        uploadErrors.clear()
         composer.clearText()
         editing = null
         submissionKey = ""
@@ -572,11 +607,24 @@ internal fun ChatPage(
             for (entry in attachments.toList()) if (
                 entry.localPath != null && entry.attachment.chatId != chatId
             ) {
+                val key = entry.attachment.id
+                uploadErrors.remove(key)
+                uploadProgress[key] = 0f
                 val uploaded =
-                    api.upload(
-                        "/chats/${segment(chatId)}/attachments/${segment(entry.attachment.id)}?name=${segment(entry.attachment.name)}",
-                        File(entry.localPath),
-                    )
+                    try {
+                        api.upload(
+                            "/chats/${segment(chatId)}/attachments/${segment(key)}?name=${segment(entry.attachment.name)}",
+                            File(entry.localPath),
+                        ) {
+                            uploadProgress[key] = it
+                        }
+                    } catch (e: Exception) {
+                        if (e !is kotlinx.coroutines.CancellationException)
+                            uploadErrors[key] = e.message ?: "Réseau indisponible"
+                        throw e
+                    } finally {
+                        uploadProgress.remove(key)
+                    }
                 attachments = attachments.map {
                     if (it.attachment.id == uploaded.id) it.copy(attachment = uploaded) else it
                 }
@@ -632,7 +680,7 @@ internal fun ChatPage(
         }
     }
     fun edit(message: ChatMessage) {
-        if (draft.isNotBlank() || attachments.isNotEmpty()) {
+        if (draft.isNotBlank() || attachments.isNotEmpty() || rejected.isNotEmpty()) {
             vm.report(
                 IllegalStateException(
                     "Envoyez ou effacez votre brouillon avant de modifier la file d’attente."
@@ -691,7 +739,24 @@ internal fun ChatPage(
         followGesture,
     )
     val agentName = chat?.agentName?.ifBlank { null } ?: selectedAgent?.name ?: "Agent"
-    CompositionLocalProvider(LocalSkillNames provides skillNames) {
+    val reuse =
+        remember(chat?.id) {
+            chat?.id?.let { chatId ->
+                AttachmentReuse(chatId) { attachment ->
+                    if (vm.state.value.busy) return@AttachmentReuse
+
+                    try {
+                        attachments = reuseAttachment(attachments, attachment)
+                    } catch (e: IllegalArgumentException) {
+                        vm.report(e)
+                    }
+                }
+            }
+        }
+    CompositionLocalProvider(
+        LocalSkillNames provides skillNames,
+        LocalAttachmentReuse provides reuse,
+    ) {
         ArtifactLinkHost(vm, live.state?.artifacts.orEmpty()) {
             Column(Modifier.fillMaxSize()) {
                 if (!fullscreen) {
@@ -1279,41 +1344,32 @@ internal fun ChatPage(
                                             steer = ::steerQueued,
                                             remove = { removing = it },
                                             togglePause = { chat?.let(::togglePause) },
-                                            attachments = { AttachmentList(vm, it) },
+                                            attachments = {
+                                                MessageAttachments(
+                                                    vm,
+                                                    it,
+                                                    Modifier.padding(top = 8.dp),
+                                                    alignment = Alignment.Start,
+                                                )
+                                            },
                                         )
                                         HorizontalDivider(
                                             Modifier.padding(horizontal = 12.dp),
                                             color = MaterialTheme.colorScheme.outlineVariant,
                                         )
                                     }
-                                    if (attachments.isNotEmpty())
-                                        Box(Modifier.heightIn(max = 140.dp)) {
-                                            LazyColumn {
-                                                item {
-                                                    AttachmentList(
-                                                        vm,
-                                                        attachments.map { it.attachment },
-                                                        { key ->
-                                                            vm.files.discard(
-                                                                attachments.filter {
-                                                                    it.attachment.id == key
-                                                                }
-                                                            )
-                                                            attachments = attachments.filter {
-                                                                it.attachment.id != key
-                                                            }
-                                                        },
-                                                        attachments
-                                                            .mapNotNull {
-                                                                it.localPath?.let { path ->
-                                                                    it.attachment.id to path
-                                                                }
-                                                            }
-                                                            .toMap(),
-                                                    )
-                                                }
-                                            }
-                                        }
+                                    if (attachments.isNotEmpty() || rejected.isNotEmpty())
+                                        ComposerAttachments(
+                                            vm,
+                                            attachments,
+                                            rejected,
+                                            uploadProgress,
+                                            uploadErrors,
+                                            remove = ::removeAttachment,
+                                            dismiss = { key ->
+                                                rejected = rejected.filter { it.id != key }
+                                            },
+                                        )
                                     if (editing != null)
                                         Row {
                                             Text(
@@ -1409,11 +1465,20 @@ internal fun ChatPage(
                                     ) {
                                         ActionIcon(
                                             "Joindre",
-                                            CairnIcons.Attach,
+                                            CairnIcons.Plus,
                                             !state.busy && attachments.size < 8,
                                         ) {
-                                            picker.launch(arrayOf("*/*"))
+                                            attaching = true
                                         }
+                                        if (attaching)
+                                            AttachSheet(
+                                                remaining = 8 - attachments.size,
+                                                attach = { uris, staged ->
+                                                    attach(uris, staged = staged)
+                                                },
+                                            ) {
+                                                attaching = false
+                                            }
                                         Box(Modifier.weight(1f).padding(end = 4.dp)) {
                                             ModelPicker(
                                                 state.modelCatalog(chosenProvider),
@@ -1435,6 +1500,8 @@ internal fun ChatPage(
                                         }
                                         val canSend =
                                             !state.busy &&
+                                                rejected.isEmpty() &&
+                                                uploadProgress.isEmpty() &&
                                                 (draft.isNotBlank() || attachments.isNotEmpty()) &&
                                                 (id == null || chat != null) &&
                                                 live.error == null

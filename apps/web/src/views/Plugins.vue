@@ -123,15 +123,18 @@ function packagePath(file: File) {
   return path.includes('/') ? path.slice(path.indexOf('/') + 1) : path
 }
 
-/** Reads a package (manifest.json, main.luau and its modules) and installs it inactive. */
+/** Reads a package (JSON/TOML manifest, main.luau and its modules) and installs it inactive. */
 async function install() {
   busy.value = true
   error.value = ''
   try {
-    const manifest = files.value.find(file => packagePath(file) === 'manifest.json')
+    const manifests = files.value.filter(file => ['manifest.json', 'manifest.toml'].includes(packagePath(file)))
+    if (manifests.length !== 1)
+      throw new Error('Choose exactly one manifest.json or manifest.toml.')
+    const manifest = manifests[0]
     const source = files.value.find(file => packagePath(file) === 'main.luau')
     if (!manifest || !source)
-      throw new Error('Choose the package’s manifest.json and main.luau, or its folder.')
+      throw new Error('Choose the package’s manifest.json or manifest.toml and main.luau, or its folder.')
     const modules: Record<string, string> = {}
     for (const file of files.value) {
       const path = packagePath(file)
@@ -141,7 +144,12 @@ async function install() {
 
     const installed = await api<{ manifest: { id: string, name: string } }>('/plugins/packages', {
       method: 'POST',
-      body: JSON.stringify({ manifest: JSON.parse(await manifest.text()), source: await source.text(), modules }),
+      body: JSON.stringify({
+        manifest: await manifest.text(),
+        manifestFormat: packagePath(manifest).endsWith('.toml') ? 'toml' : 'json',
+        source: await source.text(),
+        modules,
+      }),
     })
     installing.value = false
     files.value = []
@@ -265,7 +273,7 @@ async function install() {
       <span class="grid size-10 shrink-0 place-items-center rounded-xl bg-soft text-accent"><Icon :name="Puzzle" :size="20" /></span>
       <span class="min-w-0 flex-1">
         <span class="block text-[13px] font-semibold">Write your own</span>
-        <span class="mt-0.5 block text-2xs text-muted">A plugin is a manifest.json and a main.luau: its connection, forms, panels and commands. Start from the Discord or 1Password source.</span>
+        <span class="mt-0.5 block text-2xs text-muted">A plugin is a manifest.json or manifest.toml and a main.luau: its connection, forms, panels and commands. Start from the Discord or 1Password source.</span>
       </span>
       <span class="inline-flex shrink-0 items-center gap-1 text-xs font-semibold text-accent phone:hidden">Read the guide<Icon :name="ArrowUpRight" :size="13" /></span>
     </a>
@@ -284,14 +292,14 @@ async function install() {
           {{ error }}
         </UiAlert>
         <p class="text-xs leading-relaxed text-muted">
-          Choose the package’s <code>manifest.json</code>, <code>main.luau</code> and its other <code>.luau</code> files, or its whole folder. It is saved on this installation but stays inactive until you review and approve what it can do.
+          Choose the package’s <code>manifest.json</code> or <code>manifest.toml</code>, <code>main.luau</code> and its other <code>.luau</code> files, or its whole folder. It is saved on this installation but stays inactive until you review and approve what it can do.
         </p>
         <label class="text-xs font-semibold">
           Package files
           <input
             type="file"
             multiple
-            accept=".json,.luau"
+            accept=".json,.toml,.luau"
             aria-label="Package files"
             @change="files = [...(($event.target as HTMLInputElement).files ?? [])]"
           >

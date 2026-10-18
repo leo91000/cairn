@@ -334,7 +334,7 @@ async fn incompatible_restored_session_requires_consent_and_never_restarts_on_it
 async fn inactivity_never_archives_even_with_an_old_enabled_policy() {
     let app = App::new().await;
     let mut chat = app.create_chat().await;
-    chat["updatedAt"] = 1.into();
+    chat["updatedAt"] = (cairn_installation::config::now() - 2 * 86_400_000).into();
     let path = chat_path(&chat);
     app.service.store.put("chats", chat).await.unwrap();
     let policy = json!({ "enabled": true, "inactivityDays": 1, "coldAfterDays": 1 });
@@ -528,4 +528,380 @@ async fn chat_aliases_keep_json_body_limits_before_lookup_and_live_subscription(
         app.get(&format!("{CHATS}/quiet-cedar-00000000")).await.0,
         StatusCode::NOT_FOUND
     );
+}
+
+const RETENTION: &str = "/api/settings/conversations";
+const DAY: i64 = 86_400_000;
+
+async fn old_chat(app: &App, days: i64) -> Value {
+    let mut chat = app.create_chat().await;
+    let activity = cairn_installation::config::now() - days * DAY;
+    chat["createdAt"] = activity.into();
+    chat["updatedAt"] = activity.into();
+    chat["lastActivityAt"] = activity.into();
+    app.service.store.put("chats", chat).await.unwrap()
+}
+
+#[tokio::test]
+async fn retention_defaults_to_seven_days_and_validates_persisted_owner_settings() {
+    let app = App::new().await;
+    assert_eq!(app.get(RETENTION).await.1, json!({ "inactivityDays": 7 }));
+    for invalid in [
+        json!({}),
+        json!({ "inactivityDays": -1 }),
+        json!({ "inactivityDays": 1.5 }),
+        json!({ "inactivityDays": "7" }),
+        json!({ "inactivityDays": 36501 }),
+        json!({ "inactivityDays": null }),
+    ] {
+        assert_eq!(
+            app.request("PUT", RETENTION, invalid).await.0,
+            StatusCode::BAD_REQUEST
+        );
+    }
+    let policy = json!({ "inactivityDays": 14 });
+    assert_eq!(
+        app.request("PUT", RETENTION, policy.clone()).await.1,
+        policy
+    );
+    assert_eq!(app.get(RETENTION).await.1, policy);
+    let root = app.service.config.data_dir.clone();
+    let reopened = cairn_installation::store::Store::open(&root).unwrap();
+    assert_eq!(
+        reopened.kv("conversation-expiration").await.unwrap(),
+        Some(policy)
+    );
+}
+
+#[tokio::test]
+async fn seven_day_expiration_removes_history_files_and_public_access() {
+    let app = App::new().await;
+    let mut expired = old_chat(&app, 8).await;
+    let recent = old_chat(&app, 6).await;
+    let run = id();
+    app.add_finished_run(
+        &run,
+        RunStatus::Succeeded,
+        json!({ "finishedAt": cairn_installation::config::now() - 8 * DAY }),
+        "Old history",
+    )
+    .await;
+    expired["runId"] = run.clone().into();
+    app.service
+        .store
+        .put("chats", expired.clone())
+        .await
+        .unwrap();
+    let attachments = app
+        .service
+        .config
+        .data_dir
+        .join("chat-attachments")
+        .join(expired["id"].as_str().unwrap());
+    std::fs::create_dir_all(&attachments).unwrap();
+    std::fs::write(attachments.join("file.txt"), "old work").unwrap();
+    let artifact = id();
+    let artifact_path = app
+        .service
+        .config
+        .data_dir
+        .join("artifacts")
+        .join(&artifact);
+    std::fs::create_dir_all(artifact_path.parent().unwrap()).unwrap();
+    std::fs::write(&artifact_path, "shared work").unwrap();
+    app.service
+        .store
+        .set(
+            &format!("artifact:{run}:{artifact}"),
+            json!({ "id": artifact, "publicToken": "expired-share", "visibility": "public" }),
+            None,
+        )
+        .await
+        .unwrap();
+    app.service
+        .store
+        .set(
+            "artifact-share:expired-share",
+            json!({ "runId": run }),
+            None,
+        )
+        .await
+        .unwrap();
+    assert_eq!(app.get(&chat_path(&expired)).await.0, StatusCode::OK);
+    app.service.cleanup_conversations().await.unwrap();
+    assert_eq!(app.get(&chat_path(&expired)).await.0, StatusCode::NOT_FOUND);
+    assert_eq!(app.get(&chat_path(&recent)).await.0, StatusCode::OK);
+    assert!(!attachments.exists());
+    assert!(!artifact_path.exists());
+    assert!(
+        app.service
+            .store
+            .kv("artifact-share:expired-share")
+            .await
+            .unwrap()
+            .is_none()
+    );
+    let run_id = run.clone();
+    assert!(
+        app.service
+            .store
+            .read(move |db| db.run(&run_id))
+            .await
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[tokio::test]
+async fn disabling_and_extending_retention_preserves_old_chats_but_manual_deletion_still_works() {
+    let app = App::new().await;
+    let chat = old_chat(&app, 8).await;
+    for days in [0, 14] {
+        app.request("PUT", RETENTION, json!({ "inactivityDays": days }))
+            .await;
+        app.service.cleanup_conversations().await.unwrap();
+        assert_eq!(app.get(&chat_path(&chat)).await.0, StatusCode::OK);
+    }
+    app.request("PUT", RETENTION, json!({ "inactivityDays": 0 }))
+        .await;
+    app.request("DELETE", &chat_path(&chat), json!({})).await;
+    app.service.cleanup_conversations().await.unwrap();
+    assert_eq!(app.get(&chat_path(&chat)).await.0, StatusCode::NOT_FOUND);
+    let chat = old_chat(&app, 8).await;
+    app.request("PUT", RETENTION, json!({ "inactivityDays": 3 }))
+        .await;
+    app.service.cleanup_conversations().await.unwrap();
+    assert_eq!(app.get(&chat_path(&chat)).await.0, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn retention_protects_pending_work_recent_completion_and_worker_finalization() {
+    let app = App::new().await;
+    for protection in [
+        "queued",
+        "running",
+        "finished",
+        "wakeup",
+        "message",
+        "question",
+        "finalizing",
+    ] {
+        let mut chat = old_chat(&app, 8).await;
+        let run = id();
+        let status = match protection {
+            "queued" => RunStatus::Queued,
+            "running" => RunStatus::Running,
+            _ => RunStatus::Succeeded,
+        };
+        let finished = if protection == "finished" {
+            cairn_installation::config::now()
+        } else {
+            1
+        };
+        app.add_finished_run(
+            &run,
+            status,
+            json!({ "finishedAt": finished }),
+            "Protected work",
+        )
+        .await;
+        chat["runId"] = run.clone().into();
+        if protection == "wakeup" {
+            chat["wakeup"] = json!({ "at": 1 });
+        }
+        if protection == "finalizing" {
+            app.service
+                .worker
+                .active
+                .lock()
+                .await
+                .insert(run.clone(), tokio_util::sync::CancellationToken::new());
+        }
+        let chat_id = chat["id"].as_str().unwrap().to_owned();
+        if protection == "message" {
+            app.service
+                .store
+                .write({
+                    let chat_id = chat_id.clone();
+                    move |db| {
+                        db.put_message(&json!({
+                            "id": id(),
+                            "chatId": chat_id,
+                            "text": "Pending work",
+                            "status": "queued",
+                            "createdAt": 1
+                        }))?;
+                        Ok(())
+                    }
+                })
+                .await
+                .unwrap();
+        }
+        if protection == "question" {
+            app.service
+                .store
+                .set(
+                    &format!("chat-question:{chat_id}:question"),
+                    json!({ "id": "question", "status": "pending" }),
+                    None,
+                )
+                .await
+                .unwrap();
+        }
+        app.service.store.put("chats", chat.clone()).await.unwrap();
+        app.service.cleanup_conversations().await.unwrap();
+        assert_eq!(
+            app.get(&chat_path(&chat)).await.1["lifecycle"],
+            "active",
+            "{protection}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn expiration_uses_recent_activity_and_legacy_fallback_and_bounds_each_pass() {
+    let app = App::new().await;
+    let mut recent = old_chat(&app, 10).await;
+    recent["lastActivityAt"] = cairn_installation::config::now().into();
+    app.service
+        .store
+        .put("chats", recent.clone())
+        .await
+        .unwrap();
+    let mut legacy = old_chat(&app, 8).await;
+    legacy.as_object_mut().unwrap().remove("lastActivityAt");
+    app.service
+        .store
+        .put("chats", legacy.clone())
+        .await
+        .unwrap();
+    let second = old_chat(&app, 8).await;
+    app.service.cleanup_conversations().await.unwrap();
+    assert_eq!(app.service.store.list("chats").await.unwrap().len(), 2);
+    app.service.cleanup_conversations().await.unwrap();
+    assert_eq!(app.get(&chat_path(&legacy)).await.0, StatusCode::NOT_FOUND);
+    assert_eq!(app.get(&chat_path(&second)).await.0, StatusCode::NOT_FOUND);
+    assert_eq!(app.get(&chat_path(&recent)).await.0, StatusCode::OK);
+}
+
+#[tokio::test]
+async fn only_the_installation_owner_can_read_or_change_retention() {
+    let app = App::new().await;
+    let member = common::RelayContext::new(
+        &common::relay_fixture::member_context(&app.service, "member-retention").await,
+    );
+    for method in ["GET", "PUT"] {
+        let request = member
+            .authorize(common::request(method, RETENTION))
+            .header("content-type", "application/json")
+            .body(Body::from(json!({ "inactivityDays": 0 }).to_string()))
+            .unwrap();
+        let response = common::send(&app.router, request).await;
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+    assert_eq!(app.get(RETENTION).await.1["inactivityDays"], 7);
+}
+
+#[tokio::test]
+async fn expiration_rechecks_policy_and_activity_after_waiting_for_worker_lock() {
+    for disable in [true, false] {
+        let app = Arc::new(App::new().await);
+        let mut chat = old_chat(&app, 8).await;
+        let active = app.service.worker.active.lock().await;
+        let cleaning = app.clone();
+        let cleanup =
+            tokio::spawn(async move { cleaning.service.cleanup_conversations().await.unwrap() });
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                if app.service.conversation_storage_lock.try_lock().is_err() {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        if disable {
+            app.request("PUT", RETENTION, json!({ "inactivityDays": 0 }))
+                .await;
+        } else {
+            chat["lastActivityAt"] = cairn_installation::config::now().into();
+            app.service.store.put("chats", chat.clone()).await.unwrap();
+        }
+        drop(active);
+        cleanup.await.unwrap();
+        assert_eq!(app.get(&chat_path(&chat)).await.1["lifecycle"], "active");
+    }
+}
+
+/// Local SQLite overhead, independent of remote node/S3 latency. See the retention doc.
+#[tokio::test]
+#[ignore = "explicit local retention storage measurements"]
+async fn measure_retention_storage() {
+    use std::time::Instant;
+    fn median(mut samples: Vec<f64>) -> f64 {
+        samples.sort_by(f64::total_cmp);
+        samples[samples.len() / 2]
+    }
+    fn cpu_seconds() -> f64 {
+        let mut usage = std::mem::MaybeUninit::<libc::rusage>::zeroed();
+        assert_eq!(
+            unsafe { libc::getrusage(libc::RUSAGE_SELF, usage.as_mut_ptr()) },
+            0
+        );
+        let usage = unsafe { usage.assume_init() };
+        (usage.ru_utime.tv_sec + usage.ru_stime.tv_sec) as f64
+            + (usage.ru_utime.tv_usec + usage.ru_stime.tv_usec) as f64 / 1_000_000.0
+    }
+    let app = App::new().await;
+    for _ in 0..100 {
+        old_chat(&app, 8).await;
+    }
+    let chat = app.service.store.list("chats").await.unwrap().remove(0);
+    let id = chat["id"].as_str().unwrap();
+    let encoded = serde_json::to_vec(&chat).unwrap().len();
+    for enabled in [false, true] {
+        app.service
+            .save_conversation_retention(json!({ "inactivityDays": if enabled { 7 } else { 0 } }))
+            .await
+            .unwrap();
+        let before_cpu = cpu_seconds();
+        let mut warm = Vec::new();
+        let mut cold = Vec::new();
+        let mut writes = Vec::new();
+        let mut cleanup = Vec::new();
+        for _ in 0..50 {
+            let start = Instant::now();
+            app.service.store.get("chats", id).await.unwrap();
+            warm.push(start.elapsed().as_secs_f64() * 1000.0);
+            // Fresh SQLite connections, with the host OS page cache still warm.
+            let reopened =
+                cairn_installation::store::Store::open(&app.service.config.data_dir).unwrap();
+            let start = Instant::now();
+            reopened.get("chats", id).await.unwrap();
+            cold.push(start.elapsed().as_secs_f64() * 1000.0);
+            drop(reopened);
+            let start = Instant::now();
+            app.service.store.put("chats", chat.clone()).await.unwrap();
+            writes.push(start.elapsed().as_secs_f64() * 1000.0);
+        }
+        for _ in 0..20 {
+            let start = Instant::now();
+            app.service.cleanup_conversations().await.unwrap();
+            cleanup.push(start.elapsed().as_secs_f64() * 1000.0);
+        }
+        println!(
+            "{}",
+            json!({
+                "enabled": enabled,
+                "chatEncodedBytes": encoded,
+                "warmReadMedianMs": median(warm),
+                "coldConnectionReadMedianMs": median(cold),
+                "writeMedianMs": median(writes),
+                "cleanupMedianMs": median(cleanup),
+                "cpuSeconds": cpu_seconds() - before_cpu,
+                "remainingChats": app.service.store.list("chats").await.unwrap().len()
+            })
+        );
+    }
 }
