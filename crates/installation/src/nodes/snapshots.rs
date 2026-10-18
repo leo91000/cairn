@@ -415,7 +415,7 @@ pub struct Fetch {
     remaining: usize,
     legacy: bool,
     publication: bool,
-    publication_batch: usize,
+    direct_publication: bool,
 }
 
 impl Fetch {
@@ -434,13 +434,13 @@ impl Fetch {
             remaining: 0,
             legacy: false,
             publication: true,
-            publication_batch: PUBLICATION_BATCH,
+            direct_publication: false,
         }
     }
 
     /// Direct controller transfers have no reverse-proxy request deadline.
     pub fn direct_publication(mut self) -> Self {
-        self.publication_batch = MAX_PUBLICATION_BLOCKS;
+        self.direct_publication = true;
         self
     }
 
@@ -453,10 +453,12 @@ impl Fetch {
             .map(|(_, size)| *size)
             .ok_or_else(|| Error::bad("Unexpected snapshot block."))?;
         while self.stream.is_none() && !self.legacy {
-            let count = if self.publication {
-                self.publication_batch
-            } else {
+            let count = if !self.publication {
                 READ_BATCH
+            } else if self.direct_publication {
+                MAX_PUBLICATION_BLOCKS
+            } else {
+                PUBLICATION_BATCH
             };
             let batch: Vec<_> = self.pending.iter().take(count).collect();
             let length: u64 = batch.iter().map(|(_, size)| *size).sum();
@@ -476,7 +478,7 @@ impl Fetch {
             }
             // A stopped local journal is verified once before the response starts.
             // Its byte stream still has the ordinary per-block idle deadline.
-            let startup = if self.publication && self.publication_batch == MAX_PUBLICATION_BLOCKS {
+            let startup = if self.publication && self.direct_publication {
                 DIRECT_PUBLICATION_STARTUP
             } else {
                 TRANSFER_IDLE
@@ -635,6 +637,81 @@ mod tests {
     #[tokio::test]
     async fn direct_publication_streams_all_blocks_in_one_response() {
         check_publication_fetch(true).await;
+    }
+
+    #[tokio::test]
+    async fn fetch_startup_deadline_follows_the_route_and_resets_on_fallback() {
+        use std::time::Duration;
+
+        for (direct, fallback, delay, succeeds) in [
+            (false, false, TRANSFER_IDLE + Duration::from_secs(1), false),
+            (true, false, TRANSFER_IDLE + Duration::from_secs(1), true),
+            (
+                true,
+                false,
+                DIRECT_PUBLICATION_STARTUP + Duration::from_secs(1),
+                false,
+            ),
+            (true, true, TRANSFER_IDLE + Duration::from_secs(1), false),
+        ] {
+            let arrived = Arc::new(tokio::sync::Notify::new());
+            let release = Arc::new(tokio::sync::Notify::new());
+            let received = arrived.clone();
+            let released = release.clone();
+            let app = Router::new().fallback(any(move |request: Request| {
+                let received = received.clone();
+                let released = released.clone();
+                async move {
+                    if fallback && request.uri().path() == "/publication" {
+                        return axum::http::StatusCode::NOT_FOUND.into_response();
+                    }
+
+                    assert_eq!(
+                        request.uri().path(),
+                        if fallback { "/blocks" } else { "/publication" }
+                    );
+                    received.notify_one();
+                    released.notified().await;
+                    vec![7_u8].into_response()
+                }
+            }));
+            let (url, server) = peer(app).await;
+            let hash = "a".repeat(64);
+            let mut fetch = Fetch::new(
+                reqwest::Client::new(),
+                url,
+                "fixture".into(),
+                vec![(hash.clone(), 1)],
+            );
+            if direct {
+                fetch = fetch.direct_publication();
+            }
+
+            let mut transfer = Box::pin(fetch.block(&hash));
+            tokio::select! {
+                () = arrived.notified() => {},
+                result = &mut transfer => {
+                    panic!("Transfer finished before the peer received it: {result:?}");
+                }
+            }
+
+            // Establish the real loopback connection before advancing virtual time.
+            tokio::time::pause();
+            tokio::time::advance(delay).await;
+            if succeeds {
+                assert!(futures_util::poll!(&mut transfer).is_pending());
+                release.notify_one();
+                tokio::time::resume();
+                assert_eq!(transfer.await.unwrap(), vec![7]);
+            } else {
+                let std::task::Poll::Ready(result) = futures_util::poll!(&mut transfer) else {
+                    panic!("Transfer did not respect its startup deadline");
+                };
+                assert_eq!(result.unwrap_err().status, 503);
+                tokio::time::resume();
+            }
+            server.abort();
+        }
     }
 
     #[tokio::test]
