@@ -73,13 +73,8 @@ async fn call(s: &Arc<Service>, configuration: &Value, name: &str, args: Value) 
     let token = configuration["env"]["CAIRN_MCP_RUN_TOKEN"]
         .as_str()
         .unwrap();
-    let (status, result) = request(
-        s,
-        token,
-        "tools/call",
-        json!({ "name": name, "arguments": args }),
-    )
-    .await;
+    let (status, result) =
+        request(s, token, "tools/call", common::mcp_arguments(name, &args)).await;
     assert_eq!(status, StatusCode::OK, "{result}");
     result
 }
@@ -168,7 +163,32 @@ async fn installation_tools_schedule_inspect_update_run_and_cancel_missions() {
         .as_str()
         .unwrap();
     let (_, catalog) = request(&s, token, "tools/list", json!({})).await;
-    let tools = catalog["result"]["tools"].as_array().unwrap();
+    let native = catalog["result"]["tools"].as_array().unwrap();
+    assert_eq!(
+        native
+            .iter()
+            .map(|tool| tool["name"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        ["search", "execute"]
+    );
+    assert!(native.iter().all(|tool| tool.get("_meta").is_none()));
+    assert!(serde_json::to_vec(native).unwrap().len() < 6000);
+    let mut tools = Vec::new();
+    let mut offset = 0;
+    loop {
+        let page = call(
+            &s,
+            &configuration,
+            "search",
+            json!({ "detail": "schema", "limit": 20, "offset": offset }),
+        )
+        .await;
+        tools.extend(result(&page)["operations"].as_array().unwrap().clone());
+        let Some(next) = result(&page)["nextOffset"].as_u64() else {
+            break;
+        };
+        offset = next;
+    }
     for name in [
         "create_task",
         "list_tasks",
@@ -178,7 +198,8 @@ async fn installation_tools_schedule_inspect_update_run_and_cancel_missions() {
     ] {
         assert!(tools.iter().any(|tool| tool["name"] == name));
     }
-    let public: Value = serde_json::from_str(include_str!("../schemas/mcp-tools.json")).unwrap();
+    let public: Value =
+        serde_json::from_str(include_str!("../schemas/mcp-operations.json")).unwrap();
     let public_names: std::collections::BTreeSet<_> = public
         .as_array()
         .unwrap()
@@ -705,7 +726,7 @@ async fn installation_access_can_save_global_and_project_skills() {
     assert_eq!(invalid["result"]["isError"], true);
     let unknown = call(&s, &configuration, "unknown_tool", json!({})).await;
     assert_eq!(unknown["result"]["isError"], true);
-    assert_eq!(unknown["result"]["content"][0]["text"], "Unknown tool");
+    assert_eq!(unknown["result"]["content"][0]["text"], "Unknown operation");
 }
 
 #[tokio::test]
@@ -1014,4 +1035,718 @@ async fn legacy_grants_do_not_acquire_installation_access_and_vm_channels_bind_t
         send(other_token).send().await.unwrap().status(),
         reqwest::StatusCode::UNAUTHORIZED
     );
+}
+
+async fn public_call(s: &Arc<Service>, scopes: &[&str], name: &str, args: Value) -> Value {
+    let token = common::relay_fixture::grant(s, scopes).await;
+    let app = common::relay_fixture::router(s.clone()).await.unwrap();
+    let request = common::request("POST", "/mcp")
+        .header("authorization", format!("Bearer {token}"))
+        .body(Body::from(
+            json!({
+                "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                "params": common::mcp_arguments(name, &args),
+            })
+            .to_string(),
+        ))
+        .unwrap();
+    let response = common::send(&app, request).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    common::read_json(response).await
+}
+
+#[tokio::test]
+async fn both_mcp_endpoints_manage_chat_queues_and_lifecycle() {
+    for internal in [false, true] {
+        let root = TempDir::new().unwrap();
+        let s = service(&root).await;
+        let main = enabled_main(&s).await;
+        let (_, configuration) = active_run(&s, &main).await;
+        let invoke = |name, args| {
+            let s = s.clone();
+            let configuration = configuration.clone();
+            async move {
+                if internal {
+                    call(&s, &configuration, name, args).await
+                } else {
+                    public_call(&s, &["read", "manage", "run"], name, args).await
+                }
+            }
+        };
+        let created = invoke("create_chat", json!({})).await;
+        let chat_id = result(&created)["id"].as_str().unwrap();
+        assert_eq!(result(&created)["agentId"], MAIN_AGENT_ID);
+        let pause = invoke(
+            "set_chat_paused",
+            json!({ "chatId": chat_id, "paused": true }),
+        )
+        .await;
+        assert_eq!(result(&pause)["paused"], true);
+        let message_id = uuid::Uuid::new_v4().to_string();
+        let args = json!({
+            "chatId": chat_id,
+            "message": { "id": message_id, "text": "First message" },
+        });
+        let sent = invoke("send_chat_message", args.clone()).await;
+        assert_eq!(result(&sent)["status"], "queued");
+        let retry = invoke("send_chat_message", args).await;
+        assert_eq!(result(&sent), result(&retry));
+        let changed = invoke(
+            "edit_chat_message",
+            json!({
+                "chatId": chat_id, "messageId": message_id, "message": { "text": "Edited" },
+            }),
+        )
+        .await;
+        assert_eq!(result(&changed)["text"], "Edited");
+        let renamed = invoke(
+            "rename_chat",
+            json!({ "chatId": chat_id, "title": "  Gestion Cairn  " }),
+        )
+        .await;
+        assert_eq!(result(&renamed)["title"], "Gestion Cairn");
+        assert_eq!(
+            invoke("rename_chat", json!({ "chatId": chat_id, "title": "   " })).await["result"]["isError"],
+            true
+        );
+        let listed = invoke("list_chats", json!({ "limit": 1 })).await;
+        assert_eq!(result(&listed)["chats"][0]["id"], chat_id);
+        let detail = invoke("get_chat", json!({ "chatId": chat_id })).await;
+        assert_eq!(result(&detail)["messages"][0]["text"], "Edited");
+        assert!(result(&detail)["chat"].get("run").is_none());
+        let resumed = invoke(
+            "set_chat_paused",
+            json!({ "chatId": chat_id, "paused": false }),
+        )
+        .await;
+        assert_eq!(result(&resumed)["paused"], false);
+        let stopped = invoke("stop_chat", json!({ "chatId": chat_id })).await;
+        assert_eq!(result(&stopped)["paused"], true);
+        assert_eq!(
+            invoke("delete_chat", json!({ "chatId": chat_id })).await["result"]["isError"],
+            true
+        );
+        let removed = invoke(
+            "delete_chat_message",
+            json!({ "chatId": chat_id, "messageId": message_id }),
+        )
+        .await;
+        assert_eq!(result(&removed)["deleted"], true);
+        let deleted = invoke("delete_chat", json!({ "chatId": chat_id })).await;
+        assert_eq!(result(&deleted)["lifecycle"], "trash");
+        let listed = invoke("list_chats", json!({ "view": "trash" })).await;
+        assert_eq!(result(&listed)["chats"][0]["id"], chat_id);
+        let rejected = invoke(
+            "send_chat_message",
+            json!({
+                "chatId": chat_id, "message": { "id": uuid::Uuid::new_v4(), "text": "Deleted" },
+            }),
+        )
+        .await;
+        assert_eq!(rejected["result"]["isError"], true);
+    }
+}
+
+#[tokio::test]
+async fn chat_tools_preserve_scopes_caller_defaults_and_revocation() {
+    let root = TempDir::new().unwrap();
+    let s = service(&root).await;
+    let agent = s
+        .agent(
+            json!({
+                "name": "Delegated manager", "access": { "installation": true, "projects": [], "github": false },
+            }),
+            None,
+        )
+        .await
+        .unwrap();
+    let (run, configuration) = active_run(&s, &agent).await;
+    let created = call(&s, &configuration, "create_chat", json!({})).await;
+    let chat_id = result(&created)["id"].as_str().unwrap();
+    assert_eq!(result(&created)["agentId"], agent["id"]);
+    for (name, args) in [
+        ("create_chat", json!({})),
+        (
+            "rename_chat",
+            json!({ "chatId": chat_id, "title": "Denied" }),
+        ),
+        (
+            "send_chat_message",
+            json!({ "chatId": chat_id, "message": { "id": uuid::Uuid::new_v4(), "text": "Denied" } }),
+        ),
+        ("delete_chat", json!({ "chatId": chat_id })),
+    ] {
+        let denied = public_call(&s, &["read"], name, args).await;
+        assert_eq!(denied["result"]["isError"], true, "{denied}");
+        assert!(denied["result"]["_meta"]["mcp/www_authenticate"].is_string());
+    }
+    let read = public_call(&s, &["read"], "get_chat", json!({ "chatId": chat_id })).await;
+    assert_eq!(result(&read)["chat"]["id"], chat_id);
+    s.store
+        .patch_run(
+            run["id"].as_str().unwrap(),
+            json!({ "cancelRequestedAt": 1 }),
+        )
+        .await
+        .unwrap();
+    let token = configuration["env"]["CAIRN_MCP_RUN_TOKEN"]
+        .as_str()
+        .unwrap();
+    for name in [
+        "list_chats",
+        "create_chat",
+        "get_chat",
+        "list_chat_artifacts",
+        "stop_chat",
+    ] {
+        assert_eq!(
+            request(
+                &s,
+                token,
+                "tools/call",
+                json!({ "name": name, "arguments": {} })
+            )
+            .await
+            .0,
+            StatusCode::UNAUTHORIZED
+        );
+    }
+}
+
+#[tokio::test]
+async fn chat_file_tools_read_private_artifacts_and_attachments_in_bounded_chunks() {
+    use base64::{Engine, engine::general_purpose::STANDARD};
+    let root = TempDir::new().unwrap();
+    let s = service(&root).await;
+    let main = enabled_main(&s).await;
+    let (_, configuration) = active_run(&s, &main).await;
+    let (target, _) = active_run(&s, &main).await;
+    let chat = s.chat_create(json!({})).await.unwrap();
+    let chat_id = chat["id"].as_str().unwrap();
+    let mut chat = chat.clone();
+    chat["runId"] = target["id"].clone();
+    s.store.put("chats", chat).await.unwrap();
+    let artifact_id = uuid::Uuid::new_v4().to_string();
+    let data = (0..220_000).map(|i| (i % 251) as u8).collect::<Vec<_>>();
+    let digest = {
+        use sha2::Digest;
+        hex::encode(sha2::Sha256::digest(&data))
+    };
+    let record = json!({
+        "id": artifact_id, "runId": target["id"], "key": "report", "version": 1,
+        "title": "Private report", "name": "report.bin", "size": data.len(),
+        "digest": digest, "visibility": "private", "createdAt": 1,
+    });
+    s.store
+        .set(
+            &format!("artifact:{}:{artifact_id}", target["id"].as_str().unwrap()),
+            record,
+            None,
+        )
+        .await
+        .unwrap();
+    tokio::fs::create_dir_all(s.config.data_dir.join("artifacts"))
+        .await
+        .unwrap();
+    tokio::fs::write(
+        s.config.data_dir.join("artifacts").join(&artifact_id),
+        &data,
+    )
+    .await
+    .unwrap();
+    let listed = call(
+        &s,
+        &configuration,
+        "list_chat_artifacts",
+        json!({ "chatId": chat_id }),
+    )
+    .await;
+    assert_eq!(result(&listed)["artifacts"][0]["visibility"], "private");
+    let public_file = public_call(
+        &s,
+        &["read"],
+        "read_chat_artifact",
+        json!({
+            "chatId": chat_id, "artifactId": artifact_id,
+        }),
+    )
+    .await;
+    assert_eq!(result(&public_file)["totalBytes"], data.len());
+    let denied_share = public_call(
+        &s,
+        &["read"],
+        "set_chat_artifact_visibility",
+        json!({
+            "chatId": chat_id, "artifactId": artifact_id, "visibility": "public",
+        }),
+    )
+    .await;
+    assert_eq!(denied_share["result"]["isError"], true);
+    let mut offset = 0;
+    let mut received = Vec::new();
+    loop {
+        let chunk = call(
+            &s,
+            &configuration,
+            "read_chat_artifact",
+            json!({
+                "chatId": chat_id, "artifactId": artifact_id, "offset": offset,
+            }),
+        )
+        .await;
+        let chunk = result(&chunk);
+        let bytes = STANDARD.decode(chunk["data"].as_str().unwrap()).unwrap();
+        assert!(bytes.len() <= 192 * 1024);
+        received.extend(bytes);
+        let Some(next) = chunk["nextOffset"].as_u64() else {
+            break;
+        };
+        offset = next;
+    }
+    assert_eq!(received, data);
+    let shared = call(
+        &s,
+        &configuration,
+        "set_chat_artifact_visibility",
+        json!({
+            "chatId": chat_id, "artifactId": artifact_id, "visibility": "public",
+        }),
+    )
+    .await;
+    assert!(
+        result(&shared)["publicUrl"]
+            .as_str()
+            .unwrap()
+            .starts_with("http://127.0.0.1:")
+    );
+    let private = call(
+        &s,
+        &configuration,
+        "set_chat_artifact_visibility",
+        json!({
+            "chatId": chat_id, "artifactId": artifact_id, "visibility": "private",
+        }),
+    )
+    .await;
+    assert!(result(&private)["publicUrl"].is_null());
+    let other = s.chat_create(json!({})).await.unwrap();
+    let denied = call(
+        &s,
+        &configuration,
+        "read_chat_artifact",
+        json!({
+            "chatId": other["id"], "artifactId": artifact_id,
+        }),
+    )
+    .await;
+    assert_eq!(denied["result"]["isError"], true);
+    let attachment_id = uuid::Uuid::new_v4().to_string();
+    let upload = json!({
+        "chatId": chat_id, "attachmentId": attachment_id, "name": "note.txt",
+        "data": STANDARD.encode("Bonjour à tous"),
+    });
+    let uploaded = call(&s, &configuration, "upload_chat_attachment", upload.clone()).await;
+    let retried = call(&s, &configuration, "upload_chat_attachment", upload).await;
+    assert_eq!(result(&uploaded), result(&retried));
+    let attachments = call(
+        &s,
+        &configuration,
+        "list_chat_attachments",
+        json!({ "chatId": chat_id }),
+    )
+    .await;
+    assert_eq!(result(&attachments)["attachments"][0]["id"], attachment_id);
+    let downloaded = call(
+        &s,
+        &configuration,
+        "read_chat_attachment",
+        json!({ "chatId": chat_id, "attachmentId": attachment_id }),
+    )
+    .await;
+    assert_eq!(
+        STANDARD
+            .decode(result(&downloaded)["data"].as_str().unwrap())
+            .unwrap(),
+        "Bonjour à tous".as_bytes()
+    );
+    let stopped = call(
+        &s,
+        &configuration,
+        "stop_chat",
+        json!({ "chatId": chat_id }),
+    )
+    .await;
+    assert_eq!(result(&stopped)["paused"], true);
+    assert_eq!(
+        s.store.run(target["id"].as_str().unwrap()).await.unwrap()["status"],
+        RunStatus::Cancelled
+    );
+}
+
+#[tokio::test]
+async fn chat_questions_redact_private_answers_and_content_chunks_detect_changes() {
+    let root = TempDir::new().unwrap();
+    let s = service(&root).await;
+    let main = enabled_main(&s).await;
+    let (_, configuration) = active_run(&s, &main).await;
+    let (target, _) = active_run(&s, &main).await;
+    let mut chat = s.chat_create(json!({})).await.unwrap();
+    chat["runId"] = target["id"].clone();
+    let chat_id = chat["id"].as_str().unwrap().to_owned();
+    s.store.put("chats", chat).await.unwrap();
+    let question_id = "a".repeat(64);
+    s.question_receive(
+        target["id"].as_str().unwrap(),
+        json!({
+            "id": question_id, "blocking": true,
+            "fields": [{ "id": "secret", "title": "Private value", "secret": true }],
+        }),
+    )
+    .await
+    .unwrap();
+    let questions = call(
+        &s,
+        &configuration,
+        "list_chat_questions",
+        json!({ "chatId": chat_id }),
+    )
+    .await;
+    assert_eq!(result(&questions)["questions"][0]["status"], "pending");
+    let answer = json!({
+        "chatId": chat_id, "questionId": question_id,
+        "answer": { "id": uuid::Uuid::new_v4(), "answers": { "secret": ["fixture-private-answer"] } },
+    });
+    let answered = call(&s, &configuration, "answer_chat_question", answer.clone()).await;
+    assert_eq!(result(&answered)["status"], "answering");
+    let repeated = call(&s, &configuration, "answer_chat_question", answer).await;
+    assert_eq!(result(&answered), result(&repeated));
+    for tool in ["get_chat", "read_chat_content", "list_chat_questions"] {
+        let response = call(&s, &configuration, tool, json!({ "chatId": chat_id })).await;
+        result(&response);
+        assert!(
+            !response.to_string().contains("fixture-private-answer"),
+            "{tool} exposed a private answer"
+        );
+    }
+    // Populate a long, entirely delivered history so pagination is limited by bytes,
+    // independently of the undelivered-message queue limit.
+    let chat_key = chat_id.clone();
+    s.store
+        .transaction(move |db| {
+            for i in 0..8 {
+                db.put_message(&json!({
+                    "id": uuid::Uuid::new_v4(), "chatId": chat_key,
+                    "text": "é".repeat(50_000), "status": "delivered", "createdAt": i,
+                }))?;
+            }
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let first = call(&s, &configuration, "get_chat", json!({ "chatId": chat_id })).await;
+    assert_eq!(result(&first)["hasMore"], true);
+    let mut offset = 0;
+    let mut messages = Vec::new();
+    loop {
+        let response = call(
+            &s,
+            &configuration,
+            "get_chat",
+            json!({ "chatId": chat_id, "offset": offset }),
+        )
+        .await;
+        messages.extend(result(&response)["messages"].as_array().unwrap().clone());
+        let Some(next) = result(&response)["nextOffset"].as_u64() else {
+            break;
+        };
+        offset = next;
+    }
+    assert_eq!(messages.len(), 9);
+    assert_eq!(messages[8]["text"], "Private answer");
+    let mut offset = 0;
+    let mut checksum = Value::Null;
+    let mut content = String::new();
+    loop {
+        let mut args = json!({ "chatId": chat_id, "offset": offset });
+        if !checksum.is_null() {
+            args["sha256"] = checksum.clone();
+        }
+        let response = call(&s, &configuration, "read_chat_content", args).await;
+        let chunk = result(&response);
+        checksum = chunk["sha256"].clone();
+        content.push_str(chunk["data"].as_str().unwrap());
+        let Some(next) = chunk["nextOffset"].as_u64() else {
+            break;
+        };
+        offset = next;
+    }
+    let decoded: Value = serde_json::from_str(&content).unwrap();
+    assert_eq!(decoded["messages"].as_array().unwrap().len(), 9);
+    let renamed = call(
+        &s,
+        &configuration,
+        "rename_chat",
+        json!({ "chatId": chat_id, "title": "Changed snapshot" }),
+    )
+    .await;
+    result(&renamed);
+    let stale = call(
+        &s,
+        &configuration,
+        "read_chat_content",
+        json!({ "chatId": chat_id, "offset": 1, "sha256": checksum }),
+    )
+    .await;
+    assert_eq!(stale["result"]["isError"], true);
+}
+
+#[tokio::test]
+async fn chat_recovery_tools_preserve_confirmation_and_retention_rules() {
+    let root = TempDir::new().unwrap();
+    let s = service(&root).await;
+    let main = enabled_main(&s).await;
+    let (_, configuration) = active_run(&s, &main).await;
+    let (target, _) = active_run(&s, &main).await;
+    let run_id = target["id"].as_str().unwrap();
+    s.store
+        .patch_run(run_id, json!({ "status": RunStatus::Failed }))
+        .await
+        .unwrap();
+    s.store
+        .set(
+            &format!("run-checkpoint:{run_id}"),
+            json!({ "launched": true }),
+            None,
+        )
+        .await
+        .unwrap();
+    let mut chat = s.chat_create(json!({})).await.unwrap();
+    chat["runId"] = target["id"].clone();
+    chat["restoredAt"] = 1.into();
+    let chat_id = chat["id"].as_str().unwrap().to_owned();
+    s.store.put("chats", chat).await.unwrap();
+    let denied = call(
+        &s,
+        &configuration,
+        "restart_chat_session",
+        json!({ "chatId": chat_id }),
+    )
+    .await;
+    assert_eq!(denied["result"]["isError"], true);
+    let restarted = call(
+        &s,
+        &configuration,
+        "restart_chat_session",
+        json!({ "chatId": chat_id, "confirm": true }),
+    )
+    .await;
+    assert_eq!(result(&restarted)["sessionRestartRequested"], true);
+    assert_eq!(result(&restarted)["paused"], true);
+    let replay = call(
+        &s,
+        &configuration,
+        "resume_chat",
+        json!({ "chatId": chat_id }),
+    )
+    .await;
+    assert_eq!(replay["result"]["isError"], true);
+    let deleted = call(
+        &s,
+        &configuration,
+        "delete_chat",
+        json!({ "chatId": chat_id }),
+    )
+    .await;
+    assert_eq!(result(&deleted)["lifecycle"], "trash");
+    let expired = call(
+        &s,
+        &configuration,
+        "restore_chat",
+        json!({ "chatId": chat_id }),
+    )
+    .await;
+    assert_eq!(expired["result"]["isError"], true);
+    let mut retained = s.get("chats", &chat_id).await.unwrap();
+    retained["purgeAt"] = (cairn_installation::config::now() + 60_000).into();
+    s.store.put("chats", retained).await.unwrap();
+    let restored = call(
+        &s,
+        &configuration,
+        "restore_chat",
+        json!({ "chatId": chat_id }),
+    )
+    .await;
+    assert_eq!(result(&restored)["lifecycle"], "active");
+    assert_eq!(result(&restored)["paused"], true);
+}
+
+#[tokio::test]
+async fn code_mode_discovers_schemas_and_composes_chat_and_artifact_reads() {
+    let root = TempDir::new().unwrap();
+    let s = service(&root).await;
+    let main = enabled_main(&s).await;
+    let (_, configuration) = active_run(&s, &main).await;
+    let summary = call(
+        &s,
+        &configuration,
+        "search",
+        json!({ "query": "artifact", "limit": 20 }),
+    )
+    .await;
+    let operations = result(&summary)["operations"].as_array().unwrap();
+    assert!(
+        operations
+            .iter()
+            .any(|op| op["name"] == "read_chat_artifact")
+    );
+    assert!(operations.iter().all(|op| op.get("inputSchema").is_none()));
+    let schema = call(
+        &s,
+        &configuration,
+        "search",
+        json!({
+            "names": ["create_chat"], "detail": "schema",
+        }),
+    )
+    .await;
+    assert_eq!(
+        result(&schema)["operations"][0]["inputSchema"]["properties"]["agentId"]["default"],
+        MAIN_AGENT_ID
+    );
+    let response = call(&s, &configuration, "execute", json!({
+        "input": { "text": "A message containing quotes: \" and ` ${input} ", "id": uuid::Uuid::new_v4() },
+        "code": r#"
+            const chat = await cairn.create_chat({});
+            await cairn.set_chat_paused({chatId: chat.id, paused: true});
+            await cairn.send_chat_message({chatId: chat.id, message: input});
+            const detail = await cairn.get_chat({chatId: chat.id});
+            const files = await cairn.list_chat_artifacts({chatId: chat.id});
+            return {id: chat.id, text: detail.messages[0].text, files: files.artifacts.length};
+        "#,
+    })).await;
+    assert_eq!(
+        result(&response)["text"],
+        "A message containing quotes: \" and ` ${input}"
+    );
+    assert_eq!(result(&response)["files"], 0);
+    assert!(result(&response)["id"].is_string());
+}
+
+#[tokio::test]
+async fn code_mode_checks_each_operations_scopes_and_revocation_without_rolling_back_prior_effects()
+{
+    let root = TempDir::new().unwrap();
+    let s = service(&root).await;
+    let main = enabled_main(&s).await;
+    let (_, configuration) = active_run(&s, &main).await;
+    let denied = public_call(
+        &s,
+        &["read", "manage"],
+        "execute",
+        json!({
+            "code": r#"
+            const chat = await cairn.create_chat({});
+            await cairn.send_chat_message({chatId: chat.id, message: input});
+            return chat;
+        "#,
+            "input": { "id": uuid::Uuid::new_v4(), "text": "Must not execute" },
+        }),
+    )
+    .await;
+    assert_eq!(denied["result"]["isError"], true);
+    assert!(
+        denied["result"]["_meta"]["mcp/www_authenticate"]
+            .as_str()
+            .unwrap()
+            .contains("run")
+    );
+    let listed = public_call(&s, &["read"], "list_chats", json!({})).await;
+    let chat_id = &result(&listed)["chats"][0]["id"];
+    let detail = public_call(&s, &["read"], "get_chat", json!({ "chatId": chat_id })).await;
+    assert_eq!(result(&detail)["messages"], json!([]));
+
+    let mut access = main["access"].clone();
+    access["installation"] = false.into();
+    let revoked = call(
+        &s,
+        &configuration,
+        "execute",
+        json!({
+            "code": r#"
+            await cairn.update_agent(input);
+            return await cairn.list_chats({});
+        "#,
+            "input": { "id": MAIN_AGENT_ID, "agent": { "access": access } },
+        }),
+    )
+    .await;
+    assert_eq!(revoked["result"]["isError"], true);
+    let agents = public_call(&s, &["read"], "list_agents", json!({})).await;
+    let main = result(&agents)
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|agent| agent["id"] == MAIN_AGENT_ID)
+        .unwrap();
+    assert_eq!(main["access"]["installation"], false);
+}
+
+#[tokio::test]
+async fn code_mode_isolates_scripts_bounds_resources_and_remains_usable_after_failure() {
+    let root = TempDir::new().unwrap();
+    let s = service(&root).await;
+    let main = enabled_main(&s).await;
+    let (_, configuration) = active_run(&s, &main).await;
+    let isolated = call(&s, &configuration, "execute", json!({
+        "code": "globalThis.persisted = 1; return { frozen: Object.isFrozen(cairn), unavailable: [typeof process, typeof require, typeof fetch, typeof __cairnHost, typeof __cairnInput] };",
+    })).await;
+    assert_eq!(result(&isolated)["frozen"], true);
+    assert_eq!(
+        result(&isolated)["unavailable"],
+        json!([
+            "undefined",
+            "undefined",
+            "undefined",
+            "undefined",
+            "undefined"
+        ])
+    );
+    let fresh = call(
+        &s,
+        &configuration,
+        "execute",
+        json!({ "code": "return typeof persisted;" }),
+    )
+    .await;
+    assert_eq!(result(&fresh), "undefined");
+    for code in [
+        "return (", // Syntax errors cannot reach an operation.
+        "return await import('node:fs');",
+        "return () => 42;",
+        "return 'x'.repeat(1100000);",          // Result budget.
+        "return 'x'.repeat(80 * 1024 * 1024);", // Heap budget.
+        "for (;;) {}",                          // Process CPU budget.
+        "for (let i = 0; i < 65; i++) await cairn.list_chats({}); return true;",
+    ] {
+        let failed = call(&s, &configuration, "execute", json!({ "code": code })).await;
+        assert_eq!(failed["result"]["isError"], true, "{code}: {failed}");
+    }
+    let invalid = call(
+        &s,
+        &configuration,
+        "execute",
+        json!({
+            "code": "return await cairn.create_chat({agentId: 'invalid'});",
+        }),
+    )
+    .await;
+    assert_eq!(invalid["result"]["isError"], true);
+    let valid = call(
+        &s,
+        &configuration,
+        "execute",
+        json!({ "code": "return input.value + 1;", "input": { "value": 41 } }),
+    )
+    .await;
+    assert_eq!(result(&valid), 42);
 }

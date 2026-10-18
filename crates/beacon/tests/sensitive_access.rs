@@ -172,8 +172,8 @@ async fn personal_tokens_require_proof_in_the_calling_session() {
             "id": 1,
             "method": "tools/call",
             "params": {
-                "name": "list_agents",
-                "arguments": {},
+                "name": "search",
+                "arguments": { "names": ["list_agents"] },
             },
         }))
         .send()

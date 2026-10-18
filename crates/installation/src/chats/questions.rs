@@ -223,11 +223,28 @@ impl Service {
     }
 
     pub async fn question_answer(&self, chat_id: &str, id: &str, input: Value) -> Result<Value> {
+        self.question_answer_authorized(chat_id, id, input, |_| Ok(()))
+            .await
+    }
+
+    pub(crate) async fn question_answer_authorized<F>(
+        &self,
+        chat_id: &str,
+        id: &str,
+        input: Value,
+        authorize: F,
+    ) -> Result<Value>
+    where
+        F: FnOnce(&Db<'_>) -> Result<()> + Send + 'static,
+    {
         let input = parse_as::<AnswerInput>("answer", input)?;
         let (chat_id, id) = (chat_id.to_owned(), id.to_owned());
         let question = self
             .store
-            .transaction(move |db| answer(db, &chat_id, &id, &input))
+            .transaction(move |db| {
+                authorize(db)?;
+                answer(db, &chat_id, &id, &input)
+            })
             .await?;
         self.worker.notify();
         Ok(serde_json::to_value(question)?)

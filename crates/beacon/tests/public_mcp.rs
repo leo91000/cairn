@@ -4,9 +4,19 @@ use common::RelayedInstallation;
 use reqwest::StatusCode;
 use serde_json::{Value, json};
 
+fn code_worker() -> std::path::PathBuf {
+    std::env::var_os("CAIRN_TEST_CODE_WORKER")
+        .map(std::path::PathBuf::from)
+        .expect(
+            "Use pnpm test:backend to build the isolated code worker with matching Cargo features.",
+        )
+}
+
 #[tokio::test]
 async fn personal_mcp_token_enforces_scopes_and_revocation() {
+    let worker = code_worker();
     let relay = RelayedInstallation::new(axum::Router::new()).await;
+    relay.installation.code_mode.use_worker(worker);
     let app = &relay.app;
     let id = relay.session["installations"][0]["id"].as_str().unwrap();
     let tokens = format!("{}/api/installations/{id}/tokens", app.url);
@@ -36,8 +46,11 @@ async fn personal_mcp_token_enforces_scopes_and_revocation() {
                 "id": 1,
                 "method": "tools/call",
                 "params": {
-                    "name": name,
-                    "arguments": args,
+                    "name": "execute",
+                    "arguments": {
+                        "code": format!("return await cairn.call({}, input);", serde_json::to_string(name).unwrap()),
+                        "input": args,
+                    },
                 },
             }))
     };
@@ -671,10 +684,13 @@ async fn slow_mcp_uploads_cannot_block_owner_access_even_after_revocation() {
         "id": 1,
         "method": "tools/call",
         "params": {
-            "name": "save_project",
+            "name": "execute",
             "arguments": {
-                "name": "Rejected after revocation",
-                "path": relay.root.path().to_str().unwrap(),
+                "code": "return await cairn.save_project(input);",
+                "input": {
+                    "name": "Rejected after revocation",
+                    "path": relay.root.path().to_str().unwrap(),
+                },
             },
         },
     })

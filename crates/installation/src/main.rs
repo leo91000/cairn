@@ -43,6 +43,12 @@ where
             Err(_) => ExitCode::FAILURE,
         };
     }
+    if std::env::args().nth(1).as_deref() == Some("mcp-code-worker") {
+        return match cairn_installation::mcp_server::code_mode::worker() {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(_) => ExitCode::FAILURE,
+        };
+    }
     cairn_installation::tls::install_provider();
 
     let args = std::env::args().skip(1).collect::<Vec<_>>();
