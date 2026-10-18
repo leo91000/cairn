@@ -3,7 +3,7 @@ use crate::error::{Error, Result};
 use std::path::Path;
 
 pub(crate) const ADAPTER_LIMIT: usize = 2_000_000;
-// The transport must accommodate OpenCode's 16 MB inbox as well as Codex/Claude.
+// Transport reads allow headroom above the adapters’ 2 MB validation limit.
 pub(crate) const TRANSPORT_LIMIT: usize = 16_000_000;
 
 pub(crate) async fn read(directory: &Path, limit: usize) -> Result<Option<Vec<u8>>> {

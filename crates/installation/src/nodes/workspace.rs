@@ -96,8 +96,17 @@ pub async fn handle(State(app): State<App>, request: Request) -> Result<Response
                 &root.join("chat-input"),
                 crate::chat_inbox::TRANSPORT_LIMIT,
             )
-            .await?
-            .unwrap_or_else(|| b"[]".to_vec());
+            .await;
+            let bytes = match bytes {
+                Ok(bytes) => bytes.unwrap_or_else(|| b"[]".to_vec()),
+                // This response is a change detector, not the inbox transfer.
+                // Keep refresh_inbox seeding the file so the controller's bounded
+                // reader reports overflow to the run instead of retaining stale input.
+                Err(error) if error.status == 400 => {
+                    return Ok(Json(json!({ "oversized": true })).into_response());
+                }
+                Err(error) => return Err(error),
+            };
             let messages: Value = serde_json::from_slice(&bytes)?;
             Ok(Json(json!({ "messages": messages })).into_response())
         }

@@ -272,3 +272,79 @@ async fn refresh_inbox(session: Session, root: PathBuf, stop: CancellationToken)
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::{Json, Router, body::Body, routing::post};
+
+    #[tokio::test]
+    async fn oversized_change_detection_replaces_stale_input_for_controller_validation() {
+        let source = tempfile::tempdir().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let target = root.path().join("chat-input");
+        tokio::fs::create_dir(&target).await.unwrap();
+        tokio::fs::write(target.join("messages.json"), b"[]")
+            .await
+            .unwrap();
+        let length = crate::chat_inbox::TRANSPORT_LIMIT + 1;
+        tokio::fs::write(source.path().join("messages.json"), vec![b' '; length])
+            .await
+            .unwrap();
+        let path = source.path().to_owned();
+        let app = Router::new()
+            .route(
+                "/internal/node-workspace/attempt/inbox",
+                post(|| async { Json(json!({ "oversized": true })) }),
+            )
+            .route(
+                "/internal/node-workspace/attempt/seed",
+                post(move || {
+                    let path = path.clone();
+                    async move {
+                        let (mut writer, reader) = tokio::io::duplex(131072);
+                        tokio::spawn(async move {
+                            super::super::files::send(&path, &mut writer).await.unwrap();
+                        });
+                        Body::from_stream(tokio_util::io::ReaderStream::new(reader))
+                    }
+                }),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let master = format!("http://{}/", listener.local_addr().unwrap())
+            .parse()
+            .unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let stop = CancellationToken::new();
+        let refresh = tokio::spawn(refresh_inbox(
+            Session {
+                client: reqwest::Client::new(),
+                master,
+                token: "test-token".into(),
+                attempt: "attempt".into(),
+            },
+            root.path().to_owned(),
+            stop.clone(),
+        ));
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                if tokio::fs::metadata(target.join("messages.json"))
+                    .await
+                    .is_ok_and(|metadata| metadata.len() == length as u64)
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        let error = crate::chat_inbox::read(&target, crate::chat_inbox::TRANSPORT_LIMIT)
+            .await
+            .unwrap_err();
+        assert_eq!(error.message, "Chat inbox is too large.");
+        stop.cancel();
+        refresh.await.unwrap();
+        server.abort();
+    }
+}

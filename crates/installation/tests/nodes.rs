@@ -1996,7 +1996,7 @@ async fn mcp_through(
 }
 
 #[tokio::test]
-async fn remote_inbox_preserves_empty_invalid_and_large_opencode_inputs() {
+async fn remote_inbox_preserves_empty_invalid_and_oversized_change_detection() {
     let owner = Owner::new().await;
     let (node, attempt, run, token) = (id(), id(), id(), auth::token());
     owner.register_node(&node, &token).await;
@@ -2048,8 +2048,8 @@ async fn remote_inbox_preserves_empty_invalid_and_large_opencode_inputs() {
 
     std::fs::write(inbox.join("messages.json"), vec![b' '; 16_000_001]).unwrap();
     let (status, body) = owner.call("POST", &path, json!({}), Some(&token)).await;
-    assert_eq!(status, StatusCode::BAD_REQUEST);
-    assert_eq!(body, json!({ "error": "Chat inbox is too large." }));
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body, json!({ "oversized": true }));
 }
 
 #[tokio::test]
