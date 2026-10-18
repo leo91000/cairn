@@ -97,7 +97,8 @@ const filPage = computed(() => route.path === '/' || route.path.startsWith('/fil
 const filWorkspace = computed(() => filPage.value || route.path.startsWith('/chats'))
 const place = computed(() => filPage.value || route.path.startsWith('/chats') ? 0 : route.path.startsWith('/tasks') ? 1 : atelierPaths.some(path => route.path.startsWith(path)) ? 2 : -1)
 // Reading screens take the whole phone; the dock returns on the three places.
-const reading = computed(() => route.path.startsWith('/chats') || /^\/(?:fil\/)?runs\/./.test(route.path) || route.path === '/authorize' || route.path.startsWith('/settings/'))
+// The agent page keeps its own save bar at the bottom.
+const reading = computed(() => route.path.startsWith('/chats') || route.path.startsWith('/agents/') || /^\/(?:fil\/)?runs\/./.test(route.path) || route.path === '/authorize' || route.path.startsWith('/settings/'))
 const chats = useChatList()
 const selectedChatId = computed(() => {
   if (!route.path.startsWith('/chats/'))
@@ -297,7 +298,7 @@ function openShortcuts() {
       </div>
     </nav>
     <main
-      class="page flex-1 min-h-0 min-w-0 overflow-auto overscroll-contain [scrollbar-width:thin] [&.page-default]:mx-auto [&.page-default]:w-full [&.page-default]:max-w-340 [&.page-default]:px-9 [&.page-default]:pt-8 [&.page-default]:pb-7 tablet:[&.page-default]:px-6 phone:[&.page-default]:px-3 phone:[&.page-default]:pt-[max(14px,env(safe-area-inset-top))] phone:[&.page-default]:pb-32 [&.page-tasks]:flex [&.page-tasks]:flex-col [&.page-tasks]:overflow-hidden phone:[&.page-tasks]:pb-24 [&.page-run]:flex [&.page-run]:flex-col [&.page-run]:overflow-hidden [&.page-fil]:overflow-hidden"
+      class="page flex-1 min-h-0 min-w-0 overflow-auto overscroll-contain [scrollbar-width:thin] [&.page-default]:mx-auto [&.page-default]:w-full [&.page-default]:max-w-340 [&.page-default]:px-9 [&.page-default]:pt-8 [&.page-default]:pb-7 tablet:[&.page-default]:px-6 phone:[&.page-default]:px-3 phone:[&.page-default]:pt-[max(14px,env(safe-area-inset-top))] phone:[&.page-default]:pb-32 [&.page-tasks]:flex [&.page-tasks]:flex-col [&.page-tasks]:overflow-hidden phone:[&.page-tasks]:pb-24 [&.page-run]:flex [&.page-run]:flex-col [&.page-run]:overflow-hidden [&.page-fil]:overflow-hidden [&.page-flush]:pb-0!"
       :class="{
         'page-fil': filPage,
         'page-tasks': route.path === '/tasks',
@@ -305,6 +306,8 @@ function openShortcuts() {
         'flex overflow-hidden': filWorkspace,
         'page-chat': route.path.startsWith('/chats'),
         'page-default': !filPage && !route.path.startsWith('/chats'),
+        // The agent page ends with its sticky save bar.
+        'page-flush': route.path.startsWith('/agents/'),
       }"
     >
       <!-- Keep the Fil's filter, scroll and selection while its reading pane changes. -->

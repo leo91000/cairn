@@ -1,0 +1,396 @@
+import type { Agent, Project, Skill } from '../../../packages/contracts/contracts'
+import type { McpView } from '../../../packages/contracts/mcp'
+import type { ExecutionNode } from '../../../packages/contracts/nodes'
+import type { PluginConnection, PluginEntry } from './plugins'
+import { MAIN_AGENT_ID } from '../../../packages/contracts/constants'
+import { LOCAL_NODE_ID } from '../../../packages/contracts/nodes'
+
+// Everything an agent can reach or do is edited on its page, as one draft.
+export type AgentAccess = Agent['access']
+export interface AgentDraft {
+  name: string
+  description: string
+  instructions: string
+  provider: Agent['provider']
+  model: string
+  reasoning: string
+  timeoutMinutes: number
+  access: AgentAccess
+}
+
+export type SectionId
+  = | 'identity'
+    | 'model'
+    | 'projects'
+    | 'skills'
+    | 'mcps'
+    | 'github'
+    | 'plugins'
+    | 'nodes'
+    | 'sandbox'
+    | 'powers'
+    | 'advanced'
+
+/** Granted / None / Unavailable / Not found / Fixed (main agent) / Power. */
+export type ChipTone = 'granted' | 'none' | 'unavailable' | 'missing' | 'fixed' | 'power'
+
+/** One choosable resource in a section's "Choose" list. */
+export interface SelectionItem {
+  id: string
+  name: string
+  // Accessible name of its checkbox when the visible name is ambiguous (e.g. "review (Global)").
+  label?: string
+  detail?: string
+  // Why it cannot be used right now, e.g. "Disabled on the installation".
+  unavailable?: string
+}
+
+/** Sections the server keeps unrestricted for the main agent. */
+export const mainLockedSections: SectionId[] = ['projects', 'skills', 'mcps', 'github']
+
+export const sandboxOptions = [
+  { value: 'yolo', label: 'YOLO', description: 'Private VM with sudo and Docker. Default.' },
+  { value: 'workspace-write', label: 'Workspace write', description: 'Writes limited to task workspaces, no sudo.' },
+  { value: 'read-only', label: 'Read only', description: 'Project files are read-only; nothing can be changed.' },
+] as const
+
+export const alwaysAvailable = 'Publish deliverables (including public links), wait for a delay or a condition, see its nodes and move the conversation between them, report its outcome.'
+
+export function newAgentDraft(): AgentDraft {
+  return {
+    name: '',
+    description: '',
+    instructions: '',
+    provider: 'codex',
+    model: '',
+    reasoning: '',
+    timeoutMinutes: 0,
+    access: {
+      nodes: [LOCAL_NODE_ID],
+      exclusiveNodes: [],
+      plugins: [],
+      projects: null,
+      skills: null,
+      mcps: null,
+      mcpTools: {},
+      installation: false,
+      github: true,
+      sandbox: 'yolo',
+    },
+  }
+}
+
+/** The editable part of a saved agent, with the defaults older records omit. */
+export function draftOf(agent: Agent): AgentDraft {
+  const access = (agent.access ?? {}) as Partial<AgentAccess>
+  return {
+    name: agent.name,
+    description: agent.description ?? '',
+    instructions: agent.instructions ?? '',
+    provider: agent.provider ?? 'codex',
+    model: agent.model ?? '',
+    reasoning: agent.reasoning ?? '',
+    timeoutMinutes: agent.timeoutMinutes ?? 0,
+    access: {
+      nodes: access.nodes === undefined ? [LOCAL_NODE_ID] : access.nodes === null ? null : [...access.nodes],
+      exclusiveNodes: [...(access.exclusiveNodes ?? [])],
+      plugins: [...(access.plugins ?? [])],
+      projects: access.projects ? [...access.projects] : null,
+      skills: access.skills ? [...access.skills] : null,
+      mcps: access.mcps ? [...access.mcps] : null,
+      mcpTools: structuredClone(JSON.parse(JSON.stringify(access.mcpTools ?? {}))),
+      installation: access.installation ?? false,
+      github: access.github ?? true,
+      sandbox: access.sandbox ?? 'yolo',
+    },
+  }
+}
+
+/** "All, including future" | "3 of 12" | "None". */
+export function selectionSummary(selected: string[] | null, total: number) {
+  if (selected === null)
+    return 'All, including future'
+  if (!selected.length)
+    return 'None'
+  return `${selected.length} of ${Math.max(total, selected.length)}`
+}
+
+export function skillKey(skill: Pick<Skill, 'scope' | 'name'>) {
+  return `${skill.scope}/${skill.name}`
+}
+
+/** "review · Global", "lint · cairn": the skill's name and where it comes from. */
+export function skillLabel(key: string, projects: Pick<Project, 'id' | 'name'>[]) {
+  const separator = key.indexOf('/')
+  const scope = separator < 0 ? '' : key.slice(0, separator)
+  const name = separator < 0 ? key : key.slice(separator + 1)
+  const origin = scope === 'global' ? 'Global' : projects.find(project => project.id === scope)?.name ?? 'Removed project'
+  return { name, origin }
+}
+
+export function nodeName(node: Pick<ExecutionNode, 'id' | 'name' | 'local'> | undefined, id: string) {
+  if (id === LOCAL_NODE_ID || node?.local)
+    return 'Current runner'
+  return node?.name ?? 'Removed node'
+}
+
+/** Whether the agent may run on a node: listed, or every node allowed. */
+export function runsOn(access: AgentAccess, node: string) {
+  return access.nodes === null || access.nodes.includes(node)
+}
+
+/** The runtime can suspend other conversations for an exclusive reservation. */
+export function supportsExclusive(node: ExecutionNode) {
+  return node.exclusiveReservations === true
+}
+
+export type NodeState = 'online' | 'offline' | 'paused' | 'update'
+export function nodeState(node: ExecutionNode): { state: NodeState, label: string } {
+  if (!node.local && node.status === 'offline')
+    return { state: 'offline', label: 'Offline' }
+  if (!node.accepting)
+    return { state: 'paused', label: 'Not accepting work' }
+  if (!node.local && node.executionReady === false)
+    return { state: 'update', label: 'Runtime update needed' }
+  return { state: 'online', label: 'Online' }
+}
+
+/** Packages whose instances give agents something: commands, tools or instructions. */
+export function grantablePackages(packages: PluginEntry[]) {
+  return packages.filter(entry => entry.manifest?.agentAccess)
+}
+
+export function instanceState(connection: PluginConnection): { tone: 'granted' | 'unavailable', label: string } {
+  if (!connection.enabled)
+    return { tone: 'unavailable', label: connection.pluginId === 'onepassword' ? 'Account disabled' : 'Disabled' }
+  if (connection.status.state === 'needs_review')
+    return { tone: 'unavailable', label: 'Needs review' }
+  if (['error', 'failed', 'invalid'].includes(connection.status.state))
+    return { tone: 'unavailable', label: 'Test failed' }
+  return { tone: 'granted', label: 'Active' }
+}
+
+export interface Context {
+  projects: Pick<Project, 'id' | 'name'>[]
+  skills: Skill[]
+  mcps: McpView[]
+  nodes: ExecutionNode[]
+  packages: PluginEntry[]
+  connections: PluginConnection[]
+}
+
+function listChanges(before: string[] | null, after: string[] | null) {
+  if (before === null || after === null) {
+    if (before === after)
+      return { added: [] as string[], removed: [] as string[], scope: 0 }
+    return { added: [], removed: [], scope: 1 }
+  }
+
+  return {
+    added: after.filter(item => !before.includes(item)),
+    removed: before.filter(item => !after.includes(item)),
+    scope: 0,
+  }
+}
+
+function listCount(before: string[] | null, after: string[] | null) {
+  const change = listChanges(before, after)
+  return change.scope + change.added.length + change.removed.length
+}
+
+/** The sections whose saved values differ, one entry per changed value. */
+export function changes(saved: AgentDraft, draft: AgentDraft) {
+  const changed: SectionId[] = []
+  const add = (section: SectionId, count: number) => {
+    for (let index = 0; index < count; index++)
+      changed.push(section)
+  }
+
+  for (const key of ['name', 'description', 'instructions'] as const)
+    add('identity', Number(saved[key] !== draft[key]))
+  for (const key of ['provider', 'model', 'reasoning'] as const)
+    add('model', Number(saved[key] !== draft[key]))
+  add('advanced', Number(saved.timeoutMinutes !== draft.timeoutMinutes))
+  add('projects', listCount(saved.access.projects, draft.access.projects))
+  add('skills', listCount(saved.access.skills, draft.access.skills))
+  add('mcps', listCount(saved.access.mcps, draft.access.mcps))
+  const tools = new Set([...Object.keys(saved.access.mcpTools), ...Object.keys(draft.access.mcpTools)])
+  for (const connection of tools)
+    add('mcps', Number(JSON.stringify(saved.access.mcpTools[connection] ?? null) !== JSON.stringify(draft.access.mcpTools[connection] ?? null)))
+  add('github', Number(saved.access.github !== draft.access.github))
+  add('sandbox', Number(saved.access.sandbox !== draft.access.sandbox))
+  add('powers', Number(saved.access.installation !== draft.access.installation))
+  add('nodes', listCount(saved.access.nodes, draft.access.nodes))
+  add('nodes', listCount(saved.access.exclusiveNodes, draft.access.exclusiveNodes))
+  add('plugins', listCount(saved.access.plugins, draft.access.plugins))
+  return changed
+}
+
+export interface ReviewLine {
+  kind: 'power' | 'secret' | 'reduction'
+  text: string
+  section: SectionId
+}
+
+function connectionLabel(id: string, context: Context) {
+  const connection = context.connections.find(item => item.id === id)
+  const pack = context.packages.find(entry => entry.id === connection?.pluginId)
+  return `${pack?.manifest?.name ?? 'Plugin'} “${connection?.name ?? 'Removed instance'}”`
+}
+
+/**
+ * What saving would grant or take away that deserves a look first: new powers and
+ * secrets, and removed access when `runs` says work is affected.
+ */
+export function reviewLines(saved: AgentDraft, draft: AgentDraft, context: Context, runs = { queued: 0, running: 0 }) {
+  const lines: ReviewLine[] = []
+  const node = (id: string) => nodeName(context.nodes.find(item => item.id === id), id)
+
+  for (const id of listChanges(saved.access.exclusiveNodes, draft.access.exclusiveNodes).added)
+    lines.push({ kind: 'power', section: 'nodes', text: `Added: exclusive reservation on ${node(id)}. This agent will be able to suspend other agents’ conversations on this machine.` })
+  if (draft.access.installation && !saved.access.installation)
+    lines.push({ kind: 'power', section: 'powers', text: 'Added: installation management. This agent will be able to create and change agents, projects, skills, MCP connections, missions and runs on your behalf.' })
+  for (const id of listChanges(saved.access.plugins, draft.access.plugins).added)
+    lines.push({ kind: 'secret', section: 'plugins', text: `Added: ${connectionLabel(id, context)} — effective immediately, including in running conversations.` })
+
+  if (saved.access.github && !draft.access.github && draft.access.projects !== null)
+    lines.push({ kind: 'reduction', section: 'github', text: 'Shared GitHub connection turned off: selected projects require a dedicated token.' })
+
+  const removed: string[] = []
+  const project = (id: string) => context.projects.find(item => item.id === id)?.name ?? 'removed project'
+  const mcp = (id: string) => context.mcps.find(item => item.id === id)?.name ?? 'removed connection'
+  const described = (label: string, before: string[] | null, after: string[] | null, name: (id: string) => string) => {
+    const change = listChanges(before, after)
+    if (change.scope && after !== null)
+      removed.push(`all ${label}s (now ${after.length ? after.map(name).join(', ') : 'none'})`)
+    for (const id of change.removed)
+      removed.push(`${label} ${name(id)}`)
+  }
+
+  described('project', saved.access.projects, draft.access.projects, project)
+  described('skill', saved.access.skills, draft.access.skills, key => skillLabel(key, context.projects).name)
+  described('MCP connection', saved.access.mcps, draft.access.mcps, mcp)
+  described('node', saved.access.nodes, draft.access.nodes, node)
+  for (const id of listChanges(saved.access.exclusiveNodes, draft.access.exclusiveNodes).removed)
+    removed.push(`exclusive reservation on ${node(id)}`)
+  for (const id of listChanges(saved.access.plugins, draft.access.plugins).removed)
+    removed.push(connectionLabel(id, context))
+  if (saved.access.installation && !draft.access.installation)
+    removed.push('installation management')
+
+  const affected = runs.queued + runs.running
+  const work = [
+    runs.queued ? `${runs.queued} queued ${runs.queued === 1 ? 'run' : 'runs'}` : '',
+    runs.running ? `${runs.running} running ${runs.running === 1 ? 'conversation' : 'conversations'}` : '',
+  ].filter(Boolean).join(' and ')
+  const consequence = affected ? ` ${work} will not continue with the old access.` : ''
+  if (removed.length)
+    lines.push({ kind: 'reduction', section: 'projects', text: `Removed: ${removed.join(', ')}.${consequence}` })
+  else if (affected)
+    lines.push({ kind: 'reduction', section: 'projects', text: `Changed access.${consequence}` })
+  return lines
+}
+
+/** A plugin delegation answering as the agent, as `POST /agents/{id}/preview` reports it. */
+export interface DelegationEffect {
+  id: string
+  pluginId: string
+  name: string
+  enabled: boolean
+  suspended: boolean
+  // Why the new access cannot be reapproved, when it cannot.
+  blocked: string | null
+}
+
+export interface Preview {
+  runs: { queued: number, running: number }
+  delegations: DelegationEffect[]
+}
+
+export interface Issue {
+  section: SectionId
+  text: string
+}
+
+/** What the owner should check: grants that exist but cannot be used, or targets that are gone. */
+export function issues(draft: AgentDraft, context: Context, isMain: boolean) {
+  const found: Issue[] = []
+  const access = draft.access
+  if (!isMain) {
+    for (const id of access.projects ?? []) {
+      if (!context.projects.some(project => project.id === id))
+        found.push({ section: 'projects', text: 'A selected project no longer exists.' })
+    }
+
+    for (const key of access.skills ?? []) {
+      if (!context.skills.some(skill => skillKey(skill) === key))
+        found.push({ section: 'skills', text: `The skill “${skillLabel(key, context.projects).name}” no longer exists.` })
+    }
+
+    for (const connection of context.mcps) {
+      if (!connection.enabled && (access.mcps === null || access.mcps.includes(connection.id)))
+        found.push({ section: 'mcps', text: `The MCP connection “${connection.name}” is disabled on the installation. The agent keeps it but cannot use it until it is enabled again.` })
+    }
+  }
+
+  for (const id of access.exclusiveNodes) {
+    const node = context.nodes.find(item => item.id === id)
+    if (!node || node.revoked)
+      found.push({ section: 'nodes', text: 'An exclusive reservation targets a node that no longer exists.' })
+    else if (!runsOn(access, id))
+      found.push({ section: 'nodes', text: `The exclusive reservation on ${nodeName(node, id)} is inactive: this agent cannot run there.` })
+  }
+
+  for (const id of access.plugins) {
+    const connection = context.connections.find(item => item.id === id)
+    if (!connection)
+      found.push({ section: 'plugins', text: 'A granted plugin instance no longer exists.' })
+    else if (!connection.enabled)
+      found.push({ section: 'plugins', text: `${connectionLabel(id, context)} is disabled: the access is kept but cannot be used.` })
+  }
+
+  return found
+}
+
+/** "3 projects · 2 nodes · 1Password" for the agents list. */
+export function accessSummary(agent: Agent, context: Pick<Context, 'packages' | 'connections'>) {
+  const access = agent.access ?? {} as AgentAccess
+  const count = (value: string[] | null | undefined, noun: string, all: string) => value === null || value === undefined
+    ? all
+    : `${value.length || 'No'} ${noun}${value.length === 1 ? '' : 's'}`
+  const nodes = access.nodes === undefined ? [LOCAL_NODE_ID] : access.nodes
+  const parts = [
+    agent.id === MAIN_AGENT_ID ? 'All projects' : count(access.projects, 'project', 'All projects'),
+    count(nodes, 'node', 'All nodes'),
+  ]
+  const packages = new Set<string>()
+  for (const id of access.plugins ?? []) {
+    const connection = context.connections.find(item => item.id === id)
+    const name = context.packages.find(entry => entry.id === connection?.pluginId)?.manifest?.name
+    packages.add(name ?? 'Plugin')
+  }
+
+  parts.push(...packages)
+  if (access.exclusiveNodes?.length)
+    parts.push('Exclusive reservation')
+  if (access.installation)
+    parts.push('Installation management')
+  return parts.join(' · ')
+}
+
+/** Guesses which section a server error belongs to, so the page can point at it. */
+export function errorSection(message: string): SectionId | undefined {
+  const text = message.toLowerCase()
+  const rules: [SectionId, RegExp][] = [
+    ['plugins', /plugin|1password|delegation/],
+    ['nodes', /node|exclusive|reserv/],
+    ['mcps', /mcp|tool/],
+    ['skills', /skill/],
+    ['github', /github|token/],
+    ['projects', /project/],
+    ['model', /model|provider|reasoning|codex|claude|opencode/],
+    ['advanced', /time limit|timeout/],
+    ['identity', /name|description|instruction/],
+  ]
+  return rules.find(([, pattern]) => pattern.test(text))?.[0]
+}

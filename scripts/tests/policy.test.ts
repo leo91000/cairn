@@ -34,6 +34,8 @@ describe('agent access and task inheritance', () => {
       installation: false,
       github: true,
       sandbox: 'yolo',
+      exclusiveNodes: [],
+      plugins: [],
     })
     expect(() => ctx.service.remove('agents', main.id)).toThrow(/cannot be removed/)
     const task = ctx.service.task({

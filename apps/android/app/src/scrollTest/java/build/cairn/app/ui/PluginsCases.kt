@@ -638,6 +638,7 @@ abstract class PluginsCases {
             }
             compose.onNodeWithText("Enregistré").assertExists()
             compose.onNodeWithText("Agents autorisés : Cairn").assertExists()
+            compose.onNodeWithText("Gérer sur les fiches agents ›").assertExists()
             capture("plugin-onepassword")
             compose.onNodeWithText("Show vaults").performScrollTo().performClick()
             compose.waitUntil(30000) {
@@ -661,7 +662,7 @@ abstract class PluginsCases {
     }
 
     @Test
-    fun serviceAccountsSendTheirTokenOnceWithExplicitGrants() {
+    fun serviceAccountsSendTheirTokenOnceAndLeaveGrantsToAgentPages() {
         MockWebServer().use { server ->
             val saved = CopyOnWriteArrayList<String>()
             server.dispatcher = dispatcher { path, body ->
@@ -685,7 +686,15 @@ abstract class PluginsCases {
             compose
                 .onNode(SemanticsMatcher.keyIsDefined(SemanticsProperties.Password))
                 .assertExists()
-            compose.onNodeWithText("Helper").performScrollTo().performClick()
+            // Grants are read-only here: they are set on each agent's page.
+            compose.onNodeWithText("Aucun agent ne peut l’utiliser pour l’instant.").assertExists()
+            assertTrue(
+                compose
+                    .onAllNodesWithText("Gérer sur les fiches agents ›")
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
+            )
+            compose.onNode(hasText("Helper") and isToggleable()).assertDoesNotExist()
             capture("plugin-instance-editor")
             compose.onNodeWithText("Enregistrer").performClick()
             compose.waitUntil(10000) { saved.isNotEmpty() }
@@ -695,7 +704,7 @@ abstract class PluginsCases {
                 buildJsonObject { put("token", "ops_android_fixture") },
                 payload["secrets"],
             )
-            assertEquals(JsonArray(listOf(JsonPrimitive("helper"))), payload["agentIds"])
+            assertFalse("agentIds" in payload)
             assertEquals(JsonObject(emptyMap()), payload["settings"])
         }
     }

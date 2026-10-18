@@ -22,13 +22,11 @@ import {
   Plus,
   Server,
   Settings2,
-  Shield,
 } from '../icons'
 
 const nodes = ref<ExecutionNode[]>([])
 const editing = ref<ExecutionNode | null>(null)
 const tags = ref('')
-const exclusiveAgents = ref<string[]>([])
 const name = ref('')
 const managerUrl = ref('')
 // Ceilings are edited in GiB and stored in MiB.
@@ -112,7 +110,6 @@ function enroll() {
 function edit(node: ExecutionNode) {
   editing.value = JSON.parse(JSON.stringify(node))
   tags.value = node.tags.join(', ')
-  exclusiveAgents.value = [...node.exclusiveAgents || []]
   memoryGiB.value = +(node.limits.memoryMiB / 1024).toFixed(2)
   diskGiB.value = +(node.limits.diskMiB / 1024).toFixed(2)
 }
@@ -130,8 +127,8 @@ function save() {
         tags: tags.value.split(',').map(tag => tag.trim()).filter(Boolean),
         limits,
         slots: node.slots,
+        // Exclusive reservations are granted on each agent's page; omitting them keeps them.
         accepting: node.accepting,
-        exclusiveAgents: exclusiveAgents.value,
       }),
     })
     editing.value = null
@@ -139,9 +136,10 @@ function save() {
   })
 }
 
+// The last step of adding a machine: nothing is granted unless the owner picks agents here.
 function grant(node: ExecutionNode) {
   granting.value = node
-  granted.value = (node.agents || []).filter(agent => !agent.allNodes).map(agent => agent.id)
+  granted.value = []
 }
 
 function releaseExclusive(node: ExecutionNode) {
@@ -159,9 +157,9 @@ function saveGrants() {
   if (!node)
     return
   return action(async () => {
-    await api(`/nodes/${node.id}/agents`, { method: 'PUT', body: JSON.stringify({ agentIds: granted.value }) })
+    await api(`/nodes/${node.id}/agents`, { method: 'PUT', body: JSON.stringify({ agentIds: [...new Set([...granted.value, ...(node.agents ?? []).filter(agent => !agent.allNodes).map(agent => agent.id)])] }) })
     granting.value = null
-    notify('Agent access saved')
+    notify(`${node.name} is ready`)
     await refresh()
   })
 }
@@ -179,6 +177,10 @@ function freeStaleDisks() {
 
 function allNodes(agentId: string) {
   return granting.value?.agents?.some(agent => agent.id === agentId && agent.allNodes) ?? false
+}
+
+function agentNames(ids: string[]) {
+  return ids.map(id => state.agents.find(agent => agent.id === id)?.name ?? 'Removed agent').join(', ')
 }
 
 function configureRecovery() {
@@ -274,7 +276,7 @@ function statusLabel(node: ExecutionNode) {
           </template>
           <code class="block break-all select-all" aria-label="Single-use enrollment code">{{ enrollment.code }}</code>
           <p class="text-sm text-muted">
-            <strong>3.</strong> This page detects the machine once it connects and asks which agents may use it.
+            <strong>3.</strong> This page detects the machine once it connects and asks which agents may use it, as the last step.
           </p>
           <div>
             <UiButton variant="default" @click="enrollment = null">
@@ -300,9 +302,24 @@ function statusLabel(node: ExecutionNode) {
             <div><span>Shared RAM</span><strong>{{ formatMiB(node.limits.memoryMiB) }}</strong><span>{{ node.usage ? `${formatMiB(node.usage.memoryMiB)} in use` : 'usage unavailable' }}</span></div>
             <div><span>Shared disk</span><strong>{{ formatMiB(node.limits.diskMiB) }}</strong><span>{{ node.usage ? `${formatMiB(node.usage.diskMiB)} on this node` : 'usage unavailable' }}</span></div>
           </div>
-          <p v-if="node.agents?.length" class="mt-2 text-sm">
-            Used by {{ node.agents.map(agent => agent.allNodes ? `${agent.name} (all nodes)` : agent.name).join(', ') }}
-          </p>
+          <section class="mt-2 grid gap-1 rounded-xl border border-line px-4 py-3 text-sm" :aria-label="`Agents on ${node.name}`">
+            <p>
+              <template v-if="node.agents?.length">
+                {{ node.agents.length }} {{ node.agents.length === 1 ? 'agent can' : 'agents can' }} run here: <span class="text-muted">{{ node.agents.map(agent => agent.allNodes ? `${agent.name} (all nodes)` : agent.name).join(', ') }}</span>
+              </template>
+              <template v-else>
+                No agent can run here yet.
+              </template>
+            </p>
+            <p v-if="node.exclusiveAgents?.length">
+              {{ node.exclusiveAgents.length }} can reserve it exclusively: <span class="text-muted">{{ agentNames(node.exclusiveAgents) }}</span>
+            </p>
+            <p class="text-xs text-muted">
+              Access is set on each agent’s page. <RouterLink to="/agents" class="text-accent hover:underline">
+                Manage access from the agents ›
+              </RouterLink>
+            </p>
+          </section>
           <div v-if="node.exclusiveReservation" role="status" class="mt-3 rounded-lg border border-line p-3 text-sm">
             <p><strong>Exclusive reservation · {{ node.exclusiveReservation.state }}</strong></p>
             <p>{{ node.exclusiveReservation.reason }}</p>
@@ -364,9 +381,6 @@ function statusLabel(node: ExecutionNode) {
             </p>
           </details>
           <div class="node-actions">
-            <UiButton :variant="node.agents?.length ? 'default' : 'primary'" @click="grant(node)">
-              <Icon :name="Shield" :size="15" /> {{ node.agents?.length ? 'Agents' : 'Choose agents' }}
-            </UiButton>
             <UiButton variant="default" @click="edit(node)">
               <Icon :name="Settings2" :size="15" /> Configure
             </UiButton>
@@ -468,12 +482,12 @@ function statusLabel(node: ExecutionNode) {
     <Modal
       v-if="granting"
       sheet
-      :title="`Agents allowed on ${granting.name}`"
+      :title="`Who can use “${granting.name}”?`"
       @close="granting = null"
     >
       <form class="node-form" @submit.prevent="saveGrants">
         <p class="text-sm text-muted">
-          Chosen agents may run conversations on this machine. A tag or capability never grants access by itself.
+          Chosen agents may run their conversations on this machine. A tag or capability never grants access by itself.
         </p>
         <label v-for="agent in state.agents" :key="agent.id" class="access-row">
           <input
@@ -488,14 +502,22 @@ function statusLabel(node: ExecutionNode) {
             type="checkbox"
             :value="agent.id"
           >
-          {{ agent.name }}<span v-if="allNodes(agent.id)" class="text-muted">(allowed on all nodes)</span>
+          <span class="min-w-0">{{ agent.name }}<span v-if="allNodes(agent.id)" class="text-muted"> (allowed on all nodes)</span></span>
         </label>
+        <p class="text-xs text-muted">
+          You can change this later on each agent’s page.
+        </p>
         <UiAlert v-if="error">
           {{ error }}
         </UiAlert>
-        <UiButton type="submit" :disabled="busy">
-          Save access
-        </UiButton>
+        <div class="flex justify-end gap-2.5">
+          <UiButton :disabled="busy" @click="granting = null">
+            Later
+          </UiButton>
+          <UiButton type="submit" variant="primary" :disabled="busy">
+            Finish
+          </UiButton>
+        </div>
       </form>
     </Modal>
     <Modal
@@ -537,16 +559,6 @@ function statusLabel(node: ExecutionNode) {
         ></label>
         <label>Tags, separated by commas<input v-model="tags" class="mt-1 block w-full"></label>
         <fieldset class="form-section">
-          <legend>Exclusive reservations</legend>
-          <p>Selected agents may temporarily suspend other conversations on this node. Their commands are preserved and resume automatically after release or expiration.</p>
-          <p v-if="!editing.exclusiveReservations" class="text-sm text-muted">
-            This runtime needs an update before reservations can be acquired.
-          </p>
-          <label v-for="agent in state.agents" :key="agent.id" class="flex items-center gap-2">
-            <input v-model="exclusiveAgents" type="checkbox" :value="agent.id"> {{ agent.name }}
-          </label>
-        </fieldset>
-        <fieldset class="form-section">
           <legend>Slots and shared budgets</legend><p>All slots share these budgets. Resources are used on demand.</p><div class="form-grid">
             <label>Execution slots<input
               v-model.number="editing.slots"
@@ -586,7 +598,24 @@ function statusLabel(node: ExecutionNode) {
         </fieldset><p class="text-sm text-muted">
           Detected on this machine: {{ editing.capabilities.cpu }} CPU · {{ formatMiB(editing.capabilities.memoryMiB) }} RAM · {{ formatMiB(diskCapacity(editing)) }} disk ({{ formatMiB(editing.capabilities.diskMiB) }} free).
         </p>
-        <label class="flex gap-2"><input v-model="editing.accepting" type="checkbox">Accept new work</label>
+        <label class="access-row"><input v-model="editing.accepting" type="checkbox">Accept new work</label>
+        <section class="form-section grid gap-1.5 text-sm" aria-label="Agents">
+          <h3 class="text-[13px]! font-semibold">
+            Agents <span class="text-xs font-normal text-muted">read-only</span>
+          </h3>
+          <p>{{ editing.agents?.length ? `${editing.agents.length} ${editing.agents.length === 1 ? 'agent can' : 'agents can'} run here: ${editing.agents.map(agent => agent.name).join(', ')}` : 'No agent can run here yet.' }}</p>
+          <p v-if="editing.exclusiveAgents?.length">
+            {{ editing.exclusiveAgents.length }} can reserve it exclusively: {{ agentNames(editing.exclusiveAgents) }}
+          </p>
+          <p v-if="!editing.exclusiveReservations">
+            This runtime needs an update before exclusive reservations can be acquired.
+          </p>
+          <p class="text-xs">
+            Access is set on each agent’s page. <RouterLink to="/agents" class="text-accent hover:underline">
+              Manage access from the agents ›
+            </RouterLink>
+          </p>
+        </section>
         <UiButton type="submit" :disabled="busy">
           Save
         </UiButton>
@@ -641,6 +670,7 @@ function statusLabel(node: ExecutionNode) {
 .form-section legend { font-size: 13px; font-weight: 600; padding-right: 10px; }
 .form-section p { color: var(--color-muted); font-size: 12px; margin-bottom: 12px; }
 .form-grid { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 16px; }
-.access-row { display: flex; align-items: center; gap: 12px; border: 1px solid var(--color-line); background: var(--color-inset); border-radius: 10px; padding: 14px; font-size: 13px; }
+.access-row { display: flex; flex-direction: row; align-items: center; gap: 12px; border: 1px solid var(--color-line); background: var(--color-inset); border-radius: 10px; padding: 14px; font-size: 13px; color: var(--color-ink); }
+.access-row input { width: 16px; height: 16px; flex-shrink: 0; margin: 0; }
 @media (max-width: 640px) { .nodes-heading { align-items: start; flex-direction: column; gap: 16px; } .node-card { padding: 16px; } .capacity-grid { grid-template-columns: repeat(2,minmax(0,1fr)); } .capacity-grid strong { font-size: 15px; } .capacity-grid > div { padding: 10px; } .node-form { padding: 20px; } .form-grid { grid-template-columns: 1fr; } }
 </style>

@@ -169,8 +169,13 @@ private fun PluginCard(entry: PluginEntry, summary: PluginSummary, open: () -> U
 
 /** One plugin: its instances, what it gives agents, and its review. */
 @Composable
-fun PluginScreen(vm: CairnViewModel, state: Workspace, id: String, openChat: (String) -> Unit) =
-    PluginInstances(vm, state, id, openChat)
+fun PluginScreen(
+    vm: CairnViewModel,
+    state: Workspace,
+    id: String,
+    openAgents: () -> Unit = {},
+    openChat: (String) -> Unit,
+) = PluginInstances(vm, state, id, openChat, openAgents)
 
 @Composable
 private fun PluginInstances(
@@ -178,6 +183,7 @@ private fun PluginInstances(
     state: Workspace,
     id: String,
     openChat: (String) -> Unit,
+    openAgents: () -> Unit,
 ) {
     var catalog by remember { mutableStateOf<PluginCatalog?>(null) }
     var editing by remember { mutableStateOf<PluginConnection?>(null) }
@@ -293,6 +299,7 @@ private fun PluginInstances(
                 connection,
                 catalog?.grantsOf(connection.agentId).orEmpty(),
                 openChat = openChat,
+                openAgents = openAgents,
                 edit = {
                     vm.clearMessage()
                     editing = connection
@@ -328,6 +335,10 @@ private fun PluginInstances(
                 initial,
                 catalog?.connections.orEmpty(),
                 close = { editing = null },
+                openAgents = {
+                    editing = null
+                    openAgents()
+                },
             ) {
                 editing = null
                 load()
@@ -363,6 +374,7 @@ private fun InstanceCard(
     /** Other plugins the delegated agent is authorized on, for what it can do. */
     grants: List<String>,
     openChat: (String) -> Unit,
+    openAgents: () -> Unit,
     edit: () -> Unit,
     remove: () -> Unit,
     changed: suspend () -> Unit,
@@ -474,6 +486,7 @@ private fun InstanceCard(
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
+                TextButton(onClick = openAgents) { Text("Gérer sur les fiches agents ›") }
             }
             if (manifest.delegates) {
                 Fact(
@@ -644,8 +657,8 @@ private fun ActivityRow(connection: PluginConnection, item: PluginActivity, open
 
 /**
  * Generic instance settings: the manifest's fields (secrets never prefilled), completed by the
- * package's own form handler when it has one, the agents granted the package's commands and tools,
- * then the delegation for conversation plugins.
+ * package's own form handler when it has one, the agents granted the package's commands and tools
+ * (read-only: grants are set on each agent's page), then the delegation for conversation plugins.
  */
 @Composable
 private fun InstanceEditor(
@@ -656,6 +669,7 @@ private fun InstanceEditor(
     initial: PluginConnection,
     connections: List<PluginConnection>,
     close: () -> Unit,
+    openAgents: () -> Unit,
     saved: suspend () -> Unit,
 ) {
     val creating = initial.id.isBlank()
@@ -675,7 +689,6 @@ private fun InstanceEditor(
         }
     // Same rule for secret fields: typed in, sent once, never kept.
     var secrets by remember(initial.id) { mutableStateOf(mapOf<String, String>()) }
-    var granted by remember(initial.id) { mutableStateOf(initial.agentIds) }
     var agentId by remember(initial.id) { mutableStateOf(initial.agentId) }
     var accessMode by remember(initial.id) { mutableStateOf(initial.accessMode) }
     var people by
@@ -792,8 +805,7 @@ private fun InstanceEditor(
                                     .mapValues { JsonPrimitive(it.value.trim()) }
                             ),
                         )
-                        if (manifest.agentAccess != null)
-                            put("agentIds", JsonArray(granted.map(::JsonPrimitive)))
+                        // Agents are granted from their own page; the server keeps the list.
                         if (manifest.delegates) {
                             put("agentId", agentId)
                             put(
@@ -891,12 +903,21 @@ private fun InstanceEditor(
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
-            state.agents.forEach { agent ->
-                Toggle(agent.name, agent.id in granted) { allowed ->
-                    if (!state.busy)
-                        granted = if (allowed) granted + agent.id else granted - agent.id
+            val names =
+                initial.agentIds.map { id ->
+                    state.agents.find { it.id == id }?.name ?: "Agent supprimé"
                 }
-            }
+            Text(
+                if (names.isEmpty()) "Aucun agent ne peut l’utiliser pour l’instant."
+                else names.joinToString(", "),
+                style = MaterialTheme.typography.bodyMedium,
+            )
+            Text(
+                "Les accès se règlent sur la fiche de chaque agent (Secrets & plugins).",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            TextButton(onClick = openAgents) { Text("Gérer sur les fiches agents ›") }
         }
         if (manifest.delegates) {
             Choice(

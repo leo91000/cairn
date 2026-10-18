@@ -15,6 +15,10 @@ export const accessPolicy = z.object({
   installation: z.boolean().default(false),
   github: z.boolean().default(true),
   sandbox: z.enum(['yolo', 'workspace-write', 'read-only']).default('yolo'),
+  // Live grants, checked on every use: nodes this agent may reserve exclusively
+  // (suspending other conversations) and plugin instances such as 1Password accounts.
+  exclusiveNodes: z.array(id).max(100).default([]),
+  plugins: z.array(id).max(100).default([]),
 })
 export const agentInput = z.object({
   name,
@@ -39,6 +43,8 @@ export const agentUpdate = z.object({
     // A partial update from an older client must not restore local-runner access.
     nodes: accessPolicy.shape.nodes.removeDefault().optional(),
     installation: accessPolicy.shape.installation.removeDefault().optional(),
+    exclusiveNodes: accessPolicy.shape.exclusiveNodes.removeDefault().optional(),
+    plugins: accessPolicy.shape.plugins.removeDefault().optional(),
   }).optional(),
 })
 export const projectInput = z.object({
@@ -74,6 +80,8 @@ export type Agent = z.infer<typeof agentInput> & {
   avatar?: AgentAvatar
   id: string
   createdAt: number
+  // Changes on every save; sent back so a stale editor cannot overwrite newer access.
+  revision?: string
 }
 export type Project = z.infer<typeof projectInput> & {
   origin?: string

@@ -1,6 +1,7 @@
 package build.cairn.app.ui
 
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.selection.toggleable
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -17,7 +18,12 @@ private const val UNINSTALL_COMMAND =
     "sudo systemctl disable --now cairn-node; sudo docker rm -f cairn-execution-node; sudo rm -rf /etc/systemd/system/cairn-node.service /opt/cairn-node /var/lib/cairn-node"
 
 @Composable
-fun NodesScreen(vm: CairnViewModel, state: Workspace, openRun: (String) -> Unit = {}) {
+fun NodesScreen(
+    vm: CairnViewModel,
+    state: Workspace,
+    openRun: (String) -> Unit = {},
+    openAgents: () -> Unit = {},
+) {
     var nodes by remember { mutableStateOf<List<ExecutionNode>>(emptyList()) }
     var adding by remember { mutableStateOf(false) }
     var storage by remember { mutableStateOf<ExecutionNode?>(null) }
@@ -29,6 +35,7 @@ fun NodesScreen(vm: CairnViewModel, state: Workspace, openRun: (String) -> Unit 
     var recovery by remember { mutableStateOf<NodeSyncSettings?>(null) }
     var editing by remember { mutableStateOf<ExecutionNode?>(null) }
     var revoking by remember { mutableStateOf<ExecutionNode?>(null) }
+    // The last step of adding a machine: who may use it. Opened once, right after enrollment.
     var granting by remember { mutableStateOf<ExecutionNode?>(null) }
     var cleaning by remember { mutableStateOf<ExecutionNode?>(null) }
     var advanced by remember { mutableStateOf(false) }
@@ -56,7 +63,7 @@ fun NodesScreen(vm: CairnViewModel, state: Workspace, openRun: (String) -> Unit 
     Page {
         Heading(
             "Nodes",
-            "Gérez vos machines, leur capacité et les agents autorisés.",
+            "Gérez vos machines et leur capacité. L’accès des agents se règle sur leur fiche.",
         )
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
             Text(
@@ -115,10 +122,7 @@ fun NodesScreen(vm: CairnViewModel, state: Workspace, openRun: (String) -> Unit 
                     Text(
                         "${node.availableSlots} slots libres sur ${node.slots} · ${node.occupiedSlots} occupés"
                     )
-                    if (node.agents.isNotEmpty())
-                        Text(
-                            "Utilisée par ${node.agents.joinToString(", ") { if (it.allNodes) "${it.name} (toutes les nodes)" else it.name }}"
-                        )
+                    NodeAgents(node, state, openAgents)
                     node.exclusiveReservation?.let { reservation ->
                         Panel {
                             Text(
@@ -221,9 +225,6 @@ fun NodesScreen(vm: CairnViewModel, state: Workspace, openRun: (String) -> Unit 
                     }
                     HorizontalDivider()
                     FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        if (node.agents.isEmpty())
-                            Button(onClick = { granting = node }) { Text("Choisir les agents") }
-                        else TextButton(onClick = { granting = node }) { Text("Agents") }
                         TextButton(onClick = { editing = node }) { Text("Configurer") }
                         TextButton(onClick = { storage = node }) { Text("Stockage") }
                         if (!node.local)
@@ -258,7 +259,7 @@ fun NodesScreen(vm: CairnViewModel, state: Workspace, openRun: (String) -> Unit 
     if (adding)
         DetailSheet("Ajouter une machine", { adding = false }) {
             Text(
-                "Connectez une machine Linux, puis choisissez les agents autorisés.",
+                "Connectez une machine Linux, puis choisissez qui peut l’utiliser.",
                 style = MaterialTheme.typography.bodyMedium,
             )
             Field("Nom de la machine", name, { name = it })
@@ -348,7 +349,7 @@ fun NodesScreen(vm: CairnViewModel, state: Workspace, openRun: (String) -> Unit 
         }
     }
     granting?.let { node ->
-        AgentGrants(node, state, { granting = null }) { agentIds ->
+        FirstAgents(node, state, { granting = null }) { agentIds ->
             vm.perform {
                 api.request(
                     "PUT",
@@ -365,7 +366,7 @@ fun NodesScreen(vm: CairnViewModel, state: Workspace, openRun: (String) -> Unit 
                     },
                 )
                 granting = null
-                notify("Accès des agents enregistré")
+                notify("${node.name} est prête")
                 load()
                 refresh()
             }
@@ -421,36 +422,88 @@ fun NodesScreen(vm: CairnViewModel, state: Workspace, openRun: (String) -> Unit 
     }
 }
 
+/** Who can run here and reserve the machine, read-only: grants are set on each agent's page. */
 @Composable
-private fun AgentGrants(
+private fun NodeAgents(node: ExecutionNode, state: Workspace, openAgents: () -> Unit) {
+    fun agents(count: Int) = if (count == 1) "1 agent peut" else "$count agents peuvent"
+    val runners = node.agents.map { if (it.allNodes) "${it.name} (toutes les nodes)" else it.name }
+    val exclusive =
+        node.exclusiveAgents.mapNotNull { id ->
+            node.agents.find { it.id == id }?.name ?: state.agents.find { it.id == id }?.name
+        }
+    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        Text(
+            if (runners.isEmpty()) "Aucun agent ne peut exécuter ici."
+            else "${agents(runners.size)} exécuter ici : ${runners.joinToString(", ")}",
+            style = MaterialTheme.typography.bodyMedium,
+        )
+        Text(
+            if (exclusive.isEmpty()) "Aucun agent ne peut la réserver en exclusivité."
+            else
+                "${agents(exclusive.size)} la réserver en exclusivité : ${exclusive.joinToString(", ")}",
+            style = MaterialTheme.typography.bodyMedium,
+        )
+        TextButton(onClick = openAgents, contentPadding = PaddingValues(0.dp)) {
+            Text("Gérer l’accès depuis les agents ›")
+        }
+    }
+}
+
+/**
+ * The last step of adding a machine: nothing is chosen for the owner, except agents already allowed
+ * on every node.
+ */
+@Composable
+private fun FirstAgents(
     node: ExecutionNode,
     state: Workspace,
-    dismiss: () -> Unit,
-    save: (List<String>) -> Unit,
+    later: () -> Unit,
+    finish: (List<String>) -> Unit,
 ) {
-    val everywhere = node.agents.filter { it.allNodes }.map { it.id }.toSet()
-    var selected by
-        remember(node.id) {
-            mutableStateOf(node.agents.filter { !it.allNodes }.map { it.id }.toSet())
-        }
-    Editor(
-        "Agents autorisés sur ${node.name}",
-        state.busy,
-        state.error,
-        close = dismiss,
-        save = { save(selected.toList()) },
-    ) {
+    var selected by remember(node.id) { mutableStateOf(emptySet<String>()) }
+    DetailSheet("Qui peut utiliser « ${node.name} » ?", later) {
         Text(
-            "Les agents choisis peuvent exécuter des conversations sur cette machine. Un tag ou une capacité ne donne jamais d’accès à lui seul."
+            "Les agents choisis pourront exécuter leurs conversations sur cette machine. Un tag ou une capacité ne donne jamais d’accès à lui seul.",
+            style = MaterialTheme.typography.bodyMedium,
         )
-        Panel {
-            state.agents.forEach { agent ->
-                if (agent.id in everywhere) Text("${agent.name} (autorisé sur toutes les nodes)")
-                else
-                    Toggle(agent.name, agent.id in selected) {
-                        if (!state.busy)
-                            selected = if (it) selected + agent.id else selected - agent.id
-                    }
+        state.agents.forEach { agent ->
+            val everywhere = agent.access.nodes == null
+            Row(
+                Modifier.fillMaxWidth().heightIn(min = 48.dp).toggleable(
+                    value = everywhere || agent.id in selected,
+                    enabled = !everywhere && !state.busy,
+                    role = androidx.compose.ui.semantics.Role.Checkbox,
+                ) {
+                    selected = if (it) selected + agent.id else selected - agent.id
+                },
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Checkbox(everywhere || agent.id in selected, null, enabled = !everywhere)
+                Spacer(Modifier.width(8.dp))
+                Column(Modifier.weight(1f)) {
+                    Text(agent.name)
+                    if (everywhere)
+                        Text(
+                            "Autorisé sur toutes les nodes",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                }
+            }
+        }
+        Text(
+            "Vous pourrez modifier cela plus tard sur la fiche de chaque agent.",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        state.error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
+        Row(
+            Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.End),
+        ) {
+            TextButton(onClick = later, enabled = !state.busy) { Text("Plus tard") }
+            Button(onClick = { finish(selected.toList()) }, enabled = !state.busy) {
+                Text("Terminer")
             }
         }
     }
@@ -467,7 +520,6 @@ private fun NodeEditor(
     var tags by remember(node.id) { mutableStateOf(node.tags.joinToString(", ")) }
     var accepting by remember(node.id) { mutableStateOf(node.accepting) }
     var slots by remember(node.id) { mutableStateOf(node.slots.toString()) }
-    var exclusiveAgents by remember(node.id) { mutableStateOf(node.exclusiveAgents.toSet()) }
     var cpu by remember(node.id) { mutableStateOf(node.limits.cpu.toString()) }
     // Ceilings are edited in Gio and stored in Mio.
     var memory by remember(node.id) { mutableStateOf(gib(node.limits.memoryMiB)) }
@@ -493,7 +545,6 @@ private fun NodeEditor(
                     tags.split(',').map(String::trim).filter(String::isNotEmpty),
                     NodeResources(cpu.toInt(), memoryMiB!!, diskMiB!!),
                     slots.toInt(),
-                    exclusiveAgents.toList(),
                 )
             )
         },
@@ -515,21 +566,11 @@ private fun NodeEditor(
                 style = MaterialTheme.typography.bodySmall,
             )
         }
-        Panel {
-            Text("Réservation exclusive", style = MaterialTheme.typography.titleSmall)
+        if (!node.exclusiveReservations)
             Text(
-                "Les agents autorisés peuvent suspendre les autres tâches de cette machine pendant leurs travaux intensifs. Cet accès est distinct du droit d’y exécuter une conversation."
+                "Mettez à jour le runtime de cette machine pour activer les réservations exclusives.",
+                style = MaterialTheme.typography.bodySmall,
             )
-            if (!node.exclusiveReservations)
-                Text("Mettez à jour le runtime de cette machine pour activer les réservations.")
-            state.agents.forEach { agent ->
-                Toggle("Autoriser ${agent.name}", agent.id in exclusiveAgents) {
-                    if (!state.busy)
-                        exclusiveAgents =
-                            if (it) exclusiveAgents + agent.id else exclusiveAgents - agent.id
-                }
-            }
-        }
         Toggle("Accepter de nouveaux travaux", accepting, { if (!state.busy) accepting = it })
     }
 }

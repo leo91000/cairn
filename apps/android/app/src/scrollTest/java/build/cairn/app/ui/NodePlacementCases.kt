@@ -19,6 +19,9 @@ import org.junit.Test
 abstract class NodePlacementCases {
     protected open fun capture(name: String) {}
 
+    /** Lets [millis] of main-thread time pass, as the page's polling sees it. */
+    protected open fun elapse(millis: Long) = Thread.sleep(millis)
+
     @get:Rule val compose = createComposeRule()
 
     @Test fun suspendedChatTimelineShowsAStaticNoticeInsteadOfWorking() = suspendedTimeline(true)
@@ -404,6 +407,7 @@ abstract class NodePlacementCases {
             var revoked = false
             var configured = false
             var granted = false
+            var enrolled = false
             var cleaned = false
             server.dispatcher =
                 object : Dispatcher() {
@@ -418,8 +422,10 @@ abstract class NodePlacementCases {
                         }
                         val body =
                             when {
-                                path == "/api/installations/fixture/api/nodes/enrollments" ->
+                                path == "/api/installations/fixture/api/nodes/enrollments" -> {
+                                    enrolled = true
                                     """{"code":"fixture-enrollment","expiresAt":4102444800000,"installCommand":"curl https://fixture.invalid/install | bash"}"""
+                                }
                                 path == "/api/installations/fixture/api/nodes/node/revoke" -> {
                                     revoked = true
                                     "{}"
@@ -429,7 +435,7 @@ abstract class NodePlacementCases {
                                     "{}"
                                 }
                                 path == "/api/installations/fixture/api/nodes/settings" -> "{}"
-                                path == "/api/installations/fixture/api/nodes/node/agents" -> {
+                                path == "/api/installations/fixture/api/nodes/fresh/agents" -> {
                                     granted = true
                                     "{}"
                                 }
@@ -439,9 +445,9 @@ abstract class NodePlacementCases {
                                     """{"freedMiB":2048,"failed":0}"""
                                 }
                                 path == "/api/installations/fixture/api/nodes" ->
-                                    """[{"id":"node","name":"Serveur test","status":"${if (revoked) "revoked" else "online"}","revoked":$revoked,"accepting":true,"limits":{"cpu":4,"memoryMiB":8192,"diskMiB":65536},"agents":${if (granted) """[{"id":"agent","name":"Agent test"}]""" else "[]"},"staleDisks":{"count":${if (cleaned) 0 else 1},"diskMiB":2048}}]"""
+                                    """[{"id":"node","name":"Serveur test","status":"${if (revoked) "revoked" else "online"}","revoked":$revoked,"accepting":true,"limits":{"cpu":4,"memoryMiB":8192,"diskMiB":65536},"agents":[],"exclusiveAgents":[],"staleDisks":{"count":${if (cleaned) 0 else 1},"diskMiB":2048}}${if (enrolled) """,{"id":"fresh","name":"Nouvelle node","status":"online","accepting":true,"agents":${if (granted) """[{"id":"agent","name":"Agent test"}]""" else "[]"}}""" else ""}]"""
                                 path == "/api/installations/fixture/api/agents" ->
-                                    """[{"id":"agent","name":"Agent test"}]"""
+                                    """[{"id":"agent","name":"Agent test"},{"id":"main","name":"Agent global","access":{"nodes":null}}]"""
                                 path == "/api/installations" -> beaconInstallationsFixture()
                                 path == "/api/account/session" -> beaconAccountFixture("fixture")
                                 path == "/api/installations/fixture/api/overview" -> "{}"
@@ -519,37 +525,11 @@ abstract class NodePlacementCases {
                     .jsonPrimitive
                     .int,
             )
-            compose.onNodeWithText("Choisir les agents").performScrollTo().performClick()
-            compose.waitUntil(10000) {
-                compose.onAllNodesWithText("Agent test").fetchSemanticsNodes().isNotEmpty()
-            }
-            // A previous save can close its sheet before releasing the global busy state.
-            compose.waitUntil(10000) {
-                compose
-                    .onAllNodes(hasText("Enregistrer") and isEnabled())
-                    .fetchSemanticsNodes()
-                    .isNotEmpty()
-            }
-            compose.onNodeWithText("Agent test").performClick()
-            compose.onNodeWithText("Enregistrer").assertIsEnabled()
-            compose.onNodeWithText("Enregistrer").performClick()
-            compose.waitUntil(10000) {
-                writes.any { it.first == "/api/installations/fixture/api/nodes/node/agents" } &&
-                    compose
-                        .onAllNodesWithText("Utilisée par Agent test")
-                        .fetchSemanticsNodes()
-                        .isNotEmpty()
-            }
-            assertEquals(
-                "agent",
-                writes
-                    .first { it.first == "/api/installations/fixture/api/nodes/node/agents" }
-                    .second["agentIds"]!!
-                    .jsonArray
-                    .single()
-                    .jsonPrimitive
-                    .content,
-            )
+            // Agent access is read-only here: it is set on each agent's page.
+            compose.onNodeWithText("Choisir les agents").assertDoesNotExist()
+            compose.onNodeWithText("Aucun agent ne peut exécuter ici.").assertExists()
+            compose.onNodeWithText("Aucun agent ne peut la réserver en exclusivité.").assertExists()
+            compose.onNodeWithText("Gérer l’accès depuis les agents ›").assertExists()
             compose.onNodeWithText("Anciens disques : 2 Gio (1 conversation)").assertExists()
             compose.onNodeWithText("Libérer").performScrollTo().performClick()
             compose.waitUntil(10000) {
@@ -568,21 +548,6 @@ abstract class NodePlacementCases {
                         .fetchSemanticsNodes()
                         .isEmpty()
             }
-            compose.onNodeWithText("Ajouter une machine").performScrollTo().performClick()
-            compose.onNodeWithText("Nom de la machine").performTextInput("Nouvelle node")
-            compose.onNodeWithText("Créer un code d’inscription").performScrollTo().performClick()
-            compose.waitUntil(10000) {
-                compose.onAllNodesWithText("fixture-enrollment").fetchSemanticsNodes().isNotEmpty()
-            }
-            assertEquals(
-                "Nouvelle node",
-                writes
-                    .first { it.first == "/api/installations/fixture/api/nodes/enrollments" }
-                    .second["name"]
-                    ?.jsonPrimitive
-                    ?.content,
-            )
-            compose.onNodeWithText("Masquer").performScrollTo().performClick()
             compose
                 .onNodeWithText("Avancé : synchronisation et délais")
                 .performScrollTo()
@@ -611,7 +576,7 @@ abstract class NodePlacementCases {
             compose.onNodeWithText("Configurer", substring = false).performScrollTo().performClick()
             compose.onNodeWithText("Budget CPU partagé").performTextReplacement("3")
             compose.onNodeWithText("Slots d’exécution").performTextReplacement("12")
-            compose.onNodeWithText("Autoriser Agent test").performScrollTo().performClick()
+            compose.onNodeWithText("Autoriser Agent test").assertDoesNotExist()
             compose.onNodeWithText("Enregistrer").performClick()
             compose.waitUntil(10000) {
                 writes.any { it.first == "/api/installations/fixture/api/nodes/node" }
@@ -625,15 +590,10 @@ abstract class NodePlacementCases {
                     .jsonPrimitive
                     .int,
             )
-            assertEquals(
-                "agent",
-                writes
-                    .first { it.first == "/api/installations/fixture/api/nodes/node" }
-                    .second["exclusiveAgents"]!!
-                    .jsonArray
-                    .single()
-                    .jsonPrimitive
-                    .content,
+            // Exclusive grants stay with the agents: the node never sends them.
+            assertFalse(
+                "exclusiveAgents" in
+                    writes.first { it.first == "/api/installations/fixture/api/nodes/node" }.second
             )
             compose.onNodeWithText("Révoquer", substring = false).performScrollTo().performClick()
             compose.waitUntil(10000) {
@@ -658,6 +618,63 @@ abstract class NodePlacementCases {
             }
             assertTrue(
                 writes.any { it.first == "/api/installations/fixture/api/nodes/node/revoke" }
+            )
+            compose.onNodeWithText("Ajouter une machine").performScrollTo().performClick()
+            compose.onNodeWithText("Nom de la machine").performTextInput("Nouvelle node")
+            compose.onNodeWithText("Créer un code d’inscription").performScrollTo().performClick()
+            compose.waitUntil(10000) {
+                compose.onAllNodesWithText("fixture-enrollment").fetchSemanticsNodes().isNotEmpty()
+            }
+            assertEquals(
+                "Nouvelle node",
+                writes
+                    .first { it.first == "/api/installations/fixture/api/nodes/enrollments" }
+                    .second["name"]
+                    ?.jsonPrimitive
+                    ?.content,
+            )
+            // Once the machine connects, the last step asks who may use it, nothing pre-checked
+            // except agents already allowed on every node.
+            // The page polls every 10 seconds.
+            repeat(15) {
+                if (
+                    compose
+                        .onAllNodesWithText("Qui peut utiliser « Nouvelle node » ?")
+                        .fetchSemanticsNodes()
+                        .isEmpty()
+                ) {
+                    compose.mainClock.advanceTimeBy(2_000)
+                    elapse(2_000)
+                    compose.waitForIdle()
+                }
+            }
+            compose.waitUntil(10000) {
+                compose
+                    .onAllNodesWithText("Qui peut utiliser « Nouvelle node » ?")
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
+            }
+            capture("first-agents")
+            compose.onNodeWithText("Autorisé sur toutes les nodes").assertExists()
+            compose.onNodeWithText("Plus tard").assertExists()
+            compose.onNodeWithText("Agent test").performScrollTo().performClick()
+            compose.onNodeWithText("Terminer").performScrollTo().performClick()
+            compose.waitUntil(10000) {
+                writes.any { it.first == "/api/installations/fixture/api/nodes/fresh/agents" } &&
+                    compose
+                        .onAllNodesWithText("Qui peut utiliser « Nouvelle node » ?")
+                        .fetchSemanticsNodes()
+                        .isEmpty()
+            }
+            assertEquals(
+                "agent",
+                writes
+                    .first { it.first == "/api/installations/fixture/api/nodes/fresh/agents" }
+                    .second["agentIds"]!!
+                    .jsonArray
+                    .single()
+                    .jsonPrimitive
+                    .content,
             )
         }
     }

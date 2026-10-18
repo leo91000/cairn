@@ -126,7 +126,8 @@ data class NodeConfiguration(
     val tags: List<String>,
     val limits: NodeResources,
     val slots: Int = 4,
-    val exclusiveAgents: List<String>? = null,
+    // No exclusiveAgents: exclusive reservations are granted on each agent's page, and the server
+    // keeps them when the key is omitted.
 )
 
 @Serializable

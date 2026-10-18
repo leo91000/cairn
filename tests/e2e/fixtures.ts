@@ -361,3 +361,38 @@ export async function expectChatReady(page: Page) {
   if (mobile)
     await page.getByRole('button', { name: 'Close dialog', exact: true }).click()
 }
+
+// The agent page: sections open from its navigation, on phones through the section list.
+export async function openAgentSection(page: Page, name: string) {
+  const heading = page.getByRole('heading', { name, exact: true, level: 2 })
+  // Phones hide the section list while a section is open.
+  await expect(page.locator('nav[aria-label="Agent sections"]')).toBeAttached()
+  if (await heading.isVisible())
+    return
+  const list = page.getByRole('link', { name: 'All settings', exact: true })
+  if (await list.isVisible())
+    await list.click()
+  const pattern = new RegExp(`^${name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`)
+  await page.getByRole('navigation', { name: 'Agent sections' }).getByRole('link', { name: pattern }).click()
+  await expect(heading).toBeFocused()
+}
+
+// Creates the agent drafted on /agents/new and waits for its own page.
+export async function createAgent(page: Page) {
+  await page.getByRole('button', { name: 'Create agent', exact: true }).click()
+  await expect(page).toHaveURL(/\/agents\/[0-9a-f-]{36}$/)
+  return page.url().split('/').at(-1)!
+}
+
+// Saves the agent page; `review` confirms the review dialog that powers and secrets require.
+export async function saveAgent(page: Page, review = false) {
+  const bar = page.getByRole('region', { name: 'Unsaved changes' })
+  await bar.getByRole('button', { name: 'Save', exact: true }).click()
+  if (review) {
+    const dialog = page.getByRole('dialog', { name: 'Review before saving' })
+    await dialog.getByRole('button', { name: 'Save', exact: true }).click()
+    await expect(dialog).toHaveCount(0)
+  }
+
+  await expect(bar).toHaveCount(0)
+}

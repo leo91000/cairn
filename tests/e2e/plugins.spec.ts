@@ -2,6 +2,7 @@ import type { Route } from '@playwright/test'
 import { Buffer } from 'node:buffer'
 import {
   expect,
+  openAgentSection,
   signIn,
   test,
   useRelayForHttpMocks,
@@ -167,6 +168,23 @@ test('Discord bots are set up through the package’s own form and keep the toke
   await editor.getByRole('button', { name: 'Save bot' }).click()
   await expect(bot.getByText('1 person · only listed people')).toBeVisible()
   expect((await workspace.api('/api/plugins')).connections[0].settings.channelName).toBe('support')
+
+  // The agent's page lists the delegation read-only; changing its access offers to reapprove it.
+  const botId = (await workspace.api('/api/plugins')).connections[0].id
+  await page.goto(workspacePath(`/agents/${helper.id}?section=plugins`))
+  const delegation = page.getByRole('region', { name: 'Answers as this agent' })
+  await expect(delegation).toContainText('Answers as this agent on #support on Acme')
+  await expect(delegation.getByText('Set on the instance', { exact: true })).toBeVisible()
+  await openAgentSection(page, 'Skills')
+  await page.getByRole('group', { name: 'Skills access' }).getByRole('button', { name: 'All, including future', exact: true }).click()
+  await page.getByRole('region', { name: 'Unsaved changes' }).getByRole('button', { name: 'Save', exact: true }).click()
+  const review = page.getByRole('dialog', { name: 'Review before saving' })
+  await expect(review.getByRole('checkbox', { name: /Reapprove the new access for #support on Acme/ })).toBeChecked()
+  const saving = page.waitForRequest(request => request.method() === 'PUT' && new URL(request.url()).pathname.endsWith(`/agents/${helper.id}`))
+  await review.getByRole('button', { name: 'Save', exact: true }).click()
+  expect((await saving).postDataJSON().reapproveDelegations).toEqual([botId])
+  await expect(review).toHaveCount(0)
+  await page.goto(workspacePath('/plugins/discord'))
 
   await bot.getByRole('button', { name: 'Delete #support on Acme' }).click()
   await page.getByRole('dialog').getByRole('button', { name: 'Delete bot' }).click()

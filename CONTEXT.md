@@ -129,9 +129,10 @@ du propriétaire et aux permissions d’agent qu’il a approuvées.
 
 **Instance de plugin** :
 Une configuration d’un plugin par le propriétaire, par exemple un bot Discord ou un
-compte de service 1Password : ses réglages, ses secrets chiffrés, les agents autorisés
-à utiliser ce que le plugin leur apporte et, s’il répond à des personnes, sa
-délégation externe. Aucun agent n’est autorisé par défaut.
+compte de service 1Password : ses réglages, ses secrets chiffrés et, s’il répond à
+des personnes, sa délégation externe. Les agents autorisés à utiliser ce que le
+plugin leur apporte se choisissent sur la page de chaque agent. Aucun agent n’est
+autorisé par défaut.
 _Avoid_ : connexion (réservé aux comptes des agents de code et à GitHub)
 
 **Contribution d’un plugin** :

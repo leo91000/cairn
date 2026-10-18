@@ -34,8 +34,9 @@ const val MAIN_AGENT_ID = "00000000-0000-4000-8000-000000000001"
 
 @Serializable
 data class AccessPolicy(
+    /** Nodes its conversations may run on; null means every node, including future ones. */
     val nodes: List<String>? = listOf(LOCAL_NODE_ID),
-    /** Largest resources the agent may request per conversation; null leaves only node ceilings. */
+    /** Projects the agent may open; null means every project, including future ones. */
     val projects: List<String>? = null,
     val skills: List<String>? = null,
     val mcps: List<String>? = null,
@@ -43,6 +44,14 @@ data class AccessPolicy(
     val installation: Boolean = false,
     val github: Boolean = true,
     val sandbox: String = "yolo",
+    /**
+     * Nodes on which the agent may suspend every other conversation during intensive work. Only
+     * effective where it may also run. A live grant: it applies immediately, even in running
+     * conversations.
+     */
+    val exclusiveNodes: List<String> = emptyList(),
+    /** Plugin instances (e.g. 1Password service accounts) whose commands and tools it gets. */
+    val plugins: List<String> = emptyList(),
 )
 
 @Serializable
@@ -65,6 +74,8 @@ data class Agent(
     val access: AccessPolicy = AccessPolicy(),
     val provider: String = "codex",
     val avatar: AgentPortrait? = null,
+    /** Changes on every save; sent back so a stale editor cannot overwrite newer access. */
+    val revision: String = "",
 )
 
 @Serializable

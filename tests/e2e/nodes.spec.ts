@@ -3,11 +3,14 @@ import {
   signIn as authenticateWorkspace,
   expect,
   test,
+  useRelayForHttpMocks,
   workspacePath,
 } from './fixtures'
 
 test('registers, configures and revokes a node through the owner interface', async ({ page, workspace }) => {
   test.setTimeout(60000)
+  // Requests are observed below, so they must go through HTTP.
+  await useRelayForHttpMocks(page)
   await page.goto(workspacePath('/'))
   await authenticateWorkspace(page)
   await expect(page.locator('.shell')).toBeVisible({ timeout: 30000 })
@@ -36,16 +39,24 @@ test('registers, configures and revokes a node through the owner interface', asy
     },
   })
   expect(response.ok()).toBe(true)
-  await page.reload()
+  // Once the machine connects, the last step asks who may use it; nothing is preselected.
+  const grant = page.getByRole('dialog', { name: 'Who can use “Browser Linux”?' })
+  await expect(grant).toBeVisible({ timeout: 20000 })
+  await expect(grant).toContainText('You can change this later on each agent’s page.')
+  await expect(grant.getByRole('checkbox', { name: 'Main agent', exact: true })).not.toBeChecked()
+  await page.screenshot({ path: 'test-results/nodes-enrollment-grant.png' })
+  await grant.getByRole('checkbox', { name: 'Main agent', exact: true }).check()
+  await grant.getByRole('button', { name: 'Finish', exact: true }).click()
+  await expect(grant).toHaveCount(0)
   const node = page.getByRole('article').filter({ has: page.getByRole('heading', { name: 'Browser Linux' }) })
   await expect(node).toContainText('online')
-  await expect(node).toContainText('No agent can use this machine yet.')
-  await node.getByRole('button', { name: 'Choose agents' }).click()
-  await page.getByRole('dialog').getByRole('checkbox').first().check()
-  await page.getByRole('dialog').getByRole('button', { name: 'Save access' }).click()
-  await expect(page.getByRole('dialog')).toHaveCount(0)
-  await expect(node).toContainText('Used by')
+  await expect(node).toContainText('1 agent can run here: Main agent')
   await expect(node).not.toContainText('No agent can use this machine yet.')
+  await expect(node.getByRole('button', { name: /Choose agents|^Agents$/ })).toHaveCount(0)
+  await expect(node.getByRole('link', { name: 'Manage access from the agents ›' })).toBeVisible()
+  // It asks only once: the next refresh leaves the machine alone.
+  await page.waitForResponse(reply => new URL(reply.url()).pathname.endsWith('/nodes') && reply.request().method() === 'GET', { timeout: 15000 })
+  await expect(page.getByRole('dialog')).toHaveCount(0)
   await page.screenshot({ path: 'test-results/nodes-desktop.png' })
   await page.emulateMedia({ colorScheme: 'dark' })
   await page.screenshot({ path: 'test-results/nodes-desktop-dark.png' })
@@ -59,24 +70,27 @@ test('registers, configures and revokes a node through the owner interface', asy
   await page.keyboard.press('Escape')
   await node.getByRole('button', { name: 'Configure' }).click()
   const dialog = page.getByRole('dialog')
+  // Agent access is shown read-only; it is granted on each agent's page.
+  await expect(dialog.getByRole('group', { name: 'Exclusive reservations' })).toHaveCount(0)
+  await expect(dialog.getByRole('region', { name: 'Agents' })).toContainText('1 agent can run here: Main agent')
+  const accept = await dialog.getByRole('checkbox', { name: 'Accept new work' }).boundingBox()
+  const acceptLabel = await dialog.locator('label').filter({ hasText: 'Accept new work' }).boundingBox()
+  expect(Math.abs(accept!.y + accept!.height / 2 - (acceptLabel!.y + acceptLabel!.height / 2))).toBeLessThan(2)
+  expect(accept!.width).toBeLessThan(24)
   await dialog.getByLabel('Shared CPU budget').fill('4')
   await expect(dialog.getByLabel('Shared disk budget (GiB)')).toHaveAttribute('max', '128')
   await dialog.getByLabel('Shared disk budget (GiB)').fill('96')
   await dialog.getByLabel('Execution slots').fill('12')
   await dialog.getByLabel('Tags, separated by commas').fill('fast, linux')
-  const exclusive = dialog.getByRole('group', { name: 'Exclusive reservations' })
-  await exclusive.getByRole('checkbox').first().check()
+  const configuring = page.waitForRequest(request => request.method() === 'PUT' && /\/nodes\/[^/]+$/.test(new URL(request.url()).pathname))
   await dialog.getByRole('button', { name: 'Save', exact: true }).click()
   await expect(dialog).toHaveCount(0)
+  expect((await configuring).postDataJSON()).not.toHaveProperty('exclusiveAgents')
   await expect(node).toContainText('4 cores')
   await expect(node).toContainText('fast · linux')
   await expect(node).toContainText('12 of 12')
   const configured = (await workspace.api('/api/nodes')).find((value: { name: string }) => value.name === 'Browser Linux')
   expect(configured.limits.diskMiB).toBe(98304)
-  expect(configured.exclusiveAgents).toHaveLength(1)
-  await node.getByRole('button', { name: 'Configure' }).click()
-  await expect(dialog.getByRole('group', { name: 'Exclusive reservations' }).getByRole('checkbox').first()).toBeChecked()
-  await page.keyboard.press('Escape')
   await page.getByText('Advanced: S3 synchronization and timeouts').click()
   await page.getByRole('button', { name: 'Configure synchronization' }).click()
   await dialog.getByLabel('Synchronization target (seconds)').fill('45')

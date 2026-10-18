@@ -7,7 +7,7 @@ use crate::{
     http::{App, Input},
     mcp_client::{LEGACY, MODERN, VERSIONS},
     rpc::jsonrpc::{Frame, Message},
-    service::Service,
+    service::{AgentEditor, Service},
     store::Db,
     validation::{parse, text},
 };
@@ -693,14 +693,18 @@ pub(crate) async fn invoke(
         "list_agents" => Ok(s.store.list("agents").await?.into()),
         "list_projects" => Ok(s.store.list("projects").await?.into()),
         "list_tasks" => Ok(s.store.list("tasks").await?.into()),
-        "save_agent" => s.agent_authorized(args, None, authorize).await,
+        "save_agent" => {
+            s.agent_authorized(args, None, AgentEditor::Installation, authorize)
+                .await
+        }
         "save_project" => s.project_authorized(args, None, authorize).await,
         "create_task" => s.task(args, None).await,
         "update_agent" => {
             let id = text(&args, "id");
             let mut agent = s.get("agents", id).await?;
             crate::store::merge(&mut agent, &args["agent"]);
-            s.agent_authorized(agent, Some(id), authorize).await
+            s.agent_authorized(agent, Some(id), AgentEditor::Installation, authorize)
+                .await
         }
         "update_task" => s.task(args["task"].clone(), Some(text(&args, "id"))).await,
         "delete_agent" => {

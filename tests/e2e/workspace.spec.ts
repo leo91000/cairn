@@ -1,5 +1,6 @@
 import {
   signIn as authenticateWorkspace,
+  createAgent,
   expect,
   test,
   useRelayForHttpMocks,
@@ -37,13 +38,10 @@ test('sign in, author skills, schedule work, inspect results, and sign out', asy
   await authenticateWorkspace(page)
   await page.getByRole('link', { name: 'Atelier', exact: true }).click()
   await page.getByRole('link', { name: 'Agents', exact: true }).click()
-  await page.getByRole('button', { name: 'New agent', exact: true }).click()
-  await page
-    .getByRole('dialog')
-    .getByLabel('Name', { exact: true })
-    .fill('Release engineer')
-  await page.getByRole('button', { name: 'Save agent' }).click()
-  await expect(page.getByRole('dialog')).toHaveCount(0)
+  await page.getByRole('link', { name: 'New agent', exact: true }).click()
+  await page.getByLabel('Name', { exact: true }).fill('Release engineer')
+  await createAgent(page)
+  await page.getByRole('link', { name: 'Back to agents' }).click()
   await page.getByRole('link', { name: 'Projects', exact: true }).click()
   await page.getByRole('button', { name: 'Add project', exact: true }).click()
   await page

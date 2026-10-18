@@ -32,6 +32,7 @@ export function workspaceRouter(base = '/') {
         component: () => import('./views/Resources.vue'),
         props: { kind: 'agents' },
       },
+      { path: '/agents/:id', component: () => import('./views/AgentPage.vue') },
       {
         path: '/projects',
         component: () => import('./views/Resources.vue'),

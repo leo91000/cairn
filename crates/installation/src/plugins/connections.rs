@@ -606,6 +606,8 @@ pub async fn save(
     }
     let connection_id = existing.map_or_else(id, str::to_owned);
     uuid(&connection_id)?;
+    // Agents are granted from their own page; clients that omit the list keep it.
+    let keep_agents = existing.is_some() && input.get("agentIds").is_none();
     let agent_ids = agent_grants(&manifest, &input["agentIds"])?;
     let saved = match existing {
         Some(_) => secret_values(s, &connection_id).await?,
@@ -666,52 +668,162 @@ pub async fn save(
         updated_at: now(),
     };
     let updating = existing.is_some();
-    let result = s.store.transaction(move |db| {
-        if let Some(current) = db.get(KIND, &connection.id)? {
-            if current["pluginId"] != connection.plugin_id { return Err(Error::not_found("Plugin connection not found.")); }
-        } else if updating {
-            return Err(Error::not_found("Plugin connection not found."));
-        }
-        if !updating && db.list(KIND)?.len() >= 64 {
-            return Err(Error::bad("At most 64 plugin instances can exist on this installation."));
-        }
-        for agent in &connection.agent_ids {
-            if db.get("agents", agent)?.is_none() {
-                return Err(Error::bad("A selected agent no longer exists."));
+    let result = s
+        .store
+        .transaction(move |db| {
+            if let Some(current) = db.get(KIND, &connection.id)? {
+                if current["pluginId"] != connection.plugin_id {
+                    return Err(Error::not_found("Plugin connection not found."));
+                }
+            } else if updating {
+                return Err(Error::not_found("Plugin connection not found."));
             }
-        }
-        if !connection.agent_id.is_empty() {
-            let agent = db.get("agents", &connection.agent_id)?.ok_or_else(|| Error::bad("Agent not found."))?;
-            let access = policy(&agent);
-            let projects = connection.project_id.as_ref().map_or_else(|| json!([]), |id| json!([id]));
-            // External people never receive an installation-wide agent or project scope.
-            if access["projects"] != projects || access["installation"] == true {
-                return Err(Error::bad("Choose a dedicated agent restricted to the selected project (or no projects), with installation access disabled."));
+            if !updating && db.list(KIND)?.len() >= 64 {
+                return Err(Error::bad(
+                    "At most 64 plugin instances can exist on this installation.",
+                ));
             }
-            if let Some(project) = &connection.project_id
-                && db.get("projects", project)?.is_none()
-            { return Err(Error::bad("Project not found.")); }
-            if connection.access_mode == AccessMode::Everyone {
-                public_safe(db, &connection.agent_id, &access)?;
-            }
-            connection.granted_access = access;
-        }
-        if connection.access_mode != AccessMode::Requests {
-            for request in db.list("plugin-requests")? {
-                if request["connectionId"] == connection.id && request["status"] == "pending" {
-                    db.remove("plugin-requests", text(&request, "id"))?;
+            for agent in &connection.agent_ids {
+                if db.get("agents", agent)?.is_none() {
+                    return Err(Error::bad("A selected agent no longer exists."));
                 }
             }
-        }
-        if let Some(encrypted) = encrypted { db.set(&format!("mcp-secret:{}", credential_key(&connection.id)), &encrypted, None)?; }
-        if let Some(encrypted) = encrypted_secrets { db.set(&format!("mcp-secret:{}", secrets_key(&connection.id)), &encrypted, None)?; }
-        let value = serde_json::to_value(&connection)?;
-        db.put(KIND, &value)?;
-        db.audit("plugin.connection.saved", &json!({ "id": connection.id, "plugin": connection.plugin_id }))?;
-        Ok(value)
-    }).await?;
+            if !connection.agent_id.is_empty() {
+                let agent = db
+                    .get("agents", &connection.agent_id)?
+                    .ok_or_else(|| Error::bad("Agent not found."))?;
+                let access = policy(&agent);
+                delegation_rules(db, &connection, &access)?;
+                connection.granted_access = access;
+            }
+            if connection.access_mode != AccessMode::Requests {
+                for request in db.list("plugin-requests")? {
+                    if request["connectionId"] == connection.id && request["status"] == "pending" {
+                        db.remove("plugin-requests", text(&request, "id"))?;
+                    }
+                }
+            }
+            if let Some(encrypted) = encrypted {
+                db.set(
+                    &format!("mcp-secret:{}", credential_key(&connection.id)),
+                    &encrypted,
+                    None,
+                )?;
+            }
+            if let Some(encrypted) = encrypted_secrets {
+                db.set(
+                    &format!("mcp-secret:{}", secrets_key(&connection.id)),
+                    &encrypted,
+                    None,
+                )?;
+            }
+            if !keep_agents {
+                crate::agent_grants::set_instance_agents(
+                    db,
+                    &connection.id,
+                    &connection.agent_ids,
+                )?;
+            } else if let Some(current) = db.get(KIND, &connection.id)? {
+                connection.agent_ids =
+                    serde_json::from_value(current["agentIds"].clone()).unwrap_or_default();
+            }
+            let value = serde_json::to_value(&connection)?;
+            db.put(KIND, &value)?;
+            db.audit(
+                "plugin.connection.saved",
+                &json!({ "id": connection.id, "plugin": connection.plugin_id }),
+            )?;
+            Ok(value)
+        })
+        .await?;
     s.plugins.changed.notify_one();
     Ok(result)
+}
+
+/// What external people may reach through a delegation: one project at most, never
+/// installation access, and a read-only agent without grants when anyone may write.
+fn delegation_rules(db: &Db<'_>, connection: &Connection, access: &Value) -> Result<()> {
+    let projects = connection
+        .project_id
+        .as_ref()
+        .map_or_else(|| json!([]), |id| json!([id]));
+    // External people never receive an installation-wide agent or project scope.
+    if access["projects"] != projects || access["installation"] == true {
+        return Err(Error::bad(
+            "Choose a dedicated agent restricted to the selected project (or no projects), with installation access disabled.",
+        ));
+    }
+    if let Some(project) = &connection.project_id
+        && db.get("projects", project)?.is_none()
+    {
+        return Err(Error::bad("Project not found."));
+    }
+    if connection.access_mode == AccessMode::Everyone {
+        public_safe(db, &connection.agent_id, access)?;
+    }
+    Ok(())
+}
+
+/// Loads an instance by ID, whatever its plugin.
+pub(crate) async fn load(s: &Service, connection_id: &str) -> Result<Connection> {
+    uuid(connection_id)?;
+    let value = s.get(KIND, connection_id).await?;
+    Ok(serde_json::from_value(value)?)
+}
+
+/// Approves the agent's saved access for a delegation that answers as this agent,
+/// as saving the instance again would. Runs in the agent's save transaction.
+pub(crate) fn reapprove(db: &Db<'_>, connection_id: &str, agent: &Value) -> Result<()> {
+    let value = db
+        .get(KIND, connection_id)?
+        .ok_or_else(|| Error::bad("A plugin delegation to reapprove no longer exists."))?;
+    let mut connection: Connection = serde_json::from_value(value)?;
+    if connection.agent_id != text(agent, "id") {
+        return Err(Error::bad(
+            "This plugin delegation answers as another agent.",
+        ));
+    }
+    let access = policy(agent);
+    delegation_rules(db, &connection, &access).map_err(|error| {
+        Error::bad(format!(
+            "{} cannot answer as this agent with the new access: {error}",
+            connection.name
+        ))
+    })?;
+    connection.granted_access = access;
+    connection.revision = id();
+    connection.updated_at = now();
+    db.put(KIND, &serde_json::to_value(&connection)?)?;
+    db.audit(
+        "plugin.connection.reapproved",
+        &json!({ "id": connection.id, "agentId": connection.agent_id }),
+    )
+}
+
+/// Delegations answering as an agent and how an edited agent would affect them:
+/// `suspended` when its access no longer matches the approved one, and the reason it
+/// could not be reapproved, if any.
+pub(crate) fn delegation_effects(db: &Db<'_>, agent_id: &str, agent: &Value) -> Result<Value> {
+    let access = policy(agent);
+    let mut effects = Vec::new();
+    for value in db.list(KIND)? {
+        if value["agentId"] != agent_id {
+            continue;
+        }
+        let connection: Connection = serde_json::from_value(value)?;
+        let blocked = delegation_rules(db, &connection, &access)
+            .err()
+            .map(|error| error.to_string());
+        effects.push(json!({
+            "id": connection.id,
+            "pluginId": connection.plugin_id,
+            "name": connection.name,
+            "enabled": connection.enabled,
+            "suspended": access != connection.granted_access,
+            "blocked": blocked,
+        }));
+    }
+    Ok(effects.into())
 }
 
 /// Loads a connection and checks it belongs to the plugin named in the route.
@@ -730,6 +842,7 @@ pub async fn remove(s: &Service, plugin_id: &str, connection_id: &str) -> Result
     s.store
         .transaction(move |db| {
             db.remove(KIND, &connection_id)?;
+            crate::agent_grants::forget_resource(db, crate::agent_grants::PLUGINS, &connection_id)?;
             db.delete(&format!("mcp-secret:{}", credential_key(&connection_id)))?;
             db.delete(&format!("mcp-secret:{}", secrets_key(&connection_id)))?;
             db.delete(&format!("plugin-status:{connection_id}"))?;

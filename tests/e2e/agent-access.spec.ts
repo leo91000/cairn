@@ -1,40 +1,89 @@
+import type { Page } from '@playwright/test'
+import type { Workspace } from './fixtures'
 import {
   signIn as authenticateWorkspace,
+  createAgent,
   expect,
+  expectSingleScroll,
   expectUncovered,
+  openAgentSection,
+  saveAgent,
   test,
   useRelayForHttpMocks,
   workspacePath,
 } from './fixtures'
 
-test('agent access editor and task inheritance work on mobile in both themes', async ({ page }, testInfo) => {
+const MAIN_AGENT_ID = '00000000-0000-4000-8000-000000000001'
+
+async function signIn(page: Page) {
   await page.goto(workspacePath('/'))
   await authenticateWorkspace(page)
-  await expect(page.locator('.shell')).toBeVisible()
+  await expect(page.locator('.shell')).toBeVisible({ timeout: 30000 })
+}
+
+// Enrolls a machine through the node protocol; `exclusive` says whether its runtime can suspend others.
+async function enroll(page: Page, workspace: Workspace, name: string, exclusive: boolean) {
+  const invitation = await workspace.api('/api/nodes/enrollments', 'POST', { name })
+  const response = await page.request.post(`${workspace.installationUrl}/internal/nodes/enroll`, {
+    data: {
+      code: invitation.code,
+      name,
+      protocol: 1,
+      runtimeId: 'fixture',
+      capabilities: {
+        os: 'linux',
+        arch: 'x86_64',
+        kvm: true,
+        cpu: 8,
+        memoryMiB: 16384,
+        diskMiB: 65536,
+      },
+    },
+  })
+  expect(response.ok()).toBe(true)
+  const node = await response.json()
+  const heartbeat = await page.request.post(`${workspace.installationUrl}/internal/nodes/heartbeat`, {
+    headers: { authorization: `Bearer ${node.token}` },
+    data: { exclusiveReservations: exclusive },
+  })
+  expect(heartbeat.ok()).toBe(true)
+  return node.nodeId as string
+}
+
+test('an agent is created on its page and its access is inherited by missions on mobile in both themes', async ({ page }, testInfo) => {
+  await signIn(page)
   await page.goto(workspacePath('/agents'))
   await page.setViewportSize({ width: 390, height: 844 })
   await expect(page.getByRole('heading', { name: 'Main agent', exact: true })).toBeVisible()
-  await page.getByRole('button', { name: 'New agent', exact: true }).click()
-  const dialog = page.getByRole('dialog')
-  await dialog.getByLabel('Name', { exact: true }).fill('Scoped reviewer')
-  await dialog.getByLabel('All projects, including future projects').uncheck()
-  await dialog.getByLabel('Design system', { exact: true }).check()
-  await dialog.getByLabel('All available skills').uncheck()
-  await dialog.getByLabel('review', { exact: true }).check()
-  await expect(dialog.getByLabel('Shared GitHub connection')).not.toBeChecked()
-  await expect(dialog.getByLabel('Shared GitHub connection')).toBeDisabled()
-  const mode = dialog.getByRole('combobox', { name: 'Execution mode', exact: true })
-  await mode.click()
-  await page.getByRole('option', { name: 'Read only', exact: true }).click()
+  await page.getByRole('link', { name: 'New agent', exact: true }).click()
+  await expect(page).toHaveURL(/\/agents\/new\?section=identity$/)
+  await page.getByLabel('Name', { exact: true }).fill('Scoped reviewer')
+  await openAgentSection(page, 'Projects')
+  await page.getByRole('group', { name: 'Projects access' }).getByRole('button', { name: 'Choose', exact: true }).click()
+  await page.getByLabel('Design system', { exact: true }).check()
+  await openAgentSection(page, 'Skills')
+  await page.getByRole('group', { name: 'Skills access' }).getByRole('button', { name: 'Choose', exact: true }).click()
+  await page.getByLabel('review', { exact: true }).check()
+  await openAgentSection(page, 'GitHub')
+  await expect(page.getByRole('radio', { name: /Shared connection/ })).toBeDisabled()
+  await expect(page.getByRole('radio', { name: /No GitHub/ })).toBeChecked()
+  await openAgentSection(page, 'Execution mode')
+  await page.getByRole('radio', { name: /Read only/ }).check()
   for (const colorScheme of ['light', 'dark'] as const) {
     await page.emulateMedia({ colorScheme })
-    await dialog.locator('.agent-access-panel').scrollIntoViewIfNeeded()
-    await page.screenshot({ path: testInfo.outputPath(`agent-access-${colorScheme}.png`), animations: 'disabled' })
-    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
+    for (const width of [390, 320]) {
+      await page.setViewportSize({ width, height: 844 })
+      await expectSingleScroll(page)
+      await page.screenshot({ path: testInfo.outputPath(`agent-access-${colorScheme}-${width}.png`), animations: 'disabled' })
+    }
   }
 
-  await dialog.getByRole('button', { name: 'Save agent', exact: true }).click()
-  await expect(dialog).toHaveCount(0)
+  await page.setViewportSize({ width: 390, height: 844 })
+  const id = await createAgent(page)
+  await expect(page.getByRole('heading', { name: 'Scoped reviewer', level: 1 })).toBeVisible()
+  await page.getByRole('link', { name: 'Back to agents' }).click()
+  await expect(page.locator('article').filter({ hasText: 'Scoped reviewer' })).toContainText('1 project · 1 node')
+  await expect(page.locator(`a[href$="/agents/${id}"]`).first()).toBeVisible()
   await page.getByRole('link', { name: 'Missions', exact: true }).filter({ visible: true }).click()
   await page.getByRole('button', { name: 'New mission', exact: true }).click()
   await expect(page.getByRole('combobox', { name: 'Agent', exact: true })).toHaveValue('Main agent')
@@ -51,20 +100,19 @@ test('agent access editor and task inheritance work on mobile in both themes', a
   await expect(page.getByRole('heading', { name: 'Review the repository' })).toBeVisible()
 })
 
-for (const kind of ['agents', 'projects'] as const) {
+// Agents are created on their own page; see the agent retry journeys below.
+for (const kind of ['projects'] as const) {
   for (const failure of ['refresh', 'lost response'] as const) {
     test(`${kind} retry updates the same resource after ${failure}`, async ({ page, workspace }, testInfo) => {
       await useRelayForHttpMocks(page)
       await page.goto(workspacePath(`/${kind}`))
       await authenticateWorkspace(page)
-      const agent = kind === 'agents'
-      const label = agent ? 'agent' : 'project'
-      await page.getByRole('button', { name: agent ? 'New agent' : 'Add project', exact: true }).click()
+      const label = 'project'
+      await page.getByRole('button', { name: 'Add project', exact: true }).click()
       const dialog = page.getByRole('dialog')
       const name = `Retry ${kind} ${failure}`
       await dialog.getByLabel('Name', { exact: true }).fill(name)
-      if (!agent)
-        await dialog.getByLabel('Project directory').fill(workspace.projectPath)
+      await dialog.getByLabel('Project directory').fill(workspace.projectPath)
 
       const creations: string[] = []
       let rejectRefresh = false
@@ -118,7 +166,7 @@ for (const kind of ['agents', 'projects'] as const) {
       if (failure === 'refresh') {
         rejectUpdate = true
         await dialog.getByRole('button', { name: `Save ${label}`, exact: true }).click()
-        await expect(dialog.getByRole('alert')).toContainText(`${agent ? 'Agent' : 'Project'} saved, but the latest changes could not be saved. Update temporarily rejected`)
+        await expect(dialog.getByRole('alert')).toContainText(`Project saved, but the latest changes could not be saved. Update temporarily rejected`)
         await expectUncovered(dialog.getByRole('alert'))
         await page.screenshot({ path: testInfo.outputPath(`${kind}-update-mobile.png`), animations: 'disabled' })
         rejectUpdate = false
@@ -145,15 +193,68 @@ for (const kind of ['agents', 'projects'] as const) {
   }
 }
 
+for (const failure of ['refresh', 'lost response'] as const) {
+  test(`agent creation retry updates the same agent after ${failure}`, async ({ page, workspace }) => {
+    await useRelayForHttpMocks(page)
+    await page.goto(workspacePath('/agents/new'))
+    await authenticateWorkspace(page)
+    const name = `Retry agent ${failure}`
+    await page.getByLabel('Name', { exact: true }).fill(name)
+
+    const creations: string[] = []
+    let createdId = ''
+    let rejectRefresh = false
+    await page.route('**/api/agents', async (route) => {
+      const request = route.request()
+      if (request.method() === 'POST') {
+        creations.push(request.postData()!)
+        const response = await route.fetch()
+        createdId = (await response.json()).id
+        if (creations.length === 1 && failure === 'lost response') {
+          await route.abort('failed')
+          return
+        }
+
+        rejectRefresh = creations.length === 1 && failure === 'refresh'
+        await route.fulfill({ response })
+      }
+      else if (request.method() === 'GET' && rejectRefresh) {
+        await route.fulfill({ status: 400, json: { error: 'Resource list temporarily rejected' } })
+      }
+      else {
+        await route.continue()
+      }
+    })
+
+    await page.setViewportSize({ width: 390, height: 844 })
+    const bar = page.getByRole('region', { name: 'Unsaved changes' })
+    await bar.getByRole('button', { name: 'Create agent', exact: true }).click()
+    await expect(bar.getByRole('alert')).toContainText(failure === 'refresh' ? 'Agent saved, but the workspace could not be reloaded' : 'Could not confirm whether the agent was saved')
+    await expectUncovered(bar.getByRole('alert'))
+    rejectRefresh = false
+    await page.getByLabel('Name', { exact: true }).fill(`${name} edited`)
+    await bar.getByRole('button', { name: 'Create agent', exact: true }).click()
+    await expect(page).toHaveURL(new RegExp(`/agents/${createdId}$`))
+
+    const saved = (await workspace.api('/api/agents')).filter((item: { name: string }) => item.name.startsWith(name))
+    expect(saved).toHaveLength(1)
+    expect(saved[0]).toMatchObject({ id: createdId, name: `${name} edited` })
+    expect(creations).toHaveLength(failure === 'refresh' ? 1 : 2)
+    if (failure === 'lost response')
+      expect(creations[1]).toBe(creations[0])
+  })
+}
+
 test('a failed dedicated GitHub token keeps the created agent and retries only the connection and update', async ({ page, workspace }) => {
   await useRelayForHttpMocks(page)
-  await page.goto(workspacePath('/agents'))
+  await page.goto(workspacePath('/agents/new'))
   await authenticateWorkspace(page)
-  await page.getByRole('button', { name: 'New agent', exact: true }).click()
-  const dialog = page.getByRole('dialog')
-  await dialog.getByLabel('Name', { exact: true }).fill('Token retry agent')
-  await dialog.getByLabel('Shared GitHub connection').uncheck()
-  await dialog.getByLabel('Dedicated GitHub token').fill('fixture-token-not-a-secret')
+  await page.getByLabel('Name', { exact: true }).fill('Token retry agent')
+  await openAgentSection(page, 'Projects')
+  await page.getByRole('group', { name: 'Projects access' }).getByRole('button', { name: 'Choose', exact: true }).click()
+  await openAgentSection(page, 'GitHub')
+  await page.getByRole('radio', { name: /^Dedicated token/ }).check()
+  await page.getByLabel('GitHub token').fill('fixture-token-not-a-secret')
   let tokenAttempts = 0
   let creates = 0
   page.on('request', (request) => {
@@ -166,68 +267,163 @@ test('a failed dedicated GitHub token keeps the created agent and retries only t
       ? { status: 400, json: { error: 'GitHub connection rejected' } }
       : { json: { configured: true } })
   })
-  await dialog.getByRole('button', { name: 'Save agent', exact: true }).click()
-  await expect(dialog.getByRole('alert')).toContainText('Agent saved, but the GitHub connection could not be saved')
-  await expect(dialog.getByLabel('Dedicated GitHub token')).toHaveValue('fixture-token-not-a-secret')
-  await dialog.getByRole('button', { name: 'Save agent', exact: true }).click()
-  await expect(dialog).toHaveCount(0)
+  const bar = page.getByRole('region', { name: 'Unsaved changes' })
+  await bar.getByRole('button', { name: 'Create agent', exact: true }).click()
+  await expect(bar.getByRole('alert')).toContainText('Agent saved, but the GitHub connection could not be saved')
+  await expect(page.getByLabel('GitHub token')).toHaveValue('fixture-token-not-a-secret')
+  await bar.getByRole('button', { name: 'Create agent', exact: true }).click()
+  await expect(page).toHaveURL(/\/agents\/[0-9a-f-]{36}$/)
   expect(creates).toBe(1)
   expect(tokenAttempts).toBe(2)
   expect((await workspace.api('/api/agents')).filter((item: { name: string }) => item.name === 'Token retry agent')).toHaveLength(1)
 })
 
 test('agents start unlimited and retain an optional limit after saving', async ({ page, workspace }) => {
-  await page.goto(workspacePath('/'))
-  await authenticateWorkspace(page)
-  await expect(page.locator('.shell')).toBeVisible({ timeout: 30000 })
-  await page.goto(workspacePath('/agents'))
-  await page.getByRole('button', { name: 'New agent', exact: true }).click()
-  const dialog = page.getByRole('dialog')
-  await dialog.getByLabel('Name', { exact: true }).fill('Long running agent')
-  await expect(dialog.getByLabel('No time limit', { exact: true })).toBeChecked()
-  await expect(dialog.getByLabel('Time limit (minutes)')).toHaveCount(0)
-  await dialog.getByRole('button', { name: 'Save agent', exact: true }).click()
-  await expect(dialog).toHaveCount(0)
-  const saved = (await workspace.api('/api/agents')).find((agent: { name: string }) => agent.name === 'Long running agent')
+  await signIn(page)
+  await page.goto(workspacePath('/agents/new'))
+  await page.getByLabel('Name', { exact: true }).fill('Long running agent')
+  await openAgentSection(page, 'Limits')
+  await expect(page.getByLabel('No time limit', { exact: true })).toBeChecked()
+  await expect(page.getByLabel('Time limit (minutes)')).toHaveCount(0)
+  const id = await createAgent(page)
+  const saved = (await workspace.api('/api/agents')).find((agent: { id: string }) => agent.id === id)
   expect(saved.timeoutMinutes).toBe(0)
-  await page.getByRole('button', { name: 'Edit Long running agent', exact: true }).click()
-  await dialog.getByLabel('No time limit', { exact: true }).uncheck()
-  await dialog.getByLabel('Time limit (minutes)').fill('45')
-  await dialog.getByRole('button', { name: 'Save agent', exact: true }).click()
-  await expect(dialog).toHaveCount(0)
-  await page.getByRole('button', { name: 'Edit Long running agent', exact: true }).click()
-  await expect(dialog.getByLabel('Time limit (minutes)')).toHaveValue('45')
-  await dialog.getByLabel('No time limit', { exact: true }).check()
-  await dialog.getByRole('button', { name: 'Save agent', exact: true }).click()
-  await expect(dialog).toHaveCount(0)
-  expect((await workspace.api('/api/agents')).find((agent: { id: string }) => agent.id === saved.id).timeoutMinutes).toBe(0)
+  await openAgentSection(page, 'Limits')
+  await page.getByLabel('No time limit', { exact: true }).uncheck()
+  await page.getByLabel('Time limit (minutes)').fill('45')
+  await expect(page.getByRole('region', { name: 'Unsaved changes' })).toContainText('1 unsaved change')
+  await saveAgent(page)
+  await page.reload()
+  await openAgentSection(page, 'Limits')
+  await expect(page.getByLabel('Time limit (minutes)')).toHaveValue('45')
+  await page.getByLabel('No time limit', { exact: true }).check()
+  await saveAgent(page)
+  expect((await workspace.api('/api/agents')).find((agent: { id: string }) => agent.id === id).timeoutMinutes).toBe(0)
 })
 
-test('installation access is opt-in and can be enabled and revoked for any agent', async ({ page, workspace }) => {
-  await page.goto(workspacePath('/'))
-  await authenticateWorkspace(page)
-  await expect(page.locator('.shell')).toBeVisible()
-  await page.goto(workspacePath('/agents'))
-  await page.getByRole('button', { name: 'New agent', exact: true }).click()
-  const dialog = page.getByRole('dialog')
-  const access = dialog.getByLabel('Allow access to the current Cairn installation', { exact: true })
-  await dialog.getByLabel('Name', { exact: true }).fill('Installation helper')
-  await expect(access).not.toBeChecked()
-  await access.check()
-  await dialog.getByRole('button', { name: 'Save agent', exact: true }).click()
-  await expect(dialog).toHaveCount(0)
-  const agent = (await workspace.api('/api/agents')).find((agent: { name: string }) => agent.name === 'Installation helper')
+test('installation management is a reviewed power, and the main agent keeps its fixed access', async ({ page, workspace }, testInfo) => {
+  await signIn(page)
+  await page.goto(workspacePath('/agents/new'))
+  await page.getByLabel('Name', { exact: true }).fill('Installation helper')
+  await openAgentSection(page, 'Elevated rights')
+  const power = page.getByRole('switch', { name: 'Installation management', exact: true })
+  await expect(power).not.toBeChecked()
+  await power.check()
+  await page.getByRole('button', { name: 'Create agent', exact: true }).click()
+  const review = page.getByRole('dialog', { name: 'Review before saving' })
+  await expect(review).toContainText('Added: installation management.')
+  await expect(review.getByText('Power', { exact: true })).toBeVisible()
+  await review.getByRole('button', { name: 'Save', exact: true }).click()
+  await expect(page).toHaveURL(/\/agents\/[0-9a-f-]{36}$/)
+  const agent = (await workspace.api('/api/agents')).find((item: { name: string }) => item.name === 'Installation helper')
   expect(agent.access.installation).toBe(true)
-  await page.getByRole('button', { name: 'Edit Installation helper', exact: true }).click()
-  await expect(access).toBeChecked()
-  await access.uncheck()
-  await dialog.getByRole('button', { name: 'Save agent', exact: true }).click()
-  await expect(dialog).toHaveCount(0)
+  await openAgentSection(page, 'Elevated rights')
+  await expect(power).toBeChecked()
+  // Removing a power saves directly: nothing is interrupted.
+  await power.uncheck()
+  await saveAgent(page)
   expect((await workspace.api('/api/agents')).find((item: { id: string }) => item.id === agent.id).access.installation).toBe(false)
-  await page.getByRole('button', { name: 'Edit Main agent', exact: true }).click()
-  await expect(access).not.toBeChecked()
-  await access.check()
-  await dialog.getByRole('button', { name: 'Save agent', exact: true }).click()
-  await expect(dialog).toHaveCount(0)
-  expect((await workspace.api('/api/agents')).find((item: { name: string }) => item.name === 'Main agent').access.installation).toBe(true)
+
+  await page.goto(workspacePath(`/agents/${MAIN_AGENT_ID}`))
+  await expect(page.getByText('The main agent always has access to every project, skill, MCP connection and GitHub').filter({ visible: true })).toBeVisible()
+  for (const section of ['Projects', 'Skills', 'MCP & tools', 'GitHub']) {
+    await openAgentSection(page, section)
+    await expect(page.getByText('Fixed', { exact: true }).last()).toBeVisible()
+    await expect(page.getByRole('button', { name: 'Choose', exact: true })).toHaveCount(0)
+    await expect(page.getByRole('radio')).toHaveCount(0)
+  }
+
+  await openAgentSection(page, 'Elevated rights')
+  await power.check()
+  for (const width of [1440, 390]) {
+    await page.setViewportSize({ width, height: 900 })
+    await expectSingleScroll(page)
+    await page.screenshot({ path: testInfo.outputPath(`main-agent-${width}.png`), animations: 'disabled' })
+  }
+
+  await saveAgent(page, true)
+  expect((await workspace.api('/api/agents')).find((item: { id: string }) => item.id === MAIN_AGENT_ID).access.installation).toBe(true)
+  const main = (await workspace.api('/api/agents')).find((item: { id: string }) => item.id === MAIN_AGENT_ID)
+  await workspace.api(`/api/agents/${MAIN_AGENT_ID}`, 'PUT', { ...main, access: { ...main.access, installation: false } })
+})
+
+test('exclusive reservation is granted per node from the agent page once the agent may run there', async ({ page, workspace }, testInfo) => {
+  test.setTimeout(90000)
+  const gpu = await enroll(page, workspace, 'gpu-box', true)
+  await enroll(page, workspace, 'old-box', false)
+  const agent = await workspace.api('/api/agents', 'POST', { name: 'Release engineer', description: 'Publishes web and Android releases' })
+  await signIn(page)
+  await page.goto(workspacePath(`/agents/${agent.id}?section=nodes`))
+  await expect(page.getByRole('heading', { name: 'Nodes', level: 2 })).toBeVisible()
+  const exclusive = page.getByRole('switch', { name: 'Can reserve gpu-box exclusively' })
+  const run = page.getByRole('switch', { name: 'Can run its conversations on gpu-box' })
+  await expect(exclusive).toBeDisabled()
+  await expect(page.getByRole('listitem', { name: 'gpu-box' })).toContainText('Requires permission to run')
+  await run.check()
+  await expect(exclusive).toBeEnabled()
+  await exclusive.check()
+  await page.getByRole('switch', { name: 'Can run its conversations on old-box' }).check()
+  await expect(page.getByRole('switch', { name: 'Can reserve old-box exclusively' })).toBeDisabled()
+  await expect(page.getByRole('listitem', { name: 'old-box' })).toContainText('Unavailable on this runtime')
+  // Turning execution off also removes the reservation.
+  await run.uncheck()
+  await expect(exclusive).not.toBeChecked()
+  await run.check()
+  await exclusive.check()
+  for (const colorScheme of ['light', 'dark'] as const) {
+    await page.emulateMedia({ colorScheme })
+    for (const width of [1440, 390, 320]) {
+      await page.setViewportSize({ width, height: 900 })
+      await expectSingleScroll(page)
+      await page.screenshot({ path: testInfo.outputPath(`agent-nodes-${colorScheme}-${width}.png`), fullPage: true, animations: 'disabled' })
+    }
+  }
+
+  await page.setViewportSize({ width: 1440, height: 900 })
+  await page.emulateMedia({ colorScheme: 'light' })
+  await page.getByRole('region', { name: 'Unsaved changes' }).getByRole('button', { name: 'Save', exact: true }).click()
+  const review = page.getByRole('dialog', { name: 'Review before saving' })
+  await expect(review).toContainText('Added: exclusive reservation on gpu-box. This agent will be able to suspend other agents’ conversations on this machine.')
+  await review.getByRole('button', { name: 'Save', exact: true }).click()
+  await expect(review).toHaveCount(0)
+  const saved = (await workspace.api('/api/agents')).find((item: { id: string }) => item.id === agent.id)
+  expect(saved.access.exclusiveNodes).toEqual([gpu])
+  expect(saved.access.nodes).toContain(gpu)
+  expect((await workspace.api('/api/nodes')).find((node: { id: string }) => node.id === gpu).exclusiveAgents).toEqual([agent.id])
+
+  await page.getByRole('link', { name: 'Overview', exact: true }).click()
+  await expect(page.getByRole('button', { name: /^Exclusive reservation gpu-box/ })).toBeVisible()
+  // The node only shows who holds the grant.
+  await page.goto(workspacePath('/nodes'))
+  const card = page.getByRole('article').filter({ has: page.getByRole('heading', { name: 'gpu-box' }) })
+  await expect(card).toContainText('1 can reserve it exclusively: Release engineer')
+  await expect(card.getByRole('link', { name: 'Manage access from the agents ›' })).toBeVisible()
+})
+
+test('leaving with unsaved changes asks first, and a concurrent change is reported without losing the draft', async ({ page, workspace }) => {
+  const agent = await workspace.api('/api/agents', 'POST', { name: 'Docs writer' })
+  await signIn(page)
+  await page.goto(workspacePath(`/agents/${agent.id}?section=identity`))
+  await page.getByLabel('Description', { exact: true }).fill('Keeps the documentation current')
+  await expect(page.getByRole('region', { name: 'Unsaved changes' })).toContainText('1 unsaved change')
+  await page.getByRole('link', { name: 'Back to agents' }).click()
+  const guard = page.getByRole('dialog', { name: 'Discard unsaved changes?' })
+  await guard.getByRole('button', { name: 'Keep editing' }).click()
+  await expect(page.getByLabel('Description', { exact: true })).toHaveValue('Keeps the documentation current')
+
+  // Someone else saves the agent meanwhile.
+  await workspace.api(`/api/agents/${agent.id}`, 'PUT', { name: 'Documentation writer' })
+  await page.getByRole('region', { name: 'Unsaved changes' }).getByRole('button', { name: 'Save', exact: true }).click()
+  const bar = page.getByRole('region', { name: 'Unsaved changes' })
+  await expect(bar.getByRole('alert')).toHaveText('This agent was changed elsewhere. Reload it before saving.')
+  await expect(page.getByLabel('Description', { exact: true })).toHaveValue('Keeps the documentation current')
+  await bar.getByRole('button', { name: 'Reload', exact: true }).click()
+  await expect(page.getByLabel('Name', { exact: true })).toHaveValue('Documentation writer')
+  await expect(bar).toHaveCount(0)
+
+  await page.getByLabel('Description', { exact: true }).fill('Keeps the documentation current')
+  await page.getByRole('link', { name: 'Back to agents' }).click()
+  await guard.getByRole('button', { name: 'Discard changes' }).click()
+  await expect(page).toHaveURL(/\/agents$/)
+  expect((await workspace.api('/api/agents')).find((item: { id: string }) => item.id === agent.id).description).toBe('')
 })

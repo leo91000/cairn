@@ -4,9 +4,15 @@ Tasks choose an agent. **Main agent** is created automatically and includes all
 registered projects, available skills, and shared connections, including future
 additions. Its model, instructions, timeout, and execution mode are editable;
 its resource access cannot be reduced and it cannot be deleted.
-1Password service accounts are an explicit exception: even Main needs a grant
-under **Plugins → 1Password**. Those grants can be revoked live; see
-[1Password access](ONEPASSWORD.md).
+1Password service accounts, other plugin instances and exclusive node
+reservations are explicit exceptions: even Main needs a grant in its **Secrets &
+plugins** and **Nodes** sections. Those grants apply live; see
+[1Password access](ONEPASSWORD.md) and [agent-centric permissions](adr/0049-agent-centric-permissions.md).
+
+Every permission is edited on the agent's page, on web and Android. It summarises
+effective access, opens one section per area, keeps a single draft and reviews
+sensitive changes (new powers, secrets, reductions that stop work, suspended plugin
+delegations) before saving. Nodes and plugin instances only list their agents.
 
 **Allow access to the current Cairn installation** is also opt-in, including for
 Main and existing agents. The owner enables it in the web or Android agent editor.

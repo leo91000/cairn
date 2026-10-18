@@ -625,12 +625,13 @@ async fn configure_node(s: &Service, node: &str, body: Value) -> Result<Value> {
                 record["slots"] = slots.into();
             }
             record["accepting"] = request.accepting.into();
+            // Older clients still send this list; the grants live on each agent.
             if let Some(agents) = request.exclusive_agents {
                 for agent in &agents {
                     db.get("agents", agent)?
                         .ok_or_else(|| Error::bad("Exclusive agent missing."))?;
                 }
-                record["exclusiveAgents"] = agents.into();
+                crate::agent_grants::set_node_agents(db, &mut record, &agents)?;
             }
             db.put("nodes", &record)?;
             db.audit("node.configured", &json!({ "nodeId": node }))?;
@@ -759,6 +760,7 @@ fn set_node_grant(db: &Db<'_>, mut agent: Value, node: &str, granted: bool) -> R
         agent["access"] = json!({});
     }
     agent["access"]["nodes"] = nodes.into();
+    crate::service::touch(&mut agent);
     db.put("agents", &agent)?;
     Ok(())
 }
@@ -787,9 +789,12 @@ async fn revoke(s: &Service, node: &str) -> Result<Value> {
                 let before = nodes.len();
                 nodes.retain(|id| id != &node);
                 if nodes.len() != before {
+                    crate::service::touch(&mut agent);
                     db.put("agents", &agent)?;
                 }
             }
+            crate::agent_grants::forget_resource(db, crate::agent_grants::EXCLUSIVE_NODES, &node)?;
+            record["exclusiveAgents"] = json!([]);
             db.put("nodes", &record)?;
             db.audit("node.revoked", &json!({ "nodeId": node }))?;
             Ok(public(record))

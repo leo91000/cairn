@@ -1,7 +1,9 @@
 import {
+  createAgent,
   expect,
   expectSingleScroll,
   initializeRepository,
+  openAgentSection,
   signIn,
   test,
   workspacePath,
@@ -41,8 +43,9 @@ test('OpenCode connects a Zen key, selects native models and runs a conversation
   await expect(page.getByRole('region', { name: 'OpenCode accounts' })).toContainText('OpenCode Zen')
 
   await page.goto(workspacePath('/agents'))
-  await page.getByRole('button', { name: 'New agent', exact: true }).click()
+  await page.getByRole('link', { name: 'New agent', exact: true }).click()
   await page.getByLabel('Name', { exact: true }).fill('OpenCode workspace helper')
+  await openAgentSection(page, 'Coding agent & model')
   const picker = page.getByRole('button', { name: /^Agent, model and reasoning/ })
   await picker.click()
   const menu = page.getByRole('dialog', { name: 'Agent & model' })
@@ -60,11 +63,10 @@ test('OpenCode connects a Zen key, selects native models and runs a conversation
   }
 
   await menu.getByRole('button', { name: 'Close', exact: true }).click()
-  await page.getByRole('button', { name: 'Save agent', exact: true }).click()
-  await expect(page.getByRole('dialog')).toHaveCount(0)
+  await createAgent(page)
   const agent = (await workspace.api('/api/agents')).find((a: { name: string }) => a.name === 'OpenCode workspace helper')!
   expect(agent).toMatchObject({ provider: 'opencode', model: 'auto/ling-3-1-flash-free', reasoning: 'high' })
-  await page.locator('article').filter({ has: page.getByRole('button', { name: 'OpenCode workspace helper', exact: true }) }).getByRole('link', { name: 'Start chat' }).click()
+  await page.getByRole('link', { name: 'Chat with this agent' }).click()
   await page.getByRole('textbox', { name: 'Message', exact: true }).fill('Prepare a compact workspace status panel.')
   await page.getByRole('button', { name: 'Send', exact: true }).click()
   await expect(page).toHaveURL(/\/chats\/[a-z]+-[a-z]+-[a-f0-9]{8}$/)

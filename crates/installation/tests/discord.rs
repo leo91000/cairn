@@ -1223,3 +1223,69 @@ async fn continuous_named_send_completions_do_not_starve_reads_or_cancellation()
         .unwrap()
         .unwrap();
 }
+
+#[tokio::test]
+async fn agent_edits_preview_and_reapprove_the_bot_answering_as_the_agent() {
+    let (_root, s, agent) = service().await;
+    let saved = save(&s, &agent, json!({ "guildId": "100", "channelId": "200" }))
+        .await
+        .unwrap();
+    let connection = text(&saved, "id").to_owned();
+    let id = text(&agent, "id").to_owned();
+    let effect = |preview: &Value| preview["delegations"][0].clone();
+
+    // Instructions are not part of the approved access.
+    let mut described = agent.clone();
+    described["instructions"] = "Be brief.".into();
+    let preview = s.agent_preview(described, &id).await.unwrap();
+    assert_eq!(effect(&preview)["id"], connection);
+    assert_eq!(effect(&preview)["suspended"], false);
+
+    // A stricter sandbox changes the access the owner approved for Discord people.
+    let mut stricter = agent.clone();
+    stricter["access"]["sandbox"] = "read-only".into();
+    let preview = s.agent_preview(stricter.clone(), &id).await.unwrap();
+    assert_eq!(effect(&preview)["suspended"], true);
+    assert_eq!(effect(&preview)["blocked"], Value::Null);
+
+    stricter["reapproveDelegations"] = json!([connection]);
+    let updated = s.agent(stricter, Some(&id)).await.unwrap();
+    let stored: Connection = serde_json::from_value(
+        s.store
+            .get(connections::KIND, &connection)
+            .await
+            .unwrap()
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        stored.granted_access,
+        cairn_installation::service::policy(&updated)
+    );
+    assert_ne!(stored.revision, text(&saved, "revision"));
+
+    // Installation access can never be approved for external people.
+    let mut wider = updated.clone();
+    wider["access"]["installation"] = true.into();
+    let preview = s.agent_preview(wider.clone(), &id).await.unwrap();
+    assert!(effect(&preview)["blocked"].is_string());
+    wider["reapproveDelegations"] = json!([connection]);
+    assert!(s.agent(wider.clone(), Some(&id)).await.is_err());
+
+    // Without reapproval the save succeeds and the bot waits for the owner.
+    wider
+        .as_object_mut()
+        .unwrap()
+        .remove("reapproveDelegations");
+    let widened = s.agent(wider, Some(&id)).await.unwrap();
+    let stored = s
+        .store
+        .get(connections::KIND, &connection)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_ne!(
+        stored["grantedAccess"],
+        cairn_installation::service::policy(&widened)
+    );
+}

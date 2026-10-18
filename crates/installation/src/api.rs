@@ -99,6 +99,7 @@ async fn record_routes(s: &Arc<Service>, input: &Input, route: Route<'_>) -> Res
         ("GET", ["overview"]) => overview(s).await?,
         ("GET", ["agent-avatars"]) => json!({ "configured": s.avatars.configured(s).await? }),
         ("POST", ["agents", id, "avatar", "generate"]) => s.avatars.generate(s, id).await?,
+        ("POST", ["agents", id, "preview"]) => s.agent_preview(input.body.clone(), id).await?,
         ("GET", [kind @ ("agents" | "projects" | "tasks")]) => s.store.list(kind).await?.into(),
         ("POST", ["task-authors", "refresh"]) => {
             s.synchronize_task_authors().await?;

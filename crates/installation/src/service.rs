@@ -107,6 +107,10 @@ impl Service {
         crate::storage::migration::run(&service).await?;
         service.migrate_agents().await?;
         crate::plugins::legacy::migrate(&service).await?;
+        service
+            .store
+            .transaction(|db| crate::agent_grants::reconcile(db))
+            .await?;
         service.store.transaction(crate::accounts::migrate).await?;
         service
             .store
@@ -160,25 +164,130 @@ impl Service {
     }
 
     pub async fn agent(self: &Arc<Self>, input: Value, existing_id: Option<&str>) -> Result<Value> {
-        self.agent_authorized(input, existing_id, |_| Ok(())).await
+        self.agent_authorized(input, existing_id, AgentEditor::Owner, |_| Ok(()))
+            .await
     }
 
     pub(crate) async fn agent_authorized<F>(
         self: &Arc<Self>,
-        mut input: Value,
+        input: Value,
         existing_id: Option<&str>,
+        editor: AgentEditor,
         authorize: F,
     ) -> Result<Value>
     where
         F: FnOnce(&Db<'_>) -> Result<()> + Send + 'static,
     {
         let creation_id = creation_id(&input, existing_id)?;
+        let draft = self
+            .agent_draft(input, existing_id, editor, creation_id.clone())
+            .await?;
+        let reapprove = draft.reapprove.clone();
+        let reapproved = !reapprove.is_empty();
+        for connection in &reapprove {
+            let connection = crate::plugins::connections::load(self, connection).await?;
+            crate::plugins::connections::ensure_owner(self, &connection).await?;
+        }
+        let accepts_agents = self.instances_accepting_agents(&draft.agent).await?;
+        let creating = existing_id.is_none();
+        let AgentDraft {
+            agent,
+            access,
+            expected_revision,
+            ..
+        } = draft;
+        let (agent, created) = self
+            .store
+            .transaction(move |db| {
+                authorize(db)?;
+                if let Some(previous) = replayed_creation(db, "agents", creation_id.as_deref())? {
+                    return Ok((previous, false));
+                }
+                if let Some(expected) = &expected_revision
+                    && let Some(current) = db.get("agents", text(&agent, "id"))?
+                    && current["revision"] != *expected
+                {
+                    return Err(Error::conflict(
+                        "This agent was changed elsewhere. Reload it before saving.",
+                    ));
+                }
+                crate::agent_grants::validate(db, &agent, &accepts_agents)?;
+                let agent = save_agent(db, agent, &access)?;
+                for connection in &reapprove {
+                    crate::plugins::connections::reapprove(db, connection, &agent)?;
+                }
+                Ok((agent, creating))
+            })
+            .await?;
+        if reapproved {
+            self.plugins.changed.notify_one();
+        }
+        if created && self.avatars.configured(self).await? {
+            // Creation remains successful even when portrait scheduling fails.
+            return Ok(self
+                .avatars
+                .generate(self, text(&agent, "id"))
+                .await
+                .unwrap_or(agent));
+        }
+        Ok(agent)
+    }
+
+    /// Validates an edited agent without saving it. Owners may change live grants and
+    /// reapprove plugin delegations; the installation MCP keeps the saved ones.
+    async fn agent_draft(
+        &self,
+        mut input: Value,
+        existing_id: Option<&str>,
+        editor: AgentEditor,
+        creation_id: Option<String>,
+    ) -> Result<AgentDraft> {
         let existing = match existing_id {
             Some(id) => Some(self.get("agents", id).await?),
             None => None,
         };
+        let expected_revision = input
+            .as_object_mut()
+            .and_then(|fields| fields.remove("revision"))
+            // Agents saved before revisions existed have none; clients may send it empty.
+            .filter(|revision| {
+                revision
+                    .as_str()
+                    .is_some_and(|revision| !revision.is_empty())
+            });
+        let reapprove = input
+            .as_object_mut()
+            .and_then(|fields| fields.remove("reapproveDelegations"))
+            .unwrap_or_else(|| json!([]));
+        let Some(reapprove) = reapprove.as_array() else {
+            return Err(Error::bad("Delegations to reapprove must be a list."));
+        };
+        let reapprove = reapprove
+            .iter()
+            .map(|connection| {
+                let connection = connection.as_str().unwrap_or("");
+                crate::validation::uuid(connection)?;
+                Ok(connection.to_owned())
+            })
+            .collect::<Result<Vec<_>>>()?;
+        if editor == AgentEditor::Installation && !reapprove.is_empty() {
+            return Err(Error::forbidden(
+                "Only the installation owner can reapprove plugin delegations.",
+            ));
+        }
         if let Some(existing) = &existing {
             inherit_agent_settings(&mut input, existing);
+        }
+        if editor == AgentEditor::Installation && input["access"].is_object() {
+            // Exclusive reservations and plugin grants such as 1Password stay with the owner.
+            for key in [
+                crate::agent_grants::EXCLUSIVE_NODES,
+                crate::agent_grants::PLUGINS,
+            ] {
+                input["access"][key] = existing
+                    .as_ref()
+                    .map_or_else(|| json!([]), |agent| json!(live_grant(agent, key)));
+            }
         }
         let mut agent = parse("agent", input)?;
         crate::provider::Provider::of_agent(&agent)?
@@ -195,25 +304,61 @@ impl Service {
         let access = policy(&agent);
         validate_access(&agent, &access)?;
         self.require_access_targets(&access).await?;
-        let (agent, created) = self
-            .store
-            .transaction(move |db| {
-                authorize(db)?;
-                if let Some(previous) = replayed_creation(db, "agents", creation_id.as_deref())? {
-                    return Ok((previous, false));
-                }
-                Ok((save_agent(db, agent, &access)?, existing.is_none()))
-            })
-            .await?;
-        if created && self.avatars.configured(self).await? {
-            // Creation remains successful even when portrait scheduling fails.
-            return Ok(self
-                .avatars
-                .generate(self, text(&agent, "id"))
-                .await
-                .unwrap_or(agent));
+        Ok(AgentDraft {
+            agent,
+            access,
+            expected_revision,
+            reapprove,
+        })
+    }
+
+    /// Plugin instances whose package gives agents access.
+    async fn instances_accepting_agents(&self, agent: &Value) -> Result<Vec<String>> {
+        let requested = crate::agent_grants::plugins(agent);
+        let mut accepting = Vec::new();
+        for instance in self.store.list(crate::plugins::connections::KIND).await? {
+            let id = text(&instance, "id");
+            if !requested.iter().any(|requested| requested == id) {
+                continue;
+            }
+            let package = crate::plugins::registry::active(self, text(&instance, "pluginId")).await;
+            if package.is_ok_and(|package| package.manifest.agent_access.is_some()) {
+                accepting.push(id.to_owned());
+            }
         }
-        Ok(agent)
+        Ok(accepting)
+    }
+
+    /// What saving an edited agent would interrupt: its queued or running work that
+    /// the new access no longer covers, and plugin delegations it would suspend.
+    pub async fn agent_preview(&self, input: Value, existing_id: &str) -> Result<Value> {
+        let draft = self
+            .agent_draft(input, Some(existing_id), AgentEditor::Owner, None)
+            .await?;
+        let agent = draft.agent;
+        let id = existing_id.to_owned();
+        self.store
+            .read(move |db| {
+                let mut queued = 0;
+                let mut running = 0;
+                for run in db.active()? {
+                    let snapshot = &run["snapshot"]["agent"];
+                    if snapshot["id"] != *id || covers(&agent, snapshot) {
+                        continue;
+                    }
+                    if run["status"] == "queued" {
+                        queued += 1;
+                    } else {
+                        running += 1;
+                    }
+                }
+                let delegations = crate::plugins::connections::delegation_effects(db, &id, &agent)?;
+                Ok(json!({
+                    "runs": { "queued": queued, "running": running },
+                    "delegations": delegations,
+                }))
+            })
+            .await
     }
 
     /// Every project, MCP connection and tool permission must reference an existing record.
@@ -741,22 +886,11 @@ fn ensure_removable(db: &Db<'_>, kind: &str, id: &str) -> Result<()> {
     Ok(())
 }
 
-/// Drops an agent's credentials, portrait and plugin grants.
+/// Drops an agent's credentials, portrait, plugin grants and exclusive node grants.
 fn forget_agent(db: &Db<'_>, id: &str) -> Result<()> {
     db.delete(&format!("agent-github:{id}"))?;
     db.delete(&format!("agent-avatar:{id}"))?;
-    for mut connection in db.list(crate::plugins::connections::KIND)? {
-        let granted = connection["agentIds"]
-            .as_array()
-            .is_some_and(|agents| agents.iter().any(|agent| agent == id));
-        if granted {
-            if let Some(agents) = connection["agentIds"].as_array_mut() {
-                agents.retain(|agent| agent != id);
-            }
-            db.put(crate::plugins::connections::KIND, &connection)?;
-        }
-    }
-    Ok(())
+    crate::agent_grants::forget_agent(db, id)
 }
 
 /// Older clients omit settings they do not know about; keep the saved ones.
@@ -778,6 +912,41 @@ fn inherit_agent_settings(input: &mut Value, existing: &Value) {
             input["access"][key] = policy(existing)[key].clone();
         }
     }
+    for key in [
+        crate::agent_grants::EXCLUSIVE_NODES,
+        crate::agent_grants::PLUGINS,
+    ] {
+        if input["access"].get(key).is_none() {
+            input["access"][key] = json!(live_grant(existing, key));
+        }
+    }
+}
+
+fn live_grant(agent: &Value, key: &str) -> Vec<String> {
+    if key == crate::agent_grants::EXCLUSIVE_NODES {
+        crate::agent_grants::exclusive_nodes(agent)
+    } else {
+        crate::agent_grants::plugins(agent)
+    }
+}
+
+/// Who edits an agent: the owner from the app, or an agent through the installation MCP.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AgentEditor {
+    Owner,
+    Installation,
+}
+
+struct AgentDraft {
+    agent: Value,
+    access: Value,
+    expected_revision: Option<Value>,
+    reapprove: Vec<String>,
+}
+
+/// Marks a changed agent record so concurrent editors can detect the change.
+pub(crate) fn touch(agent: &mut Value) {
+    agent["revision"] = id().into();
 }
 
 fn restricted(access: &Value) -> bool {
@@ -826,7 +995,9 @@ fn save_agent(db: &Db<'_>, mut agent: Value, access: &Value) -> Result<Value> {
     {
         agent["avatar"] = avatar.clone();
     }
+    touch(&mut agent);
     db.put("agents", &agent)?;
+    crate::agent_grants::mirror(db, &agent)?;
     db.audit("agent.saved", &json!({ "id": agent["id"] }))?;
     Ok(agent)
 }
@@ -843,6 +1014,11 @@ pub fn policy(agent: &Value) -> Value {
         "nodes": [crate::nodes::LOCAL_NODE_ID],
     });
     merge(&mut value, &agent["access"]);
+    // Live grants are checked on every use, never captured with a run.
+    if let Some(fields) = value.as_object_mut() {
+        fields.remove(crate::agent_grants::EXCLUSIVE_NODES);
+        fields.remove(crate::agent_grants::PLUGINS);
+    }
     // Agents restricted before MCP permissions existed get no MCP connection.
     let legacy_restricted = agent["id"] != MAIN_AGENT_ID
         && agent["access"].is_object()
