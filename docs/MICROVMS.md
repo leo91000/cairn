@@ -219,6 +219,10 @@ the transmitted output. Controller failures also emit a structured
 `runner.failed` event so their cause survives an exhausted diagnostic-log budget;
 the failure starts on its own line even after truncated guest JSON, and ordinary
 stderr remains available for older managers.
+This preserves the output-limit cause in the failed run. The existing recovery
+policy and final wording for unavailable controllers are unchanged. A controller
+diagnostic after `turn.completed` preserves the completed-turn checkpoint, so
+worker recovery can settle it without relaunching the agent.
 
 The `chat_binary_compacts_large_mcp_pages_before_guest_transport` regression
 test sends 160 synthetic MCP pages with 350,000-byte text and structured results.

@@ -267,7 +267,9 @@ async fn apply_event(
             .update(|c| {
                 c.last_error = Some(Some(failure));
                 c.retry_cause = Some(cause);
-                c.completed = Some(false);
+                if provider_failure {
+                    c.completed = Some(false);
+                }
             })
             .await?;
     }
