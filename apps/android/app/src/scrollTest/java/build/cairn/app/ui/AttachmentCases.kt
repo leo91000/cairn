@@ -1,17 +1,24 @@
 package build.cairn.app.ui
 
 import android.app.Application
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.Color
 import androidx.compose.runtime.*
+import androidx.compose.ui.semantics.SemanticsActions
 import androidx.compose.ui.test.*
 import androidx.compose.ui.test.junit4.v2.createComposeRule
+import androidx.core.content.FileProvider
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.test.core.app.ApplicationProvider
 import build.cairn.app.data.*
 import java.io.ByteArrayOutputStream
+import java.io.File
+import java.io.RandomAccessFile
 import java.util.concurrent.CopyOnWriteArrayList
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.flow.first
 import kotlinx.serialization.json.*
 import okhttp3.mockwebserver.*
@@ -144,8 +151,11 @@ abstract class AttachmentCases {
                                 )
                         }
                         if (path.startsWith(prefix)) {
-                            val id = path.removePrefix(prefix)
-                            requested += "$id?$query"
+                            val id = path.removePrefix(prefix).removeSuffix("/stream")
+                            requested += "${path.removePrefix(prefix)}?$query"
+                            if (path.endsWith("/stream") && id in listOf("shot", "hdr"))
+                                return MockResponse()
+                                    .setResponseCode(if (id == "shot") 404 else 501)
                             val picture = pictures[id]
                             return when {
                                 query == "summary" ->
@@ -162,6 +172,10 @@ abstract class AttachmentCases {
                                     MockResponse()
                                         .setHeader("Content-Type", "image/jpeg")
                                         .setBody(Buffer().write(picture))
+                                        .setBodyDelay(
+                                            if (query.isEmpty()) 300 else 0,
+                                            java.util.concurrent.TimeUnit.MILLISECONDS,
+                                        )
                                 query == "preview" ->
                                     MockResponse().setResponseCode(404).setBody("{}")
                                 else -> MockResponse().setBody("id,nom\n1042,Acme\n")
@@ -182,6 +196,7 @@ abstract class AttachmentCases {
                 }
             server.start()
             val vm = CairnViewModel(app, AttachmentVault(), beaconOrigin = "")
+            var show by mutableStateOf(true)
             compose.setContent {
                 val state by vm.state.collectAsStateWithLifecycle()
                 LaunchedEffect(Unit) {
@@ -190,7 +205,7 @@ abstract class AttachmentCases {
                         vm.connect(server.url("/").toString())
                 }
                 CairnTheme {
-                    if (state.session.authenticated)
+                    if (state.session.authenticated && show)
                         ChatScreen(vm, state, "chat", openChat = {}, openRun = {})
                 }
             }
@@ -211,9 +226,25 @@ abstract class AttachmentCases {
             assertFalse("sources?summary" in requested)
             capture("01-conversation")
 
+            // Dismissing the action sheet must not cancel a cold-cache original download.
+            val clipboard = app.getSystemService(ClipboardManager::class.java)
+            clipboard.clearPrimaryClip()
+            compose.onNodeWithContentDescription(files.first().name).performTouchInput {
+                longClick()
+            }
+            compose.onNodeWithText("Copier l’image").performClick()
+            compose.onAllNodesWithTag("attachment-actions").assertCountEquals(0)
+            compose.waitUntil(10000) {
+                clipboard.primaryClip?.description?.label == files.first().name
+            }
+            assertNotNull(clipboard.primaryClip?.getItemAt(0)?.uri)
+            assertTrue("shot/stream?" in requested)
+            assertTrue("shot?" in requested)
+
             compose.onNodeWithContentDescription("IMG_20261017_141502_HDR.jpg").performClick()
             compose.onNodeWithTag("attachment-viewer").assertExists()
             compose.onNodeWithText("JPG · 3,2 Mo · 2 / 6").assertExists()
+            compose.waitUntil(10000) { "hdr/stream?" in requested && "hdr?" in requested }
             capture("02-viewer")
             // The filmstrip jumps between files (Robolectric cannot render PDF pages, so the
             // journey stays among the pictures).
@@ -244,6 +275,48 @@ abstract class AttachmentCases {
             }
             compose.onNodeWithTag("conversation-send").assertIsEnabled()
             capture("04-composer")
+
+            // Reuse cannot change the attachment list while a send is in progress.
+            val release = CompletableDeferred<Unit>()
+            compose.runOnIdle { vm.perform { release.await() } }
+            compose.waitUntil(10000) { vm.state.value.busy }
+            try {
+                compose.onNodeWithText("maquettes-sources.zip").performTouchInput { longClick() }
+                compose.onNodeWithText("Réutiliser dans un nouveau message").performClick()
+                compose.runOnIdle {
+                    assertEquals(
+                        listOf("export"),
+                        vm.chatDrafts["chat"]!!.attachments.map { it.attachment.id },
+                    )
+                }
+            } finally {
+                release.complete(Unit)
+            }
+            compose.waitUntil(10000) { !vm.state.value.busy }
+
+            // Refused cards survive disposing the conversation, just like its text and files.
+            val oversized = File(app.cacheDir, "cairn-files/oversized.png")
+            RandomAccessFile(oversized, "rw").use { it.setLength(MAX_ATTACHMENT_BYTES + 1) }
+            val uri = FileProvider.getUriForFile(app, "${app.packageName}.files", oversized)
+            compose.runOnIdle {
+                clipboard.setPrimaryClip(ClipData.newUri(app.contentResolver, "oversized", uri))
+            }
+            compose.onNode(hasSetTextAction()).performSemanticsAction(SemanticsActions.PasteText)
+            compose.waitUntil(10000) {
+                compose
+                    .onAllNodesWithText("Trop lourd", substring = true)
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
+            }
+            compose.onNodeWithTag("conversation-send").assertIsNotEnabled()
+            compose.runOnIdle { show = false }
+            compose.waitForIdle()
+            assertEquals("oversized.png", vm.chatDrafts["chat"]!!.rejected.single().name)
+            compose.runOnIdle { show = true }
+            compose.onNodeWithText("Trop lourd", substring = true).assertExists()
+            compose.onNodeWithTag("conversation-send").assertIsNotEnabled()
+            compose.onNodeWithContentDescription("Retirer oversized.png").performClick()
+            compose.onNodeWithTag("conversation-send").assertIsEnabled()
 
             compose.onNodeWithContentDescription("Joindre").performClick()
             compose.onNodeWithTag("attach-sheet").assertExists()

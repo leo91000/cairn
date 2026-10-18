@@ -8,8 +8,9 @@ import {
   canCopyImages,
   canShareFiles,
   copyImage,
+  downloadAttachment,
   reuseAttachmentKey,
-  shareAttachment,
+  useAttachmentShare,
 } from '../attachment-media'
 import { isImage, subtitle } from '../attachments'
 import {
@@ -26,14 +27,24 @@ import MenuButton from './MenuButton.vue'
 const props = defineProps<{ attachment: ChatAttachment, triggerClass?: ClassValue }>()
 const reuse = inject(reuseAttachmentKey, null)
 const share = canShareFiles()
+const sharing = useAttachmentShare(() => props.attachment)
 const copy = computed(() => canCopyImages() && isImage(props.attachment))
 const reusable = computed(() => !!reuse && !!props.attachment.chatId && reuse.chatId() === props.attachment.chatId)
 
 async function shareFile() {
   try {
-    await shareAttachment(props.attachment)
+    await sharing.share()
   }
   catch (error) { notify((error as Error).message || 'Unable to share this file.') }
+}
+
+async function prepareShare() {
+  if (!share)
+    return
+  try {
+    await sharing.prepare()
+  }
+  catch (error) { notify((error as Error).message || 'Unable to prepare this file for sharing.') }
 }
 
 async function copyFile() {
@@ -42,6 +53,13 @@ async function copyFile() {
     notify('Image copied')
   }
   catch { notify('Unable to copy this image.') }
+}
+
+async function downloadFile() {
+  try {
+    await downloadAttachment(props.attachment, sharing.file.value)
+  }
+  catch (error) { notify((error as Error).message || 'Unable to download this file.') }
 }
 </script>
 
@@ -52,11 +70,12 @@ async function copyFile() {
     title="More actions"
     :trigger-class="triggerClass"
     :width="248"
+    @open="prepareShare"
   >
     <template #trigger>
       <Icon :name="MoreHorizontal" :size="16" />
     </template>
-    <template #default="{ select, close }">
+    <template #default="{ select }">
       <div class="mb-1 border-b border-line px-2.5 pt-1 pb-2" aria-hidden="true">
         <p class="m-0! text-xs font-semibold wrap-anywhere">
           {{ attachment.name }}
@@ -71,7 +90,7 @@ async function copyFile() {
         class="menu-item"
         :href="attachmentUrl(attachment)"
         :download="attachment.name"
-        @click="close()"
+        @click.prevent="select(downloadFile)"
       ><Icon :name="Download" :size="16" />Download</a>
       <button
         v-if="share"
@@ -79,9 +98,10 @@ async function copyFile() {
         role="menuitem"
         tabindex="-1"
         class="menu-item"
-        @click="select(shareFile)"
+        :disabled="sharing.loading.value"
+        @click="sharing.file.value ? select(shareFile) : prepareShare()"
       >
-        <Icon :name="Share2" :size="16" />Share
+        <Icon :name="Share2" :size="16" />{{ sharing.loading.value ? 'Preparing file…' : sharing.file.value ? 'Share' : 'Prepare to share' }}
       </button>
       <button
         v-if="copy"

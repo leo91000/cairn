@@ -73,6 +73,10 @@ export function isImage(attachment: Named) {
   return family(attachment) === 'image'
 }
 
+export function isSvg(attachment: Named) {
+  return extension(attachment.name) === 'svg' || attachment.mediaType?.toLowerCase() === 'image/svg+xml'
+}
+
 /** Badge label: the extension uppercased, at most 4 characters; empty means a generic file icon. */
 export function badgeLabel(name: string) {
   return extension(name).toUpperCase().slice(0, 4)

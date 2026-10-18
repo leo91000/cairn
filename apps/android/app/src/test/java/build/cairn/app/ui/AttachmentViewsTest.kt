@@ -1,17 +1,34 @@
 package build.cairn.app.ui
 
+import android.app.Activity
 import android.app.Application
+import android.content.Intent
 import android.graphics.Bitmap
+import android.media.ExifInterface
+import android.net.Uri
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.LocalActivityResultRegistryOwner
+import androidx.activity.result.ActivityResultRegistry
+import androidx.activity.result.ActivityResultRegistryOwner
+import androidx.activity.result.contract.ActivityResultContract
 import androidx.compose.runtime.*
 import androidx.compose.ui.test.*
+import androidx.compose.ui.test.junit4.StateRestorationTester
 import androidx.compose.ui.test.junit4.v2.createAndroidComposeRule
+import androidx.core.app.ActivityOptionsCompat
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewmodel.initializer
 import androidx.lifecycle.viewmodel.viewModelFactory
 import androidx.test.core.app.ApplicationProvider
 import build.cairn.app.data.*
 import java.io.File
+import java.util.concurrent.CopyOnWriteArrayList
+import kotlinx.coroutines.flow.first
+import okhttp3.mockwebserver.Dispatcher
+import okhttp3.mockwebserver.MockResponse
+import okhttp3.mockwebserver.MockWebServer
+import okhttp3.mockwebserver.RecordedRequest
+import okio.Buffer
 import org.junit.Assert.*
 import org.junit.Rule
 import org.junit.Test
@@ -49,6 +66,183 @@ class AttachmentViewsTest {
 
     private fun image(name: String, chat: String = "") =
         ChatAttachment(name, chat, name, 2048, "image/png", "image")
+
+    @Test
+    fun panoramicThumbnailsHaveBoundedDecodedDimensions() {
+        for ((width, height) in listOf(12000 to 24, 24 to 12000)) {
+            val panorama = File(application.cacheDir, "panorama-$width.png")
+            val bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
+            panorama.outputStream().use { bitmap.compress(Bitmap.CompressFormat.PNG, 100, it) }
+            bitmap.recycle()
+            val thumbnail = checkNotNull(decodeSampled(panorama, 128))
+            assertTrue(thumbnail.width <= 256)
+            assertTrue(thumbnail.height <= 256)
+            assertTrue(thumbnail.byteCount <= 256 * 256 * 4)
+        }
+    }
+
+    @Test
+    fun cameraOrientationIsAppliedAtThumbnailAndViewerSizes() {
+        val photo = File(application.cacheDir, "portrait-camera.jpg")
+        photo.outputStream().use {
+            Bitmap.createBitmap(400, 300, Bitmap.Config.ARGB_8888)
+                .compress(Bitmap.CompressFormat.JPEG, 90, it)
+        }
+        ExifInterface(photo.path).apply {
+            setAttribute(
+                ExifInterface.TAG_ORIENTATION,
+                ExifInterface.ORIENTATION_ROTATE_90.toString(),
+            )
+            saveAttributes()
+        }
+        for (target in listOf(128, 2048)) {
+            val decoded = checkNotNull(decodeSampled(photo, target))
+            assertTrue("Portrait orientation at size $target", decoded.height > decoded.width)
+            decoded.recycle()
+        }
+    }
+
+    @Test
+    fun summariesAndThumbnailsStayWithinTheirInstallationSession() {
+        MockWebServer().use { first ->
+            MockWebServer().use { second ->
+                val requests = CopyOnWriteArrayList<String>()
+                val bytes = photo("scoped-preview.png").readBytes()
+                for ((server, label) in
+                    listOf(first to "Première installation", second to "Seconde installation")) {
+                    server.dispatcher =
+                        object : Dispatcher() {
+                            override fun dispatch(request: RecordedRequest): MockResponse {
+                                val path = request.path.orEmpty()
+                                requests += "$label:$path"
+                                if (path.endsWith("?preview"))
+                                    return MockResponse().setBody(Buffer().write(bytes))
+                                val body =
+                                    when {
+                                        path.endsWith("?summary") ->
+                                            """{"lines":2,"excerpt":"$label"}"""
+                                        path == "/api/account/session" ->
+                                            beaconAccountFixture("fixture")
+                                        path == "/api/installations" -> beaconInstallationsFixture()
+                                        path.endsWith("/overview") -> "{}"
+                                        path.endsWith("/models") -> """{"models":[]}"""
+                                        else -> "[]"
+                                    }
+                                return MockResponse()
+                                    .setHeader("Content-Type", "application/json")
+                                    .setBody(body)
+                            }
+                        }
+                    server.start()
+                }
+                val vm = viewModel()
+                compose.setContent {
+                    LaunchedEffect(Unit) {
+                        vm.state.first { it.ready }
+                        vm.connect(first.url("/").toString())
+                    }
+                    CairnTheme {
+                        MessageAttachments(
+                            vm,
+                            listOf(image("restored.png", "chat"), file("notes.txt", "chat")),
+                        )
+                    }
+                }
+                compose.waitUntil(10000) {
+                    !vm.state.value.busy &&
+                        compose
+                            .onAllNodesWithText("Première installation")
+                            .fetchSemanticsNodes()
+                            .isNotEmpty() &&
+                        requests.any {
+                            it.startsWith("Première installation:") && it.endsWith("?preview")
+                        }
+                }
+                compose.runOnIdle { vm.perform { vm.connect(second.url("/").toString()) } }
+                compose.waitUntil(10000) {
+                    !vm.state.value.busy &&
+                        compose
+                            .onAllNodesWithText("Seconde installation")
+                            .fetchSemanticsNodes()
+                            .isNotEmpty() &&
+                        requests.any {
+                            it.startsWith("Seconde installation:") && it.endsWith("?preview")
+                        }
+                }
+                compose.onNodeWithText("Première installation").assertDoesNotExist()
+            }
+        }
+    }
+
+    @Test
+    fun externalFileTypesStayDistinctFromTheTextViewer() {
+        for ((name, mime) in
+            listOf(
+                "export.csv" to "text/csv",
+                "data.json" to "application/json",
+                "page.html" to "text/html",
+            )) {
+            val item = file(name).copy(mediaType = mime)
+            assertEquals("code" to "text/plain", viewerType(item))
+            assertEquals(mime, attachmentMediaType(item))
+        }
+    }
+
+    @Test
+    fun savingRestoresThePendingFileAfterRecreation() {
+        val vm = viewModel()
+        val original =
+            File(application.cacheDir, "rotation-source.txt").apply {
+                writeText("Document à conserver")
+            }
+        val destination = File(application.cacheDir, "saved-after-rotation.txt").apply { delete() }
+        val item = file(original.name, size = original.length())
+        val registry =
+            object : ActivityResultRegistry() {
+                var requested: Int? = null
+
+                override fun <I, O> onLaunch(
+                    requestCode: Int,
+                    contract: ActivityResultContract<I, O>,
+                    input: I,
+                    options: ActivityOptionsCompat?,
+                ) {
+                    requested = requestCode
+                }
+            }
+        val owner =
+            object : ActivityResultRegistryOwner {
+                override val activityResultRegistry = registry
+            }
+        val restoration = StateRestorationTester(compose)
+        restoration.setContent {
+            CompositionLocalProvider(LocalActivityResultRegistryOwner provides owner) {
+                CairnTheme {
+                    AttachmentGallery(
+                        vm,
+                        listOf(item),
+                        item,
+                        mapOf(item.id to original.path),
+                        close = {},
+                    )
+                }
+            }
+        }
+        compose.onNodeWithContentDescription("Enregistrer").performClick()
+        val request = checkNotNull(registry.requested)
+        restoration.emulateSavedInstanceStateRestore()
+        compose.runOnIdle {
+            registry.dispatchResult(
+                request,
+                Activity.RESULT_OK,
+                Intent().setData(Uri.fromFile(destination)),
+            )
+        }
+        compose.waitUntil(10000) {
+            destination.exists() && destination.readText() == original.readText()
+        }
+        assertNull(vm.state.value.error)
+    }
 
     @Test
     fun composerTrayShowsEachFileStateAndRemovesTheChosenOne() {
@@ -157,7 +351,9 @@ class AttachmentViewsTest {
     @Test
     fun viewerPagesThroughTheDraftWithAFilmstrip() {
         val vm = viewModel()
-        val notes = File(application.cacheDir, "notes.txt").apply { writeText("Première ligne") }
+        val source = "const answer = 42;"
+        val notes = File(application.cacheDir, "notes.ts").apply { writeText(source) }
+        assertEquals("code" to "text/plain", viewerType(file("notes.ts")))
         val capture = photo("vue.png")
         compose.setContent {
             CairnTheme {
@@ -165,7 +361,7 @@ class AttachmentViewsTest {
                     vm,
                     listOf(
                         DraftAttachment(image("vue.png"), capture.path),
-                        DraftAttachment(file("notes.txt", size = notes.length()), notes.path),
+                        DraftAttachment(file("notes.ts", size = notes.length()), notes.path),
                     ),
                     emptyList(),
                     emptyMap(),
@@ -175,11 +371,11 @@ class AttachmentViewsTest {
                 )
             }
         }
-        compose.onNodeWithText("notes.txt").performClick()
+        compose.onNodeWithText("notes.ts").performClick()
         compose.onNodeWithTag("attachment-viewer").assertExists()
-        compose.onNodeWithText("TXT · 15 o · 2 / 2").assertExists()
+        compose.onNodeWithText("TS · 18 o · 2 / 2").assertExists()
         compose.waitUntil(10000) {
-            compose.onAllNodesWithText("Première ligne").fetchSemanticsNodes().isNotEmpty()
+            compose.onAllNodesWithText(source).fetchSemanticsNodes().isNotEmpty()
         }
         // The filmstrip jumps back to the image.
         compose.onNode(hasClickLabel("vue.png")).performClick()

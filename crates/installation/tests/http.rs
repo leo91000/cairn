@@ -457,6 +457,23 @@ async fn attachments_are_private_scoped_bounded_and_durable() {
     assert_eq!(response.headers()["cache-control"], "no-store");
     assert_eq!(response.headers()["content-type"], "image/png");
     assert_eq!(read_bytes(response).await.as_ref(), png);
+    let stream_url = format!("/api/chats/{chat_id}/attachments/{attachment_id}/stream");
+    assert_eq!(
+        attachment(&app, anonymous, "GET", &stream_url, vec![])
+            .await
+            .status(),
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(
+        attachment(&app, owner, "GET", &format!("{other_url}/stream"), vec![])
+            .await
+            .status(),
+        StatusCode::NOT_FOUND
+    );
+    let response = attachment(&app, owner, "GET", &stream_url, vec![]).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers()["content-type"], "image/png");
+    assert_eq!(read_bytes(response).await.as_ref(), png);
     assert_hostile_uploads_are_neutralized(&app, &session, chat_id).await;
 }
 

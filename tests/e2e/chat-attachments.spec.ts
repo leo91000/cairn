@@ -7,10 +7,76 @@ import {
   expectSingleScroll,
   initializeRepository,
   test,
+  useRelayForHttpMocks,
   workspacePath,
 } from './fixtures'
 
+test('sent SVGs remain images in the mosaic, viewer and clipboard', async ({ page, workspace }) => {
+  test.setTimeout(60000)
+  await useRelayForHttpMocks(page)
+  let legacyRequests = 0
+  await page.route(/\/chats\/[^/]+\/attachments\/[^/?]+\/stream$/, (route) => {
+    legacyRequests++
+    return route.fulfill({ status: 404, json: { error: 'Not found' } })
+  })
+  await page.addInitScript(() => {
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: {
+        write: async (items: ClipboardItem[]) => {
+          const png = await items[0].getType('image/png')
+          document.documentElement.dataset.copiedType = png.type
+        },
+      },
+    })
+  })
+  initializeRepository(workspace.projectPath)
+  await page.goto(workspacePath('/chats'))
+  await authenticateWorkspace(page)
+  await page.getByLabel('Attach files', { exact: true }).setInputFiles([{
+    name: 'logo.svg',
+    mimeType: 'image/svg+xml',
+    buffer: Buffer.from('<svg xmlns="http://www.w3.org/2000/svg" width="20" height="10"><rect width="20" height="10" fill="red"/><script>document.documentElement.dataset.svgScript="executed"</script></svg>'),
+  }])
+  await page.getByRole('textbox', { name: 'Message', exact: true }).fill('Inspect the vector logo.')
+  await page.getByRole('button', { name: 'Send', exact: true }).click()
+  await expect(page).toHaveURL(/\/chats\/[a-z]+-[a-z]+-[a-f0-9]{8}$/)
+  await page.reload() // Discard local draft object URLs; exercise the stored attachment.
+  await expect(page.getByRole('textbox', { name: 'Message', exact: true })).toBeVisible()
+  const message = page.locator('.activity-message').filter({ hasText: 'Inspect the vector logo.' })
+  const thumbnail = message.getByRole('button', { name: 'Preview logo.svg', exact: true })
+  await expect.poll(() => thumbnail.locator('img').evaluate((img: HTMLImageElement) => img.naturalWidth)).toBe(20)
+  await thumbnail.click()
+  const viewer = page.getByRole('dialog', { name: 'Attachment viewer' })
+  await expect.poll(() => viewer.getByLabel('Image preview', { exact: true }).locator('img').evaluate((img: HTMLImageElement) => img.naturalWidth)).toBe(20)
+  await page.keyboard.press('Escape')
+  await message.getByRole('button', { name: 'More actions for logo.svg', exact: true }).click()
+  await page.getByRole('menuitem', { name: 'Copy image', exact: true }).click()
+  await expect(page.locator('html')).toHaveAttribute('data-copied-type', 'image/png')
+  expect(legacyRequests).toBeGreaterThan(0)
+  await expect(page.locator('html')).not.toHaveAttribute('data-svg-script', 'executed')
+  await message.getByRole('button', { name: 'More actions for logo.svg', exact: true }).click()
+  const download = page.waitForEvent('download')
+  await page.getByRole('menuitem', { name: 'Download', exact: true }).click()
+  expect((await download).suggestedFilename()).toBe('logo.svg')
+  await expectChatReady(page)
+})
+
 test('uploads images and files, previews them and preserves attachments while editing the queue', async ({ page, workspace }) => {
+  test.setTimeout(60000)
+  await useRelayForHttpMocks(page)
+  await page.addInitScript(() => {
+    Object.defineProperty(navigator, 'canShare', { configurable: true, value: () => true })
+    Object.defineProperty(navigator, 'share', {
+      configurable: true,
+      value: (data: ShareData) => {
+        if (!navigator.userActivation.isActive)
+          return Promise.reject(new DOMException('User activation expired', 'NotAllowedError'))
+        document.documentElement.dataset.sharedFile = data.files?.[0]?.name
+        return Promise.resolve()
+      },
+    })
+  })
   initializeRepository(workspace.projectPath)
   await page.goto(workspacePath('/tasks'))
   await authenticateWorkspace(page)
@@ -45,6 +111,10 @@ test('uploads images and files, previews them and preserves attachments while ed
   const viewer = page.getByRole('dialog', { name: 'Attachment viewer' })
   await expect(viewer.getByRole('heading', { name: 'design.png' })).toBeVisible()
   await expect(viewer.getByText(/^PNG · [\d.]+ (KB|MB) · \d+ × \d+$/)).toBeVisible()
+  await viewer.getByRole('button', { name: 'Actual size', exact: true }).click()
+  const imagePreview = viewer.getByLabel('Image preview', { exact: true })
+  await expect.poll(() => imagePreview.evaluate(element => element.scrollWidth > element.clientWidth || element.scrollHeight > element.clientHeight)).toBe(true)
+  await viewer.getByRole('button', { name: 'Fit image', exact: true }).click()
   await page.keyboard.press('ArrowRight')
   await expect(viewer.getByRole('heading', { name: 'review-notes.md' })).toBeVisible()
   await expect(viewer.getByText('Uploaded when you send the message')).toBeVisible()
@@ -67,9 +137,22 @@ test('uploads images and files, previews them and preserves attachments while ed
   // The optimistic message is replaced once the agent acknowledges it; act on the settled one.
   await expect(page.locator('.activity-message').filter({ hasText: 'trace the component boundaries' })).toBeVisible()
   await expect(user.getByRole('status')).toHaveCount(0)
+  // A slow original download must finish before the final Share gesture.
+  let delayedOriginals = 0
+  await page.route(/\/chats\/[^/]+\/attachments\/[^/?]+\/stream$/, async (route) => {
+    delayedOriginals++
+    await new Promise(resolve => setTimeout(resolve, 5500))
+    await route.continue()
+  }, { times: 1 })
   await user.getByRole('button', { name: 'More actions for review-notes.md', exact: true }).click()
   const actions = page.getByRole('menu', { name: 'Actions for review-notes.md' })
   await expect(actions.getByRole('menuitem', { name: 'Reuse in new message' })).toBeVisible()
+  const share = actions.getByRole('menuitem', { name: 'Share', exact: true })
+  await expect(share).toBeEnabled({ timeout: 15000 })
+  await share.click()
+  await expect(page.locator('html')).toHaveAttribute('data-shared-file', 'review-notes.md')
+  expect(delayedOriginals).toBe(1)
+  await user.getByRole('button', { name: 'More actions for review-notes.md', exact: true }).click()
   const download = actions.getByRole('menuitem', { name: 'Download' })
   const response = await page.request.get((await download.getAttribute('href'))!)
   expect(await response.text()).toContain('# Design review')
@@ -79,6 +162,9 @@ test('uploads images and files, previews them and preserves attachments while ed
   await user.getByRole('button', { name: 'Preview design.png', exact: true }).click()
   await expect(viewer.getByRole('heading', { name: 'design.png' })).toBeVisible()
   await expect(viewer.getByRole('link', { name: 'Download design.png' })).toBeVisible()
+  await expect(viewer.getByRole('button', { name: 'Share design.png', exact: true })).toBeEnabled()
+  await viewer.getByRole('button', { name: 'Share design.png', exact: true }).click()
+  await expect(page.locator('html')).toHaveAttribute('data-shared-file', 'design.png')
   await expect(viewer.getByRole('list', { name: 'Attachments' }).getByRole('button')).toHaveCount(2)
   await page.keyboard.press('Escape')
   // Reuse puts the same record back in the draft, without uploading it again.
@@ -89,6 +175,15 @@ test('uploads images and files, previews them and preserves attachments while ed
   await page.getByLabel('Attach files', { exact: true }).setInputFiles([image])
   await page.getByRole('button', { name: 'Queue', exact: true }).click()
   await expect(page.getByTestId('queued-message')).toHaveCount(1)
+  // A refused item blocks sending but still counts as an unsent draft.
+  await page.getByLabel('Attach files', { exact: true }).setInputFiles([{ name: 'refused.dat', mimeType: 'application/octet-stream', buffer: Buffer.alloc(10 * 1024 * 1024 + 1) }])
+  await page.getByRole('textbox', { name: 'Message', exact: true }).fill('Keep this unsent draft')
+  await page.getByRole('button', { name: /^Queued message options/ }).first().click()
+  await page.getByRole('dialog', { name: 'Queued message' }).getByRole('button', { name: 'Edit', exact: true }).click()
+  await expect(page.getByRole('textbox', { name: 'Message', exact: true })).toHaveValue('Keep this unsent draft')
+  await expect(tray.getByRole('button', { name: 'Remove refused.dat', exact: true })).toBeVisible()
+  await tray.getByRole('button', { name: 'Remove refused.dat', exact: true }).click()
+  await page.getByRole('textbox', { name: 'Message', exact: true }).fill('')
   await page.getByRole('button', { name: /^Queued message options/ }).first().click()
   await page.getByRole('dialog', { name: 'Queued message' }).getByRole('button', { name: 'Edit', exact: true }).click()
   await expect(page.getByRole('button', { name: 'Remove design.png' })).toBeVisible()

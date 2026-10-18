@@ -17,7 +17,22 @@ data class DraftAttachment(val attachment: ChatAttachment, val localPath: String
 const val MAX_ATTACHMENT_BYTES = 10L * 1024 * 1024
 const val MAX_MESSAGE_ATTACHMENT_BYTES = 40L * 1024 * 1024
 
+/** Reuse keeps the existing record while enforcing the same draft limits as picked files. */
+fun reuseAttachment(
+    draft: List<DraftAttachment>,
+    attachment: ChatAttachment,
+): List<DraftAttachment> {
+    if (draft.any { it.attachment.id == attachment.id }) return draft
+
+    require(draft.size < 8) { "Vous pouvez joindre jusqu’à 8 fichiers." }
+    require(draft.sumOf { it.attachment.size } + attachment.size <= MAX_MESSAGE_ATTACHMENT_BYTES) {
+        "Les pièces jointes ne peuvent pas dépasser 40 Mo par message."
+    }
+    return draft + DraftAttachment(attachment)
+}
+
 /** A file refused before upload, shown in the composer until it is removed. */
+@Serializable
 data class RejectedAttachment(
     val id: String,
     val name: String,

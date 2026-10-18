@@ -39,6 +39,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Share
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
@@ -62,6 +63,8 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import androidx.core.content.FileProvider
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.lifecycle.viewModelScope
 import build.cairn.app.data.*
 import java.io.File
 import java.util.concurrent.ConcurrentHashMap
@@ -85,12 +88,27 @@ private val thumbnails =
     }
 private val summaries = ConcurrentHashMap<String, AttachmentSummary>()
 
-private fun decodeSampled(file: File, target: Int): Bitmap? {
+@Composable
+private fun attachmentCacheKey(vm: CairnViewModel, attachment: ChatAttachment): String {
+    val workspace by vm.state.collectAsStateWithLifecycle()
+    return wireJson.encodeToString(
+        listOf(
+            workspace.origin,
+            workspace.installation?.id,
+            workspace.session.account?.id,
+            workspace.session.csrf,
+            attachment.chatId,
+            attachment.id,
+        )
+    )
+}
+
+internal fun decodeSampled(file: File, target: Int): Bitmap? {
     val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
     BitmapFactory.decodeFile(file.path, bounds)
     if (bounds.outWidth <= 0 || bounds.outHeight <= 0) return null
     val sample =
-        Integer.highestOneBit((minOf(bounds.outWidth, bounds.outHeight) / target).coerceAtLeast(1))
+        Integer.highestOneBit((maxOf(bounds.outWidth, bounds.outHeight) / target).coerceAtLeast(1))
     val bitmap =
         BitmapFactory.decodeFile(file.path, BitmapFactory.Options().apply { inSampleSize = sample })
             ?: return null
@@ -131,11 +149,12 @@ private suspend fun loadThumbnail(
     attachment: ChatAttachment,
     localPath: String?,
     target: Int,
+    key: String,
 ): Bitmap? {
-    val key = "${attachment.chatId}/${attachment.id}/${localPath != null}/$target"
     thumbnails.get(key)?.let {
         return it
     }
+    val api = if (localPath == null && attachment.chatId.isNotBlank()) vm.api else null
     val image = attachment.family == AttachmentFamily.IMAGE
     val bitmap =
         withContext(Dispatchers.IO) {
@@ -146,7 +165,7 @@ private suspend fun loadThumbnail(
                     else ->
                         try {
                             vm.files.fetch(
-                                vm.api,
+                                checkNotNull(api),
                                 "${attachmentPath(attachment)}?preview",
                                 "preview-${attachment.id}.jpg",
                                 MAX_ATTACHMENT_BYTES,
@@ -154,13 +173,7 @@ private suspend fun loadThumbnail(
                         } catch (e: CancellationException) {
                             throw e
                         } catch (_: Exception) {
-                            if (image)
-                                vm.files.fetch(
-                                    vm.api,
-                                    attachmentPath(attachment),
-                                    attachment.name,
-                                    MAX_ATTACHMENT_BYTES,
-                                )
+                            if (image) fetchOriginal(vm.files, checkNotNull(api), attachment)
                             else null
                         }
                 }
@@ -178,20 +191,22 @@ private fun rememberThumbnail(
     target: Dp = 128.dp,
 ): Bitmap? {
     val pixels = with(LocalDensity.current) { target.roundToPx() }
-    val key = "${attachment.chatId}/${attachment.id}/${localPath != null}/$pixels"
-    return produceState(thumbnails.get(key), key) {
-            if (value == null)
-                value =
-                    try {
-                        loadThumbnail(vm, attachment, localPath, pixels)
-                    } catch (e: CancellationException) {
-                        throw e
-                    } catch (_: Exception) {
-                        /* The file stays available from the viewer. */
-                        null
-                    }
-        }
-        .value
+    val cacheKey = "${attachmentCacheKey(vm, attachment)}/$localPath/$pixels"
+    return key(cacheKey) {
+        produceState(thumbnails.get(cacheKey), cacheKey) {
+                if (value == null)
+                    value =
+                        try {
+                            loadThumbnail(vm, attachment, localPath, pixels, cacheKey)
+                        } catch (e: CancellationException) {
+                            throw e
+                        } catch (_: Exception) {
+                            /* The file stays available from the viewer. */
+                            null
+                        }
+            }
+            .value
+    }
 }
 
 /** Page or line counts and the opening text, from `?summary`; null until known. */
@@ -206,29 +221,31 @@ private fun rememberSummary(vm: CairnViewModel, attachment: ChatAttachment): Att
                     AttachmentFamily.CODE,
                     AttachmentFamily.TEXT,
                 )
-    val key = "${attachment.chatId}/${attachment.id}"
-    return produceState(summaries[key], key, wanted) {
-            if (value != null || !wanted) return@produceState
-            value =
-                try {
-                    val file =
-                        vm.files.fetch(
-                            vm.api,
-                            "${attachmentPath(attachment)}?summary",
-                            "summary-${attachment.id}.json",
-                            256L * 1024,
-                        )
-                    withContext(Dispatchers.IO) {
-                            wireJson.decodeFromString<AttachmentSummary>(file.readText())
-                        }
-                        .also { summaries[key] = it }
-                } catch (e: CancellationException) {
-                    throw e
-                } catch (_: Exception) {
-                    null
-                }
-        }
-        .value
+    val cacheKey = attachmentCacheKey(vm, attachment)
+    return key(cacheKey) {
+        produceState(summaries[cacheKey], cacheKey, wanted) {
+                if (value != null || !wanted) return@produceState
+                value =
+                    try {
+                        val file =
+                            vm.files.fetch(
+                                vm.api,
+                                "${attachmentPath(attachment)}?summary",
+                                "summary-${attachment.id}.json",
+                                256L * 1024,
+                            )
+                        withContext(Dispatchers.IO) {
+                                wireJson.decodeFromString<AttachmentSummary>(file.readText())
+                            }
+                            .also { summaries[cacheKey] = it }
+                    } catch (e: CancellationException) {
+                        throw e
+                    } catch (_: Exception) {
+                        null
+                    }
+            }
+            .value
+    }
 }
 
 /** The coloured tile carrying the extension; a file icon when the name has none. */
@@ -537,7 +554,7 @@ internal fun MessageAttachments(
     opening?.let { initial ->
         AttachmentGallery(vm, ordered, initial, actions = { acting = it }) { opening = null }
     }
-    acting?.let { attachment -> AttachmentActions(vm, attachment) { acting = null } }
+    AttachmentActions(vm, acting) { acting = null }
 }
 
 @Composable
@@ -664,9 +681,20 @@ private suspend fun attachmentFile(
     vm: CairnViewModel,
     attachment: ChatAttachment,
     localPath: String?,
-): File =
-    localPath?.let { File(it) }
-        ?: vm.files.fetch(vm.api, attachmentPath(attachment), attachment.name, MAX_ATTACHMENT_BYTES)
+): File = localPath?.let { File(it) } ?: fetchOriginal(vm.files, vm.api, attachment)
+
+private suspend fun fetchOriginal(files: Files, api: CairnApi, attachment: ChatAttachment): File =
+    try {
+        files.fetch(
+            api,
+            "${attachmentPath(attachment)}/stream",
+            attachment.name,
+            MAX_ATTACHMENT_BYTES,
+        )
+    } catch (e: ApiException) {
+        if (e.status != 404 && e.status != 501) throw e
+        files.fetch(api, attachmentPath(attachment), attachment.name, MAX_ATTACHMENT_BYTES)
+    }
 
 private fun shareFile(context: Context, file: File, attachment: ChatAttachment) {
     val uri =
@@ -674,7 +702,7 @@ private fun shareFile(context: Context, file: File, attachment: ChatAttachment) 
     val intent =
         Intent(Intent.ACTION_SEND)
             .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-            .setType(viewerType(attachment).second)
+            .setType(attachmentMediaType(attachment))
             .putExtra(Intent.EXTRA_STREAM, uri)
             .putExtra(Intent.EXTRA_TITLE, attachment.name)
     intent.clipData = ClipData.newRawUri(attachment.name, uri)
@@ -694,7 +722,7 @@ private object SaveDocument : ActivityResultContract<ChatAttachment, Uri?>() {
     override fun createIntent(context: Context, input: ChatAttachment) =
         Intent(Intent.ACTION_CREATE_DOCUMENT)
             .addCategory(Intent.CATEGORY_OPENABLE)
-            .setType(viewerType(input).second.ifBlank { "application/octet-stream" })
+            .setType(attachmentMediaType(input))
             .putExtra(Intent.EXTRA_TITLE, input.name)
 
     override fun parseResult(resultCode: Int, intent: Intent?) =
@@ -707,13 +735,13 @@ private fun rememberSave(
     vm: CairnViewModel,
     local: Map<String, String> = emptyMap(),
 ): (ChatAttachment) -> Unit {
-    val scope = rememberCoroutineScope()
-    var saving by remember { mutableStateOf<ChatAttachment?>(null) }
+    var saving by rememberSaveable { mutableStateOf<String?>(null) }
     val launcher =
         rememberLauncherForActivityResult(SaveDocument) { uri ->
-            val attachment = saving
+            val attachment = saving?.let { wireJson.decodeFromString<ChatAttachment>(it) }
+            saving = null
             if (uri != null && attachment != null)
-                scope.launch {
+                vm.viewModelScope.launch {
                     try {
                         vm.files.save(attachmentFile(vm, attachment, local[attachment.id]), uri)
                     } catch (e: CancellationException) {
@@ -724,7 +752,7 @@ private fun rememberSave(
                 }
         }
     return { attachment ->
-        saving = attachment
+        saving = wireJson.encodeToString(attachment)
         launcher.launch(attachment)
     }
 }
@@ -940,10 +968,13 @@ private fun AttachmentPage(
 
 /** Long press on a sent file: save, share, copy an image, or attach it again. */
 @Composable
-internal fun AttachmentActions(vm: CairnViewModel, attachment: ChatAttachment, close: () -> Unit) {
+internal fun AttachmentActions(vm: CairnViewModel, attachment: ChatAttachment?, close: () -> Unit) {
     val context = LocalContext.current
     val save = rememberSave(vm)
     val withFile = rememberFileAction(vm)
+    // The launcher and download scope outlive dismissal of the sheet.
+    if (attachment == null) return
+
     val reuse = LocalAttachmentReuse.current?.takeIf { it.chatId == attachment.chatId }
     ModalBottomSheet(onDismissRequest = close) {
         Column(Modifier.fillMaxWidth().padding(bottom = 24.dp).testTag("attachment-actions")) {

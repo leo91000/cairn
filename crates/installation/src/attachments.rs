@@ -364,6 +364,10 @@ impl Service {
     async fn attachment_summary(&self, chat: &str, id: &str) -> Result<Response> {
         let (_, bytes) = self.stored_attachment(chat, id).await?;
         let summary = if bytes.starts_with(b"%PDF-") {
+            let _permit = crate::artifacts::preview::JOBS
+                .acquire()
+                .await
+                .map_err(Error::internal)?;
             let source = self.attachment_path(chat, id);
             let pages = tokio::time::timeout(
                 Duration::from_secs(10),

@@ -115,13 +115,16 @@ fun attachmentSubtitle(attachment: ChatAttachment, summary: AttachmentSummary? =
         )
         .joinToString(" · ")
 
+/** Original or inferred file MIME for external save/share providers. */
+fun attachmentMediaType(attachment: ChatAttachment): String =
+    attachment.mediaType.takeUnless { it.isBlank() || it == "application/octet-stream" }
+        ?: android.webkit.MimeTypeMap.getSingleton()
+            .getMimeTypeFromExtension(attachmentExtension(attachment.name))
+        ?: "application/octet-stream"
+
 /** Kind and media type understood by the file viewer, which was written for artifacts. */
 fun viewerType(attachment: ChatAttachment): Pair<String, String> {
     val extension = attachmentExtension(attachment.name)
-    val guessed =
-        android.webkit.MimeTypeMap.getSingleton().getMimeTypeFromExtension(extension)
-            ?: attachment.mediaType
-    val mediaType = if (attachment.mediaType.startsWith("image/")) attachment.mediaType else guessed
     val kind =
         when (attachment.family) {
             AttachmentFamily.IMAGE -> "image"
@@ -133,6 +136,13 @@ fun viewerType(attachment: ChatAttachment): Pair<String, String> {
             AttachmentFamily.CODE -> "code"
             AttachmentFamily.SHEET -> if (extension in setOf("csv", "tsv")) "code" else "file"
             else -> "file"
+        }
+
+    // Android also maps .ts to MPEG transport streams; the chosen text family wins.
+    val mediaType =
+        when {
+            kind == "code" || kind == "markdown" -> "text/plain"
+            else -> attachmentMediaType(attachment)
         }
     return kind to mediaType
 }

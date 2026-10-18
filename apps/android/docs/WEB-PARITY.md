@@ -49,7 +49,14 @@ coverage used, not a claim that every production account/provider was exercised.
   user taps the tile; Android 14 limited access is supported), which browsers cannot offer; the
   web menu has Photos, Camera and Files. File actions use a long press on Android and a ⋯ menu
   on the web. Message images keep a fixed mosaic size on Android so the history does not move
-  while pictures load.
+  while pictures load. Both viewers zoom images: pinch and pan on Android; an
+  actual-size toggle with scrolling on the web. Web sharing prepares the original
+  while the menu or viewer is open, then enables Share for a fresh user gesture.
+  Both apps fetch original attachments through the authenticated binary stream
+  route, including files up to the 10 MiB attachment limit when using Beacon.
+  They fall back to the original download route on older installations.
+  Thumbnail formats follow platform decoders: SVGs have a placeholder on Android
+  and open in its full-screen viewer; browsers may show placeholders for HEIC.
 - Installing a plugin package uses « Continuer sur le web ». Reviewing files and
   versions, approving packages, editing instances and configuring Discord are native.
 - Foreground updates use SSE. Background question notifications retain the

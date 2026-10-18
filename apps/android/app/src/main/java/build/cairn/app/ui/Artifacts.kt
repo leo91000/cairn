@@ -630,19 +630,7 @@ private fun NativeImage(
     var bitmap by remember(file) { mutableStateOf<Bitmap?>(null) }
     var failed by remember(file) { mutableStateOf(false) }
     LaunchedEffect(file) {
-        bitmap =
-            withContext(Dispatchers.IO) {
-                val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
-                BitmapFactory.decodeFile(file.path, bounds)
-                val sample =
-                    Integer.highestOneBit(
-                        (maxOf(bounds.outWidth, bounds.outHeight) / 2048).coerceAtLeast(1)
-                    )
-                BitmapFactory.decodeFile(
-                    file.path,
-                    BitmapFactory.Options().apply { inSampleSize = sample },
-                )
-            }
+        bitmap = withContext(Dispatchers.IO) { decodeSampled(file, 2048) }
         failed = bitmap == null
     }
     bitmap?.let {

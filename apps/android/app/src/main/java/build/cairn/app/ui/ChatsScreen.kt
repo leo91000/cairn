@@ -355,7 +355,7 @@ internal fun ChatPage(
     var reasoning by rememberSaveable(id) { mutableStateOf(savedDraft.reasoning) }
     var attachments by rememberForm(savedDraft.attachments)
     // Per-file states of the composer: refused before upload, uploading, or failed to upload.
-    var rejected by remember(id) { mutableStateOf<List<RejectedAttachment>>(emptyList()) }
+    var rejected by rememberForm(savedDraft.rejected)
     val uploadProgress = remember(id) { mutableStateMapOf<String, Float>() }
     val uploadErrors = remember(id) { mutableStateMapOf<String, String>() }
     var attaching by rememberSaveable(id) { mutableStateOf(false) }
@@ -386,6 +386,7 @@ internal fun ChatPage(
                     submissionId,
                     submissionKey,
                     provider,
+                    rejected,
                 )
     }
     SideEffect { persistDraft() }
@@ -679,7 +680,7 @@ internal fun ChatPage(
         }
     }
     fun edit(message: ChatMessage) {
-        if (draft.isNotBlank() || attachments.isNotEmpty()) {
+        if (draft.isNotBlank() || attachments.isNotEmpty() || rejected.isNotEmpty()) {
             vm.report(
                 IllegalStateException(
                     "Envoyez ou effacez votre brouillon avant de modifier la file d’attente."
@@ -742,12 +743,12 @@ internal fun ChatPage(
         remember(chat?.id) {
             chat?.id?.let { chatId ->
                 AttachmentReuse(chatId) { attachment ->
-                    if (attachments.none { it.attachment.id == attachment.id }) {
-                        if (attachments.size >= 8)
-                            vm.report(
-                                IllegalStateException("Vous pouvez joindre jusqu’à 8 fichiers.")
-                            )
-                        else attachments = attachments + DraftAttachment(attachment)
+                    if (vm.state.value.busy) return@AttachmentReuse
+
+                    try {
+                        attachments = reuseAttachment(attachments, attachment)
+                    } catch (e: IllegalArgumentException) {
+                        vm.report(e)
                     }
                 }
             }

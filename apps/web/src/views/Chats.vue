@@ -578,7 +578,7 @@ async function update(message: ChatMessage, mode?: 'steer') {
 }
 
 function edit(message: ChatMessage) {
-  if (canSend.value && !editing.value) {
+  if (hasDraft.value && !editing.value) {
     error.value = 'Send or clear your draft before editing a queued message.'
     return
   }

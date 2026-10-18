@@ -1,47 +1,65 @@
 import type { InjectionKey, Ref } from 'vue'
 import type { ChatAttachment } from '../../../packages/contracts/chats'
 import type { AttachmentSummary } from './attachments'
-import { onBeforeUnmount, ref, watch } from 'vue'
+import {
+  onBeforeUnmount,
+  ref,
+  shallowRef,
+  watch,
+} from 'vue'
 import {
   api,
   apiBlob,
   ApiError,
   apiUrl,
+  state,
 } from './api'
-import { needsSummary } from './attachments'
+import { isSvg, needsSummary } from './attachments'
 
 // Previews and summaries are served with `Cache-Control: no-store`, but an attachment never changes
 // for a given id: keep them in memory for the session, fetch only visible items, and share requests.
 
 export function attachmentUrl(attachment: Pick<ChatAttachment, 'id' | 'chatId'>, flag?: 'preview' | 'summary') {
-  return apiUrl(`/chats/${encodeURIComponent(attachment.chatId)}/attachments/${encodeURIComponent(attachment.id)}${flag ? `?${flag}` : ''}`)
+  return apiUrl(attachmentPath(attachment, flag))
 }
 
-function attachmentPath(attachment: Pick<ChatAttachment, 'id' | 'chatId'>, flag: 'preview' | 'summary') {
-  return `/chats/${encodeURIComponent(attachment.chatId)}/attachments/${encodeURIComponent(attachment.id)}?${flag}`
+function attachmentPath(attachment: Pick<ChatAttachment, 'id' | 'chatId'>, flag?: 'preview' | 'summary') {
+  return `/chats/${encodeURIComponent(attachment.chatId)}/attachments/${encodeURIComponent(attachment.id)}${flag ? `?${flag}` : ''}`
 }
 
 interface Entry<T> {
   promise: Promise<T | null>
   value?: T | null
   users: number
+  retryAt?: number
 }
 
 const PREVIEW_LIMIT = 120
 const RETRY_AFTER = 60_000
 const previews = new Map<string, Entry<string>>()
 const summaries = new Map<string, Entry<AttachmentSummary>>()
-const cacheKey = (attachment: Pick<ChatAttachment, 'id' | 'chatId'>) => `${attachment.chatId}/${attachment.id}`
+
+function cacheKey(attachment: Pick<ChatAttachment, 'id' | 'chatId'>) {
+  return JSON.stringify([
+    state.installationId,
+    state.accountId,
+    state.csrf,
+    attachment.chatId,
+    attachment.id,
+  ])
+}
 
 // A missing preview stays missing; other failures (offline, rate limit) may be retried later.
-function settle<T>(map: Map<string, Entry<T>>, key: string, entry: Entry<T>, load: () => Promise<T>) {
+function settle<T>(entry: Entry<T>, load: () => Promise<T>) {
+  entry.value = undefined
+  entry.retryAt = undefined
   entry.promise = load().then((value) => {
     entry.value = value
     return value
   }, (error) => {
     entry.value = null
     if (!(error instanceof ApiError && (error.status === 404 || error.status === 415)))
-      setTimeout(() => map.get(key) === entry && !entry.users && map.delete(key), RETRY_AFTER)
+      entry.retryAt = Date.now() + RETRY_AFTER
     return null
   })
 }
@@ -53,8 +71,10 @@ function evictPreviews() {
     if (entry.users)
       continue
     previews.delete(key)
-    if (entry.value)
-      URL.revokeObjectURL(entry.value)
+    void entry.promise.then((url) => {
+      if (url)
+        URL.revokeObjectURL(url)
+    })
   }
 }
 
@@ -64,11 +84,13 @@ function acquire<T>(map: Map<string, Entry<T>>, key: string, load: () => Promise
     // Most recently used entries move to the end, away from eviction.
     map.delete(key)
     map.set(key, entry)
+    if (entry.retryAt !== undefined && Date.now() >= entry.retryAt)
+      settle(entry, load)
   }
   else {
     entry = { promise: Promise.resolve(null), users: 0 }
     map.set(key, entry)
-    settle(map, key, entry, load)
+    settle(entry, load)
   }
 
   entry.users++
@@ -76,7 +98,12 @@ function acquire<T>(map: Map<string, Entry<T>>, key: string, load: () => Promise
 }
 
 export function loadPreview(attachment: ChatAttachment) {
-  const entry = acquire(previews, cacheKey(attachment), async () => URL.createObjectURL(await apiBlob(attachmentPath(attachment, 'preview'))))
+  const entry = acquire(previews, cacheKey(attachment), async () => {
+    // SVG originals stay downloads on the server. A typed blob rendered only in <img>
+    // preserves vector detail without enabling inline SVG scripts or markup.
+    const blob = isSvg(attachment) ? await attachmentFile(attachment) : await apiBlob(attachmentPath(attachment, 'preview'))
+    return URL.createObjectURL(blob)
+  })
   evictPreviews()
   return entry
 }
@@ -236,14 +263,87 @@ export function canCopyImages() {
 }
 
 export async function attachmentFile(attachment: ChatAttachment) {
-  const blob = await apiBlob(`/chats/${encodeURIComponent(attachment.chatId)}/attachments/${encodeURIComponent(attachment.id)}`)
-  return new File([blob], attachment.name, { type: blob.type && blob.type !== 'application/octet-stream' ? blob.type : attachment.mediaType || 'application/octet-stream' })
+  const scope = cacheKey(attachment)
+  const path = attachmentPath(attachment)
+  let blob: Blob
+  try {
+    blob = await apiBlob(`${path}/stream`)
+  }
+  catch (error) {
+    // Old installations lack the alias; protocol v1 rejects streaming routes.
+    if (!(error instanceof ApiError && (error.status === 404 || error.status === 501)) || scope !== cacheKey(attachment))
+      throw error
+    blob = await apiBlob(path)
+  }
+
+  if (scope !== cacheKey(attachment))
+    throw new ApiError('The active installation changed. Please try again.', 0)
+  const type = isSvg(attachment) ? 'image/svg+xml' : blob.type && blob.type !== 'application/octet-stream' ? blob.type : attachment.mediaType || 'application/octet-stream'
+  return new File([blob], attachment.name, { type })
 }
 
-export async function shareAttachment(attachment: ChatAttachment) {
-  const file = await attachmentFile(attachment)
+export async function downloadAttachment(attachment: ChatAttachment, prepared?: File) {
+  const file = prepared ?? await attachmentFile(attachment)
+  const url = URL.createObjectURL(file)
+  const link = document.createElement('a')
+  link.href = url
+  link.download = attachment.name
+  document.body.append(link)
+  link.click()
+  link.remove()
+  setTimeout(() => URL.revokeObjectURL(url), 30_000)
+}
+
+/** Prepare the original before the final Share click, which must retain user activation. */
+export function useAttachmentShare(source: () => ChatAttachment | undefined) {
+  const file = shallowRef<File>()
+  const loading = ref(false)
+  let generation = 0
+
+  watch(() => {
+    const attachment = source()
+    return attachment ? cacheKey(attachment) : ''
+  }, () => {
+    generation++
+    file.value = undefined
+    loading.value = false
+  }, { flush: 'sync' })
+  onBeforeUnmount(() => generation++)
+
+  async function prepare() {
+    const attachment = source()
+    if (!attachment?.chatId || file.value || loading.value)
+      return
+
+    const current = generation
+    loading.value = true
+    try {
+      const downloaded = await attachmentFile(attachment)
+      if (current === generation)
+        file.value = downloaded
+    }
+    finally {
+      if (current === generation)
+        loading.value = false
+    }
+  }
+
+  function share() {
+    if (file.value)
+      return shareAttachment(file.value)
+  }
+
+  return {
+    file,
+    loading,
+    prepare,
+    share,
+  }
+}
+
+export async function shareAttachment(file: File) {
   try {
-    await navigator.share({ files: [file], title: attachment.name })
+    await navigator.share({ files: [file], title: file.name })
   }
   catch (error) {
     if ((error as DOMException).name !== 'AbortError')

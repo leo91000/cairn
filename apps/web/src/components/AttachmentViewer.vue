@@ -12,8 +12,9 @@ import { notify } from '../api'
 import {
   attachmentUrl,
   canShareFiles,
-  shareAttachment,
+  downloadAttachment,
   useAttachmentMedia,
+  useAttachmentShare,
 } from '../attachment-media'
 import {
   detail,
@@ -26,6 +27,8 @@ import {
   ChevronLeft,
   ChevronRight,
   Download,
+  Maximize2,
+  Minimize2,
   Share2,
   X,
 } from '../icons'
@@ -54,8 +57,28 @@ const text = useAttachmentMedia(() => preview.value === 'excerpt' ? current.valu
 const dimensions = ref<{ width: number, height: number }>()
 const broken = ref(false)
 const share = canShareFiles()
+const sharing = useAttachmentShare(() => current.value)
+const originalImage = ref<string>()
+watch(sharing.file, (file, _, cleanup) => {
+  originalImage.value = undefined
+  if (!file || !image.value)
+    return
+  const url = URL.createObjectURL(file)
+  originalImage.value = url
+  cleanup(() => URL.revokeObjectURL(url))
+})
+const zoom = ref(false)
 const previous = document.activeElement as HTMLElement | null
-const imageSource = computed(() => local.value || (uploaded.value && current.value ? attachmentUrl(current.value) : undefined))
+const imageSource = computed(() => {
+  if (local.value)
+    return local.value
+  return originalImage.value
+})
+watch(imageSource, () => {
+  dimensions.value = undefined
+  broken.value = false
+  zoom.value = false
+})
 const summary = computed(() => preview.value === 'page' ? page.summary.value : text.summary.value)
 const caption = computed(() => {
   const attachment = current.value
@@ -71,9 +94,15 @@ const caption = computed(() => {
 watch(index, async () => {
   dimensions.value = undefined
   broken.value = false
+  zoom.value = false
   await nextTick()
   strip.value?.querySelector<HTMLElement>('[aria-current="true"]')?.scrollIntoView?.({ block: 'nearest', inline: 'center' })
 })
+
+watch(() => [current.value, sharing.file.value], () => {
+  if ((share || image.value) && uploaded.value && !local.value)
+    void prepareShare()
+}, { immediate: true })
 watch(() => props.attachments.length, (length) => {
   if (!length)
     emit('close')
@@ -108,7 +137,7 @@ function keydown(event: KeyboardEvent) {
 let touch: { x: number, y: number } | undefined
 
 function touchStart(event: TouchEvent) {
-  touch = event.touches.length === 1 ? { x: event.touches[0].clientX, y: event.touches[0].clientY } : undefined
+  touch = !zoom.value && event.touches.length === 1 ? { x: event.touches[0].clientX, y: event.touches[0].clientY } : undefined
 }
 
 function touchEnd(event: TouchEvent) {
@@ -123,12 +152,26 @@ function touchEnd(event: TouchEvent) {
 }
 
 async function shareCurrent() {
+  try {
+    await sharing.share()
+  }
+  catch (error) { notify((error as Error).message || 'Unable to share this file.') }
+}
+
+async function prepareShare() {
+  try {
+    await sharing.prepare()
+  }
+  catch (error) { notify((error as Error).message || 'Unable to load this file.') }
+}
+
+async function downloadCurrent() {
   if (!current.value)
     return
   try {
-    await shareAttachment(current.value)
+    await downloadAttachment(current.value, sharing.file.value)
   }
-  catch (error) { notify((error as Error).message || 'Unable to share this file.') }
+  catch (error) { notify((error as Error).message || 'Unable to download this file.') }
 }
 
 onMounted(async () => {
@@ -169,6 +212,17 @@ onBeforeUnmount(() => {
               {{ caption }}
             </p>
           </div>
+          <button
+            v-if="image && imageSource && !broken"
+            type="button"
+            class="viewer-button"
+            :aria-label="zoom ? 'Fit image' : 'Actual size'"
+            :title="zoom ? 'Fit image' : 'Actual size'"
+            :aria-pressed="zoom"
+            @click="zoom = !zoom"
+          >
+            <Icon :name="zoom ? Minimize2 : Maximize2" :size="18" />
+          </button>
           <a
             v-if="uploaded"
             class="viewer-button"
@@ -176,14 +230,16 @@ onBeforeUnmount(() => {
             :download="current.name"
             :aria-label="`Download ${current.name}`"
             title="Download"
+            @click.prevent="downloadCurrent"
           ><Icon :name="Download" :size="18" /></a>
           <button
             v-if="uploaded && share"
             type="button"
             class="viewer-button"
             :aria-label="`Share ${current.name}`"
-            title="Share"
-            @click="shareCurrent"
+            :title="sharing.loading.value ? 'Preparing file…' : sharing.file.value ? 'Share' : 'Prepare to share'"
+            :disabled="sharing.loading.value"
+            @click="sharing.file.value ? shareCurrent() : prepareShare()"
           >
             <Icon :name="Share2" :size="18" />
           </button>
@@ -193,15 +249,23 @@ onBeforeUnmount(() => {
           @touchstart.passive="touchStart"
           @touchend="touchEnd"
         >
-          <img
+          <div
             v-if="image && imageSource && !broken"
-            :key="current.id"
-            :src="imageSource"
-            :alt="current.name"
-            class="block max-h-full max-w-full object-contain select-none"
-            @load="loaded"
-            @error="broken = true"
+            class="h-full w-full overflow-auto"
+            aria-label="Image preview"
           >
+            <div class="flex min-h-full" :class="zoom ? 'w-max min-w-full' : 'h-full items-center justify-center'">
+              <img
+                :key="current.id"
+                :src="imageSource"
+                :alt="current.name"
+                :class="zoom ? 'm-auto max-w-none shrink-0' : 'max-h-full max-w-full object-contain'"
+                class="block select-none"
+                @load="loaded"
+                @error="broken = true"
+              >
+            </div>
+          </div>
           <img
             v-else-if="preview === 'page' && page.preview.value"
             :key="`page:${current.id}`"
@@ -220,7 +284,7 @@ onBeforeUnmount(() => {
             <p class="m-0! max-w-sm text-sm text-[#c9c7d6] wrap-anywhere">
               {{ current.name }}
             </p>
-            <p v-if="(preview === 'page' && !page.previewFailed.value && uploaded) || (preview === 'excerpt' && summary === undefined && uploaded)" class="m-0! text-xs text-[#9d9bab]" role="status">
+            <p v-if="(image && sharing.loading.value && !broken) || (preview === 'page' && !page.previewFailed.value && uploaded) || (preview === 'excerpt' && summary === undefined && uploaded)" class="m-0! text-xs text-[#9d9bab]" role="status">
               Loading preview…
             </p>
             <template v-else-if="uploaded">
@@ -231,6 +295,7 @@ onBeforeUnmount(() => {
                 class="inline-flex min-h-10 items-center gap-2 rounded-full bg-white px-4 text-sm font-semibold text-[#0d0d12]"
                 :href="attachmentUrl(current)"
                 :download="current.name"
+                @click.prevent="downloadCurrent"
               ><Icon :name="Download" :size="16" />Download</a>
             </template>
             <p v-else class="m-0! text-xs text-[#9d9bab]">
