@@ -1000,6 +1000,31 @@ test('starts project chats, steers, edits the queue and preserves a compact mobi
   await expect(page.getByRole('combobox', { name: 'Chat agent' })).toHaveValue('Release engineer')
 })
 
+test('withdraws an obsolete question without sending an answer on desktop and mobile', async ({ page, workspace }) => {
+  for (const width of [1440, 390]) {
+    const chat = await workspace.api('/api/chats', 'POST', {})
+    await workspace.api(`/api/chats/${chat.id}/messages`, 'POST', { id: randomUUID(), text: 'fixture:question blocking' })
+    await page.setViewportSize({ width, height: 844 })
+    await page.goto(workspacePath(`/chats/${chat.id}`))
+    await authenticateWorkspace(page)
+    await expect(page.getByRole('button', { name: 'Answer pending questions' })).toBeVisible()
+    await page.getByRole('button', { name: 'Answer', exact: true }).click()
+    await expect(page.getByRole('button', { name: 'Send answer', exact: true })).toBeDisabled()
+    await page.getByRole('button', { name: 'No longer needed', exact: true }).click()
+    await expect(page.getByRole('dialog')).not.toBeVisible()
+    await expect(page.getByRole('button', { name: 'Answer pending questions' })).not.toBeVisible()
+    await expect.poll(async () => (await workspace.api(`/api/chats/${chat.id}`)).run?.status).toBe('succeeded')
+    const detail = await workspace.api(`/api/chats/${chat.id}`)
+    expect(detail.questions[0].status).toBe('cancelled')
+    expect(detail.pendingQuestions).toBe(0)
+    expect(detail.messages).toHaveLength(0)
+    const userEvents = workspace.service.store.events(detail.run.id, 0, 100).filter(event => event.type === 'chat.user')
+    expect(userEvents).toHaveLength(1)
+    await page.reload()
+    await expect(page.getByRole('button', { name: 'Answer pending questions' })).not.toBeVisible()
+  }
+})
+
 test('answers in-flight questions with choices or free text on desktop and mobile', async ({ page, workspace }) => {
   // Earlier chat journeys share this worker's request budget. Start this
   // independent flow with a fresh limiter while preserving the seeded data.

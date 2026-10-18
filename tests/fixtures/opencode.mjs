@@ -337,7 +337,7 @@ async function main() {
       return
     }
 
-    const question = url.pathname.match(/^\/question\/(que_\w+)\/reply$/)
+    const question = url.pathname.match(/^\/question\/(que_\w+)\/(reply|reject)$/)
     if (question && request.method === 'POST') {
       const pending = questions.get(question[1])
       if (!pending) {
@@ -347,8 +347,9 @@ async function main() {
 
       questions.delete(question[1])
       json(200, true)
-      emit('question.replied', { sessionID: pending.session.id, requestID: question[1] })
-      await finish(pending.session, pending.parent, `I will use the ${body.answers[0].join(', ')} layout.`)
+      const rejected = question[2] === 'reject'
+      emit(rejected ? 'question.rejected' : 'question.replied', { sessionID: pending.session.id, requestID: question[1] })
+      await finish(pending.session, pending.parent, rejected ? 'Question withdrawn without an answer.' : `I will use the ${body.answers[0].join(', ')} layout.`)
       return
     }
 

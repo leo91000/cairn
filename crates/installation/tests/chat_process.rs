@@ -469,6 +469,50 @@ async fn native_in_flight_question_accepts_answer_and_preserves_receipt() {
 }
 
 #[tokio::test]
+async fn withdrawn_native_questions_resume_without_an_answer_or_user_receipt() {
+    for blocking in [false, true] {
+        let root = TempDir::new().unwrap();
+        let home = prepare(&root);
+        let observed = home.clone();
+        let config = config(&root);
+        let plan = plan(
+            &root,
+            if blocking {
+                "fixture:question blocking"
+            } else {
+                "fixture:question"
+            },
+        );
+        let (tx, mut rx) = mpsc::channel(64);
+        let task = tokio::spawn(async move {
+            chat_process::run(&config, &home, plan, tx, CancellationToken::new()).await
+        });
+        let mut completed = false;
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while let Some(event) = rx.recv().await {
+                if event["type"] == "chat.question" {
+                    deliver(&root, &json!([{
+                        "id": "withdrawal", "questionId": event["question"]["id"], "questionCancelled": true,
+                    }])).await;
+                }
+                assert!(!(event["type"] == "chat.delivered" && event["messageId"] == "withdrawal"));
+                completed |= event["type"] == "turn.completed";
+            }
+        }).await.unwrap();
+        task.await.unwrap().unwrap();
+        assert!(completed);
+        let thread = conversation(&observed);
+        let answer = thread["turns"][0]["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|i| i["type"] == "fixtureAnswer")
+            .unwrap();
+        assert_eq!(answer["answers"], json!({}));
+    }
+}
+
+#[tokio::test]
 async fn subagent_threads_show_as_steps_of_their_subagent() {
     let root = TempDir::new().unwrap();
     let home = prepare(&root);

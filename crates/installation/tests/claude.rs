@@ -619,6 +619,36 @@ async fn question_answers_use_control_protocol() {
 }
 
 #[tokio::test]
+async fn withdrawn_questions_deny_the_native_request_without_an_answer() {
+    let root = TempDir::new().unwrap();
+    let c = setup(&root);
+    let p = plan(&root, "fixture:question");
+    let (tx, mut rx) = mpsc::channel(64);
+    let task =
+        tokio::spawn(async move { claude_process::run(&c, p, tx, CancellationToken::new()).await });
+    let mut completed = false;
+    tokio::time::timeout(Duration::from_secs(8), async {
+        while let Some(event) = rx.recv().await {
+            if event["type"] == "chat.question" {
+                deliver(&root, &json!([{
+                    "id": "withdrawal", "questionId": event["question"]["id"], "questionCancelled": true,
+                }]));
+            }
+            completed |= event["type"] == "turn.completed";
+        }
+    }).await.unwrap();
+    task.await.unwrap().unwrap();
+    assert!(completed);
+    let response: Value = serde_json::from_slice(
+        &std::fs::read(root.path().join("home/.claude/question-response.json")).unwrap(),
+    )
+    .unwrap();
+    let decision = &response["response"]["response"];
+    assert_eq!(decision["behavior"], "deny");
+    assert!(decision["updatedInput"].is_null());
+}
+
+#[tokio::test]
 async fn cancellation_and_provider_errors_do_not_complete_the_turn() {
     for prompt in ["fixture:hang", "fixture:fail", "fixture:background"] {
         let root = TempDir::new().unwrap();

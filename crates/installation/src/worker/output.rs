@@ -279,6 +279,14 @@ async fn apply_event(
     }
     if event["type"] == "turn.completed" {
         checkpoint.update(|c| c.completed = Some(true)).await?;
+        let run = s.store.run(id).await?;
+        let outcome = &run["outcome"];
+        if outcome["status"] == "completed"
+            && outcome["messageId"].is_string()
+            && outcome["messageId"] == run["chatExecution"]["messageId"]
+        {
+            s.question_release(id, None).await?;
+        }
         if !event["usage"].is_null() {
             let patch = serde_json::json!({ "usage": event["usage"] });
             s.store.patch_run(id, patch).await?;

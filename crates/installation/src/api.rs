@@ -246,6 +246,9 @@ async fn chat_routes(s: &Arc<Service>, input: &Input, route: Route<'_>) -> Resul
             s.chat_edit(id, message, Some(input.body.clone())).await?
         }
         ("DELETE", ["chats", id, "messages", message]) => s.chat_edit(id, message, None).await?,
+        ("POST", ["chats", id, "questions", question, "cancel"]) => {
+            s.question_cancel(id, question).await?
+        }
         ("POST", ["chats", id, "questions", question, "answer"]) => {
             s.question_answer(id, question, input.body.clone()).await?
         }

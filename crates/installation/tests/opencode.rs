@@ -622,6 +622,49 @@ async fn pinned_native_cli_executes_and_resumes_without_global_plugins() {
 }
 
 #[tokio::test]
+async fn withdrawn_questions_reject_the_native_request_without_an_answer() {
+    let root = TempDir::new().unwrap();
+    let s = service(&root).await;
+    connect(&s).await;
+    let lease = s
+        .accounts
+        .acquire(&s, "withdraw-question-test", Provider::Opencode, MODEL)
+        .await
+        .unwrap()
+        .unwrap();
+    let _broker = broker::serve(&s, &lease).await.unwrap();
+    let mut config = s.config.clone();
+    config.home = lease.home.parent().unwrap().to_owned();
+    let input = plan(&root, "fixture:opencode-question");
+    let (tx, mut rx) = mpsc::channel(128);
+    let task =
+        tokio::spawn(
+            async move { opencode::run(&config, input, tx, CancellationToken::new()).await },
+        );
+    let mut completed = false;
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while let Some(event) = rx.recv().await {
+            if event["type"] == "chat.question" {
+                tokio::fs::create_dir_all(root.path().join("inbox")).await.unwrap();
+                tokio::fs::write(root.path().join("inbox/messages.json"), json!([{
+                    "id": "withdrawal", "questionId": event["question"]["id"], "questionCancelled": true,
+                }]).to_string()).await.unwrap();
+            }
+            assert!(!(event["type"] == "chat.delivered" && event["messageId"] == "withdrawal"));
+            completed |= event["type"] == "turn.completed";
+        }
+    }).await.unwrap();
+    task.await.unwrap().unwrap();
+    assert!(completed);
+    assert_eq!(
+        tokio::fs::read_to_string(root.path().join("result.md"))
+            .await
+            .unwrap(),
+        "Question withdrawn without an answer."
+    );
+}
+
+#[tokio::test]
 async fn native_questions_use_cairn_ids_and_answers_reach_the_original_native_request() {
     let root = TempDir::new().unwrap();
     let s = service(&root).await;
