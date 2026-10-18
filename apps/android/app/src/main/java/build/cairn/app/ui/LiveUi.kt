@@ -1061,88 +1061,101 @@ fun EventRow(vm: CairnViewModel, event: RunEvent, agent: String = "Cairn") {
         val content =
             if (user) (event.payload?.get("text") as? JsonPrimitive)?.contentOrNull ?: event.text
             else item.string("text").ifEmpty { event.text }
-        BoxWithConstraints(
-            Modifier.fillMaxWidth(),
-            contentAlignment = if (user) Alignment.CenterEnd else Alignment.CenterStart,
-        ) {
-            Surface(
-                color =
-                    if (user) MaterialTheme.colorScheme.surfaceContainerHigh
-                    else MaterialTheme.colorScheme.background,
-                shape =
-                    RoundedCornerShape(
-                        topStart = 16.dp,
-                        topEnd = 16.dp,
-                        bottomStart = 16.dp,
-                        bottomEnd = 4.dp,
-                    ),
-                modifier =
-                    if (user) Modifier.widthIn(max = maxWidth * 0.9f) else Modifier.fillMaxWidth(),
-            ) {
-                Column(
-                    Modifier.padding(
-                        horizontal = if (user) 16.dp else 0.dp,
-                        vertical = if (user) 12.dp else 8.dp,
-                    ),
-                    verticalArrangement = Arrangement.spacedBy(6.dp),
-                ) {
-                    if (!user)
-                        Row(
-                            Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                        ) {
-                            Text(
-                                agent,
-                                Modifier.weight(1f),
-                                style = MaterialTheme.typography.labelSmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            )
-                            Text(
-                                java.text
-                                    .SimpleDateFormat(
-                                        "HH:mm",
-                                        androidx.compose.ui.platform.LocalConfiguration.current
-                                            .locales[0],
-                                    )
-                                    .format(java.util.Date(event.createdAt)),
-                                style = MaterialTheme.typography.labelSmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            )
-                        }
-                    if (user)
-                        androidx.compose.foundation.text.selection.SelectionContainer {
-                            Text(
-                                highlightSkills(
-                                    content,
-                                    LocalSkillNames.current,
-                                    skillMentionStyle(),
-                                ),
-                                style = MaterialTheme.typography.bodyLarge,
-                            )
-                        }
-                    else Markdown(content)
-                    if (user)
-                        Text(
-                            java.text
-                                .SimpleDateFormat(
-                                    "HH:mm",
-                                    androidx.compose.ui.platform.LocalConfiguration.current.locales[
-                                            0],
-                                )
-                                .format(java.util.Date(event.createdAt)),
-                            Modifier.align(Alignment.End),
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
-                    val attachments = runCatching {
+        val attachments =
+            if (!user) emptyList()
+            else
+                remember(event) {
+                    runCatching {
                         event.payload?.get("attachments")?.let {
                             wireJson.decodeFromJsonElement<List<ChatAttachment>>(it)
                         }
                     }
                         .getOrNull()
                         .orEmpty()
-                    if (attachments.isNotEmpty()) AttachmentList(vm, attachments)
                 }
+        val time =
+            java.text
+                .SimpleDateFormat(
+                    "HH:mm",
+                    androidx.compose.ui.platform.LocalConfiguration.current.locales[0],
+                )
+                .format(java.util.Date(event.createdAt))
+        BoxWithConstraints(
+            Modifier.fillMaxWidth(),
+            contentAlignment = if (user) Alignment.CenterEnd else Alignment.CenterStart,
+        ) {
+            // Like the web and other chat apps, a message's files stand above its bubble.
+            Column(
+                if (user) Modifier.widthIn(max = maxWidth * 0.9f) else Modifier.fillMaxWidth(),
+                horizontalAlignment = Alignment.End,
+                verticalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
+                if (attachments.isNotEmpty()) MessageAttachments(vm, attachments)
+                if (!user || content.isNotBlank() || attachments.isEmpty())
+                    Surface(
+                        color =
+                            if (user) MaterialTheme.colorScheme.surfaceContainerHigh
+                            else MaterialTheme.colorScheme.background,
+                        shape =
+                            RoundedCornerShape(
+                                topStart = 16.dp,
+                                topEnd = 16.dp,
+                                bottomStart = 16.dp,
+                                bottomEnd = 4.dp,
+                            ),
+                        modifier = if (user) Modifier else Modifier.fillMaxWidth(),
+                    ) {
+                        Column(
+                            Modifier.padding(
+                                horizontal = if (user) 16.dp else 0.dp,
+                                vertical = if (user) 12.dp else 8.dp,
+                            ),
+                            verticalArrangement = Arrangement.spacedBy(6.dp),
+                        ) {
+                            if (!user)
+                                Row(
+                                    Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                ) {
+                                    Text(
+                                        agent,
+                                        Modifier.weight(1f),
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    )
+                                    Text(
+                                        time,
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    )
+                                }
+                            if (user)
+                                androidx.compose.foundation.text.selection.SelectionContainer {
+                                    Text(
+                                        highlightSkills(
+                                            content,
+                                            LocalSkillNames.current,
+                                            skillMentionStyle(),
+                                        ),
+                                        style = MaterialTheme.typography.bodyLarge,
+                                    )
+                                }
+                            else Markdown(content)
+                            if (user)
+                                Text(
+                                    time,
+                                    Modifier.align(Alignment.End),
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                        }
+                    }
+                else
+                    Text(
+                        time,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
             }
         }
     } else ActivityCard(event)

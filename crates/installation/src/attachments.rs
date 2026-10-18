@@ -167,7 +167,18 @@ impl Service {
         crate::conversation_lifecycle::require_active(&self.get("chats", chat).await?)?;
         match request.method().as_str() {
             "PUT" => self.upload_attachment(chat, id, request).await,
-            "GET" => self.download_attachment(chat, id).await,
+            "GET" => {
+                let flags: HashMap<String, String> =
+                    serde_urlencoded::from_str(request.uri().query().unwrap_or(""))
+                        .map_err(|_| Error::bad("Invalid query."))?;
+                if flags.contains_key("preview") {
+                    self.attachment_preview(chat, id).await
+                } else if flags.contains_key("summary") {
+                    self.attachment_summary(chat, id).await
+                } else {
+                    self.download_attachment(chat, id).await
+                }
+            }
             _ => Err(Error::method_not_allowed("Method not allowed.")),
         }
     }
@@ -300,6 +311,82 @@ impl Service {
         Ok(response)
     }
 
+    async fn stored_attachment(&self, chat: &str, id: &str) -> Result<(Attachment, Vec<u8>)> {
+        let attachment = required(self.store.kv(&key(chat, id)).await?, "Attachment not found")?;
+        let attachment = Attachment::deserialize(&attachment)?;
+        let mut bytes = Vec::new();
+        tokio::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(self.attachment_path(chat, id))
+            .await?
+            .take(MAX_FILE as u64)
+            .read_to_end(&mut bytes)
+            .await?;
+        Ok((attachment, bytes))
+    }
+
+    /// A JPEG of an image or of the first PDF page, rendered on demand and never stored.
+    async fn attachment_preview(&self, chat: &str, id: &str) -> Result<Response> {
+        let (attachment, bytes) = self.stored_attachment(chat, id).await?;
+        let pdf = bytes.starts_with(b"%PDF-");
+        if attachment.kind != AttachmentKind::Image && !pdf {
+            return Err(Error::not_found("Preview is unavailable."));
+        }
+
+        let _permit = crate::artifacts::preview::JOBS
+            .acquire()
+            .await
+            .map_err(Error::internal)?;
+        let directory = tempfile::tempdir()?;
+        let target = directory.path().join("preview.jpg");
+        let source = self.attachment_path(chat, id);
+        let render = async {
+            if pdf {
+                crate::artifacts::preview::thumbnail(true, &source, &target).await
+            } else {
+                crate::artifacts::preview::image_thumbnail(&source, &target).await
+            }
+        };
+        let rendered = matches!(
+            tokio::time::timeout(Duration::from_secs(25), render).await,
+            Ok(Ok(true))
+        );
+        if !rendered {
+            return Err(Error::not_found("Preview is unavailable."));
+        }
+
+        let image = tokio::fs::read(&target).await?;
+        Ok(([(header::CONTENT_TYPE, "image/jpeg")], image).into_response())
+    }
+
+    /// Page count of a PDF, or line count and opening excerpt of a UTF-8 text file.
+    async fn attachment_summary(&self, chat: &str, id: &str) -> Result<Response> {
+        let (_, bytes) = self.stored_attachment(chat, id).await?;
+        let summary = if bytes.starts_with(b"%PDF-") {
+            let _permit = crate::artifacts::preview::JOBS
+                .acquire()
+                .await
+                .map_err(Error::internal)?;
+            let source = self.attachment_path(chat, id);
+            let pages = tokio::time::timeout(
+                Duration::from_secs(10),
+                crate::artifacts::preview::pdf_pages(&source),
+            )
+            .await
+            .ok()
+            .and_then(Result::ok)
+            .flatten();
+            match pages {
+                Some(pages) => serde_json::json!({ "pages": pages }),
+                None => serde_json::json!({}),
+            }
+        } else {
+            text_summary(&bytes)
+        };
+        Ok(Json(summary).into_response())
+    }
+
     pub async fn prepare_chat_files(&self, run_id: &str, attachments: &Value) -> Result<()> {
         uuid(run_id)?;
         for attachment in attachments.as_array().into_iter().flatten() {
@@ -345,6 +432,37 @@ impl Service {
     }
 }
 
+const SUMMARY_SAMPLE: usize = 64 * 1024;
+const EXCERPT_CHARS: usize = 600;
+
+fn text_summary(bytes: &[u8]) -> Value {
+    let sample = &bytes[..bytes.len().min(SUMMARY_SAMPLE)];
+    if sample.contains(&0) {
+        return serde_json::json!({});
+    }
+
+    // A sample may end in the middle of a character; anything else is not UTF-8 text.
+    let readable = match std::str::from_utf8(sample) {
+        Ok(text) => text,
+        Err(error) if error.error_len().is_none() => {
+            std::str::from_utf8(&sample[..error.valid_up_to()]).unwrap_or_default()
+        }
+        Err(_) => return serde_json::json!({}),
+    };
+
+    let newlines = bytes.iter().filter(|&&byte| byte == b'\n').count();
+    let unterminated = !bytes.is_empty() && !bytes.ends_with(b"\n");
+    let excerpt: String = readable
+        .replace("\r\n", "\n")
+        .chars()
+        .take(EXCERPT_CHARS)
+        .collect();
+    serde_json::json!({
+        "lines": newlines + usize::from(unterminated),
+        "excerpt": excerpt,
+    })
+}
+
 /// A Codex user input item.
 #[derive(Serialize)]
 #[serde(tag = "type", rename_all = "camelCase")]
@@ -386,7 +504,25 @@ pub fn input(message: &str, attachments: &Value, directory: &Path) -> Value {
 
 #[cfg(test)]
 mod tests {
-    use super::filename;
+    use super::{filename, text_summary};
+    use serde_json::json;
+
+    #[test]
+    fn text_summaries_count_lines_and_skip_binary_content() {
+        assert_eq!(
+            text_summary(b"id,name\r\n1,Acme\r\n2,Globex"),
+            json!({ "lines": 3, "excerpt": "id,name\n1,Acme\n2,Globex" })
+        );
+        assert_eq!(text_summary(b"one\ntwo\n")["lines"], 2);
+        assert_eq!(text_summary(b"")["lines"], 0);
+        assert_eq!(text_summary(b"PK\x03\x04\0\0binary"), json!({}));
+        assert_eq!(text_summary(b"\xff\xfe\xfdlatin"), json!({}));
+
+        let long = "€".repeat(30_000);
+        let summary = text_summary(long.as_bytes());
+        assert_eq!(summary["lines"], 1);
+        assert_eq!(summary["excerpt"].as_str().unwrap().chars().count(), 600);
+    }
 
     #[test]
     fn file_names_preserve_dotfiles_and_bound_utf8_bytes_without_path_components() {

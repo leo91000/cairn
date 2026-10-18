@@ -7,6 +7,36 @@ use std::{sync::Arc, time::Duration};
 use tokio::sync::Semaphore;
 
 #[tokio::test]
+async fn a_full_size_attachment_streams_without_the_buffered_response_limit() {
+    let relay = RelayedInstallation::new(Router::new()).await;
+    let chat = relay
+        .installation
+        .chat_create(serde_json::json!({}))
+        .await
+        .unwrap();
+    let chat_id = chat["id"].as_str().unwrap();
+    let id = uuid::Uuid::new_v4().to_string();
+    let bytes = vec![b'z'; cairn_installation::attachments::MAX_FILE];
+    relay
+        .installation
+        .store_attachment(chat_id, &id, "large.bin", &bytes)
+        .await
+        .unwrap();
+    let response = relay
+        .get(&format!("/chats/{chat_id}/attachments/{id}/stream"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response.headers()["content-type"],
+        "application/octet-stream"
+    );
+    assert_eq!(response.bytes().await.unwrap().as_ref(), bytes);
+    relay.close().await;
+}
+
+#[tokio::test]
 async fn an_oversized_response_fails_only_its_request() {
     let routes = Router::new().route(
         "/api/fixture/oversized",

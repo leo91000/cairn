@@ -110,7 +110,11 @@ abstract class ConnectionLostCases {
 
                 val before = overviews.get()
                 down.set(false)
-                waitFor { !vm.state.value.connectionLost && overviews.get() >= before + 2 }
+                waitFor {
+                    !vm.state.value.connectionLost &&
+                        !vm.state.value.busy &&
+                        overviews.get() >= before + 2
+                }
                 compose.waitForIdle()
                 compose.onNodeWithText("Connexion perdue · reconnexion…").assertDoesNotExist()
                 assertNull(vm.state.value.error)
