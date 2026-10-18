@@ -684,10 +684,13 @@ async fn slow_mcp_uploads_cannot_block_owner_access_even_after_revocation() {
         "id": 1,
         "method": "tools/call",
         "params": {
-            "name": "save_project",
+            "name": "execute",
             "arguments": {
-                "name": "Rejected after revocation",
-                "path": relay.root.path().to_str().unwrap(),
+                "code": "return await cairn.save_project(input);",
+                "input": {
+                    "name": "Rejected after revocation",
+                    "path": relay.root.path().to_str().unwrap(),
+                },
             },
         },
     })
