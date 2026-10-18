@@ -496,13 +496,13 @@ async function remove() {
             <p v-else>
               The main agent has access to all registered projects, skills, and shared connections.
             </p>
-            <label class="checkbox"><input v-model="form.access.installation" type="checkbox">Allow access to the current Cairn installation</label>
+            <label class="checkbox flex-row items-center gap-2 text-xs font-normal phone:text-xs phone:leading-[1.6] mx-0 my-[9px]"><input v-model="form.access.installation" type="checkbox">Allow access to the current Cairn installation</label>
             <small>Manage agents, projects, skills, MCP connections, tasks and runs on behalf of the installation owner, across the entire installation.</small>
-            <label class="checkbox"><input v-model="allNodes" type="checkbox">All nodes, including future nodes</label>
+            <label class="checkbox flex-row items-center gap-2 text-xs font-normal phone:text-xs phone:leading-[1.6] mx-0 my-[9px]"><input v-model="allNodes" type="checkbox">All nodes, including future nodes</label>
             <fieldset v-if="!allNodes" class="access-choices">
               <legend>Allowed nodes</legend>
-              <label class="checkbox"><input v-model="form.access.nodes" type="checkbox" :value="LOCAL_NODE_ID">Current runner</label>
-              <label v-for="node in nodes.filter(n => !n.local && !n.revoked)" :key="node.id" class="checkbox"><input v-model="form.access.nodes" type="checkbox" :value="node.id">{{ node.name }}</label>
+              <label class="checkbox flex-row items-center gap-2 text-xs font-normal phone:text-xs phone:leading-[1.6] mx-0 my-[9px]"><input v-model="form.access.nodes" type="checkbox" :value="LOCAL_NODE_ID">Current runner</label>
+              <label v-for="node in nodes.filter(n => !n.local && !n.revoked)" :key="node.id" class="checkbox flex-row items-center gap-2 text-xs font-normal phone:text-xs phone:leading-[1.6] mx-0 my-[9px]"><input v-model="form.access.nodes" type="checkbox" :value="node.id">{{ node.name }}</label>
             </fieldset>
             <VirtualSelect
               v-model="form.access.sandbox"
