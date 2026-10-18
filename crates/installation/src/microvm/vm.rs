@@ -386,6 +386,13 @@ fn auth_relay(
 }
 
 impl Vm {
+    pub(super) fn bind_stop(&self, stop: &crate::storage::runtime::AttemptStop) -> Result<()> {
+        if let Some(volume) = &self.volume {
+            stop.bind(volume)?;
+        }
+        Ok(())
+    }
+
     pub async fn boot(
         state: &Path,
         image: &Path,
