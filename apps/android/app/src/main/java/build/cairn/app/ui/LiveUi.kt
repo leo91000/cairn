@@ -662,7 +662,24 @@ internal fun timelineEntries(
         fun updateWait(index: Int, change: (ActivityWait) -> ActivityWait) {
             result[index] = result[index].copy(wait = change(result[index].wait!!))
         }
+        // A scheduled wait only starts once its turn ends: its card follows what the agent did
+        // after the call, and moves to where the turn ends, another wait or a message comes, or
+        // the history does.
+        var scheduled: Int? = null
+        val moves = mutableMapOf<Int, Int>()
+        fun placeScheduled() {
+            val index = scheduled ?: return
+            flushActivity()
+            moves[index] = result.size
+            scheduled = null
+        }
         for ((eventIndex, event) in folded.withIndex()) {
+            if (
+                event.type.startsWith("chat.") ||
+                    event.type in TURN_BOUNDARIES ||
+                    (event.type == "status" && event.text in TERMINAL_STATUSES)
+            )
+                placeScheduled()
             if (event.type == "turn.started") waitReason = ""
             when (event.type) {
                 "chat.sleep",
@@ -670,8 +687,8 @@ internal fun timelineEntries(
                     val wakeup = event.wakeupPayload() ?: continue
                     if (wakeup.id in waits) continue
                     openWait?.let { index -> updateWait(index) { it.copy(ended = "replaced") } }
-                    flushActivity()
                     openWait = result.size
+                    scheduled = result.size
                     waits[wakeup.id] = result.size
                     waitReason = ""
                     result.add(
@@ -946,6 +963,7 @@ internal fun timelineEntries(
             }
         }
         flushActivity()
+        placeScheduled()
         val knownWait = pendingWakeup?.id?.let(waits::get)
         if (knownWait != null && pendingWakeup.observation != null) {
             updateWait(knownWait) {
@@ -968,8 +986,16 @@ internal fun timelineEntries(
                 )
             )
         }
-        result
+        if (moves.isEmpty()) result
+        else
+            (0..result.size).flatMap { index ->
+                moves.filterValues { it == index }.keys.sorted().map(result::get) +
+                    listOfNotNull(result.getOrNull(index)?.takeIf { index !in moves })
+            }
     }
+
+private val TURN_BOUNDARIES = setOf("turn.started", "turn.completed", "turn.failed")
+private val TERMINAL_STATUSES = setOf("succeeded", "failed", "cancelled", "interrupted")
 
 /**
  * Match the web feed: attach each publication beside its response, keeping versions per message.

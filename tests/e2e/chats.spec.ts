@@ -67,6 +67,39 @@ test('a durable scheduled wait survives restart and resumes without a user messa
   expect(resumed.wakeup).toBeNull()
 })
 
+test('a scheduled wait card follows the turn that scheduled it and clamps a long reason', async ({ page, workspace }) => {
+  const chat = await workspace.api('/api/chats', 'POST', {})
+  await workspace.api(`/api/chats/${chat.id}/messages`, 'POST', { id: randomUUID(), text: 'Ship the batch and check CI' })
+  await expect.poll(async () => (await workspace.api(`/api/chats/${chat.id}`)).run?.status).toBe('succeeded')
+  const detail = await workspace.api(`/api/chats/${chat.id}`)
+  const reason = Array.from({ length: 12 }).fill('Check Quality and Android on the PR, fix failures, then continue the next batch.').join(' ')
+  const wakeup = {
+    id: randomUUID(),
+    messageId: detail.run.chatExecution.messageId,
+    seconds: 420,
+    reason,
+    createdAt: Date.now(),
+    wakeAt: Date.now() + 420000,
+  }
+  workspace.service.store.put('chats', { ...workspace.service.store.get('chats', chat.id)!, wakeup })
+  workspace.service.store.event(detail.run.id, 'chat.sleep', reason, wakeup)
+  workspace.service.store.event(detail.run.id, 'item.completed', '', { item: { id: 'after-wait', type: 'agent_message', text: 'CI is running; I will resume to check it.' } })
+  await page.goto(workspacePath(`/chats/${chat.id}`))
+  await authenticateWorkspace(page)
+  const card = page.locator('.chat-wait')
+  const reply = page.getByText('CI is running; I will resume to check it.')
+  await expect(card).toHaveCount(1)
+  await expect(reply).toBeVisible()
+  // The wait starts once the turn ends: its card follows what the agent said after the call.
+  expect((await card.boundingBox())!.y).toBeGreaterThan((await reply.boundingBox())!.y)
+  const text = card.getByText(reason)
+  const clamped = (await text.boundingBox())!.height
+  await card.getByRole('button', { name: 'Show more', exact: true }).click()
+  expect((await text.boundingBox())!.height).toBeGreaterThan(clamped * 2)
+  await card.getByRole('button', { name: 'Show less', exact: true }).click()
+  expect((await text.boundingBox())!.height).toBe(clamped)
+})
+
 test('stopping a scheduled wait cancels its wakeup and pauses the conversation', async ({ page, workspace }) => {
   const chat = await workspace.api('/api/chats', 'POST', {})
   await workspace.api(`/api/chats/${chat.id}/messages`, 'POST', { id: randomUUID(), text: 'Wait for a remote review' })

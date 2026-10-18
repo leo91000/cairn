@@ -146,6 +146,92 @@ class ChatWaitTest {
     }
 
     @Test
+    fun `places a scheduled wait at the end of its turn, after what the agent did once it called`() {
+        val scheduled = wakeup(checks)
+        fun message(text: String) =
+            event(
+                "item.completed",
+                buildJsonObject {
+                    putJsonObject("item") {
+                        put("id", "message-$id")
+                        put("type", "agent_message")
+                        put("text", text)
+                    }
+                },
+            )
+        fun shape(entries: List<TimelineEntry>) = entries.map {
+            when {
+                it.wait != null -> "wait"
+                it.message ->
+                    it.events.single().item().string("text").ifBlank { it.events.single().text }
+                else -> "activity"
+            }
+        }
+        val turn =
+            listOf(
+                event("turn.started", buildJsonObject {}),
+                message("J’ai poussé le correctif."),
+                toolCall("wait_for", "cairn_workspace"),
+                event("chat.wait", scheduled.json()),
+                event(
+                    "item.completed",
+                    buildJsonObject {
+                        putJsonObject("item") {
+                            put("id", "reasoning-$id")
+                            put("type", "reasoning")
+                            put("text", "Résumer")
+                        }
+                    },
+                ),
+                message("La CI tourne ; je reprends à la fin."),
+            )
+        // While the turn streams, the card stays last.
+        assertEquals(
+            listOf(
+                "J’ai poussé le correctif.",
+                "activity",
+                "La CI tourne ; je reprends à la fin.",
+                "wait",
+            ),
+            shape(timelineEntries(turn, chat = true)),
+        )
+        val ended =
+            timelineEntries(
+                turn +
+                    event("turn.completed", buildJsonObject {}) +
+                    event("chat.user", buildJsonObject { put("text", "Merci") }, "Merci"),
+                chat = true,
+            )
+        assertEquals(
+            listOf(
+                "J’ai poussé le correctif.",
+                "activity",
+                "La CI tourne ; je reprends à la fin.",
+                "wait",
+                "Merci",
+            ),
+            shape(ended),
+        )
+        assertEquals("cancelled", ended[3].wait?.ended)
+        // A wait the agent replaced stays where the later call replaced it.
+        val replaced =
+            timelineEntries(
+                listOf(
+                    event("chat.wait", scheduled.json()),
+                    message("Un minuteur suffit."),
+                    event("chat.sleep", scheduled.copy(id = "later", condition = null).json()),
+                    message("Je patiente."),
+                ),
+                chat = true,
+            )
+        assertEquals(
+            listOf("Un minuteur suffit.", "wait", "Je patiente.", "wait"),
+            shape(replaced),
+        )
+        assertEquals("replaced", replaced[1].wait?.ended)
+    }
+
+    @Test
     fun `paginated ready and resumption events share one card`() {
         val observation = buildJsonObject {
             put("state", "completed")

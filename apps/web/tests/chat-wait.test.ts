@@ -158,6 +158,35 @@ describe('scheduled waits', () => {
     }])
   })
 
+  it('places a scheduled wait at the end of its turn, after what the agent did once it called', () => {
+    const scheduled = wakeup({ condition: checks })
+    const message = (text: string) => event('item.completed', { item: { id: `message-${id}`, type: 'agent_message', text } })
+    const shape = (entries: ReturnType<typeof activityEntries>) => entries.map(entry => entry.kind === 'message' ? entry.text : entry.kind)
+    const turn = [
+      event('turn.started', {}),
+      message('I pushed the fix.'),
+      toolCall('wait_for', 'cairn_workspace'),
+      event('chat.wait', scheduled as unknown as Record<string, unknown>),
+      event('item.completed', { item: { id: `reasoning-${id}`, type: 'reasoning', text: 'Summarise' } }),
+      message('CI is running; I will resume when it ends.'),
+    ]
+    // While the turn streams, the card stays last.
+    expect(shape(activityEntries(turn, true))).toEqual(['I pushed the fix.', 'group', 'CI is running; I will resume when it ends.', 'wait'])
+    const ended = activityEntries([...turn, event('turn.completed', {}), event('chat.user', { text: 'Thanks' })], true)
+    expect(shape(ended)).toEqual(['I pushed the fix.', 'group', 'CI is running; I will resume when it ends.', 'wait', 'Thanks'])
+    expect(ended[3]).toMatchObject({ id: 'wait:wake', wait: { ended: 'cancelled' } })
+    // A wait the agent replaced stays where the later call replaced it.
+    const later = wakeup({ id: 'later' })
+    const replaced = activityEntries([
+      event('chat.wait', scheduled as unknown as Record<string, unknown>),
+      message('Actually, a timer is enough.'),
+      event('chat.sleep', later as unknown as Record<string, unknown>),
+      message('Sleeping.'),
+    ], true)
+    expect(shape(replaced)).toEqual(['Actually, a timer is enough.', 'wait', 'Sleeping.', 'wait'])
+    expect(replaced[1]).toMatchObject({ wait: { ended: 'replaced' } })
+  })
+
   it('folds paginated ready and resumption events into the same card', () => {
     const observation = { state: 'completed', type: 'github_pr_checks', conclusion: 'success' }
     const scheduled = wakeup({ condition: checks, observation })

@@ -10,6 +10,7 @@ import build.cairn.app.data.*
 import kotlinx.coroutines.flow.first
 import kotlinx.serialization.json.*
 import okhttp3.mockwebserver.*
+import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
 
@@ -110,6 +111,79 @@ abstract class BackgroundWaitCases {
         }
 
     @Test
+    fun scheduledWaitFollowsTheTurnAndClampsItsReason() {
+        val reason =
+            List(12) {
+                    "Vérifier Quality et Android sur la PR, corriger les échecs puis poursuivre."
+                }
+                .joinToString(" ")
+        conversation(
+            "succeeded",
+            conditional = true,
+            reason = reason,
+            history = { wakeup, now ->
+                fun message(id: Long, text: String) =
+                    RunEvent(
+                        id,
+                        now - 20_000 + id,
+                        "item.completed",
+                        "",
+                        mapOf(
+                            "item" to
+                                buildJsonObject {
+                                    put("id", "message-$id")
+                                    put("type", "agent_message")
+                                    put("text", text)
+                                }
+                        ),
+                    )
+                listOf(
+                    RunEvent(1, now - 30_000, "turn.started", "", emptyMap()),
+                    message(2, "Lot poussé dans la PR."),
+                    RunEvent(
+                        3,
+                        now - 15_000,
+                        "chat.wait",
+                        reason,
+                        wireJson.encodeToJsonElement(wakeup!!).jsonObject,
+                    ),
+                    message(4, "CI en cours, reprise programmée pour la vérifier."),
+                    RunEvent(5, now - 5_000, "turn.completed", "", emptyMap()),
+                )
+            },
+        ) {
+            compose.waitUntil(10000) {
+                compose.onAllNodesWithText("Agent principal").fetchSemanticsNodes().size == 2
+            }
+            // Messages render as rich text: each reply's author line marks where it starts.
+            val replies =
+                compose.onAllNodesWithText("Agent principal").fetchSemanticsNodes().map {
+                    it.boundsInRoot
+                }
+            val card = compose.onNodeWithTag("chat-wait").fetchSemanticsNode().boundsInRoot
+            // The wait starts once the turn ends: its card follows the agent's last reply.
+            assertTrue(replies.all { card.top > it.bottom })
+            compose.onNodeWithText("Voir plus").assertExists()
+        }
+    }
+
+    @Test
+    fun longWaitReasonIsClampedUntilExpanded() {
+        val reason = List(40) { "Vérifier la CI puis poursuivre le lot suivant." }.joinToString(" ")
+        val wakeup = ChatWakeup("wait", "message", reason, 60, 1, 60001)
+        compose.setContent {
+            CairnTheme {
+                CompositionLocalProvider(LocalLiveWait provides LiveWait(wakeup, paused = false)) {
+                    WaitCard(ActivityWait(wakeup))
+                }
+            }
+        }
+        compose.onNodeWithText("Voir plus").assertExists().performClick()
+        compose.onNodeWithText("Voir moins").assertExists().performClick()
+        compose.onNodeWithText("Voir plus").assertExists()
+    }
+
+    @Test
     fun resolvedWaitHonorsPauseAndCancellationUntilItResumes() {
         val wakeup =
             ChatWakeup(
@@ -164,6 +238,8 @@ abstract class BackgroundWaitCases {
         status: String,
         sleeping: Boolean = false,
         conditional: Boolean = false,
+        reason: String = "Attendre la CI",
+        history: ((ChatWakeup?, Long) -> List<RunEvent>)? = null,
         check: () -> Unit,
     ) {
         MockWebServer().use { server ->
@@ -181,7 +257,7 @@ abstract class BackgroundWaitCases {
                             ChatWakeup(
                                 "wake",
                                 "message",
-                                "Attendre la CI",
+                                reason,
                                 420,
                                 now,
                                 now + 420000,
@@ -195,7 +271,7 @@ abstract class BackgroundWaitCases {
                             )
                         else null,
                 )
-            val event =
+            val waiting =
                 RunEvent(
                     1,
                     now - 30_000,
@@ -210,7 +286,12 @@ abstract class BackgroundWaitCases {
                 )
             val batch =
                 wireJson.encodeToString(
-                    LiveBatch(listOf(event), LiveState(chat = chat), true, false)
+                    LiveBatch(
+                        history?.invoke(chat.wakeup, now) ?: listOf(waiting),
+                        LiveState(chat = chat),
+                        true,
+                        false,
+                    )
                 )
             server.dispatcher =
                 object : Dispatcher() {
