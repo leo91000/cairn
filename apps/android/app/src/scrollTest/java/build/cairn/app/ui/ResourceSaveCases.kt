@@ -9,6 +9,8 @@ import androidx.lifecycle.ViewModelStore
 import androidx.test.core.app.ApplicationProvider
 import build.cairn.app.data.*
 import java.util.concurrent.CopyOnWriteArrayList
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlinx.coroutines.flow.first
 import kotlinx.serialization.json.*
@@ -88,6 +90,17 @@ abstract class ResourceSaveCases {
         val created = AtomicBoolean(false)
         var committed: JsonObject? = null
         val failedToken = AtomicBoolean(false)
+        val recoveryTimeline = CopyOnWriteArrayList<String>()
+        val startedAt = System.nanoTime()
+
+        fun traceRecovery(message: String) {
+            val elapsedMillis = (System.nanoTime() - startedAt) / 1_000_000
+            recoveryTimeline += "$elapsedMillis ms: $message"
+        }
+
+        val allowRecoveryProbe = CountDownLatch(1)
+        val recoveryRefreshStarted = CountDownLatch(1)
+        val allowRecoveryRefresh = CountDownLatch(1)
         MockWebServer().use { server ->
             server.dispatcher =
                 object : Dispatcher() {
@@ -110,6 +123,7 @@ abstract class ResourceSaveCases {
                             val value =
                                 wireJson.parseToJsonElement(request.body.readUtf8()).jsonObject
                             mutations += request.method!! to value
+                            if (loseResponse) traceRecovery("${request.method} $path")
                             if (rejectReplay && mutations.size == 2)
                                 return MockResponse()
                                     .setResponseCode(429)
@@ -131,6 +145,19 @@ abstract class ResourceSaveCases {
                                 JsonObject(stored + projectPath + ("id" to JsonPrimitive("saved")))
                                     .toString()
                             )
+                        }
+                        if (loseResponse && created.get() && request.method == "GET") {
+                            if (path.endsWith("/overview")) {
+                                traceRecovery("GET /overview waiting for initial-error capture")
+                                check(allowRecoveryProbe.await(20, TimeUnit.SECONDS))
+                                traceRecovery("GET /overview released")
+                            }
+                            if (path.endsWith("/tasks") && mutations.size == 1) {
+                                traceRecovery("GET /tasks recovery refresh waiting")
+                                recoveryRefreshStarted.countDown()
+                                check(allowRecoveryRefresh.await(20, TimeUnit.SECONDS))
+                                traceRecovery("GET /tasks recovery refresh released")
+                            }
                         }
                         if (path.endsWith("/tasks") && failRefresh.get())
                             return MockResponse()
@@ -266,6 +293,32 @@ abstract class ResourceSaveCases {
                 )
                 if (uncertainResponse && kind == "projects")
                     compose.onNodeWithText("Dossier sur le serveur").assertIsNotEnabled()
+                if (loseResponse) {
+                    // A lost response also starts background recovery. Hold its refresh so this
+                    // test exercises the disabled Save, then retry only after recovery completes.
+                    assertTrue(vm.state.value.connectionLost)
+                    traceRecovery(
+                        "Initial failure: busy=${vm.state.value.busy}; connectionLost=${vm.state.value.connectionLost}; mutations=${mutations.size}"
+                    )
+                    allowRecoveryProbe.countDown()
+                    waitFor { recoveryRefreshStarted.count == 0L && vm.state.value.busy }
+                    compose.onNodeWithText("Enregistrer").assertIsNotEnabled()
+                    compose.onNodeWithText("Enregistrer").performTouchInput { click() }
+                    compose.runOnIdle {
+                        assertEquals("Recovery must not replay the creation", 1, mutations.size)
+                        assertFalse(closed.get())
+                        traceRecovery(
+                            "Save disabled and touched: busy=${vm.state.value.busy}; mutations=${mutations.size}"
+                        )
+                    }
+                    allowRecoveryRefresh.countDown()
+                    waitFor { !vm.state.value.connectionLost && !vm.state.value.busy }
+                    compose.onNodeWithText("Enregistrer").assertIsEnabled()
+                    assertEquals(1, mutations.size)
+                    traceRecovery(
+                        "Recovery complete: busy=${vm.state.value.busy}; connectionLost=${vm.state.value.connectionLost}; mutations=${mutations.size}"
+                    )
+                }
                 if (restore) {
                     restoration.emulateSavedInstanceStateRestore()
                     if (!uncertainResponse)
@@ -316,7 +369,10 @@ abstract class ResourceSaveCases {
                 )
                 if (loseResponse) assertEquals(mutations[0].second, mutations[1].second)
             } finally {
+                allowRecoveryProbe.countDown()
+                allowRecoveryRefresh.countDown()
                 models.clear()
+                if (loseResponse) println(recoveryTimeline.joinToString("\n"))
             }
         }
     }
