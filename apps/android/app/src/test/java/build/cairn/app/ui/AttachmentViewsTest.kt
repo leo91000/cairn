@@ -2,6 +2,7 @@ package build.cairn.app.ui
 
 import android.app.Activity
 import android.app.Application
+import android.content.ClipboardManager
 import android.content.Intent
 import android.graphics.Bitmap
 import android.media.ExifInterface
@@ -12,9 +13,13 @@ import androidx.activity.result.ActivityResultRegistry
 import androidx.activity.result.ActivityResultRegistryOwner
 import androidx.activity.result.contract.ActivityResultContract
 import androidx.compose.runtime.*
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.semantics.SemanticsActions
 import androidx.compose.ui.test.*
 import androidx.compose.ui.test.junit4.StateRestorationTester
 import androidx.compose.ui.test.junit4.v2.createAndroidComposeRule
+import androidx.compose.ui.text.TextLayoutResult
+import androidx.compose.ui.unit.Density
 import androidx.core.app.ActivityOptionsCompat
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewmodel.initializer
@@ -25,8 +30,10 @@ import androidx.work.testing.SynchronousExecutor
 import androidx.work.testing.WorkManagerTestInitHelper
 import build.cairn.app.data.*
 import java.io.File
+import java.io.IOException
 import java.util.concurrent.CopyOnWriteArrayList
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.runBlocking
 import okhttp3.mockwebserver.Dispatcher
 import okhttp3.mockwebserver.MockResponse
 import okhttp3.mockwebserver.MockWebServer
@@ -47,6 +54,7 @@ import org.robolectric.annotation.GraphicsMode
 @GraphicsMode(GraphicsMode.Mode.NATIVE)
 class AttachmentViewsTest {
     @get:Rule val compose = createAndroidComposeRule<ComponentActivity>()
+    @get:Rule internal val fileProvider = FileProviderRule()
 
     private val application = ApplicationProvider.getApplicationContext<Application>()
 
@@ -84,6 +92,153 @@ class AttachmentViewsTest {
 
     private fun image(name: String, chat: String = "") =
         ChatAttachment(name, chat, name, 2048, "image/png", "image")
+
+    @Test
+    fun copyingRenamedImagesKeepsTheImageMimeAndOriginalBytes() {
+        val bytes = photo("clipboard.png").readBytes()
+        MockWebServer().use { server ->
+            server.dispatcher =
+                object : Dispatcher() {
+                    override fun dispatch(request: RecordedRequest): MockResponse {
+                        val path = request.path.orEmpty()
+                        if (path.endsWith("/stream") || path.endsWith("?preview"))
+                            return MockResponse()
+                                .setHeader("Content-Type", "image/png")
+                                .setBody(Buffer().write(bytes))
+                        val body =
+                            when {
+                                path == "/api/account/session" -> beaconAccountFixture("fixture")
+                                path == "/api/installations" -> beaconInstallationsFixture()
+                                path.endsWith("/overview") -> "{}"
+                                path.endsWith("/models") -> """{"models":[]}"""
+                                else -> "[]"
+                            }
+                        return MockResponse()
+                            .setHeader("Content-Type", "application/json")
+                            .setBody(body)
+                    }
+                }
+            server.start()
+            val vm = viewModel()
+            var item by mutableStateOf(image("capture", "chat"))
+            compose.setContent {
+                LaunchedEffect(Unit) {
+                    vm.state.first { it.ready }
+                    vm.connect(server.url("/").toString())
+                }
+                CairnTheme { AttachmentActions(vm, item, close = {}) }
+            }
+            compose.waitUntil(10000) {
+                compose.onAllNodesWithText("Copier l’image").fetchSemanticsNodes().isNotEmpty() &&
+                    vm.state.value.installation != null &&
+                    !vm.state.value.busy
+            }
+            val clipboard = application.getSystemService(ClipboardManager::class.java)
+            for (name in listOf("capture", "capture.bin", "capture.jpg")) {
+                compose.runOnIdle { item = image(name, "chat") }
+                compose.onNodeWithText(name).assertExists()
+                compose.onNodeWithText("Copier l’image").performClick()
+                compose.waitUntil(10000) { clipboard.primaryClip?.description?.label == name }
+                val clip = checkNotNull(clipboard.primaryClip)
+                assertTrue(clip.description.hasMimeType("image/png"))
+                val uri = clip.getItemAt(0).uri
+                assertEquals("image/png", application.contentResolver.getType(uri))
+                application.contentResolver.openInputStream(uri)!!.use {
+                    assertArrayEquals(bytes, it.readBytes())
+                }
+            }
+            assertNull(vm.state.value.error)
+        }
+    }
+
+    @Test
+    fun documentNamesKeepTheirExtensionsAtLargerFontSizes() {
+        val vm = viewModel()
+        val names =
+            listOf(
+                "requirements-documentation.markdown",
+                "Brief_refonte_page_tarifs_v3_FINAL_relu.pdf",
+            )
+        var fontScale by mutableFloatStateOf(1f)
+        compose.setContent {
+            val density = LocalDensity.current.density
+            CompositionLocalProvider(LocalDensity provides Density(density, fontScale)) {
+                CairnTheme { MessageAttachments(vm, names.map { file(it) }) }
+            }
+        }
+        for (scale in listOf(1f, 1.3f, 2f)) {
+            compose.runOnIdle { fontScale = scale }
+            for (name in names) {
+                // Accessibility keeps the complete name, while the rendered suffix stays visible.
+                compose.onNodeWithText(name).assertExists()
+                val suffix = ".${attachmentExtension(name)}"
+                val extension = compose.onNodeWithText(suffix, useUnmergedTree = true)
+                extension.assertIsDisplayed()
+                val layouts = mutableListOf<TextLayoutResult>()
+                extension.performSemanticsAction(SemanticsActions.GetTextLayoutResult) { action ->
+                    assertTrue(action(layouts))
+                }
+                val layout = layouts.single()
+                assertFalse(layout.multiParagraph.didExceedMaxLines)
+                // The paragraph can reserve more width than its glyphs use. Check the actual
+                // characters against the rendered bounds instead of that reserved width.
+                for (index in suffix.indices) {
+                    val bounds = layout.getBoundingBox(index)
+                    assertTrue(
+                        "$suffix at scale $scale: $bounds within ${layout.size}",
+                        bounds.left >= -1f &&
+                            bounds.right <= layout.size.width + 1f &&
+                            bounds.top >= -1f &&
+                            bounds.bottom <= layout.size.height + 1f,
+                    )
+                }
+                for (line in 0 until layout.lineCount) assertFalse(layout.isLineEllipsized(line))
+            }
+        }
+    }
+
+    @Test
+    @Config(sdk = [28])
+    fun recentPhotoThumbnailsBoundPanoramasOnOlderAndroid() = runBlocking {
+        for ((width, height) in listOf(12000 to 24, 24 to 12000)) {
+            val panorama = File(application.cacheDir, "recent-$width.png")
+            val bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
+            panorama.outputStream().use { bitmap.compress(Bitmap.CompressFormat.PNG, 100, it) }
+            bitmap.recycle()
+            val thumbnail = checkNotNull(photoThumbnail(application, Uri.fromFile(panorama)))
+            assertTrue(thumbnail.width <= 512)
+            assertTrue(thumbnail.height <= 512)
+            assertTrue(thumbnail.byteCount <= 512 * 512 * 4)
+            thumbnail.recycle()
+        }
+    }
+
+    @Test
+    fun galleryShowsAndDismissesActionFailuresInsideItsWindow() {
+        val vm = viewModel()
+        val document = file("notes.txt")
+        val local = File(application.cacheDir, "notes.txt").apply { writeText("Notes") }
+        compose.setContent {
+            CairnTheme {
+                AttachmentGallery(
+                    vm,
+                    listOf(document),
+                    document,
+                    local = mapOf(document.id to local.path),
+                    close = {},
+                )
+            }
+        }
+        compose.runOnIdle { vm.report(IOException("Le téléchargement a échoué")) }
+        compose
+            .onNode(
+                hasText("Le téléchargement a échoué") and
+                    hasAnyAncestor(hasTestTag("attachment-viewer"))
+            )
+            .assertIsDisplayed()
+        compose.onNodeWithContentDescription("Masquer l’erreur").performClick()
+        compose.onNodeWithText("Le téléchargement a échoué").assertDoesNotExist()
+    }
 
     @Test
     fun panoramicThumbnailsHaveBoundedDecodedDimensions() {

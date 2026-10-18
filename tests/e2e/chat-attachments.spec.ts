@@ -64,6 +64,40 @@ test('sent SVGs remain images in the mosaic, viewer and clipboard', async ({ pag
   await expectChatReady(page)
 })
 
+test('download failures stay visible inside the attachment viewer', async ({ page, workspace }) => {
+  test.setTimeout(60000)
+  await useRelayForHttpMocks(page)
+  await page.addInitScript(() => {
+    Object.defineProperty(navigator, 'canShare', { configurable: true, value: () => false })
+  })
+  const failure = 'The file could not be downloaded. Try again.'
+  await page.route(/\/chats\/[^/]+\/attachments\/[^/?]+\/stream$/, route => route.fulfill({ status: 500, json: { error: failure } }))
+  initializeRepository(workspace.projectPath)
+  await page.goto(workspacePath('/chats'))
+  await authenticateWorkspace(page)
+  await page.getByLabel('Attach files', { exact: true }).setInputFiles([{
+    name: 'retry.txt',
+    mimeType: 'text/plain',
+    buffer: Buffer.from('Read this document.'),
+  }])
+  await page.getByRole('textbox', { name: 'Message', exact: true }).fill('Check the file download.')
+  await page.getByRole('button', { name: 'Send', exact: true }).click()
+  await expect(page).toHaveURL(/\/chats\/[a-z]+-[a-z]+-[a-f0-9]{8}$/)
+  await expectChatReady(page)
+  const message = page.locator('.activity-message').filter({ hasText: 'Check the file download.' })
+  await message.getByRole('button', { name: 'Preview retry.txt', exact: true }).click()
+  const viewer = page.getByRole('dialog', { name: 'Attachment viewer' })
+  await viewer.getByRole('link', { name: 'Download retry.txt', exact: true }).click()
+  const feedback = viewer.getByRole('status').filter({ hasText: failure })
+  await expect(feedback).toBeVisible()
+  expect(await feedback.evaluate((element) => {
+    const bounds = element.getBoundingClientRect()
+    return element.contains(document.elementFromPoint(bounds.x + bounds.width / 2, bounds.y + bounds.height / 2))
+  })).toBe(true)
+  await viewer.getByRole('button', { name: 'Close viewer', exact: true }).click()
+  await expect(viewer).toBeHidden()
+})
+
 test('uploads images and files, previews them and preserves attachments while editing the queue', async ({ page, workspace }) => {
   test.setTimeout(60000)
   await useRelayForHttpMocks(page)

@@ -8,7 +8,7 @@ import {
   ref,
   watch,
 } from 'vue'
-import { notify } from '../api'
+import { notify, state } from '../api'
 import {
   attachmentUrl,
   canShareFiles,
@@ -244,6 +244,14 @@ onBeforeUnmount(() => {
             <Icon :name="Share2" :size="18" />
           </button>
         </header>
+        <p
+          v-if="state.toast || state.connectionLost"
+          class="m-0! shrink-0 border-y border-white/10 px-4 py-2 text-xs text-[#c9c7d6]"
+          role="status"
+          aria-live="polite"
+        >
+          {{ state.toast || 'Connection lost · reconnecting…' }}
+        </p>
         <div
           class="relative flex min-h-0 flex-1 items-center justify-center px-3 sm:px-16"
           @touchstart.passive="touchStart"

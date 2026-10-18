@@ -316,6 +316,13 @@ abstract class AttachmentCases {
             compose.onNodeWithText("Trop lourd", substring = true).assertExists()
             compose.onNodeWithTag("conversation-send").assertIsNotEnabled()
             compose.onNodeWithContentDescription("Retirer oversized.png").performClick()
+            // Restoring the screen also reloads its chat; sending waits for that read to finish.
+            compose.waitUntil(10000) {
+                compose
+                    .onAllNodes(hasTestTag("conversation-send") and isEnabled())
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
+            }
             compose.onNodeWithTag("conversation-send").assertIsEnabled()
 
             compose.onNodeWithContentDescription("Joindre").performClick()

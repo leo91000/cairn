@@ -99,7 +99,7 @@ private suspend fun recentPhotos(context: Context, limit: Int = 24): List<Uri> =
         photos
     }
 
-private suspend fun photoThumbnail(context: Context, uri: Uri): Bitmap? =
+internal suspend fun photoThumbnail(context: Context, uri: Uri): Bitmap? =
     withContext(Dispatchers.IO) {
         runCatching {
             if (Build.VERSION.SDK_INT >= 29)
@@ -111,7 +111,7 @@ private suspend fun photoThumbnail(context: Context, uri: Uri): Bitmap? =
                 }
                 val sample =
                     Integer.highestOneBit(
-                        (minOf(bounds.outWidth, bounds.outHeight) / 256).coerceAtLeast(1)
+                        (maxOf(bounds.outWidth, bounds.outHeight) / 256).coerceAtLeast(1)
                     )
                 context.contentResolver.openInputStream(uri)?.use {
                     BitmapFactory.decodeStream(
@@ -138,7 +138,7 @@ internal fun AttachSheet(
     val context = LocalContext.current
     var allowed by remember { mutableStateOf(canReadPhotos(context)) }
     var limited by remember { mutableStateOf(limitedPhotos(context)) }
-    var asked by remember { mutableStateOf(false) }
+    var permissionRevision by remember { mutableIntStateOf(0) }
     var photos by remember { mutableStateOf<List<Uri>>(emptyList()) }
     var selected by remember { mutableStateOf<List<Uri>>(emptyList()) }
     // Survives the camera activity recreating this one.
@@ -149,11 +149,15 @@ internal fun AttachSheet(
     }
     val permission =
         rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) {
-            asked = true
             allowed = canReadPhotos(context)
             limited = limitedPhotos(context)
+            permissionRevision++
         }
-    LaunchedEffect(allowed, limited, asked) { if (allowed) photos = recentPhotos(context) }
+    LaunchedEffect(allowed, limited, permissionRevision) {
+        val available = if (allowed) recentPhotos(context) else emptyList()
+        photos = available
+        selected = selected.filter { it in available }
+    }
     val camera =
         rememberLauncherForActivityResult(ActivityResultContracts.TakePicture()) { taken ->
             val file = capture?.let(::File)

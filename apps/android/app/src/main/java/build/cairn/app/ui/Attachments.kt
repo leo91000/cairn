@@ -15,6 +15,7 @@ import android.graphics.Matrix
 import android.media.ExifInterface
 import android.net.Uri
 import android.util.LruCache
+import android.webkit.MimeTypeMap
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContract
 import androidx.compose.foundation.BorderStroke
@@ -52,8 +53,11 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.text
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -275,14 +279,27 @@ private fun AttachmentName(
     style: androidx.compose.ui.text.TextStyle,
     color: Color = Color.Unspecified,
 ) {
-    Text(
-        name,
-        style = style,
-        fontWeight = FontWeight.SemiBold,
-        color = color,
-        maxLines = 1,
-        overflow = TextOverflow.MiddleEllipsis,
-    )
+    val extension = attachmentExtension(name)
+    val suffix = if (extension.isEmpty()) "" else name.takeLast(extension.length + 1)
+    Row(Modifier.clearAndSetSemantics { text = AnnotatedString(name) }) {
+        Text(
+            name.dropLast(suffix.length),
+            Modifier.weight(1f, fill = false),
+            style = style,
+            fontWeight = FontWeight.SemiBold,
+            color = color,
+            maxLines = 1,
+            overflow = TextOverflow.MiddleEllipsis,
+        )
+        if (suffix.isNotEmpty())
+            Text(
+                suffix,
+                style = style,
+                fontWeight = FontWeight.SemiBold,
+                color = color,
+                // Reserve the extension first; allow wrapping when enlarged text needs it.
+            )
+    }
 }
 
 @Composable
@@ -683,18 +700,26 @@ private suspend fun attachmentFile(
     localPath: String?,
 ): File = localPath?.let { File(it) } ?: fetchOriginal(vm.files, vm.api, attachment)
 
-private suspend fun fetchOriginal(files: Files, api: CairnApi, attachment: ChatAttachment): File =
-    try {
+private suspend fun fetchOriginal(files: Files, api: CairnApi, attachment: ChatAttachment): File {
+    val mime = attachmentMediaType(attachment)
+    val imageExtension =
+        if (mime.startsWith("image/")) MimeTypeMap.getSingleton().getExtensionFromMimeType(mime)
+        else null
+    // FileProvider derives its MIME from the physical filename, including for the clipboard.
+    // Keep a typed cache name even for renamed images; actions expose the original display name.
+    val cacheName = imageExtension?.let { "${attachment.name}.$it" } ?: attachment.name
+    return try {
         files.fetch(
             api,
             "${attachmentPath(attachment)}/stream",
-            attachment.name,
+            cacheName,
             MAX_ATTACHMENT_BYTES,
         )
     } catch (e: ApiException) {
         if (e.status != 404 && e.status != 501) throw e
-        files.fetch(api, attachmentPath(attachment), attachment.name, MAX_ATTACHMENT_BYTES)
+        files.fetch(api, attachmentPath(attachment), cacheName, MAX_ATTACHMENT_BYTES)
     }
+}
 
 private fun shareFile(context: Context, file: File, attachment: ChatAttachment) {
     val uri =
@@ -790,6 +815,7 @@ internal fun AttachmentGallery(
     actions: ((ChatAttachment) -> Unit)? = null,
     close: () -> Unit,
 ) {
+    val workspace by vm.state.collectAsStateWithLifecycle()
     val pages = remember { items.ifEmpty { listOf(initial) } }
     val pager =
         rememberPagerState(
@@ -843,6 +869,8 @@ internal fun AttachmentGallery(
                         if (actions != null)
                             ActionIcon("Plus d’actions", CairnIcons.More) { actions(current) }
                     }
+                    ConnectionFeedbackNotice()
+                    workspace.error?.let { ErrorNotice(it, vm::clearMessage) }
                     HorizontalPager(
                         state = pager,
                         modifier =
