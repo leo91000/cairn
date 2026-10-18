@@ -456,7 +456,7 @@ test('instance and panel forms share defaults, clearing, hidden values and secre
         options: {},
         values: { derived: ' completed ', unknown: 'drop' },
         errors: {},
-        view: [],
+        view: [{ type: 'text', text: 'Synthetic completion applied' }],
       },
     })
   })
@@ -525,6 +525,9 @@ test('instance and panel forms share defaults, clearing, hidden values and secre
   await expect(editor.getByLabel('Title', { exact: true })).toHaveValue('Default title')
   await expect(editor.getByLabel('Password', { exact: true })).toHaveValue('')
   await expect(editor.getByLabel('Constructor secret', { exact: true })).toHaveValue('')
+  // The completion's `errors: {}` has no entry for a field named constructor.
+  await expect(editor.getByText('Synthetic completion applied')).toBeVisible()
+  await expect(editor.getByLabel('Constructor secret', { exact: true })).not.toHaveAttribute('aria-describedby')
   await editor.getByLabel('Title', { exact: true }).fill('')
   await editor.getByLabel('Count', { exact: true }).fill('')
   await editor.getByLabel('Password', { exact: true }).fill('   ')

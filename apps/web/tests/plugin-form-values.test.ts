@@ -2,6 +2,7 @@ import type { SettingField } from '../src/plugins'
 import { describe, expect, it } from 'vitest'
 import corpus from '../../../tests/fixtures/plugin-form-values.json'
 import {
+  pluginFieldAnswer,
   pluginFormSecrets,
   pluginFormValues,
   pluginSecrets,
@@ -21,6 +22,15 @@ describe('declarative plugin forms (shared Android corpus)', () => {
     const cleared = pluginFormSecrets()
     for (const key of keys)
       expect(cleared[key] ?? '').toBe('')
+  })
+
+  it('reads package answers only for the field\'s own key', () => {
+    const answers = JSON.parse('{"title":"Already used","__proto__":"Own entry"}') as Record<string, string>
+    expect(pluginFieldAnswer(answers, 'title')).toBe('Already used')
+    expect(pluginFieldAnswer(answers, '__proto__')).toBe('Own entry')
+    for (const key of ['constructor', 'toString', 'valueOf', 'hasOwnProperty'])
+      expect(pluginFieldAnswer(answers, key)).toBeUndefined()
+    expect(pluginFieldAnswer(undefined, 'title')).toBeUndefined()
   })
 
   for (const scenario of corpus) {

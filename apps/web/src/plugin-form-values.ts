@@ -5,6 +5,11 @@ export function pluginFormSecrets(): Record<string, string> {
   return Object.create(null)
 }
 
+/** A package's answer for one field; keys such as constructor never read Object.prototype. */
+export function pluginFieldAnswer<T>(answers: Record<string, T> | undefined, key: string): T | undefined {
+  return answers && Object.hasOwn(answers, key) ? answers[key] : undefined
+}
+
 /** Native control values, with defaults applied only when opening a form. */
 export function pluginFormValue(field: SettingField, saved: unknown): unknown {
   const value = saved === undefined ? field.default : saved

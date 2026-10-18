@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import type { FieldOption, SettingField } from '../plugins'
 import { computed, useId } from 'vue'
-import { pluginFormSecrets } from '../plugin-form-values'
+import { pluginFieldAnswer, pluginFormSecrets } from '../plugin-form-values'
 
 // Renders a package's declarative fields. Secret values live in their own model and
 // are never prefilled: a saved secret shows as a placeholder and stays when left blank.
@@ -18,7 +18,8 @@ const emit = defineEmits<{ refresh: [key: string] }>()
 const values = defineModel<Record<string, any>>('values', { required: true })
 const secrets = defineModel<Record<string, string>>('secrets', { default: pluginFormSecrets })
 const uid = useId()
-const described = (field: SettingField) => field.description || props.errors?.[field.key] ? `${uid}-${field.key}` : undefined
+const error = (field: SettingField) => pluginFieldAnswer(props.errors, field.key)
+const described = (field: SettingField) => field.description || error(field) ? `${uid}-${field.key}` : undefined
 
 const sections = computed(() => {
   const groups: { title: string, fields: SettingField[] }[] = []
@@ -35,7 +36,7 @@ const sections = computed(() => {
 })
 
 function choices(field: SettingField) {
-  return (field.dynamic ? props.options?.[field.key] : undefined) ?? field.options ?? []
+  return (field.dynamic ? pluginFieldAnswer(props.options, field.key) : undefined) ?? field.options ?? []
 }
 
 // Choices that explain themselves (e.g. why one can't be picked) read better as a list.
@@ -160,11 +161,11 @@ function toggle(key: string, value: string, checked: boolean) {
         @change="changed(field)"
       ></label>
       <small
-        v-if="errors?.[field.key] || (field.description && field.type !== 'boolean' && field.type !== 'multiselect')"
+        v-if="error(field) || (field.description && field.type !== 'boolean' && field.type !== 'multiselect')"
         :id="described(field)"
         class="-mt-3"
-        :class="errors?.[field.key] ? 'text-coral' : ''"
-      >{{ errors?.[field.key] || field.description }}</small>
+        :class="error(field) ? 'text-coral' : ''"
+      >{{ error(field) || field.description }}</small>
     </template>
   </fieldset>
 </template>
