@@ -379,6 +379,7 @@ test('instance and panel forms share defaults, clearing, hidden values and secre
       default: ' hidden ',
     },
     { key: 'password', title: 'Password', type: 'secret' },
+    { key: 'constructor', title: 'Constructor secret', type: 'secret' },
     {
       key: 'region',
       title: 'Region',
@@ -470,6 +471,7 @@ test('instance and panel forms share defaults, clearing, hidden values and secre
   await expect(panel.getByLabel('Title', { exact: true })).toHaveValue('Default title')
   await expect(panel.getByLabel('Count', { exact: true })).toHaveValue('0')
   await expect(panel.getByLabel('Password', { exact: true })).toHaveValue('')
+  await expect(panel.getByLabel('Constructor secret', { exact: true })).toHaveValue('')
   await expect(panel.getByRole('combobox', { name: 'Region', exact: true })).toHaveValue(' eu ')
   await expect(panel.getByLabel('Derived', { exact: true })).toHaveCount(0)
   await panel.getByRole('button', { name: 'Apply values' }).click()
@@ -487,6 +489,7 @@ test('instance and panel forms share defaults, clearing, hidden values and secre
   await panel.getByLabel('Enabled', { exact: true }).uncheck()
   await panel.getByLabel('Read', { exact: true }).uncheck()
   await panel.getByLabel('Password', { exact: true }).fill(' synthetic_panel_secret ')
+  await panel.getByLabel('Constructor secret', { exact: true }).fill(' synthetic_constructor_secret ')
   await panel.getByRole('button', { name: 'Apply values' }).click()
   await expect.poll(() => actions.length).toBe(2)
   expect(actions[1]).toEqual({
@@ -496,8 +499,10 @@ test('instance and panel forms share defaults, clearing, hidden values and secre
     derived: 'hidden',
     region: ' eu ',
     password: ' synthetic_panel_secret ',
+    constructor: ' synthetic_constructor_secret ',
   })
   await expect(panel.getByLabel('Password', { exact: true })).toHaveValue('')
+  await expect(panel.getByLabel('Constructor secret', { exact: true })).toHaveValue('')
   await expect(panel.getByLabel('Title', { exact: true })).toHaveValue('   ')
   await expect(panel.getByLabel('Count', { exact: true })).toHaveValue('3.5')
   await panel.getByRole('button', { name: 'Apply values' }).click()
@@ -519,6 +524,7 @@ test('instance and panel forms share defaults, clearing, hidden values and secre
   expect(completions[0].secrets).toEqual({})
   await expect(editor.getByLabel('Title', { exact: true })).toHaveValue('Default title')
   await expect(editor.getByLabel('Password', { exact: true })).toHaveValue('')
+  await expect(editor.getByLabel('Constructor secret', { exact: true })).toHaveValue('')
   await editor.getByLabel('Title', { exact: true }).fill('')
   await editor.getByLabel('Count', { exact: true }).fill('')
   await editor.getByLabel('Password', { exact: true }).fill('   ')

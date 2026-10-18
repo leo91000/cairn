@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import type { FieldOption, SettingField } from '../plugins'
 import { computed, useId } from 'vue'
+import { pluginFormSecrets } from '../plugin-form-values'
 
 // Renders a package's declarative fields. Secret values live in their own model and
 // are never prefilled: a saved secret shows as a placeholder and stays when left blank.
@@ -15,7 +16,7 @@ const props = defineProps<{
 }>()
 const emit = defineEmits<{ refresh: [key: string] }>()
 const values = defineModel<Record<string, any>>('values', { required: true })
-const secrets = defineModel<Record<string, string>>('secrets', { default: () => ({}) })
+const secrets = defineModel<Record<string, string>>('secrets', { default: pluginFormSecrets })
 const uid = useId()
 const described = (field: SettingField) => field.description || props.errors?.[field.key] ? `${uid}-${field.key}` : undefined
 

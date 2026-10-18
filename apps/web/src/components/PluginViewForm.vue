@@ -1,7 +1,12 @@
 <script setup lang="ts">
 import type { SettingField } from '../plugins'
 import { ref, watch } from 'vue'
-import { pluginFormValues, pluginSecrets, pluginSettings } from '../plugin-form-values'
+import {
+  pluginFormSecrets,
+  pluginFormValues,
+  pluginSecrets,
+  pluginSettings,
+} from '../plugin-form-values'
 import PluginFields from './PluginFields.vue'
 import UiButton from './UiButton.vue'
 
@@ -12,13 +17,13 @@ const props = defineProps<{
 const emit = defineEmits<{ submit: [action: string, values: Record<string, any>] }>()
 
 const values = ref<Record<string, any>>({})
-const secrets = ref<Record<string, string>>({})
+const secrets = ref<Record<string, string>>(pluginFormSecrets())
 
 // Like Android's remember(node), an unchanged returned form keeps its current draft.
 watch(() => JSON.stringify(props.node), () => {
   const node = props.node
   values.value = pluginFormValues(node.fields, node.values)
-  secrets.value = {}
+  secrets.value = pluginFormSecrets()
 }, { immediate: true })
 
 function submit() {
@@ -27,7 +32,7 @@ function submit() {
     ...pluginSettings(props.node.fields, values.value),
     ...pluginSecrets(secrets.value, false),
   })
-  secrets.value = {}
+  secrets.value = pluginFormSecrets()
 }
 </script>
 

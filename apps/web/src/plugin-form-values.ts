@@ -1,5 +1,10 @@
 import type { SettingField } from './plugins'
 
+/** Only typing may populate a secret draft, including keys such as constructor. */
+export function pluginFormSecrets(): Record<string, string> {
+  return Object.create(null)
+}
+
 /** Native control values, with defaults applied only when opening a form. */
 export function pluginFormValue(field: SettingField, saved: unknown): unknown {
   const value = saved === undefined ? field.default : saved

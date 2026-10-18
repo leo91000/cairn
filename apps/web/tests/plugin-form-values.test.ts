@@ -1,9 +1,28 @@
 import type { SettingField } from '../src/plugins'
 import { describe, expect, it } from 'vitest'
 import corpus from '../../../tests/fixtures/plugin-form-values.json'
-import { pluginFormValues, pluginSecrets, pluginSettings } from '../src/plugin-form-values'
+import {
+  pluginFormSecrets,
+  pluginFormValues,
+  pluginSecrets,
+  pluginSettings,
+} from '../src/plugin-form-values'
 
 describe('declarative plugin forms (shared Android corpus)', () => {
+  it('keeps secret fields empty for accepted prototype property names', () => {
+    const secrets = pluginFormSecrets()
+    const keys = ['constructor', 'toString', 'valueOf']
+    for (const key of keys) {
+      expect(secrets[key] ?? '').toBe('')
+      secrets[key] = 'synthetic secret'
+    }
+
+    expect(pluginSecrets(secrets)).toEqual({ constructor: 'synthetic secret', toString: 'synthetic secret', valueOf: 'synthetic secret' })
+    const cleared = pluginFormSecrets()
+    for (const key of keys)
+      expect(cleared[key] ?? '').toBe('')
+  })
+
   for (const scenario of corpus) {
     it(scenario.name, () => {
       const fields = scenario.fields as SettingField[]

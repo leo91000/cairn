@@ -44,6 +44,7 @@ import {
   Zap,
 } from '../icons'
 import {
+  pluginFormSecrets,
   pluginFormValue,
   pluginFormValues,
   pluginSecrets,
@@ -73,7 +74,7 @@ const editing = ref<PluginConnection | null>()
 const removing = ref<PluginConnection>()
 const form = ref<Record<string, any>>({})
 const values = ref<Record<string, any>>({})
-const secrets = ref<Record<string, string>>({})
+const secrets = ref<Record<string, string>>(pluginFormSecrets())
 const people = ref<{ id: string, name: string }[]>([])
 const person = ref('')
 const completion = ref<FormResult | null>(null)
@@ -151,7 +152,7 @@ function edit(connection: PluginConnection | null) {
   error.value = ''
   editing.value = connection
   values.value = pluginFormValues(storedFields.value, connection?.settings)
-  secrets.value = {}
+  secrets.value = pluginFormSecrets()
   people.value = (connection?.userIds ?? []).map(user => ({ id: user, name: connection?.people.find(item => item.id === user)?.name ?? '' }))
   person.value = ''
   completion.value = null
@@ -252,7 +253,7 @@ async function save() {
     const path = `/plugins/${id.value}/connections${editing.value ? `/${editing.value.id}` : ''}`
     await pluginOperation(path, body, editing.value ? 'PUT' : 'POST')
     form.value.token = ''
-    secrets.value = {}
+    secrets.value = pluginFormSecrets()
     editing.value = undefined
     await load()
     notify(`${singular.value} saved`)
@@ -284,7 +285,7 @@ async function remove() {
 function closeEditor() {
   clearTimeout(typing)
   asked++
-  secrets.value = {}
+  secrets.value = pluginFormSecrets()
   form.value.token = ''
   completion.value = null
   editing.value = undefined
@@ -301,7 +302,7 @@ onBeforeUnmount(() => {
   clearInterval(timer)
   clearTimeout(typing)
   form.value.token = ''
-  secrets.value = {}
+  secrets.value = pluginFormSecrets()
 })
 </script>
 
