@@ -7,6 +7,7 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
 import build.cairn.app.data.*
+import kotlinx.serialization.json.decodeFromJsonElement
 import kotlinx.serialization.json.encodeToJsonElement
 
 internal fun taskGroup(task: Task, run: Run?): String =
@@ -28,6 +29,8 @@ internal fun TaskEditor(
     close: () -> Unit,
 ) {
     var form by rememberForm(initial)
+    val saving = rememberResourceSave(initial.id)
+    var saveError by rememberSaveable { mutableStateOf<String?>(null) }
     var cadence by rememberSaveable {
         mutableStateOf(if (initial.cron == null) "once" else "custom")
     }
@@ -44,23 +47,49 @@ internal fun TaskEditor(
                 (form.projectId == null || it.scope == "global" || it.scope == form.projectId)
         }
     Editor(
-        if (initial.id.isEmpty()) "Nouvelle mission" else "Modifier la mission",
+        if (saving.id.isEmpty()) "Nouvelle mission" else "Modifier la mission",
         state.busy,
-        state.error,
+        saveError
+            ?: if (!state.busy && saving.id.isBlank() && saving.pendingCreation) {
+                "Sauvegarde de la mission non confirmée. Réessayez pour retrouver la même mission. ${state.error.orEmpty()}"
+                    .trim()
+            } else {
+                state.error
+            },
         close,
         save = {
             vm.perform {
-                val saved =
-                    api.send<Task>(
-                        if (initial.id.isBlank()) "POST" else "PUT",
-                        "/tasks" + if (initial.id.isBlank()) "" else "/${segment(initial.id)}",
-                        wireJson.encodeToJsonElement(
-                            form.copy(
-                                tags = tags.split(',').map { it.trim() }.filter { it.isNotEmpty() }
-                            )
-                        ),
-                    )
-                refresh()
+                saveError = null
+                val response =
+                    try {
+                        saving.save(
+                            api,
+                            "/tasks",
+                            value = {
+                                wireJson.encodeToJsonElement(
+                                    form.copy(
+                                        tags =
+                                            tags
+                                                .split(',')
+                                                .map { it.trim() }
+                                                .filter { it.isNotEmpty() }
+                                    )
+                                )
+                            },
+                        )
+                    } catch (error: Exception) {
+                        if (saving.id.isNotBlank() && saving.id != initial.id)
+                            saveError =
+                                "Mission enregistrée, mais les dernières modifications n’ont pas été enregistrées. Réessayez."
+                        throw error
+                    }
+                val saved = wireJson.decodeFromJsonElement<Task>(response)
+                try {
+                    refresh()
+                } catch (error: Exception) {
+                    saveError = "Mission enregistrée, mais le rechargement a échoué. Réessayez."
+                    throw error
+                }
                 onSaved(saved)
                 close()
             }

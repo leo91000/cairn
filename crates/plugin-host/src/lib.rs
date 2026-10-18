@@ -1,5 +1,5 @@
 //! Bounded process supervision. Installation supplies authorized host operations.
-use cairn_plugin_api::{API_VERSION, Frame, MAX_FRAME_BYTES, Manifest, REJECTED, Sources};
+use cairn_plugin_api::{API_VERSION, Frame, MAX_FRAME_BYTES, Manifest, Sources};
 use serde_json::Value;
 use std::{future::Future, path::Path, process::Stdio, sync::Arc, time::Duration};
 use tokio::{
@@ -10,6 +10,24 @@ use tokio::{
 
 /// A refused host call. Only `code` reaches the plugin; keep details in the host.
 pub struct Denied(pub &'static str);
+
+/// A handler's public rejection or a host/runtime failure. Only rejection messages
+/// originate from the package; runtime details never cross the worker protocol.
+#[derive(Debug, PartialEq, Eq)]
+pub enum InvocationError {
+    Rejected(String),
+    Failed(String),
+}
+
+impl std::fmt::Display for InvocationError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Rejected(message) | Self::Failed(message) => f.write_str(message),
+        }
+    }
+}
+
+impl std::error::Error for InvocationError {}
 
 pub struct Host {
     slots: Arc<Semaphore>,
@@ -113,12 +131,15 @@ impl Host {
         event: &str,
         input: Value,
         call: F,
-    ) -> Result<Value, String>
+    ) -> Result<Value, InvocationError>
     where
         F: FnMut(String, Value) -> Fut,
         Fut: Future<Output = Result<Value, Denied>>,
     {
-        let mut session = self.start(executable, manifest, source).await?;
+        let mut session = self
+            .start(executable, manifest, source)
+            .await
+            .map_err(InvocationError::Failed)?;
         let result = session.dispatch(event, input, call).await;
         session.stop().await;
         result
@@ -154,13 +175,13 @@ impl Session {
         event: &str,
         payload: Value,
         mut call: F,
-    ) -> Result<Value, String>
+    ) -> Result<Value, InvocationError>
     where
         F: FnMut(String, Value) -> Fut,
         Fut: Future<Output = Result<Value, Denied>>,
     {
         if self.broken {
-            return Err("Plugin worker stopped.".into());
+            return Err(InvocationError::Failed("Plugin worker stopped.".into()));
         }
         let manifest = self.manifest.clone();
         let deadline = self.deadline;
@@ -183,14 +204,18 @@ impl Session {
                         self.write(&frame).await?;
                     }
                     Frame::Done { value } => return Ok(Ok(value)),
-                    Frame::Failure => return Ok(Err("Plugin execution failed.".to_owned())),
+                    Frame::Failure => {
+                        return Ok(Err(InvocationError::Failed(
+                            "Plugin execution failed.".to_owned(),
+                        )));
+                    }
                     Frame::Rejected { message } => {
                         let message = message
                             .chars()
                             .filter(|c| !c.is_control())
                             .take(300)
                             .collect::<String>();
-                        return Ok(Err(format!("{REJECTED}{message}")));
+                        return Ok(Err(InvocationError::Rejected(message)));
                     }
                     _ => return Err("Invalid plugin response.".to_owned()),
                 }
@@ -202,11 +227,11 @@ impl Session {
             Ok(Ok(result)) => result,
             Ok(Err(error)) => {
                 self.broken = true;
-                Err(error)
+                Err(InvocationError::Failed(error))
             }
             Err(_) => {
                 self.broken = true;
-                Err("Plugin deadline exceeded.".into())
+                Err(InvocationError::Failed("Plugin deadline exceeded.".into()))
             }
         }
     }

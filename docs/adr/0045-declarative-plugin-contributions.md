@@ -62,7 +62,7 @@ forms were added by ADR-0046, which removed Discord's native code.)
 Only API v2 manifests load; v1 packages must be updated (ADR-0047 also changed how
 approvals are computed, so installed packages are reviewed again).
 Instances that delegate nothing to external people are no longer bound to the owner
-who created them; external delegation still is. ADR-0038's capability model, approval digests,
+who created them; external delegation still is. The [Luau-plugin capability model](0038-luau-installation-plugins-and-external-bot-delegation.md), approval digests,
 external delegation and owner-only management are unchanged; this ADR supersedes its
 statement that arbitrary native execution is deferred, for declared programs only.
 

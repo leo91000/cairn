@@ -132,17 +132,114 @@ fn receive(db: &Db<'_>, mut question: Question) -> Result<()> {
     notifications::enqueue(db, &question)
 }
 
-fn release(db: &Db<'_>, run_id: &str, id: Option<&str>) -> Result<()> {
+pub(super) fn release(db: &Db<'_>, run_id: &str, id: Option<&str>) -> Result<()> {
     let Some(chat) = chat_for_run(db, run_id)? else {
         return Ok(());
     };
     for mut question in questions(db, text(&chat, "id"))? {
-        if question.blocking && id.is_none_or(|id| question.id == id) {
+        if question.run_id != run_id || !id.is_none_or(|id| question.id == id) {
+            continue;
+        }
+        let pending = question.status == QuestionStatus::Pending;
+        if pending || question.blocking {
+            if pending {
+                question.status = QuestionStatus::Cancelled;
+            }
             question.blocking = false;
             save_question(db, &question)?;
         }
     }
     Ok(())
+}
+
+fn cancel(db: &Db<'_>, chat_id: &str, id: &str) -> Result<Question> {
+    let chat = chat(db, chat_id)?;
+    crate::conversation_lifecycle::require_active(&chat)?;
+    let mut question = required(find_question(db, chat_id, id)?, "Question not found")?;
+    if question.status == QuestionStatus::Cancelled {
+        return Ok(question);
+    }
+    if question.status != QuestionStatus::Pending {
+        return Err(Error::conflict("This question already has an answer."));
+    }
+    question.status = QuestionStatus::Cancelled;
+    question.blocking = false;
+    save_question(db, &question)?;
+    Ok(question)
+}
+
+pub fn list_tool() -> Value {
+    json!({
+        "name": "pending_questions",
+        "description": "List unanswered questions in this conversation, with their questionId and fields. Use withdraw_question when a question has become unnecessary or the user has answered it in ordinary chat. Never infer authorization from a withdrawn question.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {},
+            "additionalProperties": false,
+        },
+    })
+}
+
+pub fn cancel_tool() -> Value {
+    json!({
+        "name": "withdraw_question",
+        "description": "Withdraw one pending question that is no longer needed. Get its questionId from pending_questions. This removes the answer prompt without supplying an answer or granting permission. Questions whose answers are being delivered cannot be withdrawn.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "questionId": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+            },
+            "required": ["questionId"],
+            "additionalProperties": false,
+        },
+    })
+}
+
+pub async fn for_agent(s: &Service, bearer: &str, input: Option<&Value>) -> Result<Value> {
+    if let Some(input) = input
+        && !jsonschema::is_valid(&cancel_tool()["inputSchema"], input)
+    {
+        return Err(Error::bad(
+            "Provide a valid questionId from pending_questions.",
+        ));
+    }
+    let bearer = bearer.to_owned();
+    let input = input.cloned();
+    let result = s
+        .store
+        .transaction(move |db| {
+            let run = crate::project_workspaces::authorize_in(db, &bearer)?;
+            let run_id = text(&run, "id");
+            let chat = required(chat_for_run(db, run_id)?, "This run has no conversation.")?;
+            let chat_id = text(&chat, "id");
+
+            if let Some(input) = input {
+                let id = text(&input, "questionId");
+                let question = required(find_question(db, chat_id, id)?, "Question not found")?;
+                if question.run_id != run_id {
+                    return Err(Error::forbidden("This question belongs to another run."));
+                }
+                return Ok(serde_json::to_value(cancel(db, chat_id, id)?)?);
+            }
+
+            let pending = questions(db, chat_id)?
+                .into_iter()
+                .filter(|question| {
+                    question.run_id == run_id && question.status == QuestionStatus::Pending
+                })
+                .map(|question| {
+                    json!({
+                        "questionId": question.id,
+                        "fields": question.fields,
+                        "blocking": question.blocking,
+                    })
+                })
+                .collect::<Vec<_>>();
+            Ok(json!({ "questions": pending }))
+        })
+        .await?;
+    s.worker.notify();
+    Ok(result)
 }
 
 fn answer_text(fields: &[QuestionField], answers: &BTreeMap<String, Vec<String>>) -> String {
@@ -164,7 +261,9 @@ fn answer(db: &Db<'_>, chat_id: &str, id: &str, input: &AnswerInput) -> Result<Q
         return Ok(question);
     }
     if question.status != QuestionStatus::Pending {
-        return Err(Error::conflict("This question has already been answered."));
+        return Err(Error::conflict(
+            "This question is no longer awaiting an answer.",
+        ));
     }
     let complete = input.answers.len() == question.fields.len()
         && question
@@ -222,12 +321,39 @@ impl Service {
             .await
     }
 
+    pub async fn question_cancel(&self, chat_id: &str, id: &str) -> Result<Value> {
+        let (chat_id, id) = (chat_id.to_owned(), id.to_owned());
+        let question = self
+            .store
+            .transaction(move |db| cancel(db, &chat_id, &id))
+            .await?;
+        self.worker.notify();
+        Ok(serde_json::to_value(question)?)
+    }
+
     pub async fn question_answer(&self, chat_id: &str, id: &str, input: Value) -> Result<Value> {
+        self.question_answer_authorized(chat_id, id, input, |_| Ok(()))
+            .await
+    }
+
+    pub(crate) async fn question_answer_authorized<F>(
+        &self,
+        chat_id: &str,
+        id: &str,
+        input: Value,
+        authorize: F,
+    ) -> Result<Value>
+    where
+        F: FnOnce(&Db<'_>) -> Result<()> + Send + 'static,
+    {
         let input = parse_as::<AnswerInput>("answer", input)?;
         let (chat_id, id) = (chat_id.to_owned(), id.to_owned());
         let question = self
             .store
-            .transaction(move |db| answer(db, &chat_id, &id, &input))
+            .transaction(move |db| {
+                authorize(db)?;
+                answer(db, &chat_id, &id, &input)
+            })
             .await?;
         self.worker.notify();
         Ok(serde_json::to_value(question)?)

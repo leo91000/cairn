@@ -5,6 +5,7 @@ pub mod api;
 pub mod artifacts;
 pub mod attachments;
 pub mod auth;
+mod chat_inbox;
 pub mod chat_process;
 pub mod chat_titles;
 pub mod chats;

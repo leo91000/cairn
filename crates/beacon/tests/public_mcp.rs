@@ -4,9 +4,19 @@ use common::RelayedInstallation;
 use reqwest::StatusCode;
 use serde_json::{Value, json};
 
+fn code_worker() -> std::path::PathBuf {
+    std::env::var_os("CAIRN_TEST_CODE_WORKER")
+        .map(std::path::PathBuf::from)
+        .expect(
+            "Use pnpm test:backend to build the isolated code worker with matching Cargo features.",
+        )
+}
+
 #[tokio::test]
 async fn personal_mcp_token_enforces_scopes_and_revocation() {
+    let worker = code_worker();
     let relay = RelayedInstallation::new(axum::Router::new()).await;
+    relay.installation.code_mode.use_worker(worker);
     let app = &relay.app;
     let id = relay.session["installations"][0]["id"].as_str().unwrap();
     let tokens = format!("{}/api/installations/{id}/tokens", app.url);
@@ -36,8 +46,11 @@ async fn personal_mcp_token_enforces_scopes_and_revocation() {
                 "id": 1,
                 "method": "tools/call",
                 "params": {
-                    "name": name,
-                    "arguments": args,
+                    "name": "execute",
+                    "arguments": {
+                        "code": format!("return await cairn.call({}, input);", serde_json::to_string(name).unwrap()),
+                        "input": args,
+                    },
                 },
             }))
     };
@@ -671,10 +684,13 @@ async fn slow_mcp_uploads_cannot_block_owner_access_even_after_revocation() {
         "id": 1,
         "method": "tools/call",
         "params": {
-            "name": "save_project",
+            "name": "execute",
             "arguments": {
-                "name": "Rejected after revocation",
-                "path": relay.root.path().to_str().unwrap(),
+                "code": "return await cairn.save_project(input);",
+                "input": {
+                    "name": "Rejected after revocation",
+                    "path": relay.root.path().to_str().unwrap(),
+                },
             },
         },
     })
@@ -796,15 +812,22 @@ async fn native_loopback_ports_vary_but_other_redirects_and_code_bindings_stay_e
             "{redirect}"
         );
     }
-    let insecure = relay
-        .app
-        .client
-        .post(format!("{}/oauth/register", relay.app.url))
-        .json(&json!({ "redirect_uris": ["http://external.example/callback"] }))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(insecure.status(), StatusCode::BAD_REQUEST);
+    for redirect in [
+        "http://external.example/callback",
+        "javascript:alert(1)",
+        "https://client.example/#fragment",
+        "https://user:pass@client.example/callback",
+    ] {
+        let invalid = relay
+            .app
+            .client
+            .post(format!("{}/oauth/register", relay.app.url))
+            .json(&json!({ "redirect_uris": [redirect] }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(invalid.status(), StatusCode::BAD_REQUEST, "{redirect}");
+    }
 
     for host in ["127.0.0.1", "[::1]"] {
         let registered = format!("http://{host}:9999/callback");
@@ -837,6 +860,7 @@ async fn native_loopback_ports_vary_but_other_redirects_and_code_bindings_stay_e
         for (key, value) in [
             ("client_id", "another-client"),
             ("redirect_uri", registered.as_str()),
+            ("resource", "https://other.example/mcp"),
         ] {
             let mut wrong = exchange.clone();
             wrong[key] = value.into();
@@ -879,6 +903,123 @@ async fn native_loopback_ports_vary_but_other_redirects_and_code_bindings_stay_e
             .unwrap();
         assert_eq!(tools.status(), StatusCode::OK);
     }
+    relay.close().await;
+}
+
+#[tokio::test]
+async fn oauth_refresh_revocation_removes_access_and_rejects_further_refresh() {
+    use sha2::{Digest, Sha256};
+
+    let relay = RelayedInstallation::new(axum::Router::new()).await;
+    let parameters = oauth_parameters(&relay, "https://client.example/callback").await;
+    let exchange = approved_code_request(&relay, &parameters).await;
+    let endpoint = format!("{}/oauth/token", relay.app.url);
+    let response = relay
+        .app
+        .client
+        .post(&endpoint)
+        .form(&exchange)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let tokens: Value = response.json().await.unwrap();
+    let stored: Vec<(String, String)> =
+        sqlx_core::query_as::query_as("SELECT kind, digest FROM mcp_tokens")
+            .fetch_all(&relay.app.pool)
+            .await
+            .unwrap();
+    assert_eq!(stored.len(), 2);
+    for (kind, field) in [("access", "access_token"), ("refresh", "refresh_token")] {
+        let token = tokens[field].as_str().unwrap();
+        let expected = hex::encode(Sha256::digest(token.as_bytes()));
+        assert!(
+            stored
+                .iter()
+                .any(|(stored_kind, digest)| stored_kind == kind && digest == &expected)
+        );
+        assert!(stored.iter().all(|(_, digest)| digest != token));
+    }
+    let access = || {
+        relay
+            .app
+            .client
+            .post(format!("{}/mcp", relay.app.url))
+            .bearer_auth(tokens["access_token"].as_str().unwrap())
+            .json(&json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "tools/list",
+            }))
+    };
+    assert_eq!(access().send().await.unwrap().status(), StatusCode::OK);
+
+    let refresh = json!({
+        "grant_type": "refresh_token",
+        "client_id": parameters["client_id"],
+        "refresh_token": tokens["refresh_token"],
+    });
+    let mut wrong_resource = refresh.clone();
+    wrong_resource["resource"] = "https://other.example/mcp".into();
+    let denied = relay
+        .app
+        .client
+        .post(&endpoint)
+        .form(&wrong_resource)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(denied.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(
+        denied.json::<Value>().await.unwrap()["error"],
+        "invalid_grant"
+    );
+
+    let revoke = json!({
+        "client_id": parameters["client_id"],
+        "token": tokens["refresh_token"],
+        "token_type_hint": "refresh_token",
+    });
+    let response = relay
+        .app
+        .client
+        .post(format!("{}/oauth/revoke", relay.app.url))
+        .form(&revoke)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        access().send().await.unwrap().status(),
+        StatusCode::UNAUTHORIZED
+    );
+    let response = relay
+        .app
+        .client
+        .post(&endpoint)
+        .form(&refresh)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(
+        response.json::<Value>().await.unwrap()["error"],
+        "invalid_grant"
+    );
+
+    let unsupported = relay
+        .app
+        .client
+        .post(&endpoint)
+        .form(&json!({ "grant_type": "password" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(unsupported.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(
+        unsupported.json::<Value>().await.unwrap()["error"],
+        "unsupported_grant_type"
+    );
     relay.close().await;
 }
 

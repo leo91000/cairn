@@ -105,7 +105,7 @@ notification. Sticky routing per installation alone does not provide immediate
 session revocation across installations. Persisted checks eventually detect
 machine revocation in another process, but do not make that deployment supported.
 Do not add beacon replicas until shared connection routing and revocation
-notifications are implemented. [ADR-0032](adr/0032-single-official-relay-process.md)
+notifications are implemented. [single-relay-process decision](adr/0032-single-official-relay-process.md)
 records this restriction of spec #43 and the persisted-check tolerance trade-off.
 Terminate TLS at the public origin with a reverse proxy. The service checks the
 configured origin on every account mutation. IP limits use the TCP peer unless
@@ -514,7 +514,7 @@ ORDER BY id DESC;
 
 Restrict database access and exports to operators. The account endpoint's bound
 is a recent-activity view, not an exhaustive export. The single-relay-process
-restriction in ADR-0032 still applies to immediate session/account revocation.
+restriction in the [single-relay-process decision](adr/0032-single-official-relay-process.md) still applies to immediate session/account revocation.
 
 The invitation email keeps the installation name as plain text with only letters,
 numbers, spaces, hyphens and underscores; URL/email punctuation is replaced by
@@ -728,7 +728,7 @@ both the canonical origin and its wildcard with valid TLS. The canonical origin
 stays unchanged for login, OAuth callbacks, passkeys, account settings,
 notifications, MCP and installation enrollment. Workspace URLs become
 `https://{installation-slug}.cairn.build/chats/{chat-slug}`. Legacy paths and UUID
-links remain usable. See [ADR-0037](adr/0037-readable-workspace-urls.md) for the
+links remain usable. See [readable-workspace-URLs decision](adr/0037-readable-workspace-urls.md) for the
 shared-cookie trust boundary and browser-storage migration.
 
 For local testing, use the bundled Beacon web build, set the origin to

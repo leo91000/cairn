@@ -25,7 +25,6 @@ use tokio_util::sync::CancellationToken;
 
 const STOPPED: &str = "Claude execution stopped.";
 const MAX_LINE: usize = 32_000_000;
-const MAX_INBOX: usize = 2_000_000;
 const MAX_IMAGE: usize = 10_000_000;
 
 const DENIED: &str =
@@ -451,18 +450,32 @@ impl Turn<'_> {
 
     /// Submits messages the user added to the inbox, or answers to pending questions.
     async fn poll_inbox(&mut self) -> Result<()> {
-        let Ok(bytes) = tokio::fs::read(self.inbox.join("messages.json")).await else {
+        let Some(bytes) =
+            crate::chat_inbox::read(self.inbox, crate::chat_inbox::ADAPTER_LIMIT).await?
+        else {
             return Ok(());
         };
-        if bytes.len() > MAX_INBOX {
-            return Err(Error::bad("Chat inbox is too large."));
-        }
         let Ok(messages) = serde_json::from_slice::<Vec<Value>>(&bytes) else {
             return Ok(());
         };
         for message in messages {
             let id = text(&message, "id");
             if self.submitted.contains(id) {
+                continue;
+            }
+            if message["questionCancelled"] == true {
+                if let Some(question) = self.questions.remove(text(&message, "questionId")) {
+                    send(&mut self.stdin, control_response(&question.request_id, &json!({
+                        "behavior": "deny",
+                        "message": "This question was withdrawn. No answer or authorization was provided.",
+                    }))).await?;
+                    self.emit(json!({
+                        "type": "chat.question.closed",
+                        "questionId": message["questionId"],
+                    }))
+                    .await?;
+                }
+                self.submitted.insert(id.into());
                 continue;
             }
             if let Some(question) = self.questions.remove(text(&message, "questionId")) {

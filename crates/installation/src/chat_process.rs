@@ -21,7 +21,6 @@ pub mod resident;
 
 const STOPPED: &str = "Conversation stopped.";
 const MAX_MESSAGE: usize = 5_000_000;
-const MAX_INBOX: usize = 2_000_000;
 
 /// A Codex thread item as a chat item: snake_case names, as the conversation events use.
 pub fn chat_item(mut item: Value) -> Value {
@@ -983,12 +982,11 @@ impl Chat<'_> {
     }
 
     async fn steer(&mut self, plan: &Value) -> Result<()> {
-        let Ok(bytes) = tokio::fs::read(inbox(plan).join("messages.json")).await else {
+        let Some(bytes) =
+            crate::chat_inbox::read(inbox(plan), crate::chat_inbox::ADAPTER_LIMIT).await?
+        else {
             return Ok(());
         };
-        if bytes.len() > MAX_INBOX {
-            return Err(Error::bad("Chat inbox is too large."));
-        }
         let Ok(messages) = serde_json::from_slice::<Vec<Value>>(&bytes) else {
             return Ok(());
         };
@@ -998,6 +996,20 @@ impl Chat<'_> {
                 || self.seen.contains(id)
                 || !self.attempted.insert(id.to_owned())
             {
+                continue;
+            }
+            if message["questionCancelled"] == true {
+                if let Some(question) = self.questions.remove(text(&message, "questionId")) {
+                    self.session
+                        .rpc
+                        .reply(question.request_id, json!({ "answers": {} }))
+                        .await?;
+                    self.emit(json!({
+                        "type": "chat.question.closed",
+                        "questionId": message["questionId"],
+                    }))
+                    .await?;
+                }
                 continue;
             }
             if let Some(question) = self.questions.get_mut(text(&message, "questionId"))

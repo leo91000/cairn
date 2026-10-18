@@ -14,12 +14,13 @@ It does not assert pixel equality between a browser and Material components.
 | Composer | Native expanding text field, attachments, model/reasoning controls, preserved drafts when switching chats, send/queue/steer/stop, IME insets | Chat journey; device keyboard and enlarged text |
 | Attachments | ＋ opens the attach sheet (recent photos, camera, photo picker, files). The draft shows a horizontal tray: image thumbnails and file cards with a coloured type badge and the name shortened in the middle, upload progress per file, upload failures retried on the next send, and refused files (over 10 MB, or 40 MB per message) that block sending until removed. Sent and queued messages show their files above the bubble: an image mosaic (+N beyond four), document cards picturing a PDF's first page or a text file's opening lines, and one-line cards with page or line counts. Tapping opens a full-screen viewer that pages through the message's files with a filmstrip; a long press saves, shares, copies an image or attaches the file again. The file families, their colours and the server `?preview` / `?summary` endpoints are shared with the web (`apps/web/src/attachments.ts`) | `AttachmentPresentationTest` mirrors the web family table; `AttachmentViewsTest`; `ImagePasteCases` |
 | OpenCode model access | Web and Android keep the current conversation’s model and reasoning after opening/reloading; catalog explains provider access checks and labels provider defaults. A regional Privacy refusal offers OpenCode settings, retry in the same session, or a new conversation while preserving the failed one. Android uses French native controls and Custom Tabs. | OpenCode browser journeys; shared ChatProvider cases on JVM/device; pinned-native session resume and startup deadline/cancellation tests |
-| Delivery | Initial send and initiating run message appear in transcript; only waiting follow-ups appear in queue, held behind a scheduled wait; acknowledgements deduplicate optimistic messages; question responses use server privacy redaction | Six presentation regressions; existing message/network cases |
-| Queue and questions | Queue strip next to the composer (first follow-up visible, expandable), pause/resume, edit/remove/steer, option/free-text/private answers | Chat journey; network/Compose suite |
+| Delivery | Initial send and initiating run message appear in transcript; only waiting follow-ups appear in queue, held behind a scheduled wait; acknowledgements deduplicate optimistic messages; submission retries retain their UUID only for the same chat, queued-message edit and content, and starting a new conversation clears the attempt and its error (Android already scopes its key by chat/edit; its errors are an app-wide dismissible notice cleared by the next action); question responses use server privacy redaction | Six presentation regressions; existing message/network cases |
+| Queue and questions | Withdraw an obsolete question without answering (web: “No longer needed”; Android: “Ce n’est plus utile”); provider closures, replaced sessions and completed task outcomes remove pending prompts on both clients. Agent tools list and withdraw questions in the current conversation. Queue strip next to the composer (first follow-up visible, expandable), pause/resume, edit/remove/steer, option/free-text/private answers | Chat journey; `QuestionWithdrawalTest` / `QuestionWithdrawalDeviceTest`; network/Compose suite |
 | Subagents | Subagents started together form a team card in the conversation and the run log (state, current step or report, elapsed time); each opens its full activity (prompt, steps, report, nested teams) in a sheet with one tab per teammate; a bar above the composer keeps working subagents in sight and replaces the working indicator when the agent only waits for them | `SubagentsTest` mirrors the web subagent cases; `SubagentViewsTest` |
 | Agent plan | The plan Codex, Claude Code and OpenCode keep while they work (one `todo_list` item whatever its source) shows as a card where the agent first wrote it, kept current and folded once finished; each later change leaves a line naming the steps finished, started, added or dropped; while the agent follows the current request's plan, a bar above the composer shows its progress and the step in progress, and opens the whole plan with its explanation | `AgentPlanTest` mirrors `agent-plan.test.ts`; `PlanViewsTest`; browser plan journeys in `chats.spec.ts` |
 | Completion | Quiet task outcome below final reply, expandable reason/evidence, explicit blocked/input state, attribution; routine session rows hidden in chat; failures remain visible | Presentation/activity cases; device evidence expansion |
 | Task workspace | Missions list merging tasks and activity: readable schedules, recent run history, direct run, filters and search; mission sheet (detail pane on wide windows) with next dates, success rate and history opening each run; the full run log stays under Atelier › Journal | Native UI, workspace and Signal journeys; device mission screens |
+| Creation retries | Agents, local projects and missions retain the acquired ID before any refresh or GitHub-token step. Creation forms keep one UUID and the original POST payload across an uncertain response; retries recover the created record before applying edited fields with PUT. Save, uncertain-creation, latest-changes, token and reload failures have distinct feedback (English on web, French on Android); an edit rejected on a resource opened for editing reads as a plain save failure. A failed save brings its message into view: web scrolls the alert above the sticky actions, Android scrolls the editor back to its top message. GitHub import retains its existing repository identity and stores the returned project before refresh. | Shared `ResourceSaveCases` on JVM/device; browser creation retry journeys; backend creation replay tests |
 | Task management | Create/edit/duplicate/delete/archive/restore, schedules/timezones/tags, agent/project/model/limits, pause/resume/run, original brief | Workspace journey; device editor; existing task form |
 | Runs | Conversation/result/files, history, fullscreen, stop/retry/resume, errors/account waiting, usage, snapshots, project source revision, workspace cleanup guard | Workspace journey; history/scroll regressions |
 | Agents | Existing configuration and access controls, project-scoped GitHub behavior, dedicated token on creation, permitted skills and MCP tools | Form/API comparison; existing account/MCP suite |
@@ -60,10 +61,11 @@ coverage used, not a claim that every production account/provider was exercised.
   and open in its full-screen viewer; browsers may show placeholders for HEIC.
 - Installing a plugin package uses « Continuer sur le web ». Reviewing files and
   versions, approving packages, editing instances and configuring Discord are native.
-- Foreground updates use SSE. Background question notifications retain the
-  existing Firebase-free WorkManager service: Android schedules periodic checks
-  (approximately 15 minutes, potentially delayed by the OS), rather than browser
-  Web Push. This is an explicit delivery-timing difference.
+- Foreground updates use SSE. Background question and execution notifications use
+  account-level native push through Firebase on Android and Web Push in the browser.
+  Android rechecks the account and installation access before displaying a push.
+  Legacy WorkManager polling is cancelled; its retained `QuestionWorker` class only
+  completes persisted work without fetching data or displaying notifications.
 - Drafts survive in-app conversation switching; sensitive attachments remain in
   app storage and are cleared with session logout/forget. No draft is uploaded
   before the user sends it.
@@ -72,3 +74,16 @@ coverage used, not a claim that every production account/provider was exercised.
 
 Device UI captures use a local MockWebServer fixture, synthetic messages and
 example.test links. They do not contain production conversations or credentials.
+
+
+### Immediate wait results (#255)
+
+Web and Android read the explicit `chat.wait_ready.payload.immediate` boolean
+before the historical “Wait condition already completed” marker. An explicit
+`false` keeps the result attached to the scheduled wait, even with the historical
+text. Both clients also decode observations saved as JSON in `text` and replay
+`tests/fixtures/activity-events.json` (the original 15 activity events plus six
+wait-result cases). The event marker and reason are additive; the `wait_for`
+response, stored schema and compatibility epoch stay unchanged. Older clients
+can still read the event and its historical text. Cards retain their existing
+native presentation and language on each platform; no layout changes.

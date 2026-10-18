@@ -686,9 +686,14 @@ internal fun timelineEntries(
                 }
                 // The condition completed: right away (the agent never waited) or while it waited.
                 "chat.wait_ready" -> {
-                    val observation = event.payload?.let(::JsonObject)
+                    val observation = event.activityData()
                     // Right away, the agent never waited, and this call replaced any wait.
-                    val immediate = event.text == IMMEDIATE_WAIT_RESULT
+                    val immediate =
+                        when (observation?.get("immediate")) {
+                            JsonPrimitive(true) -> true
+                            JsonPrimitive(false) -> false
+                            else -> event.text == IMMEDIATE_WAIT_RESULT
+                        }
                     if (immediate) {
                         openWait?.let { index -> updateWait(index) { it.copy(ended = "replaced") } }
                         openWait = null

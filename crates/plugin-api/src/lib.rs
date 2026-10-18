@@ -16,8 +16,6 @@ pub use view::{validate_action_result, validate_view};
 
 /// Worker protocol and manifest version. Manifests must declare exactly this one.
 pub const API_VERSION: u32 = 2;
-/// Prefix of a host error carrying a package's `cairn.fail` message.
-pub const REJECTED: &str = "rejected: ";
 pub const MAX_FRAME_BYTES: usize = 1_048_576;
 
 /// Host capabilities a package may request, with the sentence the owner approves.

@@ -383,6 +383,76 @@ async fn granted_agents_get_tools_and_instructions_others_do_not() {
 }
 
 #[tokio::test]
+async fn metadata_tool_explains_how_to_recover_from_a_missing_account() {
+    let f = fixture().await;
+    let saved = save(
+        &f.s,
+        json!({
+            "name": "Production",
+            "enabled": true,
+            "secrets": { "token": "ops_fixture" },
+            "agentIds": [MAIN_AGENT_ID],
+        }),
+        None,
+    )
+    .await;
+
+    for operation in ["vaults", "items", "fields"] {
+        let mut arguments = json!({
+            "operation": operation,
+            "vault": "vault",
+            "item": "item",
+        });
+        let result = mcp(
+            &f,
+            "tools/call",
+            json!({ "name": "onepassword", "arguments": arguments }),
+        )
+        .await;
+        assert_eq!(result["result"]["isError"], true, "{result}");
+        assert_eq!(
+            result["result"]["content"][0]["text"],
+            format!(
+                "accountId is required for the {operation} operation. Call accounts to list authorized accounts, then retry with the chosen account's id as accountId."
+            ),
+            "{result}"
+        );
+
+        let accounts = mcp(
+            &f,
+            "tools/call",
+            json!({ "name": "onepassword", "arguments": { "operation": "accounts" } }),
+        )
+        .await;
+        let account = &accounts["result"]["structuredContent"]["accounts"][0]["id"];
+        assert_eq!(account, &saved["id"], "{accounts}");
+
+        arguments["accountId"] = account.clone();
+        let retry = mcp(
+            &f,
+            "tools/call",
+            json!({ "name": "onepassword", "arguments": arguments }),
+        )
+        .await;
+        assert_ne!(retry["result"]["isError"], true, "{retry}");
+        assert!(retry["result"]["structuredContent"].is_object(), "{retry}");
+
+        arguments["accountId"] = json!("not-authorized");
+        let denied = mcp(
+            &f,
+            "tools/call",
+            json!({ "name": "onepassword", "arguments": arguments }),
+        )
+        .await;
+        assert_eq!(denied["result"]["isError"], true, "{denied}");
+        assert_eq!(
+            denied["result"]["content"][0]["text"], "This 1Password account is not authorized.",
+            "{denied}"
+        );
+    }
+}
+
+#[tokio::test]
 async fn owners_see_the_package_view_run_its_actions_and_test_it() {
     let f = fixture().await;
     let s = &f.s;
