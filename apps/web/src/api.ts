@@ -16,6 +16,7 @@ export const installationRoute = beaconEntry ? installationHost || /^\/installat
 
 export const state = reactive({
   transportRoute: 'relay' as 'direct' | 'relay',
+  connectionLost: false,
   ready: false,
   authenticated: false,
   signingOut: false,
@@ -49,6 +50,8 @@ watch(() => [state.ready, state.authenticated, state.installationId, state.signi
 
 let toastTimer: ReturnType<typeof setTimeout> | undefined
 export function notify(message: string) {
+  if (!message)
+    return
   state.toast = message
   if (toastTimer)
     clearTimeout(toastTimer)
@@ -58,6 +61,130 @@ export function notify(message: string) {
 export class ApiError extends Error {
   constructor(message: string, readonly status: number) { super(message) }
 }
+
+class ConnectionError extends Error {
+  constructor(readonly original: unknown) { super(original instanceof Error ? original.message : String(original)) }
+}
+
+const relayUnavailable = new Set([
+  'Installation unavailable',
+  'Installation busy',
+  'Installation busy or unavailable',
+  'Installation request timed out',
+  'Installation response timed out',
+  'Installation connection lost',
+])
+
+function connectionScope() {
+  return JSON.stringify([state.installationId, state.accountId, state.csrf])
+}
+
+const recoveries = new Map<string, {
+  scope: string
+  controller: AbortController
+  promise: Promise<void>
+  reconcile: boolean
+}>()
+
+watch(() => [connectionScope(), state.authenticated, state.signingOut], () => {
+  for (const [probe, recovery] of recoveries) {
+    if (recovery.scope !== connectionScope() || !state.authenticated || state.signingOut) {
+      recoveries.delete(probe)
+      recovery.controller.abort()
+    }
+  }
+
+  state.connectionLost = recoveries.size > 0
+}, { flush: 'sync' })
+
+function recoveryDelay(milliseconds: number, signal: AbortSignal) {
+  return new Promise<void>((resolve, reject) => {
+    let timer: ReturnType<typeof setTimeout>
+    const abort = () => {
+      clearTimeout(timer)
+      reject(new ApiError('', 0))
+    }
+
+    timer = setTimeout(() => {
+      signal.removeEventListener('abort', abort)
+      resolve()
+    }, milliseconds)
+    signal.addEventListener('abort', abort, { once: true })
+    if (signal.aborted)
+      abort()
+  })
+}
+
+function awaitRecovery(pending: Promise<void>, signal?: AbortSignal | null) {
+  if (!signal)
+    return pending
+  return new Promise<void>((resolve, reject) => {
+    const abort = () => {
+      signal.removeEventListener('abort', abort)
+      reject(signal.reason)
+    }
+
+    signal.addEventListener('abort', abort, { once: true })
+    void pending.then(() => {
+      signal.removeEventListener('abort', abort)
+      resolve()
+    }, (error) => {
+      signal.removeEventListener('abort', abort)
+      reject(error)
+    })
+    if (signal.aborted)
+      abort()
+  })
+}
+
+function recoverConnection(scope: string, reconcile: boolean, probe: string) {
+  const recovery = recoveries.get(probe)
+  if (recovery?.scope === scope) {
+    recovery.reconcile ||= reconcile
+    return recovery.promise
+  }
+
+  const controller = new AbortController()
+  state.connectionLost = true
+  const promise = (async () => {
+    let delay = 1000
+    while (true) {
+      await recoveryDelay(delay, controller.signal)
+      try {
+        await requestOnce(probe, { signal: controller.signal })
+        return
+      }
+      catch (error) {
+        if (!(error instanceof ConnectionError))
+          throw error
+      }
+
+      delay = Math.min(delay * 2, 10000)
+    }
+  })().finally(() => {
+    if (recoveries.get(probe)?.controller === controller) {
+      recoveries.delete(probe)
+      state.connectionLost = recoveries.size > 0
+    }
+  })
+  const attempt = {
+    scope,
+    controller,
+    promise,
+    reconcile,
+  }
+  recoveries.set(probe, attempt)
+  // Mutations are never replayed; reload lists to reconcile an uncertain result.
+  void promise.then(async () => {
+    if (attempt.reconcile && connectionScope() === scope && state.authenticated && !state.signingOut)
+      await refresh()
+  }).catch((error) => {
+    if (connectionScope() === scope && state.authenticated && !state.signingOut)
+      state.error = (error as Error).message
+  })
+  return promise
+}
+
 export function redirect(url: string) {
   const resume = () => {
     state.redirecting = false
@@ -76,7 +203,7 @@ export function redirect(url: string) {
   }
 }
 
-async function requestApi<T = any>(
+async function requestOnce<T = any>(
   url: string,
   options: RequestInit = {},
 ): Promise<T> {
@@ -91,17 +218,72 @@ async function requestApi<T = any>(
     },
   }
   const path = state.installationId && url.startsWith(apiUrl('/')) ? url.slice(apiUrl('').length) : undefined
-  const response = path && !/^\/tokens(?:\/|$)/.test(path)
-    ? await installationTransport.request(path, url, requestOptions)
-    : await fetch(url, requestOptions)
-  const data = await response.json()
+  let response: Response
+  let text: string
+  try {
+    response = path && !/^\/tokens(?:\/|$)/.test(path)
+      ? await installationTransport.request(path, url, requestOptions)
+      : await fetch(url, requestOptions)
+    text = await response.text()
+  }
+  catch (error) {
+    if (options.signal?.aborted)
+      throw error
+    throw new ConnectionError(error)
+  }
+
+  let data: any
+  try {
+    data = JSON.parse(text)
+  }
+  catch (error) {
+    if (response.status >= 502 && response.status <= 504)
+      throw new ConnectionError(error)
+    throw error
+  }
+
   if (!response.ok) {
     if (response.status === 401)
       state.authenticated = false
-    throw new ApiError(data.error || 'Request failed. Please try again.', response.status)
+    const message = typeof data?.error === 'string' ? data.error : ''
+    const failure = new ApiError(message || 'Request failed. Please try again.', response.status)
+    if (response.status >= 502 && response.status <= 504 && (!message || relayUnavailable.has(message.replace(/\.$/, ''))))
+      throw new ConnectionError(failure)
+    throw failure
   }
 
   return data
+}
+
+async function requestApi<T = any>(url: string, options: RequestInit = {}, account = false): Promise<T> {
+  const scope = connectionScope()
+  while (true) {
+    try {
+      return await requestOnce<T>(url, options)
+    }
+    catch (error) {
+      const active = !!state.installationId && connectionScope() === scope && state.authenticated && !state.signingOut
+      if (!(error instanceof ConnectionError))
+        throw error
+      if (!active)
+        throw error.original
+
+      const method = (options.method || 'GET').toUpperCase()
+      const mutation = method !== 'GET' && method !== 'HEAD'
+      const probe = account ? '/api/account/session' : apiUrl('/overview')
+      const pending = recoverConnection(scope, mutation && !account, probe)
+      if (mutation) {
+        notify('Connection unavailable. Please try again.')
+        throw new ApiError('', 0)
+      }
+
+      await awaitRecovery(pending, options.signal)
+      if (options.signal?.aborted)
+        throw options.signal.reason
+      if (connectionScope() !== scope || !state.authenticated || state.signingOut)
+        throw new ApiError('', 0)
+    }
+  }
 }
 
 export function api<T = any>(url: string, options: RequestInit = {}): Promise<T> {
@@ -109,7 +291,7 @@ export function api<T = any>(url: string, options: RequestInit = {}): Promise<T>
 }
 
 export function accountApi<T = any>(url: string, options: RequestInit = {}): Promise<T> {
-  return requestApi<T>(`/api/account${url}`, options)
+  return requestApi<T>(`/api/account${url}`, options, true)
 }
 
 export function apiUrl(path: string) {
@@ -142,6 +324,7 @@ export function ownerPage(path: string) {
 }
 
 export async function refresh() {
+  const scope = connectionScope()
   const [agents, projects, tasks, skills, mcps] = await Promise.all([
     api<Agent[]>('/agents'),
     api<Project[]>('/projects'),
@@ -149,6 +332,8 @@ export async function refresh() {
     api<Skill[]>('/skills'),
     state.installationRole === 'owner' ? api<McpView[]>('/mcps') : Promise.resolve([]),
   ])
+  if (connectionScope() !== scope || !state.authenticated || state.signingOut)
+    return
   Object.assign(state, {
     agents,
     projects,

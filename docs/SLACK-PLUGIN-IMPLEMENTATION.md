@@ -576,3 +576,36 @@ agent eligibility, resource access and each tool/command invocation. Clients do
 not automatically repeat uncertain writes and require a fresh rule list before
 another change. This remains a delivery slice: route management, scoped resource
 forms, the Slack package and the other unchecked contract items are still pending.
+
+
+## Resource-grant CI integration
+
+Quality and Storage passed on `cc84e445`. Android's device shards and release
+smoke passed; two JVM journeys failed while testing the merge with newer `main`.
+Both failures were reproduced locally by delaying their actual HTTP responses:
+the resource editor asserted an empty rule list before its GET completed, and
+the connection-recovery journey submitted its next action while the workspace
+reload was still busy, so the view model correctly ignored that action.
+
+The shared JVM/device fixtures now hold and explicitly release those responses.
+They check the loading controls and the cleared connection notice during an
+unfinished reload, then await the completed rule list or workspace before
+continuing. Existing assertion deadlines are unchanged.
+
+Independent integration review also found that main’s recovery of failed GETs
+could keep the rule editor busy indefinitely while offline. Both clients now
+allow dismissal of read-only loading, cancel that read and discard late results.
+An outstanding mutation remains locked; its confirmed result permits closing
+during the following list reload. Reopening always requests a fresh list, without
+repeating the mutation. The browser journey exercises both offline entry and
+post-write reload with the real native grant endpoint.
+
+Device qualification also measured first plugin reads starting 5.5–6.5 seconds
+after the workspace became idle. A controlled HTTP/UI journey reproduced the
+page waiting for its periodic refresh instead of resuming at that transition.
+The Android plugin page now restarts its paused read when the workspace becomes
+idle. The new journey checks both the occupied-state gate and the first request;
+existing assertion deadlines are unchanged.
+
+The integration includes `main` at `19c47868`. This is a CI correction checkpoint;
+resource routes, scoped forms and all other unchecked Slack items remain pending.

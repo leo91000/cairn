@@ -994,6 +994,91 @@ test('resource access combines explicit profiles, operation exceptions and scope
   await expect(access.getByText('No access rules yet.', { exact: true })).toBeVisible()
 })
 
+test('resource access cancels offline reads but keeps an outstanding write locked', async ({ page, workspace }) => {
+  test.setTimeout(90000)
+  const { id, agent, path } = await resourceAccessFixture(workspace, 'access-offline')
+  await useRelayForHttpMocks(page)
+  let offline = false
+  let reads = 0
+  let writes = 0
+  let releaseWrite!: () => void
+  let writeStarted!: () => void
+  const writing = new Promise<void>((resolve) => {
+    writeStarted = resolve
+  })
+  const writeGate = new Promise<void>((resolve) => {
+    releaseWrite = resolve
+  })
+  await page.route('**/overview', async (route) => {
+    if (offline)
+      return route.fulfill({ status: 503, json: { error: 'Installation unavailable' } })
+    return route.continue()
+  })
+  await page.route(`**${path.replace('/api', '')}**`, async (route) => {
+    if (route.request().method() === 'GET') {
+      reads++
+      if (offline)
+        return route.fulfill({ status: 503, json: { error: 'Installation unavailable' } })
+    }
+
+    if (route.request().method() === 'POST') {
+      writes++
+      writeStarted()
+      await writeGate
+      const response = await route.fetch()
+      expect(response.ok()).toBe(true)
+      offline = true
+      return route.fulfill({ response })
+    }
+
+    return route.continue()
+  })
+  try {
+    await page.goto(workspacePath(`/plugins/${id}`))
+    await signIn(page)
+    const card = page.getByRole('article', { name: 'Engineering', exact: true })
+    const access = page.getByRole('dialog', { name: 'Agent access · Engineering', exact: true })
+    await expect(card.getByRole('button', { name: 'Agent access', exact: true })).toBeEnabled()
+    offline = true
+    await card.getByRole('button', { name: 'Agent access', exact: true }).click()
+    await expect.poll(() => reads).toBe(1)
+    await expect(access.getByRole('button', { name: 'Loading rules…', exact: true })).toBeDisabled()
+    await access.getByRole('button', { name: 'Close dialog', exact: true }).click()
+    await expect(access).toHaveCount(0)
+    let recovered = page.waitForResponse(response => response.url().endsWith('/overview') && response.ok())
+    offline = false
+    await recovered
+    await card.getByRole('button', { name: 'Agent access', exact: true }).click()
+    await expect(access.getByText('No access rules yet.', { exact: true })).toBeVisible()
+    expect(reads).toBe(2)
+
+    await access.getByRole('button', { name: 'Add access rule', exact: true }).click()
+    await access.getByRole('combobox', { name: 'Agent', exact: true }).selectOption(agent.id)
+    await access.getByRole('combobox', { name: 'Profile', exact: true }).selectOption('read')
+    await access.getByRole('button', { name: 'Grant access', exact: true }).click()
+    await writing
+    await access.getByRole('button', { name: 'Close dialog', exact: true }).click()
+    await expect(access).toBeVisible()
+    expect(writes).toBe(1)
+    releaseWrite()
+    await expect.poll(() => reads).toBe(3)
+    await access.getByRole('button', { name: 'Close dialog', exact: true }).click()
+    await expect(access).toHaveCount(0)
+    expect((await workspace.api(path)).items).toHaveLength(1)
+    recovered = page.waitForResponse(response => response.url().endsWith('/overview') && response.ok())
+    offline = false
+    await recovered
+    await card.getByRole('button', { name: 'Agent access', exact: true }).click()
+    await expect(access.getByRole('button', { name: 'Revoke rule', exact: true })).toHaveCount(1)
+    expect(reads).toBe(4)
+    expect(writes).toBe(1)
+  }
+  finally {
+    releaseWrite()
+    offline = false
+  }
+})
+
 test('resource access refreshes uncertain writes without automatically repeating them', async ({ page, workspace }) => {
   test.setTimeout(90000)
   const { id, agent, path } = await resourceAccessFixture(workspace, 'access-write')

@@ -62,11 +62,16 @@ fun CairnApp(
     credentials: CairnCredentials? = null,
     targetAccount: String = "",
 ) {
-    CompositionLocalProvider(LocalCairnCredentials provides credentials) {
+    val state by vm.state.collectAsStateWithLifecycle()
+    CompositionLocalProvider(
+        LocalCairnCredentials provides credentials,
+        LocalConnectionFeedback provides ConnectionFeedback(state.connectionLost, state.notice),
+    ) {
         // Gives every screen, including those outside the workspace Scaffold, the theme's
         // background and content colors instead of black text on the window background.
         Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
             CairnAppContent(
+                state,
                 sharedUrl,
                 consumedShare,
                 vm,
@@ -81,6 +86,7 @@ fun CairnApp(
 
 @Composable
 private fun CairnAppContent(
+    state: Workspace,
     sharedUrl: String,
     consumedShare: () -> Unit,
     vm: CairnViewModel,
@@ -89,7 +95,6 @@ private fun CairnAppContent(
     consumedTarget: () -> Unit,
     targetAccount: String,
 ) {
-    val state by vm.state.collectAsStateWithLifecycle()
     PerformanceUpload(vm, state)
     SideEffect {
         Performance.connection =
@@ -203,6 +208,7 @@ private fun CairnAppContent(
                 Page {
                     if (pushReenrollmentRequired) PushReenrollmentNotice()
                     InstallationHeader(state, openConnection = { connection = true })
+                    ConnectionLostNotice(state.connectionLost)
                     Heading(
                         "Installation hors ligne",
                         "Les exécutions continuent sur votre installation. Réessayez lorsqu’elle sera connectée.",
@@ -214,6 +220,7 @@ private fun CairnAppContent(
                     TextButton(onClick = { vm.perform { logout() } }) { Text("Se déconnecter") }
                     state.error?.let { ErrorNotice(it, vm::clearMessage) }
                 }
+                SnackbarHost(snackbar, Modifier.align(Alignment.BottomCenter))
             }
             if (connection) ConnectionSheet(vm, state, close = { connection = false })
         } else
@@ -401,6 +408,7 @@ private fun WorkspaceApp(
                     Column(Modifier.padding(padding)) {
                         if (pushReenrollmentRequired) PushReenrollmentNotice()
                         if (state.busy) LinearProgressIndicator(Modifier.fillMaxWidth())
+                        ConnectionLostNotice(state.connectionLost)
                         state.error?.let { ErrorNotice(it, vm::clearMessage) }
                         NavHost(
                             nav,

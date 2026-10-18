@@ -18,11 +18,15 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.Saver
 import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.semantics.LiveRegionMode
 import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.liveRegion
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -131,10 +135,76 @@ fun Empty(
 @Composable
 fun ErrorNotice(message: String, dismiss: () -> Unit) {
     Surface(color = MaterialTheme.colorScheme.errorContainer, shape = MaterialTheme.shapes.medium) {
-        Column(Modifier.fillMaxWidth().padding(12.dp)) {
-            Text(message, color = MaterialTheme.colorScheme.onErrorContainer)
-            TextButton(onClick = dismiss) { Text("Fermer") }
+        Row(
+            Modifier.fillMaxWidth().padding(start = 12.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text(
+                message,
+                Modifier.weight(1f).padding(vertical = 8.dp),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onErrorContainer,
+            )
+            IconButton(onClick = dismiss) {
+                Icon(
+                    CairnIcons.Close,
+                    "Masquer l’erreur",
+                    Modifier.size(18.dp),
+                    tint = MaterialTheme.colorScheme.onErrorContainer,
+                )
+            }
         }
+    }
+}
+
+/**
+ * A quiet line while the workspace cannot be reached. It is not an error to dismiss: it leaves on
+ * its own once the connection returns.
+ */
+@Composable
+fun ConnectionLostNotice(visible: Boolean) {
+    androidx.compose.animation.AnimatedVisibility(
+        visible,
+        enter = androidx.compose.animation.expandVertically() + androidx.compose.animation.fadeIn(),
+        exit = androidx.compose.animation.shrinkVertically() + androidx.compose.animation.fadeOut(),
+    ) {
+        Row(
+            Modifier.fillMaxWidth().padding(vertical = 4.dp).semantics {
+                liveRegion = LiveRegionMode.Polite
+            },
+            horizontalArrangement = Arrangement.spacedBy(6.dp, Alignment.CenterHorizontally),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            CircularProgressIndicator(
+                Modifier.size(10.dp),
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                strokeWidth = 1.5.dp,
+            )
+            Text(
+                "Connexion perdue · reconnexion…",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+    }
+}
+
+/** Inline feedback for windows and pages that cannot show the workspace snackbar. */
+internal data class ConnectionFeedback(val lost: Boolean = false, val notice: String? = null)
+
+internal val LocalConnectionFeedback = compositionLocalOf { ConnectionFeedback() }
+
+@Composable
+internal fun ConnectionFeedbackNotice() {
+    val feedback = LocalConnectionFeedback.current
+    ConnectionLostNotice(feedback.lost)
+    feedback.notice?.let {
+        Text(
+            it,
+            modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite },
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
     }
 }
 
@@ -252,27 +322,33 @@ fun Editor(
     close: () -> Unit,
     save: () -> Unit,
     valid: Boolean = true,
+    dismissible: Boolean = !busy,
     content: @Composable ColumnScope.() -> Unit,
 ) {
     Dialog(
-        onDismissRequest = { if (!busy) close() },
+        onDismissRequest = { if (dismissible) close() },
         properties =
             DialogProperties(usePlatformDefaultWidth = false, decorFitsSystemWindows = false),
     ) {
         Scaffold(
             modifier = Modifier.fillMaxSize().imePadding(),
             topBar = {
-                TopAppBar(
-                    title = { Text(title) },
-                    navigationIcon = {
-                        IconButton(onClick = close, enabled = !busy) {
-                            Icon(Icons.AutoMirrored.Filled.ArrowBack, "Fermer")
-                        }
-                    },
-                    actions = {
-                        TextButton(onClick = save, enabled = valid && !busy) { Text("Enregistrer") }
-                    },
-                )
+                Column {
+                    TopAppBar(
+                        title = { Text(title) },
+                        navigationIcon = {
+                            IconButton(onClick = close, enabled = dismissible) {
+                                Icon(Icons.AutoMirrored.Filled.ArrowBack, "Fermer")
+                            }
+                        },
+                        actions = {
+                            TextButton(onClick = save, enabled = valid && !busy) {
+                                Text("Enregistrer")
+                            }
+                        },
+                    )
+                    Column(Modifier.padding(horizontal = 20.dp)) { ConnectionFeedbackNotice() }
+                }
             },
         ) { padding ->
             Column(
@@ -305,6 +381,7 @@ fun Confirm(
         text = {
             Column {
                 Text(description)
+                ConnectionFeedbackNotice()
                 if (error != null) Text(error, color = MaterialTheme.colorScheme.error)
             }
         },

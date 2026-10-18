@@ -127,10 +127,10 @@ is retained in
 changes. After diagnosing and fixing a host problem, the operator may remove
 `failedImage` from that private file to retry the same approved digest.
 
-Only approve releases whose installation database remains readable by the previous
-release; this ticket adds no installation database migration. An image update
-cannot undo a destructive database migration. Keep the stopped-installation backups
-required above before approving a release with a new data format.
+Routine automatic updates require compatible persisted data. An image rollback
+cannot undo an incompatible migration, and no automatic installation backups are
+created. Preserve active data and review forward recovery separately before
+deploying a release with a new data format.
 
 ```sh
 sudo systemctl status cairn-installation-update.timer

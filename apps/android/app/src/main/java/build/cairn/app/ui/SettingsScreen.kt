@@ -52,6 +52,7 @@ fun SettingsScreen(vm: CairnViewModel, state: Workspace) {
         NotificationSettings(vm)
         PerformanceSettings(vm)
         if (state.isOwner) {
+            ConversationRetentionSettings(vm)
             settings?.let { info ->
                 Panel {
                     Text("Connecter un assistant", style = MaterialTheme.typography.titleLarge)
@@ -192,6 +193,7 @@ private fun TokenEditor(
                     Code(token)
                     CopyButton("Copier le jeton", token, sensitive = true)
                 }
+                ConnectionFeedbackNotice()
                 state.error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
             }
         },

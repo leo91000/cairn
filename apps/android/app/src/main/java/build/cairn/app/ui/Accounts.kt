@@ -469,8 +469,10 @@ internal fun AccountSheet(
         sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
         containerColor = MaterialTheme.colorScheme.surface,
     ) {
+        Column(Modifier.padding(horizontal = 20.dp)) { ConnectionFeedbackNotice() }
         Column(
             Modifier.fillMaxWidth()
+                .weight(1f, fill = false)
                 .testTag("account-sheet")
                 .verticalScroll(rememberScrollState())
                 .padding(horizontal = 20.dp)
@@ -819,8 +821,10 @@ internal fun AccountSignInSheet(
         sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
         containerColor = MaterialTheme.colorScheme.surface,
     ) {
+        Column(Modifier.padding(horizontal = 20.dp)) { ConnectionFeedbackNotice() }
         Column(
             Modifier.fillMaxWidth()
+                .weight(1f, fill = false)
                 .testTag("account-sign-in")
                 .verticalScroll(rememberScrollState())
                 .padding(horizontal = 20.dp)

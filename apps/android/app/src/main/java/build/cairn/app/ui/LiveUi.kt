@@ -547,6 +547,10 @@ internal data class TimelineEntry(
     val agents: List<Subagent> = emptyList(),
     /** A scheduled wait, shown as one card from its scheduling to its resumption. */
     val wait: ActivityWait? = null,
+    /** The agent's plan, kept up to date by its later updates. */
+    val plan: AgentPlan? = null,
+    /** Where an update changed the plan. */
+    val planUpdate: PlanUpdate? = null,
 )
 
 /** Fold updates in place within a turn; keep messages and errors in chronological order. */
@@ -600,7 +604,9 @@ internal fun timelineEntries(
             if (legacy && event.type == "item.started") legacyTool = folded.size
             val item = event.item()
             val id = item.string("id")
-            if (!event.isMessage() && id.isNotBlank()) {
+            // Each plan update keeps its place: it shows what changed at that moment.
+            val planUpdate = item.string("type") == "todo_list"
+            if (!event.isMessage() && id.isNotBlank() && !planUpdate) {
                 val key = "${item.string("type")}:$id"
                 val index = positions[key]
                 if (index == null) {
@@ -643,6 +649,8 @@ internal fun timelineEntries(
                 )
             else emptySet()
         var via = ""
+        // The plan its updates change, until the agent finishes it or writes another one.
+        var planIndex: Int? = null
         // The wait still pending, by its wakeup ID, so that its result and resumption complete it.
         val waits = mutableMapOf<String, Int>()
         var openWait: Int? = null
@@ -776,6 +784,9 @@ internal fun timelineEntries(
                 "chat.user" -> {
                     openWait?.let { index -> updateWait(index) { it.copy(ended = "cancelled") } }
                     openWait = null
+                    // A new request gets its own plan, even when the agent carries the previous
+                    // list over.
+                    planIndex = null
                 }
             }
             // A run that ends without succeeding never resumes the wait it scheduled. Only its
@@ -812,6 +823,70 @@ internal fun timelineEntries(
             if (event.type == "status" && route.string("providerName").isNotBlank()) {
                 via = route.string("providerName")
                 if (chat) continue
+            }
+            // The agent's own plan shows apart from its tools. A call that failed did not change
+            // it.
+            val planItem =
+                event.item()?.takeIf {
+                    it.string("type") == "todo_list" && it.string("parent_id").isBlank()
+                }
+            if (planItem != null) {
+                val steps = planSteps(planItem)
+                if (steps.isEmpty() || planItem.string("status") == "failed") continue
+                val current = planIndex?.let { result[it].plan }
+                val explanation = planItem.string("explanation")
+                if (current != null && samePlan(current.steps, steps)) {
+                    val updatedExplanation = explanation.ifBlank { current.explanation }
+                    if (steps != current.steps || updatedExplanation != current.explanation) {
+                        val index = checkNotNull(planIndex)
+                        result[index] =
+                            result[index].copy(
+                                plan =
+                                    current.copy(
+                                        steps = steps,
+                                        explanation = updatedExplanation,
+                                        updatedAt = event.createdAt,
+                                    )
+                            )
+                    }
+                    continue
+                }
+                if (current == null || !continuesPlan(current.steps, steps)) {
+                    flushActivity()
+                    planIndex = result.size
+                    result.add(
+                        TimelineEntry(
+                            "plan:${event.id}",
+                            listOf(event),
+                            false,
+                            plan = AgentPlan(steps, explanation, event.createdAt, event.createdAt),
+                        )
+                    )
+                    continue
+                }
+                val index = checkNotNull(planIndex)
+                val change = planChange(current.steps, steps)
+                result[index] =
+                    result[index].copy(
+                        plan =
+                            current.copy(
+                                steps = steps,
+                                explanation = explanation.ifBlank { current.explanation },
+                                updatedAt = event.createdAt,
+                            )
+                    )
+                if (change != null) {
+                    flushActivity()
+                    result.add(
+                        TimelineEntry(
+                            "plan-update:${event.id}",
+                            listOf(event),
+                            false,
+                            planUpdate = PlanUpdate(result[index].key, change, steps.progress()),
+                        )
+                    )
+                }
+                continue
             }
             val agent = subagents.anchors[event.id]
             if (agent != null) {
@@ -955,6 +1030,8 @@ internal fun TimelineRow(
     hideRunning: Boolean = false,
     /** The run is still active, so its subagents may still report. */
     active: Boolean = false,
+    /** The plan the agent still follows, if any. */
+    livePlan: String? = null,
 ) {
     if (entry.files.isNotEmpty()) ArtifactStrip(vm, entry.files)
     else if (entry.agents.isNotEmpty()) SubagentTeam(entry.agents, active, identity = entry.key)
@@ -967,6 +1044,8 @@ internal fun TimelineRow(
             )
         }
     else if (entry.wait != null) WaitCard(entry.wait)
+    else if (entry.plan != null) PlanCard(entry.plan, live = active && livePlan == entry.key)
+    else if (entry.planUpdate != null) PlanUpdateRow(entry.planUpdate)
     else if (entry.notice) ChatNotice(presentActivity(entry.events.single()))
     else {
         val presentations = remember(entry.events) { entry.events.map(::presentActivity) }

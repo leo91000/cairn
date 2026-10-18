@@ -5,6 +5,7 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import build.cairn.app.data.*
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import kotlinx.serialization.json.*
 
@@ -22,6 +23,9 @@ internal fun PluginResourceGrants(
     var opened by remember { mutableStateOf(false) }
     var ready by remember { mutableStateOf(false) }
     var busy by remember { mutableStateOf(false) }
+    var writing by remember { mutableStateOf(false) }
+    var generation by remember { mutableIntStateOf(0) }
+    var pending by remember { mutableStateOf<Job?>(null) }
     var error by remember { mutableStateOf<String?>(null) }
     var rules by remember { mutableStateOf(emptyList<PluginResourceGrant>()) }
     var adding by remember { mutableStateOf(false) }
@@ -56,28 +60,40 @@ internal fun PluginResourceGrants(
     val allowed = operations.filter { draft.permits(it) }
     val controls = ready && enabled && !busy
     val canGrant = controls && state.agents.any { it.id == agentId } && allowed.isNotEmpty()
-    suspend fun load() {
+    suspend fun load(current: Int) {
         ready = false
-        rules = vm.api.get<PluginPage<PluginResourceGrant>>(path).items
-        ready = true
+        val result = vm.api.get<PluginPage<PluginResourceGrant>>(path)
+        if (current == generation) {
+            rules = result.items
+            ready = true
+        }
     }
     fun refresh() {
         if (busy) return
         busy = true
         error = null
-        scope.launch {
+        val current = ++generation
+        pending = scope.launch {
             try {
-                load()
+                load(current)
             } catch (e: Exception) {
                 if (e is CancellationException) throw e
-                error = e.message
+                if (current == generation) error = e.message
             } finally {
-                busy = false
+                if (current == generation) {
+                    busy = false
+                    pending = null
+                }
             }
         }
     }
     fun close() {
-        if (busy) return
+        if (writing) return
+        generation++
+        pending?.cancel()
+        pending = null
+        busy = false
+        ready = false
         opened = false
         adding = false
         removing = null
@@ -107,27 +123,41 @@ internal fun PluginResourceGrants(
                 }
             else buildJsonObject {}
         busy = true
+        writing = true
         ready = false
         error = null
-        scope.launch {
+        val current = ++generation
+        pending = scope.launch {
             try {
                 vm.api.request(if (revoking == null) "POST" else "DELETE", target, body)
+                if (current != generation) return@launch
+                writing = false
                 adding = false
                 removing = null
-                load()
+                load(current)
             } catch (e: Exception) {
                 if (e is CancellationException) throw e
                 // The server may already have changed permissions; never repost automatically.
-                error = "${e.message} Actualisez les règles avant une autre modification."
-                adding = false
-                removing = null
+                if (current == generation) {
+                    error = "${e.message} Actualisez les règles avant une autre modification."
+                    adding = false
+                    removing = null
+                }
             } finally {
-                busy = false
+                if (current == generation) {
+                    writing = false
+                    busy = false
+                    pending = null
+                }
             }
         }
     }
     DisposableEffect(Unit) {
-        onDispose { activity(false) }
+        onDispose {
+            generation++
+            pending?.cancel()
+            activity(false)
+        }
     }
     TextButton(
         onClick = {
@@ -147,6 +177,7 @@ internal fun PluginResourceGrants(
             close = { close() },
             save = { mutate() },
             valid = adding && canGrant,
+            dismissible = !writing,
         ) {
             Text(
                 "Aucun agent n’a accès par défaut. Les règles s’additionnent : un refus ne s’applique qu’à sa règle, une autre peut encore autoriser l’opération."

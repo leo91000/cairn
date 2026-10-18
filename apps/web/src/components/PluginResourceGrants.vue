@@ -17,6 +17,9 @@ const emit = defineEmits<{ activity: [active: boolean] }>()
 const opened = ref(false)
 const ready = ref(false)
 const busy = ref(false)
+const writing = ref(false)
+let generation = 0
+let reader: AbortController | undefined
 const error = ref('')
 const rules = ref<PluginResourceGrant[]>([])
 const adding = ref(false)
@@ -41,10 +44,21 @@ const allowed = computed(() => resourceRuleOperations(props.operations, draft.va
 const canGrant = computed(() => props.enabled && ready.value && !busy.value
   && state.agents.some(item => item.id === agent.value) && allowed.value.length > 0)
 
-async function load() {
+async function load(current: number) {
   ready.value = false
-  rules.value = (await api<{ items: PluginResourceGrant[] }>(props.path)).items
-  ready.value = true
+  const controller = new AbortController()
+  reader = controller
+  try {
+    const result = await api<{ items: PluginResourceGrant[] }>(props.path, { signal: controller.signal })
+    if (current === generation) {
+      rules.value = result.items
+      ready.value = true
+    }
+  }
+  finally {
+    if (reader === controller)
+      reader = undefined
+  }
 }
 
 async function refresh() {
@@ -52,14 +66,17 @@ async function refresh() {
     return
   busy.value = true
   error.value = ''
+  const current = ++generation
   try {
-    await load()
+    await load(current)
   }
   catch (e) {
-    error.value = (e as Error).message
+    if (current === generation)
+      error.value = (e as Error).message
   }
   finally {
-    busy.value = false
+    if (current === generation)
+      busy.value = false
   }
 }
 
@@ -70,8 +87,13 @@ function open() {
 }
 
 function close() {
-  if (busy.value)
+  if (writing.value)
     return
+  generation++
+  reader?.abort()
+  reader = undefined
+  busy.value = false
+  ready.value = false
   opened.value = false
   adding.value = false
   removing.value = undefined
@@ -92,26 +114,40 @@ async function mutate(method: 'POST' | 'DELETE') {
   const target = method === 'DELETE' ? `${props.path}/${removing.value!.id}` : props.path
   const body = method === 'POST' ? JSON.stringify(draft.value) : undefined
   busy.value = true
+  writing.value = true
   error.value = ''
   ready.value = false
+  const current = ++generation
   try {
     await api(target, { method, body })
+    if (current !== generation)
+      return
+    writing.value = false
     adding.value = false
     removing.value = undefined
-    await load()
+    await load(current)
   }
   catch (e) {
     // A lost response may already have changed permissions. Never repost automatically.
-    error.value = `${(e as Error).message} Refresh the rules before making another change.`
-    adding.value = false
-    removing.value = undefined
+    if (current === generation) {
+      error.value = `${(e as Error).message} Refresh the rules before making another change.`
+      adding.value = false
+      removing.value = undefined
+    }
   }
   finally {
-    busy.value = false
+    if (current === generation) {
+      writing.value = false
+      busy.value = false
+    }
   }
 }
 
-onBeforeUnmount(() => emit('activity', false))
+onBeforeUnmount(() => {
+  generation++
+  reader?.abort()
+  emit('activity', false)
+})
 </script>
 
 <template>

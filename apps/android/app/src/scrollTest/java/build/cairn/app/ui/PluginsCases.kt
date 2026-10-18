@@ -8,10 +8,13 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.semantics.SemanticsProperties
 import androidx.compose.ui.test.*
 import androidx.compose.ui.test.junit4.v2.createComposeRule
+import androidx.lifecycle.ViewModelStore
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.test.core.app.ApplicationProvider
 import build.cairn.app.data.*
 import java.util.concurrent.CopyOnWriteArrayList
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.flow.first
 import kotlinx.serialization.json.*
 import okhttp3.mockwebserver.*
@@ -24,6 +27,47 @@ abstract class PluginsCases {
     @get:Rule val compose = createComposeRule()
 
     protected open fun capture(name: String) {}
+
+    @Test
+    fun pluginCatalogueResumesImmediatelyWhenWorkspaceBecomesIdle() {
+        val blocked = mutableStateOf(true)
+        val composed = CountDownLatch(1)
+        val firstRead = CountDownLatch(1)
+        MockWebServer().use { server ->
+            server.dispatcher =
+                dispatcher(
+                    read = { path ->
+                        if (path.endsWith("/plugins")) firstRead.countDown()
+
+                        null
+                    }
+                ) { _, _ ->
+                    null
+                }
+            server.start()
+            val vm =
+                show(server) { model, state ->
+                    PluginScreen(model, state.copy(busy = blocked.value), "onepassword") {}
+                    SideEffect { composed.countDown() }
+                }
+            val models = ViewModelStore().apply { put("fixture", vm) }
+            try {
+                compose.waitUntil(10000) { composed.count == 0L }
+                compose.waitForIdle()
+                assertEquals(1L, firstRead.count)
+                compose.runOnIdle { blocked.value = false }
+                compose.waitUntil(2500) {
+                    compose.onAllNodes(isRoot()).fetchSemanticsNodes()
+                    firstRead.count == 0L
+                }
+                compose.waitUntil(10000) {
+                    compose.onAllNodesWithText("1Password").fetchSemanticsNodes().isNotEmpty()
+                }
+            } finally {
+                models.clear()
+            }
+        }
+    }
 
     /** The built-in Discord package as its manifest declares it: nothing native left. */
     private val discord =
@@ -1880,6 +1924,8 @@ abstract class PluginsCases {
         val rules = CopyOnWriteArrayList<PluginResourceGrant>()
         val writes = CopyOnWriteArrayList<JsonObject>()
         val uncertain = java.util.concurrent.atomic.AtomicBoolean(false)
+        val grantsStarted = CountDownLatch(1)
+        val releaseGrants = CountDownLatch(1)
         MockWebServer().use { server ->
             val normal =
                 dispatcher(
@@ -1930,6 +1976,10 @@ abstract class PluginsCases {
                 object : Dispatcher() {
                     override fun dispatch(request: RecordedRequest): MockResponse {
                         val response = normal.dispatch(request)
+                        if (request.method == "GET" && request.path.orEmpty().endsWith("/grants")) {
+                            grantsStarted.countDown()
+                            check(releaseGrants.await(20, TimeUnit.SECONDS))
+                        }
                         return if (
                             uncertain.get() &&
                                 request.method != "GET" &&
@@ -1945,6 +1995,23 @@ abstract class PluginsCases {
                 compose.onAllNodesWithText("Accès des agents").fetchSemanticsNodes().isNotEmpty()
             }
             compose.onNodeWithText("Accès des agents").performScrollTo().performClick()
+            try {
+                compose.waitUntil(10000) { grantsStarted.count == 0L }
+                compose.onNodeWithText("Chargement des règles…").assertExists()
+                compose.onNodeWithText("Ajouter une règle").assertDoesNotExist()
+                compose.onNodeWithText("Enregistrer").assertIsNotEnabled()
+                compose.onNodeWithContentDescription("Fermer").performClick()
+                compose.onNodeWithText("Accès des agents · Engineering").assertDoesNotExist()
+            } finally {
+                releaseGrants.countDown()
+            }
+            compose.onNodeWithText("Accès des agents").performScrollTo().performClick()
+            compose.waitUntil(10000) {
+                compose
+                    .onAllNodesWithText("Aucune règle d’accès.")
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
+            }
             compose.onNodeWithText("Aucune règle d’accès.").assertExists()
             assertTrue(writes.isEmpty())
             compose.onNodeWithText("Ajouter une règle").performScrollTo().performClick()

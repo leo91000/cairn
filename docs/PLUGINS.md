@@ -453,8 +453,10 @@ Choose an agent explicitly, select a profile or individual operations, optionall
 limit scope values, and inspect the per-rule preview before granting access.
 Resource grants are unavailable during inactive setup. Rules can be revoked with
 confirmation; this does not remove permissions granted by other rules. After an
-uncertain write, refresh the saved rules before another change. Connecting a
-resource provider through OAuth does not grant any agent access by itself.
+uncertain write, refresh the saved rules before another change. Read-only loading
+can be canceled by closing the editor; reopening always fetches a fresh list. An
+outstanding grant or revocation stays locked until its response arrives. Connecting
+a resource provider through OAuth does not grant any agent access by itself.
 
 Rules are bound to the verified current owner's access, and rechecked alongside
 instance, resource/parent revisions and approval before capabilities and before
