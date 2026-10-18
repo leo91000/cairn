@@ -81,6 +81,25 @@ test('new conversation on the same route clears an uncertain submission with ide
   }
 })
 
+test('new conversation on the same route clears the abandoned attempt’s error', async ({ page }) => {
+  await useRelayForHttpMocks(page)
+  await page.route(/\/chats\/[^/]+\/messages$/, route => route.request().method() === 'POST'
+    ? route.fulfill({ status: 503, json: { error: 'Simulated send failure' } })
+    : route.continue())
+  await page.goto(workspacePath('/chats'))
+  await authenticateWorkspace(page)
+  const composer = page.getByRole('textbox', { name: 'Message', exact: true })
+  await composer.fill('Refused first message')
+  await page.getByRole('button', { name: 'Send', exact: true }).click()
+  const failure = page.getByText('Simulated send failure', { exact: true })
+  await expect(failure).toBeVisible()
+  await page.getByRole('button', { name: 'Chat details', exact: true }).click()
+  await page.getByRole('dialog', { name: 'Chat details', exact: true }).getByRole('button', { name: 'New chat', exact: true }).click()
+  await expect(page).toHaveURL(workspacePath('/chats'))
+  await expect(composer).toHaveValue('')
+  await expect(failure).toBeHidden()
+})
+
 test('identical queued-message edits keep retry identity scoped to the edited message', async ({ page, workspace }) => {
   await useRelayForHttpMocks(page)
   const chat = await workspace.api('/api/chats', 'POST', {})

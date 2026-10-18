@@ -453,6 +453,7 @@ function newConversation() {
   createdChat = undefined
   submission = undefined
   editing.value = null
+  error.value = ''
   void router.push('/chats')
 }
 
