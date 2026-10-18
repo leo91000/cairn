@@ -17,7 +17,7 @@ use cairn_installation::{
 use common::{Credentials, RelayContext, read_bytes, read_json, read_text, request, send};
 use http_body_util::BodyExt;
 use serde_json::{Value, json};
-use std::{sync::Arc, time::Duration};
+use std::{collections::HashMap, sync::Arc, time::Duration};
 use tempfile::TempDir;
 use tokio_util::sync::CancellationToken;
 
@@ -457,7 +457,138 @@ async fn attachments_are_private_scoped_bounded_and_durable() {
     assert_eq!(response.headers()["cache-control"], "no-store");
     assert_eq!(response.headers()["content-type"], "image/png");
     assert_eq!(read_bytes(response).await.as_ref(), png);
+    let stream_url = format!("/api/chats/{chat_id}/attachments/{attachment_id}/stream");
+    assert_eq!(
+        attachment(&app, anonymous, "GET", &stream_url, vec![])
+            .await
+            .status(),
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(
+        attachment(&app, owner, "GET", &format!("{other_url}/stream"), vec![])
+            .await
+            .status(),
+        StatusCode::NOT_FOUND
+    );
+    let response = attachment(&app, owner, "GET", &stream_url, vec![]).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers()["content-type"], "image/png");
+    assert_eq!(read_bytes(response).await.as_ref(), png);
     assert_hostile_uploads_are_neutralized(&app, &session, chat_id).await;
+}
+
+/// A blank PDF with `pages` pages and a valid cross-reference table.
+fn blank_pdf(pages: usize) -> Vec<u8> {
+    let kids: Vec<String> = (0..pages).map(|page| format!("{} 0 R", page + 3)).collect();
+    let mut objects = vec![
+        "<< /Type /Catalog /Pages 2 0 R >>".to_owned(),
+        format!(
+            "<< /Type /Pages /Kids [{}] /Count {pages} >>",
+            kids.join(" ")
+        ),
+    ];
+    objects.extend(
+        (0..pages).map(|_| "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 100] >>".to_owned()),
+    );
+    let mut pdf = b"%PDF-1.4\n".to_vec();
+    let mut offsets = Vec::new();
+    for (index, object) in objects.iter().enumerate() {
+        offsets.push(pdf.len());
+        pdf.extend(format!("{} 0 obj\n{object}\nendobj\n", index + 1).bytes());
+    }
+    let table = pdf.len();
+    pdf.extend(format!("xref\n0 {}\n0000000000 65535 f \n", objects.len() + 1).bytes());
+    for offset in offsets {
+        pdf.extend(format!("{offset:010} 00000 n \n").bytes());
+    }
+    pdf.extend(
+        format!(
+            "trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{table}\n%%EOF\n",
+            objects.len() + 1
+        )
+        .bytes(),
+    );
+    pdf
+}
+
+fn installed(tool: &str) -> bool {
+    std::process::Command::new(tool)
+        .arg("-v")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok()
+}
+
+#[tokio::test]
+async fn attachment_previews_and_summaries_are_rendered_on_demand() {
+    let (_root, app, service) = app().await;
+    let session = RelayContext::new(&common::relay_fixture::context(&service).await);
+    let owner = Credentials::Owner(&session);
+    let chat = service.chat_create(json!({})).await.unwrap();
+    let chat_id = chat["id"].as_str().unwrap();
+    let png = b"\x89\x50\x4e\x47\x0d\x0a\x1a\x0a\x00\x00\x00\x0d\x49\x48\x44\x52\x00\x00\x00\x04\x00\x00\x00\x02\x08\x06\x00\x00\x00\x7f\xa8\x7d\x63\x00\x00\x00\x11\x49\x44\x41\x54\x78\x9c\x63\x10\x31\x8b\xfa\x8f\x8c\x19\xd0\x05\x00\xd3\x26\x0d\x19\xad\xbe\x6f\x4f\x00\x00\x00\x00\x49\x45\x4e\x44\xae\x42\x60\x82";
+    let files = [
+        ("export.csv", b"id,name\r\n1,Acme\r\n2,Globex".to_vec()),
+        ("brief.pdf", blank_pdf(3)),
+        ("archive.zip", b"PK\x03\x04\0\0binary".to_vec()),
+        ("logo.png", png.to_vec()),
+    ];
+    let mut urls = HashMap::new();
+    for (name, bytes) in files {
+        let url = format!("/api/chats/{chat_id}/attachments/{}", id());
+        let upload = format!("{url}?name={name}");
+        let response = attachment(&app, owner, "PUT", &upload, bytes).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        urls.insert(name, url);
+    }
+    let get = async |name: &str, flag: &str| {
+        attachment(
+            &app,
+            owner,
+            "GET",
+            &format!("{}?{flag}", urls[name]),
+            vec![],
+        )
+        .await
+    };
+
+    let summary = read_json(get("export.csv", "summary").await).await;
+    assert_eq!(
+        summary,
+        json!({ "lines": 3, "excerpt": "id,name\n1,Acme\n2,Globex" })
+    );
+    assert_eq!(
+        read_json(get("archive.zip", "summary").await).await,
+        json!({})
+    );
+    for name in ["export.csv", "archive.zip"] {
+        assert_eq!(get(name, "preview").await.status(), StatusCode::NOT_FOUND);
+    }
+
+    // Rendering relies on the optional poppler and ffmpeg tools of the server image.
+    let pages = read_json(get("brief.pdf", "summary").await).await;
+    assert_eq!(
+        pages,
+        if installed("pdfinfo") {
+            json!({ "pages": 3 })
+        } else {
+            json!({})
+        }
+    );
+    for (name, tool) in [("brief.pdf", "pdftoppm"), ("logo.png", "ffmpeg")] {
+        let response = get(name, "preview").await;
+        if !installed(tool) {
+            assert_eq!(response.status(), StatusCode::NOT_FOUND);
+            continue;
+        }
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()["content-type"], "image/jpeg");
+        assert!(read_bytes(response).await.starts_with(&[0xff, 0xd8, 0xff]));
+    }
+
+    let original = get("logo.png", "name=logo.png").await;
+    assert_eq!(read_bytes(original).await.as_ref(), png);
 }
 
 #[tokio::test]

@@ -1,17 +1,23 @@
 package build.cairn.app.ui
 
 import android.app.Application
+import android.content.ClipData
+import android.content.ClipboardManager
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.semantics.SemanticsActions
 import androidx.compose.ui.test.*
 import androidx.compose.ui.test.junit4.v2.createComposeRule
+import androidx.core.content.FileProvider
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.test.core.app.ApplicationProvider
 import build.cairn.app.data.*
+import java.io.File
+import java.io.RandomAccessFile
 import java.util.concurrent.CopyOnWriteArrayList
 import kotlinx.coroutines.flow.first
 import kotlinx.serialization.json.*
@@ -201,6 +207,33 @@ abstract class QueueStripCases {
             assertEquals("steer", steer.getValue("mode").jsonPrimitive.content)
             assertEquals(long, steer.getValue("text").jsonPrimitive.content)
             settle()
+
+            // A refused-only draft still belongs to the user and must block queue editing.
+            val app = ApplicationProvider.getApplicationContext<Application>()
+            val oversized = File(app.cacheDir, "cairn-files/queue-oversized.png")
+            oversized.parentFile!!.mkdirs()
+            RandomAccessFile(oversized, "rw").use { it.setLength(MAX_ATTACHMENT_BYTES + 1) }
+            val uri = FileProvider.getUriForFile(app, "${app.packageName}.files", oversized)
+            compose.runOnIdle {
+                app.getSystemService(ClipboardManager::class.java)
+                    .setPrimaryClip(ClipData.newUri(app.contentResolver, "oversized", uri))
+            }
+            compose.onNode(hasSetTextAction()).performSemanticsAction(SemanticsActions.PasteText)
+            compose.waitUntil(10000) {
+                compose
+                    .onAllNodesWithText("Trop lourd", substring = true)
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
+            }
+            compose.onNodeWithText(long).performClick()
+            compose.onNodeWithText("Modifier").performClick()
+            compose.runOnIdle {
+                val draft = checkNotNull(vm.chatDrafts["chat"])
+                assertNull(draft.editing)
+                assertEquals("", draft.text)
+                assertEquals("queue-oversized.png", draft.rejected.single().name)
+            }
+            compose.onNodeWithContentDescription("Retirer queue-oversized.png").performClick()
 
             compose.onNodeWithText(long).performClick()
             compose.onNodeWithTag("queued-message-sheet").assertExists()

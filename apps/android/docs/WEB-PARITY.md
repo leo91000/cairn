@@ -12,6 +12,7 @@ It does not assert pixel equality between a browser and Material components.
 | Conversation retention | Owner setting shared with web: 7 days by default, custom whole days or 0 to disable, confirmation explaining permanent deletion of existing conversations. Android uses French native number input and dialog; web uses Settings → Installation. | Backend lifecycle tests; settings browser journey; `ConversationRetentionTest` / `ConversationRetentionDeviceTest` |
 | Conversations | Fil home grouped by what needs the user, live work, conversations waiting to resume and recent conversations; one card per scheduled wait in the conversation; conversations and missions opened from it read in one pager that swipes in the Fil's order, a mission run adding a Mission tab; compact chooser from the conversation title with search and date groups; agent/project chosen on screen for a new conversation | Chat and Signal journeys; device switching/search |
 | Composer | Native expanding text field, attachments, model/reasoning controls, preserved drafts when switching chats, send/queue/steer/stop, IME insets | Chat journey; device keyboard and enlarged text |
+| Attachments | ＋ opens the attach sheet (recent photos, camera, photo picker, files). The draft shows a horizontal tray: image thumbnails and file cards with a coloured type badge and the name shortened in the middle, upload progress per file, upload failures retried on the next send, and refused files (over 10 MB, or 40 MB per message) that block sending until removed. Sent and queued messages show their files above the bubble: an image mosaic (+N beyond four), document cards picturing a PDF's first page or a text file's opening lines, and one-line cards with page or line counts. Tapping opens a full-screen viewer that pages through the message's files with a filmstrip; a long press saves, shares, copies an image or attaches the file again. The file families, their colours and the server `?preview` / `?summary` endpoints are shared with the web (`apps/web/src/attachments.ts`) | `AttachmentPresentationTest` mirrors the web family table; `AttachmentViewsTest`; `ImagePasteCases` |
 | OpenCode model access | Web and Android keep the current conversation’s model and reasoning after opening/reloading; catalog explains provider access checks and labels provider defaults. A regional Privacy refusal offers OpenCode settings, retry in the same session, or a new conversation while preserving the failed one. Android uses French native controls and Custom Tabs. | OpenCode browser journeys; shared ChatProvider cases on JVM/device; pinned-native session resume and startup deadline/cancellation tests |
 | Delivery | Initial send and initiating run message appear in transcript; only waiting follow-ups appear in queue, held behind a scheduled wait; acknowledgements deduplicate optimistic messages; question responses use server privacy redaction | Six presentation regressions; existing message/network cases |
 | Queue and questions | Queue strip next to the composer (first follow-up visible, expandable), pause/resume, edit/remove/steer, option/free-text/private answers | Chat journey; network/Compose suite |
@@ -49,6 +50,18 @@ coverage used, not a claim that every production account/provider was exercised.
   above the bar.
 - Android document/photo pickers and system share/save/selection replace browser
   upload/download/clipboard controls. External OAuth uses Custom Tabs.
+- Attachments: the attach sheet lists recent photos from the device (asked for only when the
+  user taps the tile; Android 14 limited access is supported), which browsers cannot offer; the
+  web menu has Photos, Camera and Files. File actions use a long press on Android and a ⋯ menu
+  on the web. Message images keep a fixed mosaic size on Android so the history does not move
+  while pictures load. Both viewers zoom images: pinch and pan on Android; an
+  actual-size toggle with scrolling on the web. Web sharing prepares the original
+  while the menu or viewer is open, then enables Share for a fresh user gesture.
+  Both apps fetch original attachments through the authenticated binary stream
+  route, including files up to the 10 MiB attachment limit when using Beacon.
+  They fall back to the original download route on older installations.
+  Thumbnail formats follow platform decoders: SVGs have a placeholder on Android
+  and open in its full-screen viewer; browsers may show placeholders for HEIC.
 - Installing a plugin package uses « Continuer sur le web ». Reviewing files and
   versions, approving packages, editing instances and configuring Discord are native.
 - Plugin setup uses a full-screen native editor and resource dialogs on Android;

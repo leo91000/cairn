@@ -22,11 +22,14 @@ import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import okhttp3.RequestBody
 import okhttp3.RequestBody.Companion.asRequestBody
 import okhttp3.RequestBody.Companion.toRequestBody
 import okhttp3.Response
 import okhttp3.ResponseBody
 import okio.Buffer
+import okio.BufferedSink
+import okio.ForwardingSink
 import okio.ForwardingSource
 import okio.buffer
 
@@ -279,12 +282,23 @@ class CairnApi(
         }
     }
 
-    suspend fun upload(path: String, file: java.io.File): ChatAttachment {
+    suspend fun upload(
+        path: String,
+        file: java.io.File,
+        progress: (Float) -> Unit = {},
+    ): ChatAttachment {
         require(file.length() <= 10L * 1024 * 1024) {
             "Chaque pièce jointe doit faire au maximum 10 Mo."
         }
         val request =
-            builder(path).put(file.asRequestBody("application/octet-stream".toMediaType())).build()
+            builder(path)
+                .put(
+                    ProgressBody(
+                        file.asRequestBody("application/octet-stream".toMediaType()),
+                        progress,
+                    )
+                )
+                .build()
         return exchange(request, transfers) { response ->
             checkResponse(response)
             wireJson.decodeFromString<ChatAttachment>(response.body.string())
@@ -446,4 +460,34 @@ internal fun readPortraitBytes(input: java.io.InputStream, maxBytes: Int): ByteA
         output.write(buffer, 0, count)
     }
     return output.toByteArray()
+}
+
+/** Reports the share of `body` written so far, in steps of at least one percent. */
+private class ProgressBody(private val body: RequestBody, private val progress: (Float) -> Unit) :
+    RequestBody() {
+    override fun contentType() = body.contentType()
+
+    override fun contentLength() = body.contentLength()
+
+    override fun writeTo(sink: BufferedSink) {
+        val total = contentLength().coerceAtLeast(1)
+        var written = 0L
+        var reported = -1
+        val counting =
+            object : ForwardingSink(sink) {
+                override fun write(source: Buffer, byteCount: Long) {
+                    super.write(source, byteCount)
+                    written += byteCount
+                    val percent = (written * 100 / total).toInt()
+                    if (percent > reported) {
+                        reported = percent
+                        progress(percent / 100f)
+                    }
+                }
+            }
+        // Flush without closing: the caller owns the sink.
+        val buffered = counting.buffer()
+        body.writeTo(buffered)
+        buffered.flush()
+    }
 }

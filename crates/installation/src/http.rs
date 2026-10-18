@@ -10,7 +10,7 @@ use axum::{
     Json, Router,
     body::{Body, to_bytes},
     extract::{ConnectInfo, Request, State},
-    http::{HeaderMap, HeaderValue, StatusCode, header},
+    http::{HeaderMap, HeaderValue, Method, StatusCode, header},
     middleware::{self, Next},
     response::{IntoResponse, Response},
     routing::any,
@@ -700,6 +700,12 @@ async fn raw_route(app: &App, path: &str, request: Request) -> Result<Route> {
             axum::Json(s.skills.stage(&bytes).await?).into_response()
         }
         ["", "api", "chats", chat, "attachments", id] => {
+            let chat = resolve_chat_id(s, chat).await?;
+            s.attachment_http(&chat, id, request).await?
+        }
+        ["", "api", "chats", chat, "attachments", id, "stream"]
+            if request.method() == Method::GET =>
+        {
             let chat = resolve_chat_id(s, chat).await?;
             s.attachment_http(&chat, id, request).await?
         }
