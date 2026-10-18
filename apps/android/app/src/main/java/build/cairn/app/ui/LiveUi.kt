@@ -7,6 +7,10 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.semantics.LiveRegionMode
+import androidx.compose.ui.semantics.liveRegion
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.LocalLifecycleOwner
@@ -253,7 +257,7 @@ internal fun BoxScope.HistoryStatus(
     val atStart by remember(list) { derivedStateOf { !list.canScrollBackward } }
     val error = live.olderError
     Column(
-        Modifier.align(Alignment.TopCenter).padding(top = 8.dp),
+        Modifier.align(Alignment.TopCenter).padding(start = 12.dp, top = 8.dp, end = 12.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.spacedBy(6.dp),
     ) {
@@ -268,7 +272,7 @@ internal fun BoxScope.HistoryStatus(
             StatusPill {
                 Text(
                     shown,
-                    Modifier.widthIn(max = 280.dp),
+                    Modifier.widthIn(max = 280.dp).padding(vertical = 6.dp),
                     style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     maxLines = 2,
@@ -280,22 +284,33 @@ internal fun BoxScope.HistoryStatus(
             enter = androidx.compose.animation.fadeIn(),
             exit = androidx.compose.animation.fadeOut(),
         ) {
-            StatusPill {
+            // Like the web's role="status", accessibility services hear paging progress and errors.
+            StatusPill(Modifier.semantics { liveRegion = LiveRegionMode.Polite }) {
                 if (error == null) {
                     CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 2.dp)
                     Text(
                         "Chargement des messages précédents…",
+                        Modifier.padding(vertical = 6.dp),
                         style = MaterialTheme.typography.labelMedium,
                     )
                 } else {
+                    // The retry action keeps its whole label; the error wraps beside it.
                     Text(
                         error,
-                        Modifier.widthIn(max = 220.dp),
+                        Modifier.weight(1f, fill = false)
+                            .widthIn(max = 220.dp)
+                            .padding(vertical = 6.dp),
                         style = MaterialTheme.typography.labelMedium,
                         color = MaterialTheme.colorScheme.error,
-                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis,
+                        maxLines = 3,
                     )
-                    TextButton(onClick = retry) { Text("Réessayer") }
+                    TextButton(
+                        onClick = retry,
+                        contentPadding = PaddingValues(horizontal = 8.dp),
+                    ) {
+                        Text("Réessayer", softWrap = false)
+                    }
                 }
             }
         }
@@ -303,9 +318,14 @@ internal fun BoxScope.HistoryStatus(
 }
 
 @Composable
-private fun StatusPill(content: @Composable RowScope.() -> Unit) {
+private fun StatusPill(
+    modifier: Modifier = Modifier,
+    content: @Composable RowScope.() -> Unit,
+) {
+    // A capsule on one line; with large text, a rounded rectangle that keeps wrapped lines inside.
     Surface(
-        shape = RoundedCornerShape(50),
+        modifier,
+        shape = RoundedCornerShape(24.dp),
         color = MaterialTheme.colorScheme.surfaceContainerHigh,
         shadowElevation = 2.dp,
     ) {

@@ -93,10 +93,17 @@ native presentation and language on each platform; no layout changes.
 Both clients reject pages from a replaced history or stream epoch, keep accepted
 pages through subsequent emissions/reconnects, and persist the combined displayed
 snapshot. Android extracts these rules into the pure `OlderPages` class while the
-web keeps them in `useLiveRun`; native reader presentation stays the same.
+web keeps them in `useLiveRun`.
 Android also cancels a page request when its path/API Compose scope is disposed;
 the web guards application with its connection generation. The lifecycle stream
 resume adapters remain in place. `OlderPagesTest`, the `LiveTest` reconnect probe
 and `OlderPagesScopeTest` cover the Android rules and scope/cache interactions.
 See `docs/research/263-android-older-pages.md` for the discriminating experiment,
 locking decision and limits; no performance gain is asserted.
+
+The paging status matches the web's `role="status"` banner on small screens: like
+its 90% width, the Android pill keeps a 12 dp margin from the screen edges, wraps
+the error beside a whole « Réessayer » label, and becomes a rounded rectangle when
+large text wraps. It is a polite live region for accessibility services. At
+normal text size the pills keep their single-line capsule look and heights.
+`pagingErrorFitsANarrowScreenWithLargeText` checks a 320 dp width at 150% text.
