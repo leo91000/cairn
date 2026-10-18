@@ -130,6 +130,10 @@ Sources and library options: [DIRECT-TRANSPORT-RESEARCH.md](DIRECT-TRANSPORT-RES
 
 ## Validation plan
 
+The [framing corpus inventory](DIRECT-FRAMING-CORPUS.md) records existing Rust,
+web and Android scenarios and the decision to defer shared fixtures until a
+protocol change demonstrates a maintenance benefit.
+
 The reproducible Linux bench, commands and current direct/relay evidence are in
 [NETWORK-BENCH.md](NETWORK-BENCH.md). It runs without KVM; Android device
 qualification remains part of #105.
