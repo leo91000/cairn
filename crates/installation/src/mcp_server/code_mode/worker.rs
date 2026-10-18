@@ -34,9 +34,9 @@ fn write(frame: &Frame) -> Result<(), String> {
         .map_err(|_| "Code output interrupted.".into())
 }
 
-fn host(name: String, args: String) -> String {
+fn host(name: String, args: &str) -> String {
     let call = || -> Result<Value, String> {
-        let args = serde_json::from_str(&args).map_err(|_| "Invalid operation arguments.")?;
+        let args = serde_json::from_str(args).map_err(|_| "Invalid operation arguments.")?;
         write(&Frame::Call { name, args })?;
         match read(&mut std::io::stdin().lock())? {
             Frame::Reply { value } => Ok(json!({ "ok": true, "value": value })),
@@ -60,7 +60,7 @@ fn evaluate(code: &str, input: &Value, names: &[String]) -> Result<Value, String
     let context = Context::full(&runtime).map_err(|_| "Cannot create code context.")?;
 
     context.with(|ctx| {
-        let bridge = Function::new(ctx.clone(), host)
+        let bridge = Function::new(ctx.clone(), |name: String, args: String| host(name, &args))
             .map_err(|_| "Cannot create code bridge.")?;
         ctx.globals()
             .set("__cairnHost", bridge)
