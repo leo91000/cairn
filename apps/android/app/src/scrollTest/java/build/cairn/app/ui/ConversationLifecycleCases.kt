@@ -60,6 +60,12 @@ abstract class ConversationLifecycleCases {
                     restoredAt = if (freshSession == false) 10 else null,
                     canRequestNewSession = freshSession == true,
                 )
+            val restarted =
+                chat.copy(
+                    canRequestNewSession = false,
+                    sessionRestartRequested = true,
+                    paused = true,
+                )
             server.dispatcher =
                 object : Dispatcher() {
                     override fun dispatch(request: RecordedRequest): MockResponse {
@@ -74,7 +80,7 @@ abstract class ConversationLifecycleCases {
                         }
                         if (path == "/api/installations/fixture/api/chats/chat/stream") {
                             val current =
-                                chat.copy(
+                                (if (restarts.size == 2) restarted else chat).copy(
                                     lifecycle = if (deleted.get()) "trash" else "active",
                                     purgeAt =
                                         if (deleted.get()) System.currentTimeMillis() + 86400000
@@ -96,13 +102,7 @@ abstract class ConversationLifecycleCases {
                                             .setBody(
                                                 """{"error":"Réessayez la nouvelle session."}"""
                                             )
-                                    wireJson.encodeToString(
-                                        chat.copy(
-                                            canRequestNewSession = false,
-                                            sessionRestartRequested = true,
-                                            paused = true,
-                                        )
-                                    )
+                                    wireJson.encodeToString(restarted)
                                 }
                                 path == "/api/installations/fixture/api/chats/chat/restore" &&
                                     request.method == "POST" -> {
@@ -217,6 +217,16 @@ abstract class ConversationLifecycleCases {
                     captureFreshSession("retry")
                     compose.onNodeWithText("Confirmer", substring = false).performClick()
                     compose.waitUntil(10000) { restarts.size == 2 }
+                    compose.waitUntil(15000) {
+                        compose.onAllNodesWithText(offer).fetchSemanticsNodes().isEmpty()
+                    }
+                    compose.onNodeWithText("Nouvelle session agent ?").assertDoesNotExist()
+                    compose
+                        .onNodeWithText(
+                            "Écrivez un nouveau message, puis reprenez la file pour continuer."
+                        )
+                        .assertIsDisplayed()
+                    captureFreshSession("accepted")
                     restarts.forEach {
                         assertTrue(
                             wireJson
