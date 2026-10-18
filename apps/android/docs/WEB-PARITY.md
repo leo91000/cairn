@@ -87,3 +87,16 @@ wait-result cases). The event marker and reason are additive; the `wait_for`
 response, stored schema and compatibility epoch stay unchanged. Older clients
 can still read the event and its historical text. Cards retain their existing
 native presentation and language on each platform; no layout changes.
+
+### Older history pages (#263)
+
+Both clients reject pages from a replaced history or stream epoch, keep accepted
+pages through subsequent emissions/reconnects, and persist the combined displayed
+snapshot. Android extracts these rules into the pure `OlderPages` class while the
+web keeps them in `useLiveRun`; native reader presentation stays the same.
+Android also cancels a page request when its path/API Compose scope is disposed;
+the web guards application with its connection generation. The lifecycle stream
+resume adapters remain in place. `OlderPagesTest`, the `LiveTest` reconnect probe
+and `OlderPagesScopeTest` cover the Android rules and scope/cache interactions.
+See `docs/research/263-android-older-pages.md` for the discriminating experiment,
+locking decision and limits; no performance gain is asserted.

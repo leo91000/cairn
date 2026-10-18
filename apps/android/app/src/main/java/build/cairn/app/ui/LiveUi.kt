@@ -15,7 +15,10 @@ import build.cairn.app.data.*
 import build.cairn.app.diagnostics.PerfOperation
 import build.cairn.app.diagnostics.Performance
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.transformWhile
@@ -35,31 +38,16 @@ fun rememberLive(
     val api = if (enabled) vm.api else null
     var value by remember(path, api) { mutableStateOf(LiveSnapshot()) }
     val session = remember(path, api) { LiveSession() }
-    val scope = rememberCoroutineScope()
-    var older by remember(path, api) { mutableStateOf(emptyList<RunEvent>()) }
-    var olderHistory by remember(path, api) { mutableStateOf<String?>(null) }
-    var olderEpoch by remember(path, api) { mutableIntStateOf(0) }
-    var boundary by remember(path, api) { mutableStateOf<Long?>(null) }
-    var moreOlder by remember(path, api) { mutableStateOf(false) }
+    val parentScope = rememberCoroutineScope()
+    val scope =
+        remember(path, api) {
+            CoroutineScope(parentScope.coroutineContext + Job(parentScope.coroutineContext[Job]))
+        }
+    DisposableEffect(scope) { onDispose { scope.cancel() } }
+    val pages = remember(path, api) { OlderPages() }
     var loadingOlder by remember(path, api) { mutableStateOf(false) }
     var olderError by remember(path, api) { mutableStateOf<String?>(null) }
-    fun display(snapshot: LiveSnapshot): LiveSnapshot {
-        // A replaced history, even with the same revision, no longer continues these pages.
-        if (snapshot.history != olderHistory || snapshot.epoch != olderEpoch) {
-            older = emptyList()
-            boundary = null
-            olderHistory = snapshot.history
-            olderEpoch = snapshot.epoch
-            olderError = null
-        }
-        return if (boundary == null) snapshot
-        else
-            snapshot.copy(
-                events = mergeHistory(older, snapshot.events),
-                oldest = boundary!!,
-                hasOlder = moreOlder,
-            )
-    }
+
     LaunchedEffect(path, api, owner, streaming) {
         if (enabled && api != null) {
             var cacheGeneration = vm.historyCache.generation
@@ -85,7 +73,11 @@ fun rememberLive(
                             .collect {
                                 vm.acceptCacheRevision(it.state?.cacheRevision)
                                 cacheGeneration = vm.historyCache.generation
-                                if (!it.catchingUp || it.httpStatus != null) value = display(it)
+                                if (!it.catchingUp || it.httpStatus != null) {
+                                    if (it.history != value.history || it.epoch != value.epoch)
+                                        olderError = null
+                                    value = pages.display(it)
+                                }
                                 if (it.httpStatus in listOf(401, 403, 404, 409)) {
                                     vm.historyCache.remove(key)
                                     value =
@@ -131,12 +123,12 @@ fun rememberLive(
         loadingOlder = loadingOlder,
         olderError = olderError,
         loadOlder = {
-            val history = value.history
+            val requested = value
+            val history = requested.history
             if (enabled && api != null && history != null && value.hasOlder && !loadingOlder) {
                 loadingOlder = true
                 olderError = null
-                val before = value.oldest
-                val epoch = value.epoch
+                val before = requested.oldest
                 val cacheGeneration = vm.historyCache.generation
                 scope.launch {
                     var pageApplied = false
@@ -146,20 +138,10 @@ fun rememberLive(
                                 path.removeSuffix("/stream") +
                                     "/history?before=$before&history=${segment(history)}"
                             )
-                        if (
-                            value.history == history &&
-                                value.epoch == epoch &&
-                                page.history == history
-                        ) {
-                            require(page.oldest < before || !page.hasOlder) {
-                                "Page d’historique invalide."
-                            }
-                            older = mergeHistory(page.events, older)
-                            olderHistory = history
-                            olderEpoch = epoch
-                            boundary = page.oldest
-                            moreOlder = page.hasOlder
-                            value = display(value)
+
+                        val applied = pages.apply(page, value, requested)
+                        if (applied != null) {
+                            value = applied
                             // Release paging in the same UI turn as insertion. Disk persistence
                             // must not leave the reader on the new rows while restoration waits.
                             pageApplied = true
