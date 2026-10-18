@@ -7,14 +7,19 @@ small explicit fixture. Actual Codex/GitHub checks are recorded separately below
 
 ## Automated coverage
 
+This section records the original Node validation. The retired local-auth suite
+was removed during [F15's oracle inventory](LEGACY-ORACLE.md); the table below
+points to current authentication coverage. Retained Node suites are historical
+contract references, not evidence that the native implementation passed them.
+
 `pnpm check` runs Antfu ESLint, TypeScript checks, 48 unit/integration tests, and the
 production Vue build. `pnpm test:e2e` runs three complete Chromium journeys plus
 mobile layout/navigation passes in Chromium and WebKit.
 
 | Area | Evidence |
 | --- | --- |
-| Setup, password login/logout, session expiry, CSRF, Origin/Host checks, concurrent setup | `scripts/tests/auth.test.ts` |
-| OAuth client/redirect/PKCE/resource binding, one-use/expired codes, refresh rotation/reuse, scope checks, revocation | `scripts/tests/auth.test.ts` |
+| Rejection of removed installation login/setup, trusted identity, Origin/Host checks | `crates/installation/tests/http.rs` |
+| Beacon OAuth client/redirect/PKCE/resource binding, expired/replayed codes, refresh rotation/reuse, scope checks, revocation | `crates/beacon/tests/public_mcp.rs` |
 | Immutable snapshots, concurrent enqueue, task reference protection, sanitized Git origin metadata | `scripts/tests/service.test.ts` |
 | Cron validation, pause, catch-up once, overlap, spring/autumn DST | `scripts/tests/service.test.ts` |
 | Actual global/project skill files, frontmatter validation, nested supporting files, traversal and symlink escapes | `scripts/tests/service.test.ts` |
