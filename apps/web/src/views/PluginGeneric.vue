@@ -19,7 +19,6 @@ import {
   relative,
   state,
 } from '../api'
-import { pluginOperation } from '../plugin-operations'
 import Icon from '../components/Icon.vue'
 import Modal from '../components/Modal.vue'
 import PersonAvatar from '../components/PersonAvatar.vue'
@@ -44,6 +43,7 @@ import {
   X,
   Zap,
 } from '../icons'
+import { pluginOperation } from '../plugin-operations'
 import {
   capabilityLabels,
   commandUsage,
