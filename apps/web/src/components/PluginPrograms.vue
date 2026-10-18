@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import type { ProgramState } from '../plugins'
-import { onMounted, ref } from 'vue'
+import { onBeforeUnmount, onMounted, ref } from 'vue'
 import { api } from '../api'
 import { pluginOperation } from '../plugin-operations'
 import UiAlert from './UiAlert.vue'
@@ -10,12 +10,39 @@ const props = defineProps<{ plugin: string }>()
 const programs = ref<ProgramState[]>([])
 const busy = ref(false)
 const error = ref('')
+const refreshError = ref('')
+let timer: ReturnType<typeof setTimeout> | undefined
+let stopped = false
+let requested = 0
 
 async function load() {
-  programs.value = (await api<{ programs: ProgramState[] }>(`/plugins/${props.plugin}/programs`)).programs
+  const request = ++requested
+  const result = await api<{ programs: ProgramState[] }>(`/plugins/${props.plugin}/programs`)
+  if (!stopped && request === requested) {
+    programs.value = result.programs
+    refreshError.value = ''
+  }
 }
 
-onMounted(() => load().catch((e: Error) => error.value = e.message))
+async function refresh() {
+  try {
+    if (!busy.value)
+      await load()
+  }
+  catch (e) {
+    if (!stopped)
+      refreshError.value = (e as Error).message
+  }
+
+  if (!stopped)
+    timer = setTimeout(refresh, 5000)
+}
+
+onMounted(refresh)
+onBeforeUnmount(() => {
+  stopped = true
+  clearTimeout(timer)
+})
 
 async function act(program: ProgramState, action: string) {
   busy.value = true
@@ -41,8 +68,8 @@ async function act(program: ProgramState, action: string) {
     <p v-if="busy" role="status" class="text-xs text-muted">
       Preparing program…
     </p>
-    <UiAlert v-if="error">
-      {{ error }}
+    <UiAlert v-if="error || refreshError">
+      {{ error || refreshError }}
     </UiAlert>
     <div v-for="program in programs" :key="program.name" class="grid min-w-0 gap-2 text-xs">
       <p><b>{{ program.name }}</b> · {{ program.installed ? `Version ${program.installed.release.version}` : 'Not installed · prepared on first use' }}</p>

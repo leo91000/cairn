@@ -294,4 +294,9 @@ test('program releases can be checked, installed and restored independently of p
   await expect(programs.getByText('op · Version 2.39.0')).toBeVisible()
   expect(actions).toEqual(['check', 'install', 'rollback'])
   expect(polls).toBe(6)
+
+  // First use and updates from another client also change the authoritative lock.
+  program.installed = installed('2.42.0')
+  await expect(programs.getByText('op · Version 2.42.0')).toBeVisible({ timeout: 12000 })
+  expect(actions).toEqual(['check', 'install', 'rollback'])
 })
