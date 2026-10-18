@@ -26,15 +26,21 @@ const schemas = {
 }
 await writeFile('crates/installation/schemas/inputs.json', `${JSON.stringify(Object.fromEntries(Object.entries(schemas).map(([name, schema]) => [name, z.toJSONSchema(schema, { unrepresentable: 'any' })])), null, 2)}\n`)
 
-// Keep both owner interfaces aligned, including the distinction between creation
-// defaults and partial updates that must preserve existing node restrictions.
+// Derive the full agent payloads from the product contracts. Creation applies
+// defaults; partial updates preserve omitted settings, including node restrictions.
 const tools = JSON.parse(await readFile('crates/installation/schemas/mcp-tools.json', 'utf8'))
 for (const [name, schema] of Object.entries({ save_agent: agentInput, update_agent: agentUpdate })) {
   const tool = tools.find(tool => tool.name === name)
   if (!tool)
     throw new Error(`Missing MCP tool: ${name}`)
-  const properties = name === 'save_agent' ? tool.inputSchema.properties : tool.inputSchema.properties.agent.properties
-  properties.access = z.toJSONSchema(schema).properties.access
+  const inputSchema = z.toJSONSchema(schema, { unrepresentable: 'any' })
+  if (name === 'save_agent') {
+    tool.inputSchema = inputSchema
+  }
+  else {
+    delete inputSchema.$schema
+    tool.inputSchema.properties.agent = inputSchema
+  }
 }
 
 await writeFile('crates/installation/schemas/mcp-tools.json', `${JSON.stringify(tools, null, 2)}\n`)
