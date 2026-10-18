@@ -987,11 +987,16 @@ internal fun timelineEntries(
             )
         }
         if (moves.isEmpty()) result
-        else
-            (0..result.size).flatMap { index ->
-                moves.filterValues { it == index }.keys.sorted().map(result::get) +
-                    listOfNotNull(result.getOrNull(index)?.takeIf { index !in moves })
+        else {
+            // Each moved card goes before the entry at its target, in one pass.
+            val arriving = moves.entries.groupBy({ it.value }, { it.key })
+            buildList(result.size) {
+                for (index in 0..result.size) {
+                    arriving[index]?.sorted()?.forEach { add(result[it]) }
+                    if (index < result.size && index !in moves) add(result[index])
+                }
             }
+        }
     }
 
 private val TURN_BOUNDARIES = setOf("turn.started", "turn.completed", "turn.failed")
