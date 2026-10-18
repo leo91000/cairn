@@ -154,9 +154,12 @@ async fn fixture_task_authors(headers: HeaderMap) -> Result<Json<TaskAuthorPolic
 
 /// Synthetic authority for installation-only worker/handler tests.
 pub async fn claimed(service: &Service) -> Result<()> {
-    service
-        .code_mode
-        .use_worker(env!("CARGO_BIN_EXE_cairn").into());
+    // Integration tests need the real binary; the worker_fixture example
+    // already dispatches the private worker subcommand in its own executable.
+    if let Some(executable) = option_env!("CARGO_BIN_EXE_cairn") {
+        service.code_mode.use_worker(executable.into());
+    }
+
     let directory = service.config.data_dir.join("installation-relay");
     tokio::fs::create_dir_all(&directory).await?;
     let path = directory.join("identity.json");
