@@ -653,3 +653,22 @@ backup/restoration or production manifest inventory is claimed here.
 The Android `Int?` decoder's behavior for a fractional `maxLength` has not been
 executed on a JVM or device in this change. Backend admission now rejects that
 manifest before it can reach either client's field decoder.
+
+## Client form values (F5)
+
+Web instance editors and view forms use pure value transformations, compared with
+Android's native form helpers using `tests/fixtures/plugin-form-values.json`.
+Opening a form applies defaults to missing values; an explicit null or a later
+clear does not reapply a default. Only declared non-secret fields are settings,
+including hidden fields populated by the package. Nonblank text is trimmed,
+numbers are sent as JSON numbers, and blank text/numbers are omitted. Choice
+identifiers are preserved exactly, including whitespace accepted by the manifest;
+an empty single choice is omitted. False and
+empty multiple choices remain explicit. Secrets are never prefilled from a view's
+`values` or instance settings. Blank secrets are omitted, preserving saved instance
+secrets. Instance secrets follow the existing trimmed save contract; nonblank view
+form secrets reach the action exactly as typed, matching Android.
+
+These are client value transformations, not validation of an action. A plugin
+still validates its action input. The server's F6 manifest constraints, package
+admission/review, instance validation and completion handler remain unchanged.

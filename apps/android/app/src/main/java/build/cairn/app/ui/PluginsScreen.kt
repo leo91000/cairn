@@ -716,11 +716,7 @@ private fun InstanceEditor(
                             put("settings", pluginSettings(stored, values))
                             put(
                                 "secrets",
-                                JsonObject(
-                                    secrets
-                                        .filterValues { it.isNotBlank() }
-                                        .mapValues { JsonPrimitive(it.value.trim()) }
-                                ),
+                                pluginSecrets(secrets),
                             )
                             if (token.isNotBlank()) put("token", token.trim())
                             asking.second?.let { put("changed", it) }
@@ -786,11 +782,7 @@ private fun InstanceEditor(
                         // Blank secret fields keep what is saved.
                         put(
                             "secrets",
-                            JsonObject(
-                                secrets
-                                    .filterValues { it.isNotBlank() }
-                                    .mapValues { JsonPrimitive(it.value.trim()) }
-                            ),
+                            pluginSecrets(secrets),
                         )
                         if (manifest.agentAccess != null)
                             put("agentIds", JsonArray(granted.map(::JsonPrimitive)))

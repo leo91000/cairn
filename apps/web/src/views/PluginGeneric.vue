@@ -43,6 +43,12 @@ import {
   X,
   Zap,
 } from '../icons'
+import {
+  pluginFormValue,
+  pluginFormValues,
+  pluginSecrets,
+  pluginSettings,
+} from '../plugin-form-values'
 import { pluginOperation } from '../plugin-operations'
 import {
   capabilityLabels,
@@ -144,10 +150,7 @@ function agentNames(connection: PluginConnection) {
 function edit(connection: PluginConnection | null) {
   error.value = ''
   editing.value = connection
-  values.value = Object.fromEntries(storedFields.value.map(field => [
-    field.key,
-    connection?.settings[field.key] ?? field.default ?? (field.type === 'boolean' ? false : field.type === 'multiselect' ? [] : ''),
-  ]))
+  values.value = pluginFormValues(storedFields.value, connection?.settings)
   secrets.value = {}
   people.value = (connection?.userIds ?? []).map(user => ({ id: user, name: connection?.people.find(item => item.id === user)?.name ?? '' }))
   person.value = ''
@@ -165,12 +168,6 @@ function edit(connection: PluginConnection | null) {
   void complete()
 }
 
-function settings() {
-  return Object.fromEntries(Object.entries(values.value)
-    .filter(([, value]) => value !== '' && value !== undefined && value !== null)
-    .map(([key, value]) => [key, storedFields.value.find(field => field.key === key)?.type === 'number' ? Number(value) : value]))
-}
-
 /**
  * Asks the package's form handler for choices, derived values, errors and guidance.
  * Only the latest answer counts.
@@ -183,15 +180,18 @@ async function complete(changed?: string) {
   try {
     const result = await pluginOperation<FormResult>(`/plugins/${id.value}/form`, {
       instance: editing.value?.id,
-      settings: settings(),
-      secrets: Object.fromEntries(Object.entries(secrets.value).filter(([, value]) => value.trim())),
+      settings: pluginSettings(storedFields.value, values.value),
+      secrets: pluginSecrets(secrets.value),
       ...(form.value.token ? { token: form.value.token } : {}),
       ...(changed ? { changed } : {}),
     })
     if (ask !== asked)
       return
-    for (const [key, value] of Object.entries(result.values))
-      values.value[key] = value ?? ''
+    for (const field of storedFields.value) {
+      if (Object.hasOwn(result.values, field.key))
+        values.value[field.key] = pluginFormValue(field, result.values[field.key])
+    }
+
     completion.value = result
   }
   catch (e) {
@@ -234,9 +234,9 @@ async function save() {
     const body = {
       name: form.value.name,
       ...(form.value.token ? { token: form.value.token } : {}),
-      settings: settings(),
+      settings: pluginSettings(storedFields.value, values.value),
       // Blank secret fields keep what is saved.
-      secrets: Object.fromEntries(Object.entries(secrets.value).filter(([, value]) => value.trim())),
+      secrets: pluginSecrets(secrets.value),
       ...(manifest.value?.agentAccess && { agentIds: form.value.agentIds }),
       ...(delegates.value && {
         agentId: form.value.agentId,

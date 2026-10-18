@@ -154,6 +154,7 @@ function toggle(key: string, value: string, checked: boolean) {
         :maxlength="field.maxLength"
         :min="field.minimum"
         :max="field.maximum"
+        :step="field.type === 'number' ? 'any' : undefined"
         :placeholder="field.placeholder"
         @change="changed(field)"
       ></label>
