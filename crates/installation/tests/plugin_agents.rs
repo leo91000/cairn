@@ -530,9 +530,14 @@ async fn manifest_constraints_are_checked_before_install_and_defaults_can_be_sav
         serde_json::to_value(&first.manifest).unwrap()
     );
 
-    let saved = connections::save(s, "statusboard", &json!({ "name": "Defaults" }), None)
-        .await
-        .unwrap();
+    let saved = connections::save(
+        s,
+        "statusboard",
+        &json!({ "name": "Defaults", "enabled": true }),
+        None,
+    )
+    .await
+    .unwrap();
     assert_eq!(
         saved["settings"],
         json!({ "note": "é".repeat(3000), "code": "abc", "count": 2 })
@@ -588,7 +593,7 @@ async fn manifest_constraints_are_checked_before_install_and_defaults_can_be_sav
     let updated = connections::save(
         s,
         "statusboard",
-        &json!({ "name": "Defaults" }),
+        &json!({ "name": "Defaults", "enabled": true }),
         saved["id"].as_str(),
     )
     .await
