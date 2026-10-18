@@ -45,7 +45,7 @@ and route account/access mutations, installation API requests and relay
 WebSockets to it. Revocation notifications are process-local; multiple beacon
 replicas are unsupported even with sticky installation routing. See
 [beacon process limits](BEACON.md#configuration) and
-[ADR-0032](adr/0032-single-official-relay-process.md) for this explicit restriction
+[single-relay-process decision](adr/0032-single-official-relay-process.md) for this explicit restriction
 of spec #43 and the tolerance of persisted revocation checks.
 
 For an existing installation, preserve all volumes, add `CAIRN_BEACON_ORIGIN`

@@ -3,10 +3,10 @@
 Date: 2026-10-13.
 
 Updated: 2026-10-14 — installation access also permits dependencies on other
-agents' runs, following [ADR-0036](0036-opt-in-installation-tools-for-agents.md).
+agents' runs, following [installation-access decision](0036-opt-in-installation-tools-for-agents.md).
 
 An agent repeatedly checking a remote status spends inference and can keep an
-execution alive while no useful work is available. ADR-0037's durable wakeup
+execution alive while no useful work is available. The [durable-conversation-wakeups decision](0037-durable-conversation-wakeups.md)
 already supports releasing execution and continuing the same conversation.
 Extend it with `cairn_workspace.wait_for` and named, read-only conditions.
 
@@ -36,7 +36,7 @@ bounds that revision lookup for long histories. Observers recheck the current
 condition, lifecycle and access before
 recording a result. The launch transaction rechecks both the wakeup and the
 observed state. New input, stop, deletion, failure and manual resume retain
-ADR-0037's cancellation behavior. Queue pause retains the deadline.
+the [durable-wakeup cancellation behavior](0037-durable-conversation-wakeups.md). Queue pause retains the deadline.
 
 Conditions persist in the existing conversation record. `wakeAt` is the fallback
 deadline for a conditional wait; it retains its earliest-resume meaning for

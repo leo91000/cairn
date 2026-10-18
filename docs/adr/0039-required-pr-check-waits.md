@@ -2,7 +2,7 @@
 
 Date: 2026-10-13.
 
-Extend ADR-0038 with `github_pr_checks`, identified by an authorized project,
+Extend the [durable-condition-waits decision](0038-durable-condition-waits.md) with `github_pr_checks`, identified by an authorized project,
 positive PR number and full head SHA. Observe through the same existing agent
 GitHub connection, durable wakeup, cancellation and current-permission contracts.
 The condition neither performs a merge nor grants authorization for one.

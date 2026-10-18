@@ -81,7 +81,8 @@ must inspect ambiguous external effects rather than repeat commands blindly.
 
 ## Memory reclamation without device reset
 
-All VMs already share the node's budget (ADR-0012). CPU suspension retains RAM.
+All VMs already share the node's budget
+([shared-node-budgets decision](0012-shared-node-budgets.md)). CPU suspension retains RAM.
 A request may also specify a minimum available RAM target. Acquisition verifies
 both current cgroup headroom and host `MemAvailable`, including after paging.
 This is confirmed headroom at acquisition, not a separate per-VM RAM quota.
