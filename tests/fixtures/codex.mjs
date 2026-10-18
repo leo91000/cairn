@@ -287,7 +287,8 @@ async function main() {
     }
 
     if (prompt.includes('fixture:activity')) {
-      for (const event of activityEvents)
+      // Stored wait cases belong to timeline tests, not the provider's original item stream.
+      for (const event of activityEvents.filter(event => event.type.startsWith('item.')))
         emit(event)
     }
 
