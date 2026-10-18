@@ -292,6 +292,7 @@ async fn bad_checksums_unsafe_archives_and_redirects_preserve_the_installed_prog
             archive("../probe", "broken"),
             String::new(),
         ),
+        ("/symlink.zip", symlink_archive(), String::new()),
         ("/redirect", Vec::new(), String::new()),
     ] {
         let checksum = if expected.is_empty() {
