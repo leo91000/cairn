@@ -113,7 +113,8 @@ Beacon's memory and logs; it is not end-to-end encryption against it.
   direct connection entirely.
 - Older installations or clients without the new protocol version stay on the
   relay.
-- A single beacon process remains required (ADR-0032).
+- A single beacon process remains required
+  ([single-relay-process decision](adr/0032-single-official-relay-process.md)).
 - Signaling relays the DTLS fingerprints, so the Beacon could
   impersonate an installation (RFC 8827). This matches the existing trust model:
   it also serves the web application code. Android could later pin an

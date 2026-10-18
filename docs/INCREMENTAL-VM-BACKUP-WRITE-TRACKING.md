@@ -107,7 +107,13 @@ Scripts du prototype (hors dépôt) : init invité, harnais à deux démarrages,
 
 ## Implémentation (27 septembre 2026)
 
-Décision : [ADR 0005](adr/0005-guest-dm-era-write-tracking.md). Code : [tracking.rs](../crates/installation/src/nodes/tracking.rs) (état côté node), [checkpoint.rs](../crates/installation/src/nodes/checkpoint.rs) (capture), [era.rs](../crates/installation/src/microvm/era.rs) (invité), [init](../deploy/microvm/init).
+Décision : [suivi des écritures dm-era dans l’invité](adr/0005-guest-dm-era-write-tracking.md).
+Les sources ci-dessous sont figées sur la révision `69138403` de cette
+implémentation historique, avant le remplacement de ces modules :
+[tracking.rs](https://github.com/leo91000/cairn/blob/69138403b084572cae9a25a61e966e7c14daae50/backend/src/nodes/tracking.rs) (état côté node),
+[checkpoint.rs](https://github.com/leo91000/cairn/blob/69138403b084572cae9a25a61e966e7c14daae50/backend/src/nodes/checkpoint.rs) (capture),
+[era.rs](https://github.com/leo91000/cairn/blob/69138403b084572cae9a25a61e966e7c14daae50/backend/src/microvm/era.rs) (invité),
+[init](https://github.com/leo91000/cairn/blob/69138403b084572cae9a25a61e966e7c14daae50/deploy/microvm/init).
 
 **État conservé à côté de `data.ext4`.**
 - `era.meta` : les métadonnées dm-era. L'invité les recharge à chaque démarrage, ce qui récupère aussi les écritures d'une VM arrêtée brutalement.

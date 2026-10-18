@@ -1,7 +1,8 @@
 # Storage follow-up: discard, deltas and persistent observations
 
 This is an offline format study and an optional host-side observer. Production
-continues to use the compressed immutable v2 objects from ADR-0036. No new disk
+continues to use the compressed immutable v2 objects from the
+[immutable-disk-object compression decision](adr/0036-compressed-immutable-disk-objects.md). No new disk
 format, discard command or delta dependency is introduced into the application.
 
 ## Persistent observations
