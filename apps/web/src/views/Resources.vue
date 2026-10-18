@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import type { GithubRepository } from '../../../../packages/contracts/contracts'
 import type { ExecutionNode } from '../../../../packages/contracts/nodes'
-import { computed, ref } from 'vue'
+import { computed, nextTick, ref } from 'vue'
 import { providers as codingAgents } from '../../../../packages/contracts/accounts'
 import { MAIN_AGENT_ID } from '../../../../packages/contracts/constants'
 import { LOCAL_NODE_ID } from '../../../../packages/contracts/nodes'
@@ -30,6 +30,7 @@ import {
   ShieldCheck,
   Trash2,
 } from '../icons'
+import { useResourceSave } from '../resourceSave'
 import { iconButton } from '../ui'
 
 const props = defineProps<{
@@ -60,7 +61,11 @@ function repositoryLabel(origin?: string) {
   }
 }
 
-const editing = ref<string | null>(null)
+const resourceSave = useResourceSave()
+const editing = resourceSave.savedId
+const pendingCreation = resourceSave.pendingCreation
+let openedId: string | null = null
+const saveAlert = ref<InstanceType<typeof UiAlert>>()
 const open = ref(false)
 const deleting = ref<any>(null)
 const busy = ref(false)
@@ -134,7 +139,8 @@ async function edit(item?: any) {
   githubToken.value = ''
   githubConfigured.value = false
   removeGithub.value = false
-  editing.value = item?.id ?? null
+  openedId = item?.id ?? null
+  resourceSave.reset(openedId)
   form.value = item
     ? structuredClone(JSON.parse(JSON.stringify(item)))
     : isAgent.value
@@ -199,27 +205,58 @@ async function save() {
     return
   busy.value = true
   error.value = ''
+  let phase: 'save' | 'token' | 'refresh' = 'save'
   try {
-    const saved = await api(githubImport.value ? '/projects/github' : `/${props.kind}${editing.value ? `/${editing.value}` : ''}`, {
-      method: editing.value ? 'PUT' : 'POST',
-      body: JSON.stringify(githubImport.value
-        ? {
+    const importing = githubImport.value
+    const saved = await resourceSave.save(`/${props.kind}`, {
+      body: () => form.value,
+      createPath: importing ? '/projects/github' : undefined,
+      createBody: importing
+        ? () => ({
             repository: repository.value,
             name: form.value.name,
             description: form.value.description,
             baseBranch: form.value.baseBranch,
-          }
-        : form.value),
+          })
+        : undefined,
+      onCreated: (created: any) => {
+        if (importing) {
+          form.value.path = created.path
+          form.value.sourceMode = created.sourceMode
+        }
+      },
     })
-    if (isAgent.value && (githubToken.value || removeGithub.value))
+    if (isAgent.value && (githubToken.value || removeGithub.value)) {
+      phase = 'token'
       await api(`/agents/${saved.id}/github-token`, { method: 'PUT', body: JSON.stringify({ token: removeGithub.value ? '' : githubToken.value }) })
+    }
+
     githubToken.value = ''
+    removeGithub.value = false
+    phase = 'refresh'
     await refresh()
     open.value = false
     notify(`${isAgent.value ? 'Agent' : 'Project'} saved`)
   }
   catch (e) {
-    error.value = (e as Error).message
+    const label = isAgent.value ? 'Agent' : 'Project'
+    const detail = (e as Error).message
+    let summary: string
+    if (phase === 'refresh')
+      summary = `${label} saved, but the workspace could not be reloaded.`
+    else if (phase === 'token')
+      summary = 'Agent saved, but the GitHub connection could not be saved.'
+    else if (editing.value && editing.value !== openedId)
+      summary = `${label} saved, but the latest changes could not be saved.`
+    else if (pendingCreation.value)
+      summary = `Could not confirm whether the ${label.toLowerCase()} was saved. Retry to recover it safely.`
+    else
+      summary = `Could not save the ${label.toLowerCase()}.`
+    error.value = detail ? `${summary} ${detail}` : summary
+
+    // The alert follows the whole form; bring it above the sticky actions on small screens.
+    await nextTick()
+    saveAlert.value?.$el.scrollIntoView?.({ block: 'nearest' })
   }
   finally {
     busy.value = false
@@ -345,12 +382,12 @@ async function remove() {
           <VirtualSelect
             v-model="projectMode"
             label="Add from"
-            :disabled="busy"
+            :disabled="busy || pendingCreation"
             :options="[{ value: 'local', label: 'Server directory' }, { value: 'github', label: 'GitHub' }]"
           />
           <GithubRepositoryPicker
             v-if="githubImport"
-            :disabled="busy"
+            :disabled="busy || pendingCreation"
             :selected="repository"
             @select="selectRepository"
           />
@@ -473,7 +510,7 @@ async function remove() {
             placeholder="main"
           ><small>Used for new private workspaces.</small></label>
         </template>
-        <UiAlert v-if="error" class="col-span-2 phone:col-span-1">
+        <UiAlert v-if="error" ref="saveAlert" class="col-span-2 scroll-mb-24 phone:col-span-1">
           {{ error }}
         </UiAlert>
       </div>
