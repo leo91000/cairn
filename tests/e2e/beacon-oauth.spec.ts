@@ -6,7 +6,7 @@ import { createServer } from 'node:http'
 import process from 'node:process'
 import { expect, test } from '@playwright/test'
 
-test('Google and GitHub reuse an account, manage sign-in methods and preserve claim navigation', async ({ page, request }) => {
+test('Google and GitHub reuse an account, manage sign-in methods and preserve claim navigation', async ({ page, request, playwright }) => {
   test.setTimeout(90000)
   const messages: string[] = []
   let denyNextAuthorization = false
@@ -305,8 +305,37 @@ test('Google and GitHub reuse an account, manage sign-in methods and preserve cl
     await expect(page.getByText('Connexion réussie. Revenez dans l’application Cairn.')).toBeVisible()
     const nativeSession = await finish()
     expect(nativeSession.status()).toBe(200)
-    expect((await nativeSession.json()).account).toEqual(first.account)
-    expect((await finish()).status()).toBe(401)
+    const consumed = await nativeSession.json()
+    expect(consumed.account).toEqual(first.account)
+
+    // The app lost that response and its cookie. Resume with only the saved
+    // challenge and secret, using an independent context with no session.
+    const resumed = await playwright.request.newContext()
+    try {
+      const beforeRetry = await (await resumed.get(`${url}/api/account/session`)).json()
+      expect(beforeRetry.authenticated).toBe(false)
+      const invalid = await resumed.post(`${url}/api/account/oauth/github/native/finish`, {
+        headers: { origin: url },
+        data: { challenge: native.challenge, secret: 'incorrect-secret' },
+      })
+      expect(invalid.status()).toBe(401)
+      expect(invalid.headers()['set-cookie']).toBeUndefined()
+      const retry = await resumed.post(`${url}/api/account/oauth/github/native/finish`, {
+        headers: { origin: url },
+        data: { challenge: native.challenge, secret: native.secret },
+      })
+      expect(retry.status()).toBe(200)
+      const recovered = await retry.json()
+      expect(recovered.account).toEqual(first.account)
+      expect(recovered.csrf).not.toBe(consumed.csrf)
+      const authenticated = await (await resumed.get(`${url}/api/account/session`)).json()
+      expect(authenticated.authenticated).toBe(true)
+      expect(authenticated.account).toEqual(first.account)
+      expect(authenticated.csrf).toBe(recovered.csrf)
+    }
+    finally {
+      await resumed.dispose()
+    }
   }
   finally {
     child.kill('SIGTERM')

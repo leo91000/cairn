@@ -95,7 +95,11 @@ abstract class BackgroundWaitCases {
     fun conditionWaitShowsResultAndDeadlineWithoutWorkingIndicator() =
         conversation("succeeded", conditional = true) {
             compose
-                .onNodeWithText("En attente · 7 min max", substring = true, useUnmergedTree = true)
+                .onNodeWithText(
+                    "Résultat attendu · 7 min max",
+                    substring = true,
+                    useUnmergedTree = true,
+                )
                 .assertExists()
             compose.onNodeWithTag("chat-wait").assertIsDisplayed()
             compose.onNodeWithText("Attente de la fin d’une autre exécution").assertIsDisplayed()
@@ -132,20 +136,28 @@ abstract class BackgroundWaitCases {
         compose.setContent {
             CairnTheme { CompositionLocalProvider(LocalLiveWait provides live) { WaitCard(wait) } }
         }
-        compose.onNodeWithText("Reprise selon la capacité disponible").assertExists()
+        compose
+            .onNodeWithText("Reprise selon la capacité disponible", substring = true)
+            .assertExists()
         compose.runOnIdle { live = live.copy(paused = true) }
-        compose.onNodeWithText("Attente en pause").assertExists()
-        compose.onNodeWithText("Reprise selon la capacité disponible").assertDoesNotExist()
+        compose
+            .onNodeWithText("Reprise quand vous reprendrez la conversation", substring = true)
+            .assertExists()
+        compose
+            .onNodeWithText("Reprise selon la capacité disponible", substring = true)
+            .assertDoesNotExist()
         compose.runOnIdle { live = LiveWait(null, paused = false) }
-        compose.onNodeWithText("Attente annulée").assertExists()
-        compose.runOnIdle { wait = resolved.copy(ended = "message") }
-        compose.onNodeWithText("Attente annulée par votre message").assertExists()
+        compose.onNodeWithText("Attente annulée", substring = true).assertExists()
+        compose.runOnIdle { wait = resolved.copy(ended = "cancelled") }
+        compose.onNodeWithText("Attente annulée", substring = true).assertExists()
         compose.runOnIdle { wait = resolved.copy(ended = "replaced") }
-        compose.onNodeWithText("Remplacée par une nouvelle attente").assertExists()
+        compose
+            .onNodeWithText("Remplacée par un nouvel appel d’attente", substring = true)
+            .assertExists()
         compose.runOnIdle { wait = resolved.copy(resumedAt = 1000) }
         compose.onNodeWithText("Checks requis réussis").assertExists()
         compose.runOnIdle { wait = ActivityWait(null, observation, observed = true) }
-        compose.onNodeWithText("Le résultat était déjà disponible").assertExists()
+        compose.onNodeWithText("Le résultat était déjà disponible", substring = true).assertExists()
     }
 
     private fun conversation(

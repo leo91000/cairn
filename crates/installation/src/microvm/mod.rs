@@ -1,6 +1,7 @@
 //! Firecracker execution: persistent guest disks, ephemeral jailed attempts.
 pub mod budget;
 mod codex_state;
+mod entrypoint;
 pub mod guest;
 pub mod hibernation;
 pub mod host;

@@ -260,6 +260,11 @@ pub fn item(block: &Value, message: &str, index: usize) -> Option<Value> {
         "tool_use" if matches!(text(block, "name"), "Agent" | "Task") => {
             subagent(&id, &block["input"])
         }
+        "tool_use" if block["name"] == "TodoWrite" => {
+            let mut plan = crate::agent_plan::todos(&id, &block["input"]);
+            plan["status"] = "in_progress".into();
+            plan
+        }
         "tool_use" if block["name"] == "Bash" => json!({
             "id": id,
             "type": "command_execution",
@@ -639,7 +644,7 @@ impl Turn<'_> {
                 } else {
                     content.to_string().into()
                 };
-            } else {
+            } else if item["type"] != "todo_list" {
                 item["result"] = content.clone();
             }
             self.emit(json!({ "type": "item.completed", "item": item }))
@@ -685,6 +690,10 @@ impl Turn<'_> {
             let running = block["type"] == "tool_use";
             if running {
                 self.tools.insert(text(&item, "id").into(), item.clone());
+            }
+            // The plan counts once Claude Code accepts it, with the call's result.
+            if item["type"] == "todo_list" {
+                continue;
             }
             let kind = if running {
                 "item.started"

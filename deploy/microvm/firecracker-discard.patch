@@ -1,0 +1,427 @@
+diff --git a/src/vmm/src/devices/virtio/block/virtio/io/async_io.rs b/src/vmm/src/devices/virtio/block/virtio/io/async_io.rs
+--- a/src/vmm/src/devices/virtio/block/virtio/io/async_io.rs
++++ b/src/vmm/src/devices/virtio/block/virtio/io/async_io.rs
+@@ -10,7 +10,7 @@
+ use vmm_sys_util::eventfd::EventFd;
+ 
+ use crate::devices::virtio::block::virtio::io::RequestError;
+-use crate::devices::virtio::block::virtio::{IO_URING_NUM_ENTRIES, PendingRequest};
++use crate::devices::virtio::block::virtio::{PendingRequest, IO_URING_NUM_ENTRIES};
+ use crate::io_uring::operation::{Cqe, OpCode, Operation};
+ use crate::io_uring::restriction::Restriction;
+ use crate::io_uring::{IoUring, IoUringError};
+@@ -19,6 +19,8 @@
+ 
+ #[derive(Debug, thiserror::Error, displaydoc::Display)]
+ pub enum AsyncIoError {
++    /// Discard waits for outstanding asynchronous operations
++    DiscardBusy,
+     /// Not implemented
+     NotImplemented,
+     /// IO: {0}
+@@ -40,6 +42,7 @@
+     file: File,
+     ring: IoUring<WrappedRequest>,
+     completion_evt: EventFd,
++    discard_pending: bool,
+ }
+ 
+ #[derive(Debug)]
+@@ -84,6 +87,7 @@
+                 Restriction::AllowOpCode(OpCode::Read),
+                 Restriction::AllowOpCode(OpCode::Write),
+                 Restriction::AllowOpCode(OpCode::Fsync),
++                Restriction::AllowOpCode(OpCode::Fallocate),
+             ],
+             Some(completion_fd),
+         )
+@@ -100,10 +104,14 @@
+             file,
+             ring,
+             completion_evt,
++            discard_pending: false,
+         })
+     }
+ 
+     pub fn update_file(&mut self, file: File) -> Result<(), AsyncIoError> {
++        if self.discard_pending {
++            return Err(AsyncIoError::DiscardBusy);
++        }
+         let ring = Self::new_ring(&file, self.completion_evt.as_raw_fd())
+             .map_err(AsyncIoError::IoUring)?;
+ 
+@@ -128,6 +136,12 @@
+         count: u32,
+         req: PendingRequest,
+     ) -> Result<(), RequestError<AsyncIoError>> {
++        if self.discard_pending {
++            return Err(RequestError {
++                req,
++                error: AsyncIoError::DiscardBusy,
++            });
++        }
+         let buf = match mem.get_slice(addr, count as usize) {
+             Ok(slice) => slice.ptr_guard_mut().as_ptr(),
+             Err(err) => {
+@@ -162,6 +176,12 @@
+         count: u32,
+         req: PendingRequest,
+     ) -> Result<(), RequestError<AsyncIoError>> {
++        if self.discard_pending {
++            return Err(RequestError {
++                req,
++                error: AsyncIoError::DiscardBusy,
++            });
++        }
+         let buf = match mem.get_slice(addr, count as usize) {
+             Ok(slice) => slice.ptr_guard_mut().as_ptr(),
+             Err(err) => {
+@@ -189,6 +209,12 @@
+     }
+ 
+     pub fn push_flush(&mut self, req: PendingRequest) -> Result<(), RequestError<AsyncIoError>> {
++        if self.discard_pending {
++            return Err(RequestError {
++                req,
++                error: AsyncIoError::DiscardBusy,
++            });
++        }
+         let wrapped_user_data = WrappedRequest::new(req);
+ 
+         self.ring
+@@ -199,8 +225,35 @@
+             })
+     }
+ 
+-    pub fn discard(&mut self, _range: (u64, u32)) -> Result<u32, AsyncIoError> {
+-        Err(AsyncIoError::NotImplemented)
++    pub fn push_discard(
++        &mut self,
++        range: (u64, u32),
++        req: PendingRequest,
++    ) -> Result<(), RequestError<AsyncIoError>> {
++        // Defer until earlier CQEs have been consumed. Once submitted, keep
++        // later requests behind this ordering boundary, including on failure.
++        if self.ring.num_ops() != 0 || self.discard_pending {
++            return Err(RequestError {
++                req,
++                error: AsyncIoError::DiscardBusy,
++            });
++        }
++        // Mode 3 is accepted by the VFS for both files and block devices.
++        // Block devices issue WRITE_ZEROES, supported by Cairn's ublk backend.
++        self.ring
++            .push(Operation::fallocate(
++                0,
++                u32::try_from(libc::FALLOC_FL_PUNCH_HOLE | libc::FALLOC_FL_KEEP_SIZE).unwrap(),
++                range.0,
++                range.1,
++                WrappedRequest::new(req),
++            ))
++            .map_err(|(error, data)| RequestError {
++                req: data.req,
++                error: AsyncIoError::IoUring(error),
++            })?;
++        self.discard_pending = true;
++        Ok(())
+     }
+ 
+     pub fn kick_submission_queue(&mut self) -> Result<(), AsyncIoError> {
+@@ -236,7 +289,13 @@
+     }
+ 
+     fn do_pop(&mut self) -> Result<Option<Cqe<WrappedRequest>>, AsyncIoError> {
+-        self.ring.pop().map_err(AsyncIoError::IoUring)
++        let cqe = self.ring.pop().map_err(AsyncIoError::IoUring)?;
++        // Discard is submitted only to an empty ring and fences every later
++        // request, so its receipt is necessarily the sole queued completion.
++        if cqe.is_some() {
++            self.discard_pending = false;
++        }
++        Ok(cqe)
+     }
+ 
+     pub fn pop(
+diff --git a/src/vmm/src/devices/virtio/block/virtio/device.rs b/src/vmm/src/devices/virtio/block/virtio/device.rs
+--- a/src/vmm/src/devices/virtio/block/virtio/device.rs
++++ b/src/vmm/src/devices/virtio/block/virtio/device.rs
+@@ -427,10 +427,6 @@
+             return Err(VirtioBlockError::DiscardReadOnlyUnsupported);
+         }
+ 
+-        if config.discard && config.file_engine_type == FileEngineType::Async {
+-            return Err(VirtioBlockError::DiscardAsyncUnsupported);
+-        }
+-
+         let disk_properties = DiskProperties::new(
+             config.path_on_host,
+             config.is_read_only,
+@@ -1060,7 +1056,7 @@
+         assert_eq!(block.config_space.discard_sector_alignment, 8);
+ 
+         let async_config = VirtioBlockConfig {
+-            drive_id: "discard_async_unsupported".to_string(),
++            drive_id: "discard_async".to_string(),
+             path_on_host: path,
+             is_root_device: false,
+             partuuid: None,
+@@ -1072,10 +1068,8 @@
+             blk_size: None,
+             topology: None,
+         };
+-        assert!(matches!(
+-            VirtioBlock::new(async_config),
+-            Err(VirtioBlockError::DiscardAsyncUnsupported)
+-        ));
++        let block = VirtioBlock::new(async_config).unwrap();
++        assert_ne!(block.avail_features & (1u64 << VIRTIO_BLK_F_DISCARD), 0);
+ 
+         let f = TempFile::new().unwrap();
+         f.as_file().set_len(0x1000).unwrap();
+diff --git a/src/vmm/src/devices/virtio/block/virtio/io/mod.rs b/src/vmm/src/devices/virtio/block/virtio/io/mod.rs
+--- a/src/vmm/src/devices/virtio/block/virtio/io/mod.rs
++++ b/src/vmm/src/devices/virtio/block/virtio/io/mod.rs
+@@ -36,6 +36,7 @@
+ impl BlockIoError {
+     pub fn is_throttling_err(&self) -> bool {
+         match self {
++            BlockIoError::Async(AsyncIoError::DiscardBusy) => true,
+             BlockIoError::Async(AsyncIoError::IoUring(err)) => err.is_throttling_err(),
+             _ => false,
+         }
+@@ -162,11 +163,11 @@
+         req: PendingRequest,
+     ) -> Result<FileEngineOk, RequestError<BlockIoError>> {
+         match self {
+-            FileEngine::Async(engine) => match engine.discard(range) {
+-                Ok(count) => Ok(FileEngineOk::Executed(RequestOk { req, count })),
+-                Err(err) => Err(RequestError {
+-                    req,
+-                    error: BlockIoError::Async(err),
++            FileEngine::Async(engine) => match engine.push_discard(range, req) {
++                Ok(()) => Ok(FileEngineOk::Submitted),
++                Err(err) => Err(RequestError {
++                    req: err.req,
++                    error: BlockIoError::Async(err.error),
+                 }),
+             },
+             FileEngine::Sync(engine) => match engine.discard(range) {
+@@ -414,4 +415,133 @@
+         engine.drain(true).unwrap();
+         engine.drain_and_flush(true).unwrap();
+     }
+-}
++    #[test]
++    fn test_async_discard_orders_writes_and_preserves_completions() {
++        use std::os::unix::fs::FileExt;
++        let file = TempFile::new().unwrap().into_file();
++        file.set_len(16384).unwrap();
++        let witness = file.try_clone().unwrap();
++        let mem = create_mem();
++        witness.write_all_at(&[0x5a; 16384], 0).unwrap();
++        mem.write_slice(&[0x7a; 8192], GuestAddress(0)).unwrap();
++        let mut engine = FileEngine::from_file(file, FileEngineType::Async).unwrap();
++        assert!(matches!(
++            engine.write(0, &mem, GuestAddress(0), 8192, PendingRequest::default()),
++            Ok(FileEngineOk::Submitted)
++        ));
++        let error = engine
++            .discard((4096, 4096), PendingRequest::default())
++            .unwrap_err();
++        assert!(error.error.is_throttling_err());
++        engine.drain(false).unwrap();
++        assert!(
++            engine
++                .discard((4096, 4096), PendingRequest::default())
++                .unwrap_err()
++                .error
++                .is_throttling_err()
++        );
++        let FileEngine::Async(ref mut async_engine) = engine else {
++            unreachable!()
++        };
++        assert!(
++            async_engine.pop(&mem).unwrap().is_some(),
++            "discard lost earlier write completion"
++        );
++        assert!(async_engine.pop(&mem).unwrap().is_none());
++        assert!(matches!(
++            engine.discard((4096, 4096), PendingRequest::default()),
++            Ok(FileEngineOk::Submitted)
++        ));
++        assert!(
++            engine
++                .read(0, &mem, GuestAddress(0), 4096, PendingRequest::default())
++                .unwrap_err()
++                .error
++                .is_throttling_err()
++        );
++        assert!(
++            engine
++                .update_file_path(TempFile::new().unwrap().into_file())
++                .unwrap_err()
++                .is_throttling_err()
++        );
++        let blocked = engine
++            .write(4096, &mem, GuestAddress(0), 4096, PendingRequest::default())
++            .unwrap_err();
++        assert!(blocked.error.is_throttling_err());
++        engine.drain(false).unwrap();
++        // Completion alone must not permit overtaking its unconsumed receipt.
++        assert!(
++            engine
++                .flush(PendingRequest::default())
++                .unwrap_err()
++                .error
++                .is_throttling_err()
++        );
++        let FileEngine::Async(ref mut async_engine) = engine else {
++            unreachable!()
++        };
++        assert_eq!(
++            async_engine.pop(&mem).unwrap().unwrap().result().unwrap(),
++            0
++        );
++        assert!(async_engine.pop(&mem).unwrap().is_none());
++        let mut actual = [0; 16384];
++        witness.read_exact_at(&mut actual, 0).unwrap();
++        assert_eq!(&actual[..4096], &[0x7a; 4096]);
++        assert_eq!(&actual[4096..8192], &[0; 4096]);
++        assert_eq!(&actual[8192..], &[0x5a; 8192]);
++        mem.write_slice(&[0x27; 4096], GuestAddress(0)).unwrap();
++        assert!(matches!(
++            engine.write(4096, &mem, GuestAddress(0), 4096, PendingRequest::default()),
++            Ok(FileEngineOk::Submitted)
++        ));
++        engine.drain(false).unwrap();
++        witness
++            .read_exact_at(&mut actual[4096..8192], 4096)
++            .unwrap();
++        assert_eq!(&actual[4096..8192], &[0x27; 4096]);
++        engine.drain(true).unwrap();
++    }
++    #[test]
++    fn test_async_discard_error_preserves_receipt_and_releases_boundary() {
++        let temp = TempFile::new().unwrap();
++        temp.as_file().set_len(8192).unwrap();
++        let file = std::fs::OpenOptions::new()
++            .read(true)
++            .open(temp.as_path())
++            .unwrap();
++        let mem = create_mem();
++        let mut engine = FileEngine::from_file(file, FileEngineType::Async).unwrap();
++        assert!(matches!(
++            engine.discard((0, 4096), PendingRequest::default()),
++            Ok(FileEngineOk::Submitted)
++        ));
++        assert!(
++            engine
++                .read(0, &mem, GuestAddress(0), 4096, PendingRequest::default())
++                .unwrap_err()
++                .error
++                .is_throttling_err()
++        );
++        engine.drain(false).unwrap();
++        let FileEngine::Async(ref mut async_engine) = engine else {
++            unreachable!()
++        };
++        assert!(async_engine.pop(&mem).unwrap().unwrap().result().is_err());
++        assert!(async_engine.pop(&mem).unwrap().is_none());
++        assert!(matches!(
++            engine.read(0, &mem, GuestAddress(0), 4096, PendingRequest::default()),
++            Ok(FileEngineOk::Submitted)
++        ));
++        engine.drain(false).unwrap();
++        let FileEngine::Async(ref mut async_engine) = engine else {
++            unreachable!()
++        };
++        assert_eq!(
++            async_engine.pop(&mem).unwrap().unwrap().result().unwrap(),
++            4096
++        );
++    }
++}
+diff --git a/src/vmm/src/devices/virtio/block/vhost_user/device.rs b/src/vmm/src/devices/virtio/block/vhost_user/device.rs
+--- a/src/vmm/src/devices/virtio/block/vhost_user/device.rs
++++ b/src/vmm/src/devices/virtio/block/vhost_user/device.rs
+@@ -16,7 +16,7 @@
+ use crate::devices::virtio::ActivateError;
+ use crate::devices::virtio::block::CacheType;
+ use crate::devices::virtio::device::{ActiveState, DeviceState, VirtioDevice, VirtioDeviceType};
+-use crate::devices::virtio::generated::virtio_blk::{VIRTIO_BLK_F_FLUSH, VIRTIO_BLK_F_RO};
++use crate::devices::virtio::generated::virtio_blk::{VIRTIO_BLK_F_DISCARD, VIRTIO_BLK_F_FLUSH, VIRTIO_BLK_F_RO};
+ use crate::devices::virtio::generated::virtio_config::VIRTIO_F_VERSION_1;
+ use crate::devices::virtio::generated::virtio_ring::VIRTIO_RING_F_EVENT_IDX;
+ use crate::devices::virtio::queue::Queue;
+@@ -41,7 +41,9 @@
+     | VhostUserVirtioFeatures::PROTOCOL_FEATURES.bits()
+     // We always try to negotiate readonly with the backend.
+     // If the backend is configured as readonly, we will accept it.
+-    | (1 << VIRTIO_BLK_F_RO);
++    | (1 << VIRTIO_BLK_F_RO)
++    // Pass discard through only when the backend advertises support.
++    | (1 << VIRTIO_BLK_F_DISCARD);
+ 
+ /// Use this structure to set up the Block Device before booting the kernel.
+ #[derive(Debug, PartialEq, Eq)]
+@@ -637,6 +639,7 @@
+         };
+         let mut vhost_block = VhostUserBlockImpl::<MockMaster>::new(vhost_block_config).unwrap();
+ 
++        assert_ne!(vhost_block.avail_features & (1 << VIRTIO_BLK_F_DISCARD), 0);
+         // If backend has all features, features offered by block device
+         // should be negotiated and header flags should be set.
+         assert_eq!(
+diff --git a/src/vmm/src/devices/virtio/block/virtio/mod.rs b/src/vmm/src/devices/virtio/block/virtio/mod.rs
+--- a/src/vmm/src/devices/virtio/block/virtio/mod.rs
++++ b/src/vmm/src/devices/virtio/block/virtio/mod.rs
+@@ -26,7 +26,8 @@
+ ///
+ /// Keep this bounded so guest fstrim is split into predictable chunks instead
+ /// of letting one large discard ioctl block the VMM thread for too long.
+-pub const MAX_DISCARD_SECTORS: u32 = (128_u32 << 20) / SECTOR_SIZE;
++// Bound synchronous discard so other virtqueue requests can make progress.
++pub const MAX_DISCARD_SECTORS: u32 = (8_u32 << 20) / SECTOR_SIZE;
+ /// The number of queues of block device.
+ pub const BLOCK_NUM_QUEUES: usize = 1;
+ pub const BLOCK_QUEUE_SIZES: [u16; BLOCK_NUM_QUEUES] = [FIRECRACKER_MAX_QUEUE_SIZE];
+diff --git a/src/vmm/src/io_uring/operation/mod.rs b/src/vmm/src/io_uring/operation/mod.rs
+--- a/src/vmm/src/io_uring/operation/mod.rs
++++ b/src/vmm/src/io_uring/operation/mod.rs
+@@ -29,6 +29,8 @@
+     Write = io_uring_op::IORING_OP_WRITE as u8,
+     /// Fsync operation.
+     Fsync = io_uring_op::IORING_OP_FSYNC as u8,
++    /// Allocate or punch a file range asynchronously.
++    Fallocate = io_uring_op::IORING_OP_FALLOCATE as u8,
+ }
+ 
+ // Useful for outputting errors.
+@@ -38,6 +40,7 @@
+             OpCode::Read => "read",
+             OpCode::Write => "write",
+             OpCode::Fsync => "fsync",
++            OpCode::Fallocate => "fallocate",
+         }
+     }
+ }
+@@ -113,6 +116,19 @@
+         }
+     }
+ 
++    /// io_uring fallocate ABI: len contains mode, addr contains byte length.
++    pub fn fallocate(fd: FixedFd, mode: u32, offset: u64, len: u32, user_data: T) -> Self {
++        Self {
++            fd,
++            opcode: OpCode::Fallocate,
++            addr: Some(usize::try_from(len).unwrap()),
++            len: Some(mode),
++            flags: 0,
++            offset: Some(offset),
++            user_data,
++        }
++    }
++
+     pub(crate) fn fd(&self) -> FixedFd {
+         self.fd
+     }

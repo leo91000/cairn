@@ -425,6 +425,43 @@ async fn ordinary_tool_errors_and_read_content_do_not_abort_claude() {
 }
 
 #[tokio::test]
+async fn todo_writes_show_as_the_agent_plan() {
+    let root = TempDir::new().unwrap();
+    let c = setup(&root);
+    let (result, events) = run_to_end(&c, plan(&root, "fixture:plan")).await;
+    result.unwrap();
+
+    let plans: Vec<_> = events
+        .iter()
+        .filter(|e| e["item"]["type"] == "todo_list")
+        .map(|e| {
+            (
+                e["type"].as_str().unwrap(),
+                e["item"]["id"].as_str().unwrap(),
+            )
+        })
+        .collect();
+    // Each list shows once Claude Code accepts it.
+    assert_eq!(
+        plans,
+        vec![("item.completed", "todo-1"), ("item.completed", "todo-2")]
+    );
+    let last = events
+        .iter()
+        .rfind(|e| e["item"]["type"] == "todo_list")
+        .unwrap();
+    assert_eq!(last["item"]["status"], "completed");
+    assert_eq!(last["item"]["items"][1]["status"], "in_progress");
+    assert_eq!(
+        last["item"]["items"][1]["active_text"],
+        "Adding the migration"
+    );
+    // The tool result only acknowledges the list.
+    assert!(last["item"].get("result").is_none());
+    assert!(!events.iter().any(|e| e["item"]["tool"] == "TodoWrite"));
+}
+
+#[tokio::test]
 async fn streaming_tools_receipts_resume_and_no_replay_after_completion() {
     let root = TempDir::new().unwrap();
     let c = setup(&root);

@@ -147,6 +147,7 @@ fun ModelPicker(
     changeProvider: ((String) -> Unit)? = null,
     switching: Boolean = false,
     field: Boolean = false,
+    conversationDefault: Boolean = false,
     change: (String, String) -> Unit,
 ) {
     var open by rememberSaveable { mutableStateOf(false) }
@@ -321,6 +322,26 @@ fun ModelPicker(
                     Spacer(Modifier.height(4.dp))
                 }
                 SectionLabel("Modèle")
+                if (provider == "opencode")
+                    Surface(
+                        shape = RoundedCornerShape(12.dp),
+                        color = MaterialTheme.colorScheme.surfaceContainerLow,
+                    ) {
+                        Column(
+                            Modifier.padding(12.dp),
+                            verticalArrangement = Arrangement.spacedBy(4.dp),
+                        ) {
+                            Text(
+                                "Modèles de vos connexions",
+                                style = MaterialTheme.typography.labelLarge,
+                            )
+                            Text(
+                                "L’accès dépend de l’offre, du solde et des réglages Privacy du fournisseur. Un modèle affiché peut rester bloqué à l’utilisation.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                    }
                 if (refreshError.isNotBlank())
                     Text(
                         refreshError,
@@ -334,10 +355,16 @@ fun ModelPicker(
                     } ?: defaultModel
                 if (!codingAgent(provider).requiresModel || (inherit && defaultModel.isNotBlank()))
                     ModelCard(
-                        if (inherit) "Modèle de l’agent" else "Modèle par défaut",
+                        if (inherit) {
+                            if (conversationDefault) "Modèle de la conversation"
+                            else "Modèle de l’agent"
+                        } else "Modèle par défaut",
                         if (inherit)
-                            fallback.ifBlank { null }?.let { "$it · réglage de l’agent" }
-                                ?: "Suivre le réglage de l’agent"
+                            fallback
+                                .ifBlank { null }
+                                ?.let {
+                                    "$it · ${if (conversationDefault) "réglage de la conversation" else "réglage de l’agent"}"
+                                } ?: "Suivre le réglage de l’agent"
                         else
                             alias?.description?.ifBlank { null }
                                 ?: fallback
@@ -347,7 +374,27 @@ fun ModelPicker(
                         model.isBlank(),
                         enabled,
                         badge = if (alias != null && !inherit) "Recommandé" else "",
-                        reasoning = reasoningFor,
+                        reasoning = {
+                            if (inherit && chosen != null)
+                                RouteControl(
+                                    chosen,
+                                    chosen.routes.filter {
+                                        !it.hidden || it.model == defaultModel
+                                    },
+                                    route,
+                                    enabled,
+                                ) { value ->
+                                    val efforts =
+                                        (chosen.route(value)?.supportedReasoningEfforts
+                                                ?: chosen.supportedReasoningEfforts)
+                                            .map { it.reasoningEffort }
+                                    change(
+                                        value,
+                                        effectiveEffort.takeIf { it in efforts }.orEmpty(),
+                                    )
+                                }
+                            reasoningFor()
+                        },
                     ) {
                         change("", "")
                     }
@@ -361,7 +408,11 @@ fun ModelPicker(
                             ?: item.description,
                         item.matches(model),
                         enabled,
-                        badge = if (item.isDefault) "Recommandé" else "",
+                        badge =
+                            if (item.isDefault) {
+                                if (provider == "opencode") "Défaut du fournisseur"
+                                else "Recommandé"
+                            } else "",
                         reasoning = {
                             RouteControl(item, routes, route, enabled) { value ->
                                 val efforts =

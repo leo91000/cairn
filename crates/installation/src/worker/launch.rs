@@ -186,7 +186,9 @@ impl Execution<'_> {
 
     async fn mark_running(&mut self) -> Result<()> {
         let s = self.s;
-        self.checkpoint.persist().await?;
+        self.checkpoint
+            .update(|state| state.capacity_retry_at = None)
+            .await?;
         let account_name = match self.account.as_ref() {
             Some(account) => s.accounts.get(s, &account.account_id).await?["name"].clone(),
             None => Value::Null,
@@ -492,7 +494,8 @@ impl Execution<'_> {
 
     async fn prompt(&self, resume: Option<&str>) -> Result<String> {
         if resume.is_none() {
-            return Ok(run_output::prompt(self.run, false));
+            let run = crate::plugins::agents::with_instructions(self.s, self.run).await;
+            return Ok(run_output::prompt(&run, false));
         }
         let mut prompt = RESUME_PROMPT.to_owned();
         let Some(restored) = self.run["restoredAt"].as_i64() else {
@@ -649,7 +652,7 @@ impl Execution<'_> {
         let prompt = if resume.is_some() {
             launch.prompt.clone()
         } else {
-            let mut context = self.run.clone();
+            let mut context = crate::plugins::agents::with_instructions(s, self.run).await;
             context["snapshot"]["skills"] = prepared["skills"].clone();
             run_output::prompt(&context, false)
         };

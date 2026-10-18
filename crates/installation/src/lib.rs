@@ -1,5 +1,6 @@
 pub mod accounts;
 pub mod agent_avatars;
+mod agent_plan;
 pub mod api;
 pub mod artifacts;
 pub mod attachments;
@@ -35,7 +36,6 @@ pub mod network;
 pub mod nodes;
 pub mod notifications;
 pub mod object_storage;
-pub mod onepassword;
 pub mod opencode;
 pub mod outcome;
 pub mod performance;

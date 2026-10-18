@@ -24,6 +24,7 @@ import {
   Play,
   Plug,
   Plus,
+  Puzzle,
   Search,
   Settings,
   X,
@@ -135,8 +136,16 @@ const commands = computed<Command[]>(() => {
       group: 'Actions',
       label: 'Connections',
       icon: Plug,
-      keywords: 'codex claude github 1password accounts',
+      keywords: 'codex claude opencode github accounts',
       run: go('/connections'),
+    },
+    {
+      id: 'plugins',
+      group: 'Actions',
+      label: 'Plugins',
+      icon: Puzzle,
+      keywords: '1password secrets discord bots packages',
+      run: go('/plugins'),
     },
     {
       id: 'settings',
@@ -157,7 +166,7 @@ const commands = computed<Command[]>(() => {
   ]
   if (state.installationRole === 'member') {
     for (let index = items.length - 1; index >= 0; index--) {
-      if (['connections', 'settings'].includes(items[index]!.id))
+      if (['connections', 'plugins', 'settings'].includes(items[index]!.id))
         items.splice(index, 1)
     }
   }

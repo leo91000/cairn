@@ -8,7 +8,6 @@ import AccountRow from '../components/AccountRow.vue'
 import AccountSignIn from '../components/AccountSignIn.vue'
 import GithubConnection from '../components/GithubConnection.vue'
 import Icon from '../components/Icon.vue'
-import OnePasswordAccounts from '../components/OnePasswordAccounts.vue'
 import ProviderMark from '../components/ProviderMark.vue'
 import UiAlert from '../components/UiAlert.vue'
 import UiButton from '../components/UiButton.vue'
@@ -19,7 +18,7 @@ import {
   RefreshCw,
 } from '../icons'
 
-// The accounts coding agents run on, grouped by coding agent, then the tools agents reach.
+// The accounts coding agents run on, grouped by coding agent, then the GitHub identity they use.
 const accounts = useAccounts()
 const opened = ref<string>()
 const adding = ref<Provider | 'any'>()
@@ -69,7 +68,7 @@ function closeSignIn() {
     <div>
       <h1>Connections</h1>
       <p class="mt-2 text-[13px] text-muted phone:hidden">
-        The accounts your agents run on, and the tools they can reach.
+        The accounts your agents run on, and the GitHub identity they use.
       </p>
     </div>
     <UiButton
@@ -179,13 +178,12 @@ function closeSignIn() {
     </div>
   </section>
 
-  <section class="mt-8" aria-labelledby="tools">
-    <h2 id="tools" class="eyebrow mb-3">
-      Tools
+  <section class="mt-8" aria-labelledby="github">
+    <h2 id="github" class="eyebrow mb-3">
+      GitHub
     </h2>
     <div class="connection-card overflow-hidden rounded-2xl border border-line bg-surface shadow-arcade">
       <GithubConnection />
-      <OnePasswordAccounts />
     </div>
   </section>
 

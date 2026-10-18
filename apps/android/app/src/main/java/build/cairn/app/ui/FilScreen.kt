@@ -62,6 +62,8 @@ internal data class FeedItem(
     val wakeAt: Long? = null,
     /** It waits for a condition, so it may resume before [wakeAt]. */
     val condition: Boolean = false,
+    /** Its result already arrived: it resumes as soon as capacity allows. */
+    val resolved: Boolean = false,
     /** The opening of the agent's final message, for finished work not read yet. */
     val preview: String? = null,
 ) {
@@ -159,10 +161,20 @@ internal fun buildFeed(
                             .copy(working = chat.status == "running" && !chat.exclusiveSuspended)
                 !chat.paused && chat.wakeup != null && chat.status == "succeeded" ->
                     waiting +=
-                        item(FeedKind.WAITING_CHAT, waitTarget(chat.wakeup).short)
+                        item(
+                                FeedKind.WAITING_CHAT,
+                                listOfNotNull(
+                                        waitTarget(chat.wakeup).short,
+                                        chat.projectName?.ifBlank { null },
+                                    )
+                                    .joinToString(" · "),
+                            )
                             .copy(
                                 wakeAt = chat.wakeup.wakeAt,
                                 condition = chat.wakeup.condition != null,
+                                // Recorded by GitHub polling; another run's result is only computed
+                                // at resumption.
+                                resolved = chat.wakeup.observation != null,
                             )
                 chat.unread && !chat.paused && unreadNow("chat:${chat.id}", chat.finishedAt) ->
                     toRead +=
@@ -234,7 +246,8 @@ internal fun buildFeed(
         forYou + toRead.sortedByDescending { it.stamp },
         running.sortedBy { it.startedAt ?: Long.MAX_VALUE },
         recent,
-        waiting.sortedBy { it.wakeAt },
+        // A wait whose result arrived resumes first, before any deadline.
+        waiting.sortedWith(compareBy({ !it.resolved }, { it.wakeAt })),
     )
 }
 
@@ -279,7 +292,10 @@ internal fun feedSummary(feed: Feed): String {
         parts +=
             if (feed.unread.size == 1) "1 résultat à lire"
             else "${feed.unread.size} résultats à lire"
-    if (feed.waiting.isNotEmpty()) parts += "${feed.waiting.size} en attente"
+    if (feed.waiting.isNotEmpty())
+        parts +=
+            if (feed.waiting.size == 1) "1 reprise prévue"
+            else "${feed.waiting.size} reprises prévues"
     return parts.joinToString(" · ").ifBlank { "Tout est calme." }
 }
 
@@ -408,14 +424,14 @@ fun FilScreen(
                 )
             }
         }
-        section("En attente", feed.waiting) { item ->
+        section("Reprise prévue", feed.waiting) { item ->
             FeedRow(
                 item,
                 { open(item) },
                 onDelete = item.chatId?.let { id -> { trash.trash(id) } },
             ) {
                 Text(
-                    (if (item.condition) "≤ " else "") + timeLeft((item.wakeAt ?: now) - now),
+                    waitLeft(item.wakeAt ?: now, item.condition, item.resolved, now),
                     style = MaterialTheme.typography.labelLarge,
                     fontWeight = FontWeight.SemiBold,
                     color = MaterialTheme.colorScheme.primary,

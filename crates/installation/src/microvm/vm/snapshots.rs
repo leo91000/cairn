@@ -339,10 +339,21 @@ impl Templates {
                     let kernel_host = std::fs::read_to_string("/proc/sys/kernel/osrelease")?;
                     let cpu = format!("{}\n{}", properties.join("\n"), kernel_host);
                     Ok(Key {
-                        version: 1,
+                        // New read-only control drive; never restore an older
+                        // anonymous template with a different device topology.
+                        version: 2,
                         runtime: image.file_name().unwrap().to_str().unwrap().to_owned(),
                         kernel: hash_file(&image.join("vmlinux"))?,
-                        entrypoint: hash_file(&std::env::current_exe()?)?,
+                        entrypoint: blake3::hash(
+                            format!(
+                                "{}:{}",
+                                hash_file(&std::env::current_exe()?)?,
+                                hash_file(&image.join("control.squashfs"))?
+                            )
+                            .as_bytes(),
+                        )
+                        .to_hex()
+                        .to_string(),
                         firecracker: format!(
                             "{}:{}",
                             firecracker.trim(),

@@ -52,8 +52,7 @@ async function rename() {
 }
 
 async function remove() {
-  await props.accounts.remove(props.account.id)
-  if (!props.accounts.error.value) {
+  if (await props.accounts.remove(props.account.id)) {
     removing.value = false
     emit('close')
   }

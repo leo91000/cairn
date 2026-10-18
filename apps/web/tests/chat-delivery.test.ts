@@ -1,7 +1,7 @@
 import type { ChatDetail, ChatMessage } from '../../../packages/contracts/chats'
 import type { Run, RunEvent } from '../../../packages/contracts/contracts'
 import { describe, expect, it } from 'vitest'
-import { chatDelivery, chatSleepNotice, chatWaitNotice } from '../src/chat-delivery'
+import { chatDelivery, chatWaitNotice, scheduledWakeup } from '../src/chat-delivery'
 
 function message(id: string, overrides: Partial<ChatMessage> = {}): ChatMessage {
   return {
@@ -49,13 +49,26 @@ describe('chat delivery presentation', () => {
       createdAt: 1,
       wakeAt: 420001,
     }
-    expect(chatSleepNotice(detail)).toEqual({ account: null, message: 'Wait for CI', wakeup: detail.wakeup })
+    expect(scheduledWakeup(detail)).toBe(detail.wakeup)
     expect(chatDelivery(detail, []).sending).toEqual([])
     for (const status of ['running', 'queued', 'failed'] as const)
-      expect(chatSleepNotice({ ...detail, run: { ...detail.run!, status } })).toBeNull()
-    expect(chatSleepNotice({ ...detail, paused: true })).toBeNull()
-    expect(chatSleepNotice({ ...detail, lifecycle: 'trash' })).toBeNull()
-    expect(chatSleepNotice({ ...detail, wakeup: null })).toBeNull()
+      expect(scheduledWakeup({ ...detail, run: { ...detail.run!, status } })).toBeNull()
+    expect(scheduledWakeup({ ...detail, paused: true })).toBeNull()
+    expect(scheduledWakeup({ ...detail, lifecycle: 'trash' })).toBeNull()
+    expect(scheduledWakeup({ ...detail, wakeup: null })).toBeNull()
+  })
+  it('keeps follow-ups queued behind a scheduled wait', () => {
+    const detail = chat([message('next')], { ...running, status: 'succeeded' })
+    detail.wakeup = {
+      id: 'wake',
+      messageId: 'first',
+      seconds: 420,
+      reason: 'Wait for CI',
+      createdAt: 1,
+      wakeAt: 420001,
+    }
+    expect(chatDelivery(detail, [])).toEqual({ sending: [], queued: [detail.messages[0]] })
+    expect(chatDelivery({ ...detail, wakeup: null }, []).sending[0].message.id).toBe('next')
   })
   it('explains a required Claude reconnection without claiming the queued agent has started', () => {
     const detail = chat([message('first', { status: 'sending' })], {

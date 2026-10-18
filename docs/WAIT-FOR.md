@@ -215,5 +215,7 @@ la capacité de production sont distinctes de ces mesures locales.
 
 La suite proposée est maintenant les groupes de dépendances. Les autres sources peuvent suivre
 les usages observés, avec un identifiant stable, une lecture autorisée, un
-résultat explicite et un timeout. L’état d’attente dans le Fil et les notifications
-doit aussi distinguer une conversation différée d’un travail achevé.
+résultat explicite et un timeout. Le Fil distingue désormais une conversation
+différée dans sa section « Waiting » (« Reprise prévue » sur Android), avec une
+carte unique par attente dans la conversation ; les notifications doivent encore
+la distinguer d’un travail achevé.

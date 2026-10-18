@@ -742,11 +742,20 @@ impl Service {
             if chat["paused"] == true {
                 continue;
             }
-            let chat_id = id.clone();
-            let message = self
+            // A scheduled wait continues the current task before queued follow-ups.
+            let (waiting_chat, waiting_run) = (chat.clone(), run.clone());
+            let waiting = self
                 .store
-                .transaction(move |db| next_queued(db, &chat_id))
+                .read(move |db| sleep::holds_queue(db, &waiting_chat, waiting_run.as_ref()))
                 .await?;
+            let chat_id = id.clone();
+            let message = if waiting {
+                None
+            } else {
+                self.store
+                    .transaction(move |db| next_queued(db, &chat_id))
+                    .await?
+            };
             let message = match message {
                 Some(message) => message,
                 None => {

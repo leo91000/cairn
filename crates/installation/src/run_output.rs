@@ -153,13 +153,25 @@ pub fn compact_activity(event: &Value, secrets: &[String]) -> Value {
                 .flatten()
                 .take(16)
                 .map(|task| {
-                    json!({
+                    let mut step = json!({
                         "text": activity_preview(&task["text"], 256, secrets),
                         "completed": task["completed"] == true,
-                    })
+                    });
+                    for (key, limit) in [("status", 32), ("active_text", 256)] {
+                        if let Some(value) = task.get(key) {
+                            step[key] = activity_preview(value, limit, secrets);
+                        }
+                    }
+                    step
                 })
                 .collect();
             item.insert("items".into(), tasks.into());
+            if let Some(explanation) = source.get("explanation") {
+                item.insert(
+                    "explanation".into(),
+                    activity_preview(explanation, 1024, secrets),
+                );
+            }
         }
         "subagent" => {
             for (key, limit) in [
@@ -217,8 +229,9 @@ pub fn args(run: &Value, output: &str, session: Option<&str>) -> Vec<String> {
 }
 
 pub fn prompt(run: &Value, chat: bool) -> String {
-    let onepassword = if run["isolated"] == true {
-        crate::onepassword::AGENT_INSTRUCTIONS
+    // Set at launch from the plugins granting this run's agent (`agents::with_instructions`).
+    let plugins = if run["isolated"] == true {
+        text(run, "pluginInstructions")
     } else {
         ""
     };
@@ -279,7 +292,7 @@ pub fn prompt(run: &Value, chat: bool) -> String {
             -- <command> when project environment variables are needed; use uv for \
             Python environments. Do not upgrade project pins unless the task requests \
             it.\n\nSelected skills (read a skill's SKILL.md before using it; its \
-            scripts and references sit beside it):\n{skills}\n\n{onepassword}\n\nRun this task to completion within \
+            scripts and references sit beside it):\n{skills}\n\n{plugins}\n\nRun this task to completion within \
             its stated scope. Preserve unrelated files. Do not expose credentials. \
             {interaction}\n{deliverables}\n{waiting} All task-authorized effects such as creating \
             PRs or releasing must follow their checks. Use .agents/skills for skills. \

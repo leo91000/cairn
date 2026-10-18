@@ -403,12 +403,19 @@ internal fun ChatPage(
         }
     }
     val timelineKeys = remember(id) { TimelineKeys() }
+    // A failed or interrupted turn never resumes its wakeup, even when the record lingers.
+    val pendingWakeup = liveWakeup(chat)
     val history =
-        remember(live.events, live.state?.artifacts, chat?.wakeup?.id, chat?.wakeup?.observation) {
+        remember(
+            live.events,
+            live.state?.artifacts,
+            pendingWakeup?.id,
+            pendingWakeup?.observation,
+        ) {
             deliveryTimeline(
                 timelineKeys.stabilize(
                     live.history,
-                    timelineEntries(live.events, chat = true, pendingWakeup = chat?.wakeup),
+                    timelineEntries(live.events, chat = true, pendingWakeup = pendingWakeup),
                 ),
                 live.state?.artifacts.orEmpty(),
             )
@@ -448,6 +455,15 @@ internal fun ChatPage(
     val currentSubagents = remember(timeline) { currentSubagents(timeline) }
     val subagentBar =
         !fullscreen && currentSubagents.any { it.state(active) == SubagentState.RUNNING }
+    // The plan of the current request stays in sight above the composer while the agent follows
+    // it; only its latest card is live.
+    val following = running && !chat.exclusiveSuspended
+    val requestPlan =
+        remember(timeline, following) { if (following) currentPlan(timeline) else null }
+    val livePlan =
+        remember(timeline, requestPlan) {
+            if (requestPlan == null) null else timeline.lastOrNull { it.plan != null }?.key
+        }
     val working =
         remember(
             live.events,
@@ -471,9 +487,13 @@ internal fun ChatPage(
     val currentProvider = chat?.run?.snapshot?.agent?.provider ?: selectedAgent?.provider ?: "codex"
     val chosenProvider = provider.ifBlank { currentProvider }
     val switchingProvider = chat?.run != null && chosenProvider != currentProvider
-    val inheritAgentModel = chosenProvider == (selectedAgent?.provider ?: "codex")
-    val defaultModel = if (inheritAgentModel) selectedAgent?.model.orEmpty() else ""
-    val defaultReasoning = if (inheritAgentModel) selectedAgent?.reasoning.orEmpty() else ""
+    val conversationAssistant = chat?.run?.snapshot?.agent
+    val inheritConversation = chosenProvider == conversationAssistant?.provider
+    val inheritedAssistant =
+        if (inheritConversation) conversationAssistant
+        else selectedAgent?.takeIf { it.provider == chosenProvider }
+    val defaultModel = inheritedAssistant?.model.orEmpty()
+    val defaultReasoning = inheritedAssistant?.reasoning.orEmpty()
     fun chooseProvider(value: String) {
         provider = value
         model = ""
@@ -608,12 +628,16 @@ internal fun ChatPage(
                     if (it.attachment.id == uploaded.id) it.copy(attachment = uploaded) else it
                 }
             }
+            val selectedModel = model.ifBlank { defaultModel }
+            val selectedReasoning = reasoning.ifBlank {
+                if (model.isBlank()) defaultReasoning else ""
+            }
             val content = buildJsonObject {
                 put("text", draft.trim())
                 put("mode", mode)
                 put("provider", chosenProvider)
-                put("model", model)
-                put("reasoning", reasoning)
+                put("model", selectedModel)
+                put("reasoning", selectedReasoning)
                 put(
                     "attachmentIds",
                     wireJson.encodeToJsonElement(attachments.map { it.attachment.id }),
@@ -631,8 +655,8 @@ internal fun ChatPage(
                         submissionId,
                         chatId,
                         draft.trim(),
-                        model,
-                        reasoning,
+                        selectedModel,
+                        selectedReasoning,
                         mode,
                         "sending",
                         System.currentTimeMillis(),
@@ -690,15 +714,21 @@ internal fun ChatPage(
             )
         }
     }
-    fun togglePause(current: Chat) {
+    fun setPaused(current: Chat, paused: Boolean) {
         vm.perform {
             api.request(
                 "POST",
                 "/chats/${segment(current.id)}/pause",
-                buildJsonObject { put("paused", !current.paused) },
+                buildJsonObject { put("paused", paused) },
             )
         }
     }
+    fun togglePause(current: Chat) = setPaused(current, !current.paused)
+    // One callback for every wait card, so a new page state does not invalidate their rows.
+    val latestChat by rememberUpdatedState(chat)
+    val busy by rememberUpdatedState(state.busy)
+    // Pausing, not toggling: a snapshot that turned paused meanwhile must not resume it.
+    val pauseWait = remember { { if (!busy) latestChat?.let { setPaused(it, true) } } }
     val followGesture = rememberHistoryFollowGesture(listState, follow) { follow = it }
     FollowHistoryTail(
         listState,
@@ -729,8 +759,6 @@ internal fun ChatPage(
         ArtifactLinkHost(vm, live.state?.artifacts.orEmpty()) {
             Column(Modifier.fillMaxSize()) {
                 if (!fullscreen) {
-                    val wakeup = chatSleepNotice(chat)
-                    val now = if (wakeup != null) rememberNow(wakeup.id) else 0L
                     val conversation =
                         conversationState(
                             chat,
@@ -738,7 +766,6 @@ internal fun ChatPage(
                             waitingTasks,
                             state.installation?.name,
                             newChat = id == null,
-                            now = now,
                         )
                     ConversationHeader(
                         title =
@@ -748,6 +775,7 @@ internal fun ChatPage(
                         agent = agentName,
                         agentKey = chat?.agentId ?: agent,
                         status = conversation.status,
+                        wakeup = scheduledWakeup(chat),
                         live = conversation.live,
                         liveSince = waitingTasks?.since ?: chat?.run?.startedAt,
                         route = connectionRoute(state.installation, state.transportRoute),
@@ -964,8 +992,8 @@ internal fun ChatPage(
                                 val now = rememberNow(waitingTasks.since)
                                 "${waitingStep(waitingTasks).title} · ${elapsed(waitingTasks.since, now)}"
                             } else if (active) "L’agent travaille…"
-                            else if (chatSleepNotice(chat) != null)
-                                conversationState(chat, agentName, null).status
+                            else if (scheduledWakeup(chat) != null)
+                                waitStatus(chat!!.wakeup!!, rememberNow(chat.wakeup?.id))
                             else if (chat?.run?.status in listOf("failed", "interrupted"))
                                 statusLabel(chat?.run?.status.orEmpty())
                             else "Prêt"
@@ -980,7 +1008,14 @@ internal fun ChatPage(
                             )
                         }
                     }
-                if (error != null && !errorDismissed)
+                if (error != null && !errorDismissed && isOpenCodePrivacyError(error))
+                    OpenCodePrivacyNotice(
+                        enabled = !state.busy,
+                        retry = { chat?.let { setPaused(it, false) } },
+                        create = create,
+                        dismiss = { errorDismissed = true },
+                    )
+                else if (error != null && !errorDismissed)
                     Row(
                         Modifier.fillMaxWidth().padding(start = 20.dp, end = 8.dp),
                         verticalAlignment = Alignment.CenterVertically,
@@ -1146,9 +1181,13 @@ internal fun ChatPage(
                                             LocalOpenSubagent provides openSubagent,
                                             LocalLiveWait provides
                                                 chat?.let {
-                                                    LiveWait(it.wakeup, it.paused) {
-                                                        if (!state.busy) togglePause(it)
-                                                    }
+                                                    LiveWait(
+                                                        liveWakeup(it),
+                                                        it.paused,
+                                                        pauseWait,
+                                                        settled = it.run?.status == "succeeded",
+                                                        busy = state.busy,
+                                                    )
                                                 },
                                         ) {
                                             TimelineRow(
@@ -1158,6 +1197,7 @@ internal fun ChatPage(
                                                 rendering,
                                                 hideRunning = chat?.run?.status == "running",
                                                 active = active,
+                                                livePlan = livePlan,
                                             )
                                         }
                                     }
@@ -1227,6 +1267,7 @@ internal fun ChatPage(
                                 }
                             }
                         }
+                        if (!fullscreen) requestPlan?.let { PlanBar(it) }
                         if (subagentBar) SubagentBar(currentSubagents, active, openSubagent)
                         openedSubagent?.let { selected ->
                             SubagentSheet(
@@ -1395,11 +1436,15 @@ internal fun ChatPage(
                                             Box {
                                                 if (draft.isEmpty())
                                                     Text(
+                                                        // Any message cancels a pending wait,
+                                                        // paused or not.
                                                         if (chat?.paused == true)
-                                                            "Ajouter à la file…"
-                                                        else if (active) "Ajouter un message…"
-                                                        else if (chatSleepNotice(chat) != null)
+                                                            if (liveWakeup(chat) != null)
+                                                                "Ajouter à la file — annule l’attente"
+                                                            else "Ajouter à la file…"
+                                                        else if (liveWakeup(chat) != null)
                                                             "Répondre maintenant annule l’attente"
+                                                        else if (active) "Ajouter un message…"
                                                         else if (skillOptions.isNotEmpty())
                                                             "Votre message… $ pour les skills"
                                                         else "Votre message…",
@@ -1440,7 +1485,8 @@ internal fun ChatPage(
                                                 reasoning,
                                                 defaultModel,
                                                 defaultReasoning,
-                                                inherit = inheritAgentModel,
+                                                inherit = inheritedAssistant != null,
+                                                conversationDefault = inheritConversation,
                                                 enabled = !state.busy,
                                                 refresh = { vm.refreshModels(chosenProvider) },
                                                 provider = chosenProvider,
@@ -1602,7 +1648,7 @@ internal fun ChatPage(
 }
 
 @Composable
-private fun QuestionDialog(
+internal fun QuestionDialog(
     vm: CairnViewModel,
     state: Workspace,
     question: ChatQuestion,
@@ -1629,6 +1675,7 @@ private fun QuestionDialog(
             topBar = { TopAppBar(title = { Text("Votre réponse") }) },
         ) { padding ->
             Column(Modifier.padding(padding).fillMaxSize()) {
+                ConnectionFeedbackNotice()
                 Box(Modifier.weight(1f)) {
                     Page {
                         Text(

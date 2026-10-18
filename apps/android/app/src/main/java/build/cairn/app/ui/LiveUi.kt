@@ -38,15 +38,18 @@ fun rememberLive(
     val scope = rememberCoroutineScope()
     var older by remember(path, api) { mutableStateOf(emptyList<RunEvent>()) }
     var olderHistory by remember(path, api) { mutableStateOf<String?>(null) }
+    var olderEpoch by remember(path, api) { mutableIntStateOf(0) }
     var boundary by remember(path, api) { mutableStateOf<Long?>(null) }
     var moreOlder by remember(path, api) { mutableStateOf(false) }
     var loadingOlder by remember(path, api) { mutableStateOf(false) }
     var olderError by remember(path, api) { mutableStateOf<String?>(null) }
     fun display(snapshot: LiveSnapshot): LiveSnapshot {
-        if (snapshot.history != olderHistory) {
+        // A replaced history, even with the same revision, no longer continues these pages.
+        if (snapshot.history != olderHistory || snapshot.epoch != olderEpoch) {
             older = emptyList()
             boundary = null
             olderHistory = snapshot.history
+            olderEpoch = snapshot.epoch
             olderError = null
         }
         return if (boundary == null) snapshot
@@ -133,6 +136,7 @@ fun rememberLive(
                 loadingOlder = true
                 olderError = null
                 val before = value.oldest
+                val epoch = value.epoch
                 val cacheGeneration = vm.historyCache.generation
                 scope.launch {
                     var pageApplied = false
@@ -142,12 +146,17 @@ fun rememberLive(
                                 path.removeSuffix("/stream") +
                                     "/history?before=$before&history=${segment(history)}"
                             )
-                        if (value.history == history && page.history == history) {
+                        if (
+                            value.history == history &&
+                                value.epoch == epoch &&
+                                page.history == history
+                        ) {
                             require(page.oldest < before || !page.hasOlder) {
                                 "Page d’historique invalide."
                             }
                             older = mergeHistory(page.events, older)
                             olderHistory = history
+                            olderEpoch = epoch
                             boundary = page.oldest
                             moreOlder = page.hasOlder
                             value = display(value)
@@ -185,6 +194,7 @@ fun rememberLive(
                 }
             }
         },
+        followLatest = { session.followsLatest = it },
     )
 }
 
@@ -463,6 +473,7 @@ internal fun rememberHistoryPosition(
     var ready by remember(path) { mutableStateOf(false) }
     val currentFollow by rememberUpdatedState(follow)
     val firstEvent by rememberUpdatedState(live.events.firstOrNull()?.id)
+    val followLatest by rememberUpdatedState(live.followLatest)
     val api = vm.api
     val key = remember(path, api) { vm.historyCache.key(api.cacheScope, api.csrf, path) }
     LaunchedEffect(path, live.catchingUp, visible) {
@@ -488,7 +499,11 @@ internal fun rememberHistoryPosition(
                         firstEvent,
                     )
                 }
-                    .collectLatest { vm.historyCache.position(key, it) }
+                    .collectLatest {
+                        // Published only once restored, never masking a saved reader.
+                        followLatest(it.follow)
+                        vm.historyCache.position(key, it)
+                    }
             } finally {
                 withContext(NonCancellable) {
                     vm.historyCache.position(
@@ -532,6 +547,10 @@ internal data class TimelineEntry(
     val agents: List<Subagent> = emptyList(),
     /** A scheduled wait, shown as one card from its scheduling to its resumption. */
     val wait: ActivityWait? = null,
+    /** The agent's plan, kept up to date by its later updates. */
+    val plan: AgentPlan? = null,
+    /** Where an update changed the plan. */
+    val planUpdate: PlanUpdate? = null,
 )
 
 /** Fold updates in place within a turn; keep messages and errors in chronological order. */
@@ -585,7 +604,9 @@ internal fun timelineEntries(
             if (legacy && event.type == "item.started") legacyTool = folded.size
             val item = event.item()
             val id = item.string("id")
-            if (!event.isMessage() && id.isNotBlank()) {
+            // Each plan update keeps its place: it shows what changed at that moment.
+            val planUpdate = item.string("type") == "todo_list"
+            if (!event.isMessage() && id.isNotBlank() && !planUpdate) {
                 val key = "${item.string("type")}:$id"
                 val index = positions[key]
                 if (index == null) {
@@ -628,13 +649,21 @@ internal fun timelineEntries(
                 )
             else emptySet()
         var via = ""
+        // The plan its updates change, until the agent finishes it or writes another one.
+        var planIndex: Int? = null
         // The wait still pending, by its wakeup ID, so that its result and resumption complete it.
         val waits = mutableMapOf<String, Int>()
         var openWait: Int? = null
+        // The current wait call's reason: its tool row is hidden, and an immediate result omits
+        // it. Only that call may lend it, so it resets once used, once a wakeup carries it, and
+        // each turn.
+        var waitCall = ""
+        var waitReason = ""
         fun updateWait(index: Int, change: (ActivityWait) -> ActivityWait) {
             result[index] = result[index].copy(wait = change(result[index].wait!!))
         }
         for ((eventIndex, event) in folded.withIndex()) {
+            if (event.type == "turn.started") waitReason = ""
             when (event.type) {
                 "chat.sleep",
                 "chat.wait" -> {
@@ -644,6 +673,7 @@ internal fun timelineEntries(
                     flushActivity()
                     openWait = result.size
                     waits[wakeup.id] = result.size
+                    waitReason = ""
                     result.add(
                         TimelineEntry(
                             "wait:${wakeup.id}",
@@ -657,7 +687,8 @@ internal fun timelineEntries(
                 // The condition completed: right away (the agent never waited) or while it waited.
                 "chat.wait_ready" -> {
                     val observation = event.payload?.let(::JsonObject)
-                    val immediate = event.text == "Wait condition already completed"
+                    // Right away, the agent never waited, and this call replaced any wait.
+                    val immediate = event.text == IMMEDIATE_WAIT_RESULT
                     if (immediate) {
                         openWait?.let { index -> updateWait(index) { it.copy(ended = "replaced") } }
                         openWait = null
@@ -703,10 +734,22 @@ internal fun timelineEntries(
                                 "wait-ready:${event.id}",
                                 listOf(event),
                                 false,
-                                wait = ActivityWait(null, observation, observed = true),
+                                wait =
+                                    ActivityWait(
+                                        null,
+                                        observation,
+                                        observed = true,
+                                        // Cairn records the reason with the result; older
+                                        // histories only kept it on the call.
+                                        reason =
+                                            if (immediate)
+                                                observation.string("reason").ifBlank { waitReason }
+                                            else "",
+                                    ),
                             )
                         )
                     }
+                    if (immediate) waitReason = ""
                     continue
                 }
                 "chat.wakeup" -> {
@@ -739,14 +782,36 @@ internal fun timelineEntries(
                 }
                 // A new message cancels the pending wakeup.
                 "chat.user" -> {
-                    openWait?.let { index -> updateWait(index) { it.copy(ended = "message") } }
+                    openWait?.let { index -> updateWait(index) { it.copy(ended = "cancelled") } }
                     openWait = null
+                    // A new request gets its own plan, even when the agent carries the previous
+                    // list over.
+                    planIndex = null
                 }
             }
+            // A run that ends without succeeding never resumes the wait it scheduled. Only its
+            // terminal status says so: a failed turn may be retried, and the retry keeps the
+            // wakeup.
+            val failedTurn =
+                event.type == "status" && event.text in setOf("failed", "cancelled", "interrupted")
+            openWait
+                ?.takeIf { failedTurn && result[it].wait?.observed != true }
+                ?.let { index ->
+                    updateWait(index) { it.copy(ended = "cancelled") }
+                    openWait = null
+                }
             val waitTool =
                 event.item().let { it.string("type") == "mcp_tool_call" && isWaitTool(it) }
             // The wait shows as its own card; only a call that failed stays among the tools.
-            if (waitTool && !presentActivity(event).failed) continue
+            if (waitTool && !presentActivity(event).failed) {
+                // A provider may announce the call before its arguments: keep what the same call
+                // said.
+                val callId = event.item().string("id")
+                val reason = toolArguments(event.item()).string("reason")
+                if (callId != waitCall || reason.isNotBlank()) waitReason = reason
+                waitCall = callId
+                continue
+            }
             val route = event.activityData()?.get("route") as? JsonObject
             // An attempt may name the provider of its replies; the next attempt ends that label.
             val data = event.activityData()
@@ -758,6 +823,70 @@ internal fun timelineEntries(
             if (event.type == "status" && route.string("providerName").isNotBlank()) {
                 via = route.string("providerName")
                 if (chat) continue
+            }
+            // The agent's own plan shows apart from its tools. A call that failed did not change
+            // it.
+            val planItem =
+                event.item()?.takeIf {
+                    it.string("type") == "todo_list" && it.string("parent_id").isBlank()
+                }
+            if (planItem != null) {
+                val steps = planSteps(planItem)
+                if (steps.isEmpty() || planItem.string("status") == "failed") continue
+                val current = planIndex?.let { result[it].plan }
+                val explanation = planItem.string("explanation")
+                if (current != null && samePlan(current.steps, steps)) {
+                    val updatedExplanation = explanation.ifBlank { current.explanation }
+                    if (steps != current.steps || updatedExplanation != current.explanation) {
+                        val index = checkNotNull(planIndex)
+                        result[index] =
+                            result[index].copy(
+                                plan =
+                                    current.copy(
+                                        steps = steps,
+                                        explanation = updatedExplanation,
+                                        updatedAt = event.createdAt,
+                                    )
+                            )
+                    }
+                    continue
+                }
+                if (current == null || !continuesPlan(current.steps, steps)) {
+                    flushActivity()
+                    planIndex = result.size
+                    result.add(
+                        TimelineEntry(
+                            "plan:${event.id}",
+                            listOf(event),
+                            false,
+                            plan = AgentPlan(steps, explanation, event.createdAt, event.createdAt),
+                        )
+                    )
+                    continue
+                }
+                val index = checkNotNull(planIndex)
+                val change = planChange(current.steps, steps)
+                result[index] =
+                    result[index].copy(
+                        plan =
+                            current.copy(
+                                steps = steps,
+                                explanation = explanation.ifBlank { current.explanation },
+                                updatedAt = event.createdAt,
+                            )
+                    )
+                if (change != null) {
+                    flushActivity()
+                    result.add(
+                        TimelineEntry(
+                            "plan-update:${event.id}",
+                            listOf(event),
+                            false,
+                            planUpdate = PlanUpdate(result[index].key, change, steps.progress()),
+                        )
+                    )
+                }
+                continue
             }
             val agent = subagents.anchors[event.id]
             if (agent != null) {
@@ -901,6 +1030,8 @@ internal fun TimelineRow(
     hideRunning: Boolean = false,
     /** The run is still active, so its subagents may still report. */
     active: Boolean = false,
+    /** The plan the agent still follows, if any. */
+    livePlan: String? = null,
 ) {
     if (entry.files.isNotEmpty()) ArtifactStrip(vm, entry.files)
     else if (entry.agents.isNotEmpty()) SubagentTeam(entry.agents, active, identity = entry.key)
@@ -913,6 +1044,8 @@ internal fun TimelineRow(
             )
         }
     else if (entry.wait != null) WaitCard(entry.wait)
+    else if (entry.plan != null) PlanCard(entry.plan, live = active && livePlan == entry.key)
+    else if (entry.planUpdate != null) PlanUpdateRow(entry.planUpdate)
     else if (entry.notice) ChatNotice(presentActivity(entry.events.single()))
     else {
         val presentations = remember(entry.events) { entry.events.map(::presentActivity) }

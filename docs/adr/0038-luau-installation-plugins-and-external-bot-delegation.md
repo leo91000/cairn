@@ -2,6 +2,9 @@
 
 Date: 2026-10-12.
 
+Arbitrary native execution and the built-in-only 1Password capability are
+superseded by [ADR-0045](0045-declarative-plugin-contributions.md).
+
 ## Decision
 
 Installation plugins use a versioned host contract and source-only Luau packages

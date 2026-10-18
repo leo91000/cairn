@@ -12,7 +12,7 @@ use cairn_installation::{
     plugins::{
         capabilities,
         connections::{self, Connection},
-        discord, registry, runtime, work,
+        registry, runtime, socket, work,
     },
     service::Service,
     validation::text,
@@ -89,15 +89,80 @@ fn message(id: &str, author: &str, content: &str) -> Value {
     })
 }
 
+/// Feeds one Gateway dispatch to the Discord package's transport worker, after READY
+/// and the given threads under the channel, as Discord would. Returns whether a
+/// person's message was queued for the package (access requests are not).
+async fn gateway(
+    s: &Service,
+    connection: &Connection,
+    threads: &[&str],
+    name: &str,
+    data: Value,
+) -> cairn_installation::error::Result<bool> {
+    let mut session = session(s, "discord").await;
+    let (link, _commands) = socket::Link::channel();
+    let mut frames = vec![(
+        "READY",
+        json!({ "session_id": "synthetic_session", "user": { "id": "400", "username": "Cairn", "bot": true } }),
+    )];
+    for thread in threads {
+        frames.push((
+            "THREAD_CREATE",
+            json!({ "id": thread, "guild_id": "100", "parent_id": "200" }),
+        ));
+    }
+    frames.push((name, data));
+    let start = json!({ "type": "start", "settings": connection.settings });
+    let result = async {
+        socket::deliver(s, connection, &mut session, &link, start).await?;
+        let personal = || async {
+            let events = s.store.list(work::EVENTS).await?;
+            cairn_installation::error::Result::Ok(
+                events
+                    .iter()
+                    .filter(|event| event["authorId"].is_string())
+                    .count(),
+            )
+        };
+        let mut queued = false;
+        for (sequence, (name, data)) in frames.into_iter().enumerate() {
+            let before = personal().await?;
+            let frame = json!({ "op": 0, "s": sequence + 1, "t": name, "d": data });
+            let event = json!({ "type": "message", "text": frame.to_string() });
+            socket::deliver(s, connection, &mut session, &link, event).await?;
+            queued = personal().await? > before;
+        }
+        Ok(queued)
+    }
+    .await;
+    session.stop().await;
+    result
+}
+
 async fn accept(
     s: &Service,
     connection: &Connection,
     value: Value,
 ) -> cairn_installation::error::Result<bool> {
-    match discord::inbound(connection, "400", &std::collections::HashSet::new(), &value) {
-        Some(inbound) => work::accept(s, connection, inbound).await,
-        None => Ok(false),
-    }
+    gateway(s, connection, &[], "MESSAGE_CREATE", value).await
+}
+
+async fn accept_in(
+    s: &Service,
+    connection: &Connection,
+    threads: &[&str],
+    value: Value,
+) -> cairn_installation::error::Result<bool> {
+    gateway(s, connection, threads, "MESSAGE_CREATE", value).await
+}
+
+async fn interact(
+    s: &Service,
+    connection: &Connection,
+    threads: &[&str],
+    value: Value,
+) -> cairn_installation::error::Result<bool> {
+    gateway(s, connection, threads, "INTERACTION_CREATE", value).await
 }
 
 /// What a handler acts for: here, the Discord package handling `event`.
@@ -106,6 +171,8 @@ fn context(connection: &Connection, event: &Value) -> capabilities::Context {
         connection: connection.clone(),
         manifest: registry::builtin("discord").unwrap().manifest,
         event: event.clone(),
+        link: None,
+        draft: None,
     }
 }
 
@@ -227,16 +294,54 @@ async fn worker_sessions_enforce_capabilities_deadlines_and_keep_state() {
             &worker(),
             &onepassword.manifest,
             &onepassword.source,
-            json!({ "operation": "read" }),
+            "command",
+            json!({
+                "command": "read",
+                "arguments": { "account": "a1", "reference": "op://vault/item/field" },
+                "instances": [{ "id": "a1", "name": "Production" }],
+            }),
             |method, input| async move {
-                assert_eq!(method, "onepassword.read");
-                assert_eq!(input["operation"], "read");
-                Ok(json!({ "value": "synthetic_secret" }))
+                // The script names the secret; the host injects its value into `op`.
+                assert_eq!(method, "exec.run");
+                assert_eq!(input["program"], "op");
+                assert_eq!(input["instance"], "a1");
+                assert_eq!(
+                    input["env"]["OP_SERVICE_ACCOUNT_TOKEN"],
+                    json!({ "secret": "token" })
+                );
+                assert_eq!(
+                    input["args"],
+                    json!(["read", "--no-newline", "op://vault/item/field"])
+                );
+                Ok(json!({ "status": 0, "stdout": "synthetic_secret", "stderr": "" }))
             },
         )
         .await
         .unwrap();
-    assert_eq!(value["value"], "synthetic_secret");
+    assert_eq!(value, "synthetic_secret");
+    // A package's own message reaches people; other script errors never do.
+    let error = host
+        .invoke(
+            &worker(),
+            &onepassword.manifest,
+            &onepassword.source,
+            "command",
+            json!({
+                "command": "vaults",
+                "arguments": { "account": "a2" },
+                "instances": [{ "id": "a1", "name": "Production" }],
+            }),
+            |_, _| async { unreachable!() },
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(
+        error,
+        format!(
+            "{}This 1Password account is not authorized.",
+            cairn_plugin_api::REJECTED
+        )
+    );
 
     let calls = AtomicUsize::new(0);
     let error = host
@@ -244,6 +349,7 @@ async fn worker_sessions_enforce_capabilities_deadlines_and_keep_state() {
             &worker(),
             &onepassword.manifest,
             "return { command = function(input) return cairn.call('native.execute', input) end }",
+            "command",
             Value::Null,
             |_, _| {
                 calls.fetch_add(1, Ordering::SeqCst);
@@ -259,6 +365,7 @@ async fn worker_sessions_enforce_capabilities_deadlines_and_keep_state() {
             &worker(),
             &onepassword.manifest,
             "return { command = function(input) error(input.secret) end }",
+            "command",
             json!({ "secret": "synthetic_secret" }),
             |_, _| async { unreachable!() },
         )
@@ -274,7 +381,7 @@ async fn worker_sessions_enforce_capabilities_deadlines_and_keep_state() {
     );
 
     let manifest: Manifest = serde_json::from_value(json!({
-        "id": "probe", "name": "Probe", "version": "1", "apiVersion": 1, "capabilities": ["storage"]
+        "id": "probe", "name": "Probe", "version": "1", "apiVersion": 2, "capabilities": ["storage"]
     }))
     .unwrap();
     let mut session = host
@@ -460,15 +567,14 @@ async fn discord_script_runs_a_conversation_in_a_thread_end_to_end() {
     let custom = text(&buttons[1], "custom_id").to_owned();
 
     // A button press is acknowledged by the transport and answers the agent.
-    let mut threads = std::collections::HashSet::new();
-    threads.insert("500".to_owned());
+    let threads = ["500"];
     let click = json!({
         "id": "800", "token": "synthetic_interaction", "type": 3, "guild_id": "100", "channel_id": "500",
         "member": { "user": { "id": "300", "username": "sarah" } },
         "message": { "id": "9002", "author": { "id": "400" } },
         "data": { "custom_id": custom },
     });
-    discord::interact(&s, &connection, "400", &threads, &click)
+    interact(&s, &connection, &threads, click.clone())
         .await
         .unwrap();
     assert_eq!(
@@ -595,13 +701,9 @@ async fn discord_script_runs_a_conversation_in_a_thread_end_to_end() {
     let mut follow = message("501", "300", "<@400> also check staging");
     follow["channel_id"] = json!("500");
     assert!(
-        work::accept(
-            &s,
-            &connection,
-            discord::inbound(&connection, "400", &threads, &follow).unwrap()
-        )
-        .await
-        .unwrap()
+        accept_in(&s, &connection, &threads, follow.clone())
+            .await
+            .unwrap()
     );
     runtime::pump(&s, &connection, &mut session).await.unwrap();
     assert_eq!(
@@ -611,13 +713,9 @@ async fn discord_script_runs_a_conversation_in_a_thread_end_to_end() {
     );
     let mut stop = message("502", "300", "<@400> stop");
     stop["channel_id"] = json!("500");
-    work::accept(
-        &s,
-        &connection,
-        discord::inbound(&connection, "400", &threads, &stop).unwrap(),
-    )
-    .await
-    .unwrap();
+    accept_in(&s, &connection, &threads, stop.clone())
+        .await
+        .unwrap();
     runtime::pump(&s, &connection, &mut session).await.unwrap();
     assert_eq!(s.get("chats", &chat).await.unwrap()["paused"], true);
     assert_eq!(
@@ -703,17 +801,17 @@ async fn public_support_channels_need_a_limited_agent_and_stay_quiet_when_nothin
         .await
         .is_err()
     );
+    // Answering every message needs Message Content: the package turns it on.
     let missing = json!({ "guildId": "100", "channelId": "200", "everyMessage": true });
-    assert!(
-        connections::save(
-            &s,
-            "discord",
-            &input(&support, missing),
-            Some(&connection.id)
-        )
-        .await
-        .is_err()
-    );
+    let saved = connections::save(
+        &s,
+        "discord",
+        &input(&support, missing),
+        Some(&connection.id),
+    )
+    .await
+    .unwrap();
+    assert_eq!(saved["settings"]["messageContent"], true);
     let saved = connections::save(
         &s,
         "discord",
@@ -807,8 +905,7 @@ async fn public_support_channels_need_a_limited_agent_and_stay_quiet_when_nothin
     );
 
     // Only whoever started a conversation can stop it.
-    let mut threads = std::collections::HashSet::new();
-    threads.insert("601".to_owned());
+    let threads = ["601"];
     let stop = |id: &str, author: &str| {
         let mut value = message(id, author, "<@400> stop");
         value["channel_id"] = json!("601");
@@ -817,8 +914,9 @@ async fn public_support_channels_need_a_limited_agent_and_stay_quiet_when_nothin
     let binding = s.store.list(connections::KIND).await.unwrap();
     assert_eq!(binding[0]["accessMode"], "everyone");
     for (id, author) in [("603", "302"), ("604", "301")] {
-        let inbound = discord::inbound(&connection, "400", &threads, &stop(id, author)).unwrap();
-        work::accept(&s, &connection, inbound).await.unwrap();
+        accept_in(&s, &connection, &threads, stop(id, author))
+            .await
+            .unwrap();
         runtime::pump(&s, &connection, &mut session).await.unwrap();
     }
     assert_eq!(
@@ -838,11 +936,18 @@ async fn public_support_channels_need_a_limited_agent_and_stay_quiet_when_nothin
         1
     );
 
-    // Granting the agent 1Password later suspends the public connection.
-    s.store
-        .put("onepassword", json!({ "id": cairn_installation::config::id(), "name": "Prod", "agentIds": [support["id"]] }))
-        .await
-        .unwrap();
+    // Granting the agent a plugin such as 1Password later suspends the public connection.
+    connections::save(
+        &s,
+        "onepassword",
+        &json!({
+            "name": "Prod", "enabled": true,
+            "secrets": { "token": "ops_fixture" }, "agentIds": [support["id"]],
+        }),
+        None,
+    )
+    .await
+    .unwrap();
     assert_eq!(
         accept(&s, &connection, chatter("605", "303", "hello?"))
             .await
@@ -1279,8 +1384,7 @@ async fn public_question_partial_answers_require_the_starters_authority() {
         connection.id,
         cairn_installation::auth::hex_digest(&format!("question:520:{question}"))
     );
-    let mut threads = std::collections::HashSet::new();
-    threads.insert("520".into());
+    let threads = ["520"];
     // A stranger's button cannot poison the first field.
     let click = json!({
         "id": "801", "token": "synthetic_interaction", "type": 3, "guild_id": "100", "channel_id": "520",
@@ -1288,7 +1392,7 @@ async fn public_question_partial_answers_require_the_starters_authority() {
         "message": { "id": "9002", "author": { "id": "400" } },
         "data": { "custom_id": format!("a:{question}:0:1") },
     });
-    discord::interact(&s, &connection, "400", &threads, &click)
+    interact(&s, &connection, &threads, click.clone())
         .await
         .unwrap();
     runtime::pump(&s, &connection, &mut session).await.unwrap();
@@ -1304,13 +1408,9 @@ async fn public_question_partial_answers_require_the_starters_authority() {
     ] {
         let mut value = message(id, author, answer);
         value["channel_id"] = json!("520");
-        work::accept(
-            &s,
-            &connection,
-            discord::inbound(&connection, "400", &threads, &value).unwrap(),
-        )
-        .await
-        .unwrap();
+        accept_in(&s, &connection, &threads, value.clone())
+            .await
+            .unwrap();
         runtime::pump(&s, &connection, &mut session).await.unwrap();
     }
     let queued = s
@@ -1469,7 +1569,7 @@ async fn channel_fallback_questions_retry_and_controls_route_to_the_right_conver
         .unwrap();
     assert_eq!(pending["status"], "answering");
     // Stop buttons include the explicit conversation even without a shared thread.
-    discord::interact(&s, &connection, "400", &std::collections::HashSet::new(), &json!({
+    interact(&s, &connection, &[], json!({
         "id": "802", "token": "synthetic_interaction", "type": 3, "guild_id": "100", "channel_id": "200",
         "member": { "user": { "id": "300", "username": "sarah" } },
         "message": { "id": "9002", "author": { "id": "400" } },
@@ -1662,7 +1762,7 @@ fn pinger(version: &str, capabilities: &[&str]) -> Value {
             "name": "Pinger",
             "version": version,
             "description": "Pings a status API.",
-            "apiVersion": 1,
+            "apiVersion": 2,
             "capabilities": capabilities,
             "hosts": ["api.example.com"],
             "credential": { "label": "API key", "header": "x-api-key" },
@@ -1689,8 +1789,8 @@ async fn installed_packages_need_approval_and_reach_only_declared_hosts() {
     let (mock, server) = mock(&s).await;
     for invalid in [
         json!({ "manifest": pinger("1.0.0", &["onepassword.read"])["manifest"], "source": "return {}" }),
-        json!({ "manifest": { "id": "discord", "name": "Fake", "version": "1", "apiVersion": 1, "capabilities": [] }, "source": "return {}" }),
-        json!({ "manifest": { "id": "broken", "name": "Broken", "version": "1", "apiVersion": 1, "capabilities": [] }, "source": "return function() end" }),
+        json!({ "manifest": { "id": "discord", "name": "Fake", "version": "1", "apiVersion": 2, "capabilities": [] }, "source": "return {}" }),
+        json!({ "manifest": { "id": "broken", "name": "Broken", "version": "1", "apiVersion": 2, "capabilities": [] }, "source": "return function() end" }),
     ] {
         assert!(registry::install(&s, &invalid).await.is_err());
     }
@@ -1924,4 +2024,91 @@ async fn plugin_management_is_owner_only_and_mcp_never_returns_secret_reads() {
             .unwrap()
             .contains("synthetic_discord_token")
     );
+}
+
+#[tokio::test]
+async fn installed_packages_can_be_split_into_modules_and_any_file_change_needs_review() {
+    let (root, s, _) = service().await;
+    let package = |modules: Value| {
+        json!({
+            "manifest": {
+                "id": "splitter", "name": "Splitter", "version": "1.0.0", "apiVersion": 2,
+                "capabilities": [],
+            },
+            "source": "local greet = require('./lib/greet')\nreturn { probe = function(event) return greet.hello(event.name) end }",
+            "modules": modules,
+        })
+    };
+    for invalid in [
+        json!({ "../escape.luau": "return {}" }),
+        json!({ "lib/Greet.luau": "return {}" }),
+        json!({ "lib/greet.luau": 42 }),
+        json!({ "lib/other.luau": "return {}" }),
+        json!({ "lib/greet.luau": "return require('./missing')" }),
+    ] {
+        assert!(
+            registry::install(&s, &package(invalid.clone()))
+                .await
+                .is_err(),
+            "{invalid}"
+        );
+    }
+    let modules = json!({
+        "lib/greet.luau": "local text = require('./text')\nreturn { hello = function(name) return text.upper('hello ') .. name end }",
+        "lib/text.luau": "return { upper = string.upper }",
+    });
+    let installed = registry::install(&s, &package(modules)).await.unwrap();
+    assert_eq!(
+        installed["files"],
+        json!([
+            { "path": "main.luau", "bytes": 106 },
+            { "path": "lib/greet.luau", "bytes": 104 },
+            { "path": "lib/text.luau", "bytes": 31 },
+        ])
+    );
+    let directory = root.path().join("data/plugins/splitter/1.0.0");
+    assert!(directory.join("lib/greet.luau").is_file());
+    registry::approve(&s, "splitter", "1.0.0", text(&installed, "digest"))
+        .await
+        .unwrap();
+    let active = registry::active(&s, "splitter").await.unwrap();
+    assert_eq!(active.source.modules.len(), 2);
+    let result = s
+        .plugins
+        .host
+        .invoke(
+            &worker(),
+            &active.manifest,
+            &active.source,
+            "probe",
+            json!({ "name": "Ada" }),
+            |_, _| async { Err(Denied("forbidden")) },
+        )
+        .await
+        .unwrap();
+    assert_eq!(result, "HELLO Ada");
+
+    // Editing a module, adding one or linking one withdraws the approval.
+    let original = std::fs::read_to_string(directory.join("lib/text.luau")).unwrap();
+    std::fs::write(
+        directory.join("lib/text.luau"),
+        "return { upper = string.lower }",
+    )
+    .unwrap();
+    assert_eq!(
+        registry::active(&s, "splitter").await.err().unwrap().status,
+        403
+    );
+    std::fs::write(directory.join("lib/text.luau"), &original).unwrap();
+    registry::active(&s, "splitter").await.unwrap();
+    std::fs::write(directory.join("extra.luau"), "return {}").unwrap();
+    assert_eq!(
+        registry::active(&s, "splitter").await.err().unwrap().status,
+        403
+    );
+    std::fs::remove_file(directory.join("extra.luau")).unwrap();
+    std::os::unix::fs::symlink(directory.join("main.luau"), directory.join("link.luau")).unwrap();
+    assert!(registry::active(&s, "splitter").await.is_err());
+    std::fs::remove_file(directory.join("link.luau")).unwrap();
+    registry::active(&s, "splitter").await.unwrap();
 }

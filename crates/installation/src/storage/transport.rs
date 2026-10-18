@@ -91,7 +91,8 @@ fn native_drive(id: &str, path: &str) -> Value {
         "is_root_device": false,
         "is_read_only": false,
         "cache_type": "Writeback",
-        "io_engine": "Async"
+        "io_engine": "Async",
+        "discard": true
     })
 }
 

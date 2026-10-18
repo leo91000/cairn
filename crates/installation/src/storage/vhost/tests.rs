@@ -61,6 +61,17 @@ impl Disk for FixtureDisk {
         Ok(())
     }
 
+    fn discard(&self, offset: u64, length: usize) -> io::Result<()> {
+        self.events
+            .lock()
+            .unwrap()
+            .push(format!("discard:{offset}:{length}"));
+        if self.fail {
+            return Err(error("Injected discard failure"));
+        }
+        Ok(())
+    }
+
     fn sync(&self) -> io::Result<()> {
         self.events.lock().unwrap().push("flush".into());
         Ok(())
@@ -473,5 +484,56 @@ fn read_failures_are_per_request_and_panics_fail_the_queue_without_killing_worke
                 expected
             );
         }
+    }
+}
+
+#[test]
+fn discard_fences_writes_and_reads_and_reports_failure() {
+    for fail in [false, true] {
+        let (backend, vring, disk, statuses) = fixture(
+            &[(1, 512), (VIRTIO_BLK_T_DISCARD, 16), (4, 0), (0, 512)],
+            fail,
+        );
+        let memory = backend.memory.memory();
+        let mut range = [0; 16];
+        range[..8].copy_from_slice(&8u64.to_le_bytes());
+        range[8..12].copy_from_slice(&16u32.to_le_bytes());
+        memory
+            .write_slice(&range, GuestAddress(PAYLOAD + 512))
+            .unwrap();
+        backend.process_queue(&vring).unwrap();
+        assert_eq!(
+            *disk.events.lock().unwrap(),
+            ["write:1", "discard:4096:8192", "flush", "read"]
+        );
+        assert_eq!(memory.read_obj::<u8>(statuses[1]).unwrap(), u8::from(fail));
+        assert_ne!(backend.features() & (1 << VIRTIO_BLK_F_DISCARD), 0);
+        assert_eq!(
+            u32::from_le_bytes(backend.get_config(36, 4).try_into().unwrap()),
+            (MAX_BYTES / 512) as u32
+        );
+    }
+}
+
+#[test]
+fn invalid_discard_never_reaches_the_disk() {
+    for (sector, sectors, flags) in [
+        (u64::MAX, 1u32, 0u32),
+        (65535, 2, 0),
+        (0, (MAX_BYTES / 512 + 1) as u32, 0),
+        (0, 8, 1),
+    ] {
+        let (backend, vring, disk, _) = fixture(&[(VIRTIO_BLK_T_DISCARD, 16)], false);
+        let mut range = [0; 16];
+        range[..8].copy_from_slice(&sector.to_le_bytes());
+        range[8..12].copy_from_slice(&sectors.to_le_bytes());
+        range[12..].copy_from_slice(&flags.to_le_bytes());
+        backend
+            .memory
+            .memory()
+            .write_slice(&range, GuestAddress(PAYLOAD))
+            .unwrap();
+        assert!(backend.process_queue(&vring).is_err());
+        assert!(disk.events.lock().unwrap().is_empty());
     }
 }

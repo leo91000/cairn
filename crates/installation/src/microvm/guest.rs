@@ -162,8 +162,25 @@ async fn handle(
                 codex_ready: codex.ready(),
                 workspace_disks: true,
                 snapshot_clones: restored::kvm_is_deferred(),
+                entrypoint_reuse: true,
             };
             wire::write(&mut write, &status).await
+        }
+        GuestRequest::ReuseEntrypoint { digest } => {
+            let _guard = running
+                .try_lock()
+                .map_err(|_| Error::conflict("Guest already running."))?;
+            // A prepared native service owns this path until the VM is retired.
+            if codex.socket()?.is_some() {
+                return wire::write(&mut write, &Reply::ok(false)).await;
+            }
+            let reused = super::entrypoint::reuse(&digest)
+                .await
+                .unwrap_or_else(|error| {
+                    tracing::warn!(message = %error.message, "Guest entrypoint reuse skipped");
+                    false
+                });
+            wire::write(&mut write, &Reply::ok(reused)).await
         }
         GuestRequest::WarmCodex => {
             let _guard = running

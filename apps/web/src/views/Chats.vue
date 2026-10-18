@@ -7,6 +7,7 @@ import type {
   ChatMessage,
 } from '../../../../packages/contracts/chats'
 import type { DraftState } from '../attachments'
+import type { LiveWait } from '../chat-wait'
 import {
   computed,
   inject,
@@ -27,9 +28,9 @@ import {
   MAX_MESSAGE_SIZE,
   validateSelection,
 } from '../attachments'
-import { chatDelivery, chatSleepNotice, chatWaitNotice } from '../chat-delivery'
+import { chatDelivery, chatWaitNotice, scheduledWakeup } from '../chat-delivery'
 import { chatList as chats, publishChats } from '../chat-list'
-import { waitStatus } from '../chat-wait'
+import { liveWakeup, waitStatus } from '../chat-wait'
 import ActivityFeed from '../components/ActivityFeed.vue'
 import AgentAvatar from '../components/AgentAvatar.vue'
 import AssistantPicker from '../components/AssistantPicker.vue'
@@ -43,6 +44,7 @@ import Icon from '../components/Icon.vue'
 import MessageAttachments from '../components/MessageAttachments.vue'
 import Modal from '../components/Modal.vue'
 import NodeExecution from '../components/NodeExecution.vue'
+import PlanBar from '../components/PlanBar.vue'
 import QueueStrip from '../components/QueueStrip.vue'
 import SkillTextarea from '../components/SkillTextarea.vue'
 import SubagentBar from '../components/SubagentBar.vue'
@@ -54,6 +56,7 @@ import VirtualSelect from '../components/VirtualSelect.vue'
 import {
   ArrowDown,
   ArrowUp,
+  ArrowUpRight,
   Bell,
   Bot,
   Check,
@@ -70,6 +73,7 @@ import {
   Plug,
   Plus,
   Search,
+  Shield,
   Trash2,
   X,
   Zap,
@@ -174,6 +178,7 @@ function switcherAnchor() {
 const error = ref('')
 const dismissedError = ref(false)
 const visibleError = computed(() => error.value || detail.value?.error || (detail.value?.run?.status === 'failed' ? detail.value.run.error || 'The response stopped before finishing. Resume the conversation to continue.' : ''))
+const openCodeRegionBlocked = computed(() => visibleError.value.startsWith('OpenCode Go requires Global regions for this model.'))
 watch(() => [visibleError.value, detail.value?.id, detail.value?.run?.finishedAt], () => {
   dismissedError.value = false
 })
@@ -282,15 +287,17 @@ function pasteFiles(event: ClipboardEvent) {
 
 const active = computed(() => !!detail.value?.run && ['queued', 'running'].includes(detail.value.run.status))
 const suspended = computed(() => isExclusivelySuspended(detail.value?.run))
+// The plan of the current request stays in sight beside the composer while the agent follows it.
+const currentPlan = computed(() => runActive.value && !suspended.value ? activity.value?.plan : undefined)
 const retryNotice = useRetryNotice(() => detail.value?.run)
-const sleepNotice = computed(() => chatSleepNotice(detail.value))
+const scheduled = computed(() => scheduledWakeup(detail.value))
 // The scheduled wait shows as a card in the conversation; these notices explain a run that cannot start.
 const waitNotice = computed(() => retryNotice.value
   ? { account: null, message: retryNotice.value }
   : chatWaitNotice(detail.value?.run))
 const waitNow = ref(Date.now())
 let waitClock: ReturnType<typeof setInterval> | undefined
-watch(() => !!sleepNotice.value, (waiting) => {
+watch(() => !!scheduled.value, (waiting) => {
   clearInterval(waitClock)
   waitNow.value = Date.now()
   if (waiting)
@@ -298,11 +305,20 @@ watch(() => !!sleepNotice.value, (waiting) => {
 }, { immediate: true })
 onBeforeUnmount(() => clearInterval(waitClock))
 const sleepStatus = computed(() => {
-  const wakeup = sleepNotice.value?.wakeup
+  const wakeup = scheduled.value
   if (!wakeup)
     return null
   return waitStatus(wakeup, waitNow.value)
 })
+// One object per conversation state: a new one on each render would re-render the whole feed.
+const liveWait = computed<LiveWait | undefined>(() => detail.value
+  ? {
+      wakeup: liveWakeup(detail.value),
+      paused: detail.value.paused,
+      settled: detail.value.run?.status === 'succeeded',
+      busy: busy.value,
+    }
+  : undefined)
 const backgroundTasks = computed(() => detail.value?.run?.status === 'running' ? backgroundWait(events.value)?.tasks.length ?? 0 : 0)
 const chatStatus = computed(() => {
   const status = detail.value?.run?.status
@@ -315,8 +331,9 @@ const chatStatus = computed(() => {
 
   if (suspended.value)
     return exclusiveSuspensionLabel
+  // "Waiting" names the Fil section of scheduled waits; a run waiting for a runner is queued.
   if (status === 'queued')
-    return 'Waiting'
+    return 'Queued'
   if (status === 'running') {
     if (backgroundTasks.value)
       return backgroundTasks.value === 1 ? 'Background task' : 'Background tasks'
@@ -352,7 +369,13 @@ const chosenProvider = computed({
   },
 })
 const switchingProvider = computed(() => !!detail.value?.run && chosenProvider.value !== currentProvider.value)
-const inheritAgentModel = computed(() => chosenProvider.value === (selectedAgent.value?.provider || 'codex'))
+const conversationAssistant = computed(() => detail.value?.run?.snapshot.agent)
+const inheritConversation = computed(() => chosenProvider.value === conversationAssistant.value?.provider)
+const inheritedAssistant = computed(() => {
+  if (inheritConversation.value)
+    return conversationAssistant.value
+  return chosenProvider.value === selectedAgent.value?.provider ? selectedAgent.value : undefined
+})
 const skills = computed(() => chatSkills(state.skills, selectedAgent.value, detail.value ? detail.value.projectId : projectId.value))
 const skillNames = computed(() => skills.value.map(skill => skill.name))
 const projects = computed(() => [{
@@ -394,9 +417,12 @@ useReadWhileOpen(() => {
     return null
   return { key: `chat:${chat.id}`, at: run.finishedAt }
 })
-watch(live.error, (value) => {
+// A stream error leaves on its own once the stream recovers; the connection pill covers the outage.
+watch(live.error, (value, previous) => {
   if (value)
     error.value = value
+  else if (error.value === previous)
+    error.value = ''
 })
 onBeforeUnmount(clearAttachments)
 let submission: {
@@ -469,15 +495,19 @@ async function send(mode: 'queue' | 'steer' = 'queue') {
       return
 
     const attachmentIds = attachments.value.map(attachment => attachment.id)
+    // A chat can use a different model from its saved agent. Keep the displayed
+    // conversation selection explicit on the wire, including after a reload.
+    const selectedModel = model.value || inheritedAssistant.value?.model || ''
+    const selectedReasoning = reasoning.value || (!model.value ? inheritedAssistant.value?.reasoning : '') || ''
     // Retain the id after a network failure so retry cannot duplicate a message.
-    if (!submission || submission.text !== text || submission.mode !== mode || submission.provider !== chosenProvider.value || submission.model !== model.value || submission.reasoning !== reasoning.value || submission.attachmentIds.join() !== attachmentIds.join()) {
+    if (!submission || submission.text !== text || submission.mode !== mode || submission.provider !== chosenProvider.value || submission.model !== selectedModel || submission.reasoning !== selectedReasoning || submission.attachmentIds.join() !== attachmentIds.join()) {
       submission = {
         id: crypto.randomUUID(),
         text,
         mode,
         provider: chosenProvider.value,
-        model: model.value,
-        reasoning: reasoning.value,
+        model: selectedModel,
+        reasoning: selectedReasoning,
         attachmentIds,
       }
     }
@@ -525,13 +555,17 @@ const newSession = ref(false)
 
 async function action(name: 'pause' | 'stop' | 'restore' | 'new-session', body?: object) {
   if (!detail.value || busy.value)
-    return
+    return false
   busy.value = true
   error.value = ''
   try {
     await api(`/chats/${detail.value.id}/${name}`, { method: 'POST', ...(body ? { body: JSON.stringify(body) } : {}) })
+    return true
   }
-  catch (e) { error.value = (e as Error).message }
+  catch (e) {
+    error.value = (e as Error).message
+    return false
+  }
   finally { busy.value = false }
 }
 
@@ -601,7 +635,7 @@ function key(event: KeyboardEvent) {
   <Modal v-if="newSession" title="Start a fresh agent session?" @close="newSession = false">
     <div class="p-6">
       <p>The conversation history and working files will be preserved. The next message will use a new native agent session.</p>
-      <UiButton :disabled="busy" @click="action('new-session', { confirm: true }).then(() => { if (!error) newSession = false })">
+      <UiButton :disabled="busy" @click="action('new-session', { confirm: true }).then((succeeded) => { if (succeeded) newSession = false })">
         Confirm new session
       </UiButton>
     </div>
@@ -886,7 +920,7 @@ function key(event: KeyboardEvent) {
             :outcome="detail?.run?.status === 'succeeded' ? detail.run.outcome : null"
             :sending="delivery.sending"
             :events="events"
-            :wakeup="detail ? { wakeup: detail.wakeup ?? null, paused: detail.paused } : undefined"
+            :wakeup="liveWait"
             :active="detail?.run?.status === 'running'"
             :suspended="suspended"
             :agent-id="detail?.agentId || selectedAgent?.id"
@@ -903,7 +937,7 @@ function key(event: KeyboardEvent) {
             chat
             @load="live.loadOlder"
             @position="live.savePosition"
-            @pause-wait="action('pause', { paused: true })"
+            @pause-wait="busy || action('pause', { paused: true })"
           />
           <div v-if="!inactive" class="mx-auto w-full max-w-205 shrink-0 px-5 pb-1 pt-3 phone:px-0 phone:pt-2">
             <ChatQuestions
@@ -913,7 +947,50 @@ function key(event: KeyboardEvent) {
               :suspended="suspended"
               :highlighted="typeof route.query.question === 'string' ? route.query.question : undefined"
             />
-            <UiAlert v-if="visibleError && !dismissedError" class="mb-3 flex items-start gap-2">
+            <section
+              v-if="openCodeRegionBlocked && !dismissedError"
+              role="alert"
+              aria-label="OpenCode Privacy settings"
+              class="mb-3 rounded-2xl border border-warning/25 bg-surface p-4 phone:p-3.5"
+            >
+              <div class="flex items-start gap-3">
+                <span class="grid size-8 shrink-0 place-items-center rounded-xl bg-warning/10 text-warning"><Icon :name="Shield" :size="17" /></span>
+                <div class="min-w-0 flex-1">
+                  <h3 class="text-sm font-semibold text-ink">
+                    This model needs a Privacy change
+                  </h3>
+                  <p class="mt-1 text-xs leading-relaxed text-muted">
+                    OpenCode Go requires <strong class="text-ink">Global</strong> regions for this model. Review your workspace’s <strong class="text-ink">Privacy</strong> settings, or choose another model to keep your current settings.
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  :class="iconButton"
+                  class="shrink-0"
+                  aria-label="Dismiss error"
+                  @click="dismissedError = true"
+                >
+                  <Icon :name="X" :size="14" />
+                </button>
+              </div>
+              <div class="mt-3 flex flex-wrap items-center gap-2">
+                <a
+                  href="https://opencode.ai/console/"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  class="inline-flex min-h-9 items-center gap-1.5 rounded-lg bg-accent px-3 text-xs font-semibold text-surface"
+                >OpenCode settings<Icon :name="ArrowUpRight" :size="14" /></a>
+                <UiButton size="small" :disabled="busy" @click="action('pause', { paused: false })">
+                  Retry response
+                </UiButton>
+              </div>
+              <p class="mt-2.5 text-2xs text-muted">
+                To keep your current Privacy settings, <RouterLink :to="{ path: '/chats', query: { agent: detail?.agentId, project: detail?.projectId || undefined } }" class="font-medium text-accent underline">
+                  choose another model in a new conversation
+                </RouterLink>. This conversation and its files stay saved.
+              </p>
+            </section>
+            <UiAlert v-else-if="visibleError && !dismissedError" class="mb-3 flex items-start gap-2">
               <span class="min-w-0 flex-1">{{ visibleError }}</span><button
                 :class="iconButton"
                 class="shrink-0"
@@ -957,6 +1034,7 @@ function key(event: KeyboardEvent) {
                 </button>
               </div>
             </details>
+            <PlanBar v-if="currentPlan" :plan="currentPlan" />
             <SubagentBar
               v-if="subagentBar"
               :agents="currentSubagents"
@@ -1033,7 +1111,7 @@ function key(event: KeyboardEvent) {
                   v-model="draft"
                   :skills="skills"
                   aria-label="Message"
-                  :placeholder="responding ? 'Add a follow-up…' : sleepNotice ? 'Reply now — this cancels the wait' : skills.length ? 'Message your agent… Type $ for skills' : 'Message your agent…'"
+                  :placeholder="liveWait?.wakeup ? (detail?.paused ? 'Add to the queue — this cancels the wait' : 'Reply now — this cancels the wait') : responding ? 'Add a follow-up…' : skills.length ? 'Message your agent… Type $ for skills' : 'Message your agent…'"
                   rows="2"
                   maxlength="50000"
                   @keydown="key"
@@ -1049,9 +1127,10 @@ function key(event: KeyboardEvent) {
                       v-model:provider="chosenProvider"
                       v-model:model="model"
                       v-model:reasoning="reasoning"
-                      :inherit="inheritAgentModel"
-                      :default-model="inheritAgentModel ? selectedAgent?.model : ''"
-                      :default-reasoning="inheritAgentModel ? selectedAgent?.reasoning : ''"
+                      :inherit="!!inheritedAssistant"
+                      :default-model="inheritedAssistant?.model || ''"
+                      :default-reasoning="inheritedAssistant?.reasoning || ''"
+                      :default-source="inheritConversation ? 'conversation' : 'agent'"
                       :switching="switchingProvider"
                       :disabled="busy"
                     />
@@ -1073,8 +1152,8 @@ function key(event: KeyboardEvent) {
                       v-if="(active || detail?.wakeup) && !editing && !hasDraft"
                       type="button"
                       class="round-action border border-line text-coral"
-                      :aria-label="sleepNotice ? 'Cancel scheduled wait' : 'Stop response'"
-                      :title="sleepNotice ? 'Cancel wakeup and pause queue' : 'Stop response and pause queue'"
+                      :aria-label="scheduled ? 'Cancel scheduled wait' : 'Stop response'"
+                      :title="scheduled ? 'Cancel wakeup and pause queue' : 'Stop response and pause queue'"
                       :disabled="busy"
                       @click="action('stop')"
                     >

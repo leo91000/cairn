@@ -17,14 +17,19 @@ import {
   Plus,
   Puzzle,
   ShieldCheck,
-  Terminal,
   Upload,
   Users,
 } from '../icons'
-import { capabilityLabels, connectionState } from '../plugins'
+import {
+  capabilityLabels,
+  connectionState,
+  contributions,
+  delegates,
+  instanceNoun,
+  needsWorker,
+} from '../plugins'
 
 const catalog = ref<Catalog>({ packages: [], capabilities: [], connections: [] })
-const accounts = ref<{ enabled: boolean, agentIds: string[] }[]>([])
 const loaded = ref(false)
 const error = ref('')
 const reviewing = ref<PluginEntry>()
@@ -34,9 +39,7 @@ const busy = ref(false)
 const guide = 'https://github.com/leo91000/cairn/blob/main/docs/PLUGINS.md'
 
 async function load() {
-  const [plugins, onepassword] = await Promise.all([api<Catalog>('/plugins'), api('/onepassword')])
-  catalog.value = plugins
-  accounts.value = onepassword
+  catalog.value = await api<Catalog>('/plugins')
   loaded.value = true
 }
 
@@ -69,21 +72,10 @@ const tones = {
 function card(entry: PluginEntry): Card {
   const connections = catalog.value.connections.filter(item => item.pluginId === entry.id)
   const requests = connections.reduce((count, connection) => count + connection.requests.length, 0)
-  const capabilities = (entry.manifest?.capabilities ?? []).map(name => capabilityLabels[name] ?? [ShieldCheck, name] as [IconName, string])
-  if (entry.id === 'onepassword') {
-    const agents = new Set(accounts.value.flatMap(account => account.agentIds))
-    return {
-      entry,
-      to: '/connections',
-      capabilities: [[Terminal, 'CLI tool'], ...capabilities, [ShieldCheck, 'Per-agent grants']],
-      status: accounts.value.length
-        ? { label: `${accounts.value.length} account${accounts.value.length > 1 ? 's' : ''}`, tone: 'ok' }
-        : { label: 'Not set up', tone: 'muted' },
-      meta: accounts.value.length ? `${agents.size} agent${agents.size === 1 ? '' : 's'} authorized` : 'Add a service account',
-      requests: 0,
-      action: accounts.value.length ? 'Manage' : 'Set up',
-    }
-  }
+  const capabilities = [
+    ...(entry.manifest?.capabilities ?? []).map(name => capabilityLabels[name] ?? [ShieldCheck, name] as [IconName, string]),
+    ...contributions(entry.manifest),
+  ]
 
   if (entry.status === 'needs_approval' || entry.status === 'invalid') {
     return {
@@ -97,19 +89,21 @@ function card(entry: PluginEntry): Card {
   }
 
   const online = connections.filter(connection => connectionState(connection).tone === 'ok').length
-  const noun = entry.manifest?.capabilities.includes('transport.discord') ? 'bot' : 'connection'
+  const noun = instanceNoun(entry.manifest, connections.length).toLowerCase()
+  const agents = new Set(connections.flatMap(connection => connection.agentIds ?? [])).size
+  const granted = entry.manifest?.agentAccess ? ` · ${agents} agent${agents === 1 ? '' : 's'} authorized` : ''
   return {
     entry,
     to: `/plugins/${entry.id}`,
-    capabilities: entry.id === 'discord' ? [...capabilities, [Users, 'External people']] : capabilities,
+    capabilities: delegates(entry.manifest) ? [...capabilities, [Users, 'External people']] : capabilities,
     status: entry.status === 'update'
       ? { label: 'Update to review', tone: 'warn' }
       : !connections.length
           ? { label: 'Not set up', tone: 'muted' }
           : online
-            ? { label: `${online} online`, tone: 'ok' }
+            ? { label: `${online} ${needsWorker(entry.manifest) ? 'online' : 'ready'}`, tone: 'ok' }
             : connectionState(connections[0]),
-    meta: connections.length ? `${connections.length} ${noun}${connections.length > 1 ? 's' : ''}` : `Version ${entry.active}`,
+    meta: connections.length ? `${connections.length} ${noun}${granted}` : `Version ${entry.active}`,
     requests,
     action: connections.length ? 'Manage' : 'Set up',
   }
@@ -123,18 +117,31 @@ const soon = [
   { id: 'linear', name: 'Linear', detail: 'Turn issues into missions' },
 ]
 
-/** Reads a package folder (manifest.json and main.luau) and installs it inactive. */
+/** A chosen file's path inside the package: its folder's own name is dropped. */
+function packagePath(file: File) {
+  const path = file.webkitRelativePath || file.name
+  return path.includes('/') ? path.slice(path.indexOf('/') + 1) : path
+}
+
+/** Reads a package (manifest.json, main.luau and its modules) and installs it inactive. */
 async function install() {
   busy.value = true
   error.value = ''
   try {
-    const manifest = files.value.find(file => file.name === 'manifest.json')
-    const source = files.value.find(file => file.name === 'main.luau')
+    const manifest = files.value.find(file => packagePath(file) === 'manifest.json')
+    const source = files.value.find(file => packagePath(file) === 'main.luau')
     if (!manifest || !source)
-      throw new Error('Choose the package’s manifest.json and main.luau.')
+      throw new Error('Choose the package’s manifest.json and main.luau, or its folder.')
+    const modules: Record<string, string> = {}
+    for (const file of files.value) {
+      const path = packagePath(file)
+      if (path.endsWith('.luau') && path !== 'main.luau')
+        modules[path] = await file.text()
+    }
+
     const installed = await api<{ manifest: { id: string, name: string } }>('/plugins/packages', {
       method: 'POST',
-      body: JSON.stringify({ manifest: JSON.parse(await manifest.text()), source: await source.text() }),
+      body: JSON.stringify({ manifest: JSON.parse(await manifest.text()), source: await source.text(), modules }),
     })
     installing.value = false
     files.value = []
@@ -198,7 +205,7 @@ async function install() {
           @click="item.to ? undefined : reviewing = item.entry"
         >
           <span class="flex items-start gap-3">
-            <PluginMark :plugin="item.entry.id" :size="46" />
+            <PluginMark :plugin="item.entry.id" :brand="item.entry.manifest?.brand" :size="46" />
             <span class="min-w-0 flex-1">
               <span class="flex items-center gap-2">
                 <span class="truncate text-[15px] font-bold tracking-[-0.01em]">{{ item.entry.manifest?.name ?? item.entry.id }}</span>
@@ -258,7 +265,7 @@ async function install() {
       <span class="grid size-10 shrink-0 place-items-center rounded-xl bg-soft text-accent"><Icon :name="Puzzle" :size="20" /></span>
       <span class="min-w-0 flex-1">
         <span class="block text-[13px] font-semibold">Write your own</span>
-        <span class="mt-0.5 block text-2xs text-muted">A plugin is a manifest.json and a main.luau. Start from the Discord plugin source.</span>
+        <span class="mt-0.5 block text-2xs text-muted">A plugin is a manifest.json and a main.luau: its connection, forms, panels and commands. Start from the Discord or 1Password source.</span>
       </span>
       <span class="inline-flex shrink-0 items-center gap-1 text-xs font-semibold text-accent phone:hidden">Read the guide<Icon :name="ArrowUpRight" :size="13" /></span>
     </a>
@@ -277,7 +284,7 @@ async function install() {
           {{ error }}
         </UiAlert>
         <p class="text-xs leading-relaxed text-muted">
-          Choose the package’s <code>manifest.json</code> and <code>main.luau</code>. It is saved on this installation but stays inactive until you review and approve what it can do.
+          Choose the package’s <code>manifest.json</code>, <code>main.luau</code> and its other <code>.luau</code> files, or its whole folder. It is saved on this installation but stays inactive until you review and approve what it can do.
         </p>
         <label class="text-xs font-semibold">
           Package files
@@ -289,9 +296,18 @@ async function install() {
             @change="files = [...(($event.target as HTMLInputElement).files ?? [])]"
           >
         </label>
+        <label class="text-xs font-semibold">
+          Or the package folder
+          <input
+            type="file"
+            webkitdirectory
+            aria-label="Package folder"
+            @change="files = [...(($event.target as HTMLInputElement).files ?? [])]"
+          >
+        </label>
         <ul v-if="files.length" class="grid gap-1 text-2xs text-muted">
-          <li v-for="file in files" :key="file.name">
-            {{ file.name }} · {{ Math.ceil(file.size / 1024) }} KB
+          <li v-for="file in files" :key="packagePath(file)">
+            {{ packagePath(file) }} · {{ Math.ceil(file.size / 1024) }} KB
           </li>
         </ul>
         <div class="flex justify-end gap-2.5">

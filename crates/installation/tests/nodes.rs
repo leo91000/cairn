@@ -392,7 +392,8 @@ async fn shared_budget_must_be_applied_before_admission_and_reconfiguration_paus
             ready
         );
     }
-    heartbeat["pool"] = json!({ "quarantined": true });
+    let retained_run = id();
+    heartbeat["pool"] = json!({ "quarantined": true, "retained_runs": [retained_run] });
     owner
         .call("POST", HEARTBEAT, heartbeat.clone(), Some(token))
         .await;
@@ -400,6 +401,10 @@ async fn shared_budget_must_be_applied_before_admission_and_reconfiguration_paus
         owner.stored("nodes", &node).await.unwrap()["executionReady"],
         false,
         "A quarantined pool cannot admit work even if executionReady was stale"
+    );
+    assert_eq!(
+        owner.stored("nodes", &node).await.unwrap()["retainedRuns"],
+        json!([retained_run])
     );
     heartbeat["pool"]["quarantined"] = false.into();
     let (status, configured) = owner
@@ -1883,8 +1888,12 @@ fn serve_native_refreshes(provider: UnixListener) -> tokio::task::JoinHandle<()>
 }
 
 #[tokio::test]
-async fn native_auth_relays_refresh_both_protocols_and_stop_after_grant_revocation() {
-    for claude in [false, true] {
+async fn native_auth_relays_refresh_all_providers_and_stop_after_grant_revocation() {
+    for (provider, provider_home) in [
+        ("codex", ".codex"),
+        ("claude", ".claude"),
+        ("opencode", ".opencode"),
+    ] {
         let (listener, address) = common::bind().await;
         let owner = Owner::at(address.to_string()).await;
         let (node, attempt, run, token) = (id(), id(), id(), auth::token());
@@ -1907,8 +1916,8 @@ async fn native_auth_relays_refresh_both_protocols_and_stop_after_grant_revocati
         let plan = json!({
             "runId": run,
             "chat": {
-                "provider": if claude { "claude" } else { "codex" },
-                "claudeManagedAuth": claude,
+                "provider": provider,
+                "claudeManagedAuth": provider == "claude",
             },
         });
         std::fs::write(plans.join(format!("{attempt}.json")), plan.to_string()).unwrap();
@@ -1919,7 +1928,7 @@ async fn native_auth_relays_refresh_both_protocols_and_stop_after_grant_revocati
             .join("runs")
             .join(&run)
             .join("home")
-            .join(if claude { ".claude" } else { ".codex" });
+            .join(provider_home);
         std::fs::create_dir_all(&home).unwrap();
         let native =
             serve_native_refreshes(UnixListener::bind(home.join("cairn-auth.sock")).unwrap());
@@ -1936,7 +1945,13 @@ async fn native_auth_relays_refresh_both_protocols_and_stop_after_grant_revocati
         ));
         wait_for_path(&socket).await;
         for generation in 1..=2 {
-            let value = refresh_through(&socket).await.unwrap();
+            let value = cairn_installation::accounts::broker::request(
+                &socket,
+                &json!({ "method": "refresh" }),
+                Duration::from_secs(2),
+            )
+            .await
+            .unwrap();
             assert_eq!(value["accessToken"], format!("synthetic-{generation}"));
         }
         native.await.unwrap();
@@ -2158,6 +2173,46 @@ async fn remote_vm_agents_reach_workspace_tools_only_through_their_node_session(
     assert!(!socket.exists());
     server.abort();
     upstream.abort();
+}
+
+#[tokio::test]
+async fn retained_completed_disk_monitor_discovers_late_writes() {
+    use cairn_installation::nodes::storage;
+
+    let runner = Router::new().fallback(|| async {
+        Json(json!({
+            "mode": "on-demand",
+            "dirtyBytes": 114688,
+            "dirtySince": 1,
+            "localBytes": 114688,
+            "activeLocalBytes": 114688,
+        }))
+    });
+    let (runner_url, server) = common::serve_locally(runner).await;
+    let owner = Owner::with_runner(common::HOST.into(), runner_url).await;
+    let run = id();
+    let mut record = run_record(&run, RunStatus::Succeeded);
+    record["nodeId"] = LOCAL_NODE_ID.into();
+    record["storage"] = json!({ "mode": "on-demand", "dirtyBytes": 0 });
+    record["backup"] =
+        json!({ "status": "ready", "requestedRevision": 1, "acknowledgedRevision": 1 });
+    owner.add_run(&record).await;
+    owner
+        .put(
+            "nodes",
+            json!({ "id": LOCAL_NODE_ID, "retainedRuns": [run] }),
+        )
+        .await;
+    let monitor = tokio::spawn(storage::monitor(owner.service.clone()));
+    common::eventually(
+        Duration::from_secs(8),
+        Duration::from_millis(50),
+        async || (owner.run(&run).await["storage"]["dirtyBytes"] == 114688).then_some(()),
+    )
+    .await;
+    assert_eq!(owner.run(&run).await["status"], RunStatus::Succeeded);
+    monitor.abort();
+    server.abort();
 }
 
 #[tokio::test]

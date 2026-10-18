@@ -300,6 +300,28 @@ async fn already_finished_sources_return_results_without_scheduling_or_ending_th
     assert_eq!(result["deferred"], false);
     assert_eq!(result["observation"]["conclusion"], "failure");
     assert!(f.s.chat_detail(&f.chat).await.unwrap()["wakeup"].is_null());
+    // Web and Android tell an immediate result from a polled one by this text, and show the
+    // agent's reason that comes with it.
+    let run = f.run.clone();
+    let ready =
+        f.s.store
+            .read(move |db| {
+                Ok(db
+                    .events(&run, 0, 100)?
+                    .into_iter()
+                    .filter(|event| event["type"] == "chat.wait_ready")
+                    .map(|event| (event["text"].clone(), event["payload"]["reason"].clone()))
+                    .collect::<Vec<_>>())
+            })
+            .await
+            .unwrap();
+    assert_eq!(
+        ready,
+        [(
+            json!("Wait condition already completed"),
+            json!("Wait for result")
+        )]
+    );
 }
 
 #[tokio::test]
@@ -546,7 +568,7 @@ async fn deferred_target_conversations_are_not_finished_and_cycles_are_rejected(
 }
 
 #[tokio::test]
-async fn input_validation_self_waits_and_pending_messages_cannot_register_wakeups() {
+async fn input_validation_self_waits_and_pending_steering_cannot_register_wakeups() {
     let f = Fixture::new().await;
     for condition in [
         json!({ "type": "http", "url": "http://localhost/" }),
@@ -568,9 +590,12 @@ async fn input_validation_self_waits_and_pending_messages_cannot_register_wakeup
     for seconds in [json!(0), json!(86401), json!(1.5), json!("420")] {
         assert!(wait_for::schedule(&f.s, &f.token, &json!({ "condition": f.github_condition(), "reason": "Wait", "timeoutSeconds": seconds })).await.is_err());
     }
-    f.s.chat_send(&f.chat, json!({ "id": id(), "text": "Fresh input" }))
-        .await
-        .unwrap();
+    f.s.chat_send(
+        &f.chat,
+        json!({ "id": id(), "text": "Fresh input", "mode": "steer" }),
+    )
+    .await
+    .unwrap();
     assert!(
         wait_for::schedule(
             &f.s,
@@ -582,6 +607,87 @@ async fn input_validation_self_waits_and_pending_messages_cannot_register_wakeup
     );
     assert_eq!(f.calls().len(), 0);
     assert!(f.s.chat_detail(&f.chat).await.unwrap()["wakeup"].is_null());
+}
+
+#[tokio::test]
+async fn queued_follow_ups_do_not_prevent_registering_a_wait() {
+    let f = Fixture::new().await;
+    f.github_state("in_progress", None, 0);
+    f.s.chat_send(
+        &f.chat,
+        json!({ "id": id(), "text": "Afterwards, tidy up" }),
+    )
+    .await
+    .unwrap();
+    let result = wait_for::schedule(
+        &f.s,
+        &f.token,
+        &json!({ "condition": f.github_condition(), "reason": "Wait for CI", "timeoutSeconds": 420 }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(result["deferred"], true);
+    f.finish().await;
+
+    let held = f.tick().await;
+    assert_eq!(held["run"]["status"], "succeeded");
+    assert!(held["wakeup"]["condition"].is_object());
+}
+
+#[tokio::test]
+async fn newly_queued_input_during_the_initial_probe_cannot_be_held_by_a_wait() {
+    for replacing_wakeup in [false, true] {
+        let f = Fixture::new().await;
+        let earlier = id();
+        f.s.chat_send(
+            &f.chat,
+            json!({ "id": earlier, "text": "Earlier follow-up" }),
+        )
+        .await
+        .unwrap();
+        if replacing_wakeup {
+            sleep::schedule(
+                &f.s,
+                &f.token,
+                &json!({ "seconds": 420, "reason": "Earlier wait" }),
+            )
+            .await
+            .unwrap();
+        }
+        f.github_state("in_progress", None, 350);
+        let s = f.s.clone();
+        let token = f.token.clone();
+        let condition = f.github_condition();
+        let request = tokio::spawn(async move {
+            wait_for::schedule(
+                &s,
+                &token,
+                &json!({
+                    "condition": condition,
+                    "reason": "Old plan",
+                    "timeoutSeconds": 420,
+                }),
+            )
+            .await
+        });
+        common::eventually(
+            Duration::from_secs(3),
+            Duration::from_millis(10),
+            || async { (!f.calls().is_empty()).then_some(()) },
+        )
+        .await;
+        f.s.chat_send(
+            &f.chat,
+            json!({ "id": id(), "text": "New instruction during the probe" }),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(request.await.unwrap().unwrap_err().status, 409);
+        assert!(f.s.chat_detail(&f.chat).await.unwrap()["wakeup"].is_null());
+        f.finish().await;
+        assert_eq!(f.tick().await["run"]["chatExecution"]["messageId"], earlier);
+    }
 }
 
 #[tokio::test]

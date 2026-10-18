@@ -469,8 +469,10 @@ internal fun AccountSheet(
         sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
         containerColor = MaterialTheme.colorScheme.surface,
     ) {
+        Column(Modifier.padding(horizontal = 20.dp)) { ConnectionFeedbackNotice() }
         Column(
             Modifier.fillMaxWidth()
+                .weight(1f, fill = false)
                 .testTag("account-sheet")
                 .verticalScroll(rememberScrollState())
                 .padding(horizontal = 20.dp)
@@ -819,8 +821,10 @@ internal fun AccountSignInSheet(
         sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
         containerColor = MaterialTheme.colorScheme.surface,
     ) {
+        Column(Modifier.padding(horizontal = 20.dp)) { ConnectionFeedbackNotice() }
         Column(
             Modifier.fillMaxWidth()
+                .weight(1f, fill = false)
                 .testTag("account-sign-in")
                 .verticalScroll(rememberScrollState())
                 .padding(horizontal = 20.dp)
@@ -929,6 +933,11 @@ internal fun AccountSignInSheet(
                         )
                         Text(
                             "La clé est chiffrée sur votre installation. L’usage de ces clés n’est pas consulté ici.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                        Text(
+                            "L’accès aux modèles est vérifié à l’envoi. L’offre, le solde et les réglages Privacy du fournisseur s’appliquent.",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )

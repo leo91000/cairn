@@ -109,6 +109,8 @@ export function useLiveRun(path: () => string, options: { hold?: boolean } = {})
     // Applied with the complete snapshot, so a held view keeps its own pagination meanwhile.
     let older = cached?.hasOlder ?? false
     let complete = !!cached
+    // Counts history replacements: a page requested before one no longer joins the rows.
+    let replacements = 0
     let storedPosition = cached?.position
     position.value = storedPosition
     accumulator.restore(rows, cursor)
@@ -147,11 +149,12 @@ export function useLiveRun(path: () => string, options: { hold?: boolean } = {})
         return
       const expected = history
       const before = oldest
+      const baseline = replacements
       loadingOlder.value = true
       olderError.value = ''
       try {
         const page = await api<HistoryPage>(`${value.replace(/\/stream$/, '')}/history?before=${before}&history=${encodeURIComponent(expected)}`)
-        if (disposed || current !== generation || history !== expected || page.history !== expected)
+        if (disposed || current !== generation || history !== expected || page.history !== expected || replacements !== baseline)
           return
         if (page.hasOlder && page.oldest >= before)
           throw new Error('Invalid history page')
@@ -264,6 +267,7 @@ export function useLiveRun(path: () => string, options: { hold?: boolean } = {})
       const reset = batch.reset || (history && batch.history !== history)
         || (batch.state && detail?.run?.id !== batch.state.run?.id)
       if (reset) {
+        replacements++
         rows = []
         accumulator = new LiveEvents()
         oldest = 0
@@ -325,7 +329,7 @@ export function useLiveRun(path: () => string, options: { hold?: boolean } = {})
             void removeHistory(scope, value)
         }
       }).finally(() => { checking = false })
-    }, cached ? { cursor: cached.cursor, history: cached.history } : undefined)
+    }, cached ? { cursor: cached.cursor, history: cached.history } : undefined, () => position.value?.follow ?? true)
     if (state.installationId && !cached) {
       void readSnapshot()
     }

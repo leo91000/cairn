@@ -140,7 +140,7 @@ async fn member_identity_cannot_manage_installation_resources() {
     let agent = MAIN_AGENT_ID;
     let management = [
         ("GET", "/api/accounts".to_owned()),
-        ("GET", "/api/onepassword".to_owned()),
+        ("GET", "/api/plugins".to_owned()),
         ("GET", "/api/mcps".to_owned()),
         ("GET", "/api/connections/login".to_owned()),
         ("GET", "/api/settings".to_owned()),
@@ -575,24 +575,25 @@ async fn attachment_previews_and_summaries_are_rendered_on_demand() {
 }
 
 #[tokio::test]
-async fn onepassword_management_requires_trusted_owner_context() {
+async fn plugin_secrets_require_trusted_owner_context() {
     let (_root, app, service) = app().await;
-    for method in ["GET", "POST"] {
-        let request = json_request(method, "/api/onepassword")
-            .body(Body::from("{}"))
-            .unwrap();
+    for (method, path) in [
+        ("GET", "/api/plugins"),
+        ("POST", "/api/plugins/onepassword/connections"),
+    ] {
+        let request = json_request(method, path).body(Body::from("{}")).unwrap();
         assert_eq!(send(&app, request).await.status(), StatusCode::UNAUTHORIZED);
     }
     let session = owner_context(&service).await;
     let input = json!({
         "name": "Fixture",
-        "token": "ops_http_fixture",
+        "secrets": { "token": "ops_http_fixture" },
         "enabled": true,
         "agentIds": [],
     });
     let save = |credentials: Credentials| {
         credentials
-            .apply(json_request("POST", "/api/onepassword"))
+            .apply(json_request("POST", "/api/plugins/onepassword/connections"))
             .body(Body::from(input.to_string()))
             .unwrap()
     };
@@ -606,7 +607,7 @@ async fn onepassword_management_requires_trusted_owner_context() {
     assert_eq!(response.status(), StatusCode::OK);
     assert!(!read_text(response).await.contains("ops_http_fixture"));
     let listed = Credentials::Owner(&session)
-        .apply(json_request("GET", "/api/onepassword"))
+        .apply(json_request("GET", "/api/plugins"))
         .body(Body::empty())
         .unwrap();
     let response = send(&app, listed).await;

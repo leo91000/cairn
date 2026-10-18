@@ -1,30 +1,74 @@
 import type { Agent } from '../../../packages/contracts/contracts'
 import type { IconName } from './icons'
 import {
-  Bot,
-  BrandDiscord,
   BrandLinear,
-  BrandOnePassword,
   BrandSlack,
   BrandTelegram,
+  Cable,
   CirclePause,
   Clock,
+  Cpu,
   Globe,
   HardDrive,
+  Inbox,
   KeyRound,
+  LayoutPanelTop,
   MessageSquare,
+  Terminal,
+  Wrench,
 } from './icons'
 
+export interface FieldOption {
+  value: string
+  label: string
+  /** Shown under the choice, e.g. why it can't be picked. */
+  description?: string
+  disabled?: boolean
+}
+
+/** One field of a declarative plugin form (instance settings or a view's form). */
 export interface SettingField {
   key: string
   title: string
-  type: 'string' | 'number' | 'boolean'
+  type: 'string' | 'text' | 'number' | 'boolean' | 'secret' | 'select' | 'multiselect' | 'url'
   description?: string
+  placeholder?: string
+  section?: string
   required?: boolean
   hidden?: boolean
   maxLength?: number
   minimum?: number
   maximum?: number
+  pattern?: string
+  options?: FieldOption[]
+  /** Choices come from the package's form handler while the owner edits. */
+  dynamic?: boolean
+  /** Changing this field asks the package's form handler again. */
+  refresh?: boolean
+  default?: unknown
+}
+
+/** What a package's `form` handler returns while the owner edits an instance. */
+export interface FormResult {
+  options: Record<string, FieldOption[]>
+  values: Record<string, unknown>
+  errors: Record<string, string>
+  view: any[]
+}
+
+export interface PluginArgument {
+  name: string
+  flag?: string
+  positional?: boolean
+  required?: boolean
+  description?: string
+}
+
+export interface PluginCommand {
+  name: string
+  description?: string
+  output?: 'json' | 'text' | 'secret'
+  arguments?: PluginArgument[]
 }
 
 export interface Manifest {
@@ -37,11 +81,23 @@ export interface Manifest {
   hosts?: string[]
   credential?: { label: string, header: string, prefix?: string }
   settings?: SettingField[]
+  instances?: { singular: string, plural: string }
+  brand?: { color: string, path?: string }
+  programs?: { name: string, path: string, description?: string }[]
+  agentAccess?: { description?: string }
+  commands?: PluginCommand[]
+  tools?: { name: string, description: string }[]
+  instructions?: string
+  instanceView?: boolean
+  instanceTest?: boolean
+  instanceForm?: boolean
 }
 
 export interface PackageVersion {
   version: string
   digest?: string
+  /** The package's Luau files, `main.luau` first. */
+  files?: { path: string, bytes: number }[]
   manifest?: Manifest
   approved?: boolean
   error?: string
@@ -92,6 +148,10 @@ export interface PluginConnection {
   name: string
   enabled: boolean
   settings: Record<string, any>
+  /** Agents granted the package's commands and tools on this instance. */
+  agentIds?: string[]
+  /** Secret fields saved in the vault; values never reach the browser. */
+  secretKeys?: string[]
   userIds: string[]
   people: Label[]
   accessMode: 'allowlist' | 'requests' | 'everyone'
@@ -99,47 +159,66 @@ export interface PluginConnection {
   agentId: string
   projectId: string | null
   maxMessagesPerHour: number
-  status: { state: string }
+  /** Live state, with the package's own message (e.g. who it is signed in as). */
+  status: { state: string, message?: string | null }
   usage: { hour: number }
   requests: AccessRequest[]
   activity: Activity[]
 }
 
-export interface Discovery {
-  bot: Label & { username: string }
-  applicationId: string
-  inviteUrl: string
-  guilds: Label[]
-  channels?: (Label & { canRead: boolean, canReply: boolean, canThread?: boolean })[]
-  users?: Label[]
-}
-
-/** Discord connections keep their scope and labels in plugin settings. */
-export type DiscordConnection = PluginConnection & {
-  settings: {
-    guildId: string
-    guildName?: string
-    channelId: string
-    channelName?: string
-    botId?: string
-    botName?: string
-  }
-}
-
 /** How each host capability reads in the catalogue. */
 export const capabilityLabels: Record<string, [IconName, string]> = {
-  'transport.discord': [Bot, 'Discord bot'],
+  'socket': [Cable, 'Live connection'],
+  'inbound': [Inbox, 'Receives messages'],
   'conversations.submit': [MessageSquare, 'Conversations'],
   'conversations.control': [CirclePause, 'Answer and stop'],
   'http': [Globe, 'Web requests'],
   'storage': [HardDrive, 'Storage'],
   'timers': [Clock, 'Timers'],
-  'onepassword.read': [KeyRound, 'Secrets'],
+  'exec': [Cpu, 'Runs programs'],
 }
 
-export const brands: Record<string, { icon: IconName, color: string }> = {
-  discord: { icon: BrandDiscord, color: '#5865F2' },
-  onepassword: { icon: BrandOnePassword, color: '#1A285F' },
+/** What a package gives agents, for catalogue chips. */
+export function contributions(manifest: Manifest | null | undefined): [IconName, string][] {
+  if (!manifest)
+    return []
+  return [
+    ...(manifest.commands?.length ? [[Terminal, 'CLI commands'] as [IconName, string]] : []),
+    ...(manifest.tools?.length ? [[Wrench, 'Agent tools'] as [IconName, string]] : []),
+    ...(manifest.agentAccess ? [[KeyRound, 'Per-agent grants'] as [IconName, string]] : []),
+    ...(manifest.instanceView ? [[LayoutPanelTop, 'Dashboard'] as [IconName, string]] : []),
+  ]
+}
+
+/** Packages that react to people, connections or timers keep a worker running. */
+export function needsWorker(manifest: Manifest | null | undefined) {
+  return ['socket', 'inbound', 'conversations.submit', 'conversations.control', 'timers']
+    .some(name => manifest?.capabilities.includes(name))
+}
+
+/** Packages whose instances let people outside Cairn talk to an agent. */
+export function delegates(manifest: Manifest | null | undefined) {
+  return manifest?.capabilities.includes('conversations.submit') ?? false
+}
+
+/** "Service account" / "Service accounts", or the generic wording. */
+export function instanceNoun(manifest: Manifest | null | undefined, count = 1) {
+  if (manifest?.instances)
+    return count === 1 ? manifest.instances.singular : manifest.instances.plural
+  return count === 1 ? 'Instance' : 'Instances'
+}
+
+/** Command-line usage, as agents type it. */
+export function commandUsage(plugin: string, command: PluginCommand) {
+  const parts = (command.arguments ?? []).map((argument) => {
+    const part = argument.flag ? `${argument.flag} <${argument.name}>` : `<${argument.name}>`
+    return argument.required ? part : `[${part}]`
+  })
+  return ['cairn plugin', plugin, command.name, ...parts].join(' ')
+}
+
+/** Marks of plugins announced in the catalogue, not available yet. Packages bring their own. */
+export const upcoming: Record<string, { icon: IconName, color: string }> = {
   slack: { icon: BrandSlack, color: '#4A154B' },
   telegram: { icon: BrandTelegram, color: '#26A5E4' },
   linear: { icon: BrandLinear, color: '#5E6AD2' },
@@ -149,6 +228,7 @@ export function connectionState(connection: PluginConnection) {
   if (!connection.enabled)
     return { label: 'Paused', tone: 'muted' } as const
   return ({
+    ready: { label: 'Ready', tone: 'ok' },
     connected: { label: 'Online', tone: 'ok' },
     connecting: { label: 'Connecting…', tone: 'muted' },
     needs_review: { label: 'Needs review', tone: 'coral' },
@@ -166,9 +246,9 @@ export function eligibleAgent(agent: Agent) {
 
 /**
  * Why an agent can't serve anyone in a channel, or '' when it can. Mirrors the server:
- * read-only sandbox, one project at most, no installation, GitHub, MCP or 1Password.
+ * read-only sandbox, one project at most, no installation, GitHub, MCP or plugin grants.
  */
-export function publicProblem(agent: Agent, onepassword: { agentIds: string[] }[]) {
+export function publicProblem(agent: Agent, connections: Pick<PluginConnection, 'agentIds'>[]) {
   if (!eligibleAgent(agent))
     return 'Too broad'
   if (agent.access.sandbox !== 'read-only')
@@ -177,7 +257,7 @@ export function publicProblem(agent: Agent, onepassword: { agentIds: string[] }[
     return 'Has GitHub'
   if (!Array.isArray(agent.access.mcps) || agent.access.mcps.length)
     return 'Has MCPs'
-  if (onepassword.some(account => account.agentIds.includes(agent.id)))
-    return 'Has 1Password'
+  if (connections.some(connection => connection.agentIds?.includes(agent.id)))
+    return 'Has plugin access'
   return ''
 }

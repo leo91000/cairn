@@ -19,12 +19,17 @@ class ChatWaitTest {
 
     private var id = 0L
 
-    private fun event(type: String, payload: JsonObject) =
-        (++id).let { RunEvent(it, it * 60_000, type, "", payload) }
+    private fun event(type: String, payload: JsonObject, text: String = "") =
+        (++id).let { RunEvent(it, it * 60_000, type, text, payload) }
 
     private fun ChatWakeup.json() = wireJson.encodeToJsonElement(this).jsonObject
 
-    private fun toolCall(tool: String, server: String, error: Boolean = false) =
+    private fun toolCall(
+        tool: String,
+        server: String,
+        error: Boolean = false,
+        arguments: JsonElement? = null,
+    ) =
         event(
             "item.completed",
             buildJsonObject {
@@ -35,6 +40,7 @@ class ChatWaitTest {
                     put("server", server)
                     put("status", "completed")
                     if (error) putJsonObject("error") { put("message", "Pending user input") }
+                    if (arguments != null) put("arguments", arguments)
                 }
             },
         )
@@ -51,6 +57,9 @@ class ChatWaitTest {
             waitTarget(wakeup(checks)),
         )
         assertTrue(waitTarget(wakeup()).short.startsWith("Reprise à "))
+        // Seen only in a run's history, a wait reads as what was scheduled.
+        assertTrue(recordedTitle(wakeup()).startsWith("Reprise programmée à "))
+        assertEquals("Attente programmée · Checks PR #193", recordedTitle(wakeup(checks)))
         assertEquals("45 s", timeLeft(45_000))
         assertEquals("2 min", timeLeft(61_000))
         assertEquals("1 h 05", timeLeft(65 * 60_000L))
@@ -93,6 +102,19 @@ class ChatWaitTest {
                 .title,
         )
         assertEquals(WaitTone.NEUTRAL, waitOutcome(null).tone)
+        fun workflow(conclusion: String) =
+            waitOutcome(
+                buildJsonObject {
+                    put("state", "completed")
+                    put("type", "github_workflow")
+                    put("conclusion", conclusion)
+                }
+            )
+        assertEquals(WaitOutcome(WaitTone.ERROR, "Workflow en échec", ""), workflow("failure"))
+        assertEquals("échec au démarrage", workflow("startup_failure").detail)
+        assertEquals("Workflow annulé", workflow("cancelled").title)
+        assertEquals("Workflow : action requise", workflow("action_required").title)
+        assertEquals("Workflow périmé", workflow("stale").title)
     }
 
     @Test
@@ -243,14 +265,261 @@ class ChatWaitTest {
                             put("type", "run_finished")
                             put("status", "succeeded")
                         },
+                        IMMEDIATE_WAIT_RESULT,
                     ),
                 ),
                 chat = true,
             )
         assertEquals(listOf(false, true, false), entries.map { it.message })
-        assertEquals("message", entries[0].wait?.ended)
+        assertEquals("cancelled", entries[0].wait?.ended)
         assertNull(entries[2].wait?.wakeup)
         assertTrue(entries[2].wait!!.finished)
+    }
+
+    @Test
+    fun `keeps an immediate result apart from the wait it replaced`() {
+        val replaced =
+            wakeup(
+                buildJsonObject {
+                    put("type", "run_finished")
+                    put("runId", "first")
+                }
+            )
+        val immediate = buildJsonObject {
+            put("state", "completed")
+            put("type", "run_finished")
+            put("status", "succeeded")
+        }
+        val entries =
+            timelineEntries(
+                listOf(
+                    event("chat.wait", replaced.json()),
+                    event("chat.wait_ready", immediate, IMMEDIATE_WAIT_RESULT),
+                ),
+                chat = true,
+            )
+        assertEquals(
+            listOf(
+                ActivityWait(replaced, ended = "replaced"),
+                ActivityWait(null, immediate, observed = true),
+            ),
+            entries.map { it.wait },
+        )
+        // Its hidden call still gives the card the agent's reason, whichever way the provider
+        // records it.
+        for (arguments in
+            listOf(
+                buildJsonObject { put("reason", "Merger après la CI") },
+                JsonPrimitive("""{"reason":"Merger après la CI"}"""),
+            )) {
+            val card =
+                timelineEntries(
+                        listOf(
+                            toolCall("wait_for", "cairn_workspace", arguments = arguments),
+                            event("chat.wait_ready", immediate, IMMEDIATE_WAIT_RESULT),
+                        ),
+                        chat = true,
+                    )
+                    .single()
+            assertEquals("Merger après la CI", card.wait?.reason)
+        }
+        // A call announced without its arguments never borrows an earlier call's reason.
+        val later =
+            timelineEntries(
+                listOf(
+                    toolCall(
+                        "sleep",
+                        "cairn_workspace",
+                        arguments = buildJsonObject { put("reason", "Délai précédent") },
+                    ),
+                    event("chat.sleep", wakeup().json()),
+                    event("chat.wakeup", wakeup().json()),
+                    toolCall("wait_for", "cairn_workspace", arguments = buildJsonObject {}),
+                    event("chat.wait_ready", immediate, IMMEDIATE_WAIT_RESULT),
+                ),
+                chat = true,
+            )
+        assertEquals("", later.last().wait?.reason)
+        // A call's later update cannot lend its reason again once a card used it.
+        fun call(type: String, callId: String, reason: String) =
+            event(
+                type,
+                buildJsonObject {
+                    putJsonObject("item") {
+                        put("id", callId)
+                        put("type", "mcp_tool_call")
+                        put("tool", "wait_for")
+                        put("server", "cairn_workspace")
+                        put("status", if (type == "item.started") "in_progress" else "completed")
+                        putJsonObject("arguments") { put("reason", reason) }
+                    }
+                },
+            )
+        val raced =
+            timelineEntries(
+                listOf(
+                    call("item.started", "c1", "Premier"),
+                    event("chat.wait_ready", immediate, IMMEDIATE_WAIT_RESULT),
+                    call("item.completed", "c1", "Premier"),
+                    event("chat.wait_ready", immediate, IMMEDIATE_WAIT_RESULT),
+                    call("item.started", "c2", "Second"),
+                ),
+                chat = true,
+            )
+        assertEquals(listOf("Premier", ""), raced.mapNotNull { it.wait?.reason })
+        // Recorded with the result, the reason no longer depends on when the call is reported.
+        fun ready(reason: String) =
+            event(
+                "chat.wait_ready",
+                JsonObject(immediate + ("reason" to JsonPrimitive(reason))),
+                IMMEDIATE_WAIT_RESULT,
+            )
+        val recorded =
+            timelineEntries(
+                listOf(
+                    ready("Premier"),
+                    call("item.started", "c1", "Premier"),
+                    ready("Second"),
+                    call("item.started", "c2", "Second"),
+                ),
+                chat = true,
+            )
+        assertEquals(listOf("Premier", "Second"), recorded.mapNotNull { it.wait?.reason })
+        // A resumption whose scheduling is unloaded keeps one card, even if it repeats.
+        val resumed =
+            timelineEntries(
+                listOf(
+                    event("chat.wakeup", wakeup().json()),
+                    event("chat.wakeup", wakeup().json()),
+                ),
+                chat = true,
+            )
+        assertEquals(listOf("wait:wake"), resumed.map { it.key })
+    }
+
+    @Test
+    fun `says when an overdue or answered wait resumes and ignores a failed turn's wakeup`() {
+        assertEquals("Reprise dans 20 min", waitStatus(wakeup(), 600_000))
+        assertEquals("Résultat attendu · 20 min max", waitStatus(wakeup(checks), 600_000))
+        assertEquals("Reprise imminente", waitStatus(wakeup(), 2_000_000))
+        assertEquals(
+            "Reprise imminente",
+            waitStatus(
+                wakeup(checks).copy(observation = buildJsonObject { put("state", "completed") }),
+                600_000,
+            ),
+        )
+        val waiting =
+            Chat(
+                "chat",
+                status = "succeeded",
+                run = Run("run", status = "succeeded"),
+                wakeup = wakeup(),
+            )
+        assertEquals(wakeup(), liveWakeup(waiting))
+        assertNull(liveWakeup(waiting.copy(run = Run("run", status = "failed"))))
+        assertNull(liveWakeup(waiting.copy(lifecycle = "trash")))
+    }
+
+    @Test
+    fun `cancels the wait of a run that ends failed, not of a retried turn, and lists answered waits first`() {
+        val retried =
+            timelineEntries(
+                listOf(
+                    event("chat.sleep", wakeup().json()),
+                    event(
+                        "turn.failed",
+                        buildJsonObject {
+                            putJsonObject("error") { put("message", "Provider unavailable") }
+                        },
+                    ),
+                ),
+                chat = true,
+            )
+        assertNull(retried.first().wait?.ended)
+        val failed =
+            timelineEntries(
+                listOf(
+                    event("chat.sleep", wakeup().json()),
+                    event("status", buildJsonObject {}, "failed"),
+                ),
+                chat = true,
+            )
+        assertEquals("cancelled", failed.first().wait?.ended)
+        val done = Run("run", status = "succeeded")
+        val answered =
+            wakeup(checks, 9000).copy(observation = buildJsonObject { put("state", "completed") })
+        val feed =
+            buildFeed(
+                listOf(
+                    Chat(
+                        "sooner",
+                        status = "succeeded",
+                        run = done,
+                        wakeup = wakeup(wakeAt = 5000),
+                    ),
+                    Chat("answered", status = "succeeded", run = done, wakeup = answered),
+                ),
+                emptyList(),
+                emptyList(),
+            )
+        assertEquals(listOf("chat:answered", "chat:sooner"), feed.waiting.map { it.key })
+        assertEquals("2 reprises prévues", feedSummary(feed))
+    }
+
+    @Test
+    fun `trusts the live wakeup over the history and keeps a paused or answered wait pausable`() {
+        val pending = wakeup()
+        val live = LiveWait(pending, false)
+        // Whatever the history says, the live wakeup is authoritative: the conversation still
+        // waits.
+        val retried = waitProgress(ActivityWait(pending, ended = "cancelled"), live)
+        assertTrue(retried.current && retried.pending && retried.pausable)
+        assertFalse(retried.cancelled)
+        // A stop leaves no event: the live state alone says it is over.
+        val stopped = waitProgress(ActivityWait(pending), LiveWait(null, false))
+        assertTrue(stopped.cancelled)
+        assertFalse(stopped.pending || stopped.pausable)
+        val paused = waitProgress(ActivityWait(pending), LiveWait(pending, true))
+        assertTrue(paused.paused)
+        assertFalse(paused.pending || paused.pausable)
+        val result = buildJsonObject { put("state", "completed") }
+        val answered =
+            waitProgress(ActivityWait(pending), LiveWait(pending.copy(observation = result), false))
+        assertTrue(answered.finished && answered.pausable)
+        assertFalse(answered.pending)
+        assertEquals(result, answered.observation)
+        val replaced =
+            waitProgress(
+                ActivityWait(pending, ended = "replaced"),
+                LiveWait(pending.copy(id = "next"), false),
+            )
+        assertTrue(replaced.replaced)
+        assertFalse(replaced.cancelled)
+        // Without live state, as in a run's history, only the history speaks.
+        assertTrue(waitProgress(ActivityWait(pending, ended = "cancelled"), null).cancelled)
+        assertEquals(
+            "Checks PR #193",
+            observedTarget(
+                buildJsonObject {
+                    put("type", "github_pr_checks")
+                    put("prNumber", 193)
+                }
+            ),
+        )
+        assertEquals("", observedTarget(buildJsonObject { put("state", "timed_out") }))
+        assertEquals("≤ 10 min", waitLeft(600_000, condition = true, resolved = false, now = 0))
+        assertEquals("< 1 min", waitLeft(45_000, condition = false, resolved = false, now = 0))
+        assertEquals("< 1 min", waitLeft(45_000, condition = true, resolved = false, now = 0))
+        // Until the turn that scheduled it ends, the conversation is not paused from the card.
+        val running = waitProgress(ActivityWait(pending), live.copy(settled = false))
+        assertTrue(running.pending)
+        assertFalse(running.pausable)
+        assertEquals("bientôt", waitLeft(600_000, condition = false, resolved = true, now = 0))
+        assertEquals(
+            "bientôt",
+            waitLeft(600_000, condition = false, resolved = false, now = 700_000),
+        )
     }
 
     @Test

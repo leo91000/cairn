@@ -1,7 +1,6 @@
 <script setup lang="ts">
-import type { ChatWakeup } from '../../../../packages/contracts/chats'
 import type { ActivityWait } from '../activity'
-import type { WaitTone } from '../chat-wait'
+import type { LiveWait, WaitTone } from '../chat-wait'
 import type { IconName } from '../icons'
 import {
   computed,
@@ -10,10 +9,14 @@ import {
   watch,
 } from 'vue'
 import {
+  observedTarget,
+  recordedTitle,
   timeLeft,
   waitCountdown,
+  waitDue,
   waited,
   waitOutcome,
+  waitProgress,
   waitTarget,
   wakeTime,
 } from '../chat-wait'
@@ -34,17 +37,22 @@ import Icon from './Icon.vue'
 const props = defineProps<{
   wait: ActivityWait
   /** The conversation's pending wakeup; absent where it is unknown, as in a run's history. */
-  live?: { wakeup: ChatWakeup | null, paused: boolean }
+  live?: LiveWait
 }>()
 const emit = defineEmits<{ pause: [] }>()
 
 const now = ref(Date.now())
 let clock: ReturnType<typeof setInterval> | undefined
 const wakeup = computed(() => props.wait.wakeup)
-const finished = computed(() => !!props.wait.resumedAt || props.wait.observation !== undefined)
-const current = computed(() => !!wakeup.value && props.live?.wakeup?.id === wakeup.value.id)
+const state = computed(() => waitProgress(props.wait, props.live))
+const current = computed(() => state.value.current)
+const observation = computed(() => state.value.observation)
+const finished = computed(() => state.value.finished)
+const cancelled = computed(() => state.value.cancelled)
+const paused = computed(() => state.value.paused)
+const pausable = computed(() => state.value.pausable)
 // Pending: the conversation still waits for this wakeup, with its deadline ahead.
-const pending = computed(() => current.value && !props.live?.paused && !finished.value)
+const pending = computed(() => state.value.pending)
 watch(pending, (value) => {
   clearInterval(clock)
   now.value = Date.now()
@@ -69,38 +77,25 @@ const view = computed<{
   title: string
   detail: string
 }>(() => {
-  const reason = wakeup.value?.reason ?? ''
-  // An observed condition may still be cancelled or paused before the wakeup launches.
-  const interrupted = !props.wait.resumedAt && !!wakeup.value && (
-    !!props.wait.ended || (props.live && (!current.value || props.live.paused))
-  )
-  if (finished.value && !interrupted) {
-    if (!wakeup.value?.condition && !props.wait.observation) {
+  const reason = wakeup.value?.reason ?? props.wait.reason ?? ''
+  if (finished.value) {
+    if (!wakeup.value?.condition && !observation.value) {
       return {
         tone: 'neutral',
         icon: Clock,
         title: 'Resumed as scheduled',
-        detail: duration(),
+        detail: [reason, duration()].filter(Boolean).join(' · '),
       }
     }
 
-    const outcome = waitOutcome(props.wait.observation)
+    const outcome = waitOutcome(observation.value)
     const icon = outcome.tone === 'ok' ? CircleCheck : outcome.tone === 'error' ? CircleX : outcome.tone === 'warning' ? TriangleAlert : Clock
-    const when = !wakeup.value ? 'The result was already available' : props.wait.resumedAt ? duration() : 'Resuming when capacity allows'
     return {
       tone: outcome.tone,
       icon,
       title: outcome.title,
-      detail: [outcome.detail, when].filter(Boolean).join(' · '),
-    }
-  }
-
-  if (props.wait.ended === 'message') {
-    return {
-      tone: 'paused',
-      icon: Hourglass,
-      title: 'Wait cancelled by your message',
-      detail: reason,
+      // Like a pending one, a finished card says why it waited.
+      detail: [reason, awaited(), outcome.detail, resolution()].filter(Boolean).join(' · '),
     }
   }
 
@@ -108,12 +103,12 @@ const view = computed<{
     return {
       tone: 'paused',
       icon: Hourglass,
-      title: 'Replaced by a new wait',
+      title: 'Replaced by a later wait call',
       detail: reason,
     }
   }
 
-  if (props.live && !current.value) {
+  if (cancelled.value) {
     return {
       tone: 'paused',
       icon: Hourglass,
@@ -122,36 +117,56 @@ const view = computed<{
     }
   }
 
-  if (current.value && props.live?.paused) {
+  if (paused.value) {
     return {
       tone: 'paused',
       icon: Pause,
-      title: 'Wait paused',
-      detail: 'The deadline still applies. Resume the conversation to continue.',
+      title: target.value!.title,
+      detail: reason,
     }
   }
 
+  // A run's history cannot tell whether the wait still stands: it is shown as recorded.
   return {
-    tone: 'live',
+    tone: props.live ? 'live' : 'neutral',
     icon: icons[target.value!.kind]!,
-    title: target.value!.title,
+    title: props.live ? target.value!.title : recordedTitle(wakeup.value!, now.value),
     detail: reason,
   }
 })
+
+/** A finished card still names what it waited for; a timer's outcome says it already. */
+function awaited() {
+  if (!wakeup.value)
+    return observedTarget(observation.value)
+  return wakeup.value.condition ? target.value!.short : ''
+}
+
+/** After its result: how the conversation went on, or why it did not. */
+function resolution() {
+  if (!wakeup.value)
+    return 'The result was already available'
+  if (props.wait.resumedAt)
+    return duration()
+  if (props.wait.ended === 'replaced')
+    return 'Replaced by a later wait call'
+  if (cancelled.value)
+    return 'Wait cancelled'
+  if (paused.value)
+    return 'Resumes when you resume the conversation'
+  return 'Resuming when capacity allows'
+}
 
 function duration() {
   const start = wakeup.value?.createdAt
   return start && props.wait.resumedAt ? `Waited ${waited(props.wait.resumedAt - start)}` : ''
 }
 
-const chips = computed(() => {
-  if (!pending.value && view.value.tone !== 'live')
-    return []
-  return target.value?.details.filter(Boolean) ?? []
-})
+const chips = computed(() => !finished.value && !cancelled.value && !state.value.replaced ? target.value?.details.filter(Boolean) ?? [] : [])
 const checked = computed(() => {
   const next = polled.value?.nextCheckAt
-  if (!pending.value || !polled.value?.condition || polled.value.condition.type === 'run_finished')
+  // Cairn checks GitHub only once the turn has ended, and until the deadline.
+  if (!pending.value || !props.live?.settled || waitDue(polled.value!, now.value) || !polled.value?.condition || polled.value.condition.type === 'run_finished')
     return ''
   if (polled.value.lastError)
     return ''
@@ -175,7 +190,7 @@ const tones: Record<string, string> = {
 </script>
 
 <template>
-  <section class="chat-wait my-3 overflow-hidden rounded-xl border border-line bg-surface" :aria-label="view.title">
+  <article class="chat-wait my-3 overflow-hidden rounded-xl border border-line bg-surface" :aria-label="view.title">
     <div class="flex items-start gap-3 px-3.5 py-3">
       <span class="relative grid size-8 shrink-0 place-items-center rounded-lg" :class="tones[view.tone]">
         <Icon :name="view.icon" :size="16" />
@@ -202,21 +217,35 @@ const tones: Record<string, string> = {
         <p class="m-0! font-heading text-base font-bold tabular-nums leading-tight text-accent">
           {{ waitCountdown(wakeup, now) }}
         </p>
-        <p class="m-0! mt-0.5 text-2xs text-subtle">
-          {{ wakeup.condition ? `deadline ${wakeTime(wakeup.wakeAt, now)}` : wakeTime(wakeup.wakeAt, now) }}
+        <!-- A timer names its time in the title already. -->
+        <p v-if="wakeup.condition" class="m-0! mt-0.5 text-2xs text-subtle">
+          deadline {{ wakeTime(wakeup.wakeAt, now) }}
         </p>
       </div>
-      <p v-else-if="!finished && !live && wakeup" class="m-0! shrink-0 text-2xs text-subtle">
-        {{ wakeup.condition ? 'Deadline' : 'Resumes' }} {{ wakeTime(wakeup.wakeAt, now) }}
+      <div v-else-if="paused && !finished && wakeup" class="shrink-0 text-right">
+        <p class="m-0! text-sm font-semibold text-muted">
+          Paused
+        </p>
+        <p v-if="wakeup.condition" class="m-0! mt-0.5 text-2xs text-subtle">
+          deadline {{ wakeTime(wakeup.wakeAt, now) }}
+        </p>
+      </div>
+      <p v-else-if="!finished && !live && wakeup?.condition" class="m-0! shrink-0 text-2xs text-subtle">
+        Deadline {{ wakeTime(wakeup.wakeAt, now) }}
       </p>
     </div>
-    <div v-if="pending" class="-mt-1 flex justify-end px-3 pb-2.5">
-      <button type="button" class="flex items-center gap-1.5 rounded-lg px-2.5 py-1 text-xs font-semibold text-muted hover:bg-hover hover:text-ink" @click="emit('pause')">
+    <div v-if="pausable" class="-mt-1 flex justify-end px-3 pb-2.5">
+      <button
+        type="button"
+        class="flex items-center gap-1.5 rounded-lg px-2.5 py-1 text-xs font-semibold text-muted hover:bg-hover hover:text-ink disabled:opacity-50"
+        :disabled="live?.busy"
+        @click="emit('pause')"
+      >
         <Icon :name="Pause" :size="13" />Pause wait
       </button>
     </div>
     <div v-if="pending" class="h-[3px] bg-hover" aria-hidden="true">
       <i class="block h-full rounded-r-full bg-accent transition-[width] duration-1000 ease-linear" :style="{ width: `${progress}%` }" />
     </div>
-  </section>
+  </article>
 </template>

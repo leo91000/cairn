@@ -370,7 +370,15 @@ async fn builtin_mcp_endpoint_exposes_scoped_workspace_tools_and_checks_the_run_
         let value: Value = response.json().await.unwrap();
         assert!(value["error"].is_null(), "{value}");
         if method == "tools/list" {
-            assert_eq!(value["result"]["tools"].as_array().unwrap().len(), 13);
+            // Plugin tools such as 1Password's appear only for agents granted an instance.
+            assert_eq!(value["result"]["tools"].as_array().unwrap().len(), 12);
+            assert!(
+                !value["result"]["tools"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|tool| tool["name"] == "onepassword")
+            );
             for name in [
                 "acquire_exclusive",
                 "release_exclusive",

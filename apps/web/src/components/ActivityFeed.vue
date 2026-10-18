@@ -4,6 +4,7 @@ import type { ChatWakeup } from '../../../../packages/contracts/chats'
 import type { RunEvent, TaskOutcome } from '../../../../packages/contracts/contracts'
 import type { ActivityEntry } from '../activity'
 import type { SendingMessage } from '../chat-delivery'
+import type { LiveWait } from '../chat-wait'
 import type { ReadingPosition } from '../history-cache'
 import { twMerge } from 'tailwind-merge'
 import {
@@ -16,6 +17,7 @@ import {
 } from 'vue'
 import { latestArtifacts } from '../../../../packages/contracts/artifacts'
 import { activityEntries, ActivityGroups } from '../activity'
+import { currentPlan } from '../agent-plan'
 import { deliveryEntries } from '../deliverables'
 import { ArrowDown, Maximize2, Minimize2 } from '../icons'
 import { exclusiveSuspensionLabel } from '../run-status'
@@ -32,6 +34,8 @@ import ChatOutcome from './ChatOutcome.vue'
 import ChatWaitCard from './ChatWaitCard.vue'
 import Icon from './Icon.vue'
 import MessageAttachments from './MessageAttachments.vue'
+import PlanCard from './PlanCard.vue'
+import PlanUpdate from './PlanUpdate.vue'
 import SubagentTeam from './SubagentTeam.vue'
 import UiButton from './UiButton.vue'
 import WorkingIndicator from './WorkingIndicator.vue'
@@ -59,7 +63,7 @@ const props = defineProps<{
   /** The page shows the current subagents beside the composer, so the feed need not. */
   subagentBar?: boolean
   /** The conversation's pending wakeup, which keeps its wait card live. */
-  wakeup?: { wakeup: ChatWakeup | null, paused: boolean }
+  wakeup?: LiveWait
 }>()
 const emit = defineEmits<{ load: [], position: [value: ReadingPosition, key?: string], pauseWait: [] }>()
 const skillNames = computed(() => new Set(props.skills ?? []))
@@ -94,11 +98,15 @@ const entries = computed(() => {
 })
 const teams = computed(() => subagentTeams(entries.value))
 const subagents = computed(() => currentSubagents(entries.value))
+const activity = computed(() => entries.value.filter((entry): entry is ActivityEntry => entry.kind !== 'deliverables'))
+const plan = computed(() => currentPlan(activity.value))
+// Only the latest plan is still being followed.
+const livePlan = computed(() => props.active && !props.suspended ? activity.value.findLast(entry => entry.kind === 'plan')?.id : undefined)
 const working = computed(() => {
   const wait = backgroundWait(props.events)
   if (wait)
     return { ...waitingStep(wait), subagents: waitingForSubagents(props.events, subagents.value) }
-  return workingStep(entries.value.filter((entry): entry is ActivityEntry => entry.kind !== 'deliverables'), props.agent, props.events[0]?.createdAt ?? null)
+  return workingStep(activity.value, props.agent, props.events[0]?.createdAt ?? null)
 })
 const visibleOutcome = computed(() => !props.active && !props.sending?.length && !props.loading ? props.outcome : null)
 const outcomeEntryId = computed(() => {
@@ -292,6 +300,7 @@ onBeforeUnmount(() => viewer.value?.close())
 defineExpose({
   teams,
   subagents,
+  plan,
   openFiles: () => { artifactViewer.value = '' },
   enterFullscreen,
   followLatest,
@@ -392,6 +401,8 @@ defineExpose({
                 </article>
                 <ChatNotice v-else-if="entry.kind === 'notice'" :notice="entry.artifact" />
                 <SubagentTeam v-else-if="entry.kind === 'team'" :agents="entry.agents" :active="active" />
+                <PlanCard v-else-if="entry.kind === 'plan'" :plan="entry.plan" :live="entry.id === livePlan && !!plan" />
+                <PlanUpdate v-else-if="entry.kind === 'plan-update'" :change="entry.change" :progress="entry.progress" />
                 <ChatWaitCard
                   v-else-if="entry.kind === 'wait'"
                   :wait="entry.wait"

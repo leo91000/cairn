@@ -2,6 +2,7 @@ package build.cairn.app.data
 
 import build.cairn.app.diagnostics.PerfOperation
 import build.cairn.app.diagnostics.Performance
+import java.io.FileNotFoundException
 import java.io.IOException
 import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
@@ -25,9 +26,11 @@ import okhttp3.RequestBody
 import okhttp3.RequestBody.Companion.asRequestBody
 import okhttp3.RequestBody.Companion.toRequestBody
 import okhttp3.Response
+import okhttp3.ResponseBody
 import okio.Buffer
 import okio.BufferedSink
 import okio.ForwardingSink
+import okio.ForwardingSource
 import okio.buffer
 
 val wireJson = Json {
@@ -36,7 +39,36 @@ val wireJson = Json {
     explicitNulls = false
 }
 
-class ApiException(val status: Int, message: String) : IOException(message)
+/** [explained] is false when the response carried no Cairn error, as a proxy's error page. */
+class ApiException(val status: Int, message: String, val explained: Boolean = true) :
+    IOException(message)
+
+/** Marks I/O from the HTTP transport; local document and disk errors remain actionable. */
+class ConnectionException(cause: IOException) : IOException(cause.message, cause)
+
+// Beacon's relay answers these when it cannot reach the installation for a moment.
+private val relayUnavailable =
+    setOf(
+        "Installation unavailable",
+        "Installation busy",
+        "Installation busy or unavailable",
+        "Installation request timed out",
+        "Installation response timed out",
+        "Installation connection lost",
+    )
+
+/**
+ * A request that failed because the device, Beacon or the installation could not be reached, and
+ * that the same request can retry once the connection returns.
+ */
+fun isConnectionFailure(error: Throwable): Boolean =
+    when (error) {
+        is ApiException ->
+            error.status in 502..504 &&
+                (!error.explained || error.message?.removeSuffix(".") in relayUnavailable)
+        is ConnectionException -> true
+        else -> false
+    }
 
 fun serverOrigin(input: String, allowLocalHttp: Boolean = false): HttpUrl {
     val url = input.trim().toHttpUrl()
@@ -351,12 +383,14 @@ class CairnApi(
         call.enqueue(
             object : Callback {
                 override fun onFailure(call: Call, e: IOException) {
-                    if (continuation.isActive) continuation.resumeWithException(e)
+                    // A staged upload can disappear before OkHttp opens its local file.
+                    val failure = if (e is FileNotFoundException) e else ConnectionException(e)
+                    if (continuation.isActive) continuation.resumeWithException(failure)
                 }
 
                 override fun onResponse(call: Call, response: Response) {
                     try {
-                        val result = response.use(consume)
+                        val result = response.withConnectionErrors().use(consume)
                         if (continuation.isActive) continuation.resume(result)
                     } catch (e: Exception) {
                         if (continuation.isActive) continuation.resumeWithException(e)
@@ -365,6 +399,30 @@ class CairnApi(
             }
         )
     }
+}
+
+/** Only response reads are network I/O; a consumer may also write to local storage. */
+private fun Response.withConnectionErrors(): Response {
+    val original = body
+    val input =
+        object : ForwardingSource(original.source()) {
+                override fun read(sink: Buffer, byteCount: Long): Long =
+                    try {
+                        super.read(sink, byteCount)
+                    } catch (error: IOException) {
+                        throw ConnectionException(error)
+                    }
+            }
+            .buffer()
+    val wrapped =
+        object : ResponseBody() {
+            override fun contentType() = original.contentType()
+
+            override fun contentLength() = original.contentLength()
+
+            override fun source() = input
+        }
+    return newBuilder().body(wrapped).build()
 }
 
 /** Imports, skill batches and staged uploads may clone or transfer several megabytes. */
@@ -381,12 +439,15 @@ internal fun longRequest(path: String): Boolean {
 internal fun checkResponse(response: Response) {
     if (response.isSuccessful) return
     val text = response.body.string()
-    val message =
-        runCatching {
-            wireJson.parseToJsonElement(text).jsonObject["error"]?.jsonPrimitive?.content
-        }
-            .getOrNull() ?: "Le serveur a répondu avec le code ${response.code}."
-    throw ApiException(response.code, message)
+    val message = runCatching {
+        wireJson.parseToJsonElement(text).jsonObject["error"]?.jsonPrimitive?.content
+    }
+        .getOrNull()
+    throw ApiException(
+        response.code,
+        message ?: "Le serveur a répondu avec le code ${response.code}.",
+        explained = message != null,
+    )
 }
 
 internal fun readPortraitBytes(input: java.io.InputStream, maxBytes: Int): ByteArray {

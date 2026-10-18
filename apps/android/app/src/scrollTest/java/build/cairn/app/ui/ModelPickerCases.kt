@@ -199,4 +199,62 @@ abstract class ModelPickerCases {
     private fun SurfaceForTest(content: @Composable () -> Unit) {
         androidx.compose.material3.Surface(Modifier.fillMaxSize()) { Column { content() } }
     }
+
+    @Test
+    fun inheritedPinnedModelDropsRouteOnlyReasoningWhenReturningToAuto() {
+        val shared = listOf("medium", "high").map { ReasoningOption(it) }
+        val catalog =
+            ModelCatalog(
+                listOf(
+                    CodingAgentModel(
+                        "auto/sonnet",
+                        displayName = "Sonnet",
+                        supportedReasoningEfforts = shared,
+                        routes =
+                            listOf(
+                                ModelRoute(
+                                    "opencode-go/sonnet",
+                                    "opencode-go",
+                                    "OpenCode Go",
+                                    "subscription",
+                                    supportedReasoningEfforts = shared,
+                                ),
+                                ModelRoute(
+                                    "opencode/sonnet",
+                                    "opencode",
+                                    "OpenCode Zen",
+                                    "credits",
+                                    supportedReasoningEfforts = shared + ReasoningOption("max"),
+                                ),
+                            ),
+                    )
+                )
+            )
+        var chosen: Pair<String, String>? = null
+        compose.setContent {
+            var model by remember { mutableStateOf("") }
+            var reasoning by remember { mutableStateOf("") }
+            CairnTheme {
+                SurfaceForTest {
+                    ModelPicker(
+                        catalog,
+                        model,
+                        reasoning,
+                        defaultModel = "opencode/sonnet",
+                        defaultReasoning = "max",
+                        inherit = true,
+                        conversationDefault = true,
+                        provider = "opencode",
+                    ) { m, r ->
+                        model = m
+                        reasoning = r
+                        chosen = m to r
+                    }
+                }
+            }
+        }
+        compose.onNodeWithTag("model-picker").performClick()
+        compose.onNodeWithText("Auto", substring = false).performScrollTo().performClick()
+        compose.runOnIdle { assertEquals("auto/sonnet" to "", chosen) }
+    }
 }

@@ -89,12 +89,12 @@ fun AtelierScreen(vm: CairnViewModel, state: Workspace, navigate: (String) -> Un
         return
     }
     var accounts by remember { mutableStateOf<AccountsView?>(null) }
-    var onePassword by remember { mutableStateOf<List<OnePasswordAccount>?>(null) }
+    var plugins by remember { mutableStateOf<PluginCatalog?>(null) }
     var loaded by remember { mutableStateOf(false) }
     var signingOut by remember { mutableStateOf(false) }
     Poll("atelier", 30_000) {
         accounts = optional(vm) { vm.api.get<AccountsView>("/accounts") }
-        onePassword = optional(vm) { vm.api.get<List<OnePasswordAccount>>("/onepassword") }
+        plugins = optional(vm) { vm.api.get<PluginCatalog>("/plugins") }
         loaded = true
     }
     val pending = if (loaded) "Indisponible" else "…"
@@ -240,8 +240,8 @@ fun AtelierScreen(vm: CairnViewModel, state: Workspace, navigate: (String) -> Un
                     tint = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
-            Spacer(Modifier.height(12.dp))
             codingAgents.forEach { (provider, _) ->
+                Spacer(Modifier.height(12.dp))
                 val ready = summary.ready(provider).size
                 val total = summary.total(provider)
                 val remaining = summary.remaining(provider)
@@ -261,29 +261,64 @@ fun AtelierScreen(vm: CairnViewModel, state: Workspace, navigate: (String) -> Un
                         signal.attention
                     else signal.success,
                 )
-                Spacer(Modifier.height(12.dp))
             }
+        }
+        SignalCard(
+            Modifier.fillMaxWidth().testTag("atelier-plugins"),
+            onClick = { navigate("plugins") },
+        ) {
             Row(verticalAlignment = Alignment.CenterVertically) {
+                Eyebrow("Plugins", Modifier.weight(1f))
                 Icon(
-                    CairnIcons.Key,
+                    CairnIcons.Right,
                     null,
-                    Modifier.size(20.dp),
+                    Modifier.size(16.dp),
                     tint = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
-                Spacer(Modifier.width(10.dp))
-                Text("1Password", Modifier.weight(1f), style = MaterialTheme.typography.titleSmall)
-                Text(
-                    when (val accounts = onePassword) {
-                        null -> pending
-                        else ->
-                            if (accounts.isEmpty()) "Aucun compte"
-                            else
-                                "${accounts.size} compte${if (accounts.size > 1) "s" else ""} · " +
-                                    "${accounts.flatMap { it.agentIds }.distinct().size} agent(s)"
-                    },
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
+            }
+            when (val catalog = plugins) {
+                null ->
+                    Text(
+                        pending,
+                        Modifier.padding(top = 12.dp),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                else ->
+                    catalog.packages.forEach { entry ->
+                        val summary = entry.summary(catalog.connections)
+                        Spacer(Modifier.height(12.dp))
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            PluginMark(entry.id, 24.dp, entry.manifest?.brand)
+                            Spacer(Modifier.width(10.dp))
+                            Text(
+                                entry.name,
+                                Modifier.weight(1f),
+                                style = MaterialTheme.typography.titleSmall,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                            if (summary.requests > 0)
+                                Text(
+                                    "${summary.requests} demande${if (summary.requests > 1) "s" else ""} · ",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = signal.attention,
+                                )
+                            Text(
+                                summary.badge.label,
+                                style = MaterialTheme.typography.bodySmall,
+                                color =
+                                    when (summary.badge.tone) {
+                                        PluginTone.OK -> signal.success
+                                        PluginTone.ATTENTION -> signal.attention
+                                        PluginTone.WARNING -> signal.warning
+                                        PluginTone.MUTED ->
+                                            MaterialTheme.colorScheme.onSurfaceVariant
+                                    },
+                                maxLines = 1,
+                            )
+                        }
+                    }
             }
         }
         SignalCard(

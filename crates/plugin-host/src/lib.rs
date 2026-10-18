@@ -1,5 +1,5 @@
 //! Bounded process supervision. Installation supplies authorized host operations.
-use cairn_plugin_api::{API_VERSION, Frame, MAX_FRAME_BYTES, MAX_SOURCE_BYTES, Manifest};
+use cairn_plugin_api::{API_VERSION, Frame, MAX_FRAME_BYTES, Manifest, REJECTED, Sources};
 use serde_json::Value;
 use std::{future::Future, path::Path, process::Stdio, sync::Arc, time::Duration};
 use tokio::{
@@ -32,17 +32,17 @@ impl Host {
     }
 
     /// Starts a long-lived worker with an empty environment and private directory,
-    /// then loads the package. The session ends when dropped or stopped.
+    /// then loads the package's files. The session ends when dropped or stopped.
     pub async fn start(
         &self,
         executable: &Path,
         manifest: &Manifest,
-        source: &str,
+        source: impl Into<Sources>,
     ) -> Result<Session, String> {
         manifest.validate().map_err(str::to_owned)?;
-        if source.len() > MAX_SOURCE_BYTES {
-            return Err("Plugin source is too large.".into());
-        }
+        let sources = source.into();
+        sources.validate().map_err(str::to_owned)?;
+        let Sources { main, modules } = sources;
         let permit = self
             .slots
             .clone()
@@ -76,7 +76,8 @@ impl Host {
             session
                 .write(&Frame::Load {
                     api_version: API_VERSION,
-                    source: source.to_owned(),
+                    source: main,
+                    modules,
                     deadline_ms,
                 })
                 .await?;
@@ -94,12 +95,14 @@ impl Host {
         Ok(session)
     }
 
-    /// One-shot invocation (CLI commands): load, run the `command` handler, stop.
+    /// One-shot invocation (commands, tools, views, actions, tests): load, run one
+    /// handler, stop.
     pub async fn invoke<F, Fut>(
         &self,
         executable: &Path,
         manifest: &Manifest,
-        source: &str,
+        source: impl Into<Sources>,
+        event: &str,
         input: Value,
         call: F,
     ) -> Result<Value, String>
@@ -108,7 +111,7 @@ impl Host {
         Fut: Future<Output = Result<Value, Denied>>,
     {
         let mut session = self.start(executable, manifest, source).await?;
-        let result = session.dispatch("command", input, call).await;
+        let result = session.dispatch(event, input, call).await;
         session.stop().await;
         result
     }
@@ -173,6 +176,14 @@ impl Session {
                     }
                     Frame::Done { value } => return Ok(Ok(value)),
                     Frame::Failure => return Ok(Err("Plugin execution failed.".to_owned())),
+                    Frame::Rejected { message } => {
+                        let message = message
+                            .chars()
+                            .filter(|c| !c.is_control())
+                            .take(300)
+                            .collect::<String>();
+                        return Ok(Err(format!("{REJECTED}{message}")));
+                    }
                     _ => return Err("Invalid plugin response.".to_owned()),
                 }
             }

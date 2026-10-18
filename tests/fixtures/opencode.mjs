@@ -14,6 +14,12 @@ if (process.argv.includes('--version')) {
 async function main() {
   const root = path.join(process.env.XDG_DATA_HOME, 'opencode')
   await mkdir(root, { recursive: true })
+  if (JSON.parse(process.env.OPENCODE_CONFIG_CONTENT || '{}').fixtureStartupHang) {
+    await writeFile(path.join(root, 'startup.pid'), `${process.pid}`)
+    setInterval(() => {}, 1000)
+    return
+  }
+
   const file = path.join(root, 'fixture-sessions.json')
   const sessions = JSON.parse(await readFile(file, 'utf8').catch(() => '{}'))
   const streams = new Set()
@@ -175,6 +181,28 @@ async function main() {
       return
     }
 
+    if (body.includes('fixture:opencode-region') || body.includes('fixture:opencode-unknown-error')) {
+      const message = body.includes('fixture:opencode-region')
+        ? 'Upstream request failed: This Go model requires Global regions. Select Global in your workspace\'s Privacy settings to use it.'
+        : 'Sensitive provider detail'
+      const failed = {
+        info: {
+          id: id('msg'),
+          sessionID: session.id,
+          parentID: input.messageID,
+          role: 'assistant',
+          error: { name: 'APIError', data: { statusCode: 400, message, responseBody: 'Sensitive provider detail' } },
+          time: { created: Date.now(), completed: Date.now() },
+        },
+        parts: [],
+      }
+      session.messages.push(failed)
+      await persist()
+      emit('message.updated', { info: failed.info })
+      emit('session.error', { sessionID: session.id, error: failed.info.error })
+      return
+    }
+
     if (body.includes('fixture:opencode-continuation')) {
       const continuation = {
         info: {
@@ -210,6 +238,46 @@ async function main() {
       questions.set(request, { session, parent: input.messageID })
       emit('question.asked', { id: request, sessionID: session.id, questions: [{ question: 'Which layout should I build?', header: 'Layout', options: [{ label: 'Compact', description: 'A focused workspace' }, { label: 'Spacious', description: 'More room for the details' }] }] })
       return
+    }
+
+    // OpenCode announces todowrite before its arguments, then rewrites the whole list.
+    if (body.includes('fixture:plan')) {
+      const todos = {
+        id: id('prt'),
+        sessionID: session.id,
+        messageID: id('msg'),
+        type: 'tool',
+        tool: 'todowrite',
+        state: { status: 'pending', input: {} },
+      }
+      emit('message.part.updated', { part: todos })
+      todos.state = {
+        status: 'completed',
+        input: {
+          todos: [
+            {
+              id: '1',
+              content: 'Check the workspace',
+              status: 'in_progress',
+              priority: 'high',
+            },
+            {
+              id: '2',
+              content: 'Prepare the status panel',
+              status: 'pending',
+              priority: 'medium',
+            },
+            {
+              id: '3',
+              content: 'Write a changelog',
+              status: 'cancelled',
+              priority: 'low',
+            },
+          ],
+        },
+        output: '[]',
+      }
+      emit('message.part.updated', { part: todos })
     }
 
     const tool = {

@@ -119,9 +119,9 @@ async function copyCode() {
 async function submit() {
   if (!code.value.trim())
     return
-  await props.accounts.submitCode(code.value.trim())
+  const succeeded = await props.accounts.submitCode(code.value.trim())
   code.value = ''
-  submitted.value = !props.accounts.error.value
+  submitted.value = !!succeeded
 }
 
 async function close() {
@@ -199,6 +199,9 @@ async function close() {
           </label>
           <p class="text-xs text-muted">
             The key is encrypted on your installation and used only for this model provider. Provider usage isn’t reported here.
+          </p>
+          <p class="text-xs text-muted">
+            Model access is checked when you send a message. Your provider’s plan, balance and Privacy settings still apply.
           </p>
         </template>
         <p v-else class="text-xs text-muted">

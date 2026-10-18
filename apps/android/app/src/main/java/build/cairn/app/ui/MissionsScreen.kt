@@ -249,8 +249,10 @@ fun MissionsScreen(vm: CairnViewModel, state: Workspace, openRun: (String) -> Un
                 sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
                 containerColor = MaterialTheme.colorScheme.background,
             ) {
+                Column(Modifier.padding(horizontal = 20.dp)) { ConnectionFeedbackNotice() }
                 Column(
                     Modifier.fillMaxWidth()
+                        .weight(1f, fill = false)
                         .testTag("mission-sheet")
                         .verticalScroll(rememberScrollState())
                         .padding(horizontal = 20.dp)

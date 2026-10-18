@@ -483,6 +483,50 @@ export function chatFixture() {
         save()
       }
 
+      // Codex replaces the whole plan of the turn with each update. `fixture:plan-working`
+      // leaves the second step in progress while the turn stays open.
+      if (text.includes('fixture:plan')) {
+        const plan = (explanation, steps) => notify('turn/plan/updated', {
+          threadId: thread.id,
+          turnId: active.id,
+          explanation,
+          plan: steps.map(([step, status]) => ({ step, status })),
+        })
+        plan('Data model first, then the middleware.', [
+          ['Explore the auth middleware', 'inProgress'],
+          ['Add the session expiry migration', 'pending'],
+          ['Refresh tokens in the middleware', 'pending'],
+        ])
+        notify('item/completed', {
+          threadId: thread.id,
+          item: {
+            id: `plan-read-${active.id}`,
+            type: 'commandExecution',
+            command: 'rg -n session src',
+            status: 'completed',
+            exitCode: 0,
+            aggregatedOutput: 'src/auth.rs:1',
+          },
+        })
+        plan(null, [
+          ['Explore the auth middleware', 'completed'],
+          ['Add the session expiry migration', 'inProgress'],
+          ['Refresh tokens in the middleware', 'pending'],
+          ['Run the checks', 'pending'],
+        ])
+        if (text.includes('fixture:plan-working')) {
+          hold = true
+        }
+        else {
+          plan(null, [
+            ['Explore the auth middleware', 'completed'],
+            ['Add the session expiry migration', 'completed'],
+            ['Refresh tokens in the middleware', 'completed'],
+            ['Run the checks', 'completed'],
+          ])
+        }
+      }
+
       if (text.includes('fixture:disconnect'))
         process.exit(1)
       if (text.includes('finish now'))

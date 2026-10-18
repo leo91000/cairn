@@ -14,7 +14,10 @@ use std::{
 use tokio_util::sync::CancellationToken;
 
 enum Entry {
-    Open(Weak<Volume>),
+    Open {
+        volume: Weak<Volume>,
+        disk: Weak<LazyDisk>,
+    },
     Replacing,
 }
 
@@ -33,7 +36,7 @@ pub(crate) fn configure(state: &Path, policy: &Policy) -> Result<()> {
         if directory.parent().and_then(Path::parent) != Some(state) {
             continue;
         }
-        let Entry::Open(volume) = entry else {
+        let Entry::Open { volume, .. } = entry else {
             continue;
         };
         let Some(volume) = volume.upgrade() else {
@@ -88,17 +91,35 @@ pub fn exists(directory: &Path) -> bool {
 pub fn live(directory: &Path) -> Option<Arc<Volume>> {
     let registry = registry().try_lock().ok()?;
     match registry.get(directory)? {
-        Entry::Open(volume) => volume.upgrade(),
+        Entry::Open { volume, .. } => volume.upgrade(),
         Entry::Replacing => None,
     }
 }
 
+fn closing_error() -> Error {
+    Error::unavailable(
+        "Conversation disk is still closing. Its journal has been preserved; retry when its readers have finished.",
+    )
+}
+
 pub fn open(directory: &Path) -> Result<Arc<Volume>> {
+    try_open(directory)?.ok_or_else(closing_error)
+}
+
+fn try_open(directory: &Path) -> Result<Option<Arc<Volume>>> {
     let mut registry = registry().lock().map_err(Error::internal)?;
     match registry.get(directory) {
-        Some(Entry::Open(volume)) => {
+        Some(Entry::Open { volume, disk }) => {
             if let Some(volume) = volume.upgrade() {
-                return Ok(volume);
+                if volume.stop.is_cancelled() {
+                    return Ok(None);
+                }
+                return Ok(Some(volume));
+            }
+            // A publication may retain the journal after its Volume is gone.
+            // Its exclusive writer lock must drain before reopening it.
+            if disk.strong_count() > 0 {
+                return Ok(None);
             }
         }
         Some(Entry::Replacing) => return Err(Error::conflict("Disk replacement is in progress.")),
@@ -155,8 +176,14 @@ pub fn open(directory: &Path) -> Result<Arc<Volume>> {
         transition: Mutex::new(None),
     });
     volume.health()?;
-    registry.insert(directory.to_owned(), Entry::Open(Arc::downgrade(&volume)));
-    Ok(volume)
+    registry.insert(
+        directory.to_owned(),
+        Entry::Open {
+            volume: Arc::downgrade(&volume),
+            disk: Arc::downgrade(&volume.disk),
+        },
+    );
+    Ok(Some(volume))
 }
 
 /// The caller also holds the conversation disk lock. Existing inspections must
@@ -181,7 +208,9 @@ pub async fn replacement(directory: &Path) -> Result<Replacement> {
             Some(Entry::Replacing) => {
                 return Err(Error::conflict("Disk replacement is in progress."));
             }
-            Some(Entry::Open(volume)) if volume.strong_count() > 0 => {
+            Some(Entry::Open { volume, disk })
+                if volume.strong_count() > 0 || disk.strong_count() > 0 =>
+            {
                 return Err(Error::conflict("Disk is still in use; retry restoration."));
             }
             _ => {}
@@ -206,8 +235,24 @@ async fn blocking<T: Send + 'static>(
 }
 
 pub async fn load(directory: &Path) -> Result<Arc<Volume>> {
-    let directory = directory.to_owned();
-    blocking(move || open(&directory)).await
+    load_with_wait(directory, std::time::Duration::from_secs(60)).await
+}
+
+async fn load_with_wait(directory: &Path, wait: std::time::Duration) -> Result<Arc<Volume>> {
+    let deadline = tokio::time::Instant::now() + wait;
+    loop {
+        let path = directory.to_owned();
+        if let Some(volume) = blocking(move || try_open(&path)).await? {
+            return Ok(volume);
+        }
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            return Err(closing_error());
+        }
+        // Release both the registry lock and the bounded I/O permit while the
+        // previous readers drain; another disk must still be able to open.
+        tokio::time::sleep(remaining.min(std::time::Duration::from_millis(20))).await;
+    }
 }
 
 /// Initialize and synchronize a journal on the same bounded pool as journal opens.
@@ -550,6 +595,12 @@ impl Volume {
     }
 }
 
+#[derive(Clone, Copy)]
+enum WriteAdmission {
+    Wait,
+    BestEffort,
+}
+
 impl Disk for Volume {
     fn size(&self) -> u64 {
         self.disk.size()
@@ -569,7 +620,32 @@ impl Disk for Volume {
     }
 
     fn write_at(&self, offset: u64, bytes: &[u8]) -> io::Result<()> {
-        self.admit_write(bytes.len(), 1, || self.disk.write_at(offset, bytes))
+        self.admit_write(bytes.len(), 1, WriteAdmission::Wait, || {
+            self.disk.write_at(offset, bytes)
+        })
+    }
+
+    fn discard(&self, offset: u64, length: usize) -> io::Result<()> {
+        super::device::range(self.size(), offset, length)?;
+        if self.stop.is_cancelled() {
+            return Err(io::Error::new(io::ErrorKind::Interrupted, "Disk stopped"));
+        }
+        // The shared loop determines no-op ranges before asking for write
+        // admission. An empty sparse tail must not debit the node's quota.
+        let result = self.disk.discard_with(offset, length, |position, bytes| {
+            self.admit_write(bytes.len(), 1, WriteAdmission::BestEffort, || {
+                self.disk.write_at(position, bytes)
+            })
+        });
+        if result.as_ref().is_err_and(|error| {
+            !matches!(
+                error.kind(),
+                io::ErrorKind::Interrupted | io::ErrorKind::WouldBlock
+            )
+        }) {
+            self.fault.store(true, Ordering::SeqCst);
+        }
+        result
     }
 
     fn write_batch(&self, writes: &[DiskWrite<'_>]) -> io::Result<()> {
@@ -582,7 +658,9 @@ impl Disk for Volume {
                 .filter(|total| *total <= 8 * 1024 * 1024)
                 .ok_or_else(|| io::Error::other("Disk write batch exceeds its byte limit"))
         })?;
-        self.admit_write(bytes, writes.len(), || self.disk.write_batch(writes))
+        self.admit_write(bytes, writes.len(), WriteAdmission::Wait, || {
+            self.disk.write_batch(writes)
+        })
     }
 
     fn sync(&self) -> io::Result<()> {
@@ -599,6 +677,7 @@ impl Volume {
         &self,
         bytes: usize,
         frames: usize,
+        admission: WriteAdmission,
         write: impl FnOnce() -> io::Result<()>,
     ) -> io::Result<()> {
         let sample = self.disk.start_write_admission();
@@ -638,6 +717,15 @@ impl Volume {
                     sample.finish(bytes);
                 }
                 return result;
+            }
+            if matches!(admission, WriteAdmission::BestEffort) {
+                // The VMM handles native discard on its control thread. Routine
+                // maintenance must not wait for a space-pressure pause that
+                // requires that same thread to service the management API.
+                return Err(io::Error::new(
+                    io::ErrorKind::WouldBlock,
+                    "Discard deferred for disk space",
+                ));
             }
             self.pressure.store(true, Ordering::SeqCst);
             drop(guard);
@@ -716,6 +804,173 @@ mod tests {
 
     fn prepared_context() -> Value {
         json!({ "unassigned": true, "policy": { "reserveMiB": 64, "reservePercent": 1 } })
+    }
+
+    #[tokio::test]
+    async fn reopened_conversation_never_returns_a_stopped_disk() {
+        let root = tempfile::tempdir().unwrap();
+        let (previous, _, _api) = controller_fixture(root.path()).await;
+        previous.write_at(0, b"BEFORE").unwrap();
+        previous.sync().unwrap();
+
+        // VM shutdown cancels this token. An inspector/publication task can
+        // retain the previous Volume while another VM loads the same disk.
+        previous.stop.cancel();
+        let directory = root.path().join("disks/conversation");
+        let reopening = load(&directory);
+        tokio::pin!(reopening);
+        if let Ok(early) =
+            tokio::time::timeout(std::time::Duration::from_millis(40), &mut reopening).await
+        {
+            let volume = early.unwrap();
+            panic!(
+                "VM boot received a disk before its stopped reader drained: same_volume={}, stopped={}, write={:?}",
+                Arc::ptr_eq(&previous, &volume),
+                volume.stop.is_cancelled(),
+                volume.write_at(8, b"AFTER!"),
+            );
+        }
+        assert!(previous.stop.is_cancelled());
+        drop(previous);
+        let reopened = tokio::time::timeout(std::time::Duration::from_secs(1), reopening)
+            .await
+            .unwrap()
+            .unwrap();
+        reopened.write_at(8, b"AFTER!").unwrap();
+        let mut bytes = [0; 6];
+        reopened.read_at(0, &mut bytes).unwrap();
+        assert_eq!(&bytes, b"BEFORE");
+    }
+
+    #[tokio::test]
+    async fn stopped_conversation_reopens_after_last_owner_is_released() {
+        let root = tempfile::tempdir().unwrap();
+        let (previous, _, _api) = controller_fixture(root.path()).await;
+        previous.write_at(0, b"BEFORE").unwrap();
+        previous.sync().unwrap();
+        previous.stop.cancel();
+        drop(previous);
+
+        let reopened = load(&root.path().join("disks/conversation")).await.unwrap();
+        reopened.write_at(8, b"AFTER!").unwrap();
+        let mut bytes = [0; 6];
+        reopened.read_at(0, &mut bytes).unwrap();
+        assert_eq!(&bytes, b"BEFORE");
+        reopened.read_at(8, &mut bytes).unwrap();
+        assert_eq!(&bytes, b"AFTER!");
+    }
+
+    #[tokio::test]
+    async fn stopped_journal_wait_is_bounded_and_preserves_other_disk_admission() {
+        let root = tempfile::tempdir().unwrap();
+        let (previous, _, _api) = controller_fixture(root.path()).await;
+        previous.write_at(0, b"BEFORE").unwrap();
+        let journal = previous.disk.clone();
+        previous.stop.cancel();
+        drop(previous);
+        let directory = root.path().join("disks/conversation");
+        assert!(replacement(&directory).await.err().unwrap().is_conflict());
+
+        let waiting = load_with_wait(&directory, std::time::Duration::from_millis(80));
+        let other_root = tempfile::tempdir().unwrap();
+        let (other, _, _other_api) = controller_fixture(other_root.path()).await;
+        let other_directory = other_root.path().join("disks/conversation");
+        let other_open = async {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            let opened = load(&other_directory).await.unwrap();
+            assert!(Arc::ptr_eq(&opened, &other));
+            opened.write_at(0, b"OTHER").unwrap();
+        };
+        let (result, ()) = tokio::join!(waiting, other_open);
+        assert!(result.err().unwrap().is_unavailable());
+        let mut bytes = [0; 6];
+        journal.read_at(0, &mut bytes).unwrap();
+        assert_eq!(&bytes, b"BEFORE");
+        drop(journal);
+
+        let reopened = load(&directory).await.unwrap();
+        reopened.write_at(8, b"AFTER!").unwrap();
+        reopened.read_at(0, &mut bytes).unwrap();
+        assert_eq!(&bytes, b"BEFORE");
+    }
+
+    #[tokio::test]
+    #[ignore = "explicit local stopped-volume read/write measurement; run alone"]
+    async fn stopped_volume_reopen_measurement() {
+        fn cpu_micros() -> u64 {
+            let mut usage = std::mem::MaybeUninit::<libc::rusage>::zeroed();
+            assert_eq!(
+                unsafe { libc::getrusage(libc::RUSAGE_SELF, usage.as_mut_ptr()) },
+                0
+            );
+            let usage = unsafe { usage.assume_init() };
+            ((usage.ru_utime.tv_sec + usage.ru_stime.tv_sec) * 1_000_000
+                + usage.ru_utime.tv_usec
+                + usage.ru_stime.tv_usec) as u64
+        }
+
+        for cancelled in [false, true] {
+            let root = tempfile::tempdir_in("/var/tmp").unwrap();
+            let (previous, _, _api) = controller_fixture(root.path()).await;
+            let bytes = [7; 4096];
+            previous.write_at(0, &bytes).unwrap();
+            previous.sync().unwrap();
+            let directory = root.path().join("disks/conversation");
+            let cpu = cpu_micros();
+            let opening = std::time::Instant::now();
+            let releasing = if cancelled {
+                previous.stop.cancel();
+                Some(tokio::spawn(async move {
+                    tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+                    drop(previous);
+                }))
+            } else {
+                drop(previous);
+                None
+            };
+            let reopened = load(&directory).await.unwrap();
+            let open_us = opening.elapsed().as_micros();
+            if let Some(releasing) = releasing {
+                releasing.await.unwrap();
+            }
+            let mut output = [0; 4096];
+            let reading = std::time::Instant::now();
+            reopened.read_at(0, &mut output).unwrap();
+            assert_eq!(output, bytes);
+            let cold_read_us = reading.elapsed().as_micros();
+            let reading = std::time::Instant::now();
+            for _ in 0..256 {
+                reopened.read_at(0, &mut output).unwrap();
+                assert_eq!(output, bytes);
+            }
+            let warm_reads_us = reading.elapsed().as_micros();
+            let writing = std::time::Instant::now();
+            for _ in 0..16 {
+                reopened.write_at(0, &bytes).unwrap();
+            }
+            reopened.sync().unwrap();
+            let writes_us = writing.elapsed().as_micros();
+            let cpu_us = cpu_micros() - cpu;
+            let journal_bytes: u64 = std::fs::read_dir(directory.join("lazy"))
+                .unwrap()
+                .map(|entry| entry.unwrap().metadata().unwrap())
+                .filter(std::fs::Metadata::is_file)
+                .map(|metadata| metadata.len())
+                .sum();
+            println!(
+                "{}",
+                json!({
+                    "cancelled": cancelled,
+                    "openUs": open_us,
+                    "coldReaderReadUs": cold_read_us,
+                    "warmReads256Us": warm_reads_us,
+                    "writes16AndSyncUs": writes_us,
+                    "cpuUs": cpu_us,
+                    "journalFileBytes": journal_bytes,
+                    "remoteEncodedBytes": 0,
+                })
+            );
+        }
     }
 
     #[tokio::test]
@@ -1234,7 +1489,90 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn disk_pressure_waits_without_acknowledging_or_losing_writes_and_resumes() {
+    async fn sparse_discard_never_charges_quota_and_reaches_later_deleted_bytes() {
+        const BLOCK: u64 = 4 * 1024 * 1024;
+        let root = tempfile::tempdir().unwrap();
+        let directory = root.path().join("disks/conversation");
+        let manifest = json!({
+            "version": 1,
+            "size": 16 * BLOCK,
+            "blockSize": BLOCK,
+            "blocks": (0..16).map(|index| json!({
+                "offset": index * BLOCK,
+                "size": BLOCK,
+                "hash": null
+            })).collect::<Vec<_>>()
+        });
+        let context = json!({
+            "master": "http://127.0.0.1:1/",
+            "grant": "test",
+            "policy": Policy::default()
+        });
+        let disk = create(&directory.join("lazy"), &manifest, &context)
+            .await
+            .unwrap();
+        disk.write_at(15 * BLOCK + 1024, b"deleted").unwrap();
+        drop(disk);
+        let volume = load(&directory).await.unwrap();
+        let budget = crate::microvm::budget::Budget {
+            slots: 1,
+            limits: crate::nodes::Resources {
+                cpu: 1,
+                memory_mi_b: 2048,
+                disk_mi_b: 128,
+            },
+        };
+        std::fs::write(
+            root.path().join(crate::microvm::budget::FILE),
+            serde_json::to_vec(&budget).unwrap(),
+        )
+        .unwrap();
+        crate::microvm::budget::disk_bytes(root.path()).unwrap();
+        // Charging the empty prefix as writes exhausts this quota before the
+        // final block is reached. Only that block needs a zero frame.
+        volume.discard(0, volume.size() as usize).unwrap();
+        let mut bytes = [1; 7];
+        volume.read_at(15 * BLOCK + 1024, &mut bytes).unwrap();
+        assert_eq!(bytes, [0; 7]);
+        let accounting = volume.disk.accounting().unwrap();
+        let charged = crate::microvm::budget::disk_bytes(root.path()).unwrap();
+        for _ in 0..8 {
+            volume.discard(0, volume.size() as usize).unwrap();
+        }
+        assert_eq!(volume.disk.accounting().unwrap(), accounting);
+        assert!(crate::microvm::budget::disk_bytes(root.path()).unwrap() <= charged);
+        assert!(!volume.fault.load(Ordering::SeqCst));
+        assert!(!volume.pressure.load(Ordering::SeqCst));
+        volume.stop.cancel();
+        assert_eq!(
+            volume.discard(0, 4096).unwrap_err().kind(),
+            io::ErrorKind::Interrupted
+        );
+    }
+
+    #[test]
+    fn disk_pressure_waits_without_acknowledging_or_losing_writes_and_resumes() {
+        // Other tests deliberately hold the process-global admission mutex.
+        // Keep the discard deadline and pressure recovery in an isolated process.
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "storage::runtime::tests::disk_pressure_recovery_child",
+                "--ignored",
+            ])
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "isolated process-global admission and pressure recovery child"]
+    async fn disk_pressure_recovery_child() {
         let root = tempfile::tempdir().unwrap();
         let directory = root.path().join("disks/conversation");
         let policy = Policy {
@@ -1268,6 +1606,19 @@ mod tests {
         disk.set_context(&context).unwrap();
         drop(disk);
         let volume = open(&directory).unwrap();
+        let sparse = volume.disk.accounting().unwrap();
+        volume.discard(0, 4096).unwrap();
+        assert_eq!(volume.disk.accounting().unwrap(), sparse);
+        volume.disk.write_at(0, b"deleted").unwrap();
+        let dirty_before = volume.disk.accounting().unwrap()["dirtyBytes"].clone();
+        let started = std::time::Instant::now();
+        assert_eq!(
+            volume.discard(0, 4096).unwrap_err().kind(),
+            io::ErrorKind::WouldBlock
+        );
+        assert!(started.elapsed() < std::time::Duration::from_secs(1));
+        assert!(!volume.fault.load(Ordering::SeqCst));
+        assert!(!volume.pressure.load(Ordering::SeqCst));
         let writer = {
             let volume = volume.clone();
             tokio::task::spawn_blocking(move || volume.write_at(3, b"retained"))
@@ -1275,7 +1626,10 @@ mod tests {
         tokio::time::sleep(std::time::Duration::from_millis(150)).await;
         assert!(!writer.is_finished());
         assert_eq!(volume.status().unwrap()["waitingFor"], "disk-space");
-        assert_eq!(volume.disk.accounting().unwrap()["dirtyBytes"], 0);
+        assert_eq!(
+            volume.disk.accounting().unwrap()["dirtyBytes"],
+            dirty_before
+        );
         let policy = Policy {
             reserve_mi_b: 64,
             reserve_percent: 1,

@@ -11,6 +11,7 @@ import {
   FolderGit2,
   LogOut,
   Plug,
+  Puzzle,
   Robot,
   Settings,
 } from '../icons'
@@ -62,13 +63,13 @@ const workspace = computed<Array<{
     to: '/connections',
     label: 'Connections',
     icon: Plug,
-    detail: 'Codex, Claude Code, GitHub and 1Password',
+    detail: 'Coding agent accounts and GitHub',
   },
   {
     to: '/plugins',
     label: 'Plugins',
-    icon: Plug,
-    detail: 'Integrations and bots',
+    icon: Puzzle,
+    detail: '1Password, Discord and your packages',
   },
   {
     to: '/nodes',
