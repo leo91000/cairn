@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { onMounted, ref } from 'vue'
-import { api, notify } from '../api'
+import { notify } from '../api'
+import { pluginOperation } from '../plugin-operations'
 import PluginView from './PluginView.vue'
 import UiAlert from './UiAlert.vue'
 
@@ -16,7 +17,7 @@ async function load() {
   busy.value = true
   error.value = ''
   try {
-    nodes.value = (await api<{ view: any[] | null }>(`${path()}/view`)).view
+    nodes.value = (await pluginOperation<{ view: any[] | null }>(`${path()}/view`, undefined, 'GET')).view
   }
   catch (e) {
     error.value = (e as Error).message
@@ -30,10 +31,7 @@ async function act(action: string, payload: unknown, values?: Record<string, any
   busy.value = true
   error.value = ''
   try {
-    const result = await api<{ notice?: string, view?: any[] }>(`${path()}/actions`, {
-      method: 'POST',
-      body: JSON.stringify({ action, payload, values: values ?? {} }),
-    })
+    const result = await pluginOperation<{ notice?: string, view?: any[] }>(`${path()}/actions`, { action, payload, values: values ?? {} })
     if (result.view)
       nodes.value = result.view
     if (result.notice)

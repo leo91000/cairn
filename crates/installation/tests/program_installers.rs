@@ -16,6 +16,7 @@ use sha2::{Digest, Sha256};
 use std::{
     collections::HashMap,
     io::{Cursor, Write},
+    os::unix::fs::PermissionsExt,
     path::PathBuf,
     sync::{
         Arc,
@@ -99,6 +100,17 @@ fn archive(name: &str, version: &str) -> Vec<u8> {
     zip.finish().unwrap().into_inner()
 }
 
+fn symlink_archive() -> Vec<u8> {
+    let mut zip = zip::ZipWriter::new(Cursor::new(Vec::new()));
+    zip.add_symlink(
+        "probe",
+        "/etc/passwd",
+        zip::write::SimpleFileOptions::default(),
+    )
+    .unwrap();
+    zip.finish().unwrap().into_inner()
+}
+
 impl Publisher {
     async fn release(&self, version: &str) {
         let bytes = archive("probe", version);
@@ -132,6 +144,7 @@ impl Fixture {
         let root = TempDir::new().unwrap();
         std::fs::create_dir_all(root.path().join("home")).unwrap();
         let service = Service::new(common::config(root.path())).await.unwrap();
+        common::relay_fixture::claimed(&service).await.unwrap();
         service
             .plugins
             .use_worker(PathBuf::from(env!("CARGO_BIN_EXE_cairn")));
@@ -312,10 +325,8 @@ async fn installers_cannot_request_instance_secrets_or_other_capabilities() {
         "cairn.download({url='https://downloads.example.com/file'})",
     ] {
         let installer = INSTALLER.replace("assert(input.platform.os == \"linux\")", forbidden);
-        let name = format!(
-            "probe-{}",
-            hex::encode(Sha256::digest(forbidden.as_bytes()))[..8].to_owned()
-        );
+        let digest = hex::encode(Sha256::digest(forbidden.as_bytes()));
+        let name = format!("probe-{}", &digest[..8]);
         let manifest = MANIFEST.replace("program-probe", &name);
         let package = f.upload(&manifest, &installer).await.unwrap();
         assert!(
@@ -374,7 +385,7 @@ async fn installed_binaries_are_checked_before_execution() {
     let path = program_installation::executable(&f.service, &package.manifest, program)
         .await
         .unwrap();
-    std::fs::set_permissions(&path, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
     std::fs::write(path, "tampered").unwrap();
     assert!(
         program_installation::executable(&f.service, &package.manifest, program)
@@ -503,7 +514,7 @@ async fn release_metadata_larger_than_half_a_frame_is_not_duplicated() {
 
 #[tokio::test]
 async fn first_use_can_finish_a_download_longer_than_the_normal_handler_deadline() {
-    use cairn_installation::plugins::{connections, panels};
+    use cairn_installation::plugins::connections;
     let f = Fixture::new().await;
     *f.publisher.release.lock().await = json!({ "version": "2.41.0" });
     let arch = if std::env::consts::ARCH == "aarch64" {
@@ -527,10 +538,25 @@ async fn first_use_can_finish_a_download_longer_than_the_normal_handler_deadline
     .unwrap();
     let gate = Arc::new(tokio::sync::Notify::new());
     *f.publisher.download_gate.lock().await = Some(gate.clone());
-    let service = f.service.clone();
-    let first_use = tokio::spawn(async move {
-        panels::test(&service, "onepassword", account["id"].as_str().unwrap()).await
-    });
+    let request = axum::http::Request::builder()
+        .method("POST")
+        .uri(format!(
+            "/api/plugins/onepassword/connections/{}/test",
+            account["id"].as_str().unwrap()
+        ))
+        .body(Body::empty())
+        .unwrap();
+    let input = cairn_installation::http::Input::read(request)
+        .await
+        .unwrap();
+    let accepted = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        cairn_installation::plugins::routes(&f.service, &input),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let operation = accepted["operation"].as_str().unwrap();
     common::eventually(
         std::time::Duration::from_secs(15),
         std::time::Duration::from_millis(10),
@@ -538,14 +564,22 @@ async fn first_use_can_finish_a_download_longer_than_the_normal_handler_deadline
     )
     .await;
     tokio::time::sleep(std::time::Duration::from_secs(36)).await;
-    let still_running = !first_use.is_finished();
-    gate.notify_one();
-    let result = first_use.await.unwrap();
-    assert!(
-        still_running,
-        "the first-use handler must outlive its ordinary 35-second budget"
+    assert_eq!(
+        f.service.plugins.operations.get(operation).unwrap()["state"],
+        "running"
     );
-    assert_eq!(result.unwrap()["ok"], true);
+    gate.notify_one();
+    let completed = common::eventually(
+        std::time::Duration::from_secs(15),
+        std::time::Duration::from_millis(10),
+        async || {
+            let state = f.service.plugins.operations.get(operation).unwrap();
+            (state["state"] != "running").then_some(state)
+        },
+    )
+    .await;
+    assert_eq!(completed["state"], "completed", "{completed}");
+    assert_eq!(completed["result"]["ok"], true);
 }
 
 /// Reproducible local I/O reference; deliberately excluded from normal tests.
@@ -773,4 +807,23 @@ async fn owner_preparation_is_tracked_without_holding_a_relay_request_open() {
     assert_eq!(failed["state"], "failed");
     assert!(failed["error"].as_str().unwrap().contains("SHA-256"));
     assert_eq!(f.output().await, "1.0.0");
+}
+
+#[tokio::test]
+async fn unarchived_binaries_can_be_installed_and_reused() {
+    let f = Fixture::new().await;
+    let bytes = b"#!/bin/sh\nprintf '2.0.0'\n".to_vec();
+    *f.publisher.release.lock().await = json!({
+        "version": "2.0.0", "url": "https://downloads.example.com/binary",
+        "sha256": hex::encode(Sha256::digest(&bytes)), "format": "binary", "executable": "probe",
+    });
+    f.publisher
+        .files
+        .lock()
+        .await
+        .insert("/binary".into(), bytes);
+    f.approve().await;
+    assert_eq!(f.output().await, "2.0.0");
+    assert_eq!(f.output().await, "2.0.0");
+    assert_eq!(f.publisher.requests.load(Ordering::SeqCst), 2);
 }

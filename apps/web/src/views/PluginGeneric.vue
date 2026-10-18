@@ -13,6 +13,7 @@ import {
   ref,
 } from 'vue'
 import { useRoute } from 'vue-router'
+import { pluginOperation } from '../plugin-operations'
 import {
   api,
   notify,
@@ -180,15 +181,12 @@ async function complete(changed?: string) {
   const ask = ++asked
   completing.value = true
   try {
-    const result = await api<FormResult>(`/plugins/${id.value}/form`, {
-      method: 'POST',
-      body: JSON.stringify({
+    const result = await pluginOperation<FormResult>(`/plugins/${id.value}/form`, {
         instance: editing.value?.id,
         settings: settings(),
         secrets: Object.fromEntries(Object.entries(secrets.value).filter(([, value]) => value.trim())),
         ...(form.value.token ? { token: form.value.token } : {}),
         ...(changed ? { changed } : {}),
-      }),
     })
     if (ask !== asked)
       return
@@ -252,7 +250,7 @@ async function save() {
       enabled: form.value.enabled,
     }
     const path = `/plugins/${id.value}/connections${editing.value ? `/${editing.value.id}` : ''}`
-    await api(path, { method: editing.value ? 'PUT' : 'POST', body: JSON.stringify(body) })
+    await pluginOperation(path, body, editing.value ? 'PUT' : 'POST')
     form.value.token = ''
     secrets.value = {}
     editing.value = undefined
@@ -270,7 +268,7 @@ async function post(connection: PluginConnection, path: string, body?: unknown) 
 
 async function test(connection: PluginConnection) {
   await action(async () => {
-    const result = await api<{ message?: string }>(`/plugins/${id.value}/connections/${connection.id}/test`, { method: 'POST' })
+    const result = await pluginOperation<{ message?: string }>(`/plugins/${id.value}/connections/${connection.id}/test`)
     notify(`${connection.name}: ${result.message || 'it works'}`)
   })
 }

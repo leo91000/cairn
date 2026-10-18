@@ -386,7 +386,8 @@ or filesystem paths to Luau. Downloads are streamed, limited to 64 MiB and 90
 seconds; the installer event has a 120-second deadline. One-shot calls with an
 unprepared dependency have a 180-second enclosing budget so preparation can finish;
 subsequent calls retain the normal 35-second budget, and each executable still has
-its own 30-second limit. ZIPs have at most 256
+its own 30-second limit. The run-local plugin CLI allows 190 seconds for the
+private channel, covering that cold preparation budget. ZIPs have at most 256
 entries; links and unsafe paths are refused. Only the selected regular executable,
 at most 128 MiB, is written. No arbitrary shell/install scripts are run.
 
@@ -416,7 +417,10 @@ their synchronous summary response. This keeps downloads independent of the
 30-second HTTP relay deadline. Operations have a nine-minute total budget, four
 concurrent slots, and 64 recent in-memory results. A server restart loses operation
 status, not the atomic program/package locks; refresh the plugin and retry if
-needed. Web and Android perform this polling, including approval failures.
+needed. Web and Android perform this polling, including approval failures. Cold instance tests, views/actions and form handlers
+also use this response when they may prepare an executable; once prepared, their
+ordinary synchronous responses are unchanged. Instance saves without a form
+handler remain synchronous and do not download programs.
 
 Locks and executables live under `<data>/plugin-programs/`, scoped by package
 digest and server platform. Failed preparation preserves the current version;

@@ -172,6 +172,55 @@ pub async fn routes(s: &Arc<Service>, input: &Input) -> Result<Value> {
         .collect::<Vec<_>>();
     let body = &input.body;
     let version = || crate::validation::text(body, "version").to_owned();
+    // Cold owner handlers may prepare programs. Keep that work outside the relay's
+    // short request lifetime, including views/forms that call exec lazily.
+    let cold_handler = match (input.method.as_str(), parts.as_slice()) {
+        ("POST", ["plugins", id, "form"]) => Some((*id, "", "form")),
+        ("GET", ["plugins", id, "connections", instance, "view"]) => Some((*id, *instance, "view")),
+        ("POST", ["plugins", id, "connections", instance, "test"]) => {
+            Some((*id, *instance, "test"))
+        }
+        ("POST", ["plugins", id, "connections", instance, "actions"]) => {
+            Some((*id, *instance, "action"))
+        }
+        ("POST", ["plugins", id, "connections"]) => Some((*id, "", "save")),
+        ("PUT", ["plugins", id, "connections", instance]) => Some((*id, *instance, "save")),
+        _ => None,
+    };
+    if let Some((id, instance, handler)) = cold_handler {
+        let package = registry::active(s, id).await?;
+        let invokes_handler = match handler {
+            "form" | "save" => package.manifest.instance_form,
+            "view" | "action" => package.manifest.instance_view,
+            "test" => package.manifest.instance_test,
+            _ => false,
+        };
+        if invokes_handler && program_installation::needs_preparation(s, &package) {
+            let (service, id, instance, body) =
+                (s.clone(), id.to_owned(), instance.to_owned(), body.clone());
+            return s.plugins.operations.start(s.clone(), async move {
+                match handler {
+                    "form" => forms::form(&service, &id, &body).await,
+                    "view" => panels::view(&service, &id, &instance).await,
+                    "test" => panels::test(&service, &id, &instance).await,
+                    "action" => panels::action(&service, &id, &instance, &body).await,
+                    "save" => {
+                        if !instance.is_empty() {
+                            connections::get(&service, &id, &instance).await?;
+                        }
+                        connections::save(
+                            &service,
+                            &id,
+                            &body,
+                            (!instance.is_empty()).then_some(instance.as_str()),
+                        )
+                        .await
+                    }
+                    _ => unreachable!("classified owner handler"),
+                }
+            });
+        }
+    }
     match (input.method.as_str(), parts.as_slice()) {
         ("GET", ["plugins"]) => {
             let mut catalog = registry::catalog(s).await?;

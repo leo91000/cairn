@@ -575,7 +575,7 @@ private fun InstanceCard(
                     TextButton(
                         onClick = {
                             vm.perform {
-                                val result = api.send<JsonObject>("POST", "$path/test")
+                                val result = api.pluginOperation("$path/test").jsonObject
                                 val message =
                                     result["message"]?.jsonPrimitive?.contentOrNull.orEmpty()
                                 notify(
@@ -708,24 +708,25 @@ private fun InstanceEditor(
             completing = true
             if (asking.second != null) kotlinx.coroutines.delay(400)
             runCatching {
-                vm.api.send<PluginForm>(
-                    "POST",
-                    "/plugins/${segment(pluginId)}/form",
-                    buildJsonObject {
-                        if (!creating) put("instance", initial.id)
-                        put("settings", pluginSettings(stored, values))
-                        put(
-                            "secrets",
-                            JsonObject(
-                                secrets
-                                    .filterValues { it.isNotBlank() }
-                                    .mapValues { JsonPrimitive(it.value.trim()) }
-                            ),
-                        )
-                        if (token.isNotBlank()) put("token", token.trim())
-                        asking.second?.let { put("changed", it) }
-                    },
-                )
+                val result =
+                    vm.api.pluginOperation(
+                        "/plugins/${segment(pluginId)}/form",
+                        buildJsonObject {
+                            if (!creating) put("instance", initial.id)
+                            put("settings", pluginSettings(stored, values))
+                            put(
+                                "secrets",
+                                JsonObject(
+                                    secrets
+                                        .filterValues { it.isNotBlank() }
+                                        .mapValues { JsonPrimitive(it.value.trim()) }
+                                ),
+                            )
+                            if (token.isNotBlank()) put("token", token.trim())
+                            asking.second?.let { put("changed", it) }
+                        },
+                    )
+                wireJson.decodeFromJsonElement<PluginForm>(result)
             }
                 .onSuccess { form ->
                     values =
@@ -775,8 +776,7 @@ private fun InstanceEditor(
                 !completing,
         save = {
             vm.perform {
-                api.request(
-                    if (creating) "POST" else "PUT",
+                api.pluginOperation(
                     "/plugins/${segment(pluginId)}/connections" +
                         if (creating) "" else "/${segment(initial.id)}",
                     buildJsonObject {
@@ -819,6 +819,7 @@ private fun InstanceEditor(
                         }
                         put("enabled", enabled)
                     },
+                    method = if (creating) "POST" else "PUT",
                 )
                 token = ""
                 secrets = emptyMap()

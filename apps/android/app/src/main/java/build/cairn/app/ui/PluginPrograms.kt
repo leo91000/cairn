@@ -20,7 +20,12 @@ internal fun PluginPrograms(vm: CairnViewModel, state: Workspace, plugin: String
         programs = vm.api.get("/plugins/${segment(plugin)}/programs")
     }
     Poll("plugin-programs-$plugin", 5000) {
-        if (!state.busy) try { load() } catch (e: Exception) { vm.report(e) }
+        if (!state.busy)
+            try {
+                load()
+            } catch (e: Exception) {
+                vm.report(e)
+            }
     }
     fun act(program: ProgramInstallation, action: String) = vm.perform {
         api.pluginOperation(
@@ -34,16 +39,20 @@ internal fun PluginPrograms(vm: CairnViewModel, state: Workspace, plugin: String
         if (programs == null) LinearProgressIndicator(Modifier.fillMaxWidth())
         programs?.programs.orEmpty().forEach { program ->
             Text(
-                "${program.name} · " + (program.installed?.let { "Version ${it.release.version}" }
-                    ?: "Pas encore installé · préparé à la première utilisation"),
+                "${program.name} · " +
+                    (program.installed?.let { "Version ${it.release.version}" }
+                        ?: "Pas encore installé · préparé à la première utilisation"),
                 Modifier.padding(top = 8.dp),
                 style = MaterialTheme.typography.bodyMedium,
             )
             program.candidate?.let { release ->
                 Note("Disponible : ${release.version}")
                 Note(release.url)
-                Note(if (release.sha256 != null) "L’empreinte publiée par l’éditeur sera vérifiée."
-                    else "La provenance repose sur HTTPS ; l’empreinte sera enregistrée au téléchargement.")
+                Note(
+                    if (release.sha256 != null) "L’empreinte publiée par l’éditeur sera vérifiée."
+                    else
+                        "La provenance repose sur HTTPS ; l’empreinte sera enregistrée au téléchargement."
+                )
             }
             FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 OutlinedButton(enabled = !state.busy, onClick = { act(program, "check") }) {

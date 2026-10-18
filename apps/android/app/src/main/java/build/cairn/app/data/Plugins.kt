@@ -90,8 +90,7 @@ data class ProgramInstallation(
     val digest: String? = null,
 )
 
-@Serializable
-data class ProgramInstallations(val programs: List<ProgramInstallation> = emptyList())
+@Serializable data class ProgramInstallations(val programs: List<ProgramInstallation> = emptyList())
 
 @Serializable data class PluginAgentAccess(val description: String = "")
 

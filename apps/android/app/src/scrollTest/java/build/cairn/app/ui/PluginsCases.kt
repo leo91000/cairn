@@ -12,8 +12,8 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.test.core.app.ApplicationProvider
 import build.cairn.app.data.*
 import java.util.concurrent.CopyOnWriteArrayList
-import java.util.concurrent.atomic.AtomicReference
 import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicReference
 import kotlinx.coroutines.flow.first
 import kotlinx.serialization.json.*
 import okhttp3.mockwebserver.*
@@ -530,24 +530,62 @@ abstract class PluginsCases {
     fun programReleasesCanBeCheckedInstalledAndRestored() {
         MockWebServer().use { server ->
             val initial = InstalledProgram(release = ProgramRelease(version = "2.39.0"))
-            val program = AtomicReference(ProgramInstallation(name = "op", installer = "programs/op.luau", installed = initial))
+            val program =
+                AtomicReference(
+                    ProgramInstallation(
+                        name = "op",
+                        installer = "programs/op.luau",
+                        installed = initial,
+                    )
+                )
             val actions = CopyOnWriteArrayList<String>()
             val polls = AtomicInteger()
             server.dispatcher = dispatcher { path, body ->
                 val base = "/api/installations/fixture/api/plugins/onepassword/programs"
                 when (path) {
                     "/api/installations/fixture/api/plugins/packages/operations/program-job" ->
-                        if (polls.incrementAndGet() % 2 == 1) "{\"state\":\"running\"}" else "{\"state\":\"completed\"}"
+                        if (polls.incrementAndGet() % 2 == 1) "{\"state\":\"running\"}"
+                        else "{\"state\":\"completed\"}"
                     base -> wireJson.encodeToString(ProgramInstallations(listOf(program.get())))
                     "$base/op/check" -> {
                         actions += "check"
-                        program.set(program.get().copy(candidate = ProgramRelease(version = "2.41.0", url = "https://cache.agilebits.com/op.zip"), digest = "reviewed-release"))
+                        program.set(
+                            program
+                                .get()
+                                .copy(
+                                    candidate =
+                                        ProgramRelease(
+                                            version = "2.41.0",
+                                            url = "https://cache.agilebits.com/op.zip",
+                                        ),
+                                    digest = "reviewed-release",
+                                )
+                        )
                         "{\"operation\":\"program-job\"}"
                     }
                     "$base/op/install" -> {
                         actions += "install"
-                        assertEquals("reviewed-release", wireJson.parseToJsonElement(body).jsonObject["digest"]?.jsonPrimitive?.content)
-                        program.set(program.get().copy(installed = InstalledProgram(release = ProgramRelease(version = "2.41.0")), previous = initial, candidate = null, digest = null))
+                        assertEquals(
+                            "reviewed-release",
+                            wireJson
+                                .parseToJsonElement(body)
+                                .jsonObject["digest"]
+                                ?.jsonPrimitive
+                                ?.content,
+                        )
+                        program.set(
+                            program
+                                .get()
+                                .copy(
+                                    installed =
+                                        InstalledProgram(
+                                            release = ProgramRelease(version = "2.41.0")
+                                        ),
+                                    previous = initial,
+                                    candidate = null,
+                                    digest = null,
+                                )
+                        )
                         "{\"operation\":\"program-job\"}"
                     }
                     "$base/op/rollback" -> {
@@ -560,14 +598,22 @@ abstract class PluginsCases {
             }
             server.start()
             show(server) { vm, state -> PluginScreen(vm, state, "onepassword") {} }
-            compose.waitUntil(30000) { compose.onAllNodesWithText("Vérifier op").fetchSemanticsNodes().isNotEmpty() }
+            compose.waitUntil(30000) {
+                compose.onAllNodesWithText("Vérifier op").fetchSemanticsNodes().isNotEmpty()
+            }
             compose.onNodeWithText("Vérifier op").performScrollTo().performClick()
-            compose.waitUntil(30000) { compose.onAllNodesWithText("Installer op 2.41.0").fetchSemanticsNodes().isNotEmpty() }
+            compose.waitUntil(30000) {
+                compose.onAllNodesWithText("Installer op 2.41.0").fetchSemanticsNodes().isNotEmpty()
+            }
             compose.onNodeWithText("Installer op 2.41.0").performScrollTo().performClick()
-            compose.waitUntil(30000) { compose.onAllNodesWithText("op · Version 2.41.0").fetchSemanticsNodes().isNotEmpty() }
+            compose.waitUntil(30000) {
+                compose.onAllNodesWithText("op · Version 2.41.0").fetchSemanticsNodes().isNotEmpty()
+            }
             capture("plugin-program-installed")
             compose.onNodeWithText("Restaurer op 2.39.0").performScrollTo().performClick()
-            compose.waitUntil(30000) { compose.onAllNodesWithText("op · Version 2.39.0").fetchSemanticsNodes().isNotEmpty() }
+            compose.waitUntil(30000) {
+                compose.onAllNodesWithText("op · Version 2.39.0").fetchSemanticsNodes().isNotEmpty()
+            }
             assertEquals(listOf("check", "install", "rollback"), actions.toList())
             assertEquals(6, polls.get())
             capture("plugin-program-restored")
@@ -694,10 +740,20 @@ abstract class PluginsCases {
                                 )
                             )
                         "/api/installations/fixture/api/plugins/onepassword/programs" ->
-                            wireJson.encodeToString(ProgramInstallations(listOf(ProgramInstallation(
-                                name = "op", installer = "programs/op.luau",
-                                installed = InstalledProgram(release = ProgramRelease(version = "2.39.0")),
-                            ))))
+                            wireJson.encodeToString(
+                                ProgramInstallations(
+                                    listOf(
+                                        ProgramInstallation(
+                                            name = "op",
+                                            installer = "programs/op.luau",
+                                            installed =
+                                                InstalledProgram(
+                                                    release = ProgramRelease(version = "2.39.0")
+                                                ),
+                                        )
+                                    )
+                                )
+                            )
                         "/api/installations/fixture/api/plugins/discord/connections/bot/view" ->
                             """{"view":[{"type":"facts","items":[{"label":"Channel","value":"#support"},{"label":"Server","value":"Acme"}]}]}"""
                         "/api/installations/fixture/api/plugins/onepassword/connections/op1/view" ->

@@ -37,7 +37,7 @@ pub async fn run(args: &[String]) -> Result<()> {
     let response = reqwest::Client::builder()
         .no_proxy()
         .redirect(reqwest::redirect::Policy::none())
-        .timeout(std::time::Duration::from_secs(40))
+        .timeout(std::time::Duration::from_secs(190))
         .build()
         .map_err(Error::internal)?
         .post(format!("{}/plugin-command", crate::microvm::mcp::ORIGIN))

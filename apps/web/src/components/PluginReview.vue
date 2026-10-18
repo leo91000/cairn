@@ -10,8 +10,8 @@ import {
   Trash2,
   TriangleAlert,
 } from '../icons'
-import { capabilityLabels } from '../plugins'
 import { pluginOperation } from '../plugin-operations'
+import { capabilityLabels } from '../plugins'
 import Icon from './Icon.vue'
 import Modal from './Modal.vue'
 import PluginMark from './PluginMark.vue'

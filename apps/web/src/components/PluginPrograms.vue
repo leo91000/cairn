@@ -38,7 +38,9 @@ async function act(program: ProgramState, action: string) {
     <h2 class="text-sm! font-semibold">
       Installed programs
     </h2>
-    <p v-if="busy" role="status" class="text-xs text-muted">Preparing program…</p>
+    <p v-if="busy" role="status" class="text-xs text-muted">
+      Preparing program…
+    </p>
     <UiAlert v-if="error">
       {{ error }}
     </UiAlert>

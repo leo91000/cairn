@@ -42,7 +42,9 @@ No download or network access occurs merely by uploading or listing a package.
 
 Web and Android offer the same check, explicit install and restore actions.
 Owner preparation requests return an operation ID immediately and clients poll its
-result with short requests, including installer-backed package activation. This
+result with short requests, including installer-backed package activation and cold
+instance handlers that may execute a program. Saves without a form handler keep
+their synchronous response and do not download dependencies. This
 respects the existing 30-second relay deadline. Operations are bounded to four
 concurrent jobs, a nine-minute total budget and 64 recent in-memory results. On a
 server restart, refresh the authoritative package/program locks; there is no
