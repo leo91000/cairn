@@ -92,10 +92,12 @@ pub async fn handle(State(app): State<App>, request: Request) -> Result<Response
             Ok(Json(descriptor).into_response())
         }
         "inbox" => {
-            let path = root.join("chat-input/messages.json");
-            let bytes = tokio::fs::read(path)
-                .await
-                .unwrap_or_else(|_| b"[]".to_vec());
+            let bytes = crate::chat_inbox::read(
+                &root.join("chat-input"),
+                crate::chat_inbox::TRANSPORT_LIMIT,
+            )
+            .await?
+            .unwrap_or_else(|| b"[]".to_vec());
             let messages: Value = serde_json::from_slice(&bytes)?;
             Ok(Json(json!({ "messages": messages })).into_response())
         }

@@ -1996,6 +1996,63 @@ async fn mcp_through(
 }
 
 #[tokio::test]
+async fn remote_inbox_preserves_empty_invalid_and_large_opencode_inputs() {
+    let owner = Owner::new().await;
+    let (node, attempt, run, token) = (id(), id(), id(), auth::token());
+    owner.register_node(&node, &token).await;
+    owner.grant_nodes(MAIN_AGENT_ID, json!([node])).await;
+    owner
+        .put(
+            "node-attempts",
+            json!({ "id": attempt, "nodeId": node, "released": false }),
+        )
+        .await;
+    let mut record = run_record(&run, RunStatus::Running);
+    record["snapshot"] = json!({ "agent": { "id": MAIN_AGENT_ID } });
+    owner.add_run(&record).await;
+    owner
+        .set_checkpoint(&run, json!({ "nodeId": node, "runnerId": attempt }))
+        .await;
+    let plans = owner.service.config.data_dir.join("runner-plans");
+    std::fs::create_dir_all(&plans).unwrap();
+    std::fs::write(
+        plans.join(format!("{attempt}.json")),
+        json!({ "runId": run }).to_string(),
+    )
+    .unwrap();
+    let inbox = owner
+        .service
+        .config
+        .data_dir
+        .join("runs")
+        .join(&run)
+        .join("chat-input");
+    std::fs::create_dir_all(&inbox).unwrap();
+    let path = format!("/internal/node-workspace/{attempt}/inbox");
+
+    let (status, body) = owner.call("POST", &path, json!({}), Some(&token)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body, json!({ "messages": [] }));
+
+    for length in [2_000_001, 16_000_000] {
+        let bytes = format!("[]{}", " ".repeat(length - 2));
+        std::fs::write(inbox.join("messages.json"), bytes).unwrap();
+        let (status, body) = owner.call("POST", &path, json!({}), Some(&token)).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body, json!({ "messages": [] }));
+    }
+
+    std::fs::write(inbox.join("messages.json"), b"invalid json").unwrap();
+    let (status, _) = owner.call("POST", &path, json!({}), Some(&token)).await;
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+
+    std::fs::write(inbox.join("messages.json"), vec![b' '; 16_000_001]).unwrap();
+    let (status, body) = owner.call("POST", &path, json!({}), Some(&token)).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body, json!({ "error": "Chat inbox is too large." }));
+}
+
+#[tokio::test]
 async fn remote_vm_agents_reach_workspace_tools_only_through_their_node_session() {
     let (listener, address) = common::bind().await;
     // An installation with its local runner and a node enrolled at a private origin.
