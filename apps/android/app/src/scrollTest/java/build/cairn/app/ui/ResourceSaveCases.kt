@@ -57,6 +57,10 @@ abstract class ResourceSaveCases {
         saveAfterFailure("projects", false, rejectReplay = true, malformedResponse = true)
 
     @Test
+    fun rejectedUpdateAfterRefreshFailureNamesTheCreatedProject() =
+        saveAfterFailure("projects", false, rejectReplay = true)
+
+    @Test
     fun dedicatedTokenFailureDoesNotCreateAnotherAgent() =
         saveAfterFailure("agents", false, tokenFailure = true)
 
@@ -155,12 +159,15 @@ abstract class ResourceSaveCases {
                     },
                     beaconOrigin = "",
                 )
+            // Resolving the URL starts the server; StrictMode rejects that on the device main
+            // thread.
+            val origin = server.url("/").toString()
             val models = ViewModelStore().apply { put("fixture", vm) }
             val restoration = StateRestorationTester(compose)
             restoration.setContent {
                 LaunchedEffect(Unit) {
                     vm.state.first { it.ready }
-                    if (vm.state.value.installation == null) vm.connect(server.url("/").toString())
+                    if (vm.state.value.installation == null) vm.connect(origin)
                 }
                 val state = vm.state.collectAsState().value
                 CairnTheme {
@@ -222,6 +229,9 @@ abstract class ResourceSaveCases {
                         .onNodeWithText("Jeton GitHub dédié (facultatif)")
                         .performScrollTo()
                         .performTextInput("fixture-token")
+                compose
+                    .onNode(hasScrollAction() and hasAnyDescendant(hasText("Nom")))
+                    .performTouchInput { swipeUp() }
                 compose.onNodeWithText("Enregistrer").performClick()
                 waitFor { mutations.isNotEmpty() && !vm.state.value.busy }
                 assertFalse(closed.get())
@@ -230,8 +240,7 @@ abstract class ResourceSaveCases {
                         .onNodeWithText(
                             "Agent enregistré, mais le jeton GitHub n’a pas été enregistré. Réessayez."
                         )
-                        .performScrollTo()
-                        .assertExists()
+                        .assertIsDisplayed()
                 } else if (!uncertainResponse) {
                     val label =
                         when (kind) {
@@ -244,14 +253,14 @@ abstract class ResourceSaveCases {
                         .onNodeWithText(
                             "$label enregistré${if (kind == "tasks") "e" else ""}, mais le rechargement a échoué. Réessayez."
                         )
-                        .performScrollTo()
-                        .assertExists()
+                        .assertIsDisplayed()
                 }
                 if (uncertainResponse)
+                    compose.onNodeWithText("Sauvegarde", substring = true).assertIsDisplayed()
+                if (kind == "agents" && !uncertainResponse)
                     compose
-                        .onNodeWithText("Sauvegarde", substring = true)
-                        .performScrollTo()
-                        .assertExists()
+                        .onAllNodesWithText("Enregistrez l’agent pour importer un portrait.")
+                        .assertCountEquals(0)
                 captureFailure(
                     "$kind-${if (tokenFailure) "token" else if (uncertainResponse) "uncertain" else "reload"}"
                 )
@@ -269,7 +278,15 @@ abstract class ResourceSaveCases {
                 if (rejectReplay) {
                     compose.onNodeWithText("Enregistrer").performClick()
                     waitFor { mutations.size == 2 && !vm.state.value.busy }
-                    if (kind == "projects")
+                    if (!uncertainResponse) {
+                        compose
+                            .onNodeWithText(
+                                "Projet enregistré, mais les dernières modifications n’ont pas été enregistrées. Réessayez."
+                            )
+                            .assertIsDisplayed()
+                        captureFailure("$kind-update")
+                    }
+                    if (kind == "projects" && uncertainResponse)
                         compose.onNodeWithText("Dossier sur le serveur").assertIsNotEnabled()
                 }
                 compose.onNodeWithText("Nom").performScrollTo().performTextReplacement("Modifié")
@@ -277,6 +294,7 @@ abstract class ResourceSaveCases {
                 waitFor { closed.get() && !vm.state.value.busy }
                 val expected =
                     when {
+                        rejectReplay && !uncertainResponse -> listOf("POST", "PUT", "PUT")
                         rejectReplay -> listOf("POST", "POST", "POST", "PUT")
                         uncertainResponse -> listOf("POST", "POST", "PUT")
                         else -> listOf("POST", "PUT")

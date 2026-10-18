@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import type { GithubRepository } from '../../../../packages/contracts/contracts'
 import type { ExecutionNode } from '../../../../packages/contracts/nodes'
-import { computed, ref } from 'vue'
+import { computed, nextTick, ref } from 'vue'
 import { providers as codingAgents } from '../../../../packages/contracts/accounts'
 import { MAIN_AGENT_ID } from '../../../../packages/contracts/constants'
 import { LOCAL_NODE_ID } from '../../../../packages/contracts/nodes'
@@ -64,6 +64,8 @@ function repositoryLabel(origin?: string) {
 const resourceSave = useResourceSave()
 const editing = resourceSave.savedId
 const pendingCreation = resourceSave.pendingCreation
+let openedId: string | null = null
+const saveAlert = ref<InstanceType<typeof UiAlert>>()
 const open = ref(false)
 const deleting = ref<any>(null)
 const busy = ref(false)
@@ -137,7 +139,8 @@ async function edit(item?: any) {
   githubToken.value = ''
   githubConfigured.value = false
   removeGithub.value = false
-  resourceSave.reset(item?.id ?? null)
+  openedId = item?.id ?? null
+  resourceSave.reset(openedId)
   form.value = item
     ? structuredClone(JSON.parse(JSON.stringify(item)))
     : isAgent.value
@@ -237,17 +240,23 @@ async function save() {
   }
   catch (e) {
     const label = isAgent.value ? 'Agent' : 'Project'
-    const detail = (e as Error).message || 'Please try again.'
+    const detail = (e as Error).message
+    let summary: string
     if (phase === 'refresh')
-      error.value = `${label} saved, but the workspace could not be reloaded. ${detail}`
+      summary = `${label} saved, but the workspace could not be reloaded.`
     else if (phase === 'token')
-      error.value = `Agent saved, but the GitHub connection could not be saved. ${detail}`
-    else if (editing.value)
-      error.value = `${label} saved, but the latest changes could not be saved. ${detail}`
+      summary = 'Agent saved, but the GitHub connection could not be saved.'
+    else if (editing.value && editing.value !== openedId)
+      summary = `${label} saved, but the latest changes could not be saved.`
     else if (pendingCreation.value)
-      error.value = `Could not confirm whether the ${label.toLowerCase()} was saved. Retry to recover it safely. ${detail}`
+      summary = `Could not confirm whether the ${label.toLowerCase()} was saved. Retry to recover it safely.`
     else
-      error.value = `Could not save the ${label.toLowerCase()}. ${detail}`
+      summary = `Could not save the ${label.toLowerCase()}.`
+    error.value = detail ? `${summary} ${detail}` : summary
+
+    // The alert follows the whole form; bring it above the sticky actions on small screens.
+    await nextTick()
+    saveAlert.value?.$el.scrollIntoView?.({ block: 'nearest' })
   }
   finally {
     busy.value = false
@@ -501,7 +510,7 @@ async function remove() {
             placeholder="main"
           ><small>Used for new private workspaces.</small></label>
         </template>
-        <UiAlert v-if="error" class="col-span-2 phone:col-span-1">
+        <UiAlert v-if="error" ref="saveAlert" class="col-span-2 scroll-mb-24 phone:col-span-1">
           {{ error }}
         </UiAlert>
       </div>

@@ -2,6 +2,7 @@ import {
   signIn as authenticateWorkspace,
   expect,
   expectSingleScroll,
+  expectUncovered,
   test,
   useRelayForHttpMocks,
   workspacePath,
@@ -110,12 +111,13 @@ for (const failure of ['refresh', 'lost response'] as const) {
       }
     })
 
+    await page.setViewportSize({ width: 390, height: 844 })
     await dialog.getByRole('button', { name: 'Create mission', exact: true }).click()
     await expect(dialog.getByRole('alert')).toContainText(failure === 'refresh' ? 'Mission saved, but the workspace could not be reloaded' : 'Could not confirm whether the mission was saved')
+    await expectUncovered(dialog.getByRole('alert'))
     rejectRefresh = false
     const created = (await workspace.api('/api/tasks')).find((task: { id: string }) => task.id === createdId)
     expect(created.cron).toBe('0 9 * * 1')
-    await page.setViewportSize({ width: 390, height: 844 })
     await page.screenshot({ path: testInfo.outputPath(`mission-${failure.replaceAll(' ', '-')}-mobile.png`), animations: 'disabled' })
     await dialog.getByLabel('Mission name', { exact: true }).fill(`${name} edited`)
     await dialog.getByRole('button', { name: failure === 'refresh' ? 'Save changes' : 'Create mission', exact: true }).click()

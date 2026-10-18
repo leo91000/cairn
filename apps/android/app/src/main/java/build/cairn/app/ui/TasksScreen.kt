@@ -60,8 +60,8 @@ internal fun TaskEditor(
         save = {
             vm.perform {
                 saveError = null
-                val saved =
-                    wireJson.decodeFromJsonElement<Task>(
+                val response =
+                    try {
                         saving.save(
                             api,
                             "/tasks",
@@ -77,7 +77,13 @@ internal fun TaskEditor(
                                 )
                             },
                         )
-                    )
+                    } catch (error: Exception) {
+                        if (saving.id.isNotBlank() && saving.id != initial.id)
+                            saveError =
+                                "Mission enregistrée, mais les dernières modifications n’ont pas été enregistrées. Réessayez."
+                        throw error
+                    }
+                val saved = wireJson.decodeFromJsonElement<Task>(response)
                 try {
                     refresh()
                 } catch (error: Exception) {

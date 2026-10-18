@@ -1,6 +1,11 @@
 <script setup lang="ts">
 import type { Task } from '../../../../packages/contracts/contracts'
-import { computed, ref, watch } from 'vue'
+import {
+  computed,
+  nextTick,
+  ref,
+  watch,
+} from 'vue'
 import { MAIN_AGENT_ID } from '../../../../packages/contracts/constants'
 import {
   api,
@@ -101,6 +106,7 @@ const busy = ref(false)
 const error = ref('')
 const resourceSave = useResourceSave(props.task?.id)
 const savedId = resourceSave.savedId
+const saveAlert = ref<InstanceType<typeof UiAlert>>()
 const occurrences = ref<number[]>([])
 const available = computed(() =>
   state.skills.filter(
@@ -169,15 +175,21 @@ async function save() {
     emit('close')
   }
   catch (e) {
-    const detail = (e as Error).message || 'Please try again.'
+    const detail = (e as Error).message
+    let summary: string
     if (refreshing)
-      error.value = `Mission saved, but the workspace could not be reloaded. ${detail}`
-    else if (savedId.value)
-      error.value = `Mission saved, but the latest changes could not be saved. ${detail}`
+      summary = 'Mission saved, but the workspace could not be reloaded.'
+    else if (savedId.value && savedId.value !== props.task?.id)
+      summary = 'Mission saved, but the latest changes could not be saved.'
     else if (resourceSave.pendingCreation.value)
-      error.value = `Could not confirm whether the mission was saved. Retry to recover it safely. ${detail}`
+      summary = 'Could not confirm whether the mission was saved. Retry to recover it safely.'
     else
-      error.value = `Could not save the mission. ${detail}`
+      summary = 'Could not save the mission.'
+    error.value = detail ? `${summary} ${detail}` : summary
+
+    // The alert follows the whole form; bring it above the sticky actions on small screens.
+    await nextTick()
+    saveAlert.value?.$el.scrollIntoView?.({ block: 'nearest' })
   }
   finally {
     busy.value = false
@@ -277,7 +289,7 @@ async function save() {
             </div>
           </fieldset>
         </template>
-        <UiAlert v-if="error" class="col-span-2 phone:col-span-1">
+        <UiAlert v-if="error" ref="saveAlert" class="col-span-2 scroll-mb-24 phone:col-span-1">
           {{ error }}
         </UiAlert>
       </div>

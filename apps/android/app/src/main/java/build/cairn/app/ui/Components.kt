@@ -338,6 +338,14 @@ fun Editor(
     valid: Boolean = true,
     content: @Composable ColumnScope.() -> Unit,
 ) {
+    val scroll = rememberScrollState()
+    var revealFeedback by remember { mutableStateOf(false) }
+    // Save feedback sits above the form: bring it back into view after a failed save.
+    LaunchedEffect(busy, error) {
+        if (!revealFeedback || busy) return@LaunchedEffect
+        revealFeedback = false
+        if (error != null) scroll.animateScrollTo(0)
+    }
     Dialog(
         onDismissRequest = { if (!busy) close() },
         properties =
@@ -355,7 +363,13 @@ fun Editor(
                             }
                         },
                         actions = {
-                            TextButton(onClick = save, enabled = valid && !busy) {
+                            TextButton(
+                                onClick = {
+                                    revealFeedback = true
+                                    save()
+                                },
+                                enabled = valid && !busy,
+                            ) {
                                 Text("Enregistrer")
                             }
                         },
@@ -365,10 +379,7 @@ fun Editor(
             },
         ) { padding ->
             Column(
-                Modifier.padding(padding)
-                    .fillMaxSize()
-                    .verticalScroll(rememberScrollState())
-                    .padding(20.dp),
+                Modifier.padding(padding).fillMaxSize().verticalScroll(scroll).padding(20.dp),
                 verticalArrangement = Arrangement.spacedBy(16.dp),
             ) {
                 if (busy) LinearProgressIndicator(Modifier.fillMaxWidth())

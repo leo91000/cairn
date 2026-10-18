@@ -171,11 +171,18 @@ internal fun AgentEditor(vm: CairnViewModel, state: Workspace, initial: Agent, c
         save = {
             vm.perform {
                 saveError = null
-                saving.save(
-                    api,
-                    "/agents",
-                    { wireJson.encodeToJsonElement(form.copy(timeoutMinutes = minutes!!)) },
-                )
+                try {
+                    saving.save(
+                        api,
+                        "/agents",
+                        { wireJson.encodeToJsonElement(form.copy(timeoutMinutes = minutes!!)) },
+                    )
+                } catch (error: Exception) {
+                    if (saving.id.isNotBlank() && saving.id != initial.id)
+                        saveError =
+                            "Agent enregistré, mais les dernières modifications n’ont pas été enregistrées. Réessayez."
+                    throw error
+                }
                 try {
                     if (newToken.isNotBlank() && !form.access.github)
                         api.request(
@@ -209,7 +216,7 @@ internal fun AgentEditor(vm: CairnViewModel, state: Workspace, initial: Agent, c
                 form.reasoning.length <= 40 &&
                 Regex("(?:[a-z][a-z0-9_-]*)?").matches(form.reasoning),
     ) {
-        AgentPortraitEditor(vm, state, initial)
+        AgentPortraitEditor(vm, state, initial.copy(id = saving.id))
         Field("Nom", form.name, { form = form.copy(name = it) })
         Field("Description", form.description, { form = form.copy(description = it) }, 3)
         ModelPicker(
@@ -431,33 +438,40 @@ internal fun ProjectEditor(
         save = {
             vm.perform {
                 saveError = null
-                saving.save(
-                    api,
-                    "/projects",
-                    value = { wireJson.encodeToJsonElement(form) },
-                    createPath = if (github) "/projects/github" else "/projects",
-                    createValue = {
-                        if (github)
-                            body(
-                                "repository" to repository,
-                                "name" to form.name,
-                                "description" to form.description,
-                                "baseBranch" to form.baseBranch,
-                            )
-                        else wireJson.encodeToJsonElement(form)
-                    },
-                    onCreated = {
-                        if (github) {
-                            val saved = wireJson.decodeFromJsonElement<Project>(it)
-                            form =
-                                form.copy(
-                                    id = saved.id,
-                                    path = saved.path,
-                                    sourceMode = saved.sourceMode,
+                try {
+                    saving.save(
+                        api,
+                        "/projects",
+                        value = { wireJson.encodeToJsonElement(form) },
+                        createPath = if (github) "/projects/github" else "/projects",
+                        createValue = {
+                            if (github)
+                                body(
+                                    "repository" to repository,
+                                    "name" to form.name,
+                                    "description" to form.description,
+                                    "baseBranch" to form.baseBranch,
                                 )
-                        }
-                    },
-                )
+                            else wireJson.encodeToJsonElement(form)
+                        },
+                        onCreated = {
+                            if (github) {
+                                val saved = wireJson.decodeFromJsonElement<Project>(it)
+                                form =
+                                    form.copy(
+                                        id = saved.id,
+                                        path = saved.path,
+                                        sourceMode = saved.sourceMode,
+                                    )
+                            }
+                        },
+                    )
+                } catch (error: Exception) {
+                    if (saving.id.isNotBlank() && saving.id != initial.id)
+                        saveError =
+                            "Projet enregistré, mais les dernières modifications n’ont pas été enregistrées. Réessayez."
+                    throw error
+                }
                 try {
                     refresh()
                 } catch (error: Exception) {

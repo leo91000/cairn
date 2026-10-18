@@ -1,6 +1,7 @@
 import {
   signIn as authenticateWorkspace,
   expect,
+  expectUncovered,
   test,
   useRelayForHttpMocks,
   workspacePath,
@@ -69,10 +70,18 @@ for (const kind of ['agents', 'projects'] as const) {
       let rejectRefresh = false
       let createdId = ''
       let updates = 0
+      let rejectUpdate = false
       await page.route(`**/api/${kind}/*`, async (route) => {
-        if (route.request().method() === 'PUT')
-          updates++
-        await route.continue()
+        if (route.request().method() !== 'PUT') {
+          await route.continue()
+          return
+        }
+
+        updates++
+        if (rejectUpdate)
+          await route.fulfill({ status: 400, json: { error: 'Update temporarily rejected' } })
+        else
+          await route.continue()
       })
       await page.route(`**/api/${kind}`, async (route) => {
         const request = route.request()
@@ -96,25 +105,42 @@ for (const kind of ['agents', 'projects'] as const) {
         }
       })
 
+      await page.setViewportSize({ width: 390, height: 844 })
       await dialog.getByRole('button', { name: `Save ${label}`, exact: true }).click()
       await expect(dialog.getByRole('alert')).toContainText(failure === 'refresh' ? 'saved, but the workspace could not be reloaded' : `Could not confirm whether the ${label} was saved`)
+      await expectUncovered(dialog.getByRole('alert'))
       rejectRefresh = false
       const first = (await workspace.api(`/api/${kind}`)).filter((item: { id: string }) => item.id === createdId)
       expect(first).toHaveLength(1)
       const createdAt = first[0].createdAt
-      await page.setViewportSize({ width: 390, height: 844 })
       await page.screenshot({ path: testInfo.outputPath(`${kind}-${failure.replaceAll(' ', '-')}-mobile.png`), animations: 'disabled' })
       await dialog.getByLabel('Name', { exact: true }).fill(`${name} edited`)
+      if (failure === 'refresh') {
+        rejectUpdate = true
+        await dialog.getByRole('button', { name: `Save ${label}`, exact: true }).click()
+        await expect(dialog.getByRole('alert')).toContainText(`${agent ? 'Agent' : 'Project'} saved, but the latest changes could not be saved. Update temporarily rejected`)
+        await expectUncovered(dialog.getByRole('alert'))
+        await page.screenshot({ path: testInfo.outputPath(`${kind}-update-mobile.png`), animations: 'disabled' })
+        rejectUpdate = false
+      }
+
       await dialog.getByRole('button', { name: `Save ${label}`, exact: true }).click()
       await expect(dialog).toHaveCount(0)
 
       const saved = (await workspace.api(`/api/${kind}`)).filter((item: { name: string }) => item.name.startsWith(name))
       expect(saved).toHaveLength(1)
       expect(saved[0]).toMatchObject({ id: createdId, name: `${name} edited`, createdAt })
-      expect(updates).toBe(1)
+      expect(updates).toBe(failure === 'refresh' ? 2 : 1)
       expect(creations).toHaveLength(failure === 'refresh' ? 1 : 2)
       if (failure === 'lost response')
         expect(creations[1]).toBe(creations[0])
+
+      if (failure === 'refresh') {
+        rejectUpdate = true
+        await page.getByRole('button', { name: `Edit ${name} edited`, exact: true }).click()
+        await dialog.getByRole('button', { name: `Save ${label}`, exact: true }).click()
+        await expect(dialog.getByRole('alert')).toHaveText(`Could not save the ${label}. Update temporarily rejected`)
+      }
     })
   }
 }
