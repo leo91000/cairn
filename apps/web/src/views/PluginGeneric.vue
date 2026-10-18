@@ -25,6 +25,7 @@ import PersonAvatar from '../components/PersonAvatar.vue'
 import PluginFields from '../components/PluginFields.vue'
 import PluginInstancePanel from '../components/PluginInstancePanel.vue'
 import PluginMark from '../components/PluginMark.vue'
+import PluginPrograms from '../components/PluginPrograms.vue'
 import PluginReview from '../components/PluginReview.vue'
 import PluginView from '../components/PluginView.vue'
 import UiAlert from '../components/UiAlert.vue'
@@ -573,7 +574,7 @@ onBeforeUnmount(() => {
               Programs
             </h3>
             <p v-for="program in manifest.programs" :key="program.name" class="text-2xs text-muted">
-              <b class="font-mono text-ink">{{ program.path }}</b><template v-if="program.description">
+              <b class="font-mono text-ink">{{ program.path || program.name }}</b><template v-if="program.description">
                 · {{ program.description }}
               </template>
             </p>
@@ -581,6 +582,13 @@ onBeforeUnmount(() => {
         </aside>
       </div>
     </template>
+
+    <PluginPrograms
+      v-if="entry?.active && manifest?.programs?.some(program => program.installer)"
+      :key="`${id}:${entry.active}`"
+      :plugin="id"
+      class="mt-5"
+    />
 
     <PluginReview
       v-if="reviewing && entry"

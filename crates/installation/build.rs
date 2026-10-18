@@ -36,7 +36,7 @@ fn main() {
     let mut packages = fs::read_dir(&plugins)
         .expect("plugins directory")
         .map(|entry| entry.expect("plugins entry").path())
-        .filter(|path| path.join("manifest.json").is_file())
+        .filter(|path| path.join("manifest.json").is_file() || path.join("manifest.toml").is_file())
         .collect::<Vec<_>>();
     packages.sort();
     let mut code = String::from("&[\n");
@@ -44,10 +44,17 @@ fn main() {
         let id = package.file_name().unwrap().to_str().unwrap();
         let mut files = Vec::new();
         luau(&package, &package, &mut files);
-        let manifest = package.join("manifest.json").canonicalize().unwrap();
+        let json = package.join("manifest.json");
+        let toml = package.join("manifest.toml");
+        let (format, manifest) = match (json.is_file(), toml.is_file()) {
+            (true, false) => ("json", json),
+            (false, true) => ("toml", toml),
+            _ => panic!("{id}: expected exactly one manifest.json or manifest.toml"),
+        };
+        let manifest = manifest.canonicalize().unwrap();
         writeln!(
             code,
-            "    ({id:?}, include_str!({:?}), &[",
+            "    ({id:?}, {format:?}, include_str!({:?}), &[",
             manifest.display()
         )
         .unwrap();

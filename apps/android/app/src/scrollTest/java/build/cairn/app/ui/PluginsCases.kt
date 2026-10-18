@@ -12,6 +12,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.test.core.app.ApplicationProvider
 import build.cairn.app.data.*
 import java.util.concurrent.CopyOnWriteArrayList
+import java.util.concurrent.atomic.AtomicReference
 import kotlinx.coroutines.flow.first
 import kotlinx.serialization.json.*
 import okhttp3.mockwebserver.*
@@ -115,7 +116,7 @@ abstract class PluginsCases {
                     version = "1.0.0",
                     capabilities = listOf("exec"),
                     instances = PluginInstances("Service account", "Service accounts"),
-                    programs = listOf(PluginProgram("op", "/usr/local/bin/op")),
+                    programs = listOf(PluginProgram(name = "op", installer = "programs/op.luau")),
                     settings =
                         listOf(
                             PluginSetting(
@@ -525,6 +526,50 @@ abstract class PluginsCases {
     }
 
     @Test
+    fun programReleasesCanBeCheckedInstalledAndRestored() {
+        MockWebServer().use { server ->
+            val initial = InstalledProgram(release = ProgramRelease(version = "2.39.0"))
+            val program = AtomicReference(ProgramInstallation(name = "op", installer = "programs/op.luau", installed = initial))
+            val actions = CopyOnWriteArrayList<String>()
+            server.dispatcher = dispatcher { path, body ->
+                val base = "/api/installations/fixture/api/plugins/onepassword/programs"
+                when (path) {
+                    base -> wireJson.encodeToString(ProgramInstallations(listOf(program.get())))
+                    "$base/op/check" -> {
+                        actions += "check"
+                        program.set(program.get().copy(candidate = ProgramRelease(version = "2.41.0", url = "https://cache.agilebits.com/op.zip"), digest = "reviewed-release"))
+                        wireJson.encodeToString(program.get())
+                    }
+                    "$base/op/install" -> {
+                        actions += "install"
+                        assertEquals("reviewed-release", wireJson.parseToJsonElement(body).jsonObject["digest"]?.jsonPrimitive?.content)
+                        program.set(program.get().copy(installed = InstalledProgram(release = ProgramRelease(version = "2.41.0")), previous = initial, candidate = null, digest = null))
+                        wireJson.encodeToString(program.get())
+                    }
+                    "$base/op/rollback" -> {
+                        actions += "rollback"
+                        program.set(program.get().copy(installed = initial, previous = null))
+                        wireJson.encodeToString(program.get())
+                    }
+                    else -> null
+                }
+            }
+            server.start()
+            show(server) { vm, state -> PluginScreen(vm, state, "onepassword") {} }
+            compose.waitUntil(30000) { compose.onAllNodesWithText("Vérifier op").fetchSemanticsNodes().isNotEmpty() }
+            compose.onNodeWithText("Vérifier op").performScrollTo().performClick()
+            compose.waitUntil(30000) { compose.onAllNodesWithText("Installer op 2.41.0").fetchSemanticsNodes().isNotEmpty() }
+            compose.onNodeWithText("Installer op 2.41.0").performScrollTo().performClick()
+            compose.waitUntil(30000) { compose.onAllNodesWithText("op · Version 2.41.0").fetchSemanticsNodes().isNotEmpty() }
+            capture("plugin-program-installed")
+            compose.onNodeWithText("Restaurer op 2.39.0").performScrollTo().performClick()
+            compose.waitUntil(30000) { compose.onAllNodesWithText("op · Version 2.39.0").fetchSemanticsNodes().isNotEmpty() }
+            assertEquals(listOf("check", "install", "rollback"), actions.toList())
+            capture("plugin-program-restored")
+        }
+    }
+
+    @Test
     fun onePasswordIsAGenericPluginWithItsPanelAndAgentUsage() {
         MockWebServer().use { server ->
             val actions = CopyOnWriteArrayList<String>()
@@ -558,7 +603,7 @@ abstract class PluginsCases {
             compose
                 .onNodeWithText("cairn plugin onepassword read --account <account> <reference>")
                 .assertExists()
-            compose.onNodeWithText("/usr/local/bin/op").assertExists()
+            compose.onNodeWithText("op", useUnmergedTree = true).assertExists()
             capture("plugin-onepassword-agents")
         }
     }
@@ -643,6 +688,11 @@ abstract class PluginsCases {
                                     connections = listOf(bot, account),
                                 )
                             )
+                        "/api/installations/fixture/api/plugins/onepassword/programs" ->
+                            wireJson.encodeToString(ProgramInstallations(listOf(ProgramInstallation(
+                                name = "op", installer = "programs/op.luau",
+                                installed = InstalledProgram(release = ProgramRelease(version = "2.39.0")),
+                            ))))
                         "/api/installations/fixture/api/plugins/discord/connections/bot/view" ->
                             """{"view":[{"type":"facts","items":[{"label":"Channel","value":"#support"},{"label":"Server","value":"Acme"}]}]}"""
                         "/api/installations/fixture/api/plugins/onepassword/connections/op1/view" ->

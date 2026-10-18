@@ -8,6 +8,7 @@ pub mod connections;
 pub mod forms;
 pub mod legacy;
 pub mod panels;
+pub mod program_installation;
 pub mod programs;
 pub mod registry;
 pub mod runtime;
@@ -44,6 +45,8 @@ pub struct Plugins {
     socket_origin: Mutex<Option<String>>,
     worker: Mutex<Option<std::path::PathBuf>>,
     programs: Mutex<HashMap<(String, String), PathBuf>>,
+    pub(crate) program_installation: tokio::sync::Mutex<()>,
+    pub(crate) installer_host: Host,
     /// When each paced key (e.g. a bot token's Identify budget) may send next.
     paces: socket::pacing::Paces,
 }
@@ -61,6 +64,8 @@ impl Default for Plugins {
             socket_origin: Mutex::new(None),
             worker: Mutex::new(None),
             programs: Mutex::new(HashMap::new()),
+            program_installation: tokio::sync::Mutex::new(()),
+            installer_host: Host::with_limits(4, std::time::Duration::from_secs(120)),
             paces: socket::pacing::Paces::default(),
         }
     }
@@ -110,13 +115,12 @@ impl Plugins {
             .insert((plugin.to_owned(), program.to_owned()), path);
     }
 
-    pub(crate) fn program_path(&self, plugin: &str, program: &Program) -> PathBuf {
+    pub(crate) fn program_override(&self, plugin: &str, program: &Program) -> Option<PathBuf> {
         self.programs
             .lock()
             .unwrap()
             .get(&(plugin.to_owned(), program.name.clone()))
             .cloned()
-            .unwrap_or_else(|| PathBuf::from(&program.path))
     }
 
     /// Run-scoped CLI commands declared by any package the run's agent is granted.
@@ -199,6 +203,10 @@ pub async fn routes(s: &Arc<Service>, input: &Input) -> Result<Value> {
         }
         ("DELETE", ["plugins", "packages", id]) => registry::uninstall(s, id).await,
         ("POST", ["plugins", id, "form"]) => forms::form(s, id, body).await,
+        ("GET", ["plugins", id, "programs"]) => program_installation::list(s, id).await,
+        ("POST", ["plugins", id, "programs", name, action]) => {
+            program_installation::action(s, id, name, action, body).await
+        }
         ("POST", ["plugins", id, "connections"]) => connections::save(s, id, body, None).await,
         ("PUT", ["plugins", id, "connections", connection]) => {
             connections::get(s, id, connection).await?;

@@ -39,12 +39,17 @@ Tokens are secret instance fields, encrypted using the application's existing
 AES-GCM credential vault. They are never returned by the management API, given to
 the package's script, copied into a run/VM environment, or included in audit
 records. Back up `mcp-encryption-key` together with the application database. The
-manager runs the pinned official CLI as the package's declared program: an empty
+manager runs the plugin’s locked official CLI as the package's declared program: an empty
 environment with only the token and a disabled cache, a temporary home, the
 package's fixed read-only arguments and a 30-second timeout. CLI error output is not
 exposed. Accounts saved before plugin API v2 were moved into instances with the same
-IDs, grants and tokens. Docker includes CLI 2.39.0;
-local development needs the CLI at `/usr/local/bin/op`.
+IDs, grants and tokens. The plugin installs its own CLI on first use, on Linux
+x86_64 or aarch64, from the official 1Password HTTPS hosts. It selects a stable
+version >=2.39.0 <3 and records its archive/executable hashes. The archive has no
+published SHA-256 sidecar; this does not verify its OpenPGP signature. Docker and
+local development no longer require a global `/usr/local/bin/op`. **Installed
+programs** on the plugin page lets the owner check, install or restore a release
+on web and Android. Restarting keeps the installed release.
 
 The connection test checks that the saved token can list its vaults. Saving does
 not require 1Password availability; a failed test does not erase the token or
