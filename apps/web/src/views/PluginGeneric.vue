@@ -13,13 +13,13 @@ import {
   ref,
 } from 'vue'
 import { useRoute } from 'vue-router'
-import { pluginOperation } from '../plugin-operations'
 import {
   api,
   notify,
   relative,
   state,
 } from '../api'
+import { pluginOperation } from '../plugin-operations'
 import Icon from '../components/Icon.vue'
 import Modal from '../components/Modal.vue'
 import PersonAvatar from '../components/PersonAvatar.vue'
@@ -182,11 +182,11 @@ async function complete(changed?: string) {
   completing.value = true
   try {
     const result = await pluginOperation<FormResult>(`/plugins/${id.value}/form`, {
-        instance: editing.value?.id,
-        settings: settings(),
-        secrets: Object.fromEntries(Object.entries(secrets.value).filter(([, value]) => value.trim())),
-        ...(form.value.token ? { token: form.value.token } : {}),
-        ...(changed ? { changed } : {}),
+      instance: editing.value?.id,
+      settings: settings(),
+      secrets: Object.fromEntries(Object.entries(secrets.value).filter(([, value]) => value.trim())),
+      ...(form.value.token ? { token: form.value.token } : {}),
+      ...(changed ? { changed } : {}),
     })
     if (ask !== asked)
       return
