@@ -10,7 +10,7 @@ use crate::{
     error::{Error, Result},
     service::Service,
 };
-use cairn_plugin_host::Denied;
+use cairn_plugin_host::{Denied, InvocationError};
 use serde_json::{Value, json};
 use std::sync::{Arc, Mutex};
 
@@ -173,13 +173,7 @@ pub async fn invoke(
         .await;
     match (result, refused.into_inner().unwrap()) {
         (Ok(value), _) => Ok(value),
-        (Err(error), _) if error.starts_with(cairn_plugin_api::REJECTED) => {
-            Err(Error::bad_gateway(
-                error
-                    .trim_start_matches(cairn_plugin_api::REJECTED)
-                    .to_owned(),
-            ))
-        }
+        (Err(InvocationError::Rejected(message)), _) => Err(Error::bad_gateway(message)),
         (Err(_), Some(error)) => Err(error),
         (Err(_), None) => Err(Error::bad_gateway(format!(
             "The {} plugin failed while handling {event}.",

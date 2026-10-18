@@ -356,16 +356,16 @@ async fn failed_program_preparation_does_not_activate_a_new_package_version() {
         "cairn.fail('Unsupported platform')",
     );
     let update = f.upload(&manifest, &installer).await.unwrap();
-    assert!(
-        registry::approve(
-            &f.service,
-            "program-probe",
-            "2.0.0",
-            update["digest"].as_str().unwrap()
-        )
-        .await
-        .is_err()
-    );
+    let error = registry::approve(
+        &f.service,
+        "program-probe",
+        "2.0.0",
+        update["digest"].as_str().unwrap(),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(error.status, 502);
+    assert_eq!(error.message, "Unsupported platform");
     assert_eq!(
         registry::active(&f.service, "program-probe")
             .await
