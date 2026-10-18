@@ -604,3 +604,52 @@ through its package form, people management, and installing, approving, connecti
 and uninstalling a package, on desktop and mobile.
 These are local fixture tests, not evidence of a real Discord connection or a
 production deployment.
+
+## Setting constraints and compatibility (F6)
+
+`maxLength`, when present, must be a JSON/TOML integer from 1 through 10,000
+for non-secret fields, or through 16,384 for secrets. Cairn rejects a larger
+text declaration with the explicit 10,000 limit instead of accepting a manifest
+whose declared limit would be silently capped on save. Text lengths count Unicode
+characters; secret lengths count UTF-8 bytes, as before. Without `maxLength`, the
+save limits remain 200 for `string` and dynamic choices, 2,000 for `text`/`url`,
+and 16,384 bytes for secrets. `minimum` and `maximum` must be finite numbers;
+when both are present, `minimum` must not exceed `maximum`.
+
+A non-null `default` must have the field's type and satisfy its length, numeric
+range, choices and whole-value pattern. Text defaults follow save behavior:
+length/control characters are checked before trimming, patterns after trimming;
+required text cannot trim to empty, and nonempty URLs must use HTTP(S). Optional
+empty text retains the existing pattern exemption. Secret defaults and dynamic
+choice defaults remain forbidden. A null default on a non-secret field means
+no default. No values are truncated.
+
+This tightens the set of persisted manifests that the registry can read. The
+installation compatibility epoch advances from 3 to 4; automatic production
+rollout must stop at that boundary under [the production compatibility
+contract](PRODUCTION-CAIRN.md#installation-data-compatibility). This PR does not
+perform a rollout. Both bundled manifests and ordinary valid installed packages
+retain their settings, serialized form and approval digests; no database, secret
+or instance record is rewritten.
+
+Before a separately reviewed epoch transition, inspect installed manifest settings
+for negative, zero, fractional or oversized `maxLength`, reversed numeric bounds,
+and defaults that fail the rules above. The registry revalidates every version on
+read: an incompatible installed version fails with a validation error, remains on
+disk, and cannot run; catalog version errors identify it. Do not silently clamp,
+normalize or reapprove its contents.
+
+Forward repair: publish a corrected package with a new version under the same
+plugin ID, upload it, review and approve that version. Choose bounds that cover
+existing instance values, or deliberately correct those values when editing the
+instance. The registry then activates the approved version; existing instance IDs,
+settings, encrypted secrets and grants stay in place. If repair or approval fails,
+keep the original files and records and fix the package before retrying. Preserve
+the previous binary and an explicitly prepared pre-transition data backup for a
+reviewed rollback; do not run the previous binary on epoch-4 installation data or
+lower the compatibility epoch to bypass the rollout gate. No automatic data
+backup/restoration or production manifest inventory is claimed here.
+
+The Android `Int?` decoder's behavior for a fractional `maxLength` has not been
+executed on a JVM or device in this change. Backend admission now rejects that
+manifest before it can reach either client's field decoder.
