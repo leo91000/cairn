@@ -45,7 +45,7 @@ impl Output {
 
 /// Separate budget for technical logs; tool activity has only a per-item detail limit.
 const LOG_BUDGET: usize = 500_000;
-const ITEM_DETAIL_LIMIT: usize = 16 * 1024;
+const ITEM_DETAIL_LIMIT: usize = run_output::ACTIVITY_DETAIL_LIMIT;
 const LINE_LIMIT: usize = 2_000_000;
 // Match the resident Codex transport: supported tool frames must reach the JSON
 // parser intact before shortening. Large buffers are released after each frame.
@@ -54,13 +54,14 @@ const MESSAGE_LIMIT: usize = 100_000;
 const ERROR_LIMIT: usize = 10_000;
 
 /// Event types that are always recorded. Clients use turn markers to scope reused message IDs.
-const CONVERSATION_EVENTS: [&str; 6] = [
+const CONVERSATION_EVENTS: [&str; 7] = [
     "thread.started",
     "turn.started",
     "turn.completed",
     "turn.failed",
     "turn.waiting",
     "error",
+    "runner.failed",
 ];
 
 // Separate pipe readers keep stderr draining even while stdout applies database backpressure.
@@ -248,14 +249,20 @@ async fn apply_event(
     secrets: &[String],
 ) -> Result<()> {
     let failure = text(&event["error"], "message");
-    if event["type"] == "turn.failed"
+    let provider_failure = event["type"] == "turn.failed";
+    let controller_failure = event["type"] == "runner.failed";
+    if (provider_failure || controller_failure)
         && !failure.is_empty()
         && checkpoint.read(|c| c.last_error().is_empty()).await
     {
         let failure = truncate(&run_output::redact(failure, secrets), ERROR_LIMIT);
         let mut error = run_output::payload(&event["error"], secrets);
         error["message"] = failure.clone().into();
-        let cause = crate::run_retry::Cause::classify(&error);
+        let cause = if provider_failure {
+            crate::run_retry::Cause::classify(&error)
+        } else {
+            None
+        };
         checkpoint
             .update(|c| {
                 c.last_error = Some(Some(failure));

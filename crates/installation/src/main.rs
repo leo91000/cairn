@@ -435,8 +435,7 @@ async fn chat(config: &Config, plan: Value, stop: CancellationToken) -> Result<i
                 };
                 activity.output();
                 activity.observe(&value);
-                let mut bytes = value.to_string().into_bytes();
-                bytes.push(b'\n');
+                let bytes = cairn_installation::run_output::event_line(&value);
                 cairn_installation::performance::wait("stdout_write", stdout.write_all(&bytes))
                     .await?;
             }

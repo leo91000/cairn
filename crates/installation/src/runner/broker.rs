@@ -419,6 +419,10 @@ fn exit_code(result: Result<i32>, lease_expired: bool) -> i32 {
 /// Appends a controller failure to the attempt output so the manager can show it.
 async fn log_failure(broker: &Broker, id: &str, message: &str) {
     let event = Event::Output {
+        stderr: false,
+        data: STANDARD.encode(crate::run_output::controller_failure_line(message)),
+    };
+    let diagnostic = Event::Output {
         stderr: true,
         data: STANDARD.encode(format!("{message}\n")),
     };
@@ -429,6 +433,7 @@ async fn log_failure(broker: &Broker, id: &str, message: &str) {
         .await;
     if let Ok(mut log) = log {
         let _ = wire::write(&mut log, &event).await;
+        let _ = wire::write(&mut log, &diagnostic).await;
     }
 }
 
@@ -536,6 +541,41 @@ mod ownership_tests {
             Broker::new(data, state, pool, CancellationToken::new()),
             run,
         )
+    }
+
+    #[tokio::test]
+    async fn controller_failures_emit_structured_events_and_legacy_diagnostics() {
+        let root = tempfile::tempdir().unwrap();
+        let (broker, run) = pending_claim(root.path()).await;
+        let message = "Guest output exceeded the run limit.";
+        log_failure(&broker, &run, message).await;
+        let bytes = tokio::fs::read(broker.state_file(&run, "log"))
+            .await
+            .unwrap();
+        let mut lines = bytes.as_slice();
+        let frame = wire::read(&mut lines).await.unwrap().unwrap();
+        assert_eq!(frame["type"], "output");
+        assert_eq!(frame["stderr"], false);
+        assert!(
+            STANDARD
+                .decode(frame["data"].as_str().unwrap())
+                .unwrap()
+                .starts_with(b"\n"),
+            "Failure must start independently of a truncated guest JSON line"
+        );
+        let event: Value =
+            serde_json::from_slice(&STANDARD.decode(frame["data"].as_str().unwrap()).unwrap())
+                .unwrap();
+        assert_eq!(
+            event,
+            json!({ "type": "runner.failed", "error": { "message": message } })
+        );
+        let frame = wire::read(&mut lines).await.unwrap().unwrap();
+        assert_eq!(frame["stderr"], true);
+        assert_eq!(
+            STANDARD.decode(frame["data"].as_str().unwrap()).unwrap(),
+            format!("{message}\n").as_bytes()
+        );
     }
 
     #[tokio::test]
