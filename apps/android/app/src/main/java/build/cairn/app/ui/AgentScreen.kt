@@ -1475,8 +1475,10 @@ private fun PluginsSection(
                     SwitchRow(
                         connection.name,
                         when {
-                            !connection.enabled ->
+                            on && !connection.enabled ->
                                 "L’accès est conservé, mais l’agent ne peut rien utiliser tant que ${if (onePassword) "le compte" else "l’instance"} reste désactivé${if (onePassword) "" else "e"}."
+                            !connection.enabled ->
+                                "Non accordé · désactivé${if (onePassword) "" else "e"}"
                             on -> "Accordé"
                             else -> "Non accordé"
                         },
