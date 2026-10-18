@@ -47,6 +47,11 @@ abstract class ConnectionLostCases {
     fun theNoticeClearsItselfAndReloadsTheWorkspaceOnceTheInstallationAnswers() {
         val down = AtomicBoolean(false)
         val overviews = AtomicInteger()
+        // An answered overview probe does not finish the parallel workspace reload.
+        // Hold another response so subsequent actions cannot accidentally race it.
+        val holdReload = AtomicBoolean(false)
+        val reloadStarted = CountDownLatch(1)
+        val releaseReload = CountDownLatch(1)
         MockWebServer().use { server ->
             server.dispatcher =
                 object : Dispatcher() {
@@ -56,6 +61,10 @@ abstract class ConnectionLostCases {
                             return MockResponse()
                                 .setResponseCode(503)
                                 .setBody("""{"error":"Installation unavailable"}""")
+                        if (path.endsWith("/agents") && holdReload.get()) {
+                            reloadStarted.countDown()
+                            releaseReload.await(20, TimeUnit.SECONDS)
+                        }
                         if (path.endsWith("/overview")) overviews.incrementAndGet()
                         val response =
                             when {
@@ -109,11 +118,19 @@ abstract class ConnectionLostCases {
                 compose.onNodeWithContentDescription("Masquer l’erreur").assertDoesNotExist()
 
                 val before = overviews.get()
+                holdReload.set(true)
                 down.set(false)
-                waitFor { !vm.state.value.connectionLost && overviews.get() >= before + 2 }
+                waitFor {
+                    !vm.state.value.connectionLost &&
+                        overviews.get() >= before + 2 &&
+                        reloadStarted.count == 0L
+                }
                 compose.waitForIdle()
                 compose.onNodeWithText("Connexion perdue · reconnexion…").assertDoesNotExist()
                 assertNull(vm.state.value.error)
+                assertTrue(vm.state.value.busy)
+                releaseReload.countDown()
+                waitFor { !vm.state.value.busy }
 
                 // Errors the user must read keep their compact notice.
                 compose.runOnIdle { vm.report(ApiException(502, "GitHub indisponible")) }
@@ -126,6 +143,7 @@ abstract class ConnectionLostCases {
                 assertFalse(vm.state.value.connectionLost)
                 compose.onNodeWithText("Stockage plein").assertExists()
             } finally {
+                releaseReload.countDown()
                 models.clear()
             }
         }
