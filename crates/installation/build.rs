@@ -6,29 +6,8 @@ use std::{
     path::{Path, PathBuf},
 };
 
-fn luau(root: &Path, directory: &Path, files: &mut Vec<(String, PathBuf)>) {
-    let mut entries = fs::read_dir(directory)
-        .expect("plugin directory")
-        .map(|entry| entry.expect("plugin entry").path())
-        .collect::<Vec<_>>();
-    entries.sort();
-    for path in entries {
-        if path.is_dir() {
-            luau(root, &path, files);
-        } else if path
-            .extension()
-            .is_some_and(|extension| extension == "luau")
-        {
-            let relative = path.strip_prefix(root).expect("inside the package");
-            let name = relative
-                .components()
-                .map(|part| part.as_os_str().to_str().expect("UTF-8 file name"))
-                .collect::<Vec<_>>()
-                .join("/");
-            files.push((name, path));
-        }
-    }
-}
+#[path = "../../plugins/luau_files.rs"]
+mod luau_files;
 
 fn main() {
     let plugins = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../plugins");
@@ -43,7 +22,7 @@ fn main() {
     for package in packages {
         let id = package.file_name().unwrap().to_str().unwrap();
         let mut files = Vec::new();
-        luau(&package, &package, &mut files);
+        luau_files::luau(&package, &package, &mut files);
         let json = package.join("manifest.json");
         let toml = package.join("manifest.toml");
         let (format, manifest) = match (json.is_file(), toml.is_file()) {
