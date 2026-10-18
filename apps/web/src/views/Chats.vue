@@ -426,13 +426,16 @@ watch(live.error, (value, previous) => {
 })
 onBeforeUnmount(clearAttachments)
 let submission: {
-  id: string
-  text: string
-  mode: 'queue' | 'steer'
-  provider: Provider
-  model: string
-  reasoning: string
-  attachmentIds: string[]
+  key: string
+  message: {
+    id: string
+    text: string
+    mode: 'queue' | 'steer'
+    provider: Provider
+    model: string
+    reasoning: string
+    attachmentIds: string[]
+  }
 } | undefined
 let createdChat: Chat | undefined
 
@@ -448,6 +451,7 @@ function newConversation() {
   agentId.value = MAIN_AGENT_ID
   projectId.value = ''
   createdChat = undefined
+  submission = undefined
   editing.value = null
   void router.push('/chats')
 }
@@ -499,22 +503,26 @@ async function send(mode: 'queue' | 'steer' = 'queue') {
     // conversation selection explicit on the wire, including after a reload.
     const selectedModel = model.value || inheritedAssistant.value?.model || ''
     const selectedReasoning = reasoning.value || (!model.value ? inheritedAssistant.value?.reasoning : '') || ''
-    // Retain the id after a network failure so retry cannot duplicate a message.
-    if (!submission || submission.text !== text || submission.mode !== mode || submission.provider !== chosenProvider.value || submission.model !== selectedModel || submission.reasoning !== selectedReasoning || submission.attachmentIds.join() !== attachmentIds.join()) {
+    const content = {
+      text,
+      mode,
+      provider: chosenProvider.value,
+      model: selectedModel,
+      reasoning: selectedReasoning,
+      attachmentIds,
+    }
+    const submissionKey = JSON.stringify({ chatId: chat.id, editing: editing.value, ...content })
+    // Retain the id after a network failure only for the same target and content.
+    if (submission?.key !== submissionKey) {
       submission = {
-        id: crypto.randomUUID(),
-        text,
-        mode,
-        provider: chosenProvider.value,
-        model: selectedModel,
-        reasoning: selectedReasoning,
-        attachmentIds,
+        key: submissionKey,
+        message: { id: crypto.randomUUID(), ...content },
       }
     }
 
     if (direct) {
       outgoing.value = {
-        ...submission,
+        ...submission.message,
         chatId: chat.id,
         status: 'queued',
         createdAt: Date.now(),
@@ -522,7 +530,7 @@ async function send(mode: 'queue' | 'steer' = 'queue') {
       }
     }
 
-    await api(`/chats/${chat.id}/messages${editing.value ? `/${editing.value}` : ''}`, { method: editing.value ? 'PUT' : 'POST', body: JSON.stringify(submission) })
+    await api(`/chats/${chat.id}/messages${editing.value ? `/${editing.value}` : ''}`, { method: editing.value ? 'PUT' : 'POST', body: JSON.stringify(submission.message) })
     // Another conversation was opened meanwhile; its composer is not this message's.
     if (chatId.value !== origin) {
       submission = undefined
