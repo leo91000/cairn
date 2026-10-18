@@ -22,6 +22,7 @@ const KIND: &str = "plugin-packages";
 type Bundled = (
     &'static str,
     &'static str,
+    &'static str,
     &'static [(&'static str, &'static str)],
 );
 
@@ -48,10 +49,8 @@ fn digest(manifest: &Manifest, source: &Sources) -> Result<String> {
     )))
 }
 
-fn package(manifest: &str, source: Sources, builtin: bool) -> Result<Package> {
-    let manifest: Manifest =
-        serde_json::from_str(manifest).map_err(|_| Error::bad("Invalid plugin manifest."))?;
-    manifest.validate().map_err(Error::bad)?;
+fn package(format: &str, manifest: &str, source: Sources, builtin: bool) -> Result<Package> {
+    let manifest = Manifest::parse(format, manifest).map_err(Error::bad)?;
     source.validate().map_err(|message| {
         if source.size() > MAX_SOURCE_BYTES {
             Error::too_large(message)
@@ -59,9 +58,16 @@ fn package(manifest: &str, source: Sources, builtin: bool) -> Result<Package> {
             Error::bad(message)
         }
     })?;
+    for program in &manifest.programs {
+        if !program.installer.is_empty() && !source.modules.contains_key(&program.installer) {
+            return Err(Error::bad(
+                "A program installer must name a Luau file in the package.",
+            ));
+        }
+    }
     if !builtin
         && (RESERVED.contains(&manifest.id.as_str())
-            || BUILTIN.iter().any(|(id, _, _)| *id == manifest.id))
+            || BUILTIN.iter().any(|(id, _, _, _)| *id == manifest.id))
     {
         return Err(Error::bad("This plugin ID belongs to a built-in plugin."));
     }
@@ -76,8 +82,8 @@ fn package(manifest: &str, source: Sources, builtin: bool) -> Result<Package> {
 pub fn builtin(id: &str) -> Option<Package> {
     BUILTIN
         .iter()
-        .find(|(name, _, _)| *name == id)
-        .map(|(_, manifest, files)| {
+        .find(|(name, _, _, _)| *name == id)
+        .map(|(_, format, manifest, files)| {
             let mut source = Sources::default();
             for (path, text) in *files {
                 if *path == "main.luau" {
@@ -88,7 +94,7 @@ pub fn builtin(id: &str) -> Option<Package> {
                         .insert((*path).to_owned(), (*text).to_owned());
                 }
             }
-            package(manifest, source, true).expect("bundled plugin")
+            package(format, manifest, source, true).expect("bundled plugin")
         })
 }
 
@@ -134,13 +140,24 @@ fn read_version(s: &Service, id: &str, version: &str) -> Result<Package> {
     if !std::fs::symlink_metadata(&directory).is_ok_and(|metadata| metadata.is_dir()) {
         return Err(Error::not_found("Plugin version not found."));
     }
-    let manifest = read_limited(&directory.join("manifest.json"), 65_536)?;
+    let json = directory.join("manifest.json");
+    let toml = directory.join("manifest.toml");
+    let (format, path) = match (json.try_exists()?, toml.try_exists()?) {
+        (true, false) => ("json", json),
+        (false, true) => ("toml", toml),
+        _ => {
+            return Err(Error::bad(
+                "A package must contain exactly one manifest.json or manifest.toml.",
+            ));
+        }
+    };
+    let manifest = read_limited(&path, 65_536)?;
     let mut source = Sources {
         main: read_limited(&directory.join("main.luau"), MAX_SOURCE_BYTES as u64)?,
         modules: BTreeMap::new(),
     };
     read_modules(&directory, "", &mut source)?;
-    let package = package(&manifest, source, false)?;
+    let package = package(format, &manifest, source, false)?;
     if package.manifest.id != id || package.manifest.version != version {
         return Err(Error::bad(
             "Plugin folder names must match the manifest ID and version.",
@@ -238,7 +255,7 @@ fn summary(package: &Package) -> Value {
 /// Everything the owner reviews: requested capabilities, hosts and approval state.
 pub async fn catalog(s: &Service) -> Result<Value> {
     let mut packages = Vec::new();
-    for (id, _, _) in BUILTIN {
+    for (id, _, _, _) in BUILTIN {
         let package = builtin(id).expect("bundled plugin");
         packages.push(json!({
             "id": id,
@@ -250,7 +267,7 @@ pub async fn catalog(s: &Service) -> Result<Value> {
         }));
     }
     for id in entries(&root(s)) {
-        if BUILTIN.iter().any(|(name, _, _)| *name == id) {
+        if BUILTIN.iter().any(|(name, _, _, _)| *name == id) {
             continue;
         }
         let record = record(s, &id).await?;
@@ -304,7 +321,16 @@ pub async fn catalog(s: &Service) -> Result<Value> {
 /// `modules` maps paths such as `lib/rest.luau` to their text. It stays inactive until
 /// approved.
 pub async fn install(s: &Service, input: &Value) -> Result<Value> {
-    let manifest = serde_json::to_string(&input["manifest"])?;
+    let format = input["manifestFormat"].as_str().unwrap_or("json");
+    let manifest = match &input["manifest"] {
+        Value::String(source) => source.clone(),
+        Value::Object(_) if format == "json" => serde_json::to_string(&input["manifest"])?,
+        _ => {
+            return Err(Error::bad(
+                "Supply a JSON manifest object or JSON/TOML text with manifestFormat.",
+            ));
+        }
+    };
     let empty = Map::new();
     let modules = match &input["modules"] {
         Value::Null => &empty,
@@ -321,7 +347,7 @@ pub async fn install(s: &Service, input: &Value) -> Result<Value> {
             .ok_or_else(|| Error::bad("Package modules must map file paths to text."))?;
         source.modules.insert(path.clone(), text.to_owned());
     }
-    let package = package(&manifest, source, false)?;
+    let package = package(format, &manifest, source, false)?;
     if !segment(&package.manifest.version) {
         return Err(Error::bad("Use a simple version such as 1.2.0."));
     }
@@ -335,6 +361,26 @@ pub async fn install(s: &Service, input: &Value) -> Result<Value> {
             Error::bad("The plugin source did not load. main.luau must return a table of handlers, and every require must name a package file.")
         })?;
     session.stop().await;
+    for program in package
+        .manifest
+        .programs
+        .iter()
+        .filter(|program| !program.installer.is_empty())
+    {
+        let session = s
+            .plugins
+            .host
+            .start(
+                &s.plugins.executable()?,
+                &package.manifest,
+                super::program_installation::source(&package, program),
+            )
+            .await
+            .map_err(|_| {
+                Error::bad("Program installers must load and export resolve and install functions.")
+            })?;
+        session.stop().await;
+    }
     let directory = root(s)
         .join(&package.manifest.id)
         .join(&package.manifest.version);
@@ -396,6 +442,21 @@ async fn set_active(
         return Err(Error::forbidden(
             "Approve this version before activating it.",
         ));
+    }
+    // Approval has been checked before any installer is allowed network or file effects.
+    super::program_installation::prepare(s, &package).await?;
+    let current = read_version(s, id, version)?;
+    if current.digest != package.digest {
+        return Err(Error::conflict(
+            "The plugin changed during program preparation. Review it again.",
+        ));
+    }
+    // Preparation can take time; preserve approvals written by concurrent requests.
+    record = self::record(s, id).await?;
+    if reviewed_digest.is_some() {
+        record["approvals"][version] = json!(package.digest);
+    } else if record["approvals"][version] != package.digest {
+        return Err(Error::forbidden("This version is no longer approved."));
     }
     record["active"] = json!(version);
     record["updatedAt"] = json!(now());

@@ -116,6 +116,9 @@ async fn serve(
     stop: &CancellationToken,
 ) -> Result<()> {
     ensure_owner(s, connection).await?;
+    if super::program_installation::needs_preparation(s, package) {
+        super::program_installation::prepare(s, package).await?;
+    }
     let mut session = s
         .plugins
         .host

@@ -86,7 +86,7 @@ fun PluginsScreen(vm: CairnViewModel, state: Workspace, open: (String) -> Unit) 
         SignalCard(Modifier.fillMaxWidth().padding(top = 8.dp)) {
             Text("Installer un package", style = MaterialTheme.typography.titleSmall)
             Text(
-                "Un plugin est un manifest.json et un main.luau. L’envoi des fichiers se fait sur le web, puis vous l’approuvez ici ou sur le web.",
+                "Un plugin est un manifest.json ou manifest.toml et un main.luau. L’envoi des fichiers se fait sur le web, puis vous l’approuvez ici ou sur le web.",
                 Modifier.padding(top = 4.dp, bottom = 12.dp),
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -304,6 +304,8 @@ private fun PluginInstances(
                 changed = { load() },
             )
         }
+        if (entry.active != null && manifest.programs.any { it.installer.isNotBlank() })
+            PluginPrograms(vm, state, manifest.id)
         if (manifest.agentAccess != null) AgentUsage(manifest)
     }
     if (reviewing && entry != null)
@@ -1241,7 +1243,7 @@ private fun AgentUsage(manifest: PluginManifest) {
         if (manifest.programs.isNotEmpty()) {
             Eyebrow("Programmes", Modifier.padding(top = 10.dp, bottom = 4.dp))
             manifest.programs.forEach { program ->
-                Code(program.path)
+                Code(program.path.ifBlank { program.name })
                 if (program.description.isNotBlank()) Note(program.description)
             }
         }
@@ -1476,7 +1478,10 @@ private fun PluginReview(
                     }
                     manifest.programs.forEach { program ->
                         Text(
-                            "Exécute ${program.path} sur ce serveur, hors du bac à sable Luau, avec les fichiers et le réseau que ce programme peut atteindre." +
+                            "Exécute ${program.path.ifBlank { program.name }} sur ce serveur, hors du bac à sable Luau, avec les fichiers et le réseau que ce programme peut atteindre." +
+                                (if (program.installer.isNotBlank())
+                                    " Installation et mises à jour par ${program.installer}, depuis les hôtes déclarés."
+                                else "") +
                                 program.description
                                     .takeIf { it.isNotBlank() }
                                     ?.let { " $it" }
