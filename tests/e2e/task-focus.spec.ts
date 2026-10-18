@@ -67,6 +67,75 @@ test('reconnects after a temporary restart and resumes a cancelled conversation 
   expect(workspace.service.store.runs().filter(item => item.taskId === task.id)).toHaveLength(1)
 })
 
+for (const failure of ['refresh', 'lost response'] as const) {
+  test(`mission retry preserves one scheduled mission after ${failure}`, async ({ page, workspace }, testInfo) => {
+    await useRelayForHttpMocks(page)
+    await page.goto(workspacePath('/tasks'))
+    await authenticateWorkspace(page)
+    await page.getByRole('button', { name: 'New mission', exact: true }).click()
+    const dialog = page.getByRole('dialog')
+    const name = `Scheduled retry ${failure}`
+    await dialog.getByLabel('Mission name', { exact: true }).fill(name)
+    await dialog.getByLabel('What should happen?').fill('Keep exactly one scheduled mission.')
+    await dialog.getByRole('combobox', { name: 'When', exact: true }).click()
+    await page.getByRole('option', { name: 'Every Monday', exact: true }).click()
+    const creations: string[] = []
+    let rejectRefresh = false
+    let createdId = ''
+    let updates = 0
+    await page.route('**/api/tasks/*', async (route) => {
+      if (route.request().method() === 'PUT')
+        updates++
+      await route.continue()
+    })
+    await page.route('**/api/tasks', async (route) => {
+      const request = route.request()
+      if (request.method() === 'POST') {
+        creations.push(request.postData()!)
+        const response = await route.fetch()
+        createdId = (await response.json()).id
+        if (creations.length === 1 && failure === 'lost response') {
+          await route.abort('failed')
+          return
+        }
+
+        rejectRefresh = creations.length === 1 && failure === 'refresh'
+        await route.fulfill({ response })
+      }
+      else if (request.method() === 'GET' && rejectRefresh) {
+        await route.fulfill({ status: 400, json: { error: 'Mission list temporarily rejected' } })
+      }
+      else {
+        await route.continue()
+      }
+    })
+
+    await dialog.getByRole('button', { name: 'Create mission', exact: true }).click()
+    await expect(dialog.getByRole('alert')).toContainText(failure === 'refresh' ? 'Mission saved, but the workspace could not be reloaded' : 'Could not confirm whether the mission was saved')
+    rejectRefresh = false
+    const created = (await workspace.api('/api/tasks')).find((task: { id: string }) => task.id === createdId)
+    expect(created.cron).toBe('0 9 * * 1')
+    await page.setViewportSize({ width: 390, height: 844 })
+    await page.screenshot({ path: testInfo.outputPath(`mission-${failure.replaceAll(' ', '-')}-mobile.png`), animations: 'disabled' })
+    await dialog.getByLabel('Mission name', { exact: true }).fill(`${name} edited`)
+    await dialog.getByRole('button', { name: failure === 'refresh' ? 'Save changes' : 'Create mission', exact: true }).click()
+    await expect(page.getByRole('dialog', { name: /Give your agent a mission|Edit mission/ })).toHaveCount(0)
+
+    const saved = (await workspace.api('/api/tasks')).filter((task: { name: string }) => task.name.startsWith(name))
+    expect(saved).toHaveLength(1)
+    expect(saved[0]).toMatchObject({
+      id: createdId,
+      name: `${name} edited`,
+      createdAt: created.createdAt,
+      cron: '0 9 * * 1',
+    })
+    expect(updates).toBe(1)
+    expect(creations).toHaveLength(failure === 'refresh' ? 1 : 2)
+    if (failure === 'lost response')
+      expect(creations[1]).toBe(creations[0])
+  })
+}
+
 test('keeps the selected mission across reloads and runs it from its mobile sheet', async ({ page, workspace }) => {
   await page.goto(workspacePath('/tasks'))
   await authenticateWorkspace(page)

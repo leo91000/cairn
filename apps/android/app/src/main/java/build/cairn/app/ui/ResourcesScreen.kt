@@ -7,6 +7,7 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
 import build.cairn.app.data.*
+import kotlinx.serialization.json.decodeFromJsonElement
 import kotlinx.serialization.json.encodeToJsonElement
 
 @Composable
@@ -141,7 +142,7 @@ fun ResourcesScreen(
 }
 
 @Composable
-private fun AgentEditor(vm: CairnViewModel, state: Workspace, initial: Agent, close: () -> Unit) {
+internal fun AgentEditor(vm: CairnViewModel, state: Workspace, initial: Agent, close: () -> Unit) {
     var nodes by remember { mutableStateOf<List<ExecutionNode>>(emptyList()) }
     LaunchedEffect(initial.id) {
         try {
@@ -154,29 +155,46 @@ private fun AgentEditor(vm: CairnViewModel, state: Workspace, initial: Agent, cl
     var timeout by rememberSaveable { mutableStateOf(initial.timeoutMinutes.toString()) }
     val minutes = timeout.toIntOrNull()
     var newToken by remember { mutableStateOf("") }
-    var savedId by rememberSaveable { mutableStateOf(initial.id) }
+    val saving = rememberResourceSave(initial.id)
+    var saveError by rememberSaveable { mutableStateOf<String?>(null) }
     Editor(
-        if (initial.id.isEmpty()) "Créer un agent" else "Modifier l’agent",
+        if (saving.id.isEmpty()) "Créer un agent" else "Modifier l’agent",
         state.busy,
-        state.error,
+        saveError
+            ?: if (!state.busy && saving.id.isBlank() && saving.pendingCreation) {
+                "Sauvegarde de l’agent non confirmée. Réessayez pour retrouver le même agent. ${state.error.orEmpty()}"
+                    .trim()
+            } else {
+                state.error
+            },
         close,
         save = {
             vm.perform {
-                val saved =
-                    api.send<Agent>(
-                        if (savedId.isBlank()) "POST" else "PUT",
-                        "/agents" + if (savedId.isBlank()) "" else "/${segment(savedId)}",
-                        wireJson.encodeToJsonElement(form.copy(timeoutMinutes = minutes!!)),
-                    )
-                savedId = saved.id
-                if (newToken.isNotBlank() && !form.access.github)
-                    api.request(
-                        "PUT",
-                        "/agents/${segment(savedId)}/github-token",
-                        body("token" to newToken),
-                    )
-                newToken = ""
-                refresh()
+                saveError = null
+                saving.save(
+                    api,
+                    "/agents",
+                    { wireJson.encodeToJsonElement(form.copy(timeoutMinutes = minutes!!)) },
+                )
+                try {
+                    if (newToken.isNotBlank() && !form.access.github)
+                        api.request(
+                            "PUT",
+                            "/agents/${segment(saving.id)}/github-token",
+                            body("token" to newToken),
+                        )
+                    newToken = ""
+                } catch (error: Exception) {
+                    saveError =
+                        "Agent enregistré, mais le jeton GitHub n’a pas été enregistré. Réessayez."
+                    throw error
+                }
+                try {
+                    refresh()
+                } catch (error: Exception) {
+                    saveError = "Agent enregistré, mais le rechargement a échoué. Réessayez."
+                    throw error
+                }
                 close()
             }
         },
@@ -387,36 +405,65 @@ private fun AgentEditor(vm: CairnViewModel, state: Workspace, initial: Agent, cl
 }
 
 @Composable
-private fun ProjectEditor(
+internal fun ProjectEditor(
     vm: CairnViewModel,
     state: Workspace,
     initial: Project,
     close: () -> Unit,
 ) {
     var form by rememberForm(initial)
+    val saving = rememberResourceSave(initial.id)
+    var saveError by rememberSaveable { mutableStateOf<String?>(null) }
     var mode by rememberSaveable { mutableStateOf("local") }
     var repository by rememberSaveable { mutableStateOf("") }
-    val github = initial.id.isEmpty() && mode == "github"
+    val github = saving.id.isEmpty() && mode == "github"
     Editor(
-        if (initial.id.isEmpty()) "Ajouter un projet" else "Modifier le projet",
+        if (saving.id.isEmpty()) "Ajouter un projet" else "Modifier le projet",
         state.busy,
-        state.error,
+        saveError
+            ?: if (!state.busy && saving.id.isBlank() && saving.pendingCreation) {
+                "Sauvegarde du projet non confirmée. Réessayez pour retrouver le même projet. ${state.error.orEmpty()}"
+                    .trim()
+            } else {
+                state.error
+            },
         close,
         save = {
             vm.perform {
-                if (github) {
-                    api.request(
-                        "POST",
-                        "/projects/github",
-                        body(
-                            "repository" to repository,
-                            "name" to form.name,
-                            "description" to form.description,
-                            "baseBranch" to form.baseBranch,
-                        ),
-                    )
+                saveError = null
+                saving.save(
+                    api,
+                    "/projects",
+                    value = { wireJson.encodeToJsonElement(form) },
+                    createPath = if (github) "/projects/github" else "/projects",
+                    createValue = {
+                        if (github)
+                            body(
+                                "repository" to repository,
+                                "name" to form.name,
+                                "description" to form.description,
+                                "baseBranch" to form.baseBranch,
+                            )
+                        else wireJson.encodeToJsonElement(form)
+                    },
+                    onCreated = {
+                        if (github) {
+                            val saved = wireJson.decodeFromJsonElement<Project>(it)
+                            form =
+                                form.copy(
+                                    id = saved.id,
+                                    path = saved.path,
+                                    sourceMode = saved.sourceMode,
+                                )
+                        }
+                    },
+                )
+                try {
                     refresh()
-                } else save("projects", initial.id, wireJson.encodeToJsonElement(form))
+                } catch (error: Exception) {
+                    saveError = "Projet enregistré, mais le rechargement a échoué. Réessayez."
+                    throw error
+                }
                 close()
             }
         },
@@ -426,16 +473,17 @@ private fun ProjectEditor(
                 (if (github) repository.isNotBlank() else form.path.isNotBlank()) &&
                 form.baseBranch.isNotBlank(),
     ) {
-        if (initial.id.isEmpty()) {
+        if (saving.id.isEmpty()) {
             Choice(
                 "Ajouter depuis",
                 mode,
                 listOf("local" to "Dossier sur le serveur", "github" to "GitHub"),
+                enabled = !state.busy && !saving.pendingCreation,
             ) {
-                if (!state.busy) mode = it
+                mode = it
             }
             if (github)
-                GithubRepositoryPicker(vm.api, repository, !state.busy) {
+                GithubRepositoryPicker(vm.api, repository, !state.busy && !saving.pendingCreation) {
                     repository = it.fullName
                     form =
                         form.copy(

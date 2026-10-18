@@ -279,17 +279,31 @@ fun Choice(
     selected: String,
     choices: List<Pair<String, String>>,
     onChange: (String) -> Unit,
+) = Choice(label, selected, choices, enabled = true, onChange = onChange)
+
+@Composable
+fun Choice(
+    label: String,
+    selected: String,
+    choices: List<Pair<String, String>>,
+    enabled: Boolean,
+    onChange: (String) -> Unit,
 ) {
     var expanded by remember { mutableStateOf(false) }
     Column {
         Text(label, style = MaterialTheme.typography.labelLarge)
-        OutlinedButton(onClick = { expanded = true }, modifier = Modifier.fillMaxWidth()) {
+        OutlinedButton(
+            onClick = { expanded = true },
+            enabled = enabled,
+            modifier = Modifier.fillMaxWidth(),
+        ) {
             Text(choices.find { it.first == selected }?.second ?: "Choisir…")
         }
         DropdownMenu(expanded, { expanded = false }) {
             choices.forEach { (key, name) ->
                 DropdownMenuItem(
                     text = { Text(name) },
+                    enabled = enabled,
                     onClick = {
                         expanded = false
                         onChange(key)

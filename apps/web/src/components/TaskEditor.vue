@@ -16,6 +16,7 @@ import {
   FolderGit2,
   Play,
 } from '../icons'
+import { useResourceSave } from '../resourceSave'
 import Icon from './Icon.vue'
 import Modal from './Modal.vue'
 import UiAlert from './UiAlert.vue'
@@ -98,6 +99,8 @@ const tagText = computed({
 })
 const busy = ref(false)
 const error = ref('')
+const resourceSave = useResourceSave(props.task?.id)
+const savedId = resourceSave.savedId
 const occurrences = ref<number[]>([])
 const available = computed(() =>
   state.skills.filter(
@@ -151,20 +154,30 @@ async function preview() {
 }
 
 async function save() {
+  if (busy.value)
+    return
+
   busy.value = true
   error.value = ''
+  let refreshing = false
   try {
-    const saved = await api<Task>(`/tasks${props.task ? `/${props.task.id}` : ''}`, {
-      method: props.task ? 'PUT' : 'POST',
-      body: JSON.stringify(form.value),
-    })
+    const saved = await resourceSave.save<Task>('/tasks', { body: () => form.value })
+    refreshing = true
     await refresh()
     emit('saved', saved)
     notify(props.task ? 'Task updated' : 'Task created')
     emit('close')
   }
   catch (e) {
-    error.value = (e as Error).message
+    const detail = (e as Error).message || 'Please try again.'
+    if (refreshing)
+      error.value = `Mission saved, but the workspace could not be reloaded. ${detail}`
+    else if (savedId.value)
+      error.value = `Mission saved, but the latest changes could not be saved. ${detail}`
+    else if (resourceSave.pendingCreation.value)
+      error.value = `Could not confirm whether the mission was saved. Retry to recover it safely. ${detail}`
+    else
+      error.value = `Could not save the mission. ${detail}`
   }
   finally {
     busy.value = false
@@ -174,9 +187,9 @@ async function save() {
 
 <template>
   <Modal
-    :title="task ? 'Edit mission' : 'Give your agent a mission'"
+    :title="savedId ? 'Edit mission' : 'Give your agent a mission'"
     wide
-    @close="emit('close')"
+    @close="!busy && emit('close')"
   >
     <form @submit.prevent="save">
       <div class="modal-body form-grid grid grid-cols-[1fr_1fr] gap-5 phone:grid-cols-1 phone:gap-4.5 px-6.5 py-6 phone:p-5">
@@ -269,14 +282,14 @@ async function save() {
         </UiAlert>
       </div>
       <footer class="modal-actions flex justify-end gap-2.5 bg-surface border-t border-line sticky bottom-0 phone:flex-wrap px-6.5 py-4.5 phone:px-5 phone:py-4">
-        <UiButton type="button" @click="emit('close')">
+        <UiButton type="button" :disabled="busy" @click="emit('close')">
           Cancel
         </UiButton><UiButton
           variant="primary"
           type="submit"
           :disabled="busy || !state.agents.length"
         >
-          {{ busy ? "Saving…" : task ? "Save changes" : "Create mission" }}
+          {{ busy ? "Saving…" : savedId ? "Save changes" : "Create mission" }}
         </UiButton>
       </footer>
     </form>

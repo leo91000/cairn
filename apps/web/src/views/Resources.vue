@@ -30,6 +30,7 @@ import {
   ShieldCheck,
   Trash2,
 } from '../icons'
+import { useResourceSave } from '../resourceSave'
 import { iconButton } from '../ui'
 
 const props = defineProps<{
@@ -60,7 +61,9 @@ function repositoryLabel(origin?: string) {
   }
 }
 
-const editing = ref<string | null>(null)
+const resourceSave = useResourceSave()
+const editing = resourceSave.savedId
+const pendingCreation = resourceSave.pendingCreation
 const open = ref(false)
 const deleting = ref<any>(null)
 const busy = ref(false)
@@ -134,7 +137,7 @@ async function edit(item?: any) {
   githubToken.value = ''
   githubConfigured.value = false
   removeGithub.value = false
-  editing.value = item?.id ?? null
+  resourceSave.reset(item?.id ?? null)
   form.value = item
     ? structuredClone(JSON.parse(JSON.stringify(item)))
     : isAgent.value
@@ -199,27 +202,52 @@ async function save() {
     return
   busy.value = true
   error.value = ''
+  let phase: 'save' | 'token' | 'refresh' = 'save'
   try {
-    const saved = await api(githubImport.value ? '/projects/github' : `/${props.kind}${editing.value ? `/${editing.value}` : ''}`, {
-      method: editing.value ? 'PUT' : 'POST',
-      body: JSON.stringify(githubImport.value
-        ? {
+    const importing = githubImport.value
+    const saved = await resourceSave.save(`/${props.kind}`, {
+      body: () => form.value,
+      createPath: importing ? '/projects/github' : undefined,
+      createBody: importing
+        ? () => ({
             repository: repository.value,
             name: form.value.name,
             description: form.value.description,
             baseBranch: form.value.baseBranch,
-          }
-        : form.value),
+          })
+        : undefined,
+      onCreated: (created: any) => {
+        if (importing) {
+          form.value.path = created.path
+          form.value.sourceMode = created.sourceMode
+        }
+      },
     })
-    if (isAgent.value && (githubToken.value || removeGithub.value))
+    if (isAgent.value && (githubToken.value || removeGithub.value)) {
+      phase = 'token'
       await api(`/agents/${saved.id}/github-token`, { method: 'PUT', body: JSON.stringify({ token: removeGithub.value ? '' : githubToken.value }) })
+    }
+
     githubToken.value = ''
+    removeGithub.value = false
+    phase = 'refresh'
     await refresh()
     open.value = false
     notify(`${isAgent.value ? 'Agent' : 'Project'} saved`)
   }
   catch (e) {
-    error.value = (e as Error).message
+    const label = isAgent.value ? 'Agent' : 'Project'
+    const detail = (e as Error).message || 'Please try again.'
+    if (phase === 'refresh')
+      error.value = `${label} saved, but the workspace could not be reloaded. ${detail}`
+    else if (phase === 'token')
+      error.value = `Agent saved, but the GitHub connection could not be saved. ${detail}`
+    else if (editing.value)
+      error.value = `${label} saved, but the latest changes could not be saved. ${detail}`
+    else if (pendingCreation.value)
+      error.value = `Could not confirm whether the ${label.toLowerCase()} was saved. Retry to recover it safely. ${detail}`
+    else
+      error.value = `Could not save the ${label.toLowerCase()}. ${detail}`
   }
   finally {
     busy.value = false
@@ -345,12 +373,12 @@ async function remove() {
           <VirtualSelect
             v-model="projectMode"
             label="Add from"
-            :disabled="busy"
+            :disabled="busy || pendingCreation"
             :options="[{ value: 'local', label: 'Server directory' }, { value: 'github', label: 'GitHub' }]"
           />
           <GithubRepositoryPicker
             v-if="githubImport"
-            :disabled="busy"
+            :disabled="busy || pendingCreation"
             :selected="repository"
             @select="selectRepository"
           />

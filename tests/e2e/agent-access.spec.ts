@@ -2,6 +2,7 @@ import {
   signIn as authenticateWorkspace,
   expect,
   test,
+  useRelayForHttpMocks,
   workspacePath,
 } from './fixtures'
 
@@ -47,6 +48,106 @@ test('agent access editor and task inheritance work on mobile in both themes', a
   // As on Android, the new mission opens in its sheet on phones.
   await expect(page.getByRole('dialog', { name: 'Review the repository' })).toBeVisible()
   await expect(page.getByRole('heading', { name: 'Review the repository' })).toBeVisible()
+})
+
+for (const kind of ['agents', 'projects'] as const) {
+  for (const failure of ['refresh', 'lost response'] as const) {
+    test(`${kind} retry updates the same resource after ${failure}`, async ({ page, workspace }, testInfo) => {
+      await useRelayForHttpMocks(page)
+      await page.goto(workspacePath(`/${kind}`))
+      await authenticateWorkspace(page)
+      const agent = kind === 'agents'
+      const label = agent ? 'agent' : 'project'
+      await page.getByRole('button', { name: agent ? 'New agent' : 'Add project', exact: true }).click()
+      const dialog = page.getByRole('dialog')
+      const name = `Retry ${kind} ${failure}`
+      await dialog.getByLabel('Name', { exact: true }).fill(name)
+      if (!agent)
+        await dialog.getByLabel('Project directory').fill(workspace.projectPath)
+
+      const creations: string[] = []
+      let rejectRefresh = false
+      let createdId = ''
+      let updates = 0
+      await page.route(`**/api/${kind}/*`, async (route) => {
+        if (route.request().method() === 'PUT')
+          updates++
+        await route.continue()
+      })
+      await page.route(`**/api/${kind}`, async (route) => {
+        const request = route.request()
+        if (request.method() === 'POST') {
+          creations.push(request.postData()!)
+          const response = await route.fetch()
+          createdId = (await response.json()).id
+          if (creations.length === 1 && failure === 'lost response') {
+            await route.abort('failed')
+            return
+          }
+
+          rejectRefresh = creations.length === 1 && failure === 'refresh'
+          await route.fulfill({ response })
+        }
+        else if (request.method() === 'GET' && rejectRefresh) {
+          await route.fulfill({ status: 400, json: { error: 'Resource list temporarily rejected' } })
+        }
+        else {
+          await route.continue()
+        }
+      })
+
+      await dialog.getByRole('button', { name: `Save ${label}`, exact: true }).click()
+      await expect(dialog.getByRole('alert')).toContainText(failure === 'refresh' ? 'saved, but the workspace could not be reloaded' : `Could not confirm whether the ${label} was saved`)
+      rejectRefresh = false
+      const first = (await workspace.api(`/api/${kind}`)).filter((item: { id: string }) => item.id === createdId)
+      expect(first).toHaveLength(1)
+      const createdAt = first[0].createdAt
+      await page.setViewportSize({ width: 390, height: 844 })
+      await page.screenshot({ path: testInfo.outputPath(`${kind}-${failure.replaceAll(' ', '-')}-mobile.png`), animations: 'disabled' })
+      await dialog.getByLabel('Name', { exact: true }).fill(`${name} edited`)
+      await dialog.getByRole('button', { name: `Save ${label}`, exact: true }).click()
+      await expect(dialog).toHaveCount(0)
+
+      const saved = (await workspace.api(`/api/${kind}`)).filter((item: { name: string }) => item.name.startsWith(name))
+      expect(saved).toHaveLength(1)
+      expect(saved[0]).toMatchObject({ id: createdId, name: `${name} edited`, createdAt })
+      expect(updates).toBe(1)
+      expect(creations).toHaveLength(failure === 'refresh' ? 1 : 2)
+      if (failure === 'lost response')
+        expect(creations[1]).toBe(creations[0])
+    })
+  }
+}
+
+test('a failed dedicated GitHub token keeps the created agent and retries only the connection and update', async ({ page, workspace }) => {
+  await useRelayForHttpMocks(page)
+  await page.goto(workspacePath('/agents'))
+  await authenticateWorkspace(page)
+  await page.getByRole('button', { name: 'New agent', exact: true }).click()
+  const dialog = page.getByRole('dialog')
+  await dialog.getByLabel('Name', { exact: true }).fill('Token retry agent')
+  await dialog.getByLabel('Shared GitHub connection').uncheck()
+  await dialog.getByLabel('Dedicated GitHub token').fill('fixture-token-not-a-secret')
+  let tokenAttempts = 0
+  let creates = 0
+  page.on('request', (request) => {
+    if (request.method() === 'POST' && request.url().endsWith('/api/agents'))
+      creates++
+  })
+  await page.route('**/api/agents/*/github-token', async (route) => {
+    tokenAttempts++
+    await route.fulfill(tokenAttempts === 1
+      ? { status: 400, json: { error: 'GitHub connection rejected' } }
+      : { json: { configured: true } })
+  })
+  await dialog.getByRole('button', { name: 'Save agent', exact: true }).click()
+  await expect(dialog.getByRole('alert')).toContainText('Agent saved, but the GitHub connection could not be saved')
+  await expect(dialog.getByLabel('Dedicated GitHub token')).toHaveValue('fixture-token-not-a-secret')
+  await dialog.getByRole('button', { name: 'Save agent', exact: true }).click()
+  await expect(dialog).toHaveCount(0)
+  expect(creates).toBe(1)
+  expect(tokenAttempts).toBe(2)
+  expect((await workspace.api('/api/agents')).filter((item: { name: string }) => item.name === 'Token retry agent')).toHaveLength(1)
 })
 
 test('agents start unlimited and retain an optional limit after saving', async ({ page, workspace }) => {
