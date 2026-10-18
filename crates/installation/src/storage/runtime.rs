@@ -28,6 +28,12 @@ fn registry() -> &'static Registry {
     REGISTRY.get_or_init(Default::default)
 }
 
+#[cfg(test)]
+pub(crate) fn with_registry_locked(operation: impl FnOnce()) {
+    let _registry = registry().lock().unwrap();
+    operation();
+}
+
 /// Apply node limits without policy-file reads in the CPU safety path.
 pub(crate) fn configure(state: &Path, policy: &Policy) -> Result<()> {
     super::NodeBlockCache::new(state)?.resize(policy.memory_cache_mi_b as usize * 1024 * 1024)?;
@@ -56,6 +62,44 @@ pub(crate) fn configure(state: &Path, policy: &Policy) -> Result<()> {
 
 /// Longest pause waiting for a late backup before the VM continues without it.
 pub const BACKUP_LAG_PAUSE_MS: i64 = 10 * 60 * 1000;
+
+/// An attempt keeps its acquired volume's stop token independently of the registry.
+/// Normal completion cancels only `execution`, so a retained VM can keep its disk.
+pub(crate) struct AttemptStop {
+    pub execution: CancellationToken,
+    volume: OnceLock<CancellationToken>,
+}
+
+impl AttemptStop {
+    pub fn new(execution: CancellationToken) -> Self {
+        Self {
+            execution,
+            volume: OnceLock::new(),
+        }
+    }
+
+    pub fn bind(&self, volume: &Volume) -> Result<()> {
+        self.volume
+            .set(volume.stop.clone())
+            .map_err(|_| Error::internal("Execution disk is already bound."))?;
+
+        // Publish before checking expiry. Either cancel sees this token, or
+        // acquisition sees the cancellation, including a late journal open.
+        if self.execution.is_cancelled() {
+            volume.stop.cancel();
+            return Err(Error::unavailable("VM preparation stopped."));
+        }
+
+        Ok(())
+    }
+
+    pub fn cancel(&self) {
+        self.execution.cancel();
+        if let Some(volume) = self.volume.get() {
+            volume.cancel();
+        }
+    }
+}
 
 pub struct Volume {
     pub disk: Arc<LazyDisk>,
@@ -807,6 +851,40 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn expired_attempt_stops_a_volume_acquired_after_expiry() {
+        let root = tempfile::tempdir().unwrap();
+        let (volume, _, _api) = controller_fixture(root.path()).await;
+        let attempt = AttemptStop::new(CancellationToken::new());
+        attempt.cancel();
+
+        assert!(attempt.bind(&volume).unwrap_err().is_unavailable());
+        assert!(volume.stop.is_cancelled());
+        assert_eq!(
+            volume.write_at(0, b"late").unwrap_err().kind(),
+            io::ErrorKind::Interrupted
+        );
+    }
+
+    #[tokio::test]
+    async fn completed_attempt_preserves_the_disk_until_the_next_attempt_expires() {
+        let root = tempfile::tempdir().unwrap();
+        let (volume, _, _api) = controller_fixture(root.path()).await;
+        let completed = AttemptStop::new(CancellationToken::new());
+        completed.bind(&volume).unwrap();
+        completed.execution.cancel();
+        drop(completed);
+        volume.write_at(0, b"retained").unwrap();
+
+        let next = AttemptStop::new(CancellationToken::new());
+        next.bind(&volume).unwrap();
+        next.cancel();
+        assert_eq!(
+            volume.write_at(0, b"expired").unwrap_err().kind(),
+            io::ErrorKind::Interrupted
+        );
+    }
+
+    #[tokio::test]
     async fn reopened_conversation_never_returns_a_stopped_disk() {
         let root = tempfile::tempdir().unwrap();
         let (previous, _, _api) = controller_fixture(root.path()).await;
@@ -916,10 +994,12 @@ mod tests {
             previous.write_at(0, &bytes).unwrap();
             previous.sync().unwrap();
             let directory = root.path().join("disks/conversation");
+            let attempt = AttemptStop::new(CancellationToken::new());
+            attempt.bind(&previous).unwrap();
             let cpu = cpu_micros();
             let opening = std::time::Instant::now();
             let releasing = if cancelled {
-                previous.stop.cancel();
+                attempt.cancel();
                 Some(tokio::spawn(async move {
                     tokio::time::sleep(std::time::Duration::from_millis(25)).await;
                     drop(previous);

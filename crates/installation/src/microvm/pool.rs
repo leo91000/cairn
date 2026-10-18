@@ -926,12 +926,29 @@ impl Reservation {
     }
 
     pub async fn execute(
-        mut self,
-        mut plan: Plan,
+        self,
+        plan: Plan,
         socket: Arc<OnceCell<PathBuf>>,
         control: Arc<Mutex<()>>,
         stop: CancellationToken,
     ) -> Result<i32> {
+        self.execute_attempt(
+            plan,
+            socket,
+            control,
+            Arc::new(crate::storage::runtime::AttemptStop::new(stop)),
+        )
+        .await
+    }
+
+    pub(crate) async fn execute_attempt(
+        mut self,
+        mut plan: Plan,
+        socket: Arc<OnceCell<PathBuf>>,
+        control: Arc<Mutex<()>>,
+        attempt_stop: Arc<crate::storage::runtime::AttemptStop>,
+    ) -> Result<i32> {
+        let stop = attempt_stop.execution.clone();
         if stop.is_cancelled() {
             self.finish().await;
             return Ok(143);
@@ -970,6 +987,7 @@ impl Reservation {
             if self.resumed {
                 tracing::info!(target: "cairn_performance", operation = "vm_retention", event = "claimed", run_id = crate::performance::identity(plan.run_id()));
                 let vm = self.vm.as_mut().unwrap();
+                vm.bind_stop(&attempt_stop)?;
                 let _capture = self.idle_control.lock().await;
                 vm.resume_idle().await?;
                 let _ = socket.set(vm.socket.clone());
@@ -1054,6 +1072,7 @@ impl Reservation {
                 crate::storage::bootstrap::prepare(&disk, size, plan.storage(), &stop).await?;
             }
             let volume = crate::storage::runtime::load(&disk).await?;
+            attempt_stop.bind(&volume)?;
             if volume.source.authorization()?.is_none() {
                 // A controller crash may leave ownership durable before its
                 // authorization was attached. Bind before any user import.

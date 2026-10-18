@@ -13,6 +13,7 @@ use crate::{
         wire,
     },
     skills::atomic_write,
+    storage::runtime::AttemptStop,
     validation::{text, uuid},
 };
 use base64::{Engine, engine::general_purpose::STANDARD};
@@ -372,17 +373,18 @@ struct Execution {
 impl Execution {
     async fn run(self, reservation: Reservation) {
         let lease_expired = Arc::new(AtomicBool::new(false));
+        let attempt_stop = Arc::new(AttemptStop::new(self.stop));
         let timer = tokio::spawn(enforce_limits(
             self.broker.clone(),
             self.id.clone(),
             self.plan.clone(),
             self.socket.clone(),
             self.control.clone(),
-            self.stop.clone(),
+            attempt_stop.clone(),
             lease_expired.clone(),
         ));
         let result = reservation
-            .execute(self.plan, self.socket, self.control, self.stop)
+            .execute_attempt(self.plan, self.socket, self.control, attempt_stop)
             .await;
         timer.abort();
         let broker = &self.broker;
@@ -445,16 +447,16 @@ async fn enforce_limits(
     plan: Plan,
     socket: Arc<OnceCell<PathBuf>>,
     control: Arc<Mutex<()>>,
-    expiry: CancellationToken,
+    attempt_stop: Arc<AttemptStop>,
     lease_expired: Arc<AtomicBool>,
 ) {
+    let expiry = &attempt_stop.execution;
     let deadline = plan.deadline();
     let leased = plan.node_lease_required();
     loop {
         if expiry.is_cancelled() {
             return;
         }
-        let disk_directory = crate::storage::environment::directory(&broker.state, plan.run_id());
         let paused =
             crate::microvm::suspension::administrative_suspended_ms(&broker.state, &attempt)
                 .await
@@ -469,12 +471,7 @@ async fn enforce_limits(
             lease_expired.store(lost_lease, Ordering::SeqCst);
             // Cancellation releases an in-flight guest thaw before waiting
             // for its control lock. The timer never waits unboundedly.
-            expiry.cancel();
-            if let Ok(directory) = &disk_directory
-                && let Some(volume) = crate::storage::runtime::live(directory)
-            {
-                volume.stop.cancel();
-            }
+            attempt_stop.cancel();
             if leased {
                 let _guard = tokio::time::timeout(Duration::from_secs(2), control.lock()).await;
                 if let Err(error) = host::pause_attempt(&broker.state, &attempt).await {
@@ -483,7 +480,7 @@ async fn enforce_limits(
             }
             return;
         }
-        let directory = match disk_directory {
+        let directory = match crate::storage::environment::directory(&broker.state, plan.run_id()) {
             Ok(directory) => Some(directory),
             // Attribution publishes two durable records before exposing the
             // guest socket. Its temporary incomplete state is not a VM fault.
@@ -501,7 +498,7 @@ async fn enforce_limits(
                 return;
             }
             if volume
-                .enforce_limits(&broker.state, &attempt, &expiry)
+                .enforce_limits(&broker.state, &attempt, expiry)
                 .await
                 .is_err()
             {
@@ -521,6 +518,82 @@ async fn plan_run_id(path: &Path) -> Result<String> {
 mod ownership_tests {
     use super::*;
     use serde_json::json;
+
+    #[tokio::test]
+    async fn deadline_stops_its_volume_while_the_registry_is_contended() {
+        use crate::storage::{Disk, policy::Policy, runtime};
+
+        let root = tempfile::tempdir().unwrap();
+        let (broker, _) = pending_claim(root.path()).await;
+        let run = crate::config::id();
+        let directory = broker.state.join("disks").join(&run);
+        let policy = Policy {
+            reserve_mi_b: 64,
+            reserve_percent: 1,
+            ..Policy::default()
+        };
+
+        drop(
+            runtime::create(
+                &directory.join("lazy"),
+                &json!({
+                    "version": 1,
+                    "size": 4096,
+                    "blockSize": 4_194_304,
+                    "blocks": [{ "offset": 0, "size": 4096, "hash": null }],
+                }),
+                &json!({
+                    "master": "http://127.0.0.1:1/",
+                    "grant": "fixture",
+                    "policy": policy,
+                }),
+            )
+            .await
+            .unwrap(),
+        );
+        let volume = runtime::load(&directory).await.unwrap();
+        let expiry = CancellationToken::new();
+        let attempt_stop = Arc::new(AttemptStop::new(expiry.clone()));
+        attempt_stop.bind(&volume).unwrap();
+        let (locked, ready) = std::sync::mpsc::channel();
+        let (release, released) = std::sync::mpsc::channel();
+        let contention = std::thread::spawn(move || {
+            runtime::with_registry_locked(|| {
+                if locked.send(()).is_ok() {
+                    let _ = released.recv_timeout(Duration::from_secs(30));
+                }
+            });
+        });
+        ready.recv_timeout(Duration::from_secs(30)).unwrap();
+
+        let result = tokio::time::timeout(
+            Duration::from_secs(2),
+            enforce_limits(
+                broker,
+                crate::config::id(),
+                Plan::new(json!({ "runId": run, "expires": now() })),
+                Arc::default(),
+                Arc::default(),
+                attempt_stop,
+                Arc::default(),
+            ),
+        )
+        .await;
+        let volume_stopped = volume.stop.is_cancelled();
+        release.send(()).unwrap();
+        contention.join().unwrap();
+
+        result.unwrap();
+        assert!(expiry.is_cancelled());
+        assert!(
+            volume_stopped,
+            "expiration must stop the acquired volume before registry contention clears"
+        );
+        assert_eq!(
+            volume.write_at(0, b"expired").unwrap_err().kind(),
+            std::io::ErrorKind::Interrupted
+        );
+    }
 
     async fn pending_claim(root: &Path) -> (Broker, String) {
         let state = root.join("state");
@@ -590,7 +663,7 @@ mod ownership_tests {
             Plan::new(json!({ "runId": run })),
             socket.clone(),
             Arc::default(),
-            stop.clone(),
+            Arc::new(AttemptStop::new(stop.clone())),
             Arc::default(),
         ));
         tokio::time::sleep(Duration::from_millis(50)).await;
@@ -618,7 +691,7 @@ mod ownership_tests {
                 Plan::new(json!({ "runId": run, "expires": now() })),
                 Arc::default(),
                 Arc::default(),
-                stop.clone(),
+                Arc::new(AttemptStop::new(stop.clone())),
                 Arc::default(),
             ),
         )
