@@ -287,6 +287,42 @@ fn completes(events: &[Value]) -> bool {
 }
 
 #[tokio::test]
+async fn oversized_inbox_fails_before_submitting_messages() {
+    let root = TempDir::new().unwrap();
+    let c = setup(&root);
+    std::fs::write(
+        root.path().join("inbox/messages.json"),
+        vec![b' '; 2_000_001],
+    )
+    .unwrap();
+    let (result, events) = tokio::time::timeout(
+        Duration::from_secs(10),
+        run_to_end(&c, plan(&root, "fixture:question")),
+    )
+    .await
+    .unwrap();
+    let error = result.unwrap_err();
+    assert_eq!(error.status, 400);
+    assert_eq!(error.message, "Chat inbox is too large.");
+    assert!(!completes(&events));
+}
+
+#[tokio::test]
+async fn invalid_and_exact_limit_empty_inboxes_do_not_interrupt_a_turn() {
+    for bytes in [
+        b"invalid json".to_vec(),
+        format!("[]{}", " ".repeat(1_999_998)).into_bytes(),
+    ] {
+        let root = TempDir::new().unwrap();
+        let c = setup(&root);
+        std::fs::write(root.path().join("inbox/messages.json"), bytes).unwrap();
+        let (result, events) = run_to_end(&c, plan(&root, "fixture:slow")).await;
+        result.unwrap();
+        assert!(completes(&events));
+    }
+}
+
+#[tokio::test]
 async fn large_system_instructions_reach_claude_unchanged() {
     let root = TempDir::new().unwrap();
     let c = setup(&root);

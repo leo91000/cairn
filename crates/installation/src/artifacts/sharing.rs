@@ -77,12 +77,35 @@ pub async fn set(
     value: &str,
     bearer: Option<&str>,
 ) -> Result<Value> {
+    let bearer = bearer.map(str::to_owned);
+    let expected_run = run.to_owned();
+    set_authorized(s, run, artifact, value, move |db| {
+        if let Some(token) = bearer {
+            let authorized = crate::project_workspaces::authorize_in(db, &token)?;
+            if authorized["id"] != expected_run {
+                return Err(Error::forbidden("Artifact is outside this run."));
+            }
+        }
+        Ok(())
+    })
+    .await
+}
+
+pub(crate) async fn set_authorized<F>(
+    s: &Service,
+    run: &str,
+    artifact: &str,
+    value: &str,
+    authorize: F,
+) -> Result<Value>
+where
+    F: FnOnce(&Db<'_>) -> Result<()> + Send + 'static,
+{
     uuid(run)?;
     uuid(artifact)?;
     let run = run.to_owned();
     let artifact = artifact.to_owned();
     let value = checked(Some(value))?.to_owned();
-    let bearer = bearer.map(str::to_owned);
     let origin = if value == "public" {
         public_origin(s).await?
     } else {
@@ -90,12 +113,7 @@ pub async fn set(
     };
     s.store
         .transaction(move |db| {
-            if let Some(token) = bearer {
-                let authorized = crate::project_workspaces::authorize_in(db, &token)?;
-                if authorized["id"] != run {
-                    return Err(Error::forbidden("Artifact is outside this run."));
-                }
-            }
+            authorize(db)?;
             required(db.run(&run)?, "Run not found")?;
             let key = format!("artifact:{run}:{artifact}");
             let mut record = required(db.kv(&key)?, "Artifact not found")?;

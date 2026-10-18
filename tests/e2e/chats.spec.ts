@@ -10,6 +10,133 @@ import {
   workspacePath,
 } from './fixtures'
 
+test('a lost message acknowledgement retries the same submission without duplicating it', async ({ page, workspace }) => {
+  await useRelayForHttpMocks(page)
+  const attempts: { id: string, chatId: string }[] = []
+  await page.route(/\/chats\/([^/]+)\/messages$/, async (route) => {
+    if (route.request().method() !== 'POST')
+      return route.continue()
+    const chatId = new URL(route.request().url()).pathname.split('/').at(-2)!
+    attempts.push({ id: route.request().postDataJSON().id, chatId })
+    const response = await route.fetch()
+    expect(response.ok()).toBe(true)
+    if (attempts.length === 1)
+      return route.abort('failed')
+    return route.fulfill({ response })
+  })
+  await page.goto(workspacePath('/chats'))
+  await authenticateWorkspace(page)
+  const composer = page.getByRole('textbox', { name: 'Message', exact: true })
+  await composer.fill('Keep this message exactly once')
+  await page.getByRole('button', { name: 'Send', exact: true }).click()
+  await expect(page.getByText('Connection unavailable. Please try again.', { exact: true })).toBeVisible()
+  await expect(composer).toHaveValue('Keep this message exactly once')
+  await page.getByRole('button', { name: 'Send', exact: true }).click()
+  await expect(page).toHaveURL(/\/chats\/[a-z]+-[a-z]+-[a-f0-9]{8}$/)
+  expect(attempts).toHaveLength(2)
+  expect(attempts[1]).toEqual(attempts[0])
+  const detail = workspace.service.chats.detail(attempts[0].chatId)
+  expect(detail.messages).toHaveLength(1)
+  expect(detail.messages[0].id).toBe(attempts[0].id)
+})
+
+test('new conversation on the same route clears an uncertain submission with identical content', async ({ page, workspace }) => {
+  await useRelayForHttpMocks(page)
+  const attempts: { id: string, chatId: string }[] = []
+  await page.route(/\/chats\/([^/]+)\/messages$/, async (route) => {
+    if (route.request().method() !== 'POST')
+      return route.continue()
+    attempts.push({
+      id: route.request().postDataJSON().id,
+      chatId: new URL(route.request().url()).pathname.split('/').at(-2)!,
+    })
+    const response = await route.fetch()
+    if (attempts.length === 1) {
+      expect(response.ok()).toBe(true)
+      return route.abort('failed')
+    }
+
+    return route.fulfill({ response })
+  })
+  await page.goto(workspacePath('/chats'))
+  await authenticateWorkspace(page)
+  const composer = page.getByRole('textbox', { name: 'Message', exact: true })
+  await composer.fill('Same content, separate conversation')
+  await page.getByRole('button', { name: 'Send', exact: true }).click()
+  await expect(page.getByText('Connection unavailable. Please try again.', { exact: true })).toBeVisible()
+  await expect(page).toHaveURL(workspacePath('/chats'))
+  await page.getByRole('button', { name: 'Chat details', exact: true }).click()
+  await page.getByRole('dialog', { name: 'Chat details', exact: true }).getByRole('button', { name: 'New chat', exact: true }).click()
+  await expect(composer).toHaveValue('')
+  await composer.fill('Same content, separate conversation')
+  await page.getByRole('button', { name: 'Send', exact: true }).click()
+  await expect(page).toHaveURL(/\/chats\/[a-z]+-[a-z]+-[a-f0-9]{8}$/)
+  expect(attempts).toHaveLength(2)
+  expect(attempts[1].chatId).not.toBe(attempts[0].chatId)
+  expect(attempts[1].id).not.toBe(attempts[0].id)
+  for (const attempt of attempts) {
+    const detail = workspace.service.chats.detail(attempt.chatId)
+    expect(detail.messages).toHaveLength(1)
+    expect(detail.messages[0].id).toBe(attempt.id)
+  }
+})
+
+test('new conversation on the same route clears the abandoned attempt’s error', async ({ page }) => {
+  await useRelayForHttpMocks(page)
+  await page.route(/\/chats\/[^/]+\/messages$/, route => route.request().method() === 'POST'
+    ? route.fulfill({ status: 503, json: { error: 'Simulated send failure' } })
+    : route.continue())
+  await page.goto(workspacePath('/chats'))
+  await authenticateWorkspace(page)
+  const composer = page.getByRole('textbox', { name: 'Message', exact: true })
+  await composer.fill('Refused first message')
+  await page.getByRole('button', { name: 'Send', exact: true }).click()
+  const failure = page.getByText('Simulated send failure', { exact: true })
+  await expect(failure).toBeVisible()
+  await page.getByRole('button', { name: 'Chat details', exact: true }).click()
+  await page.getByRole('dialog', { name: 'Chat details', exact: true }).getByRole('button', { name: 'New chat', exact: true }).click()
+  await expect(page).toHaveURL(workspacePath('/chats'))
+  await expect(composer).toHaveValue('')
+  await expect(failure).toBeHidden()
+})
+
+test('identical queued-message edits keep retry identity scoped to the edited message', async ({ page, workspace }) => {
+  await useRelayForHttpMocks(page)
+  const chat = await workspace.api('/api/chats', 'POST', {})
+  await workspace.api(`/api/chats/${chat.id}/pause`, 'POST', { paused: true })
+  const first = randomUUID()
+  const second = randomUUID()
+  for (const id of [first, second])
+    await workspace.api(`/api/chats/${chat.id}/messages`, 'POST', { id, text: 'Identical queued draft' })
+  const attempts: { id: string, target: string }[] = []
+  await page.route(/\/chats\/[^/]+\/messages\/[^/]+$/, async (route) => {
+    if (route.request().method() !== 'PUT')
+      return route.continue()
+    attempts.push({ id: route.request().postDataJSON().id, target: new URL(route.request().url()).pathname.split('/').at(-1)! })
+    return route.fulfill({ status: 503, json: { error: 'Simulated edit failure' } })
+  })
+  await page.goto(workspacePath(`/chats/${chat.id}`))
+  await authenticateWorkspace(page)
+  const save = page.getByRole('button', { name: 'Save', exact: true })
+  await page.getByRole('button', { name: /^Queued message options/ }).first().click()
+  await page.getByRole('dialog', { name: 'Queued message' }).getByRole('button', { name: 'Edit', exact: true }).click()
+  await save.click()
+  await expect(page.getByText('Simulated edit failure', { exact: true })).toBeVisible()
+  await save.click()
+  await expect(save).toBeEnabled()
+  expect(attempts).toHaveLength(2)
+  expect(attempts[1]).toEqual(attempts[0])
+  await page.getByRole('button', { name: '+ 1 other message', exact: true }).click()
+  await page.getByRole('button', { name: /^Queued message options/ }).nth(1).click()
+  await page.getByRole('dialog', { name: 'Queued message' }).getByRole('button', { name: 'Edit', exact: true }).click()
+  await save.click()
+  await expect(save).toBeEnabled()
+  expect(attempts).toHaveLength(3)
+  expect(attempts[0].target).toBe(first)
+  expect(attempts[2].target).toBe(second)
+  expect(attempts[2].id).not.toBe(attempts[0].id)
+})
+
 test('a durable scheduled wait survives restart and resumes without a user message', async ({ page, workspace }) => {
   test.setTimeout(90000)
   const chat = await workspace.api('/api/chats', 'POST', {})

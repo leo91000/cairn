@@ -10,7 +10,7 @@ use crate::{
     validation::text,
 };
 use cairn_plugin_api::{Manifest, Program, Sources};
-use cairn_plugin_host::Denied;
+use cairn_plugin_host::{Denied, InvocationError};
 use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -217,11 +217,10 @@ async fn metadata(s: &Service, manifest: &Manifest, args: &Value) -> Result<Valu
     Ok(response)
 }
 
-fn invocation_error(message: String, refused: Option<Error>) -> Error {
-    if let Some(message) = message.strip_prefix(cairn_plugin_api::REJECTED) {
-        Error::bad_gateway(message)
-    } else {
-        refused.unwrap_or_else(|| Error::bad_gateway(message))
+fn invocation_error(error: InvocationError, refused: Option<Error>) -> Error {
+    match error {
+        InvocationError::Rejected(message) => Error::bad_gateway(message),
+        InvocationError::Failed(message) => refused.unwrap_or_else(|| Error::bad_gateway(message)),
     }
 }
 
