@@ -1096,11 +1096,7 @@ internal fun ChatPage(
                             .fillMaxWidth()
                             .align(Alignment.CenterHorizontally)
                     ) {
-                        if (
-                            chat?.restoredAt != null &&
-                                chat.run?.status in setOf("failed", "interrupted") &&
-                                !chat.sessionRestartRequested
-                        )
+                        if (chat?.canRequestNewSession == true)
                             TextButton({ newSession = true }) {
                                 Text("Repartir avec une nouvelle session agent")
                             }

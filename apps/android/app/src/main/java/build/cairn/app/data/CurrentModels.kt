@@ -93,6 +93,7 @@ data class Chat(
     val purgeAt: Long? = null,
     val restoredAt: Long? = null,
     val sessionRestartRequested: Boolean = false,
+    val canRequestNewSession: Boolean = false,
     val lifecycleError: String? = null,
     val wakeup: ChatWakeup? = null,
     val suspendedByExclusive: ExclusiveReservation? = null,
