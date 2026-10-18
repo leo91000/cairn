@@ -463,6 +463,21 @@ impl Turn<'_> {
             if self.submitted.contains(id) {
                 continue;
             }
+            if message["questionCancelled"] == true {
+                if let Some(question) = self.questions.remove(text(&message, "questionId")) {
+                    send(&mut self.stdin, control_response(&question.request_id, &json!({
+                        "behavior": "deny",
+                        "message": "This question was withdrawn. No answer or authorization was provided.",
+                    }))).await?;
+                    self.emit(json!({
+                        "type": "chat.question.closed",
+                        "questionId": message["questionId"],
+                    }))
+                    .await?;
+                }
+                self.submitted.insert(id.into());
+                continue;
+            }
             if let Some(question) = self.questions.remove(text(&message, "questionId")) {
                 self.answer(question, &message).await?;
                 continue;

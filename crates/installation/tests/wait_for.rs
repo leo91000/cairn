@@ -300,8 +300,9 @@ async fn already_finished_sources_return_results_without_scheduling_or_ending_th
     assert_eq!(result["deferred"], false);
     assert_eq!(result["observation"]["conclusion"], "failure");
     assert!(f.s.chat_detail(&f.chat).await.unwrap()["wakeup"].is_null());
-    // Web and Android tell an immediate result from a polled one by this text, and show the
-    // agent's reason that comes with it.
+    // The additive marker and reason live on the event; the public observation is unchanged.
+    assert!(result["observation"].get("immediate").is_none());
+    assert!(result["observation"].get("reason").is_none());
     let run = f.run.clone();
     let ready =
         f.s.store
@@ -310,17 +311,17 @@ async fn already_finished_sources_return_results_without_scheduling_or_ending_th
                     .events(&run, 0, 100)?
                     .into_iter()
                     .filter(|event| event["type"] == "chat.wait_ready")
-                    .map(|event| (event["text"].clone(), event["payload"]["reason"].clone()))
+                    .map(|event| (event["text"].clone(), event["payload"].clone()))
                     .collect::<Vec<_>>())
             })
             .await
             .unwrap();
+    let mut announced = result["observation"].clone();
+    announced["immediate"] = json!(true);
+    announced["reason"] = json!("Wait for result");
     assert_eq!(
         ready,
-        [(
-            json!("Wait condition already completed"),
-            json!("Wait for result")
-        )]
+        [(json!("Wait condition already completed"), announced)]
     );
 }
 

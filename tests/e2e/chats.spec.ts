@@ -1127,6 +1127,31 @@ test('starts project chats, steers, edits the queue and preserves a compact mobi
   await expect(page.getByRole('combobox', { name: 'Chat agent' })).toHaveValue('Release engineer')
 })
 
+test('withdraws an obsolete question without sending an answer on desktop and mobile', async ({ page, workspace }) => {
+  for (const width of [1440, 390]) {
+    const chat = await workspace.api('/api/chats', 'POST', {})
+    await workspace.api(`/api/chats/${chat.id}/messages`, 'POST', { id: randomUUID(), text: 'fixture:question blocking' })
+    await page.setViewportSize({ width, height: 844 })
+    await page.goto(workspacePath(`/chats/${chat.id}`))
+    await authenticateWorkspace(page)
+    await expect(page.getByRole('button', { name: 'Answer pending questions' })).toBeVisible()
+    await page.getByRole('button', { name: 'Answer', exact: true }).click()
+    await expect(page.getByRole('button', { name: 'Send answer', exact: true })).toBeDisabled()
+    await page.getByRole('button', { name: 'No longer needed', exact: true }).click()
+    await expect(page.getByRole('dialog')).not.toBeVisible()
+    await expect(page.getByRole('button', { name: 'Answer pending questions' })).not.toBeVisible()
+    await expect.poll(async () => (await workspace.api(`/api/chats/${chat.id}`)).run?.status).toBe('succeeded')
+    const detail = await workspace.api(`/api/chats/${chat.id}`)
+    expect(detail.questions[0].status).toBe('cancelled')
+    expect(detail.pendingQuestions).toBe(0)
+    expect(detail.messages).toHaveLength(0)
+    const userEvents = workspace.service.store.events(detail.run.id, 0, 100).filter(event => event.type === 'chat.user')
+    expect(userEvents).toHaveLength(1)
+    await page.reload()
+    await expect(page.getByRole('button', { name: 'Answer pending questions' })).not.toBeVisible()
+  }
+})
+
 test('answers in-flight questions with choices or free text on desktop and mobile', async ({ page, workspace }) => {
   // Earlier chat journeys share this worker's request budget. Start this
   // independent flow with a fresh limiter while preserving the seeded data.
@@ -1345,4 +1370,46 @@ test('a failed fresh-session action keeps its confirmation available for retry',
   await expect(confirmation.getByRole('status').filter({ hasText: 'Connection unavailable. Please try again.' })).toBeVisible()
   await expect(confirmation).toBeVisible()
   expect(attempts).toBe(1)
+})
+
+test('an explicit immediate result replaces the wait despite changed wording', async ({ page, workspace }) => {
+  const chat = await workspace.api('/api/chats', 'POST', {})
+  await workspace.api(`/api/chats/${chat.id}/messages`, 'POST', { id: randomUUID(), text: 'Check the review' })
+  await expect.poll(async () => (await workspace.api(`/api/chats/${chat.id}`)).run?.status).toBe('succeeded')
+  const detail = await workspace.api(`/api/chats/${chat.id}`)
+  const wakeup = {
+    id: randomUUID(),
+    messageId: detail.run.chatExecution.messageId,
+    reason: 'Original wait',
+    seconds: 420,
+    createdAt: Date.now(),
+    wakeAt: Date.now() + 420000,
+    condition: { type: 'run_finished', runId: 'dependency' },
+  }
+  workspace.service.store.event(detail.run.id, 'chat.wait', wakeup.reason, wakeup)
+  // Real histories keep the marker on the event, independently of its display text.
+  workspace.service.store.event(detail.run.id, 'chat.wait_ready', 'Result available', {
+    immediate: true,
+    reason: 'Review finished',
+    state: 'completed',
+    type: 'run_finished',
+    runId: 'dependency',
+    status: 'succeeded',
+  })
+  await workspace.restart()
+  await page.goto(workspacePath(`/chats/${chat.id}`))
+  await authenticateWorkspace(page)
+  const cards = page.locator('.chat-wait')
+  await expect(cards).toHaveCount(2)
+  await expect(cards.first()).toContainText('Replaced by a later wait call')
+  await expect(cards.last()).toContainText('The result was already available')
+  await expect(cards.last()).toContainText('Review finished')
+  await expect(cards.last()).toContainText('The run finished')
+  for (const width of [1280, 390]) {
+    await page.setViewportSize({ width, height: 844 })
+    await cards.last().scrollIntoViewIfNeeded()
+    await expect(cards.last()).toBeVisible()
+    await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth - innerWidth)).toBeLessThanOrEqual(1)
+    await page.screenshot({ path: test.info().outputPath(`immediate-wait-${width}.png`), animations: 'disabled' })
+  }
 })

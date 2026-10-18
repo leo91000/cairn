@@ -1735,6 +1735,21 @@ internal fun QuestionDialog(
                                 )
                         }
                         state.error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
+                        TextButton(
+                            onClick = {
+                                vm.perform {
+                                    api.request(
+                                        "POST",
+                                        "/chats/${segment(question.chatId)}/questions/${segment(question.id)}/cancel",
+                                    )
+                                    answers = emptyMap()
+                                    close()
+                                }
+                            },
+                            enabled = !state.busy,
+                        ) {
+                            Text("Ce n’est plus utile")
+                        }
                     }
                 }
                 Row(

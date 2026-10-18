@@ -105,7 +105,7 @@ export interface ActivityWait {
   reason?: string
 }
 
-/** The text Cairn gives `chat.wait_ready` when `wait_for` finds its condition already met. */
+/** Historical marker for events that predate the explicit immediate boolean. */
 const immediateResult = 'Wait condition already completed'
 
 // Codex names the workspace server; Claude and OpenCode prefix the tool with it.
@@ -145,7 +145,7 @@ function payload(event: RunEvent) {
     return event.payload
   try {
     const data = record(JSON.parse(event.text))
-    return data.type === event.type || Object.hasOwn(data, 'item') ? data : {}
+    return event.type === 'chat.wait_ready' || data.type === event.type || Object.hasOwn(data, 'item') ? data : {}
   }
   catch {
     return {}
@@ -236,13 +236,14 @@ export function activityEntries(events: RunEvent[], chat = false, groups = new A
     }
 
     // The condition completed right away: the agent never waited, and this call replaced any wait.
-    if (event.type === 'chat.wait_ready' && event.text === immediateResult) {
+    const observation = event.type === 'chat.wait_ready' ? payload(event) : {}
+    const immediate = typeof observation.immediate === 'boolean' ? observation.immediate : event.text === immediateResult
+    if (event.type === 'chat.wait_ready' && immediate) {
       if (openWait) {
         openWait.ended = 'replaced'
         openWait = undefined
       }
 
-      const observation = record(event.payload)
       // Cairn records the reason with the result; older histories only kept it on the call.
       const reason = text(observation.reason) || waitReason
       entries.push({
@@ -259,7 +260,6 @@ export function activityEntries(events: RunEvent[], chat = false, groups = new A
     // Polling found the result while the conversation waited. When the scheduling is outside the
     // loaded page, a later resumption or the live snapshot identifies the wait.
     if (event.type === 'chat.wait_ready') {
-      const observation = record(event.payload)
       const following = events.slice(eventIndex + 1)
       const boundary = following.findIndex(next => ['chat.user', 'chat.wait', 'chat.sleep'].includes(next.type))
       const continuation = boundary < 0 ? following : following.slice(0, boundary)

@@ -371,7 +371,7 @@ async fn builtin_mcp_endpoint_exposes_scoped_workspace_tools_and_checks_the_run_
         assert!(value["error"].is_null(), "{value}");
         if method == "tools/list" {
             // Plugin tools such as 1Password's appear only for agents granted an instance.
-            assert_eq!(value["result"]["tools"].as_array().unwrap().len(), 12);
+            assert_eq!(value["result"]["tools"].as_array().unwrap().len(), 14);
             assert!(
                 !value["result"]["tools"]
                     .as_array()
@@ -844,4 +844,70 @@ async fn missing_account_identity_never_fabricates_an_agent_author() {
     let config = std::fs::read_to_string(home.join(".gitconfig")).unwrap();
     assert!(!config.contains("agent@localhost"));
     assert!(!config.contains("Main agent"));
+}
+
+#[tokio::test]
+async fn question_tools_only_withdraw_the_authorized_conversations_pending_questions() {
+    let (_root, s, _) = fixture().await;
+    let run = run(&s, Value::Null, MAIN_AGENT_ID).await;
+    let bearer = running_run_token(&s, &run).await;
+    let mut chat = s.chat_create(json!({})).await.unwrap();
+    chat["runId"] = run["id"].clone();
+    let chat_id = text(&chat, "id").to_owned();
+    s.store.put("chats", chat).await.unwrap();
+    let question = "a".repeat(64);
+    s.question_receive(text(&run, "id"), json!({
+        "id": question, "blocking": true, "fields": [{ "id": "scope", "title": "Still needed?" }],
+    })).await.unwrap();
+    let call = |name: &str, args: Value| json!({ "name": name, "arguments": args });
+    let pending = project_workspaces::rpc(
+        &s,
+        &bearer,
+        "tools/call",
+        &call("pending_questions", json!({})),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        pending["structuredContent"]["questions"][0]["questionId"],
+        question
+    );
+    let cancelled = project_workspaces::rpc(
+        &s,
+        &bearer,
+        "tools/call",
+        &call("withdraw_question", json!({ "questionId": question })),
+    )
+    .await
+    .unwrap();
+    assert_eq!(cancelled["structuredContent"]["status"], "cancelled");
+    // Retrying a withdrawal must not reopen it or send a user message.
+    let retried = s.question_cancel(&chat_id, &question).await.unwrap();
+    assert_eq!(retried["status"], "cancelled");
+    assert_eq!(
+        s.chat_detail(&chat_id).await.unwrap()["messages"],
+        json!([])
+    );
+
+    let other_run = crate::run(&s, Value::Null, MAIN_AGENT_ID).await;
+    let other_token = running_run_token(&s, &other_run).await;
+    let rejected = project_workspaces::rpc(
+        &s,
+        &other_token,
+        "tools/call",
+        &call("withdraw_question", json!({ "questionId": question })),
+    )
+    .await
+    .unwrap();
+    assert_eq!(rejected["isError"], true);
+    patch_run(&s, &run, json!({ "status": RunStatus::Succeeded })).await;
+    let revoked = project_workspaces::rpc(
+        &s,
+        &bearer,
+        "tools/call",
+        &call("pending_questions", json!({})),
+    )
+    .await;
+    // Authorization errors can be returned as tool errors, never as question data.
+    assert!(revoked.is_err() || revoked.unwrap()["isError"] == true);
 }

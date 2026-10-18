@@ -1,134 +1,16 @@
-import { readFileSync } from 'node:fs'
-import { createServer } from 'node:http'
+import { spawnSync } from 'node:child_process'
 import {
-  afterEach,
-  beforeEach,
-  describe,
-  expect,
-  it,
-} from 'vitest'
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs'
+import os from 'node:os'
+import path from 'node:path'
+import process from 'node:process'
+import { describe, expect, it } from 'vitest'
 import { parse } from 'yaml'
-import {
-  buildVersions,
-  currentImage,
-  deployUpdate,
-  newer,
-  toolkitUpdate,
-} from '../cli-updates.mjs'
-
-describe('cLI update deployment and rollback', () => {
-  let server
-  let config
-  let plan
-  let activeRuns
-  let selectedImage
-  let failCandidate
-  let releases
-  let restarts
-  let hideImage
-  const previous = `ghcr.io/owner/cairn@sha256:${'a'.repeat(64)}`
-  const candidate = `ghcr.io/owner/cairn@sha256:${'b'.repeat(64)}`
-  beforeEach(async () => {
-    activeRuns = 0
-    selectedImage = previous
-    failCandidate = false
-    releases = 0
-    restarts = 0
-    hideImage = false
-    plan = {
-      image: previous,
-      commit: 'same-application',
-      previousRuntimeId: 'old-runtime',
-      versions: { codex: '0.154.0', gh: '2.100.0' },
-    }
-    server = createServer(async (request, response) => {
-      let body = ''
-      for await (const chunk of request)
-        body += chunk
-      const input = body ? JSON.parse(body) : null
-      response.setHeader('content-type', 'application/json')
-      if (request.url === '/internal/deployment-lease') {
-        if (request.method === 'DELETE')
-          releases++
-        response.end(JSON.stringify({ activeRuns }))
-      }
-      else if (request.url.endsWith('/envs')) {
-        if (request.method === 'PATCH')
-          selectedImage = input.value
-        response.end(JSON.stringify([{ key: 'CAIRN_IMAGE', ...(!hideImage && { value: selectedImage }) }]))
-      }
-      else if (request.url.endsWith('/restart')) {
-        restarts++
-        response.end('{}')
-      }
-      else if (request.url === '/api/v1/services/service') {
-        response.end(JSON.stringify({ docker_compose_raw: readFileSync(new URL('../../compose.yaml', import.meta.url), 'utf8') }))
-      }
-      else if (request.url === '/health') {
-        response.end(JSON.stringify({ status: 'ok', commit: plan.commit, runtimeId: selectedImage === candidate && !failCandidate ? 'cli-123-1' : 'old-runtime' }))
-      }
-      else if (request.url === '/internal/nodes/release') {
-        response.end(JSON.stringify({ protocol: 2, commit: plan.commit, image: selectedImage }))
-      }
-      else {
-        response.writeHead(404).end('{}')
-      }
-    })
-    await new Promise(resolve => server.listen(0, '127.0.0.1', resolve))
-    const origin = `http://127.0.0.1:${server.address().port}`
-    config = {
-      coolifyUrl: origin,
-      publicUrl: origin,
-      serviceUuid: 'service',
-      repository: 'owner/cairn',
-      token: 'test-token',
-      maintenanceToken: 'test-maintenance',
-      runtimeId: 'cli-123-1',
-    }
-  })
-  afterEach(async () => {
-    server.closeAllConnections()
-    await new Promise(resolve => server.close(resolve))
-  })
-  it('chooses newer stable versions and never downgrades or accepts prereleases', () => {
-    expect(newer('0.99.0', '0.154.0')).toBe('0.154.0')
-    expect(newer('2.100.0', '2.99.0')).toBe('2.100.0')
-    expect(newer('2.100.0', '2.100.0')).toBe('2.100.0')
-    for (const version of ['next', '1.0.0-beta', undefined, '1.0.0\nARG BAD'])
-      expect(() => newer('1.0.0', version)).toThrow(/stable/)
-  })
-  it('verifies the new runtime despite an unchanged application commit', async () => {
-    expect(await deployUpdate(config, plan, candidate, { intervalMs: 0, timeoutMs: 1000 })).toMatchObject({ deployed: true, runtimeId: 'cli-123-1' })
-    expect(selectedImage).toBe(candidate)
-    expect(releases).toBe(1)
-  })
-  it('explains the missing Coolify permission without exposing environment values', async () => {
-    hideImage = true
-    await expect(currentImage(config)).rejects.toThrow('read:sensitive permission')
-    expect(restarts).toBe(0)
-  })
-  it('updates busy workers using restart recovery and releases the lease afterwards', async () => {
-    activeRuns = 1
-    expect(await deployUpdate(config, plan, candidate, { intervalMs: 0, timeoutMs: 1000 })).toMatchObject({ deployed: true })
-    expect(restarts).toBe(1)
-    expect(selectedImage).toBe(candidate)
-    expect(releases).toBe(1)
-  })
-  it('does not overwrite an application release that happened during the build', async () => {
-    selectedImage = `ghcr.io/owner/cairn@sha256:${'c'.repeat(64)}`
-    expect(await deployUpdate(config, plan, candidate)).toMatchObject({ deployed: false })
-    expect(restarts).toBe(0)
-    expect(releases).toBe(0)
-  })
-  it('restores and verifies the previous image when the candidate remains unhealthy or stale', async () => {
-    activeRuns = 1
-    failCandidate = true
-    await expect(deployUpdate(config, plan, candidate, { intervalMs: 1, timeoutMs: 50 })).rejects.toThrow('previous image was restored')
-    expect(selectedImage).toBe(previous)
-    expect(restarts).toBe(2)
-    expect(releases).toBe(1)
-  })
-})
+import { buildVersions } from '../cli-updates.mjs'
 
 describe('application image tool versions', () => {
   const releases = {
@@ -168,6 +50,24 @@ describe('application image tool versions', () => {
     expect(record.env.GH_VERSION).toBe('${{ needs.resolve.outputs.gh }}')
   })
 
+  it('authenticates only GitHub discovery and keeps the npm request public', async () => {
+    const requests = []
+    await buildVersions({
+      githubToken: 'fixture-token',
+      request: async (url, options) => {
+        requests.push({ url, options })
+        return request(url)
+      },
+    })
+    expect(requests).toEqual([
+      { url: 'https://registry.npmjs.org/@openai/codex/latest', options: undefined },
+      {
+        url: 'https://api.github.com/repos/cli/cli/releases/latest',
+        options: { headers: { Accept: 'application/vnd.github+json', authorization: 'Bearer fixture-token' } },
+      },
+    ])
+  })
+
   it('rejects unstable releases and failed discovery before building', async () => {
     await expect(buildVersions({
       request: async () => {
@@ -181,39 +81,58 @@ describe('application image tool versions', () => {
   })
 })
 
-describe('global toolkit update selection', () => {
-  const now = 1800000000000
-  const installedToolkit = { mise: '2026.9.4', tools: { node: '24.21.0', pnpm: '12.4.0' }, builtAt: now }
-  const available = { mise: '2026.9.4', tools: { node: '24.21.0', pnpm: '12.4.0' } }
-  it('skips unchanged tools and refreshes OS packages weekly', () => {
-    expect(toolkitUpdate({ changed: false, installedToolkit }, available, now).changed).toBe(false)
-    expect(toolkitUpdate({ changed: false, installedToolkit }, available, now + 7 * 86400000).changed).toBe(true)
-  })
-  it('detects mise or tool releases while preserving newer installed versions', () => {
-    const result = toolkitUpdate({ changed: false, installedToolkit }, { mise: '2026.9.5', tools: { node: '24.22.0', pnpm: '12.3.0' } }, now)
-    expect(result).toEqual({ changed: true, toolkit: { mise: '2026.9.5', tools: { node: '24.22.0', pnpm: '12.4.0' } } })
-  })
-  it('rejects unexpected tool sets and prereleases', () => {
-    expect(() => toolkitUpdate({ installedToolkit }, { ...available, tools: {} }, now)).toThrow(/catalogue/)
-    expect(() => toolkitUpdate({ installedToolkit }, { ...available, mise: '2026.9.5-beta' }, now)).toThrow(/stable/)
-  })
-})
+describe('build-versions command', () => {
+  const preload = `globalThis.fetch = async (url) => {
+    const release = url === 'https://registry.npmjs.org/@openai/codex/latest'
+      ? { version: '0.159.0' }
+      : { tag_name: 'v2.101.0', draft: false, prerelease: false };
+    return Response.json(release);
+  };`
+  const run = (args, env = {}, setup = preload) => spawnSync(process.execPath, [
+    '--import',
+    `data:text/javascript,${encodeURIComponent(setup)}`,
+    'scripts/cli-updates.mjs',
+    ...args,
+  ], { encoding: 'utf8', env: { ...process.env, ...env }, timeout: 10000 })
 
-describe('standalone tool workflow', () => {
-  it('only explains the supported update path without reading production configuration or running updates', () => {
-    const source = readFileSync('.github/workflows/cli-updates.yaml', 'utf8')
-    const workflow = parse(source)
-    expect(source).not.toMatch(/COOLIFY_|CAIRN_PUBLIC_URL|CAIRN_IMAGE|secrets\.|\$\{\{/)
-    expect(Object.values(workflow.permissions).every(permission => permission === 'read')).toBe(true)
-    for (const job of Object.values(workflow.jobs)) {
-      expect(job.environment).toBeUndefined()
-      expect(job.services).toBeUndefined()
-      expect(job.steps.length).toBeGreaterThan(0)
-      for (const step of job.steps) {
-        expect(step.uses).toBeUndefined()
-        expect(step.env).toBeUndefined()
-        expect(step.run).toMatch(/^echo '[^']+'$/)
-      }
+  it('emits exact JSON versions and appends the existing GitHub Actions outputs', () => {
+    const directory = mkdtempSync(path.join(os.tmpdir(), 'cairn-build-versions-'))
+    try {
+      const output = path.join(directory, 'outputs')
+      writeFileSync(output, 'existing=value\n')
+      const result = run(['build-versions'], { GITHUB_OUTPUT: output })
+      expect(result.status).toBe(0)
+      expect(result.stderr).toBe('')
+      expect(JSON.parse(result.stdout)).toEqual({ codex: '0.159.0', gh: '2.101.0' })
+      expect(readFileSync(output, 'utf8')).toBe('existing=value\ncodex=0.159.0\ngh=2.101.0\n')
+    }
+    finally {
+      rmSync(directory, { recursive: true, force: true })
+    }
+  })
+
+  it('fails discovery without emitting usable build outputs', () => {
+    const directory = mkdtempSync(path.join(os.tmpdir(), 'cairn-build-versions-'))
+    try {
+      const output = path.join(directory, 'outputs')
+      writeFileSync(output, 'existing=value\n')
+      const result = run(['build-versions'], { GITHUB_OUTPUT: output }, 'globalThis.fetch = async () => new Response("unavailable", { status: 503 });')
+      expect(result.status).toBe(1)
+      expect(result.stdout).toBe('')
+      expect(result.stderr.trim()).toBe('Request failed (HTTP 503).')
+      expect(readFileSync(output, 'utf8')).toBe('existing=value\n')
+    }
+    finally {
+      rmSync(directory, { recursive: true, force: true })
+    }
+  })
+
+  it('rejects removed deployment commands before making any network request', () => {
+    for (const args of [[], ['check'], ['deploy']]) {
+      const result = run(args, {}, 'globalThis.fetch = () => { throw new Error("Unexpected network request"); };')
+      expect(result.status).toBe(1)
+      expect(result.stdout).toBe('')
+      expect(result.stderr.trim()).toBe('Usage: cli-updates.mjs build-versions')
     }
   })
 })

@@ -298,7 +298,11 @@ pub fn prompt(run: &Value, chat: bool) -> String {
             clarification is useful. Nonblocking questions let you continue independent \
             work while the user considers the options; a suggested answer is never user \
             approval. Follow the latest user instructions and do not treat a question \
-            as authorization to publish changes."
+            as authorization to publish changes. Use cairn_workspace.pending_questions and \
+            cairn_workspace.withdraw_question to retire a question that became unnecessary \
+            or was answered in ordinary chat. Withdrawal never supplies approval. A completed \
+            outcome retires unanswered questions at the end of the turn; report needs_input \
+            when an answer is still required."
     } else {
         "This unattended task cannot answer clarification questions; report a \
             concrete blocker if required information is missing."

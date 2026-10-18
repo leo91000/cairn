@@ -23,7 +23,7 @@ command, including after changing directories in a noninteractive shell.
 `deploy/toolkit/tools.json` defines the global update channels. Its sibling
 `versions.json` pins the initial build. The installer generates the global mise
 config from those exact versions and installs shared tools into the image.
-Codex and gh retain their existing dedicated, versioned installers and updater.
+Codex and gh use their dedicated, versioned image installers.
 OS utilities come from Debian's supported package repositories.
 
 ## Project versions
@@ -51,27 +51,29 @@ or sandbox write permissions are granted. Restricted agents can use preinstalled
 tools; installing a missing version inside a restricted Codex sandbox can be denied and
 must be reported instead of bypassing that policy.
 
-## Automatic updates
+## Image updates
 
-The existing VPS timer dispatches `cli-updates.yaml` daily. In addition to Codex and
-gh, it resolves newer stable mise and global tool versions using the catalogue
-inside the deployed image. It never downgrades versions. If everything is current,
-it skips rebuilding, except for a weekly refresh of Debian packages.
+Tools are installed when building a new application image. CI resolves stable
+Codex and GitHub CLI versions with `scripts/cli-updates.mjs build-versions` and
+passes those exact versions to their dedicated installers. The global toolkit
+uses the reviewed `deploy/toolkit/tools.json` catalogue and `versions.json` pins;
+changing those pins requires rebuilding and validating an application image.
+OS utilities come from the image build's Debian packages. No daily standalone
+workflow upgrades the toolbox or refreshes OS packages in place.
 
-Candidates use the original deployed application image and an exact version plan.
-CI supplies its GitHub token only to the temporary resolver/test container and
-through a BuildKit secret for downloads; it is not baked into images or passed to
-production agents. The build verifies mise's release checksum, installs tools via mise's backends and
-refreshes OS packages. It never updates itself inside a running agent process.
-Container tests exercise every managed tool, real Rust compilation, a Python venv,
-project version selection, packageManager pins, and all three browser engines.
-Runner tests exercise the toolkit inside actual workspace-write/read-only sandboxes.
-The deployment lease, concurrent-release check, health verification and
-rollback apply to the entire toolbox update. See [CLI updates](CLI-UPDATES.md).
+The installer verifies mise's release checksum and installs tools via mise's
+backends. Container tests exercise managed tools, real Rust compilation, a Python
+venv, project version selection, packageManager pins and all three browser
+engines. Runner tests exercise the toolkit inside actual
+workspace-write/read-only sandboxes. The health endpoint reports the image's
+exact toolkit manifest and build time.
 
-After changing the catalogue or runner integration, deploy a new application image
-once; subsequent tool updates need no application version release. The health
-endpoint reports the image's exact toolkit manifest and build time.
+Installations follow the approved paired release through their host updater,
+which retains the deployment lease, runtime verification and rollback. Tools
+never update themselves inside a running agent process. See
+[tool versions and retired standalone updates](CLI-UPDATES.md) for the retained
+CI command and operator instructions for old dispatch timers, and the
+[production runbook](PRODUCTION-CAIRN.md) for the supported release path.
 
 References: [mise system installs](https://mise.jdx.dev/mise-cookbook/docker.html),
 [configuration](https://mise.jdx.dev/configuration.html),

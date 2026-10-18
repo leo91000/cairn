@@ -405,6 +405,7 @@ fn claim_steering(
     chat_id: &str,
     paused: bool,
     delivering: &Value,
+    run_id: &str,
 ) -> Result<Vec<Value>> {
     if chat(db, chat_id).is_ok_and(|chat| !is_active(&chat)) {
         return Ok(Vec::new());
@@ -423,6 +424,17 @@ fn claim_steering(
             message["status"] = MessageStatus::Sending.into();
             db.put_message(&message)?;
             steering.push(message);
+        }
+    }
+    // Withdrawal commands are not user answers or queued chat messages. Replaying
+    // one is harmless: each provider only rejects a request it still holds.
+    for question in questions(db, chat_id)? {
+        if question.run_id == run_id && question.status == QuestionStatus::Cancelled {
+            steering.push(json!({
+                "id": format!("withdraw-question:{}", question.id),
+                "questionId": question.id,
+                "questionCancelled": true,
+            }));
         }
     }
     Ok(steering)
@@ -520,6 +532,8 @@ fn continue_run(
     };
     let provider = Provider::of_run(snapshot)?;
     if provider != Provider::of_run(run)? || checkpoint["freshSession"] == true {
+        // The next provider cannot resolve requests from the session being replaced.
+        questions::release(db, run_id, None)?;
         checkpoint["freshSession"] = false.into();
         execution.context = Some(handoff_context(db, run_id)?);
         checkpoint["launched"] = false.into();
@@ -805,9 +819,10 @@ impl Service {
         let chat_id = text(chat, "id").to_owned();
         let paused = chat["paused"] == true;
         let delivering = run["chatExecution"]["messageId"].clone();
+        let run_id = text(run, "id").to_owned();
         let mut steering = self
             .store
-            .transaction(move |db| claim_steering(db, &chat_id, paused, &delivering))
+            .transaction(move |db| claim_steering(db, &chat_id, paused, &delivering, &run_id))
             .await?;
         let skills = &run["snapshot"]["skills"];
         for message in &mut steering {
