@@ -189,6 +189,25 @@ export function chatFixture() {
         }
       }
 
+      if (text.includes('fixture:verbose-mcp')) {
+        const body = 'PAGE_CONTENT_MARKER_'.padEnd(350_000, 'x')
+        for (let index = 0; index < 160; index++) {
+          const item = {
+            id: `history-page-${index}`,
+            type: 'mcpToolCall',
+            server: 'cairn_installation',
+            tool: 'get_run',
+            arguments: { runId: 'fixture-audit', after: index },
+            status: 'completed',
+            result: { content: [{ type: 'text', text: body }], structuredContent: { body }, isError: index === 159 },
+          }
+          // Keep one native result to prove UI compaction leaves it intact.
+          if (index === 0)
+            active.items.push(item)
+          notify('item/completed', { threadId: thread.id, item })
+        }
+      }
+
       if (text.includes('fixture:verbose-tools')) {
         for (let index = 0; index < 60; index++) {
           notify('item/completed', {

@@ -23,6 +23,99 @@ const FIRST_RUN: &str = "11111111-1111-4111-8111-111111111111";
 const SECOND_RUN: &str = "22222222-2222-4222-8222-222222222222";
 
 #[tokio::test]
+async fn chat_binary_compacts_large_mcp_pages_before_guest_transport() {
+    use std::process::Stdio;
+    use tokio::io::AsyncWriteExt;
+
+    let root = TempDir::new().unwrap();
+    let config = config(&root);
+    let config_file = root.path().join("config.json");
+    std::fs::write(&config_file, serde_json::to_vec(&config).unwrap()).unwrap();
+    let home = codex_home(&config);
+    let plan = json!({
+        "provider": "codex",
+        "cwd": root.path(),
+        "model": "fixture",
+        "reasoning": "medium",
+        "sandbox": "yolo",
+        "output": root.path().join("result.md"),
+        "inputDirectory": root.path(),
+        "writableRoots": [],
+        "execution": {
+            "messageId": "fixture-message",
+            "text": "fixture:verbose-mcp",
+            "attachments": [],
+        },
+    });
+    let mut child = tokio::process::Command::new(env!("CARGO_BIN_EXE_cairn"))
+        .args(["chat", &common::fixture("codex.mjs")])
+        .env("CAIRN_CONFIG", &config_file)
+        .env("CODEX_HOME", &home)
+        .env("RUST_LOG", "warn")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .unwrap();
+    let mut stdin = child.stdin.take().unwrap();
+    stdin.write_all(plan.to_string().as_bytes()).await.unwrap();
+    drop(stdin);
+    let output = tokio::time::timeout(Duration::from_secs(30), child.wait_with_output())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        output.stdout.len() < 1_000_000,
+        "160 MCP pages must not consume the guest's 100 MB output budget: {} bytes",
+        output.stdout.len(),
+    );
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let events = stdout
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).unwrap())
+        .collect::<Vec<_>>();
+    let pages = events
+        .iter()
+        .filter(|event| event["item"]["tool"] == "get_run")
+        .collect::<Vec<_>>();
+    assert_eq!(pages.len(), 160);
+    assert!(
+        pages
+            .iter()
+            .all(|event| event["item"]["details_truncated"] == true)
+    );
+    assert_eq!(pages.last().unwrap()["item"]["result"]["isError"], true);
+    assert_eq!(events.last().unwrap()["type"], "turn.completed");
+    assert!(!stdout.contains("PAGE_CONTENT_MARKER_"));
+
+    let native: Value =
+        serde_json::from_slice(&std::fs::read(home.join("fixture-conversation.json")).unwrap())
+            .unwrap();
+    let page = native["turns"][0]["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["type"] == "mcpToolCall")
+        .unwrap();
+    assert_eq!(
+        page["result"]["content"][0]["text"].as_str().unwrap().len(),
+        350_000
+    );
+    assert!(
+        page["result"]["structuredContent"]["body"]
+            .as_str()
+            .unwrap()
+            .starts_with("PAGE_CONTENT_MARKER_")
+    );
+}
+
+#[tokio::test]
 async fn chat_binary_correlates_native_rpc_and_activity_without_changing_stdout_or_logging_prompts()
 {
     use std::process::Stdio;

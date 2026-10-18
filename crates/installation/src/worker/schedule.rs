@@ -499,6 +499,50 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn completed_turn_with_late_controller_failure_settles_without_relaunch() {
+        let (_root, service, _chat_id, run_id, _workspace) = fixture().await;
+        let checkpoint = super::super::checkpoint::Checkpoint::new(
+            service.store.clone(),
+            run_id.clone(),
+            RunCheckpoint::fresh(None),
+        );
+        let mut activity =
+            crate::performance::Activity::new(&run_id, "fixture", "host", Provider::Codex);
+        let mut log_total = 500_000;
+        for event in [
+            json!({ "type": "turn.completed" }),
+            json!({ "type": "runner.failed", "error": { "message": "Workspace sealing failed" } }),
+        ] {
+            super::super::output::record(
+                &service,
+                &super::super::output::Output {
+                    diagnostic: false,
+                    raw: event.to_string(),
+                    received: tokio::time::Instant::now(),
+                },
+                &checkpoint,
+                false,
+                &[],
+                &mut log_total,
+                &mut activity,
+            )
+            .await
+            .unwrap();
+        }
+        let saved = RunCheckpoint::load(&service.store, &run_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(saved.last_error(), "Workspace sealing failed");
+        let run = service.store.run(&run_id).await.unwrap();
+        assert!(!recover(&service, &run).await.unwrap());
+        assert_eq!(
+            service.store.run(&run_id).await.unwrap()["status"],
+            "succeeded"
+        );
+    }
+
+    #[tokio::test]
     async fn deletion_during_account_preparation_leaves_no_orphan_files() {
         let (_root, service, chat_id, run_id, workspace) = fixture().await;
         service.accounts.initialize(&service).await.unwrap();
