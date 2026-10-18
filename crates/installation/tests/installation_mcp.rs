@@ -85,6 +85,210 @@ fn result(response: &Value) -> &Value {
 }
 
 #[tokio::test]
+async fn agent_catalog_accepts_current_providers_and_reasoning_through_native_mcp() {
+    let root = TempDir::new().unwrap();
+    let s = service(&root).await;
+    let main = enabled_main(&s).await;
+    let (_, configuration) = active_run(&s, &main).await;
+    let token = configuration["env"]["CAIRN_MCP_RUN_TOKEN"]
+        .as_str()
+        .unwrap();
+    let (_, catalog) = request(&s, token, "tools/list", json!({})).await;
+    let tools = catalog["result"]["tools"].as_array().unwrap();
+    assert_eq!(
+        tools
+            .iter()
+            .map(|tool| tool["name"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        ["search", "execute"]
+    );
+    let catalog = call(
+        &s,
+        &configuration,
+        "search",
+        json!({ "names": ["save_agent", "update_agent"], "detail": "schema" }),
+    )
+    .await;
+    let operations = result(&catalog)["operations"].as_array().unwrap();
+    assert_eq!(operations.len(), 2);
+    for name in ["save_agent", "update_agent"] {
+        let tool = operations.iter().find(|tool| tool["name"] == name).unwrap();
+        let schema = if name == "save_agent" {
+            &tool["inputSchema"]
+        } else {
+            &tool["inputSchema"]["properties"]["agent"]
+        };
+        assert_eq!(
+            schema["properties"]["provider"]["enum"],
+            json!(["codex", "claude", "opencode"])
+        );
+        assert!(schema["properties"]["reasoning"].get("enum").is_none());
+    }
+
+    let saved = call(
+        &s,
+        &configuration,
+        "save_agent",
+        json!({ "name": "Default engine" }),
+    )
+    .await;
+    assert_eq!(result(&saved)["provider"], "codex");
+    assert_eq!(result(&saved)["reasoning"], "high");
+
+    for provider in ["codex", "claude", "opencode"] {
+        let saved = call(
+            &s,
+            &configuration,
+            "save_agent",
+            json!({
+                "name": "Selected engine",
+                "provider": provider,
+                "model": if provider == "opencode" { "opencode/test-model" } else { "" },
+                "reasoning": if provider == "claude" { "max" } else { "future_effort-2" },
+            }),
+        )
+        .await;
+        let agent = result(&saved);
+        assert_eq!(agent["provider"], provider);
+        assert_eq!(
+            agent["reasoning"],
+            if provider == "claude" {
+                "max"
+            } else {
+                "future_effort-2"
+            }
+        );
+        assert_eq!(
+            s.get("agents", agent["id"].as_str().unwrap())
+                .await
+                .unwrap()["provider"],
+            provider
+        );
+    }
+
+    for invalid in [
+        json!({ "provider": "unknown" }),
+        json!({ "provider": null }),
+        json!({ "reasoning": "INVALID" }),
+        json!({ "reasoning": "a".repeat(41) }),
+    ] {
+        let mut args = json!({ "name": "Invalid profile" });
+        args.as_object_mut()
+            .unwrap()
+            .extend(invalid.as_object().unwrap().clone());
+        let rejected = call(&s, &configuration, "save_agent", args).await;
+        assert_eq!(rejected["result"]["isError"], true, "{rejected}");
+    }
+}
+
+#[tokio::test]
+async fn agent_updates_preserve_omitted_settings_and_accept_new_engine_settings() {
+    let root = TempDir::new().unwrap();
+    let s = service(&root).await;
+    let main = enabled_main(&s).await;
+    let (_, configuration) = active_run(&s, &main).await;
+    let saved = call(
+        &s,
+        &configuration,
+        "save_agent",
+        json!({
+            "name": "Restricted Claude",
+            "provider": "claude",
+            "reasoning": "max",
+            "model": "claude-opus-4-6",
+            "instructions": "Preserve these settings",
+            "timeoutMinutes": 37,
+            "access": { "nodes": [], "installation": true },
+        }),
+    )
+    .await;
+    let original = result(&saved);
+    let updated = call(
+        &s,
+        &configuration,
+        "update_agent",
+        json!({
+            "id": original["id"],
+            "agent": { "description": "New description" },
+        }),
+    )
+    .await;
+    let agent = result(&updated);
+    for field in [
+        "provider",
+        "reasoning",
+        "model",
+        "instructions",
+        "timeoutMinutes",
+        "access",
+    ] {
+        assert_eq!(agent[field], original[field], "{field}");
+    }
+
+    let updated = call(
+        &s,
+        &configuration,
+        "update_agent",
+        json!({
+            "id": original["id"],
+            "agent": {
+                "provider": "opencode",
+                "model": "opencode/test-model",
+                "reasoning": "future_effort-2",
+                "access": {},
+            },
+        }),
+    )
+    .await;
+    let agent = result(&updated);
+    assert_eq!(agent["provider"], "opencode");
+    assert_eq!(agent["reasoning"], "future_effort-2");
+    assert_eq!(agent["access"]["nodes"], json!([]));
+    assert_eq!(agent["access"]["installation"], true);
+
+    let updated = call(
+        &s,
+        &configuration,
+        "update_agent",
+        json!({
+            "id": original["id"],
+            "agent": { "reasoning": "" },
+        }),
+    )
+    .await;
+    assert_eq!(result(&updated)["reasoning"], "");
+    assert_eq!(result(&updated)["provider"], "opencode");
+
+    for patch in [
+        json!({ "provider": "unknown" }),
+        json!({ "provider": null }),
+        json!({ "reasoning": "INVALID" }),
+    ] {
+        let before = s
+            .get("agents", original["id"].as_str().unwrap())
+            .await
+            .unwrap();
+        let rejected = call(
+            &s,
+            &configuration,
+            "update_agent",
+            json!({
+                "id": original["id"],
+                "agent": patch,
+            }),
+        )
+        .await;
+        assert_eq!(rejected["result"]["isError"], true, "{rejected}");
+        assert_eq!(
+            s.get("agents", original["id"].as_str().unwrap())
+                .await
+                .unwrap(),
+            before
+        );
+    }
+}
+
+#[tokio::test]
 async fn installation_access_is_opt_in_and_older_profile_updates_preserve_it() {
     let root = TempDir::new().unwrap();
     let s = service(&root).await;

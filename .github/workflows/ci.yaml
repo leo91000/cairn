@@ -146,7 +146,7 @@ jobs:
         run: pnpm check
       - run: |
           node --import tsx scripts/backend-schemas.mjs
-          git diff --exit-code -- crates/installation/schemas/inputs.json
+          git diff --exit-code -- crates/installation/schemas/
           cargo clippy --locked --workspace --all-targets --features ublk-prototype -- -D warnings
           node scripts/test-backend.mjs --features ublk-prototype
           # Also compile the browser-test binaries into the cache that later build jobs restore.
