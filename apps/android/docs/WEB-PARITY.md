@@ -73,3 +73,16 @@ coverage used, not a claim that every production account/provider was exercised.
 
 Device UI captures use a local MockWebServer fixture, synthetic messages and
 example.test links. They do not contain production conversations or credentials.
+
+
+### Immediate wait results (#255)
+
+Web and Android read the explicit `chat.wait_ready.payload.immediate` boolean
+before the historical “Wait condition already completed” marker. An explicit
+`false` keeps the result attached to the scheduled wait, even with the historical
+text. Both clients also decode observations saved as JSON in `text` and replay
+`tests/fixtures/activity-events.json` (the original 15 activity events plus six
+wait-result cases). The event marker and reason are additive; the `wait_for`
+response, stored schema and compatibility epoch stay unchanged. Older clients
+can still read the event and its historical text. Cards retain their existing
+native presentation and language on each platform; no layout changes.

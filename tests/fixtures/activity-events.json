@@ -183,5 +183,59 @@
       "type": "agent_message",
       "text": "### Ready for review\n\nThe regression is covered and all checks passed.\n\n- **8 tests passed**, including both sibling functions.\n- TypeScript checks are clean.\n- The changeset is ready for the next patch release.\n\nThe changes are small and preserve the existing authoring behavior.\n\n[{\"id\":34375012123,\"head\":\"f467d688bbc17c2d5d62eff454480d61c299c95f\",\"status\":\"completed\",\"conclusion\":\"success\",\"jobs\":[{\"name\":\"changes\",\"conclusion\":\"success\"},{\"name\":\"changeset-policy\",\"conclusion\":\"success\"},{\"name\":\"native-quality\",\"conclusion\":\"success\"},{\"name\":\"wasm-quality\",\"conclusion\":\"success\"},{\"name\":\"documentation\",\"conclusion\":\"success\"},{\"name\":\"native-foreign-bindings (s390x-unknown-linux-gnu)\",\"conclusion\":\"success\"},{\"name\":\"native-musl-bindings (x86_64-unknown-linux-musl, ubuntu-24.04)\",\"conclusion\":\"success\"},{\"name\":\"browser-compatibility\",\"conclusion\":\"success\"},{\"name\":\"minimum-node\",\"conclusion\":\"success\"},{\"name\":\"quality\",\"conclusion\":\"success\"},{\"name\":\"native-bindings (aarch64-apple-darwin, macos-15)\",\"conclusion\":\"success\"},{\"name\":\"node-current-signal\",\"conclusion\":\"skipped\"}]}]\n\nimplementation-pr {\"baseRefOid\":\"bde80b7848503fd55b73032804761375c2ea9832\",\"body\":\"\",\"files\":[\".changeset/september-baseline-authoring.md\",\".github/workflows/ci.yml\",\"compatibility/css-authoring-coverage.json\",\"compatibility/css-authoring-probes.json\",\"compatibility/css-feature-target.json\",\"crates/sheetom-core/src/declaration_state.rs\",\"crates/sheetom-core/src/extension_value.rs\",\"crates/sheetom-core/src/lib.rs\",\"crates/sheetom-native/src/lib.rs\",\"crates/sheetom-wasm/src/lib.rs\",\"docs/css-baseline-gap-audit.md\",\"scripts/generate-css-feature-target.ts\"],\"headRefOid\":\"f467d688bbc17c2d5d62eff454480d61c299c95f\",\"title\":\"Refresh CSS Baseline authoring support\"}"
     }
+  },
+  {
+    "type": "chat.wait_ready",
+    "text": "Result available",
+    "payload": {
+      "state": "completed",
+      "type": "run_finished",
+      "runId": "dependency",
+      "status": "succeeded",
+      "reason": "Review finished",
+      "immediate": true
+    }
+  },
+  {
+    "type": "chat.wait_ready",
+    "text": "Wait condition already completed",
+    "payload": {
+      "state": "completed",
+      "type": "run_finished",
+      "runId": "dependency",
+      "status": "succeeded",
+      "reason": "Review finished"
+    }
+  },
+  {
+    "type": "chat.wait_ready",
+    "text": "Wait condition already completed",
+    "payload": {
+      "state": "completed",
+      "type": "run_finished",
+      "runId": "dependency",
+      "status": "succeeded",
+      "reason": "Review finished",
+      "immediate": false
+    }
+  },
+  {
+    "type": "chat.wait_ready",
+    "text": "Wait condition resolved",
+    "payload": {
+      "state": "completed",
+      "type": "run_finished",
+      "runId": "dependency",
+      "status": "succeeded",
+      "reason": "Review finished"
+    }
+  },
+  {
+    "type": "chat.wait_ready",
+    "text": "{\"state\": \"completed\", \"type\": \"run_finished\", \"runId\": \"dependency\", \"status\": \"succeeded\", \"reason\": \"Review finished\", \"immediate\": true}"
+  },
+  {
+    "type": "chat.wait_ready",
+    "text": "{\"state\": \"completed\", \"type\": \"run_finished\", \"runId\": \"dependency\", \"status\": \"succeeded\", \"reason\": \"Review finished\"}"
   }
 ]

@@ -151,6 +151,10 @@ dependencies {
 tasks.withType<Test>().configureEach {
     maxHeapSize = "512m"
     maxParallelForks = 1
+
+    val activityCorpus = rootProject.file("../../tests/fixtures/activity-events.json")
+    inputs.file(activityCorpus)
+    systemProperty("cairn.activityCorpus", activityCorpus.absolutePath)
     // Robolectric's Android 16 shared-memory emulation uses JDK file descriptors.
     jvmArgs(
         "--add-opens=java.base/jdk.internal.access=ALL-UNNAMED",

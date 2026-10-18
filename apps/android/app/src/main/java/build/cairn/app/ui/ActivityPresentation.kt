@@ -44,7 +44,7 @@ internal fun RunEvent.activityData(): JsonObject? =
         ?: runCatching {
             if (text.firstOrNull { !it.isWhitespace() } != '{') return@runCatching null
             (wireJson.parseToJsonElement(text) as? JsonObject)?.takeIf {
-                it.string("type") == type || it.containsKey("item")
+                type == "chat.wait_ready" || it.string("type") == type || it.containsKey("item")
             }
         }
             .getOrNull()
