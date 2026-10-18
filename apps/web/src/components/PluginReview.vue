@@ -10,6 +10,7 @@ import {
   Trash2,
   TriangleAlert,
 } from '../icons'
+import { pluginOperation } from '../plugin-operations'
 import { capabilityLabels } from '../plugins'
 import Icon from './Icon.vue'
 import Modal from './Modal.vue'
@@ -40,7 +41,7 @@ async function act(operation: 'approve' | 'activate') {
   busy.value = true
   error.value = ''
   try {
-    await api(`/plugins/packages/${props.entry.id}/${operation}`, { method: 'POST', body: JSON.stringify({ version: selected.value, digest: version.value?.digest }) })
+    await pluginOperation(`/plugins/packages/${props.entry.id}/${operation}`, { version: selected.value, digest: version.value?.digest })
     notify(`${manifest.value?.name} ${selected.value} is active`)
     emit('changed')
     emit('close')
@@ -145,7 +146,7 @@ async function uninstall() {
           :key="program.name"
           class="mt-1.5 flex items-start gap-2 rounded-lg bg-warning-surface px-2.5 py-2 text-2xs leading-relaxed text-warning"
         >
-          <Icon :name="TriangleAlert" :size="13" class="mt-px shrink-0" /><span>Runs <code>{{ program.path }}</code> on this server, outside the Luau sandbox, with the files and network that program can reach.<template v-if="program.description"> {{ program.description }}</template></span>
+          <Icon :name="TriangleAlert" :size="13" class="mt-px shrink-0" /><span>Runs <code>{{ program.path || program.name }}</code> on this server, outside the Luau sandbox, with the files and network that program can reach.<template v-if="program.installer"> Installed and updated by <code>{{ program.installer }}</code> from the declared hosts.</template><template v-if="program.description"> {{ program.description }}</template></span>
         </p>
         <p v-if="manifest.agentAccess" class="mt-1.5 flex items-start gap-2 text-2xs leading-relaxed text-muted">
           <Icon :name="KeyRound" :size="13" class="mt-px" /><span>Agents you authorize on an instance get {{ manifest.commands?.length ?? 0 }} command{{ manifest.commands?.length === 1 ? '' : 's' }} and {{ manifest.tools?.length ?? 0 }} tool{{ manifest.tools?.length === 1 ? '' : 's' }}<template v-if="manifest.instructions">, and instructions in their prompt</template>. Nothing is granted by default.</span>

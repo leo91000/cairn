@@ -1,6 +1,6 @@
 # Installation plugins
 
-A plugin is a package: a `manifest.json`, a `main.luau` and, optionally, other Luau
+A plugin is a package: a `manifest.json` or `manifest.toml`, a `main.luau` and, optionally, other Luau
 modules it loads with `require`. Cairn runs each package
 in its own long-lived `cairn plugin-worker` process and reaches it only through
 events; the package reaches Cairn only through host capabilities its manifest
@@ -53,7 +53,7 @@ withdraws the package until it is approved again.
 
 ```text
 plugins/discord/
-  manifest.json
+  manifest.toml        or manifest.json; same validated contract
   main.luau             returns the handler table, nothing else
   gateway.luau          socket: the Gateway session
   setup.luau            form, test and view
@@ -96,8 +96,9 @@ A manifest declares `"apiVersion": 2` (the only version Cairn loads) and:
 - `instances`: `{ singular, plural }`, how the interfaces name an instance;
 - `brand`: `{ color: "#rrggbb", path }`, the package's mark (an SVG path on a
   24×24 grid);
-- `programs` (with `exec`): `[{ name, path, description }]`, absolute paths the
-  package may run;
+- `programs` (with `exec`): `[{ name, path?, installer?, description }]`; exactly
+  one of an absolute administrator-installed `path` or a package-relative Luau
+  `installer`. Installers also require `http` and declared `hosts`; see below;
 - `agentAccess`: `{ description }`; the owner grants agents per instance and
   only granted agents get the package's commands, tools and instructions;
 - `commands`, `tools`, `instructions` (need `agentAccess`), `instanceView`,
@@ -315,7 +316,8 @@ More capabilities:
   at most. `env` values are text or `{ secret = "<setting key>" }`: the host injects the
   instance's secret, which the script never sees. `LD_*`, `DYLD_*` and `HOME` can't be
   set. Returns `{ status, stdout, stderr }`. Programs run outside the Luau sandbox with
-  whatever files and network they can reach: the review screen names each path.
+  whatever files and network they can reach: the review screen names each path or
+  installer.
 - `cairn.http.request{ …, auth = { secret = "<setting key>", header?, prefix? } }`
   adds a secret field to one header of a declared host.
 - `cairn.json.decode(text)` and `cairn.json.encode(value)` convert JSON.
@@ -327,6 +329,103 @@ the generic `POST …/connections/{id}/test` and `POST /api/plugins/{id}/form`
 only returns their names (`secretKeys`). Grants are saved as `agentIds`. Instances of
 packages that need no worker (no socket, inbound messages, conversations or timers)
 start nothing and show as ready while enabled.
+
+## Program installers
+
+Keep exactly one `manifest.json` or `manifest.toml` at the package root. Both
+formats use the same field names, defaults, validation and approval digest. The
+upload endpoint accepts a JSON manifest object as before, or manifest text with
+`manifestFormat: "json" | "toml"`; it persists canonical JSON. The web accepts
+both formats. Android reviews both formats through the normalized interface;
+package file uploads continue to use the web.
+
+For a managed executable, declare:
+
+```toml
+capabilities = [
+  "http",
+  "exec"
+]
+hosts = [ "downloads.example.com" ]
+
+[[programs]]
+name = "tool"
+installer = "programs/tool.luau"
+```
+
+The module must export `resolve(input)` and `install(input)`:
+
+```lua
+return {
+    resolve = function(input)
+        -- Select a compatible stable version for input.platform.os / .arch.
+        local response = cairn.http.request({ url = "https://downloads.example.com/latest" })
+        -- Example publisher returns { version, url, sha256?, format, executable }.
+        assert(response.status == 200)
+        return response.json
+    end,
+    install = function(input)
+        local release = input.release
+        local archive = cairn.download({ url = release.url, sha256 = release.sha256 })
+        return cairn.archive.executable({
+            archive = archive.id, format = release.format, path = release.executable,
+        })
+    end,
+}
+```
+
+`resolve` returns an exact `{ version, url, sha256?, format, executable }` descriptor.
+`format` is `zip` or `binary`. With `binary`, `executable` is a logical filename.
+Discovery can only fetch public HTTPS metadata from declared hosts (GET, 1 MiB,
+15 seconds, no redirects). It cannot read instance credentials or use storage,
+program execution or installation primitives. `install` receives exactly the
+selected descriptor. Its only capabilities are `cairn.download` and
+`cairn.archive.executable`, restricted to that artifact and entry. These operations
+are refused in ordinary instance/agent handlers. Handles never expose file bytes
+or filesystem paths to Luau. Downloads are streamed, limited to 64 MiB and 90
+seconds; the installer event has a 120-second deadline. One-shot calls with an
+unprepared dependency have a 180-second enclosing budget so preparation can finish;
+subsequent calls retain the normal 35-second budget, and each executable still has
+its own 30-second limit. The run-local plugin CLI allows 190 seconds for the
+private channel, covering that cold preparation budget. ZIPs have at most 256
+entries; links and unsafe paths are refused. Only the selected regular executable,
+at most 128 MiB, is written. No arbitrary shell/install scripts are run.
+
+Cairn verifies an expected SHA-256 when provided. Otherwise provenance is HTTPS to
+the approved publisher, and the actual archive hash is recorded at installation;
+this is not publisher signature verification. Both modes record the executable
+hash, checked before each use. A restart reuses that exact binary. A corrupted lock
+or binary fails closed; it does not silently download a replacement.
+
+Uploaded packages prepare their programs when approved, before switching the
+active version. Bundled programs prepare on first use. Preparation is shared by
+all instances and serialized; no instance secrets are available. Web and Android
+show installed/candidate versions and offer Check, Install and Restore. Package
+and program updates are independent. There is no periodic check or automatic
+upgrade in this initial implementation. Owner-only routes are:
+
+- `GET /api/plugins/<id>/programs`: installed, previous and candidate releases.
+- `POST …/programs/<name>/check`: resolve and save a candidate and its digest.
+- `POST …/programs/<name>/install` with `{ digest }`: install that candidate.
+- `POST …/programs/<name>/rollback`: restore the retained previous executable.
+
+These program actions return `{ operation: ID }` immediately. Poll
+`GET /api/plugins/packages/operations/ID` for `{ state, result?, error? }`, where
+state is `running`, `completed` or `failed`. Approval/activation of an uploaded
+installer-backed package uses the same operation response; ordinary packages keep
+their synchronous summary response. This keeps downloads independent of the
+30-second HTTP relay deadline. Operations have a nine-minute total budget, four
+concurrent slots, and 64 recent in-memory results. A server restart loses operation
+status, not the atomic program/package locks; refresh the plugin and retry if
+needed. Web and Android perform this polling, including approval failures. Cold instance tests, views/actions and form handlers
+also use this response when they may prepare an executable; once prepared, their
+ordinary synchronous responses are unchanged. Instance saves without a form
+handler remain synchronous and do not download programs.
+
+Locks and executables live under `<data>/plugin-programs/`, scoped by package
+digest and server platform. Failed preparation preserves the current version;
+older files remain available for rollback. See ADR-0049 for the epoch-3 migration
+and deployment recovery contract.
 
 ## 1Password
 
