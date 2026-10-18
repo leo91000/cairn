@@ -182,7 +182,7 @@ test('TOML packages wait for review and connect through a generated form', async
   await signIn(page)
   await page.getByRole('button', { name: 'Install package' }).click()
   const install = page.getByRole('dialog', { name: 'Install a plugin package' })
-  await install.getByLabel('Package files').setInputFiles([
+  const files = (maxLength: number) => [
     {
       name: 'manifest.toml',
       mimeType: 'text/plain',
@@ -198,11 +198,17 @@ key = "team"
 title = "Team"
 type = "string"
 required = true
+maxLength = ${maxLength}
 `),
     },
     { name: 'main.luau', mimeType: 'text/plain', buffer: Buffer.from(source) },
     { name: 'notes.luau', mimeType: 'text/plain', buffer: Buffer.from(module) },
-  ])
+  ]
+  // Admission names the limit rather than accepting a declaration it would cap on save.
+  await install.getByLabel('Package files').setInputFiles(files(10001))
+  await install.getByRole('button', { name: 'Install', exact: true }).click()
+  await expect(install.getByRole('alert')).toHaveText('Plugin setting maxLength must be an integer from 1 to 10000 (text limit).')
+  await install.getByLabel('Package files').setInputFiles(files(10000))
   await install.getByRole('button', { name: 'Install', exact: true }).click()
 
   const review = page.getByRole('dialog', { name: 'Review Team notes' })
@@ -232,6 +238,42 @@ required = true
   await page.getByRole('dialog').getByRole('button', { name: 'Uninstall' }).click()
   await page.getByRole('dialog').getByRole('button', { name: 'Confirm uninstall' }).click()
   await expect(page.getByText('This plugin isn’t installed.')).toBeVisible()
+})
+
+test('stored versions that fail admission explain why and remain removable', async ({ page }) => {
+  await useRelayForHttpMocks(page)
+  const error = 'Plugin setting maxLength must be an integer from 1 to 10000 (text limit).'
+  await page.route('**/api/plugins', route => route.fulfill({
+    json: {
+      packages: [{
+        id: 'legacy',
+        builtin: false,
+        status: 'invalid',
+        active: null,
+        manifest: null,
+        versions: [{ version: '1.0.0', error }],
+      }],
+      capabilities: [],
+      connections: [],
+    },
+  }))
+  await page.goto(workspacePath('/plugins'))
+  await signIn(page)
+  const card = page.getByRole('button', { name: 'legacy · Review' })
+  await expect(card).toContainText('Invalid')
+  await expect(card).toContainText('Check the package files')
+  await card.click()
+  const review = page.getByRole('dialog', { name: 'Review legacy' })
+  await expect(review.getByText(`Version 1.0.0 can’t be used: ${error}`)).toBeVisible()
+  await expect(review.getByRole('button', { name: 'Uninstall' })).toBeVisible()
+  await expect(review.getByRole('button', { name: 'Approve and activate' })).toHaveCount(0)
+  await review.getByRole('button', { name: 'Close', exact: true }).click()
+
+  await page.goto(workspacePath('/plugins/legacy'))
+  const notice = page.getByRole('status').filter({ hasText: 'No version of this plugin can be used.' })
+  await expect(notice).toBeVisible()
+  await notice.getByRole('button', { name: 'Review' }).click()
+  await expect(page.getByRole('dialog', { name: 'Review legacy' }).getByText(`Version 1.0.0 can’t be used: ${error}`)).toBeVisible()
 })
 
 test('program releases can be checked, installed and restored independently of plugin accounts', async ({ page }) => {

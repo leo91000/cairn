@@ -538,6 +538,140 @@ async fn legacy_service_accounts_move_into_instances_once() {
     );
 }
 
+#[tokio::test]
+async fn manifest_constraints_are_checked_before_install_and_defaults_can_be_saved() {
+    use cairn_installation::plugins::registry;
+    let f = fixture().await;
+    let s = &f.s;
+    let mut package = status_board();
+    package["source"] = json!("return {}");
+    package["manifest"]["settings"] = json!([
+        {
+            "key": "note",
+            "title": "Note",
+            "type": "text",
+            "maxLength": 10000,
+            "default": "é".repeat(3000),
+        },
+        {
+            "key": "code",
+            "title": "Code",
+            "type": "string",
+            "pattern": "[a-z]+",
+            "maxLength": 3,
+            "default": "abc",
+        },
+        {
+            "key": "count",
+            "title": "Count",
+            "type": "number",
+            "minimum": 1,
+            "maximum": 2,
+            "default": 2,
+        },
+        {
+            "key": "apiKey",
+            "title": "API key",
+            "type": "secret",
+            "maxLength": 16384,
+        },
+    ]);
+    for (key, value) in [
+        ("maxLength", json!(-1)),
+        ("maxLength", json!(1.5)),
+        ("maxLength", json!(10001)),
+        ("default", json!(false)),
+        ("default", json!("x".repeat(10001))),
+    ] {
+        let mut invalid = package.clone();
+        invalid["manifest"]["settings"][0][key] = value;
+        assert_eq!(
+            registry::install(s, &invalid).await.unwrap_err().status,
+            400
+        );
+        assert!(!f.root.path().join("data/plugins/statusboard").exists());
+    }
+    registry_install_and_approve(s, package.clone()).await;
+    let first = registry::active(s, "statusboard").await.unwrap();
+    let reloaded = registry::active(s, "statusboard").await.unwrap();
+    assert_eq!(first.digest, reloaded.digest);
+    assert_eq!(
+        serde_json::to_value(&reloaded.manifest).unwrap(),
+        serde_json::to_value(&first.manifest).unwrap()
+    );
+
+    let saved = connections::save(
+        s,
+        "statusboard",
+        &json!({ "name": "Defaults", "enabled": true }),
+        None,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        saved["settings"],
+        json!({ "note": "é".repeat(3000), "code": "abc", "count": 2 })
+    );
+    let input = json!({ "note": "é".repeat(10000) });
+    assert_eq!(
+        connections::settings(&reloaded.manifest, &input).unwrap()["note"],
+        input["note"]
+    );
+    assert!(
+        connections::settings(&reloaded.manifest, &json!({ "note": "x".repeat(10001) })).is_err()
+    );
+    let empty = serde_json::Map::new();
+    assert!(
+        connections::secrets(
+            &reloaded.manifest,
+            &json!({ "apiKey": "x".repeat(16384) }),
+            &empty
+        )
+        .is_ok()
+    );
+    assert!(
+        connections::secrets(
+            &reloaded.manifest,
+            &json!({ "apiKey": "x".repeat(16385) }),
+            &empty
+        )
+        .is_err()
+    );
+
+    // Simulate a previously admitted manifest on disk. Reads must report its
+    // unsupported constraint, without rewriting the package or its approval.
+    let manifest_path = f
+        .root
+        .path()
+        .join("data/plugins/statusboard/1.0.0/manifest.json");
+    package["manifest"]["settings"][0]["maxLength"] = json!(10001);
+    let legacy_bytes = serde_json::to_vec_pretty(&package["manifest"]).unwrap();
+    std::fs::write(&manifest_path, &legacy_bytes).unwrap();
+    let error = registry::active(s, "statusboard").await.err().unwrap();
+    assert!(error.to_string().contains("10000"));
+    assert_eq!(std::fs::read(&manifest_path).unwrap(), legacy_bytes);
+
+    // A corrected version restores access under the same plugin and instance IDs.
+    package["manifest"]["version"] = json!("1.0.1");
+    package["manifest"]["settings"][0]["maxLength"] = json!(10000);
+    let installed = registry::install(s, &package).await.unwrap();
+    registry::approve(s, "statusboard", "1.0.1", text(&installed, "digest"))
+        .await
+        .unwrap();
+    let repaired = registry::active(s, "statusboard").await.unwrap();
+    assert_eq!(repaired.manifest.version, "1.0.1");
+    let updated = connections::save(
+        s,
+        "statusboard",
+        &json!({ "name": "Defaults", "enabled": true }),
+        saved["id"].as_str(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(updated["id"], saved["id"]);
+    assert_eq!(updated["settings"], saved["settings"]);
+}
+
 /// A third-party package: everything a v2 integration needs, without any Cairn change.
 fn status_board() -> Value {
     json!({
