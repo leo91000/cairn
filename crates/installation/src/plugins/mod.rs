@@ -7,6 +7,7 @@ pub mod cli;
 pub mod connections;
 pub mod forms;
 pub mod legacy;
+pub mod operations;
 pub mod panels;
 pub mod program_installation;
 pub mod programs;
@@ -47,6 +48,7 @@ pub struct Plugins {
     programs: Mutex<HashMap<(String, String), PathBuf>>,
     pub(crate) program_installation: tokio::sync::Mutex<()>,
     pub(crate) installer_host: Host,
+    pub operations: operations::Operations,
     /// When each paced key (e.g. a bot token's Identify budget) may send next.
     paces: socket::pacing::Paces,
 }
@@ -66,6 +68,7 @@ impl Default for Plugins {
             programs: Mutex::new(HashMap::new()),
             program_installation: tokio::sync::Mutex::new(()),
             installer_host: Host::with_limits(4, std::time::Duration::from_secs(120)),
+            operations: operations::Operations::default(),
             paces: socket::pacing::Paces::default(),
         }
     }
@@ -195,17 +198,33 @@ pub async fn routes(s: &Arc<Service>, input: &Input) -> Result<Value> {
             Ok(catalog)
         }
         ("POST", ["plugins", "packages"]) => registry::install(s, body).await,
+        ("GET", ["plugins", "packages", "operations", id]) => s.plugins.operations.get(id),
         ("POST", ["plugins", "packages", id, "approve"]) => {
-            registry::approve(s, id, &version(), crate::validation::text(body, "digest")).await
+            registry::activate_request(
+                s,
+                id,
+                &version(),
+                Some(crate::validation::text(body, "digest")),
+            )
+            .await
         }
         ("POST", ["plugins", "packages", id, "activate"]) => {
-            registry::activate(s, id, &version()).await
+            registry::activate_request(s, id, &version(), None).await
         }
         ("DELETE", ["plugins", "packages", id]) => registry::uninstall(s, id).await,
         ("POST", ["plugins", id, "form"]) => forms::form(s, id, body).await,
         ("GET", ["plugins", id, "programs"]) => program_installation::list(s, id).await,
         ("POST", ["plugins", id, "programs", name, action]) => {
-            program_installation::action(s, id, name, action, body).await
+            let (service, id, name, action, body) = (
+                s.clone(),
+                id.to_string(),
+                name.to_string(),
+                action.to_string(),
+                body.clone(),
+            );
+            s.plugins.operations.start(s.clone(), async move {
+                program_installation::action(&service, &id, &name, &action, &body).await
+            })
         }
         ("POST", ["plugins", id, "connections"]) => connections::save(s, id, body, None).await,
         ("PUT", ["plugins", id, "connections", connection]) => {

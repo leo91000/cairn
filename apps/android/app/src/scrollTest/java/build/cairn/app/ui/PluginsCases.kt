@@ -13,6 +13,7 @@ import androidx.test.core.app.ApplicationProvider
 import build.cairn.app.data.*
 import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.atomic.AtomicReference
+import java.util.concurrent.atomic.AtomicInteger
 import kotlinx.coroutines.flow.first
 import kotlinx.serialization.json.*
 import okhttp3.mockwebserver.*
@@ -531,25 +532,28 @@ abstract class PluginsCases {
             val initial = InstalledProgram(release = ProgramRelease(version = "2.39.0"))
             val program = AtomicReference(ProgramInstallation(name = "op", installer = "programs/op.luau", installed = initial))
             val actions = CopyOnWriteArrayList<String>()
+            val polls = AtomicInteger()
             server.dispatcher = dispatcher { path, body ->
                 val base = "/api/installations/fixture/api/plugins/onepassword/programs"
                 when (path) {
+                    "/api/installations/fixture/api/plugins/packages/operations/program-job" ->
+                        if (polls.incrementAndGet() % 2 == 1) "{\"state\":\"running\"}" else "{\"state\":\"completed\"}"
                     base -> wireJson.encodeToString(ProgramInstallations(listOf(program.get())))
                     "$base/op/check" -> {
                         actions += "check"
                         program.set(program.get().copy(candidate = ProgramRelease(version = "2.41.0", url = "https://cache.agilebits.com/op.zip"), digest = "reviewed-release"))
-                        wireJson.encodeToString(program.get())
+                        "{\"operation\":\"program-job\"}"
                     }
                     "$base/op/install" -> {
                         actions += "install"
                         assertEquals("reviewed-release", wireJson.parseToJsonElement(body).jsonObject["digest"]?.jsonPrimitive?.content)
                         program.set(program.get().copy(installed = InstalledProgram(release = ProgramRelease(version = "2.41.0")), previous = initial, candidate = null, digest = null))
-                        wireJson.encodeToString(program.get())
+                        "{\"operation\":\"program-job\"}"
                     }
                     "$base/op/rollback" -> {
                         actions += "rollback"
                         program.set(program.get().copy(installed = initial, previous = null))
-                        wireJson.encodeToString(program.get())
+                        "{\"operation\":\"program-job\"}"
                     }
                     else -> null
                 }
@@ -565,6 +569,7 @@ abstract class PluginsCases {
             compose.onNodeWithText("Restaurer op 2.39.0").performScrollTo().performClick()
             compose.waitUntil(30000) { compose.onAllNodesWithText("op · Version 2.39.0").fetchSemanticsNodes().isNotEmpty() }
             assertEquals(listOf("check", "install", "rollback"), actions.toList())
+            assertEquals(6, polls.get())
             capture("plugin-program-restored")
         }
     }

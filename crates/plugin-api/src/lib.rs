@@ -578,7 +578,10 @@ path = "/usr/bin/probe"
 "#;
         let expected = Manifest::parse("json", json).unwrap();
         let actual = Manifest::parse("toml", toml).unwrap();
-        assert_eq!(actual, expected);
+        assert_eq!(
+            serde_json::to_value(&actual).unwrap(),
+            serde_json::to_value(&expected).unwrap()
+        );
         assert!(
             !serde_json::to_string(&actual)
                 .unwrap()

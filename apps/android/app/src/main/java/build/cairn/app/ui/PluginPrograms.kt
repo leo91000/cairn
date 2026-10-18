@@ -23,8 +23,7 @@ internal fun PluginPrograms(vm: CairnViewModel, state: Workspace, plugin: String
         if (!state.busy) try { load() } catch (e: Exception) { vm.report(e) }
     }
     fun act(program: ProgramInstallation, action: String) = vm.perform {
-        api.request(
-            "POST",
+        api.pluginOperation(
             "/plugins/${segment(plugin)}/programs/${segment(program.name)}/$action",
             buildJsonObject { program.digest?.let { put("digest", it) } },
         )

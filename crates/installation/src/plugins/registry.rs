@@ -482,6 +482,42 @@ async fn set_active(
     Ok(summary(&package))
 }
 
+/// Installer-backed activation is tracked without holding a relay request open.
+/// Ordinary packages keep the existing synchronous response contract.
+pub async fn activate_request(
+    s: &std::sync::Arc<Service>,
+    id: &str,
+    version: &str,
+    reviewed_digest: Option<&str>,
+) -> Result<Value> {
+    if builtin(id).is_some() {
+        return set_active(s, id, version, reviewed_digest).await;
+    }
+    let package = read_version(s, id, version)?;
+    if !package
+        .manifest
+        .programs
+        .iter()
+        .any(|program| !program.installer.is_empty())
+    {
+        return set_active(s, id, version, reviewed_digest).await;
+    }
+    if reviewed_digest.is_some_and(|digest| digest != package.digest) {
+        return Err(Error::conflict(
+            "This version changed while you reviewed it. Reload Plugins.",
+        ));
+    }
+    let (service, id, version, digest) = (
+        s.clone(),
+        id.to_owned(),
+        version.to_owned(),
+        reviewed_digest.map(str::to_owned),
+    );
+    s.plugins.operations.start(s.clone(), async move {
+        set_active(&service, &id, &version, digest.as_deref()).await
+    })
+}
+
 /// Records the owner's approval of this exact version and runs it.
 pub async fn approve(s: &Service, id: &str, version: &str, digest: &str) -> Result<Value> {
     set_active(s, id, version, Some(digest)).await

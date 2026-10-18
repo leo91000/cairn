@@ -408,6 +408,16 @@ upgrade in this initial implementation. Owner-only routes are:
 - `POST …/programs/<name>/install` with `{ digest }`: install that candidate.
 - `POST …/programs/<name>/rollback`: restore the retained previous executable.
 
+These program actions return `{ operation: ID }` immediately. Poll
+`GET /api/plugins/packages/operations/ID` for `{ state, result?, error? }`, where
+state is `running`, `completed` or `failed`. Approval/activation of an uploaded
+installer-backed package uses the same operation response; ordinary packages keep
+their synchronous summary response. This keeps downloads independent of the
+30-second HTTP relay deadline. Operations have a nine-minute total budget, four
+concurrent slots, and 64 recent in-memory results. A server restart loses operation
+status, not the atomic program/package locks; refresh the plugin and retry if
+needed. Web and Android perform this polling, including approval failures.
+
 Locks and executables live under `<data>/plugin-programs/`, scoped by package
 digest and server platform. Failed preparation preserves the current version;
 older files remain available for rollback. See ADR-0049 for the epoch-3 migration

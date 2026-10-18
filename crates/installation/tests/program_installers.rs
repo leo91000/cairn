@@ -476,7 +476,7 @@ async fn preparing_an_update_does_not_block_the_installed_program() {
     )
     .await;
     let running = tokio::time::timeout(std::time::Duration::from_secs(5), f.output()).await;
-    gate.notify_waiters();
+    gate.notify_one();
     update.await.unwrap().unwrap();
     assert_eq!(running.unwrap(), "1.0.0");
     assert_eq!(f.output().await, "1.1.0");
@@ -539,7 +539,7 @@ async fn first_use_can_finish_a_download_longer_than_the_normal_handler_deadline
     .await;
     tokio::time::sleep(std::time::Duration::from_secs(36)).await;
     let still_running = !first_use.is_finished();
-    gate.notify_waiters();
+    gate.notify_one();
     let result = first_use.await.unwrap();
     assert!(
         still_running,
@@ -699,4 +699,78 @@ async fn smoke_install_official_onepassword_cli() {
             "executableBytes": std::fs::metadata(path).unwrap().len(),
         })
     );
+}
+
+#[tokio::test]
+async fn owner_preparation_is_tracked_without_holding_a_relay_request_open() {
+    let f = Fixture::new().await;
+    let package = f.upload(MANIFEST, INSTALLER).await.unwrap();
+    let gate = Arc::new(tokio::sync::Notify::new());
+    *f.publisher.download_gate.lock().await = Some(gate.clone());
+    let accepted = registry::activate_request(
+        &f.service,
+        "program-probe",
+        "1.0.0",
+        package["digest"].as_str(),
+    )
+    .await
+    .unwrap();
+    let operation = accepted["operation"].as_str().unwrap();
+    assert_eq!(
+        f.service.plugins.operations.get(operation).unwrap()["state"],
+        "running"
+    );
+    common::eventually(
+        std::time::Duration::from_secs(15),
+        std::time::Duration::from_millis(10),
+        async || (f.publisher.requests.load(Ordering::SeqCst) >= 2).then_some(()),
+    )
+    .await;
+    assert!(registry::active(&f.service, "program-probe").await.is_err());
+    gate.notify_one();
+    *f.publisher.download_gate.lock().await = None;
+    let completed = common::eventually(
+        std::time::Duration::from_secs(15),
+        std::time::Duration::from_millis(10),
+        async || {
+            let state = f.service.plugins.operations.get(operation).unwrap();
+            (state["state"] != "running").then_some(state)
+        },
+    )
+    .await;
+    assert_eq!(completed["state"], "completed", "{completed}");
+    assert_eq!(f.output().await, "1.0.0");
+
+    f.publisher.release("1.1.0").await;
+    f.publisher.release.lock().await["sha256"] = json!("0".repeat(64));
+    let candidate = f.action("check", &json!({})).await.unwrap();
+    let service = f.service.clone();
+    let accepted = f
+        .service
+        .plugins
+        .operations
+        .start(f.service.clone(), async move {
+            program_installation::action(
+                &service,
+                "program-probe",
+                "probe",
+                "install",
+                &json!({ "digest": candidate["digest"] }),
+            )
+            .await
+        })
+        .unwrap();
+    let operation = accepted["operation"].as_str().unwrap();
+    let failed = common::eventually(
+        std::time::Duration::from_secs(15),
+        std::time::Duration::from_millis(10),
+        async || {
+            let state = f.service.plugins.operations.get(operation).unwrap();
+            (state["state"] != "running").then_some(state)
+        },
+    )
+    .await;
+    assert_eq!(failed["state"], "failed");
+    assert!(failed["error"].as_str().unwrap().contains("SHA-256"));
+    assert_eq!(f.output().await, "1.0.0");
 }

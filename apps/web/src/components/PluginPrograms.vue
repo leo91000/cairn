@@ -2,6 +2,7 @@
 import type { ProgramState } from '../plugins'
 import { onMounted, ref } from 'vue'
 import { api } from '../api'
+import { pluginOperation } from '../plugin-operations'
 import UiAlert from './UiAlert.vue'
 import UiButton from './UiButton.vue'
 
@@ -20,10 +21,7 @@ async function act(program: ProgramState, action: string) {
   busy.value = true
   error.value = ''
   try {
-    await api(`/plugins/${props.plugin}/programs/${program.name}/${action}`, {
-      method: 'POST',
-      body: JSON.stringify({ digest: program.digest }),
-    })
+    await pluginOperation(`/plugins/${props.plugin}/programs/${program.name}/${action}`, { digest: program.digest })
     await load()
   }
   catch (e) {
@@ -40,6 +38,7 @@ async function act(program: ProgramState, action: string) {
     <h2 class="text-sm! font-semibold">
       Installed programs
     </h2>
+    <p v-if="busy" role="status" class="text-xs text-muted">Preparing program…</p>
     <UiAlert v-if="error">
       {{ error }}
     </UiAlert>

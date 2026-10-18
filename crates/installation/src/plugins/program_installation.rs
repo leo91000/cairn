@@ -475,7 +475,8 @@ pub async fn executable(s: &Service, manifest: &Manifest, program: &Program) -> 
         return Ok(PathBuf::from(&program.path));
     }
     let package = registry::active(s, &manifest.id).await?;
-    if package.manifest != *manifest {
+    let same_manifest = serde_json::to_value(&package.manifest)? == serde_json::to_value(manifest)?;
+    if !same_manifest {
         return Err(Error::conflict("The plugin changed. Retry the command."));
     }
     let directory = root(s, &package, program);

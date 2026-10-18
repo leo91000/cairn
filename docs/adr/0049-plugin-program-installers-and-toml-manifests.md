@@ -40,7 +40,13 @@ prepared calls retain the normal 35-second host deadline. Long-lived workers pre
 dependencies before dispatch. Metadata-only handlers do not eagerly install programs.
 No download or network access occurs merely by uploading or listing a package.
 
-Web and Android offer the same check, explicit install and restore actions. A
+Web and Android offer the same check, explicit install and restore actions.
+Owner preparation requests return an operation ID immediately and clients poll its
+result with short requests, including installer-backed package activation. This
+respects the existing 30-second relay deadline. Operations are bounded to four
+concurrent jobs, a nine-minute total budget and 64 recent in-memory results. On a
+server restart, refresh the authoritative package/program locks; there is no
+implicit replay of a mutation or persistent operation migration. A
 candidate digest binds installation to the release the owner saw. Checking again
 can invalidate an earlier candidate. No periodic updater or automatic upgrade policy
 is introduced in this change. Restarting always uses the installed lock. Changing

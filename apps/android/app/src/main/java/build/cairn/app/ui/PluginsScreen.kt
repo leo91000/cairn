@@ -1277,8 +1277,7 @@ private fun PluginReview(
     val added =
         manifest?.capabilities.orEmpty().filter { active != null && it !in active.capabilities }
     fun act(operation: String) = vm.perform {
-        api.request(
-            "POST",
+        api.pluginOperation(
             "/plugins/packages/${segment(entry.id)}/$operation",
             buildJsonObject {
                 put("version", selected)
@@ -1524,7 +1523,7 @@ private fun PluginReview(
 }
 
 @Composable
-private fun Note(text: String) =
+internal fun Note(text: String) =
     Text(
         text,
         style = MaterialTheme.typography.bodySmall,

@@ -11,6 +11,7 @@ import {
   TriangleAlert,
 } from '../icons'
 import { capabilityLabels } from '../plugins'
+import { pluginOperation } from '../plugin-operations'
 import Icon from './Icon.vue'
 import Modal from './Modal.vue'
 import PluginMark from './PluginMark.vue'
@@ -40,7 +41,7 @@ async function act(operation: 'approve' | 'activate') {
   busy.value = true
   error.value = ''
   try {
-    await api(`/plugins/packages/${props.entry.id}/${operation}`, { method: 'POST', body: JSON.stringify({ version: selected.value, digest: version.value?.digest }) })
+    await pluginOperation(`/plugins/packages/${props.entry.id}/${operation}`, { version: selected.value, digest: version.value?.digest })
     notify(`${manifest.value?.name} ${selected.value} is active`)
     emit('changed')
     emit('close')

@@ -252,6 +252,10 @@ test('program releases can be checked, installed and restored independently of p
     digest: null as string | null,
   }
   const actions: string[] = []
+  let polls = 0
+  await page.route('**/api/plugins/packages/operations/program-job', route => route.fulfill({
+    json: ++polls % 2 ? { state: 'running' } : { state: 'completed', result: program },
+  }))
   await page.route('**/api/plugins/onepassword/programs**', async (route) => {
     const action = new URL(route.request().url()).pathname.split('/').at(-1)
     if (route.request().method() === 'POST') {
@@ -272,7 +276,7 @@ test('program releases can be checked, installed and restored independently of p
         program.previous = null
       }
 
-      await route.fulfill({ json: program })
+      await route.fulfill({ json: { operation: 'program-job' } })
     }
     else {
       await route.fulfill({ json: { programs: [program] } })
@@ -289,4 +293,5 @@ test('program releases can be checked, installed and restored independently of p
   await programs.getByRole('button', { name: 'Restore op 2.39.0' }).click()
   await expect(programs.getByText('op · Version 2.39.0')).toBeVisible()
   expect(actions).toEqual(['check', 'install', 'rollback'])
+  expect(polls).toBe(6)
 })
