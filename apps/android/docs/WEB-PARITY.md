@@ -60,10 +60,11 @@ coverage used, not a claim that every production account/provider was exercised.
   and open in its full-screen viewer; browsers may show placeholders for HEIC.
 - Installing a plugin package uses « Continuer sur le web ». Reviewing files and
   versions, approving packages, editing instances and configuring Discord are native.
-- Foreground updates use SSE. Background question notifications retain the
-  existing Firebase-free WorkManager service: Android schedules periodic checks
-  (approximately 15 minutes, potentially delayed by the OS), rather than browser
-  Web Push. This is an explicit delivery-timing difference.
+- Foreground updates use SSE. Background question and execution notifications use
+  account-level native push through Firebase on Android and Web Push in the browser.
+  Android rechecks the account and installation access before displaying a push.
+  Legacy WorkManager polling is cancelled; its retained `QuestionWorker` class only
+  completes persisted work without fetching data or displaying notifications.
 - Drafts survive in-app conversation switching; sensitive attachments remain in
   app storage and are cleared with session logout/forget. No draft is uploaded
   before the user sends it.
