@@ -207,6 +207,32 @@ than reusing another slot’s network. Disk ownership is protected by an exclusi
 one writable disk cannot be opened by two attempts. Console and execution output
 are bounded independently of the guest disk.
 
+Managed chat adapters shorten activity details larger than 16 KiB before sending
+them to the guest output stream, using the same detail budget as persisted history.
+Until the manager can redact configured secrets, oversized preview fields are
+omitted whole rather than cut across an unknown secret.
+Full tool results remain in the coding agent's native session; conversation
+messages and terminal events are preserved. This keeps repeated MCP history
+pages from consuming the controller's 100 MB cumulative output limit merely to
+transport details the manager would then discard. The limit still applies to
+the transmitted output. Controller failures also emit a structured
+`runner.failed` event so their cause survives an exhausted diagnostic-log budget;
+the failure starts on its own line even after truncated guest JSON, and ordinary
+stderr remains available for older managers.
+This preserves the output-limit cause in the failed run. The existing recovery
+policy and final wording for unavailable controllers are unchanged. A controller
+diagnostic after `turn.completed` preserves the completed-turn checkpoint, so
+worker recovery can settle it without relaunching the agent.
+
+The `chat_binary_compacts_large_mcp_pages_before_guest_transport` regression
+test sends 160 synthetic MCP pages with 350,000-byte text and structured results.
+On 2026-10-18 the local debug binary emitted 112,050,698 bytes before this change
+and 60,408 bytes afterward, with all 160 outcomes and the final turn marker
+preserved. The test also verifies that the native result remains complete. These
+are serialized transport bytes, not production network-latency measurements.
+Run it with `pnpm test:backend -p cairn-installation --test codex
+chat_binary_compacts_large_mcp_pages_before_guest_transport`.
+
 Per-guest firewall rules permit outgoing TCP and UDP on all ports to public
 IPv4 destinations (including STUN, QUIC and DNS). Before either allow rule, they
 reject spoofed source addresses and private/reserved destinations: unspecified,

@@ -520,6 +520,8 @@ fn continue_run(
     };
     let provider = Provider::of_run(snapshot)?;
     if provider != Provider::of_run(run)? || checkpoint["freshSession"] == true {
+        // The next provider cannot resolve requests from the session being replaced.
+        questions::release(db, run_id, None)?;
         checkpoint["freshSession"] = false.into();
         execution.context = Some(handoff_context(db, run_id)?);
         checkpoint["launched"] = false.into();

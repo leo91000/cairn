@@ -132,7 +132,7 @@ fn receive(db: &Db<'_>, mut question: Question) -> Result<()> {
     notifications::enqueue(db, &question)
 }
 
-fn release(db: &Db<'_>, run_id: &str, id: Option<&str>) -> Result<()> {
+pub(super) fn release(db: &Db<'_>, run_id: &str, id: Option<&str>) -> Result<()> {
     let Some(chat) = chat_for_run(db, run_id)? else {
         return Ok(());
     };

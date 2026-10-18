@@ -52,5 +52,5 @@ Sockets are text only; binary frames are ignored. Gateway resume state still liv
 in memory, so events missed while the installation is offline are not recovered.
 
 Builds on ADR-0045, which deferred native transports and long-lived sockets for
-scripts; ADR-0038's capability model, approval digests and owner-only management are
+scripts; the [Luau-plugin capability model](0038-luau-installation-plugins-and-external-bot-delegation.md), approval digests and owner-only management are
 unchanged.

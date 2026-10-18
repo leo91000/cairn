@@ -115,6 +115,11 @@ return {
         if request.operation == "read" or operation == nil then
             cairn.fail("Read secrets through the Cairn plugin CLI and pipe them directly to the consuming command.")
         end
+
+        if request.operation ~= "accounts" and request.accountId == nil then
+            cairn.fail(`accountId is required for the {request.operation} operation. Call accounts to list authorized accounts, then retry with the chosen account's id as accountId.`)
+        end
+
         return operation({
             arguments = { account = request.accountId, vault = request.vault, item = request.item },
             instances = input.instances,
