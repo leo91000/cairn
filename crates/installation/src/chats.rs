@@ -293,7 +293,14 @@ fn send(
     require_sendable(db, &chat, &messages, text(&values, "id"))?;
     validate_steer(db, &chat, &values)?;
     if messages.is_empty() {
-        chat["title"] = title(&values).into();
+        let private_answer = answer
+            .as_ref()
+            .is_some_and(|(question, _)| question.is_private());
+        chat["title"] = if private_answer {
+            PRIVATE_ANSWER_TEXT.into()
+        } else {
+            title(&values).into()
+        };
     }
     touch(&mut chat);
     chat["wakeup"] = Value::Null;
@@ -327,7 +334,12 @@ fn withdraw(db: &Db<'_>, chat_id: &str, message: &Value) -> Result<Value> {
     Ok(json!({ "deleted": true }))
 }
 
-fn edit(db: &Db<'_>, chat_id: &str, message_id: &str, values: Option<Value>) -> Result<Value> {
+pub(crate) fn edit(
+    db: &Db<'_>,
+    chat_id: &str,
+    message_id: &str,
+    values: Option<Value>,
+) -> Result<Value> {
     let chat = chat(db, chat_id)?;
     require_active(&chat)?;
     let mut current = required(find_message(db, chat_id, message_id)?, "Message not found")?;
@@ -640,6 +652,17 @@ pub(crate) fn send_in(db: &Db<'_>, chat: &str, input: Value) -> Result<Value> {
     send(db, chat, parse("message", input)?, None)
 }
 
+pub(crate) fn pause_in(db: &Db<'_>, id: &str, paused: bool) -> Result<Value> {
+    let mut chat = chat(db, id)?;
+    require_active(&chat)?;
+    if chat["lastActivityAt"].is_null() {
+        chat["lastActivityAt"] = chat["updatedAt"].clone();
+    }
+    chat["paused"] = paused.into();
+    chat["updatedAt"] = now().into();
+    db.put("chats", &chat)
+}
+
 impl Service {
     pub async fn chat_list(&self) -> Result<Vec<Value>> {
         self.store.read(|db| list(db)).await
@@ -685,16 +708,7 @@ impl Service {
         let id = id.to_owned();
         let result = self
             .store
-            .write(move |db| {
-                let mut chat = chat(db, &id)?;
-                require_active(&chat)?;
-                if chat["lastActivityAt"].is_null() {
-                    chat["lastActivityAt"] = chat["updatedAt"].clone();
-                }
-                chat["paused"] = paused.into();
-                chat["updatedAt"] = now().into();
-                db.put("chats", &chat)
-            })
+            .write(move |db| pause_in(db, &id, paused))
             .await?;
         self.worker.notify();
         Ok(result)

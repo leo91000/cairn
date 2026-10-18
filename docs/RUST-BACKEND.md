@@ -63,8 +63,10 @@ pnpm test:e2e
 ```
 
 Regenerate `crates/installation/schemas/inputs.json` with `node --import tsx scripts/backend-schemas.mjs`
-after changing shared input contracts. CI rejects schema drift. MCP's tool catalog
-lives in `crates/installation/schemas/mcp-tools.json`; keep it aligned with tool dispatch.
+after changing shared input contracts. CI rejects schema drift. MCP's `search` and
+`execute` definitions live in `crates/installation/schemas/mcp-tools.json`; the
+typed operation catalog lives in `crates/installation/schemas/mcp-operations.json`.
+Keep the operation schemas aligned with dispatch. See [MCP](MCP.md) for the compact interface.
 
 `cairn serve` runs the manager; `cairn runner-broker`, `runner-client`, `runner-entry`,
 `supervise` and `chat` implement the execution boundary. `toolkit-env` and

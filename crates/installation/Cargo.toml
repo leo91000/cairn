@@ -18,6 +18,7 @@ ublk = [ "dep:libublk" ]
 ublk-prototype = [ "ublk" ]
 
 [dependencies]
+rquickjs = "=0.14.0"
 cairn-protocol = { path = "../protocol" }
 cairn-plugin-api = { path = "../plugin-api" }
 cairn-plugin-host = { path = "../plugin-host" }
