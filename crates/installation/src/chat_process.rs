@@ -998,6 +998,20 @@ impl Chat<'_> {
             {
                 continue;
             }
+            if message["questionCancelled"] == true {
+                if let Some(question) = self.questions.remove(text(&message, "questionId")) {
+                    self.session
+                        .rpc
+                        .reply(question.request_id, json!({ "answers": {} }))
+                        .await?;
+                    self.emit(json!({
+                        "type": "chat.question.closed",
+                        "questionId": message["questionId"],
+                    }))
+                    .await?;
+                }
+                continue;
+            }
             if let Some(question) = self.questions.get_mut(text(&message, "questionId"))
                 && let Some(answers) = message["answers"].as_object()
             {
