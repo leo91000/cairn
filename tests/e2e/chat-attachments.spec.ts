@@ -43,8 +43,10 @@ test('sent SVGs remain images in the mosaic, viewer and clipboard', async ({ pag
   await expect(page).toHaveURL(/\/chats\/[a-z]+-[a-z]+-[a-f0-9]{8}$/)
   await page.reload() // Discard local draft object URLs; exercise the stored attachment.
   await expect(page.getByRole('textbox', { name: 'Message', exact: true })).toBeVisible()
+  await expectChatReady(page)
   const message = page.locator('.activity-message').filter({ hasText: 'Inspect the vector logo.' })
   const thumbnail = message.getByRole('button', { name: 'Preview logo.svg', exact: true })
+  await thumbnail.scrollIntoViewIfNeeded() // Stored thumbnails load only when near the viewport.
   await expect.poll(() => thumbnail.locator('img').evaluate((img: HTMLImageElement) => img.naturalWidth)).toBe(20)
   await thumbnail.click()
   const viewer = page.getByRole('dialog', { name: 'Attachment viewer' })

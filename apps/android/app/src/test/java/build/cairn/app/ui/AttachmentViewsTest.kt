@@ -20,6 +20,9 @@ import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewmodel.initializer
 import androidx.lifecycle.viewmodel.viewModelFactory
 import androidx.test.core.app.ApplicationProvider
+import androidx.work.Configuration
+import androidx.work.testing.SynchronousExecutor
+import androidx.work.testing.WorkManagerTestInitHelper
 import build.cairn.app.data.*
 import java.io.File
 import java.util.concurrent.CopyOnWriteArrayList
@@ -29,7 +32,9 @@ import okhttp3.mockwebserver.MockResponse
 import okhttp3.mockwebserver.MockWebServer
 import okhttp3.mockwebserver.RecordedRequest
 import okio.Buffer
+import org.junit.After
 import org.junit.Assert.*
+import org.junit.Before
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -44,6 +49,19 @@ class AttachmentViewsTest {
     @get:Rule val compose = createAndroidComposeRule<ComponentActivity>()
 
     private val application = ApplicationProvider.getApplicationContext<Application>()
+
+    @Before
+    fun initializeWork() {
+        WorkManagerTestInitHelper.initializeTestWorkManager(
+            application,
+            Configuration.Builder().setExecutor(SynchronousExecutor()).build(),
+        )
+    }
+
+    @After
+    fun closeWork() {
+        WorkManagerTestInitHelper.closeWorkDatabase()
+    }
 
     private fun viewModel() =
         ViewModelProvider(
@@ -149,22 +167,22 @@ class AttachmentViewsTest {
                     }
                 }
                 compose.waitUntil(10000) {
-                    !vm.state.value.busy &&
-                        compose
-                            .onAllNodesWithText("Première installation")
-                            .fetchSemanticsNodes()
-                            .isNotEmpty() &&
+                    compose
+                        .onAllNodesWithText("Première installation")
+                        .fetchSemanticsNodes()
+                        .isNotEmpty() &&
+                        !vm.state.value.busy &&
                         requests.any {
                             it.startsWith("Première installation:") && it.endsWith("?preview")
                         }
                 }
                 compose.runOnIdle { vm.perform { vm.connect(second.url("/").toString()) } }
                 compose.waitUntil(10000) {
-                    !vm.state.value.busy &&
-                        compose
-                            .onAllNodesWithText("Seconde installation")
-                            .fetchSemanticsNodes()
-                            .isNotEmpty() &&
+                    compose
+                        .onAllNodesWithText("Seconde installation")
+                        .fetchSemanticsNodes()
+                        .isNotEmpty() &&
+                        !vm.state.value.busy &&
                         requests.any {
                             it.startsWith("Seconde installation:") && it.endsWith("?preview")
                         }

@@ -12,6 +12,8 @@ import org.robolectric.annotation.Config
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [36], qualifiers = "w412dp-h915dp-mdpi")
 class AttachmentJourneyTest : AttachmentCases() {
+    @get:Rule internal val fileProvider = FileProviderRule()
+
     @Before
     fun setup() {
         WorkManagerTestInitHelper.initializeTestWorkManager(
