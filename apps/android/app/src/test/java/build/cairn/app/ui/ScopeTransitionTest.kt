@@ -124,7 +124,11 @@ class ScopeTransitionTest {
     }
 
     private fun finish(pending: Pair<Job, AtomicReference<Throwable?>>) {
-        compose.waitUntil(30000) { pending.first.isCompleted }
+        compose.waitUntil(30000) {
+            // Compose's clock does not deliver platform callbacks on Android's main Looper.
+            ShadowLooper.idleMainLooper()
+            pending.first.isCompleted
+        }
         pending.second.get()?.let { throw AssertionError("Fixture action failed", it) }
         compose.waitForIdle()
     }
