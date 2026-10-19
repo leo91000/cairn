@@ -6,7 +6,7 @@ isolateTestCredentials()
 
 export default defineConfig({
   testDir: './tests/e2e',
-  testMatch: 'network-relay.spec.ts',
+  testMatch: process.env.CAIRN_NETWORK_SCENARIO === 'qualification' ? 'network-qualification.spec.ts' : 'network-relay.spec.ts',
   workers: 1,
   retries: 0,
   timeout: 120000,

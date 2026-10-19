@@ -184,6 +184,15 @@ with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sender:
                 self.assertNotEqual(delivered["client"], delivered["installation"])
             finally:
                 network.close()
+            counts = network.loss_counts()
+            self.assertEqual(set(counts), {"client", "installation"})
+            for observed in counts.values():
+                self.assertEqual(observed["packets"], 125)
+                self.assertEqual(observed["droppedPackets"], 25)
+                self.assertEqual(observed["forwardedPackets"], 100)
+            output = Path("test-results/network/packet-loss-router-counts.json")
+            output.parent.mkdir(parents=True, exist_ok=True)
+            output.write_text(json.dumps(counts) + "\n")
 
 
 if __name__ == "__main__":

@@ -82,7 +82,7 @@ jobs:
           restore-keys: rust-${{ runner.os }}-1.97.1-debug0-
       - name: Build the browser-test backend and frontend
         run: |
-          cargo build --locked --bin cairn --example worker_fixture --example network_direct_client --features ublk
+          cargo build --locked --bin cairn --example worker_fixture --example network_direct_client --example network_qualification --features ublk
           cargo build --locked -p cairn-beacon --bin cairn-beacon --example network_stun_server
           pnpm exec vite build --config apps/web/vite.config.ts
       - uses: actions/upload-artifact@v7.0.1
@@ -93,6 +93,7 @@ jobs:
             target/debug/cairn-beacon
             target/debug/examples/worker_fixture
             target/debug/examples/network_direct_client
+            target/debug/examples/network_qualification
             target/debug/examples/network_stun_server
           retention-days: 1
       - uses: actions/upload-artifact@v7.0.1
@@ -150,7 +151,7 @@ jobs:
           cargo clippy --locked --workspace --all-targets --features ublk-prototype -- -D warnings
           node scripts/test-backend.mjs --features ublk-prototype
           # Also compile the browser-test binaries into the cache that later build jobs restore.
-          cargo build --locked --bin cairn --example worker_fixture --example network_direct_client --features ublk
+          cargo build --locked --bin cairn --example worker_fixture --example network_direct_client --example network_qualification --features ublk
           cargo build --locked -p cairn-beacon --bin cairn-beacon --example network_stun_server
       - name: Validate node supervisor and S3 recovery
         run: |
@@ -296,12 +297,14 @@ jobs:
           name: browser-backend
           path: target/debug/
       - run: chmod +x target/debug/cairn target/debug/cairn-beacon target/debug/examples/network_direct_client target/debug/examples/network_stun_server
+      - run: chmod +x target/debug/examples/network_qualification
+      - run: pnpm exec vite build --config tests/network-qualification.vite.ts
       - name: Validate real network topology and authenticated sessions
         run: |
           python3 tests/network_probe_test.py
           python3 tests/network_bench_test.py
           python3 tests/stun_docker_test.py
-          for scenario in same-lan mdns-only-client nat-client nat-installation nat-both udp-blocked symmetric-nat symmetric-client same-server network-change packet-loss; do
+          for scenario in same-lan mdns-only-client nat-client nat-installation nat-both udp-blocked symmetric-nat symmetric-client same-server network-change packet-loss qualification; do
             python3 tests/network-bench.py "$scenario" --output "test-results/network/$scenario.json"
           done
       - uses: actions/upload-artifact@v7.0.1
