@@ -23,6 +23,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.transformWhile
@@ -30,14 +31,24 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.*
 
+/** How long a revalidation of a saved conversation may take before the reader is told. */
+private const val SLOW_UPDATE_MILLIS = 1000L
+
 @Composable
 fun rememberLive(
     vm: CairnViewModel,
     workspace: Workspace,
     path: String,
     streaming: Boolean = true,
+    /**
+     * Whether a saved conversation still matches what the server holds. An outdated one only
+     * resumes the stream from its cursor: the reader waits for the update instead of seeing older
+     * output that is about to change, as on the web. Previews always show their copy.
+     */
+    current: (CachedHistory) -> Boolean = { true },
 ): LiveSnapshot {
     val owner = LocalLifecycleOwner.current
+    val isCurrent by rememberUpdatedState(current)
     val enabled = workspace.session.authenticated && !workspace.signingOut
     val api = if (enabled) vm.api else null
     var value by remember(path, api) { mutableStateOf(LiveSnapshot()) }
@@ -56,11 +67,13 @@ fun rememberLive(
         if (enabled && api != null) {
             var cacheGeneration = vm.historyCache.generation
             val key = vm.historyCache.key(api.cacheScope, api.csrf, path)
+            var outdated = false
             // A resumed session is already at least as recent as its cache.
             if (session.path != path)
                 vm.historyCache.read(key)?.let {
                     session.restore(it, path, api.streamGeneration.get())
-                    value = session.snapshot
+                    outdated = streaming && !isCurrent(it)
+                    if (!outdated) value = session.snapshot
                 }
             try {
                 owner.lifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) {
@@ -75,6 +88,10 @@ fun rememberLive(
                                 streaming || (it.catchingUp && it.httpStatus == null)
                             }
                             .collect {
+                                // The stream's own state replaces an outdated copy; without a
+                                // connection, the copy is still better than nothing.
+                                if (outdated && it.status == UPDATING_STATUS) return@collect
+                                outdated = false
                                 vm.acceptCacheRevision(it.state?.cacheRevision)
                                 cacheGeneration = vm.historyCache.generation
                                 if (!it.catchingUp || it.httpStatus != null) {
@@ -261,11 +278,17 @@ internal fun BoxScope.HistoryStatus(
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.spacedBy(6.dp),
     ) {
+        // A revalidation that takes a moment says so; a quick one stays silent, as on the web.
+        var notice by remember { mutableStateOf(connection.takeIf { it != UPDATING_STATUS }) }
+        LaunchedEffect(connection) {
+            if (connection == UPDATING_STATUS) delay(SLOW_UPDATE_MILLIS)
+            notice = connection
+        }
         // Keep the last text while fading out, so the pill does not empty before it disappears.
-        var shown by remember { mutableStateOf(connection.orEmpty()) }
-        if (connection != null) shown = connection
+        var shown by remember { mutableStateOf(notice.orEmpty()) }
+        notice?.let { shown = it }
         androidx.compose.animation.AnimatedVisibility(
-            connection != null,
+            notice != null,
             enter = androidx.compose.animation.fadeIn(),
             exit = androidx.compose.animation.fadeOut(),
         ) {
