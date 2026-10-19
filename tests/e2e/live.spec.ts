@@ -439,7 +439,7 @@ test('cached history survives reload before a delayed stream, then clear on logo
   await authenticateWorkspace(page)
   await expect(page.locator('.activity-message').filter({ hasText: 'Cache persistence proof' }).first()).toBeVisible()
   const count = (current = false) => page.evaluate(({ chatId, current }) => new Promise<number>((resolve, reject) => {
-    const request = indexedDB.open('cairn-history-v1', 1)
+    const request = indexedDB.open('cairn-history-v2')
     request.onsuccess = () => {
       const db = request.result
       const tx = db.transaction('entries', 'readonly')
@@ -506,7 +506,7 @@ test('a cached run restores the reading offset while its stream is still connect
   await expect(page.getByRole('button', { name: 'Latest activity', exact: true })).toBeVisible()
   await expect.poll(() => scroller.evaluate(element => element.scrollTop)).toBe(300)
   await expect.poll(() => page.evaluate(() => new Promise<number>((resolve) => {
-    const request = indexedDB.open('cairn-history-v1', 1)
+    const request = indexedDB.open('cairn-history-v2')
     request.onsuccess = () => {
       const db = request.result
       const tx = db.transaction('entries', 'readonly')
@@ -518,7 +518,7 @@ test('a cached run restores the reading offset while its stream is still connect
   // A previous visit may have cached "running" just before the run completed.
   await page.goto(workspacePath(`${workspace.url}/agents`))
   await page.evaluate(() => new Promise<void>((resolve, reject) => {
-    const request = indexedDB.open('cairn-history-v1', 1)
+    const request = indexedDB.open('cairn-history-v2')
     request.onsuccess = () => {
       const db = request.result
       const tx = db.transaction('entries', 'readwrite')
@@ -559,8 +559,9 @@ test('a cached run restores the reading offset while its stream is still connect
   try {
     await page.goto(workspacePath(`${workspace.url}/runs/${run.id}`))
     // A run opens on its conversation, restoring the cached reading offset before the stream connects.
+    // Scroll anchoring may then absorb a sub-pixel change above the reader by moving the offset.
     await expect(page.getByRole('button', { name: /^Conversation/ })).toHaveAttribute('aria-pressed', 'true')
-    await expect.poll(() => scroller.evaluate(element => element.scrollTop)).toBe(300)
+    await expect.poll(() => scroller.evaluate(element => Math.abs(element.scrollTop - 300))).toBeLessThanOrEqual(1)
     await expect(page.getByRole('button', { name: 'Latest activity', exact: true })).toBeVisible()
   }
   finally {
@@ -604,7 +605,7 @@ test('following the latest output resumes a long backlog on the recent window, w
 
   const line = (i: number) => page.locator('.activity-message').filter({ hasText: `Resume line ${String(i).padStart(3, '0')}.` })
   const saved = () => page.evaluate(runId => new Promise<{ cursor: number, top?: number, follow?: boolean } | null>((resolve) => {
-    const open = indexedDB.open('cairn-history-v1', 1)
+    const open = indexedDB.open('cairn-history-v2')
     open.onsuccess = () => {
       const db = open.result
       const tx = db.transaction('entries')
@@ -716,7 +717,7 @@ test('recent history loads older pages without moving the reader and survives a 
   await expect.poll(async () => {
     await scroller.evaluate(el => el.scrollTop = 0)
     return page.evaluate(runId => new Promise<boolean>((resolve) => {
-      const open = indexedDB.open('cairn-history-v1', 1)
+      const open = indexedDB.open('cairn-history-v2')
       open.onsuccess = () => {
         const db = open.result
         const tx = db.transaction('entries')
@@ -733,7 +734,7 @@ test('recent history loads older pages without moving the reader and survives a 
   await page.getByRole('button', { name: 'Latest activity', exact: true }).click()
   await expect(page.locator('.activity-message').filter({ hasText: 'Paged line 349' })).toBeVisible()
   await expect.poll(() => page.evaluate(() => new Promise<number>((resolve) => {
-    const open = indexedDB.open('cairn-history-v1', 1)
+    const open = indexedDB.open('cairn-history-v2')
     open.onsuccess = () => {
       const db = open.result
       const tx = db.transaction('entries')

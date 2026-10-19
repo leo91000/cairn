@@ -8,6 +8,7 @@ import type {
 } from '../../../../packages/contracts/chats'
 import type { DraftState } from '../attachments'
 import type { LiveWait } from '../chat-wait'
+import type { CachedHistory } from '../history-cache'
 import {
   computed,
   inject,
@@ -29,7 +30,7 @@ import {
   validateSelection,
 } from '../attachments'
 import { chatDelivery, chatWaitNotice, scheduledWakeup } from '../chat-delivery'
-import { chatList as chats, publishChats } from '../chat-list'
+import { chatListCarried, chatList as chats, publishChats } from '../chat-list'
 import { liveWakeup, waitStatus } from '../chat-wait'
 import ActivityFeed from '../components/ActivityFeed.vue'
 import AgentAvatar from '../components/AgentAvatar.vue'
@@ -107,11 +108,44 @@ const selectedChatId = computed(() => {
     return detail.value.id
   return key
 })
-const streamPath = computed(() => chatId.value ? `/chats/${chatId.value}/stream` : '/chats/stream')
-const live = useLiveRun(() => streamPath.value, { hold: true })
+// While a conversation opens, the header names it from the Fil.
+const listed = computed(() => chats.value.find(chat => chat.id === selectedChatId.value))
+const heading = computed(() => detail.value ?? listed.value)
+
+// A saved conversation is current when the Fil shows nothing new since it was saved:
+// the same finished turn, no work in progress and no later change.
+function savedIsCurrent(saved: CachedHistory) {
+  const chat = saved.state.chat
+  const known = chat && chats.value.find(item => item.id === chat.id)
+  if (!chat || !known)
+    return true
+  const run = saved.state.run
+  return known.runId === (run?.id ?? null)
+    && known.status === (run?.status ?? 'idle')
+    && known.status !== 'queued' && known.status !== 'running'
+    && (known.finishedAt ?? null) === (run?.finishedAt ?? null)
+    && known.updatedAt <= chat.updatedAt
+}
+
+// The view shows the selected conversation only. A current saved copy shows at once;
+// otherwise a loader stands in until its first snapshot, which shows in one piece.
+// A conversation the Fil knows opens under the slug the Fil links to, so a link by
+// identifier and one by slug share one saved copy.
+const streamPath = ref<string>()
+watch(chatId, (key) => {
+  const known = key && chats.value.find(chat => chat.id === key || chat.slug === key)
+  streamPath.value = key ? `/chats/${known ? known.slug || known.id : key}/stream` : undefined
+}, { immediate: true, flush: 'sync' })
+// Its stream carries the conversation list meanwhile, so the tab keeps a single stream.
+watch(streamPath, path => chatListCarried.value = !!path, { immediate: true, flush: 'sync' })
+onBeforeUnmount(() => chatListCarried.value = false)
+const live = useLiveRun(() => streamPath.value, {
+  current: savedIsCurrent,
+  list: true,
+  // Also saved under its slug when a link by identifier opened it: the Fil links to slugs.
+  savedAs: state => state.chat ? `/chats/${state.chat.slug || state.chat.id}/stream` : undefined,
+})
 const { events, connectionNotice, catchingUp } = live
-// The previous conversation stays visible until the selected one is ready.
-const switching = computed(() => live.shown.value !== streamPath.value)
 const deliverables = computed(() => live.snapshot.value?.artifacts ?? [])
 const draft = ref('')
 const model = ref('')
@@ -407,13 +441,13 @@ watch(agentId, () => {
 watch(live.snapshot, (value) => {
   detail.value = value?.chat ?? null
   if (value?.chats)
-    publishChats(value.chats)
+    publishChats(value.chats, { saved: live.restored.value })
 })
 // The open conversation's finished turns are read while the page is visible.
 useReadWhileOpen(() => {
   const chat = detail.value
   const run = chat?.run
-  if (!chat || !live.synced.value || catchingUp.value || switching.value || chat.id !== selectedChatId.value || run?.status !== 'succeeded' || !run.finishedAt)
+  if (!chat || !live.synced.value || catchingUp.value || chat.id !== selectedChatId.value || run?.status !== 'succeeded' || !run.finishedAt)
     return null
   return { key: `chat:${chat.id}`, at: run.finishedAt }
 })
@@ -754,7 +788,7 @@ function key(event: KeyboardEvent) {
       <!-- One row, as on Android: who and what on the left, files and the ⋯ menu on the right. -->
       <header class="chat-header flex min-h-15 shrink-0 items-center gap-3 border-b border-line/70 pb-3 phone:h-15 phone:gap-2 phone:pb-0">
         <h1 class="sr-only hidden phone:block">
-          {{ detail?.title || 'New conversation' }}
+          {{ heading?.title || 'New conversation' }}
         </h1>
         <RouterLink to="/" class="hidden size-11 shrink-0 place-items-center rounded-full text-ink hover:bg-hover phone:grid" aria-label="Back to the Fil">
           <Icon :name="ChevronLeft" :size="22" />
@@ -770,33 +804,33 @@ function key(event: KeyboardEvent) {
         >
           <span class="flex min-w-0 items-center gap-2.5">
             <AgentAvatar
-              :name="detail?.agentName || selectedAgent?.name || 'Main agent'"
-              :identity="detail?.agentId || selectedAgent?.id"
+              :name="heading?.agentName || selectedAgent?.name || 'Main agent'"
+              :identity="heading?.agentId || selectedAgent?.id"
               :size="34"
             />
             <span class="min-w-0 text-left">
               <span class="flex min-w-0 items-center gap-1 text-[14px] font-semibold leading-tight text-ink">
-                <span class="truncate">{{ detail?.title || 'New conversation' }}</span><Icon :name="ChevronDown" :size="14" class="shrink-0 text-muted" />
+                <span class="truncate">{{ heading?.title || 'New conversation' }}</span><Icon :name="ChevronDown" :size="14" class="shrink-0 text-muted" />
               </span>
               <span class="mt-0.5 flex min-w-0 items-center gap-1.5 text-[11.5px] font-normal leading-tight text-muted" :title="currentInstallation ? `${currentInstallation.status} · ${routeLabel(state.transportRoute)}` : undefined">
                 <span class="size-1.5 shrink-0 rounded-full" :class="connectionTone(currentInstallation, state.transportRoute)" />
-                <span class="truncate">{{ [detail?.agentName || selectedAgent?.name || 'Main agent', currentInstallation?.name].filter(Boolean).join(' · ') }}</span>
+                <span class="truncate">{{ [heading?.agentName || selectedAgent?.name || 'Main agent', currentInstallation?.name].filter(Boolean).join(' · ') }}</span>
               </span>
             </span>
           </span>
         </button>
         <div class="flex min-w-0 flex-1 items-center gap-3 phone:hidden">
           <AgentAvatar
-            v-if="detail"
-            :name="detail.agentName"
-            :identity="detail.agentId"
+            v-if="heading"
+            :name="heading.agentName"
+            :identity="heading.agentId"
             :size="36"
-            :working="detail.run?.status === 'running' && !detail.paused && !suspended"
+            :working="detail?.run?.status === 'running' && !detail.paused && !suspended"
           />
           <div class="min-w-0 flex-1">
             <div class="flex min-w-0 items-center gap-1">
               <h1 class="truncate text-base! font-semibold! leading-snug! tracking-tight!">
-                {{ detail?.title || 'New conversation' }}
+                {{ heading?.title || 'New conversation' }}
               </h1>
               <button
                 ref="tabletHistoryButton"
@@ -810,14 +844,14 @@ function key(event: KeyboardEvent) {
                 <Icon :name="ChevronDown" :size="16" />
               </button>
             </div>
-            <div v-if="detail" class="m-0! mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px] text-muted">
-              <span class="flex min-w-0 items-center gap-1.5"><Icon :name="Bot" :size="13" /><span class="truncate max-w-40">{{ detail.agentName }}</span></span>
-              <template v-if="detail.projectName">
+            <div v-if="heading" class="m-0! mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px] text-muted">
+              <span class="flex min-w-0 items-center gap-1.5"><Icon :name="Bot" :size="13" /><span class="truncate max-w-40">{{ heading.agentName }}</span></span>
+              <template v-if="heading.projectName">
                 <span aria-hidden="true" class="text-muted/40">/</span>
-                <span class="flex min-w-0 items-center gap-1.5"><Icon :name="FolderGit2" :size="13" /><span class="truncate max-w-48">{{ detail.projectName }}</span></span>
+                <span class="flex min-w-0 items-center gap-1.5"><Icon :name="FolderGit2" :size="13" /><span class="truncate max-w-48">{{ heading.projectName }}</span></span>
               </template>
-              <span class="flex items-center gap-1.5 font-semibold" :class="chatStatus === 'Working' ? 'text-accent' : chatStatus === 'Failed' || chatStatus === 'Interrupted' ? 'text-coral' : ''"><span v-if="chatStatus !== 'Working'" class="size-1 shrink-0 rounded-full" :class="active ? 'bg-accent' : 'bg-muted'" />{{ chatStatus }}<span v-if="chatStatus === 'Working'" class="working-wave"><i /><i /><i /></span></span>
-              <NodeExecution v-if="detail.run && state.installationRole === 'owner'" :key="detail.run.id" :run="detail.run" />
+              <span v-if="detail" class="flex items-center gap-1.5 font-semibold" :class="chatStatus === 'Working' ? 'text-accent' : chatStatus === 'Failed' || chatStatus === 'Interrupted' ? 'text-coral' : ''"><span v-if="chatStatus !== 'Working'" class="size-1 shrink-0 rounded-full" :class="active ? 'bg-accent' : 'bg-muted'" />{{ chatStatus }}<span v-if="chatStatus === 'Working'" class="working-wave"><i /><i /><i /></span></span>
+              <NodeExecution v-if="detail?.run && state.installationRole === 'owner'" :key="detail.run.id" :run="detail.run" />
             </div>
           </div>
         </div>
@@ -865,15 +899,17 @@ function key(event: KeyboardEvent) {
       <div class="flex min-h-0 flex-1 flex-col">
         <section
           class="relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden"
-          :aria-busy="switching"
+          :aria-busy="!!route.params.id && !detail"
           aria-label="Chat workspace"
         >
           <!-- A floating pill, as on Android: connection status never moves the conversation. -->
-          <p v-if="switching || connectionNotice" role="status" class="pointer-events-none absolute top-3 left-1/2 z-10 m-0! -translate-x-1/2 rounded-full border border-line bg-surface/95 px-3 py-1.5 text-xs whitespace-nowrap text-muted shadow-[0_4px_16px_#0000000f] backdrop-blur-sm">
-            {{ switching ? 'Opening conversation…' : connectionNotice }}
+          <p v-if="connectionNotice" role="status" class="pointer-events-none absolute top-3 left-1/2 z-10 m-0! -translate-x-1/2 rounded-full border border-line bg-surface/95 px-3 py-1.5 text-xs whitespace-nowrap text-muted shadow-[0_4px_16px_#0000000f] backdrop-blur-sm">
+            {{ connectionNotice }}
           </p>
-          <div v-if="route.params.id && !detail" role="status" class="flex flex-1 items-center justify-center text-sm text-muted">
-            Loading conversation…
+          <!-- As on Android, a conversation opens on a centred loader. It appears only when
+               opening takes a moment, so a quick open goes straight to the conversation. -->
+          <div v-if="route.params.id && !detail" role="status" class="opening-loader flex flex-1 flex-col items-center justify-center gap-3 text-sm text-muted">
+            <Icon :name="LoaderCircle" :size="22" class="animate-spin" />Loading conversation…
           </div>
           <div v-else-if="inactive" class="m-auto w-full max-w-xl px-6 py-12 text-center">
             <h2 class="mb-3 text-xl">
@@ -922,8 +958,8 @@ function key(event: KeyboardEvent) {
           <ActivityFeed
             v-else
             ref="activity"
-            :key="live.shown.value"
-            :cache-key="live.shown.value"
+            :key="streamPath"
+            :cache-key="streamPath"
             :position="live.position.value"
             :deliverables="deliverables"
             :outcome="detail?.run?.status === 'succeeded' ? detail.run.outcome : null"

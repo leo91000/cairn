@@ -7,7 +7,8 @@ export type LiveStatus = 'connecting' | 'live' | 'reconnecting' | 'offline'
 // The cursor advances only after the consumer accepts a complete batch. Every
 // connection owns its cursor, optionally restored with a matching cached snapshot.
 // A viewer following the latest output accepts the recent window in place of a long replay.
-export function liveConnection(path: string, accept: (batch: LiveBatch, cursor: number) => void, status: (value: LiveStatus) => void, initial?: { cursor: number, history: string }, followsLatest?: () => boolean) {
+// `query` adds request parameters, such as `&list=1` for a stream that carries the list.
+export function liveConnection(path: string, accept: (batch: LiveBatch, cursor: number) => void, status: (value: LiveStatus) => void, initial?: { cursor: number, history: string }, followsLatest?: () => boolean, query = '') {
   let cursor = String(initial?.cursor ?? 0)
   let history = initial?.history
   let source: EventSource | undefined
@@ -50,7 +51,7 @@ export function liveConnection(path: string, accept: (batch: LiveBatch, cursor: 
     status(failures ? 'reconnecting' : 'connecting')
     const windowed = path !== '/chats/stream'
     const recent = windowed && cursor !== '0' && followsLatest?.()
-    const route = `${path}?after=${cursor}${history ? `&history=${encodeURIComponent(history)}` : ''}${windowed ? '&window=1' : ''}${recent ? '&recent=1' : ''}`
+    const route = `${path}?after=${cursor}${history ? `&history=${encodeURIComponent(history)}` : ''}${windowed ? '&window=1' : ''}${recent ? '&recent=1' : ''}${query}`
     const current = installationTransport.source(route, apiUrl(route))
     source = current
     alive()

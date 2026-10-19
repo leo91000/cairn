@@ -10,7 +10,7 @@ import {
 
 async function expectSavedStream(page: Page, stream: string, savedAfter = 0) {
   await expect.poll(() => page.evaluate(({ stream, savedAfter }) => new Promise<boolean>((resolve) => {
-    const open = indexedDB.open('cairn-history-v1', 1)
+    const open = indexedDB.open('cairn-history-v2')
     open.onsuccess = () => {
       const db = open.result
       const tx = db.transaction('entries')
@@ -123,8 +123,8 @@ for (const view of ['conversation', 'fil'] as const) {
   })
 }
 
-// Samples every animation frame while switching conversations. A seamless switch never
-// shows the loading placeholder, never empties the Fil and keeps the shell mounted.
+// Samples every animation frame while switching conversations: which conversation the
+// URL selects, which one the reader shows, and whether the shell stays mounted.
 async function recordFrames(page: Page) {
   await page.evaluate(() => {
     const w = window as any
@@ -134,13 +134,13 @@ async function recordFrames(page: Page) {
     const sample = () => {
       const heading = document.querySelector('.chat-page h1:not(.sr-only)')
       w.__frames.push({
+        path: location.pathname,
         loading: !!Array.from(document.querySelectorAll('[role="status"]')).some(e => e.textContent?.includes('Loading conversation')),
         filRemounted: !document.querySelector('aside[aria-label="Fil"][data-probe]'),
         composerRemounted: !document.querySelector('textarea[data-probe]'),
         filItems: document.querySelectorAll('aside[aria-label="Fil"] [data-fil-key]').length,
         title: heading?.textContent?.trim() ?? '',
-        messages: document.querySelectorAll('.activity-message').length,
-        opacity: getComputedStyle(document.querySelector('[aria-label="Chat workspace"]')!).opacity,
+        messages: Array.from(document.querySelectorAll('.activity-message'), message => message.textContent ?? ''),
       })
       if (w.__frames.length < 120)
         requestAnimationFrame(sample)
@@ -150,7 +150,7 @@ async function recordFrames(page: Page) {
   })
 }
 
-test('switching conversations is seamless', async ({ page, workspace }) => {
+test('switching conversations never shows the previous one and reopens saved ones at once', async ({ page, workspace }) => {
   test.setTimeout(90000)
   const first = await workspace.api('/api/chats', 'POST', {})
   const second = await workspace.api('/api/chats', 'POST', {})
@@ -161,50 +161,44 @@ test('switching conversations is seamless', async ({ page, workspace }) => {
   workspace.service.store.put('chats', { ...workspace.service.chats.detail(first.id), title: 'Alpha conversation' })
   workspace.service.store.put('chats', { ...workspace.service.chats.detail(second.id), title: 'Beta conversation' })
   await page.setViewportSize({ width: 1440, height: 900 })
+  // Opened by identifier: the copy is saved where the Fil's slug link finds it.
   await page.goto(workspacePath(`/chats/${first.id}`))
   await authenticateWorkspace(page)
   await expect(page.locator('.activity-message').getByText('First conversation message', { exact: true }).first()).toBeVisible({ timeout: 30000 })
   const fil = page.getByRole('complementary', { name: 'Fil' })
-  // The first message batch can precede the initial conversation list.
   await expect(fil.locator('[data-fil-key]')).toHaveCount(2)
-  const summaries: Record<string, unknown>[] = []
-  for (const [target, text] of [['Beta conversation', 'Second conversation message'], ['Alpha conversation', 'First conversation message'], ['Beta conversation', 'Second conversation message']] as const) {
+  const switches = [
+    ['Beta conversation', 'Second conversation message', 'First conversation message', 'first visit'],
+    ['Alpha conversation', 'First conversation message', 'Second conversation message', 'saved'],
+    ['Beta conversation', 'Second conversation message', 'First conversation message', 'saved'],
+  ] as const
+  for (const [target, text, previous, visit] of switches) {
     await recordFrames(page)
     await fil.getByText(target, { exact: true }).first().click()
     await expect(page.locator('.activity-message').getByText(text, { exact: true }).first()).toBeVisible()
     await page.waitForFunction(() => (window as any).__frames.length >= 120)
     const frames: any[] = await page.evaluate(() => (window as any).__frames)
-    const summary = {
-      target,
-      loadingFrames: frames.filter(f => f.loading).length,
-      emptyTitleFrames: frames.filter(f => !f.title).length,
-      noMessageFrames: frames.filter(f => !f.messages).length,
-      fadedFrames: frames.filter(f => Number(f.opacity) < 1).length,
-      minFilItems: Math.min(...frames.map(f => f.filItems)),
-      filRemounted: frames.some(f => f.filRemounted),
-      composerRemounted: frames.some(f => f.composerRemounted),
+    const selected = frames.filter(f => f.path === new URL(page.url()).pathname)
+    expect(selected.length).toBeGreaterThan(0)
+    // Once the target is selected, the previous conversation never shows again, and the
+    // header names the target from the Fil while it opens.
+    expect(selected.filter(f => f.messages.some((message: string) => message.includes(previous)))).toEqual([])
+    expect(selected.every(f => f.title === target)).toBe(true)
+    // A conversation read earlier in the page shows in the first frame after the click.
+    if (visit === 'saved') {
+      expect(selected.filter(f => f.loading || !f.messages.length)).toEqual([])
     }
-    summaries.push(summary)
-  }
 
-  for (const summary of summaries) {
-    expect(summary).toMatchObject({
-      loadingFrames: 0,
-      emptyTitleFrames: 0,
-      noMessageFrames: 0,
-      fadedFrames: 0,
-      filRemounted: false,
-      composerRemounted: false,
-    })
-    expect(summary.minFilItems).toBeGreaterThan(0)
+    expect(frames.some(f => f.filRemounted || f.composerRemounted)).toBe(false)
+    expect(Math.min(...frames.map(f => f.filItems))).toBeGreaterThan(0)
   }
 })
 
-test('a slow conversation switch keeps the current reading pane until the target is ready', async ({ page, workspace }) => {
+test('a slow conversation opens on a loader, then returns to the previous reading position at once', async ({ page, workspace }) => {
   await useRelayForHttpMocks(page)
   const first = await workspace.api('/api/chats', 'POST', {})
   const second = await workspace.api('/api/chats', 'POST', {})
-  for (const [chat, text] of [[first, 'Keep this conversation visible'], [second, 'Slow target conversation']] as const) {
+  for (const [chat, text] of [[first, 'Keep this conversation saved'], [second, 'Slow target conversation']] as const) {
     await workspace.api(`/api/chats/${chat.id}/messages`, 'POST', { id: randomUUID(), text })
     await expect.poll(() => workspace.service.chats.detail(chat.id).run?.status).toBe('succeeded')
   }
@@ -217,8 +211,8 @@ test('a slow conversation switch keeps the current reading pane until the target
 
   await page.goto(workspacePath(`/chats/${first.slug}`))
   await authenticateWorkspace(page)
-  const previous = page.locator('.activity-message').getByText('Keep this conversation visible', { exact: true }).first()
-  await expect(previous).toBeVisible()
+  const previous = page.locator('.activity-message').getByText('Keep this conversation saved', { exact: true }).first()
+  await expect(previous).toBeAttached()
   const scroller = page.getByRole('region', { name: 'Activity output' })
   await scroller.evaluate(element => element.scrollTop = 300)
   await expect.poll(() => scroller.evaluate(element => element.scrollTop)).toBe(300)
@@ -231,16 +225,72 @@ test('a slow conversation switch keeps the current reading pane until the target
   try {
     await page.locator(`[data-fil-key="chat:${second.id}"]`).click()
     await expect(page).toHaveURL(workspacePath(`/chats/${second.slug}`))
-    // A real network delay outlasts the old one-second placeholder timer.
-    await page.waitForTimeout(1400)
-    await expect(previous).toBeVisible()
-    await expect(scroller).toHaveJSProperty('scrollTop', 300)
-    await expect(page.getByRole('region', { name: 'Chat workspace' })).toHaveCSS('opacity', '1')
-    await expect(page.getByRole('status').filter({ hasText: 'Loading conversation' })).toHaveCount(0)
+    // The previous conversation leaves at once; a centred loader takes its place.
+    await expect(previous).toHaveCount(0)
+    await expect(page.locator('.activity-message')).toHaveCount(0)
+    const loader = page.getByRole('status').filter({ hasText: 'Loading conversation' })
+    await expect(loader).toBeVisible()
+    await expect(loader).toHaveCSS('opacity', '1')
+    await expect(page.locator('.chat-page h1:not(.sr-only)')).toHaveText(workspace.service.chats.detail(second.id).title)
     await page.screenshot({ path: test.info().outputPath('slow-navigation-pending.png'), animations: 'disabled' })
     release()
     await expect(page.locator('.activity-message').getByText('Slow target conversation', { exact: true }).first()).toBeVisible()
+    await expect(loader).toHaveCount(0)
     await page.screenshot({ path: test.info().outputPath('slow-navigation-ready.png'), animations: 'disabled' })
+  }
+  finally {
+    release()
+    await page.unrouteAll({ behavior: 'ignoreErrors' })
+  }
+
+  // Going back shows the saved conversation where the reader left it, without a loader.
+  await page.locator(`[data-fil-key="chat:${first.id}"]`).click()
+  await expect(previous).toBeAttached()
+  await expect(scroller).toHaveJSProperty('scrollTop', 300)
+  await expect(page.getByRole('status').filter({ hasText: 'Loading conversation' })).toHaveCount(0)
+})
+
+test('an outdated saved conversation waits for its update instead of showing older output', async ({ page, workspace }) => {
+  await useRelayForHttpMocks(page)
+  const first = await workspace.api('/api/chats', 'POST', {})
+  const second = await workspace.api('/api/chats', 'POST', {})
+  for (const [chat, text] of [[first, 'Outdated conversation question'], [second, 'Another conversation']] as const) {
+    await workspace.api(`/api/chats/${chat.id}/messages`, 'POST', { id: randomUUID(), text })
+    await expect.poll(() => workspace.service.chats.detail(chat.id).run?.status).toBe('succeeded')
+  }
+
+  await page.goto(workspacePath(`/chats/${first.slug}`))
+  await authenticateWorkspace(page)
+  await expect(page.locator('.activity-message').getByText('Outdated conversation question', { exact: true }).first()).toBeVisible()
+  await page.locator(`[data-fil-key="chat:${second.id}"]`).click()
+  await expect(page.locator('.activity-message').getByText('Another conversation', { exact: true }).first()).toBeVisible()
+
+  // The first conversation finishes another turn while the reader is elsewhere.
+  await workspace.api(`/api/chats/${first.id}/messages`, 'POST', { id: randomUUID(), text: 'A later question' })
+  await expect.poll(() => workspace.service.chats.detail(first.id).messages.some(message => message.text === 'A later question' && message.status === 'delivered')).toBe(true)
+  await expect.poll(() => workspace.service.chats.detail(first.id).run?.status).toBe('succeeded')
+  // The Fil's list stream reports the finished turn the reader has not opened yet.
+  const row = page.locator(`[data-fil-key="chat:${first.id}"][data-unread]`)
+  await expect(row).toBeAttached()
+
+  let release!: () => void
+  const gate = new Promise<void>(resolve => release = resolve)
+  const streams: string[] = []
+  await page.route(`**/api/chats/${first.slug}/stream**`, async (route) => {
+    streams.push(route.request().url())
+    await gate
+    await route.continue()
+  })
+  try {
+    await row.click()
+    // The Fil already shows the later turn: the saved copy only resumes the stream.
+    await expect(page.getByRole('status').filter({ hasText: 'Loading conversation' })).toBeVisible()
+    await expect(page.locator('.activity-message')).toHaveCount(0)
+    await expect.poll(() => streams.length).toBeGreaterThan(0)
+    expect(Number(new URL(streams[0]!).searchParams.get('after'))).toBeGreaterThan(0)
+    release()
+    await expect(page.locator('.activity-message').getByText('A later question', { exact: true }).first()).toBeVisible()
+    await expect(page.locator('.activity-message').getByText('Outdated conversation question', { exact: true }).first()).toBeAttached()
   }
   finally {
     release()
@@ -275,7 +325,10 @@ test('opening a mission from a conversation keeps the Fil mounted and visible', 
     return opacity
   })).toBe(1)
   await page.screenshot({ path: test.info().outputPath('mission-navigation-ready.png'), animations: 'disabled' })
-  await page.locator(`[data-fil-key="chat:${chat.id}"]`).click()
+  // Once read, the conversation moves out of « For you »: click it where it settles.
+  const conversation = page.locator(`[data-fil-key="chat:${chat.id}"]`)
+  await expect(conversation).toHaveCount(1)
+  await conversation.click()
   await expect(page.locator('.activity-message').getByText('Navigation shell proof', { exact: true }).first()).toBeVisible()
   await expect(fil).toHaveAttribute('data-navigation-probe', 'mounted')
   await expect(fil.getByRole('textbox', { name: 'Filter conversations' })).toHaveValue('Navigation')

@@ -207,6 +207,17 @@
   }
 }
 
+/* Hidden for the first moments of an open, so a quick one never flashes the loader. */
+.opening-loader {
+  animation: opening-loader 160ms ease-out 200ms both;
+}
+
+@keyframes opening-loader {
+  from {
+    opacity: 0;
+  }
+}
+
 @media (max-width: 640px) {
   .activity-toolbar-controls .icon-button {
     min-width: 44px;
@@ -233,6 +244,9 @@
 @media (prefers-reduced-motion: reduce) {
   .activity-presence.live {
     animation: none;
+  }
+  .opening-loader {
+    animation-duration: 1ms;
   }
 }
 
