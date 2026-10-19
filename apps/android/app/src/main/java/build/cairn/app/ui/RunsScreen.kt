@@ -317,13 +317,7 @@ fun RunScreen(
                         color = MaterialTheme.colorScheme.error,
                         style = MaterialTheme.typography.labelMedium,
                     )
-                current.accountWaitReason?.let {
-                    Text(
-                        "En attente : $it",
-                        Modifier.padding(horizontal = 20.dp),
-                        style = MaterialTheme.typography.bodySmall,
-                    )
-                }
+                RunWaitingReason(current)
                 if (current.recoveryPending)
                     Text(
                         "Récupération en cours…",

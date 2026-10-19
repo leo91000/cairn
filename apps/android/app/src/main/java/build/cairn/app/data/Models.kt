@@ -142,6 +142,16 @@ data class Snapshot(
     val skills: List<SnapshotSkill> = emptyList(),
 )
 
+@Serializable data class RunRetryCause(val kind: String, val message: String)
+
+@Serializable
+data class RunRetry(
+    val attempt: Int,
+    val limit: Int,
+    val nextAttemptAt: Long? = null,
+    val cause: RunRetryCause,
+)
+
 @Serializable
 data class Run(
     val id: String,
@@ -165,6 +175,7 @@ data class Run(
     /** The coding agent whose accounts need the user in Connexions before this run can start. */
     val accountRequired: String? = null,
     val accountWaitReason: String? = null,
+    val retry: RunRetry? = null,
     val cancelRequestedAt: Long? = null,
     val resumeCount: Int = 0,
     val workspaces: List<RunWorkspace> = emptyList(),

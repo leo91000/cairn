@@ -37,8 +37,11 @@ internal fun scheduledWakeup(chat: Chat?): ChatWakeup? {
     return wakeup
 }
 
-internal fun chatWaitNotice(run: Run?): ChatWaitNotice? {
+internal fun chatWaitNotice(run: Run?, now: Long = System.currentTimeMillis()): ChatWaitNotice? {
     if (run?.status != "queued") return null
+    retryNotice(run, now)?.let {
+        return ChatWaitNotice(it)
+    }
     val reason = run.accountWaitReason?.trim()?.takeIf { it.isNotEmpty() } ?: return null
     val provider = run.accountRequired ?: return ChatWaitNotice(reason)
     return ChatWaitNotice(
