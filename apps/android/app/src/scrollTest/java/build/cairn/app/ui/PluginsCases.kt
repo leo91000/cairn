@@ -387,6 +387,94 @@ abstract class PluginsCases {
     }
 
     @Test
+    fun requiredWhitespaceChoiceCanBeSavedWithNonblankUnicodeText() {
+        val entry =
+            notes.copy(
+                manifest =
+                    notes.manifest!!.copy(
+                        capabilities = emptyList(),
+                        settings =
+                            listOf(
+                                PluginSetting(
+                                    key = "region",
+                                    title = "Region",
+                                    type = "select",
+                                    required = true,
+                                    default = JsonPrimitive(" "),
+                                    options =
+                                        listOf(
+                                            PluginOption(" ", "Space option"),
+                                            PluginOption("eu", "Europe"),
+                                        ),
+                                ),
+                                PluginSetting(key = "team", title = "Team", required = true),
+                                PluginSetting(
+                                    key = "password",
+                                    title = "Password",
+                                    type = "secret",
+                                    required = true,
+                                ),
+                            ),
+                    )
+            )
+        MockWebServer().use { server ->
+            val saved = CopyOnWriteArrayList<String>()
+            server.dispatcher =
+                dispatcher(includeGet = true) { path, body ->
+                    when (path) {
+                        "/api/installations/fixture/api/plugins" ->
+                            wireJson.encodeToString(PluginCatalog(packages = listOf(entry)))
+                        "/api/installations/fixture/api/plugins/notes/connections" -> {
+                            saved += body
+                            "{}"
+                        }
+                        else -> null
+                    }
+                }
+            server.start()
+            show(server) { vm, state -> PluginScreen(vm, state, "notes") {} }
+            compose.waitUntil(30000) {
+                compose
+                    .onAllNodesWithText("Ajouter une instance")
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
+            }
+            compose.onNodeWithText("Ajouter une instance").performClick()
+            compose.onNodeWithText("Space option").assertExists()
+            compose.onNodeWithText("Enregistrer").assertIsNotEnabled()
+            compose.onNodeWithText("Team").performTextInput("   ")
+            compose.onNodeWithText("Password").performTextInput(" \uFEFFcredential\uFEFF ")
+            compose.onNodeWithText("Enregistrer").assertIsNotEnabled()
+            compose.onNodeWithText("Team").performTextReplacement(" \uFEFFteam\uFEFF ")
+            // Opening default is a nonempty identifier, even though it is blank as text.
+            compose.onNodeWithText("Enregistrer").assertIsEnabled()
+            // The same identifier chosen manually must reach the save guard and wire payload.
+            compose.onNodeWithText("Space option").performClick()
+            compose.onNodeWithText("Europe").performClick()
+            compose.onNodeWithText("Europe").performClick()
+            compose.onNodeWithText("Space option").performClick()
+            compose.onNodeWithText("Enregistrer").assertIsEnabled()
+            capture("plugin-whitespace-choice-editor")
+            compose.onNodeWithText("Enregistrer").performClick()
+            compose.waitUntil(10000) { saved.isNotEmpty() }
+            val payload = wireJson.parseToJsonElement(saved.single()).jsonObject
+            assertEquals(
+                buildJsonObject {
+                    put("region", " ")
+                    put("team", "\uFEFFteam\uFEFF")
+                },
+                payload["settings"],
+            )
+            assertEquals(
+                buildJsonObject {
+                    put("password", "\uFEFFcredential\uFEFF")
+                },
+                payload["secrets"],
+            )
+        }
+    }
+
+    @Test
     fun discordBotIsSetUpThroughItsPackageForm() {
         MockWebServer().use { server ->
             val forms = CopyOnWriteArrayList<JsonObject>()

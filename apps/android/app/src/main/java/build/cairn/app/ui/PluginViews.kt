@@ -344,9 +344,7 @@ private fun PanelForm(node: JsonObject, busy: Boolean, submit: (String, JsonObje
             enabled = !busy,
         ) {
             // A form's secret fields go to the package like its other values.
-            val output =
-                pluginSettings(fields, values) +
-                    secrets.filterValues { it.isNotBlank() }.mapValues { JsonPrimitive(it.value) }
+            val output = pluginSettings(fields, values) + pluginSecrets(secrets, trim = false)
             secrets = emptyMap()
             submit(action, JsonObject(output))
         }
