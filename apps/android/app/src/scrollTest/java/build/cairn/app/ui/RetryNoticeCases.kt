@@ -1,7 +1,12 @@
 package build.cairn.app.ui
 
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.safeDrawingPadding
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Surface
 import androidx.compose.runtime.*
+import androidx.compose.ui.Modifier
 import androidx.compose.ui.semantics.SemanticsProperties
 import androidx.compose.ui.test.*
 import androidx.compose.ui.test.junit4.v2.createComposeRule
@@ -24,16 +29,24 @@ abstract class RetryNoticeCases {
             retry = RunRetry(1, 3, deadline, RunRetryCause("timeout", "Temporary timeout")),
         )
 
-    @Test
-    fun conversationAndRunCountDownWithoutNewEvents() {
-        compose.setContent {
-            val run = remember { run(System.currentTimeMillis() + 4000) }
-            CairnTheme {
-                Column {
+    /** Like CairnApp, the background surface gives the run text its theme colours. */
+    @Composable
+    private fun Notices(run: Run) {
+        CairnTheme {
+            Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
+                Column(Modifier.safeDrawingPadding()) {
                     ChatRunWaitingNotice(run, {})
                     RunWaitingReason(run)
                 }
             }
+        }
+    }
+
+    @Test
+    fun conversationAndRunCountDownWithoutNewEvents() {
+        compose.setContent {
+            val run = remember { run(System.currentTimeMillis() + 4000) }
+            Notices(run)
         }
         val notices = compose.onAllNodesWithText("Temporary agent error.", substring = true)
         notices.assertCountEquals(2)
@@ -58,14 +71,7 @@ abstract class RetryNoticeCases {
     @Test
     fun noticesFollowRunUpdatesAndKeepOtherWaitReasons() {
         val current = mutableStateOf(run(System.currentTimeMillis() + 60_000))
-        compose.setContent {
-            CairnTheme {
-                Column {
-                    ChatRunWaitingNotice(current.value, {})
-                    RunWaitingReason(current.value)
-                }
-            }
-        }
+        compose.setContent { Notices(current.value) }
         compose.onAllNodesWithText("attempt 1/3", substring = true).assertCountEquals(2)
         compose.runOnIdle {
             current.value =
@@ -78,11 +84,13 @@ abstract class RetryNoticeCases {
                 )
         }
         compose.onAllNodesWithText("attempt 2/3", substring = true).assertCountEquals(2)
+        capture("attempt")
         compose.runOnIdle {
             current.value = current.value.copy(accountWaitReason = "Waiting for capacity.")
         }
         compose.onAllNodesWithText("Waiting for capacity.", substring = true).assertCountEquals(2)
         compose.onAllNodesWithText("Temporary agent error.", substring = true).assertCountEquals(0)
+        capture("priority")
 
         compose.runOnIdle {
             current.value = current.value.copy(accountWaitReason = null, status = "running")
