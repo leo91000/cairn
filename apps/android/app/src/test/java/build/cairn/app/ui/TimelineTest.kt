@@ -7,6 +7,54 @@ import org.junit.Test
 
 class TimelineTest {
     @Test
+    fun `reconnection scan does not serialize message payloads while preparing chat history`() {
+        var payloadScans = 0
+        fun observed(values: Map<String, JsonElement>): Map<String, JsonElement> =
+            object : Map<String, JsonElement> by values {
+                override val entries: Set<Map.Entry<String, JsonElement>>
+                    get() {
+                        payloadScans++
+                        return values.entries
+                    }
+            }
+        val retry = RunEvent(1, 1, "diagnostic", "WebSocket connection failed: 503")
+        val user =
+            RunEvent(
+                2,
+                2,
+                "chat.user",
+                "Question",
+                observed(mapOf("text" to JsonPrimitive("Question"))),
+            )
+        val reply =
+            RunEvent(
+                3,
+                3,
+                "item.updated",
+                "Answer",
+                observed(
+                    mapOf(
+                        "item" to
+                            buildJsonObject {
+                                put("id", "answer")
+                                put("type", "agent_message")
+                                put("text", "Answer ".repeat(10_000))
+                            }
+                    )
+                ),
+            )
+        val entries = timelineEntries(listOf(retry, user, reply), chat = true)
+        assertEquals(listOf(1L, 2L, 3L), entries.flatMap { it.events }.map { it.id })
+        assertTrue(entries.first().notice)
+        assertTrue(entries.drop(1).all { it.message })
+        assertEquals(
+            "Messages must not be pretty-serialized to look for connection notices",
+            0,
+            payloadScans,
+        )
+    }
+
+    @Test
     fun `chat counts folded visible tools despite diagnostics and gaps in global event ids`() {
         val events =
             (0L..64L).flatMap { index ->
