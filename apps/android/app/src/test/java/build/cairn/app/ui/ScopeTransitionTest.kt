@@ -8,7 +8,9 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.junit4.v2.createComposeRule
+import androidx.compose.ui.test.onNodeWithText
 import androidx.datastore.preferences.core.edit
 import androidx.lifecycle.ViewModelStore
 import androidx.test.core.app.ApplicationProvider
@@ -18,6 +20,8 @@ import androidx.work.testing.WorkManagerTestInitHelper
 import build.cairn.app.data.*
 import java.io.File
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit.SECONDS
 import java.util.concurrent.atomic.AtomicReference
 import kotlinx.coroutines.*
 import okhttp3.mockwebserver.*
@@ -52,6 +56,8 @@ class ScopeTransitionTest {
             Session(true, "csrf", CairnAccount("account", "a@example.test"), listOf(first, second))
         )
     private var status = 200
+    @Volatile private var holdInstallations = false
+    private val installationsReleased = CountDownLatch(1)
     private lateinit var vm: CairnViewModel
     private lateinit var cachedFile: File
     private var mounted by mutableStateOf(false)
@@ -73,7 +79,9 @@ class ScopeTransitionTest {
                                     .setResponseCode(status)
                                     .setBody(wireJson.encodeToString(session.get()))
                             path == "/api/installations" ->
-                                wireJson.encodeToString(session.get().installations)
+                                wireJson.encodeToString(session.get().installations).also {
+                                    if (holdInstallations) installationsReleased.await(30, SECONDS)
+                                }
                             path == "/api/account/logout" ->
                                 return MockResponse().setResponseCode(503).setBody("{}")
                             path == "/api/account/options" || path == "/api/account/methods" -> "{}"
@@ -102,6 +110,7 @@ class ScopeTransitionTest {
 
     @After
     fun cleanup() {
+        installationsReleased.countDown()
         if (::jobs.isInitialized) jobs.cancel()
         models.clear()
         server.close()
@@ -223,6 +232,28 @@ class ScopeTransitionTest {
             assertTrue(vm.notifications.seen().isEmpty())
             assertNull(vm.notifications.alertsUntil())
         }
+    }
+
+    @Test
+    fun revokedLastAccessExplainsTheChangeOnTheAccountPage() {
+        session.set(session.get().copy(installations = emptyList()))
+        compose.runOnIdle { vm.report(ApiException(403, "access revoked")) }
+        compose.waitUntil(20000) {
+            ShadowLooper.idleMainLooper()
+            vm.state.value.notice != null && !vm.state.value.busy
+        }
+        assertNull(vm.state.value.installation)
+
+        // Hold the page's first installation poll: its refresh would replace the account state
+        // before the notice could be inspected.
+        holdInstallations = true
+        compose.runOnIdle { mounted = true }
+        val notice = compose.onNodeWithText("Votre accès à cette installation a changé.")
+        compose.waitUntil(20000) {
+            ShadowLooper.idleMainLooper()
+            runCatching { notice.assertIsDisplayed() }.isSuccess
+        }
+        compose.onNodeWithText("Aucune installation").assertIsDisplayed()
     }
 
     @Test
