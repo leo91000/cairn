@@ -797,8 +797,50 @@ abstract class PluginsCases {
         }
     }
 
+    @Test fun editingAnInstanceLeavesItsGrantsToTheAgentPages() = editExistingAccount(older = false)
+
+    @Test
+    fun anOlderInstallationKeepsTheGrantsOfAnEditedInstance() = editExistingAccount(older = true)
+
+    /**
+     * An older installation (agents without revisions) reads a missing `agentIds` as "no agents":
+     * the editor then sends the instance's current grants unchanged. A current one keeps them.
+     */
+    private fun editExistingAccount(older: Boolean) {
+        MockWebServer().use { server ->
+            val saved = CopyOnWriteArrayList<String>()
+            server.dispatcher =
+                dispatcher(revision = if (older) "" else "r1") { path, body ->
+                    if (path.endsWith("/plugins/onepassword/connections/op1")) {
+                        saved += body
+                        "{}"
+                    } else null
+                }
+            server.start()
+            show(server) { vm, state -> PluginScreen(vm, state, "onepassword") {} }
+            compose.waitUntil(30000) {
+                compose.onAllNodesWithText("Modifier").fetchSemanticsNodes().isNotEmpty()
+            }
+            compose.onNodeWithText("Modifier").performScrollTo().performClick()
+            compose.waitUntil(10000) {
+                compose.onAllNodesWithText("Enregistrer").fetchSemanticsNodes().isNotEmpty()
+            }
+            compose.onNodeWithText("Enregistrer").performClick()
+            compose.waitUntil(10000) { saved.isNotEmpty() }
+            val payload = wireJson.parseToJsonElement(saved.single()).jsonObject
+            if (older)
+                assertEquals(JsonArray(listOf(JsonPrimitive(MAIN_AGENT_ID))), payload["agentIds"])
+            else assertFalse("agentIds" in payload)
+        }
+    }
+
     /** Answers the workspace fixture; custom handlers can opt into GETs for polling. */
-    private fun dispatcher(includeGet: Boolean = false, handle: (String, String) -> String?) =
+    private fun dispatcher(
+        includeGet: Boolean = false,
+        /** Blank for an installation that predates agent revisions. */
+        revision: String = "r1",
+        handle: (String, String) -> String?,
+    ) =
         object : Dispatcher() {
             override fun dispatch(request: RecordedRequest): MockResponse {
                 val path = request.path.orEmpty()
@@ -819,11 +861,12 @@ abstract class PluginsCases {
                         "/api/installations/fixture/api/agents" ->
                             wireJson.encodeToString(
                                 listOf(
-                                    Agent(id = MAIN_AGENT_ID, name = "Cairn"),
+                                    Agent(id = MAIN_AGENT_ID, name = "Cairn", revision = revision),
                                     Agent(
                                         id = "helper",
                                         name = "Helper",
                                         access = AccessPolicy(projects = listOf("project")),
+                                        revision = revision,
                                     ),
                                 )
                             )

@@ -261,6 +261,8 @@ export interface Context {
   connections: PluginConnection[]
   // The plugin catalogue could not be loaded: plugin grants cannot be checked.
   pluginsUnavailable?: boolean
+  // The nodes could not be loaded: node grants cannot be checked.
+  nodesUnavailable?: boolean
 }
 
 function listChanges(before: string[] | null, after: string[] | null) {
@@ -425,12 +427,12 @@ export interface Preview {
 
 /**
  * Whether saving needs the review first: a power or a secret added, interrupted work, a delegation
- * this edit suspends or cannot reapprove, or a switch to the saved GitHub token. A delegation
- * already suspended by an earlier change is listed when the review opens, but never opens it.
+ * this edit suspends, or a switch to the saved GitHub token. A delegation already suspended by an
+ * earlier change, blocked or not, is listed when the review opens, but never opens it.
  */
 export function needsReview(lines: ReviewLine[], preview: Preview | null, githubSwitch = false) {
   const runs = preview ? preview.runs.queued + preview.runs.running : 0
-  const delegations = preview?.delegations.some(item => item.suspended && (item.blocked || !item.alreadySuspended)) ?? false
+  const delegations = preview?.delegations.some(item => item.suspended && !item.alreadySuspended) ?? false
   return lines.some(line => line.kind !== 'reduction') || runs > 0 || delegations || githubSwitch
 }
 
@@ -463,7 +465,7 @@ export function issues(draft: AgentDraft, context: Context, isMain: boolean, age
     }
   }
 
-  for (const id of draft.exclusiveNodes ?? []) {
+  for (const id of context.nodesUnavailable ? [] : draft.exclusiveNodes ?? []) {
     const node = context.nodes.find(item => item.id === id)
     if (!node || node.revoked)
       found.push({ section: 'nodes', text: 'An exclusive reservation targets a node that no longer exists.' })

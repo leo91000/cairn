@@ -113,6 +113,11 @@ abstract class AgentPageCases {
         val failPlugins: AtomicBoolean = AtomicBoolean(false),
         /** The agent has a dedicated GitHub token saved. */
         val tokenConfigured: AtomicBoolean = AtomicBoolean(false),
+        /**
+         * An installation that predates agent revisions: live grants live on the resources
+         * (instance `agentIds`, node `exclusiveAgents`).
+         */
+        val older: AtomicBoolean = AtomicBoolean(false),
     )
 
     private fun fixture(): Fixture {
@@ -128,6 +133,7 @@ abstract class AgentPageCases {
         val failNodes = AtomicBoolean(false)
         val failPlugins = AtomicBoolean(false)
         val tokenConfigured = AtomicBoolean(false)
+        val older = AtomicBoolean(false)
         val server = MockWebServer()
         server.dispatcher =
             object : Dispatcher() {
@@ -219,8 +225,26 @@ abstract class AgentPageCases {
                                 """[{"id":"p1","name":"cairn","path":"/srv/cairn"},{"id":"p2","name":"SheetOM","path":"/srv/sheetom"}]"""
                             path == "/skills" ->
                                 """[{"name":"review","scope":"global"},{"name":"lint","scope":"p1"}]"""
-                            path == "/nodes" -> nodes
-                            path == "/plugins" -> wireJson.encodeToString(catalog)
+                            path == "/nodes" ->
+                                if (older.get())
+                                    nodes.replace(
+                                        """"id":"gpu",""",
+                                        """"id":"gpu","exclusiveAgents":["agent"],""",
+                                    )
+                                else nodes
+                            path == "/plugins" ->
+                                wireJson.encodeToString(
+                                    if (older.get())
+                                        catalog.copy(
+                                            connections =
+                                                catalog.connections.map {
+                                                    if (it.id == "prod")
+                                                        it.copy(agentIds = listOf("agent"))
+                                                    else it
+                                                }
+                                        )
+                                    else catalog
+                                )
                             path == "/api/installations" -> beaconInstallationsFixture()
                             path == "/api/account/session" -> beaconAccountFixture("fixture")
                             path.endsWith("/models") -> """{"models":[]}"""
@@ -245,6 +269,7 @@ abstract class AgentPageCases {
             failNodes,
             failPlugins,
             tokenConfigured,
+            older,
         )
     }
 
@@ -562,6 +587,48 @@ abstract class AgentPageCases {
                 .assertExists()
             open(AgentSection.Github)
             compose.onNodeWithText("Un jeton est enregistré.").assertExists()
+        }
+    }
+
+    @Test
+    fun anOlderInstallationShowsLiveGrantsReadOnly() {
+        journey(
+            "agent",
+            prepare = { fixture ->
+                fixture.older.set(true)
+                fixture.agents.set(
+                    fixture.agents.get().map {
+                        it.copy(
+                            revision = "",
+                            access = it.access.copy(nodes = listOf(LOCAL_NODE_ID, "gpu")),
+                        )
+                    }
+                )
+            },
+        ) { _ ->
+            val note =
+                "Mettez à jour l’installation pour accorder ces accès depuis la fiche de l’agent."
+            // The grants come from the resources and cannot be changed from the agent.
+            open(AgentSection.Plugins)
+            waitForDescription("Accès à Production")
+            compose.onNodeWithText(note).assertExists()
+            compose
+                .onNodeWithContentDescription("Accès à Production")
+                .assertIsOn()
+                .assertIsNotEnabled()
+            back()
+            open(AgentSection.Nodes)
+            waitForDescription("Réserver gpu-box en exclusivité")
+            compose.onNodeWithText(note).assertExists()
+            compose
+                .onNodeWithContentDescription("Réserver gpu-box en exclusivité")
+                .performScrollTo()
+                .assertIsOn()
+                .assertIsNotEnabled()
+            // Execution itself is part of the access policy and stays editable.
+            compose
+                .onNodeWithContentDescription("Exécuter ses conversations sur gpu-box")
+                .assertIsEnabled()
         }
     }
 

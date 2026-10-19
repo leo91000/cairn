@@ -123,6 +123,24 @@ fun newAgent() =
         plugins = emptyList(),
     )
 
+/**
+ * An installation that predates agent revisions also predates live grants on the agent: it ignores
+ * top-level `exclusiveNodes` and `plugins` and keeps them on the resources (instance `agentIds`,
+ * node `exclusiveAgents`).
+ */
+fun olderInstallation(agents: List<Agent>) =
+    agents.isNotEmpty() && agents.all { it.revision.isBlank() }
+
+/** On an older installation, the agent's live grants as its resources record them. */
+fun Agent.withResourceGrants(catalog: PluginCatalog?, nodes: List<ExecutionNode>): Agent =
+    copy(
+        plugins = catalog?.connections?.filter { id in it.agentIds }?.map { it.id }.orEmpty(),
+        exclusiveNodes =
+            nodes
+                .filter { id in it.exclusiveAgents }
+                .map { if (it.local) LOCAL_NODE_ID else it.id },
+    )
+
 /** Everything the page shows the agent's access against. */
 data class AgentResources(
     val projects: List<Project> = emptyList(),

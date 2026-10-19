@@ -563,6 +563,7 @@ test('recovering a created agent keeps its revision, so a concurrent change is a
 
   // Someone else changes the created agent before the retry.
   await workspace.api(`/api/agents/${createdId}`, 'PUT', { name: 'Recovered agent', description: 'Changed elsewhere' })
+  await workspace.api(`/api/agents/${createdId}/github-token`, 'PUT', { token: 'fixture-token-not-a-secret' })
   await page.getByLabel('Name', { exact: true }).fill('Recovered agent edited')
   await bar.getByRole('button', { name: 'Create agent', exact: true }).click()
   await expect(bar.getByRole('alert')).toHaveText('This agent was changed elsewhere. Reload it before saving.')
@@ -571,15 +572,22 @@ test('recovering a created agent keeps its revision, so a concurrent change is a
     description: 'Changed elsewhere',
   })
 
+  // Reloading also re-reads its GitHub token, saved meanwhile, although the page is still /agents/new.
+  const tokenState = page.waitForRequest(request => request.method() === 'GET' && request.url().endsWith(`/api/agents/${createdId}/github-token`))
   await bar.getByRole('button', { name: 'Reload', exact: true }).click()
+  await tokenState
   await expect(page.getByLabel('Name', { exact: true })).toHaveValue('Recovered agent edited')
   await expect(page.getByLabel('Description', { exact: true })).toHaveValue('Changed elsewhere')
+  await openAgentSection(page, 'GitHub')
+  await expect(page.getByRole('radio', { name: /^Dedicated token/ })).toBeChecked()
+  await expect(page.getByText('A token is saved', { exact: true })).toBeVisible()
   await bar.getByRole('button', { name: 'Create agent', exact: true }).click()
   await expect(page).toHaveURL(new RegExp(`/agents/${createdId}$`))
   expect(creations).toBe(1)
   expect((await workspace.api('/api/agents')).filter((item: { name: string }) => item.name.startsWith('Recovered agent'))).toEqual([
     expect.objectContaining({ id: createdId, name: 'Recovered agent edited', description: 'Changed elsewhere' }),
   ])
+  expect(await workspace.api(`/api/agents/${createdId}/github-token`)).toEqual({ configured: true })
 })
 
 test('tool choices stay visible and editable when every MCP connection is granted', async ({ page, workspace }) => {
@@ -786,4 +794,35 @@ test('when plugins cannot be loaded, plugin access is read-only and no grant loo
   await failure.getByRole('button', { name: 'Try again', exact: true }).click()
   await expect(failure).toHaveCount(0)
   await expect(page.getByRole('button', { name: 'Remove deleted plugin instances' })).toBeVisible()
+})
+
+test('when nodes cannot be loaded, the page stays usable and node access is read-only', async ({ page, workspace }) => {
+  await useRelayForHttpMocks(page)
+  const agent = await workspace.api('/api/agents', 'POST', { name: 'Node reader', access: { nodes: null } })
+  let nodesFail = true
+  await page.route('**/api/nodes', route => nodesFail
+    ? route.fulfill({ status: 500, json: { error: 'Node registry unavailable' } })
+    : route.continue())
+  await page.goto(workspacePath(`/agents/${agent.id}`))
+  await authenticateWorkspace(page)
+  await expect(page.getByRole('button', { name: /^Execution Not loaded/ })).toBeVisible()
+  await expect(page.getByText('to check')).toHaveCount(0)
+
+  // Other sections still save.
+  await openAgentSection(page, 'Identity & instructions')
+  await page.getByLabel('Description', { exact: true }).fill('Reads the node registry')
+  await saveAgent(page)
+  const saved = (await workspace.api('/api/agents')).find((item: { id: string }) => item.id === agent.id)
+  expect(saved.description).toBe('Reads the node registry')
+  // Nothing was restricted from an empty list.
+  expect(saved.access.nodes).toBeNull()
+
+  await openAgentSection(page, 'Nodes')
+  const failure = page.getByRole('alert').filter({ hasText: 'Nodes could not be loaded, so this agent’s node access cannot be shown or changed.' })
+  await expect(failure).toContainText('Node registry unavailable')
+  await expect(page.getByRole('switch', { name: 'All nodes, including future' })).toHaveCount(0)
+  nodesFail = false
+  await failure.getByRole('button', { name: 'Try again', exact: true }).click()
+  await expect(failure).toHaveCount(0)
+  await expect(page.getByRole('switch', { name: 'All nodes, including future' })).toBeChecked()
 })

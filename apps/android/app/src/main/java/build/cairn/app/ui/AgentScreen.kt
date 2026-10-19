@@ -53,6 +53,10 @@ private fun agentSaver() =
         restore = { mutableStateOf(wireJson.decodeFromString(Agent.serializer(), it)) },
     )
 
+/** Shown where an older installation cannot take grants set on the agent. */
+private const val UPDATE_FOR_GRANTS =
+    "Mettez à jour l’installation pour accorder ces accès depuis la fiche de l’agent."
+
 /** The review shown before saving sensitive changes. */
 private class PendingReview(
     val edited: Agent,
@@ -175,6 +179,11 @@ private fun AgentPage(
         AgentResources(state.projects, state.skills, state.mcps, nodes, catalog, tokenSaved)
     val errors = agentErrors(draft, tokenSaved, newToken)
     val issues = agentIssues(draft.agent, resources)
+    // An older installation keeps live grants on its resources and ignores them on the agent:
+    // they are shown from there, read-only.
+    val legacy = olderInstallation(state.agents)
+    val shown =
+        if (legacy) draft.copy(agent = draft.agent.withResourceGrants(catalog, nodes)) else draft
     val current = AgentSection.entries.find { it.name == section }
 
     fun update(change: (Agent) -> Agent) {
@@ -375,7 +384,7 @@ private fun AgentPage(
                 when (current) {
                     null ->
                         AgentOverview(
-                            draft,
+                            shown,
                             resources,
                             creating,
                             issues,
@@ -429,8 +438,9 @@ private fun AgentPage(
                             )
                     AgentSection.Plugins ->
                         PluginsSection(
-                            draft.agent,
+                            shown.agent,
                             catalog,
+                            legacy,
                             catalogFailed,
                             retry = { catalogAttempt++ },
                             navigate = { navigate(it) },
@@ -438,8 +448,9 @@ private fun AgentPage(
                         )
                     AgentSection.Nodes ->
                         NodesSection(
-                            draft.agent,
+                            shown.agent,
                             nodes,
+                            legacy,
                             nodesFailed,
                             retry = { nodesAttempt++ },
                             change = ::update,
@@ -449,7 +460,7 @@ private fun AgentPage(
                             access { it.copy(sandbox = value) }
                         }
                     AgentSection.Powers ->
-                        PowersSection(draft.agent, nodes, { section = it.name }, ::access)
+                        PowersSection(shown.agent, nodes, { section = it.name }, ::access)
                     AgentSection.Identity ->
                         IdentitySection(vm, state, baseline, draft.agent, creating, ::update)
                     AgentSection.Engine -> EngineSection(vm, state, draft.agent, ::update)
@@ -1559,11 +1570,13 @@ private fun SwitchRow(
 private fun PluginsSection(
     agent: Agent,
     catalog: PluginCatalog?,
+    legacy: Boolean,
     failed: Boolean,
     retry: () -> Unit,
     navigate: (String) -> Unit,
     change: ((Agent) -> Agent) -> Unit,
 ) {
+    if (legacy) Note(UPDATE_FOR_GRANTS)
     if (catalog == null) {
         if (!failed) {
             LinearProgressIndicator(Modifier.fillMaxWidth())
@@ -1623,6 +1636,7 @@ private fun PluginsSection(
                             else -> "Non accordé"
                         },
                         on,
+                        enabled = !legacy,
                         description = "Accès à ${connection.name}",
                     ) { allowed ->
                         change {
@@ -1669,13 +1683,16 @@ private fun PluginsSection(
                     style = MaterialTheme.typography.titleSmall,
                 )
                 ToneChip(PluginBadge("Indisponible", PluginTone.ATTENTION))
-                TextButton(
-                    onClick = { change { it.copy(plugins = it.plugins - connection.id) } },
-                    modifier =
-                        Modifier.semantics { contentDescription = "Retirer ${connection.name}" },
-                ) {
-                    Text("Retirer")
-                }
+                if (!legacy)
+                    TextButton(
+                        onClick = { change { it.copy(plugins = it.plugins - connection.id) } },
+                        modifier =
+                            Modifier.semantics {
+                                contentDescription = "Retirer ${connection.name}"
+                            },
+                    ) {
+                        Text("Retirer")
+                    }
             }
             Note(
                 "Ce plugin ne donne plus d’accès aux agents (version non approuvée, invalide ou sans accès agent). L’accès est conservé, mais ne donne rien tant qu’il ne redevient pas disponible."
@@ -1687,9 +1704,10 @@ private fun PluginsSection(
         Row(verticalAlignment = Alignment.CenterVertically) {
             Text("Instance supprimée", Modifier.weight(1f))
             ToneChip(PluginBadge("Introuvable", PluginTone.ATTENTION))
-            TextButton(onClick = { change { it.copy(plugins = it.plugins - id) } }) {
-                Text("Retirer")
-            }
+            if (!legacy)
+                TextButton(onClick = { change { it.copy(plugins = it.plugins - id) } }) {
+                    Text("Retirer")
+                }
         }
     }
     val delegations = catalog.connections.filter { agent.id.isNotBlank() && it.agentId == agent.id }
@@ -1732,6 +1750,7 @@ private fun nodeStatus(node: ExecutionNode): PluginBadge =
 private fun NodesSection(
     agent: Agent,
     nodes: List<ExecutionNode>,
+    legacy: Boolean,
     failed: Boolean,
     retry: () -> Unit,
     change: ((Agent) -> Agent) -> Unit,
@@ -1739,6 +1758,7 @@ private fun NodesSection(
     val access = agent.access
     // Without the machine list, any change could restrict the agent to the current runner.
     val editable = !failed
+    if (legacy) Note(UPDATE_FOR_GRANTS)
     if (failed)
         Row(verticalAlignment = Alignment.CenterVertically) {
             Text(
@@ -1812,7 +1832,7 @@ private fun NodesSection(
                         else -> "Suspend les autres conversations"
                     },
                     exclusive,
-                    enabled = editable && runs && supported,
+                    enabled = editable && !legacy && runs && supported,
                     power = true,
                     description = "Réserver ${node.name} en exclusivité",
                 ) { on ->
@@ -1825,9 +1845,10 @@ private fun NodesSection(
                             else "Inactif tant que le runtime n’est pas mis à jour.",
                             Modifier.weight(1f),
                         )
-                        TextButton(onClick = { change { it.withExclusive(node.id, false) } }) {
-                            Text("Retirer")
-                        }
+                        if (!legacy)
+                            TextButton(onClick = { change { it.withExclusive(node.id, false) } }) {
+                                Text("Retirer")
+                            }
                     }
                 HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
             }
@@ -1839,9 +1860,10 @@ private fun NodesSection(
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Text("Node supprimée ou révoquée", Modifier.weight(1f))
                     ToneChip(PluginBadge("Introuvable", PluginTone.ATTENTION))
-                    TextButton(onClick = { change { it.withExclusive(id, false) } }) {
-                        Text("Retirer")
-                    }
+                    if (!legacy)
+                        TextButton(onClick = { change { it.withExclusive(id, false) } }) {
+                            Text("Retirer")
+                        }
                 }
             }
     Text(

@@ -824,6 +824,10 @@ private fun InstanceEditor(
                             put("maxPerPersonPerHour", perPerson.toIntOrNull() ?: 5)
                         }
                         put("enabled", enabled)
+                        // An older installation reads a missing list as "no agents": send the
+                        // current grants unchanged. A current one keeps them when omitted.
+                        if (!creating && olderInstallation(state.agents))
+                            put("agentIds", JsonArray(initial.agentIds.map(::JsonPrimitive)))
                     },
                     method = if (creating) "POST" else "PUT",
                 )

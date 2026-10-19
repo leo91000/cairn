@@ -121,6 +121,9 @@ const nodes = ref<ExecutionNode[]>([])
 const catalog = ref<Catalog>({ packages: [], capabilities: [], connections: [] })
 // Only a loaded catalogue says which grants exist: on failure, plugin access is shown read-only.
 const catalogError = ref('')
+// Never restrict from an empty list: when nodes cannot be loaded, node access is read-only.
+const nodesError = ref('')
+const nodesLoading = ref(false)
 const catalogLoading = ref(false)
 // The dedicated GitHub token is a separate secret, saved with the page.
 const githubConfigured = ref(false)
@@ -151,6 +154,7 @@ const context = computed<Context>(() => ({
   packages: catalog.value.packages,
   connections: catalog.value.connections,
   pluginsUnavailable: Boolean(catalogError.value),
+  nodesUnavailable: Boolean(nodesError.value),
 }))
 const access = computed(() => draft.value.access)
 const availableNodes = computed(() => nodes.value.filter(node => !node.revoked))
@@ -258,9 +262,11 @@ const summaries = computed<Record<SectionId, { short: string, long: string }>>((
   plugins: catalogError.value
     ? { short: 'Unavailable', long: 'Not loaded' }
     : { short: draft.value.plugins.length ? String(draft.value.plugins.length) : 'None', long: pluginSummary.value || 'None' },
-  nodes: { short: short(access.value.nodes, availableNodes.value.length), long: `${selectionSummary(access.value.nodes, availableNodes.value.length)}${exclusiveNodes.value.length ? ` · exclusive on ${exclusiveNodes.value.length}` : ''}` },
+  nodes: nodesError.value
+    ? { short: 'Unavailable', long: 'Not loaded' }
+    : { short: short(access.value.nodes, availableNodes.value.length), long: `${selectionSummary(access.value.nodes, availableNodes.value.length)}${exclusiveNodes.value.length ? ` · exclusive on ${exclusiveNodes.value.length}` : ''}` },
   sandbox: { short: sandbox.value.label, long: sandbox.value.label },
-  powers: { short: powers.value ? String(powers.value) : 'None', long: [exclusiveNodes.value.length ? 'Exclusive reservation' : '', access.value.installation ? 'Installation management' : ''].filter(Boolean).join(' · ') || 'None' },
+  powers: { short: powers.value ? String(powers.value) : nodesError.value ? 'Unavailable' : 'None', long: [nodesError.value ? 'Exclusive reservation not loaded' : exclusiveNodes.value.length ? 'Exclusive reservation' : '', access.value.installation ? 'Installation management' : ''].filter(Boolean).join(' · ') || 'None' },
   advanced: { short: draft.value.timeoutMinutes ? `${draft.value.timeoutMinutes} min` : '', long: draft.value.timeoutMinutes ? `Time limit: ${draft.value.timeoutMinutes} minutes` : 'No time limit' },
 }))
 
@@ -317,17 +323,17 @@ const overview = computed(() => [
         id: 'nodes',
         section: 'nodes' as const,
         title: 'Execution',
-        summary: access.value.nodes === null ? 'All nodes, including future' : `${access.value.nodes.length} of ${availableNodes.value.length} ${availableNodes.value.length === 1 ? 'node' : 'nodes'}`,
-        detail: access.value.nodes === null ? `${availableNodes.value.length} today` : names(access.value.nodes, node => nodeName(nodes.value.find(item => item.id === node), node)) || 'Cannot run anywhere',
-        chip: access.value.nodes?.length === 0 ? { tone: 'none' as const, label: 'None' } : { tone: 'granted' as const, label: 'Granted' },
+        summary: nodesError.value ? 'Not loaded' : access.value.nodes === null ? 'All nodes, including future' : `${access.value.nodes.length} of ${availableNodes.value.length} ${availableNodes.value.length === 1 ? 'node' : 'nodes'}`,
+        detail: nodesError.value ? 'Nodes could not be loaded' : access.value.nodes === null ? `${availableNodes.value.length} today` : names(access.value.nodes, node => nodeName(nodes.value.find(item => item.id === node), node)) || 'Cannot run anywhere',
+        chip: nodesError.value ? { tone: 'unavailable' as const, label: 'Unavailable' } : access.value.nodes?.length === 0 ? { tone: 'none' as const, label: 'None' } : { tone: 'granted' as const, label: 'Granted' },
       },
       {
         id: 'exclusive',
         section: 'nodes' as const,
         title: 'Exclusive reservation',
-        summary: exclusiveNodes.value.length ? names(exclusiveNodes.value, node => nodeName(nodes.value.find(item => item.id === node), node)) : 'None',
-        detail: exclusiveNodes.value.length ? 'Can suspend other conversations for up to 15 minutes' : 'Cannot suspend other conversations',
-        chip: exclusiveNodes.value.length ? { tone: 'power' as const, label: 'Power' } : undefined,
+        summary: nodesError.value ? 'Not loaded' : exclusiveNodes.value.length ? names(exclusiveNodes.value, node => nodeName(nodes.value.find(item => item.id === node), node)) : 'None',
+        detail: nodesError.value ? 'Nodes could not be loaded' : exclusiveNodes.value.length ? 'Can suspend other conversations for up to 15 minutes' : 'Cannot suspend other conversations',
+        chip: nodesError.value ? { tone: 'unavailable' as const, label: 'Unavailable' } : exclusiveNodes.value.length ? { tone: 'power' as const, label: 'Power' } : undefined,
         power: true,
       },
       {
@@ -388,10 +394,11 @@ async function loadSuspension() {
   catch {}
 }
 
-async function loadGithub() {
-  if (isNew.value || isMain.value)
+// `target` is the agent being edited, also one created from /agents/new that the page still edits.
+async function loadGithub(target: string | null = isNew.value ? null : id.value) {
+  if (!target || target === MAIN_AGENT_ID)
     return
-  githubConfigured.value = (await api<{ configured: boolean }>(`/agents/${id.value}/github-token`)).configured
+  githubConfigured.value = (await api<{ configured: boolean }>(`/agents/${target}/github-token`)).configured
   savedDedicated.value = !saved.value.access.github && githubConfigured.value
   dedicated.value = savedDedicated.value
 }
@@ -423,17 +430,43 @@ async function retryCatalog() {
   }
 }
 
+// Like plugins, nodes that cannot be loaded leave the rest of the page usable.
+async function loadNodes() {
+  try {
+    const nodeList = await api<ExecutionNode[]>('/nodes')
+    nodesError.value = ''
+    return nodeList
+  }
+  catch (e) {
+    nodesError.value = (e as Error).message || 'Nodes could not be loaded.'
+    return null
+  }
+}
+
+async function retryNodes() {
+  nodesLoading.value = true
+  try {
+    const nodeList = await loadNodes()
+    if (nodeList)
+      nodes.value = nodeList
+  }
+  finally {
+    nodesLoading.value = false
+  }
+}
+
 async function load() {
   loadError.value = ''
   loaded.value = false
   try {
     const [agents, nodeList, plugins] = await Promise.all([
       api<Agent[]>('/agents'),
-      api<ExecutionNode[]>('/nodes'),
+      loadNodes(),
       // An installation without plugins still edits every other permission.
       loadCatalog(),
     ])
-    nodes.value = nodeList
+    if (nodeList)
+      nodes.value = nodeList
     if (plugins)
       catalog.value = plugins
     if (isNew.value) {
@@ -666,7 +699,7 @@ async function reloadAgent() {
     agent.value = found
     saved.value = draftOf(found)
     draft.value = rebaseDraft(base, mine, saved.value)
-    await loadGithub()
+    await loadGithub(found.id)
     if (githubEdited)
       dedicated.value = pendingDedicated
     conflict.value = false
@@ -1079,7 +1112,22 @@ const errorCount = computed(() => Object.keys(fieldErrors.value).length)
           </template>
 
           <template v-else-if="section === 'nodes'">
-            <AgentNodesSection v-model:access="draft.access" v-model:exclusive-nodes="draft.exclusiveNodes" :nodes="nodes" />
+            <div v-if="nodesError" class="grid gap-3 rounded-xl border border-line bg-surface p-5" role="alert">
+              <p class="text-sm">
+                Nodes could not be loaded, so this agent’s node access cannot be shown or changed. {{ nodesError }}
+              </p>
+              <div>
+                <UiButton size="small" :disabled="nodesLoading" @click="retryNodes">
+                  {{ nodesLoading ? 'Loading…' : 'Try again' }}
+                </UiButton>
+              </div>
+            </div>
+            <AgentNodesSection
+              v-else
+              v-model:access="draft.access"
+              v-model:exclusive-nodes="draft.exclusiveNodes"
+              :nodes="nodes"
+            />
           </template>
 
           <template v-else-if="section === 'sandbox'">
@@ -1127,14 +1175,14 @@ const errorCount = computed(() => Object.keys(fieldErrors.value).length)
                   Exclusive reservation
                 </p>
                 <p class="mt-1 text-xs text-muted">
-                  {{ exclusiveNodes.length ? `Granted on ${names(exclusiveNodes, node => nodeName(nodes.find(item => item.id === node), node), 5)}` : 'Not granted on any node' }} ·
+                  {{ nodesError ? 'Not loaded: nodes could not be loaded' : exclusiveNodes.length ? `Granted on ${names(exclusiveNodes, node => nodeName(nodes.find(item => item.id === node), node), 5)}` : 'Not granted on any node' }} ·
                   <RouterLink :to="{ query: { section: 'nodes' } }" class="text-accent hover:underline">
                     Set per node ›
                   </RouterLink>
                 </p>
               </div>
-              <AccessChip :tone="exclusiveNodes.length ? 'power' : 'none'">
-                {{ exclusiveNodes.length ? `${exclusiveNodes.length} ${exclusiveNodes.length === 1 ? 'node' : 'nodes'}` : 'None' }}
+              <AccessChip :tone="nodesError ? 'unavailable' : exclusiveNodes.length ? 'power' : 'none'">
+                {{ nodesError ? 'Unavailable' : exclusiveNodes.length ? `${exclusiveNodes.length} ${exclusiveNodes.length === 1 ? 'node' : 'nodes'}` : 'None' }}
               </AccessChip>
             </div>
             <div class="rounded-xl bg-inset px-5 py-4 text-xs leading-relaxed text-muted">

@@ -429,9 +429,18 @@ it('opens the review only for what this edit does', () => {
   // Already suspended by an earlier change: listed if the review opens, but it does not open it.
   expect(needsReview(reduction, preview)).toBe(false)
   expect(needsReview(reduction, { ...preview, delegations: [{ ...delegation, alreadySuspended: false }] })).toBe(true)
-  expect(needsReview(reduction, { ...preview, delegations: [{ ...delegation, blocked: 'Too broad' }] })).toBe(true)
+  // Blocked or not, as on Android.
+  expect(needsReview(reduction, { ...preview, delegations: [{ ...delegation, blocked: 'Too broad' }] })).toBe(false)
+  expect(needsReview(reduction, { ...preview, delegations: [{ ...delegation, blocked: 'Too broad', alreadySuspended: false }] })).toBe(true)
   expect(needsReview(reduction, { ...preview, runs: { queued: 1, running: 0 } })).toBe(true)
   expect(needsReview([{ ...reduction[0]!, kind: 'secret' }], null)).toBe(true)
   // Moving to the saved GitHub token changes the agent's credentials.
   expect(needsReview(reduction, null, true)).toBe(true)
+})
+
+it('raises no node issue while the nodes are not loaded', () => {
+  const draft = newAgentDraft()
+  draft.exclusiveNodes = ['gone']
+  expect(issues(draft, { ...context, nodes: [], nodesUnavailable: true }, false)).toEqual([])
+  expect(issues(draft, { ...context, nodes: [] }, false).map(issue => issue.section)).toEqual(['nodes'])
 })

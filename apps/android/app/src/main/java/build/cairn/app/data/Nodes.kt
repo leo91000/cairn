@@ -93,11 +93,14 @@ suspend fun grantNodeAgents(
     }
 }
 
-/** An installation that predates `add` refuses it as an unknown field. */
+/**
+ * An installation that predates `add` refuses the unknown field while decoding the request, with
+ * its generic "Invalid node request." (or a serde "unknown field" message).
+ */
 private fun rejectsGrantOnly(error: ApiException): Boolean {
-    val message = error.message.orEmpty().lowercase()
+    val message = error.message.orEmpty().trim()
     return error.status == 400 &&
-        ("unknown field" in message || Regex("""\badd\b""").containsMatchIn(message))
+        (message == "Invalid node request." || "unknown field" in message.lowercase())
 }
 
 @Serializable

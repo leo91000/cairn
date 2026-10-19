@@ -454,7 +454,8 @@ class AgentEditingTest {
         sent.clear()
         grantNodeAgents(listOf("agent"), setOf("other")) { body ->
             sent += body
-            if ("add" in body) throw ApiException(400, "unknown field `add`, expected `agentIds`")
+            // What an older server answers when decoding the unknown field fails.
+            if ("add" in body) throw ApiException(400, "Invalid node request.")
         }
         assertEquals(2, sent.size)
         assertFalse("add" in sent.last())
@@ -462,6 +463,14 @@ class AgentEditingTest {
             setOf("other", "agent"),
             sent.last()["agentIds"]!!.jsonArray.map { it.jsonPrimitive.content }.toSet(),
         )
+
+        // A serde-style unknown-field message is recognized too.
+        sent.clear()
+        grantNodeAgents(listOf("agent"), setOf("other")) { body ->
+            sent += body
+            if ("add" in body) throw ApiException(400, "unknown field `add`, expected `agentIds`")
+        }
+        assertEquals(2, sent.size)
 
         // Other failures, including another 400, are reported without replacing the list.
         for (error in listOf(ApiException(500, "Erreur"), ApiException(400, "Invalid agent id."))) {
