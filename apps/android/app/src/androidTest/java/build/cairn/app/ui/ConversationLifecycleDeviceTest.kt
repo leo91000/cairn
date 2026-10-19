@@ -9,7 +9,11 @@ import org.junit.runner.RunWith
 @RobolectricTwin
 @RunWith(AndroidJUnit4::class)
 class ConversationLifecycleDeviceTest : ConversationLifecycleCases() {
-    override fun captureSwipe() {
+    override fun captureFreshSession(name: String) = capture("fresh-session-$name.png")
+
+    override fun captureSwipe() = capture("swipe-fil.png")
+
+    private fun capture(name: String) {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         // The mid-gesture frame must reach the display before the system screenshot.
         instrumentation.waitForIdleSync()
@@ -18,7 +22,7 @@ class ConversationLifecycleDeviceTest : ConversationLifecycleCases() {
             File(instrumentation.targetContext.filesDir, "conversation-lifecycle").apply {
                 mkdirs()
             }
-        File(directory, "swipe-fil.png").outputStream().use {
+        File(directory, name).outputStream().use {
             check(
                 instrumentation.uiAutomation
                     .takeScreenshot()

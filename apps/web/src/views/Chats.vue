@@ -1020,7 +1020,7 @@ function key(event: KeyboardEvent) {
                 Open Connections
               </RouterLink>
             </div>
-            <div v-if="detail?.restoredAt && ['failed', 'interrupted'].includes(detail.run?.status ?? '') && !detail.sessionRestartRequested" class="mb-3 rounded-lg border border-line p-3 text-sm">
+            <div v-if="detail?.canRequestNewSession" class="mb-3 rounded-lg border border-line p-3 text-sm">
               <p>If the restored native session is incompatible, start a fresh session using the preserved history and files.</p>
               <UiButton :disabled="busy" @click="newSession = true">
                 Start a fresh agent session
