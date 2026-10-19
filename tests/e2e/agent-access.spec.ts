@@ -734,7 +734,13 @@ test('restricting projects moves the agent from the shared GitHub connection to 
   await expect(page.getByRole('radio', { name: /^Dedicated token/ })).toBeChecked()
   const note = page.getByRole('status').filter({ hasText: 'The shared connection was turned off: this agent will use its saved dedicated token.' })
   await expect(note).toBeVisible()
-  await saveAgent(page)
+  // Moving to the saved token changes the agent's credentials: the review says so first.
+  await page.getByRole('region', { name: 'Unsaved changes' }).getByRole('button', { name: 'Save', exact: true }).click()
+  const review = page.getByRole('dialog', { name: 'Review before saving' })
+  await expect(review).toContainText('Shared GitHub connection turned off: the agent will use its saved dedicated token.')
+  await review.getByRole('button', { name: 'Save', exact: true }).click()
+  await expect(review).toHaveCount(0)
+  await expect(page.getByRole('region', { name: 'Unsaved changes' })).toHaveCount(0)
   expect(tokenSaves).toEqual([])
   expect(await workspace.api(`/api/agents/${agent.id}/github-token`)).toEqual({ configured: true })
   expect((await workspace.api('/api/agents')).find((item: { id: string }) => item.id === agent.id).access).toMatchObject({ projects: [], github: false })
@@ -747,4 +753,37 @@ test('restricting projects moves the agent from the shared GitHub connection to 
   await saveAgent(page)
   expect(tokenSaves).toEqual([JSON.stringify({ token: '' })])
   expect(await workspace.api(`/api/agents/${agent.id}/github-token`)).toEqual({ configured: false })
+})
+
+test('when plugins cannot be loaded, plugin access is read-only and no grant looks deleted', async ({ page, workspace }) => {
+  await useRelayForHttpMocks(page)
+  const agent = await workspace.api('/api/agents', 'POST', { name: 'Catalog reader' })
+  await page.route('**/api/agents', async (route) => {
+    if (route.request().method() !== 'GET') {
+      await route.continue()
+      return
+    }
+
+    const response = await route.fetch()
+    const agents = await response.json()
+    await route.fulfill({ response, json: agents.map((item: { id: string }) => item.id === agent.id ? { ...item, plugins: ['queue'] } : item) })
+  })
+  let catalogFails = true
+  await page.route('**/api/plugins', route => catalogFails
+    ? route.fulfill({ status: 500, json: { error: 'Plugin host unavailable' } })
+    : route.fulfill({ json: { packages: [], capabilities: [], connections: [] } }))
+  await page.goto(workspacePath(`/agents/${agent.id}`))
+  await authenticateWorkspace(page)
+  await expect(page.getByRole('button', { name: /^Secrets & plugins/ })).toContainText('Not loaded')
+  await expect(page.getByText('to check')).toHaveCount(0)
+
+  await openAgentSection(page, 'Secrets & plugins')
+  const failure = page.getByRole('alert').filter({ hasText: 'Plugins could not be loaded' })
+  await expect(failure).toContainText('Plugin host unavailable')
+  await expect(page.getByRole('button', { name: 'Remove deleted plugin instances' })).toHaveCount(0)
+  // Once loaded, the grant is checked again: here its instance is really gone.
+  catalogFails = false
+  await failure.getByRole('button', { name: 'Try again', exact: true }).click()
+  await expect(failure).toHaveCount(0)
+  await expect(page.getByRole('button', { name: 'Remove deleted plugin instances' })).toBeVisible()
 })

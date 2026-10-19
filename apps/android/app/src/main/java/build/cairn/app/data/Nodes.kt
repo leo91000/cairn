@@ -67,26 +67,37 @@ fun ExecutionNode.grantedAgents(agents: List<Agent> = emptyList()): Set<String> 
         agents.filter { it.access.nodes?.contains(id) == true }.map { it.id }
 
 /**
- * Grants [chosen] agents a node with `PUT /nodes/{id}/agents` `{ agentIds, add: true }`, which
- * never revokes anyone. An older installation rejects `add` (400): the request is then sent once
- * without it, with the full list ([granted] plus [chosen]) since that form replaces the node's
- * list.
+ * Grants a node to the agents newly [chosen] (already allowed ones in [granted] are skipped) with
+ * `PUT /nodes/{id}/agents` `{ agentIds, add: true }`, which never revokes anyone. Nothing is sent
+ * when no agent is new. An older installation rejects the unknown `add` field (400): the request is
+ * then sent once without it, with the full list, since that form replaces the node's list. Any
+ * other rejection is reported.
  */
 suspend fun grantNodeAgents(
     chosen: List<String>,
     granted: Set<String>,
     send: suspend (JsonObject) -> Unit,
 ) {
+    val added = chosen.distinct().filter { it !in granted }
+    if (added.isEmpty()) return
+
     fun body(ids: List<String>, grantOnly: Boolean) = buildJsonObject {
         put("agentIds", buildJsonArray { ids.forEach { add(JsonPrimitive(it)) } })
         if (grantOnly) put("add", true)
     }
     try {
-        send(body(chosen.distinct(), grantOnly = true))
+        send(body(added, grantOnly = true))
     } catch (e: ApiException) {
-        if (e.status != 400) throw e
-        send(body((granted + chosen).distinct(), grantOnly = false))
+        if (!rejectsGrantOnly(e)) throw e
+        send(body((granted + added).toList(), grantOnly = false))
     }
+}
+
+/** An installation that predates `add` refuses it as an unknown field. */
+private fun rejectsGrantOnly(error: ApiException): Boolean {
+    val message = error.message.orEmpty().lowercase()
+    return error.status == 400 &&
+        ("unknown field" in message || Regex("""\badd\b""").containsMatchIn(message))
 }
 
 @Serializable

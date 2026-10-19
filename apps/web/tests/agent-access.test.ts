@@ -14,6 +14,7 @@ import {
   grantableConnection,
   grantablePackages,
   issues,
+  needsReview,
   newAgentDraft,
   rebaseDraft,
   restrictedGithubMode,
@@ -372,4 +373,65 @@ it('says when restricted projects move the agent to its saved GitHub token', () 
   draft.access.github = false
   expect(reviewLines(saved, draft, context, undefined, null, true).at(-1)!.text).toBe('Shared GitHub connection turned off: the agent will use its saved dedicated token.')
   expect(reviewLines(saved, draft, context).at(-1)!.text).toBe('Shared GitHub connection turned off: selected projects require a dedicated token.')
+})
+
+it('raises no plugin issue while the plugin catalogue is not loaded', () => {
+  const draft = newAgentDraft()
+  draft.plugins = ['prod', 'gone']
+  expect(issues(draft, {
+    ...context,
+    connections: [],
+    packages: [],
+    pluginsUnavailable: true,
+  }, false)).toEqual([])
+  expect(issues(draft, context, false).map(issue => issue.text)).toEqual(['A granted plugin instance no longer exists.'])
+})
+
+it('lists a delegation answering as the agent that waits for reapproval, as Android does', () => {
+  const bot = {
+    ...production,
+    id: 'bot',
+    pluginId: 'discord',
+    name: '#support on Acme',
+    agentId: 'a',
+    status: { state: 'needs_review' },
+  } as PluginConnection
+  const withBot = { ...context, connections: [production, bot] }
+  expect(issues(newAgentDraft(), withBot, false, 'a').map(issue => issue.text)).toEqual(['#support on Acme is suspended until it is reapproved.'])
+  expect(issues(newAgentDraft(), withBot, false, 'other')).toEqual([])
+  expect(issues(newAgentDraft(), { ...withBot, connections: [{ ...bot, enabled: false }] }, false, 'a')).toEqual([])
+})
+
+it('compares MCP tool choices as sets', () => {
+  const saved = newAgentDraft()
+  saved.access.mcps = ['m1']
+  saved.access.mcpTools = { m1: ['echo', 'search'] }
+  const draft = structuredClone(saved)
+  draft.access.mcpTools = { m1: ['search', 'echo'] }
+  expect(changes(saved, draft)).toEqual([])
+  draft.access.mcpTools = { m1: ['search'] }
+  expect(changes(saved, draft)).toEqual(['mcps'])
+})
+
+it('opens the review only for what this edit does', () => {
+  const reduction = [{ kind: 'reduction' as const, section: 'projects' as const, text: 'Removed: project SheetOM.' }]
+  const delegation = {
+    id: 'bot',
+    pluginId: 'discord',
+    name: 'Bot',
+    enabled: true,
+    suspended: true,
+    blocked: null,
+    alreadySuspended: true,
+  }
+  const preview = { runs: { queued: 0, running: 0 }, delegations: [delegation] }
+  expect(needsReview(reduction, null)).toBe(false)
+  // Already suspended by an earlier change: listed if the review opens, but it does not open it.
+  expect(needsReview(reduction, preview)).toBe(false)
+  expect(needsReview(reduction, { ...preview, delegations: [{ ...delegation, alreadySuspended: false }] })).toBe(true)
+  expect(needsReview(reduction, { ...preview, delegations: [{ ...delegation, blocked: 'Too broad' }] })).toBe(true)
+  expect(needsReview(reduction, { ...preview, runs: { queued: 1, running: 0 } })).toBe(true)
+  expect(needsReview([{ ...reduction[0]!, kind: 'secret' }], null)).toBe(true)
+  // Moving to the saved GitHub token changes the agent's credentials.
+  expect(needsReview(reduction, null, true)).toBe(true)
 })

@@ -109,6 +109,10 @@ abstract class AgentPageCases {
         val failRefresh: AtomicBoolean = AtomicBoolean(false),
         /** The machine list fails to load. */
         val failNodes: AtomicBoolean = AtomicBoolean(false),
+        /** The plugin catalog fails to load. */
+        val failPlugins: AtomicBoolean = AtomicBoolean(false),
+        /** The agent has a dedicated GitHub token saved. */
+        val tokenConfigured: AtomicBoolean = AtomicBoolean(false),
     )
 
     private fun fixture(): Fixture {
@@ -122,6 +126,8 @@ abstract class AgentPageCases {
         val rejectUpdate = AtomicBoolean(false)
         val failRefresh = AtomicBoolean(false)
         val failNodes = AtomicBoolean(false)
+        val failPlugins = AtomicBoolean(false)
+        val tokenConfigured = AtomicBoolean(false)
         val server = MockWebServer()
         server.dispatcher =
             object : Dispatcher() {
@@ -192,6 +198,10 @@ abstract class AgentPageCases {
                         return response
                             .setResponseCode(409)
                             .setBody("""{"error":"Rechargement impossible"}""")
+                    if (path == "/plugins" && failPlugins.get())
+                        return response
+                            .setResponseCode(409)
+                            .setBody("""{"error":"Plugins indisponibles"}""")
                     if (path == "/nodes" && failNodes.get())
                         return response
                             .setResponseCode(409)
@@ -202,7 +212,8 @@ abstract class AgentPageCases {
                                 if (path.startsWith("/agents/agent"))
                                     """{"runs":{"queued":0,"running":0},"delegations":[{"id":"bot","pluginId":"discord","name":"#support","enabled":true,"suspended":true,"blocked":null,"alreadySuspended":${alreadySuspended.get()}}]}"""
                                 else """{"runs":{"queued":0,"running":0},"delegations":[]}"""
-                            path.endsWith("/github-token") -> """{"configured":false}"""
+                            path.endsWith("/github-token") ->
+                                """{"configured":${tokenConfigured.get()}}"""
                             path == "/agents" -> wireJson.encodeToString(agents.get())
                             path == "/projects" ->
                                 """[{"id":"p1","name":"cairn","path":"/srv/cairn"},{"id":"p2","name":"SheetOM","path":"/srv/sheetom"}]"""
@@ -232,6 +243,8 @@ abstract class AgentPageCases {
             rejectUpdate,
             failRefresh,
             failNodes,
+            failPlugins,
+            tokenConfigured,
         )
     }
 
@@ -494,8 +507,22 @@ abstract class AgentPageCases {
     fun aDelegationSuspendedEarlierIsNotReapprovedByDefault() {
         journey("agent") { fixture ->
             fixture.alreadySuspended.set(true)
+            // An earlier suspension alone does not open the review.
             open(AgentSection.Identity)
             compose.onNodeWithText("Nom").performTextReplacement("Release bot")
+            back()
+            compose.onNodeWithText("Enregistrer").performClick()
+            compose.waitUntil(15000) {
+                fixture.saved.size == 1 &&
+                    compose.onAllNodesWithTag("agent-save-bar").fetchSemanticsNodes().isEmpty()
+            }
+            compose.onNodeWithTag("agent-review").assertDoesNotExist()
+            assertFalse("reapproveDelegations" in fixture.saved.single().second)
+
+            // When a grant opens it, the delegation is listed unchecked.
+            open(AgentSection.Plugins)
+            waitForDescription("Accès à Production")
+            compose.onNodeWithContentDescription("Accès à Production").performClick()
             back()
             compose.onNodeWithText("Enregistrer").performClick()
             compose.waitUntil(15000) {
@@ -509,8 +536,63 @@ abstract class AgentPageCases {
                 )
                 .assertExists()
             confirmReview()
-            compose.waitUntil(15000) { fixture.saved.isNotEmpty() }
-            assertFalse("reapproveDelegations" in fixture.saved.single().second)
+            compose.waitUntil(15000) { fixture.saved.size == 2 }
+            assertFalse("reapproveDelegations" in fixture.saved.last().second)
+        }
+    }
+
+    @Test
+    fun aReloadAfterAConflictReadsTheTokenAgain() {
+        journey("agent") { fixture ->
+            open(AgentSection.Identity)
+            compose.onNodeWithText("Nom").performTextReplacement("Release bot")
+            back()
+            // Someone else saved the agent and its dedicated token meanwhile.
+            fixture.conflict.set(true)
+            fixture.tokenConfigured.set(true)
+            compose.onNodeWithText("Enregistrer").performClick()
+            confirmReview()
+            waitForText("Cet agent a été modifié ailleurs", substring = true)
+            compose.onNodeWithText("Recharger").performClick()
+            compose.waitUntil(15000) {
+                compose.onAllNodesWithText("Recharger").fetchSemanticsNodes().isEmpty()
+            }
+            compose
+                .onNodeWithContentDescription("GitHub, ${GithubMode.Dedicated.label}")
+                .assertExists()
+            open(AgentSection.Github)
+            compose.onNodeWithText("Un jeton est enregistré.").assertExists()
+        }
+    }
+
+    @Test
+    fun pluginGrantsStayAsTheyAreWhenTheCatalogFailsToLoad() {
+        journey(
+            "agent",
+            prepare = { fixture ->
+                fixture.failPlugins.set(true)
+                fixture.agents.set(
+                    fixture.agents.get().map {
+                        if (it.id == "agent") it.copy(plugins = listOf("prod")) else it
+                    }
+                )
+            },
+        ) { fixture ->
+            // Nothing is reported missing while the catalog is unknown.
+            compose.onNodeWithText("point à vérifier", substring = true).assertDoesNotExist()
+            open(AgentSection.Plugins)
+            waitForText("Impossible de charger les plugins", substring = true)
+            compose.onNodeWithText("1 instance accordée.").assertExists()
+            compose.onNodeWithText("Retirer").assertDoesNotExist()
+            compose.onNodeWithText("Instance supprimée").assertDoesNotExist()
+
+            fixture.failPlugins.set(false)
+            compose.onNodeWithText("Réessayer").performClick()
+            waitForDescription("Accès à Production")
+            compose.onNodeWithContentDescription("Accès à Production").assertIsOn()
+            compose
+                .onNodeWithText("Impossible de charger les plugins", substring = true)
+                .assertDoesNotExist()
         }
     }
 

@@ -111,6 +111,9 @@ private fun AgentPage(
     var nodesFailed by remember { mutableStateOf(false) }
     var nodesAttempt by remember { mutableIntStateOf(0) }
     var catalog by remember { mutableStateOf<PluginCatalog?>(null) }
+    // Without the catalog, held grants cannot be checked: the section stays read-only.
+    var catalogFailed by remember { mutableStateOf(false) }
+    var catalogAttempt by remember { mutableIntStateOf(0) }
     var tokenSaved by remember { mutableStateOf(false) }
     var saving by remember { mutableStateOf(false) }
     var saveError by remember { mutableStateOf<String?>(null) }
@@ -137,15 +140,16 @@ private fun AgentPage(
             nodesFailed = true
         }
     }
-    LaunchedEffect(agentId) {
+    LaunchedEffect(agentId, catalogAttempt) {
         try {
             catalog = vm.api.get("/plugins")
+            catalogFailed = false
         } catch (e: Exception) {
             if (e is CancellationException) throw e
-            catalog = PluginCatalog()
+            catalogFailed = true
         }
     }
-    LaunchedEffect(agentId) {
+    suspend fun loadToken() {
         if (agentId.isNotBlank())
             try {
                 tokenSaved =
@@ -154,6 +158,7 @@ private fun AgentPage(
                 if (e is CancellationException) throw e
             }
     }
+    LaunchedEffect(agentId) { loadToken() }
 
     val changes = agentChanges(baseline, draft, tokenSaved, newToken)
     val dirty = changes.isNotEmpty()
@@ -333,6 +338,8 @@ private fun AgentPage(
                         ?: error("Cet agent n’existe plus.")
                 draft = draft.rebased(baseline, theirs)
                 baseline = theirs
+                // The token may have been set or removed elsewhere too.
+                loadToken()
                 saveError = null
                 conflict = false
                 runCatching { vm.refresh() }
@@ -421,7 +428,14 @@ private fun AgentPage(
                                 },
                             )
                     AgentSection.Plugins ->
-                        PluginsSection(draft.agent, catalog, { navigate(it) }, ::update)
+                        PluginsSection(
+                            draft.agent,
+                            catalog,
+                            catalogFailed,
+                            retry = { catalogAttempt++ },
+                            navigate = { navigate(it) },
+                            change = ::update,
+                        )
                     AgentSection.Nodes ->
                         NodesSection(
                             draft.agent,
@@ -1545,11 +1559,30 @@ private fun SwitchRow(
 private fun PluginsSection(
     agent: Agent,
     catalog: PluginCatalog?,
+    failed: Boolean,
+    retry: () -> Unit,
     navigate: (String) -> Unit,
     change: ((Agent) -> Agent) -> Unit,
 ) {
     if (catalog == null) {
-        LinearProgressIndicator(Modifier.fillMaxWidth())
+        if (!failed) {
+            LinearProgressIndicator(Modifier.fillMaxWidth())
+            return
+        }
+        // Grants are kept as they are: nothing can be checked, granted or removed until it loads.
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text(
+                "Impossible de charger les plugins. Leurs accès ne peuvent pas être modifiés pour l’instant.",
+                Modifier.weight(1f),
+                color = MaterialTheme.colorScheme.error,
+            )
+            TextButton(onClick = retry) { Text("Réessayer") }
+        }
+        if (agent.plugins.isNotEmpty())
+            Note(
+                if (agent.plugins.size == 1) "1 instance accordée."
+                else "${agent.plugins.size} instances accordées."
+            )
         return
     }
     val granted = agent.plugins

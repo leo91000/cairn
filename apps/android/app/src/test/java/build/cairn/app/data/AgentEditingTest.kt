@@ -454,7 +454,7 @@ class AgentEditingTest {
         sent.clear()
         grantNodeAgents(listOf("agent"), setOf("other")) { body ->
             sent += body
-            if ("add" in body) throw ApiException(400, "Unknown field add")
+            if ("add" in body) throw ApiException(400, "unknown field `add`, expected `agentIds`")
         }
         assertEquals(2, sent.size)
         assertFalse("add" in sent.last())
@@ -463,16 +463,80 @@ class AgentEditingTest {
             sent.last()["agentIds"]!!.jsonArray.map { it.jsonPrimitive.content }.toSet(),
         )
 
-        // Other failures are not retried.
-        sent.clear()
-        val failed = runCatching {
-            grantNodeAgents(listOf("agent"), setOf("other")) { body ->
-                sent += body
-                throw ApiException(500, "Erreur")
+        // Other failures, including another 400, are reported without replacing the list.
+        for (error in listOf(ApiException(500, "Erreur"), ApiException(400, "Invalid agent id."))) {
+            sent.clear()
+            val failed = runCatching {
+                grantNodeAgents(listOf("agent"), setOf("other")) { body ->
+                    sent += body
+                    throw error
+                }
             }
+            assertEquals(error, failed.exceptionOrNull())
+            assertEquals(1, sent.size)
         }
-        assertTrue(failed.isFailure)
-        assertEquals(1, sent.size)
+
+        // Nothing new chosen: no request at all.
+        sent.clear()
+        grantNodeAgents(listOf("other"), setOf("other")) { sent += it }
+        grantNodeAgents(emptyList(), setOf("other")) { sent += it }
+        assertTrue(sent.isEmpty())
+    }
+
+    @Test
+    fun reviewOpensForTheTokenSwitchButNotForAnEarlierSuspensionAlone() {
+        val switched =
+            ReviewLine(ReviewKind.Reduction, "Connexion GitHub partagée désactivée", true)
+        assertTrue(needsReview(listOf(switched), null))
+        assertFalse(needsReview(listOf(switched.copy(opensReview = false)), null))
+
+        val earlier =
+            AgentPreview(
+                delegations =
+                    listOf(AgentDelegationEffect("bot", suspended = true, alreadySuspended = true))
+            )
+        assertFalse(needsReview(emptyList(), earlier))
+        val now = AgentPreview(delegations = listOf(AgentDelegationEffect("bot", suspended = true)))
+        assertTrue(needsReview(emptyList(), now))
+    }
+
+    @Test
+    fun reorderedToolChoicesAreNotAChange() {
+        val chosen =
+            agent.copy(access = agent.access.copy(mcpTools = mapOf("m" to listOf("a", "b"))))
+        val reordered =
+            AgentDraft(
+                chosen.copy(access = chosen.access.copy(mcpTools = mapOf("m" to listOf("b", "a"))))
+            )
+        assertTrue(agentChanges(chosen, reordered, false, "").isEmpty())
+        val narrowed =
+            AgentDraft(
+                chosen.copy(access = chosen.access.copy(mcpTools = mapOf("m" to listOf("a"))))
+            )
+        assertEquals(listOf(AgentSection.Mcp), agentChanges(chosen, narrowed, false, ""))
+    }
+
+    @Test
+    fun issuesFlagMissingProjectsAndDisabledConnectionsGrantedThroughAll() {
+        val mcps =
+            listOf(
+                Mcp(id = "on", name = "Linear"),
+                Mcp(id = "off", name = "Sentry", enabled = false),
+            )
+        val gone =
+            agent.copy(access = agent.access.copy(projects = listOf("p1", "gone"), mcps = null))
+        val issues = agentIssues(gone, resources.copy(mcps = mcps))
+        assertEquals(listOf(AgentSection.Projects, AgentSection.Mcp), issues.map { it.section })
+        assertEquals("Un projet sélectionné n’existe plus.", issues[0].text)
+        assertTrue("« Sentry » est désactivée" in issues[1].text)
+
+        // The main agent always has every project and connection: nothing to check there.
+        assertTrue(
+            agentIssues(gone.copy(id = MAIN_AGENT_ID), resources.copy(mcps = mcps)).isEmpty()
+        )
+        // A connection the agent does not hold is not its problem.
+        val limited = gone.copy(access = gone.access.copy(projects = null, mcps = listOf("on")))
+        assertTrue(agentIssues(limited, resources.copy(mcps = mcps)).isEmpty())
     }
 
     @Test

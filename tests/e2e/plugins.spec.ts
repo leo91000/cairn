@@ -194,7 +194,20 @@ test('Discord bots are set up through the package’s own form and keep the toke
     await page.getByRole('region', { name: 'Unsaved changes' }).getByRole('button', { name: 'Save', exact: true }).click()
   }
 
+  // Alone, a delegation already suspended does not open the review, and is not reapproved.
+  const direct = page.waitForRequest(request => request.method() === 'PUT' && new URL(request.url()).pathname.endsWith(`/agents/${helper.id}`))
   await describe('Answers support questions')
+  expect((await direct).postDataJSON()).not.toHaveProperty('reapproveDelegations')
+  await expect(page.getByRole('region', { name: 'Unsaved changes' })).toHaveCount(0)
+  await expect(review).toHaveCount(0)
+
+  // When the review opens for another reason, here queued work, it is listed unchecked.
+  await page.route(`**/api/agents/${helper.id}/preview`, async (route) => {
+    const response = await route.fetch()
+    const preview = await response.json()
+    await route.fulfill({ response, json: { ...preview, runs: { queued: 1, running: 0 } } })
+  })
+  await describe('Answers support questions on Acme')
   const earlier = review.getByRole('checkbox', { name: /Reapprove the new access for #support on Acme/ })
   await expect(earlier).not.toBeChecked()
   await expect(review).toContainText('Already suspended by an earlier change. Reapprove only after checking its current access.')
@@ -203,7 +216,7 @@ test('Discord bots are set up through the package’s own form and keep the toke
   expect((await unchecked).postDataJSON()).not.toHaveProperty('reapproveDelegations')
   await expect(review).toHaveCount(0)
   // Checked deliberately, it is reapproved.
-  await describe('Answers support questions on Acme')
+  await describe('Answers support questions in Acme')
   await earlier.check()
   const checked = page.waitForRequest(request => request.method() === 'PUT' && new URL(request.url()).pathname.endsWith(`/agents/${helper.id}`))
   await review.getByRole('button', { name: 'Save', exact: true }).click()

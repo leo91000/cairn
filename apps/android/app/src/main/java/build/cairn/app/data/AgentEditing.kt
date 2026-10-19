@@ -198,7 +198,11 @@ fun agentChanges(
         if (draft.timeout.trim() != original.timeoutMinutes.toString()) add(AgentSection.Advanced)
         if (after.projects != before.projects) add(AgentSection.Projects)
         if (after.skills != before.skills) add(AgentSection.Skills)
-        if (after.mcps != before.mcps || after.mcpTools != before.mcpTools) add(AgentSection.Mcp)
+        // Tool choices compare as sets: their order is not a change.
+        val toolsChanged =
+            after.mcpTools.mapValues { it.value.toSet() } !=
+                before.mcpTools.mapValues { it.value.toSet() }
+        if (after.mcps != before.mcps || toolsChanged) add(AgentSection.Mcp)
         if (after.github != before.github || draft.tokenChange(tokenSaved, newToken) != null)
             add(AgentSection.Github)
         if (edited.plugins.toSet() != original.plugins.toSet()) add(AgentSection.Plugins)
@@ -448,15 +452,9 @@ data class AgentIssue(val section: AgentSection, val text: String)
 fun agentIssues(agent: Agent, resources: AgentResources): List<AgentIssue> = buildList {
     val access = agent.access
     if (agent.id != MAIN_AGENT_ID) {
-        access.mcps.orEmpty().forEach { id ->
-            val mcp = resources.mcps.find { it.id == id }
-            if (mcp != null && !mcp.enabled)
-                add(
-                    AgentIssue(
-                        AgentSection.Mcp,
-                        "La connexion MCP « ${mcp.name} » est désactivée sur l’installation. L’agent la garde, mais ne peut pas l’utiliser.",
-                    )
-                )
+        access.projects.orEmpty().forEach { id ->
+            if (resources.projects.none { it.id == id })
+                add(AgentIssue(AgentSection.Projects, "Un projet sélectionné n’existe plus."))
         }
         if (resources.skills.isNotEmpty())
             access.skills.orEmpty().forEach { key ->
@@ -467,6 +465,17 @@ fun agentIssues(agent: Agent, resources: AgentResources): List<AgentIssue> = bui
                             "La skill « ${key.substringAfter('/')} » n’existe plus.",
                         )
                     )
+            }
+        // Granted one by one or through « Toutes, y compris futures ».
+        resources.mcps
+            .filter { !it.enabled && (access.mcps == null || it.id in access.mcps) }
+            .forEach { mcp ->
+                add(
+                    AgentIssue(
+                        AgentSection.Mcp,
+                        "La connexion MCP « ${mcp.name} » est désactivée sur l’installation. L’agent la garde, mais ne peut pas l’utiliser.",
+                    )
+                )
             }
     }
     if (resources.nodes.isNotEmpty()) {
@@ -548,7 +557,10 @@ enum class ReviewKind(val label: String) {
     Reduction("Réduction"),
 }
 
-data class ReviewLine(val kind: ReviewKind, val text: String)
+/**
+ * [opensReview]: a reduction the owner must see before saving, e.g. GitHub switching to a token.
+ */
+data class ReviewLine(val kind: ReviewKind, val text: String, val opensReview: Boolean = false)
 
 private val sandboxStrictness = mapOf("yolo" to 0, "workspace-write" to 1, "read-only" to 2)
 
@@ -721,13 +733,17 @@ fun agentReview(
         add(ReviewLine(ReviewKind.Reduction, "Accès modifié. ${runsSentence(runs)}"))
     if (before.github && !after.github && after.projects != null && before.projects == null)
         add(
-            ReviewLine(
-                ReviewKind.Reduction,
-                if (savedToken)
-                    "Connexion GitHub partagée désactivée : l’agent utilisera son jeton dédié enregistré."
-                else
+            if (savedToken)
+                ReviewLine(
+                    ReviewKind.Reduction,
+                    "Connexion GitHub partagée désactivée : l’agent utilisera son jeton dédié enregistré.",
+                    opensReview = true,
+                )
+            else
+                ReviewLine(
+                    ReviewKind.Reduction,
                     "Connexion GitHub partagée désactivée : les projets choisis exigent un jeton dédié.",
-            )
+                )
         )
 }
 
@@ -756,14 +772,15 @@ fun AgentPreview.preselectedReapprovals(): Set<String> =
         .toSet()
 
 /**
- * The review is needed for a power or a secret added, a reduction that stops work, or a delegation
- * it would suspend. Otherwise the page saves directly.
+ * The review is needed for a power or a secret added, a reduction that stops work or switches
+ * GitHub to the saved token, or a delegation this save would suspend. A delegation already
+ * suspended by an earlier change does not open it on its own. Otherwise the page saves directly.
  */
 fun needsReview(lines: List<ReviewLine>, preview: AgentPreview?): Boolean =
-    lines.any { it.kind != ReviewKind.Reduction } ||
+    lines.any { it.kind != ReviewKind.Reduction || it.opensReview } ||
         (preview != null &&
             (preview.runs.queued + preview.runs.running > 0 ||
-                preview.suspendedDelegations().isNotEmpty()))
+                preview.suspendedDelegations().any { !it.alreadySuspended }))
 
 /**
  * Applies the owner's edits to the newest saved agent after someone else saved it: every setting

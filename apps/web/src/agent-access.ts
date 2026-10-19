@@ -259,6 +259,8 @@ export interface Context {
   nodes: ExecutionNode[]
   packages: PluginEntry[]
   connections: PluginConnection[]
+  // The plugin catalogue could not be loaded: plugin grants cannot be checked.
+  pluginsUnavailable?: boolean
 }
 
 function listChanges(before: string[] | null, after: string[] | null) {
@@ -299,8 +301,10 @@ export function changes(saved: AgentDraft, draft: AgentDraft) {
   const savedTools = saved.access.mcpTools ?? {}
   const draftTools = draft.access.mcpTools ?? {}
   const tools = new Set([...Object.keys(savedTools), ...Object.keys(draftTools)])
+  // Tool choices are sets: unticking and reticking a tool changes nothing.
+  const asSet = (chosen: string[] | undefined) => chosen ? JSON.stringify([...new Set(chosen)].sort()) : null
   for (const connection of tools)
-    add('mcps', Number(JSON.stringify(savedTools[connection] ?? null) !== JSON.stringify(draftTools[connection] ?? null)))
+    add('mcps', Number(asSet(savedTools[connection]) !== asSet(draftTools[connection])))
   add('github', Number(saved.access.github !== draft.access.github))
   add('sandbox', Number(saved.access.sandbox !== draft.access.sandbox))
   add('powers', Number(saved.access.installation !== draft.access.installation))
@@ -419,13 +423,27 @@ export interface Preview {
   delegations: DelegationEffect[]
 }
 
+/**
+ * Whether saving needs the review first: a power or a secret added, interrupted work, a delegation
+ * this edit suspends or cannot reapprove, or a switch to the saved GitHub token. A delegation
+ * already suspended by an earlier change is listed when the review opens, but never opens it.
+ */
+export function needsReview(lines: ReviewLine[], preview: Preview | null, githubSwitch = false) {
+  const runs = preview ? preview.runs.queued + preview.runs.running : 0
+  const delegations = preview?.delegations.some(item => item.suspended && (item.blocked || !item.alreadySuspended)) ?? false
+  return lines.some(line => line.kind !== 'reduction') || runs > 0 || delegations || githubSwitch
+}
+
 export interface Issue {
   section: SectionId
   text: string
 }
 
-/** What the owner should check: grants that exist but cannot be used, or targets that are gone. */
-export function issues(draft: AgentDraft, context: Context, isMain: boolean) {
+/**
+ * What the owner should check: grants that exist but cannot be used, targets that are gone, and
+ * delegations answering as the agent (`agentId`) that wait for reapproval.
+ */
+export function issues(draft: AgentDraft, context: Context, isMain: boolean, agentId: string | null = null) {
   const found: Issue[] = []
   const access = draft.access
   if (!isMain) {
@@ -455,6 +473,9 @@ export function issues(draft: AgentDraft, context: Context, isMain: boolean) {
       found.push({ section: 'nodes', text: `The exclusive reservation on ${nodeName(node, id)} is inactive: its runtime must be updated for exclusive reservations.` })
   }
 
+  if (context.pluginsUnavailable)
+    return found
+
   for (const id of draft.plugins ?? []) {
     const connection = context.connections.find(item => item.id === id)
     if (!connection)
@@ -463,6 +484,11 @@ export function issues(draft: AgentDraft, context: Context, isMain: boolean) {
       found.push({ section: 'plugins', text: `${connectionLabel(id, context)} is unavailable: its plugin needs review or no longer gives agents access.` })
     else if (!connection.enabled)
       found.push({ section: 'plugins', text: `${connectionLabel(id, context)} is disabled: the access is kept but cannot be used.` })
+  }
+
+  for (const connection of context.connections) {
+    if (agentId && connection.agentId === agentId && connection.enabled && connection.status.state === 'needs_review')
+      found.push({ section: 'plugins', text: `${connection.name} is suspended until it is reapproved.` })
   }
 
   return found

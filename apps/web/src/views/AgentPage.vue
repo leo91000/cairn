@@ -34,6 +34,7 @@ import {
   githubTokenChange,
   grantablePackages,
   mainLockedSections,
+  needsReview,
   newAgentDraft,
   nodeName,
   rebaseDraft,
@@ -118,6 +119,9 @@ const saved = ref<AgentDraft>(newAgentDraft())
 const draft = ref<AgentDraft>(newAgentDraft())
 const nodes = ref<ExecutionNode[]>([])
 const catalog = ref<Catalog>({ packages: [], capabilities: [], connections: [] })
+// Only a loaded catalogue says which grants exist: on failure, plugin access is shown read-only.
+const catalogError = ref('')
+const catalogLoading = ref(false)
 // The dedicated GitHub token is a separate secret, saved with the page.
 const githubConfigured = ref(false)
 const githubToken = ref('')
@@ -146,6 +150,7 @@ const context = computed<Context>(() => ({
   nodes: nodes.value,
   packages: catalog.value.packages,
   connections: catalog.value.connections,
+  pluginsUnavailable: Boolean(catalogError.value),
 }))
 const access = computed(() => draft.value.access)
 const availableNodes = computed(() => nodes.value.filter(node => !node.revoked))
@@ -171,7 +176,7 @@ const tokenChange = computed(() => githubTokenChange({
 const usesSavedToken = computed(() => githubMode.value === 'dedicated' && githubConfigured.value && !githubToken.value.trim())
 const changed = computed(() => [...changes(saved.value, draft.value), ...(tokenChange.value ? ['github' as const] : [])])
 const dirty = computed(() => loaded.value && !notFound.value && changed.value.length > 0)
-const issues = computed(() => loaded.value ? findIssues(draft.value, context.value, isMain.value) : [])
+const issues = computed(() => loaded.value ? findIssues(draft.value, context.value, isMain.value, isNew.value ? null : id.value) : [])
 
 const allProjects = computed({
   get: () => draft.value.access.projects,
@@ -250,7 +255,9 @@ const summaries = computed<Record<SectionId, { short: string, long: string }>>((
   skills: { short: isMain.value ? 'Fixed' : short(access.value.skills, permittedSkills.value.length), long: isMain.value ? 'All, including future' : selectionSummary(access.value.skills, permittedSkills.value.length) },
   mcps: { short: isMain.value ? 'Fixed' : short(access.value.mcps, state.mcps.length), long: isMain.value ? 'All, including future' : `${selectionSummary(access.value.mcps, state.mcps.length)}${limitedMcps.value.length ? ` · tools limited on ${limitedMcps.value.length}` : ''}${disabledMcps.value.length ? ` · ${disabledMcps.value.length} disabled` : ''}` },
   github: { short: isMain.value ? 'Fixed' : githubMode.value === 'shared' ? 'Shared' : githubMode.value === 'dedicated' ? 'Token' : 'None', long: githubSummary.value },
-  plugins: { short: draft.value.plugins.length ? String(draft.value.plugins.length) : 'None', long: pluginSummary.value || 'None' },
+  plugins: catalogError.value
+    ? { short: 'Unavailable', long: 'Not loaded' }
+    : { short: draft.value.plugins.length ? String(draft.value.plugins.length) : 'None', long: pluginSummary.value || 'None' },
   nodes: { short: short(access.value.nodes, availableNodes.value.length), long: `${selectionSummary(access.value.nodes, availableNodes.value.length)}${exclusiveNodes.value.length ? ` · exclusive on ${exclusiveNodes.value.length}` : ''}` },
   sandbox: { short: sandbox.value.label, long: sandbox.value.label },
   powers: { short: powers.value ? String(powers.value) : 'None', long: [exclusiveNodes.value.length ? 'Exclusive reservation' : '', access.value.installation ? 'Installation management' : ''].filter(Boolean).join(' · ') || 'None' },
@@ -297,9 +304,9 @@ const overview = computed(() => [
         id: 'plugins',
         section: 'plugins' as const,
         title: 'Secrets & plugins',
-        summary: pluginSummary.value || 'No access',
-        detail: [names(draft.value.plugins, connectionName), ...delegations.value.map(item => `Answers on ${item.name} (delegation)`)].filter(Boolean).join(' · ') || 'No plugin access by default, including Main',
-        chip: draft.value.plugins.length ? { tone: 'granted' as const, label: 'Granted' } : { tone: 'none' as const, label: 'None' },
+        summary: catalogError.value ? 'Not loaded' : pluginSummary.value || 'No access',
+        detail: catalogError.value ? 'Plugins could not be loaded' : [names(draft.value.plugins, connectionName), ...delegations.value.map(item => `Answers on ${item.name} (delegation)`)].filter(Boolean).join(' · ') || 'No plugin access by default, including Main',
+        chip: catalogError.value ? { tone: 'unavailable' as const, label: 'Unavailable' } : draft.value.plugins.length ? { tone: 'granted' as const, label: 'Granted' } : { tone: 'none' as const, label: 'None' },
       },
     ],
   },
@@ -389,6 +396,33 @@ async function loadGithub() {
   dedicated.value = savedDedicated.value
 }
 
+// An installation without plugins still edits every other permission.
+async function loadCatalog() {
+  try {
+    const loadedCatalog = await api<Catalog>('/plugins')
+    catalogError.value = ''
+    return loadedCatalog
+  }
+  catch (e) {
+    catalogError.value = (e as Error).message || 'Plugins could not be loaded.'
+    return null
+  }
+}
+
+async function retryCatalog() {
+  catalogLoading.value = true
+  try {
+    const plugins = await loadCatalog()
+    if (plugins) {
+      catalog.value = plugins
+      void loadSuspension()
+    }
+  }
+  finally {
+    catalogLoading.value = false
+  }
+}
+
 async function load() {
   loadError.value = ''
   loaded.value = false
@@ -397,10 +431,11 @@ async function load() {
       api<Agent[]>('/agents'),
       api<ExecutionNode[]>('/nodes'),
       // An installation without plugins still edits every other permission.
-      api<Catalog>('/plugins').catch(() => ({ packages: [], capabilities: [], connections: [] })),
+      loadCatalog(),
     ])
     nodes.value = nodeList
-    catalog.value = plugins
+    if (plugins)
+      catalog.value = plugins
     if (isNew.value) {
       saved.value = newAgentDraft()
       draft.value = newAgentDraft()
@@ -468,7 +503,7 @@ async function requestSave() {
 
   let lines = reviewLines(saved.value, draft.value, context.value, undefined, tokenChange.value, usesSavedToken.value)
   let effects: DelegationEffect[] = []
-  let affected = 0
+  let current: Preview | null = null
   // A pending GitHub token alone changes no access: it is saved without a preview.
   if (!isNew.value && changes(saved.value, draft.value).length) {
     busy.value = true
@@ -477,7 +512,7 @@ async function requestSave() {
       const preview = await api<Preview>(`/agents/${id.value}/preview`, { method: 'POST', body: JSON.stringify(body()) })
       lines = reviewLines(saved.value, draft.value, context.value, preview.runs, tokenChange.value, usesSavedToken.value)
       effects = preview.delegations.filter(item => item.suspended)
-      affected = preview.runs.queued + preview.runs.running
+      current = preview
     }
     catch (e) {
       failed(e)
@@ -488,8 +523,9 @@ async function requestSave() {
     }
   }
 
-  // Powers, secrets, interrupted work and suspended delegations deserve a look; anything else saves directly.
-  if (lines.some(line => line.kind !== 'reduction') || affected || effects.length) {
+  // Powers, secrets, interrupted work, delegations this edit suspends and a switch to the saved
+  // GitHub token deserve a look; anything else saves directly.
+  if (needsReview(lines, current, switchedToToken.value && githubMode.value === 'dedicated')) {
     reviewError.value = ''
     review.value = { lines, delegations: effects }
     return
@@ -1019,14 +1055,25 @@ const errorCount = computed(() => Object.keys(fieldErrors.value).length)
           </template>
 
           <template v-else-if="section === 'plugins'">
+            <div v-if="catalogError" class="grid gap-3 rounded-xl border border-line bg-surface p-5" role="alert">
+              <p class="text-sm">
+                Plugins could not be loaded, so this agent’s plugin access cannot be shown or changed. {{ catalogError }}
+              </p>
+              <div>
+                <UiButton size="small" :disabled="catalogLoading" @click="retryCatalog">
+                  {{ catalogLoading ? 'Loading…' : 'Try again' }}
+                </UiButton>
+              </div>
+            </div>
             <AgentPluginsSection
+              v-else
               v-model:plugins="draft.plugins"
               :agent-id="isNew ? null : id"
               :packages="catalog.packages"
               :connections="catalog.connections"
               :suspended="suspended"
             />
-            <p v-if="!grantablePackages(catalog.packages).length && !catalog.packages.length" class="text-xs text-muted">
+            <p v-if="!catalogError && !grantablePackages(catalog.packages).length && !catalog.packages.length" class="text-xs text-muted">
               Plugins add secrets and tools that you grant per agent.
             </p>
           </template>
