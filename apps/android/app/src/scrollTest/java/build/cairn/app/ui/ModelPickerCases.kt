@@ -156,6 +156,73 @@ abstract class ModelPickerCases {
         compose.onNodeWithText("Sonnet").assertExists()
     }
 
+    protected open fun captureDefaultModel() = Unit
+
+    @Test
+    fun claudeDefaultNamesRemainUnpinnedWhenMetadataChanges() {
+        var name by mutableStateOf("Opus Fixture (1M context)")
+        var description by mutableStateOf("Model recommended for your subscription")
+        var model by mutableStateOf("sonnet")
+        var reasoning by mutableStateOf("high")
+        compose.setContent {
+            CairnTheme("dark") {
+                SurfaceForTest {
+                    ModelPicker(
+                        ModelCatalog(
+                            listOf(
+                                CodingAgentModel("default", name, description, isDefault = true),
+                                CodingAgentModel("sonnet", "Sonnet"),
+                            )
+                        ),
+                        model,
+                        reasoning,
+                        provider = "claude",
+                    ) { m, r ->
+                        model = m
+                        reasoning = r
+                    }
+                }
+            }
+        }
+        compose.onNodeWithTag("model-picker").performClick()
+        val scenarios =
+            listOf(
+                Triple(
+                    "Opus Fixture (1M context)",
+                    "Model recommended for your subscription",
+                    "Modèle par défaut · Opus Fixture (1M context)",
+                ),
+                Triple(
+                    "Opus description",
+                    "Opus description · Details",
+                    "Modèle par défaut · Opus description",
+                ),
+                Triple(
+                    "claude-opus-fixture[1m]",
+                    "",
+                    "Modèle par défaut · claude-opus-fixture[1m]",
+                ),
+                Triple("Default (recommended)", "", "Modèle par défaut"),
+            )
+        for ((display, details, title) in scenarios) {
+            compose.runOnIdle {
+                name = display
+                description = details
+            }
+            val default = compose.onNode(hasText(title) and isSelectable())
+            default.performClick().assertIsSelected()
+            compose.runOnIdle {
+                assertEquals("", model)
+                assertEquals("", reasoning)
+            }
+            if (display == "Opus Fixture (1M context)") captureDefaultModel()
+            compose.onNodeWithText("Terminé").performClick()
+            compose.onNodeWithTag("model-picker").assertTextContains(display).performClick()
+            compose.onNode(hasText("Sonnet") and isSelectable()).performClick()
+            compose.runOnIdle { assertEquals("sonnet", model) }
+        }
+    }
+
     @Test
     fun unknownModelDoesNotBorrowDefaultModelsEfforts() {
         compose.setContent {
