@@ -1028,9 +1028,7 @@ internal fun ChatPage(
                         )
                         ActionIcon("Masquer l’erreur", CairnIcons.Close) { errorDismissed = true }
                     }
-                chatWaitNotice(chat?.run)?.let {
-                    ChatWaitingNotice(it, openConnections, state.isOwner)
-                }
+                ChatRunWaitingNotice(chat?.run, openConnections, state.isOwner)
                 if (gallery) {
                     ModalBottomSheet(
                         onDismissRequest = { gallery = false },
