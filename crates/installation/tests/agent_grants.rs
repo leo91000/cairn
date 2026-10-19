@@ -269,6 +269,32 @@ async fn older_clients_editing_resources_update_the_agent() {
     let agent = owner.create_agent("Android QA").await;
     let id = text(&agent, "id").to_owned();
 
+    // An agent that may not run on the node cannot reserve it.
+    let refused = json!({
+        "name": "gpu-box",
+        "tags": [],
+        "limits": { "cpu": 2, "memoryMiB": 4096, "diskMiB": 8192 },
+        "accepting": true,
+        "exclusiveAgents": [id],
+    });
+    owner
+        .send("PUT", &format!("/api/nodes/{NODE}"), refused)
+        .await;
+    assert_eq!(
+        owner.stored("agents", &id).await["exclusiveNodes"],
+        json!([])
+    );
+    assert_eq!(
+        owner.stored("nodes", NODE).await["exclusiveAgents"],
+        json!([])
+    );
+    let mut runs_here = owner.stored("agents", &id).await;
+    runs_here["access"]["nodes"] = json!([LOCAL_NODE_ID, NODE]);
+    let (status, _) = owner
+        .send("PUT", &path(&runs_here), runs_here.clone())
+        .await;
+    assert_eq!(status, StatusCode::OK);
+
     let configuration = json!({
         "name": "gpu-box",
         "tags": [],

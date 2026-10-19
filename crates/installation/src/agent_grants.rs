@@ -161,10 +161,21 @@ fn grant_resource(db: &Db<'_>, key: &str, resource: &str, agents: &[String]) -> 
     Ok(())
 }
 
-/// Records the agents allowed to reserve a node, on the agents and on the node.
+/// Records the agents allowed to reserve a node, on the agents and on the node. Only
+/// agents allowed to run on it can reserve it.
 pub(crate) fn set_node_agents(db: &Db<'_>, node: &mut Value, agents: &[String]) -> Result<()> {
-    grant_resource(db, EXCLUSIVE_NODES, text(node, "id"), agents)?;
-    node["exclusiveAgents"] = json!(agents);
+    let node_id = text(node, "id").to_owned();
+    let mut runnable = Vec::new();
+    for agent in agents {
+        let may_run = db.get("agents", agent)?.is_some_and(|saved| {
+            crate::service::allowed(&crate::service::policy(&saved)["nodes"], &node_id)
+        });
+        if may_run {
+            runnable.push(agent.clone());
+        }
+    }
+    grant_resource(db, EXCLUSIVE_NODES, &node_id, &runnable)?;
+    node["exclusiveAgents"] = json!(runnable);
     Ok(())
 }
 

@@ -601,11 +601,25 @@ test('tool choices stay visible and editable when every MCP connection is grante
   expect(saved.access.mcps).toBeNull()
   expect(saved.access.mcpTools).toEqual({ [mcp.id]: ['echo', 'search'] })
 
-  // Switching to a chosen list and back keeps the tool choices.
+  // Choosing starts with no connection selected, as for projects and skills and on Android;
+  // switching back keeps the tool choices.
   await group.getByRole('button', { name: 'Choose', exact: true }).click()
-  await expect(page.getByLabel('Design tools', { exact: true })).toBeChecked()
+  await expect(page.getByLabel('Design tools', { exact: true })).not.toBeChecked()
   await group.getByRole('button', { name: 'All, including future', exact: true }).click()
   await expect(connection).toContainText('2 chosen')
+  await expect(bar).toHaveCount(0)
+  // Leaving "All enabled tools" starts with no tool chosen.
+  await connection.locator('details').evaluate((element) => {
+    (element as HTMLDetailsElement).open = true
+  })
+  await connection.getByLabel('All enabled tools', { exact: true }).check()
+  await expect(connection).toContainText('all enabled tools')
+  await connection.getByLabel('All enabled tools', { exact: true }).uncheck()
+  await expect(connection).toContainText('0 chosen')
+  await expect(connection.getByLabel('echo', { exact: true })).not.toBeChecked()
+  await expect(connection.getByLabel('search', { exact: true })).not.toBeChecked()
+  await connection.getByLabel('echo', { exact: true }).check()
+  await connection.getByLabel('search', { exact: true }).check()
   await expect(bar).toHaveCount(0)
   await page.getByRole('link', { name: 'Overview', exact: true }).click()
   await expect(page.getByRole('button', { name: /^MCP & tools/ })).toContainText('Tools limited on Design tools')

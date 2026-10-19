@@ -14,8 +14,9 @@ const props = defineProps<{
   error: string
 }>()
 const emit = defineEmits<{ close: [], confirm: [reapprove: string[]] }>()
-// Reapproval is the default; a delegation that cannot be reapproved stops.
-const reapprove = ref(props.delegations.filter(item => !item.blocked).map(item => item.id))
+// Reapproval is the default only for what this edit suspends: a delegation already suspended by an
+// earlier change must not be reapproved unchecked, and one that cannot be reapproved stops.
+const reapprove = ref(props.delegations.filter(item => item.suspended && !item.blocked && !item.alreadySuspended).map(item => item.id))
 const kinds: Record<ReviewLine['kind'], [ChipTone, string]> = {
   power: ['power', 'Power'],
   secret: ['granted', 'Access'],
@@ -49,7 +50,7 @@ const kinds: Record<ReviewLine['kind'], [ChipTone, string]> = {
               class="mt-1 size-4 w-4!"
               :value="delegation.id"
             >
-            <span>Reapprove the new access for {{ delegation.name }}<small class="block text-2xs">Unchecked, the bot stops answering until it is reapproved on its instance.</small></span>
+            <span>Reapprove the new access for {{ delegation.name }}<small v-if="delegation.alreadySuspended" class="block text-2xs">Already suspended by an earlier change. Reapprove only after checking its current access.</small><small v-else class="block text-2xs">Unchecked, the bot stops answering until it is reapproved on its instance.</small></span>
           </label>
         </template>
       </fieldset>

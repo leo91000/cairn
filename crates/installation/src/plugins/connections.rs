@@ -815,13 +815,15 @@ pub(crate) fn reapprove(db: &Db<'_>, connection_id: &str, agent: &Value) -> Resu
     )
 }
 
-/// Delegations answering as an agent and how an edited agent would affect them:
+/// Delegations answering as an agent and how an edited agent would affect them,
+/// including `alreadySuspended` when the saved agent no longer matches the approval:
 /// `suspended` when its access no longer matches the approved one or no longer meets
 /// the delegation's rules, such as a plugin grant for an agent anyone may reach, and
 /// the reason it could not be reapproved, if any.
 pub(crate) fn delegation_effects(db: &Db<'_>, agent_id: &str, agent: &Value) -> Result<Value> {
     let access = policy(agent);
     let plugins = !crate::agent_grants::plugins(agent).is_empty();
+    let saved = db.get("agents", agent_id)?;
     let mut effects = Vec::new();
     for value in db.list(KIND)? {
         if value["agentId"] != agent_id {
@@ -831,6 +833,12 @@ pub(crate) fn delegation_effects(db: &Db<'_>, agent_id: &str, agent: &Value) -> 
         let blocked = delegation_rules(db, &connection, &access, plugins)
             .err()
             .map(|error| error.to_string());
+        // Suspended before this edit, so reapproving would also approve earlier changes.
+        let already_suspended = saved.as_ref().is_none_or(|saved| {
+            policy(saved) != connection.granted_access
+                || (connection.access_mode == AccessMode::Everyone
+                    && public_safe(db, agent_id, &connection.granted_access).is_err())
+        });
         effects.push(json!({
             "id": connection.id,
             "pluginId": connection.plugin_id,
@@ -839,6 +847,7 @@ pub(crate) fn delegation_effects(db: &Db<'_>, agent_id: &str, agent: &Value) -> 
             "suspended": blocked.is_some()
                 || access != connection.granted_access,
             "blocked": blocked,
+            "alreadySuspended": already_suspended,
         }));
     }
     Ok(effects.into())

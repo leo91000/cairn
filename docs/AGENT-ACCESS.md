@@ -47,6 +47,7 @@ Other agents can select projects, skills, MCP connections and tools, and disable
 connection. Agents created on the web or Android page start restricted (no
 projects, skills or MCP connections, no GitHub, the current runner only) and the
 owner widens them; the API still defaults omitted settings to full access and YOLO.
+Restricted agents need the isolated runner, which every production installation has.
 A task inherits its
 agent's resources, or can choose its initial project context and skills under
 **Customize task scope**. Task overrides cannot expand agent access. Project

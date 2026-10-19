@@ -28,6 +28,11 @@ data class AgentDelegationEffect(
     val suspended: Boolean = false,
     /** Why the new access cannot be reapproved, or null. */
     val blocked: String? = null,
+    /**
+     * Already suspended by an earlier change: reapproving now would also approve that change, so it
+     * is never preselected.
+     */
+    val alreadySuspended: Boolean = false,
 )
 
 @Serializable
@@ -290,9 +295,10 @@ fun Agent.withExclusive(node: String, granted: Boolean): Agent =
     )
 
 /** Turning "all projects" off also turns the shared GitHub connection off. */
-fun AccessPolicy.withAllProjects(all: Boolean, projects: List<Project>): AccessPolicy =
+/** Choosing projects starts with none selected, as on the web. */
+fun AccessPolicy.withAllProjects(all: Boolean): AccessPolicy =
     if (all) copy(projects = null)
-    else copy(projects = this.projects ?: projects.map { it.id }, github = false)
+    else copy(projects = this.projects ?: emptyList(), github = false)
 
 fun skillKey(skill: Skill) = "${skill.scope}/${skill.name}"
 
@@ -529,10 +535,14 @@ fun agentReductions(original: Agent, edited: Agent, resources: AgentResources): 
             noun: String,
             plural: String,
             name: (String) -> String,
+            feminine: Boolean = false,
         ) {
             if (new == null) return
             if (old == null) {
-                add("accès limité à ${plural(new.size, noun, plural)}")
+                add(
+                    if (new.isEmpty()) "plus ${if (feminine) "aucune" else "aucun"} $noun"
+                    else "accès limité à ${plural(new.size, noun, plural)}"
+                )
                 return
             }
             val gone = old.filter { it !in new }
@@ -556,6 +566,7 @@ fun agentReductions(original: Agent, edited: Agent, resources: AgentResources): 
             { key ->
                 skillKeyLabel(key, resources.projects)
             },
+            feminine = true,
         )
         removed(
             before.mcps,
@@ -565,10 +576,12 @@ fun agentReductions(original: Agent, edited: Agent, resources: AgentResources): 
             { id ->
                 resources.mcps.find { it.id == id }?.name ?: id
             },
+            feminine = true,
         )
         if (
             after.mcpTools.any { (id, tools) ->
-                before.mcpTools[id]?.let { !it.containsAll(tools) } ?: true
+                // A narrower choice, or a choice where every enabled tool was allowed.
+                before.mcpTools[id]?.let { previous -> !tools.containsAll(previous) } ?: true
             }
         )
             add("outils MCP restreints")
@@ -582,10 +595,29 @@ fun agentReductions(original: Agent, edited: Agent, resources: AgentResources): 
                 nodes.find { it.id == id }?.name ?: id
             },
         )
+        original.exclusiveNodes
+            .filter { it !in edited.exclusiveNodes }
+            .forEach { id ->
+                add("réservation exclusive sur « ${nodes.find { it.id == id }?.name ?: id} »")
+            }
+        original.plugins
+            .filter { it !in edited.plugins }
+            .forEach { id -> add(pluginGrantLabel(id, resources.catalog)) }
+        if (before.installation && !after.installation) add("gestion de l’installation")
         if (before.github && !after.github) add("connexion GitHub partagée")
         if ((sandboxStrictness[after.sandbox] ?: 0) > (sandboxStrictness[before.sandbox] ?: 0))
             add("mode d’exécution « ${sandboxLabel(after.sandbox)} »")
     }
+
+/** "1Password « Production »": a granted plugin instance and its package. */
+private fun pluginGrantLabel(id: String, catalog: PluginCatalog?): String {
+    val connection = catalog?.connections?.find { it.id == id }
+    val plugin =
+        catalog?.packages?.find { it.id == connection?.pluginId }?.name
+            ?: connection?.pluginId
+            ?: "Plugin"
+    return "$plugin « ${connection?.name ?: "instance supprimée"} »"
+}
 
 private fun runsSentence(runs: AgentPreviewRuns): String {
     val parts = buildList {
@@ -629,15 +661,10 @@ fun agentReview(
     edited.plugins
         .filter { it !in original.plugins }
         .forEach { id ->
-            val connection = resources.catalog?.connections?.find { it.id == id }
-            val plugin =
-                resources.catalog?.packages?.find { it.id == connection?.pluginId }?.name
-                    ?: connection?.pluginId
-                    ?: "Plugin"
             add(
                 ReviewLine(
                     ReviewKind.Access,
-                    "Ajout : $plugin « ${connection?.name ?: id} », effectif immédiatement, y compris dans les conversations en cours.",
+                    "Ajout : ${pluginGrantLabel(id, resources.catalog)}, effectif immédiatement, y compris dans les conversations en cours.",
                 )
             )
         }
@@ -663,6 +690,16 @@ fun agentReview(
 
 /** Delegations the save would suspend: these get a reapproval checkbox. */
 fun AgentPreview.suspendedDelegations() = delegations.filter { it.suspended }
+
+/**
+ * Reapprovals checked when the review opens: only delegations this save suspends, that can be
+ * reapproved and were not already suspended by an earlier, unrelated change.
+ */
+fun AgentPreview.preselectedReapprovals(): Set<String> =
+    suspendedDelegations()
+        .filter { it.blocked == null && !it.alreadySuspended }
+        .map { it.id }
+        .toSet()
 
 /**
  * The review is needed for a power or a secret added, a reduction that stops work, or a delegation

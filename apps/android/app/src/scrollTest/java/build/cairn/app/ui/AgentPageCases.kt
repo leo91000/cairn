@@ -101,6 +101,8 @@ abstract class AgentPageCases {
         val loseCreation: AtomicBoolean,
         val rejectToken: AtomicBoolean,
         val tokens: CopyOnWriteArrayList<String>,
+        /** The preview reports the delegation as suspended by an earlier change. */
+        val alreadySuspended: AtomicBoolean = AtomicBoolean(false),
     )
 
     private fun fixture(): Fixture {
@@ -110,6 +112,7 @@ abstract class AgentPageCases {
         val loseCreation = AtomicBoolean(false)
         val rejectToken = AtomicBoolean(false)
         val tokens = CopyOnWriteArrayList<String>()
+        val alreadySuspended = AtomicBoolean(false)
         val server = MockWebServer()
         server.dispatcher =
             object : Dispatcher() {
@@ -176,7 +179,7 @@ abstract class AgentPageCases {
                         when {
                             path.endsWith("/preview") ->
                                 if (path.startsWith("/agents/agent"))
-                                    """{"runs":{"queued":0,"running":0},"delegations":[{"id":"bot","pluginId":"discord","name":"#support","enabled":true,"suspended":true,"blocked":null}]}"""
+                                    """{"runs":{"queued":0,"running":0},"delegations":[{"id":"bot","pluginId":"discord","name":"#support","enabled":true,"suspended":true,"blocked":null,"alreadySuspended":${alreadySuspended.get()}}]}"""
                                 else """{"runs":{"queued":0,"running":0},"delegations":[]}"""
                             path.endsWith("/github-token") -> """{"configured":false}"""
                             path == "/agents" -> wireJson.encodeToString(agents.get())
@@ -196,7 +199,16 @@ abstract class AgentPageCases {
                 }
             }
         server.start()
-        return Fixture(server, saved, agents, conflict, loseCreation, rejectToken, tokens)
+        return Fixture(
+            server,
+            saved,
+            agents,
+            conflict,
+            loseCreation,
+            rejectToken,
+            tokens,
+            alreadySuspended,
+        )
     }
 
     private var backDispatcher: OnBackPressedDispatcher? = null
@@ -451,6 +463,30 @@ abstract class AgentPageCases {
             val body = fixture.saved.single().second
             assertEquals(JsonArray(listOf(JsonPrimitive("prod"))), body["plugins"])
             assertFalse("reapproveDelegations" in body)
+        }
+    }
+
+    @Test
+    fun aDelegationSuspendedEarlierIsNotReapprovedByDefault() {
+        journey("agent") { fixture ->
+            fixture.alreadySuspended.set(true)
+            open(AgentSection.Identity)
+            compose.onNodeWithText("Nom").performTextReplacement("Release bot")
+            back()
+            compose.onNodeWithText("Enregistrer").performClick()
+            compose.waitUntil(15000) {
+                compose.onAllNodesWithTag("agent-review").fetchSemanticsNodes().isNotEmpty()
+            }
+            // Reapproving would also approve the earlier, unreviewed change: it stays unchecked.
+            compose.onNodeWithText("Réapprouver les nouveaux accès pour « #support »").assertIsOff()
+            compose
+                .onNodeWithText(
+                    "Déjà suspendu par une modification précédente. Ne le réapprouvez qu’après avoir vérifié ses accès actuels."
+                )
+                .assertExists()
+            confirmReview()
+            compose.waitUntil(15000) { fixture.saved.isNotEmpty() }
+            assertFalse("reapproveDelegations" in fixture.saved.single().second)
         }
     }
 

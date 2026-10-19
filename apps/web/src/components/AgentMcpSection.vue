@@ -19,12 +19,12 @@ const items = computed<SelectionItem[]>(() => props.mcps.map(connection => ({
 const selection = computed({
   get: () => access.value.mcps,
   set: (value: string[] | null) => {
-    // Leaving "All" starts from every connection, keeping the tools chosen for each.
-    if (access.value.mcps === null && value !== null && !value.length)
-      value = props.mcps.map(connection => connection.id)
+    // Leaving "All" starts with no connection chosen, as for projects and skills and on Android,
+    // and keeps the tool choices until the chosen list changes.
+    const leavingAll = access.value.mcps === null
     access.value.mcps = value
     // Tool choices only apply to connections that stay granted.
-    if (value !== null)
+    if (value !== null && !leavingAll)
       access.value.mcpTools = Object.fromEntries(Object.entries(access.value.mcpTools).filter(([id]) => value.includes(id)))
   },
 })

@@ -285,11 +285,26 @@ function connectionLabel(id: string, context: Context) {
   return `${pack?.manifest?.name ?? 'Plugin'} “${connection?.name ?? 'Removed instance'}”`
 }
 
+const sandboxStrictness: Record<AgentAccess['sandbox'], number> = { 'yolo': 0, 'workspace-write': 1, 'read-only': 2 }
+
+/** MCP connections granted before and after whose tools the draft narrows, from all enabled tools or by removing one. */
+function restrictedTools(saved: AgentAccess, draft: AgentAccess) {
+  const before = saved.mcpTools ?? {}
+  const after = draft.mcpTools ?? {}
+  return Object.entries(after).filter(([id, tools]) => {
+    // A connection granted just now, or removed, is reported as such.
+    const kept = (saved.mcps === null || saved.mcps.includes(id)) && (draft.mcps === null || draft.mcps.includes(id))
+    const previous = before[id]
+    return kept && (previous === undefined || previous.some(tool => !tools.includes(tool)))
+  }).map(([id]) => id)
+}
+
 /**
  * What saving would grant or take away that deserves a look first: new powers and
- * secrets, and removed access when `runs` says work is affected.
+ * secrets, and removed access when `runs` says work is affected. `githubToken` is the
+ * pending change of the dedicated GitHub token, saved with the page.
  */
-export function reviewLines(saved: AgentDraft, draft: AgentDraft, context: Context, runs = { queued: 0, running: 0 }) {
+export function reviewLines(saved: AgentDraft, draft: AgentDraft, context: Context, runs = { queued: 0, running: 0 }, githubToken: 'set' | 'remove' | null = null) {
   const lines: ReviewLine[] = []
   const node = (id: string) => nodeName(context.nodes.find(item => item.id === id), id)
 
@@ -299,9 +314,6 @@ export function reviewLines(saved: AgentDraft, draft: AgentDraft, context: Conte
     lines.push({ kind: 'power', section: 'powers', text: 'Added: installation management. This agent will be able to create and change agents, projects, skills, MCP connections, missions and runs on your behalf.' })
   for (const id of listChanges(saved.plugins ?? [], draft.plugins ?? []).added)
     lines.push({ kind: 'secret', section: 'plugins', text: `Added: ${connectionLabel(id, context)} — effective immediately, including in running conversations.` })
-
-  if (saved.access.github && !draft.access.github && draft.access.projects !== null)
-    lines.push({ kind: 'reduction', section: 'github', text: 'Shared GitHub connection turned off: selected projects require a dedicated token.' })
 
   const removed: string[] = []
   const project = (id: string) => context.projects.find(item => item.id === id)?.name ?? 'removed project'
@@ -317,6 +329,8 @@ export function reviewLines(saved: AgentDraft, draft: AgentDraft, context: Conte
   described('project', saved.access.projects, draft.access.projects, project)
   described('skill', saved.access.skills, draft.access.skills, key => skillLabel(key, context.projects).name)
   described('MCP connection', saved.access.mcps, draft.access.mcps, mcp)
+  for (const id of restrictedTools(saved.access, draft.access))
+    removed.push(`MCP tools on ${mcp(id)} (now ${draft.access.mcpTools[id]!.length || 'none'} chosen)`)
   described('node', saved.access.nodes, draft.access.nodes, node)
   for (const id of listChanges(saved.exclusiveNodes ?? [], draft.exclusiveNodes ?? []).removed)
     removed.push(`exclusive reservation on ${node(id)}`)
@@ -324,6 +338,14 @@ export function reviewLines(saved: AgentDraft, draft: AgentDraft, context: Conte
     removed.push(connectionLabel(id, context))
   if (saved.access.installation && !draft.access.installation)
     removed.push('installation management')
+  if (saved.access.github && !draft.access.github)
+    removed.push('shared GitHub connection')
+  if (githubToken === 'remove')
+    removed.push('dedicated GitHub token')
+  if (sandboxStrictness[draft.access.sandbox] > sandboxStrictness[saved.access.sandbox]) {
+    const mode = sandboxOptions.find(option => option.value === draft.access.sandbox)?.label ?? draft.access.sandbox
+    removed.push(`execution mode (now ${mode})`)
+  }
 
   const affected = runs.queued + runs.running
   const work = [
@@ -335,6 +357,8 @@ export function reviewLines(saved: AgentDraft, draft: AgentDraft, context: Conte
     lines.push({ kind: 'reduction', section: 'projects', text: `Removed: ${removed.join(', ')}.${consequence}` })
   else if (affected)
     lines.push({ kind: 'reduction', section: 'projects', text: `Changed access.${consequence}` })
+  if (saved.access.github && !draft.access.github && saved.access.projects === null && draft.access.projects !== null)
+    lines.push({ kind: 'reduction', section: 'github', text: 'Shared GitHub connection turned off: selected projects require a dedicated token.' })
   return lines
 }
 
@@ -345,6 +369,8 @@ export interface DelegationEffect {
   name: string
   enabled: boolean
   suspended: boolean
+  // The saved agent already no longer matches the delegation's approval, before this edit.
+  alreadySuspended?: boolean
   // Why the new access cannot be reapproved, when it cannot.
   blocked: string | null
 }

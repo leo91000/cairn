@@ -450,7 +450,7 @@ async function requestSave() {
     return
   }
 
-  let lines = reviewLines(saved.value, draft.value, context.value)
+  let lines = reviewLines(saved.value, draft.value, context.value, undefined, tokenChange.value)
   let effects: DelegationEffect[] = []
   let affected = 0
   // A pending GitHub token alone changes no access: it is saved without a preview.
@@ -459,7 +459,7 @@ async function requestSave() {
     try {
       // The server says which queued or running work and which delegations the change affects.
       const preview = await api<Preview>(`/agents/${id.value}/preview`, { method: 'POST', body: JSON.stringify(body()) })
-      lines = reviewLines(saved.value, draft.value, context.value, preview.runs)
+      lines = reviewLines(saved.value, draft.value, context.value, preview.runs, tokenChange.value)
       effects = preview.delegations.filter(item => item.suspended)
       affected = preview.runs.queued + preview.runs.running
     }

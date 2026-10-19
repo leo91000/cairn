@@ -258,3 +258,56 @@ it('reports a held grant whose plugin cannot give agents access any more', () =>
   expect(found[0]!.text).toBe('Tickets “queue” is unavailable: its plugin needs review or no longer gives agents access.')
   expect(found[1]!.text).toBe('Plugin “old” is unavailable: its plugin needs review or no longer gives agents access.')
 })
+
+it('lists every reduction the Android review lists', () => {
+  const mcpContext: Context = { ...context, mcps: [{ id: 'm1', name: 'Design tools' }, { id: 'm2', name: 'Docs' }] as Context['mcps'] }
+  const saved = newAgentDraft()
+  saved.access.mcps = ['m1', 'm2']
+  saved.access.mcpTools = { m2: ['read', 'write'] }
+  saved.access.github = true
+  saved.access.projects = null
+  const draft = structuredClone(saved)
+  // Stricter execution mode.
+  draft.access.sandbox = 'workspace-write'
+  // From all enabled tools to a chosen few, and a tool removed from a chosen list.
+  draft.access.mcpTools = { m1: ['echo'], m2: ['read'] }
+  draft.access.github = false
+  draft.access.projects = ['p1']
+  const lines = reviewLines(saved, draft, mcpContext, undefined, 'remove')
+  expect(lines.map(line => line.kind)).toEqual(['reduction', 'reduction'])
+  expect(lines[0]!.text).toBe('Removed: all projects (now SheetOM), MCP tools on Design tools (now 1 chosen), MCP tools on Docs (now 1 chosen), shared GitHub connection, dedicated GitHub token, execution mode (now Workspace write).')
+  expect(lines[1]!.text).toBe('Shared GitHub connection turned off: selected projects require a dedicated token.')
+
+  // A looser mode, an added tool or a connection granted with chosen tools reduces nothing.
+  const looser = structuredClone(draft)
+  const wider = structuredClone(looser)
+  wider.access.sandbox = 'yolo'
+  wider.access.mcpTools = { m1: ['echo', 'search'], m2: ['read', 'write'], m3: [] }
+  wider.access.mcps = ['m1', 'm2', 'm3']
+  expect(reviewLines(looser, wider, mcpContext)).toEqual([])
+  const readOnly = structuredClone(wider)
+  readOnly.access.sandbox = 'read-only'
+  expect(reviewLines(wider, readOnly, mcpContext)[0]!.text).toBe('Removed: execution mode (now Read only).')
+})
+
+it('lists every addition and removal of powers and grants', () => {
+  const saved = newAgentDraft()
+  saved.access.nodes = [LOCAL_NODE_ID, 'gpu']
+  const granted = structuredClone(saved)
+  granted.exclusiveNodes = ['gpu']
+  granted.plugins = ['prod']
+  granted.access.installation = true
+  expect(reviewLines(saved, granted, context).map(line => line.text)).toEqual([
+    'Added: exclusive reservation on gpu-box. This agent will be able to suspend other agents’ conversations on this machine.',
+    'Added: installation management. This agent will be able to create and change agents, projects, skills, MCP connections, missions and runs on your behalf.',
+    'Added: 1Password “Production” — effective immediately, including in running conversations.',
+  ])
+  const revoked = structuredClone(granted)
+  revoked.exclusiveNodes = []
+  revoked.plugins = []
+  revoked.access.installation = false
+  revoked.access.nodes = [LOCAL_NODE_ID]
+  expect(reviewLines(granted, revoked, context).map(line => line.text)).toEqual([
+    'Removed: node gpu-box, exclusive reservation on gpu-box, 1Password “Production”, installation management.',
+  ])
+})

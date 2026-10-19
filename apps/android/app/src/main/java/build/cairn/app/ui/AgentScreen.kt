@@ -271,7 +271,7 @@ private fun AgentPage(
                 val lines = agentReview(baseline, edited, resources, preview)
                 if (needsReview(lines, preview)) {
                     val suspended = preview?.suspendedDelegations().orEmpty()
-                    reapprove = suspended.filter { it.blocked == null }.map { it.id }.toSet()
+                    reapprove = preview?.preselectedReapprovals().orEmpty()
                     review = PendingReview(edited, lines, suspended)
                 } else commit(edited, emptyList())
             } catch (e: Exception) {
@@ -991,6 +991,12 @@ private fun ReviewDialog(
                                     style = MaterialTheme.typography.bodyMedium,
                                 )
                             }
+                            if (delegation.alreadySuspended)
+                                Text(
+                                    "Déjà suspendu par une modification précédente. Ne le réapprouvez qu’après avoir vérifié ses accès actuels.",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
                             if (!checked)
                                 Text(
                                     "Ce bot sera suspendu jusqu’à sa reconfirmation sur l’instance.",
@@ -1158,7 +1164,7 @@ private fun ProjectsSection(
         "Les projets que cet agent peut ouvrir. Une réduction vaut pour les prochaines exécutions : le travail en file qui n’est plus couvert ne démarrera pas."
     )
     ScopeChoice(access.projects == null, false) { all ->
-        change { it.withAllProjects(all, projects) }
+        change { it.withAllProjects(all) }
     }
     if (access.projects == null) {
         Note("Les nouveaux projets seront accessibles dès leur ajout.")
@@ -1193,7 +1199,8 @@ private fun SkillsSection(
     )
     val choosable = choosableSkills(skills, access)
     ScopeChoice(access.skills == null, true) { all ->
-        change { it.copy(skills = if (all) null else it.skills ?: choosable.map(::skillKey)) }
+        // Choosing starts with no skill selected, as on the web.
+        change { it.copy(skills = if (all) null else it.skills ?: emptyList()) }
     }
     if (access.skills == null) {
         Note("${choosable.size} disponibles · limitées aux projets autorisés.")
@@ -1247,7 +1254,8 @@ private fun McpTools(
                     it.copy(
                         mcpTools =
                             if (all) it.mcpTools - mcp.id
-                            else it.mcpTools + (mcp.id to enabled.map { tool -> tool.name })
+                            // Choosing starts with no tool selected, as on the web.
+                            else it.mcpTools + (mcp.id to emptyList())
                     )
                 }
             }
@@ -1288,7 +1296,8 @@ private fun McpSection(
     ScopeChoice(access.mcps == null, true) { all ->
         change {
             it.copy(
-                mcps = if (all) null else it.mcps ?: mcps.map { mcp -> mcp.id },
+                // Choosing starts with no connection selected, as on the web.
+                mcps = if (all) null else it.mcps ?: emptyList(),
                 mcpTools = it.mcpTools,
             )
         }

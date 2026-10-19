@@ -1247,6 +1247,7 @@ async fn agent_edits_preview_and_reapprove_the_bot_answering_as_the_agent() {
     let preview = s.agent_preview(stricter.clone(), &id).await.unwrap();
     assert_eq!(effect(&preview)["suspended"], true);
     assert_eq!(effect(&preview)["blocked"], Value::Null);
+    assert_eq!(effect(&preview)["alreadySuspended"], false);
 
     stricter["reapproveDelegations"] = json!([connection]);
     let updated = s.agent(stricter, Some(&id)).await.unwrap();
@@ -1288,6 +1289,12 @@ async fn agent_edits_preview_and_reapprove_the_bot_answering_as_the_agent() {
         stored["grantedAccess"],
         cairn_installation::service::policy(&widened)
     );
+    // A later unrelated edit reports that the bot was already suspended.
+    let mut renamed = widened.clone();
+    renamed["description"] = "Renamed".into();
+    let preview = s.agent_preview(renamed, &id).await.unwrap();
+    assert_eq!(effect(&preview)["suspended"], true);
+    assert_eq!(effect(&preview)["alreadySuspended"], true);
 }
 
 #[tokio::test]

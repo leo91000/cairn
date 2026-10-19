@@ -44,7 +44,10 @@ révision périmée reçoit un conflit au lieu d’écraser des droits plus réc
 `POST /agents/{id}/preview` décrit, sans rien écrire, les exécutions qu’une réduction
 d’accès arrêterait et les délégations (bot Discord) qui seraient suspendues. Le
 propriétaire peut réapprouver ces délégations dans le même enregistrement
-(`reapproveDelegations`), sous les mêmes règles que l’écran de l’instance.
+(`reapproveDelegations`), sous les mêmes règles que l’écran de l’instance. Seules
+celles que cette modification suspend sont proposées cochées : une délégation déjà
+suspendue par une modification antérieure (`alreadySuspended`) reste à réapprouver
+explicitement, pour ne jamais approuver des accès que le propriétaire n’a pas revus.
 
 ## Compatibilité
 

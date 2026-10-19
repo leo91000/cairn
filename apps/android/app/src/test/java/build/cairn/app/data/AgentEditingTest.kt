@@ -245,10 +245,93 @@ class AgentEditingTest {
     }
 
     @Test
+    fun reviewListsEveryRemovedGrantAndPower() {
+        val granted =
+            agent.copy(
+                access = agent.access.copy(installation = true),
+                exclusiveNodes = listOf("gpu"),
+                plugins = listOf("prod"),
+            )
+        assertEquals(
+            listOf(
+                "réservation exclusive sur « gpu-box »",
+                "1Password « Production »",
+                "gestion de l’installation",
+            ),
+            agentReductions(granted, agent, resources),
+        )
+        val lines = agentReview(granted, agent, resources, AgentPreview())
+        assertEquals(
+            "Retrait : réservation exclusive sur « gpu-box », 1Password « Production », gestion de l’installation.",
+            lines.single().text,
+        )
+        assertEquals(ReviewKind.Reduction, lines.single().kind)
+
+        // "All" turned into a choice of nothing says so.
+        val everything = agent.copy(access = agent.access.copy(skills = null, mcps = null))
+        assertEquals(
+            listOf("plus aucune skill", "plus aucune connexion MCP"),
+            agentReductions(
+                everything,
+                everything.copy(
+                    access = everything.access.copy(skills = emptyList(), mcps = emptyList())
+                ),
+                resources,
+            ),
+        )
+    }
+
+    @Test
+    fun onlyNarrowerMcpToolChoicesAreReviewedAsRestrictions() {
+        val chosen =
+            agent.copy(
+                access = agent.access.copy(mcps = null, mcpTools = mapOf("m" to listOf("a", "b")))
+            )
+        fun tools(vararg names: String) =
+            chosen.copy(access = chosen.access.copy(mcpTools = mapOf("m" to names.toList())))
+        assertEquals(emptyList<String>(), agentReductions(chosen, tools("a", "b", "c"), resources))
+        assertEquals(
+            listOf("outils MCP restreints"),
+            agentReductions(chosen, tools("a"), resources),
+        )
+        val all = chosen.copy(access = chosen.access.copy(mcpTools = emptyMap()))
+        assertEquals(listOf("outils MCP restreints"), agentReductions(all, tools("a"), resources))
+        assertEquals(emptyList<String>(), agentReductions(chosen, all, resources))
+    }
+
+    @Test
+    fun onlyDelegationsThisSaveSuspendsArePreselectedForReapproval() {
+        val preview =
+            AgentPreview(
+                delegations =
+                    listOf(
+                        AgentDelegationEffect("new", suspended = true),
+                        AgentDelegationEffect("earlier", suspended = true, alreadySuspended = true),
+                        AgentDelegationEffect(
+                            "blocked",
+                            suspended = true,
+                            blocked = "Accès refusé",
+                        ),
+                        AgentDelegationEffect("kept"),
+                    )
+            )
+        assertEquals(setOf("new"), preview.preselectedReapprovals())
+        assertEquals(
+            listOf("new", "earlier", "blocked"),
+            preview.suspendedDelegations().map { it.id },
+        )
+        // Older servers omit the flag: it means not already suspended.
+        val decoded =
+            wireJson.decodeFromString<AgentDelegationEffect>("""{"id":"bot","suspended":true}""")
+        assertFalse(decoded.alreadySuspended)
+    }
+
+    @Test
     fun restrictingProjectsTurnsSharedGithubOffAndSaysSo() {
         val shared = agent.copy(access = agent.access.copy(projects = null, github = true))
-        val restricted = shared.access.withAllProjects(false, projects)
-        assertEquals(listOf("p1", "p2"), restricted.projects)
+        // Choosing starts with no project selected, as on the web.
+        val restricted = shared.access.withAllProjects(false)
+        assertEquals(emptyList<String>(), restricted.projects)
         assertFalse(restricted.github)
         val lines = agentReview(shared, shared.copy(access = restricted), resources, null)
         assertTrue(lines.any { it.text.startsWith("Connexion GitHub partagée désactivée") })

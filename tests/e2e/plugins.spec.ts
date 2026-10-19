@@ -184,6 +184,31 @@ test('Discord bots are set up through the package’s own form and keep the toke
   await review.getByRole('button', { name: 'Save', exact: true }).click()
   expect((await saving).postDataJSON().reapproveDelegations).toEqual([botId])
   await expect(review).toHaveCount(0)
+
+  // An earlier change elsewhere already suspended the bot: a later edit never reapproves it by default.
+  const reapproved = (await workspace.api('/api/agents')).find((item: { id: string }) => item.id === helper.id)
+  await workspace.api(`/api/agents/${helper.id}`, 'PUT', { ...reapproved, access: { ...reapproved.access, skills: [] } })
+  await page.goto(workspacePath(`/agents/${helper.id}?section=identity`))
+  const describe = async (text: string) => {
+    await page.getByLabel('Description', { exact: true }).fill(text)
+    await page.getByRole('region', { name: 'Unsaved changes' }).getByRole('button', { name: 'Save', exact: true }).click()
+  }
+
+  await describe('Answers support questions')
+  const earlier = review.getByRole('checkbox', { name: /Reapprove the new access for #support on Acme/ })
+  await expect(earlier).not.toBeChecked()
+  await expect(review).toContainText('Already suspended by an earlier change. Reapprove only after checking its current access.')
+  const unchecked = page.waitForRequest(request => request.method() === 'PUT' && new URL(request.url()).pathname.endsWith(`/agents/${helper.id}`))
+  await review.getByRole('button', { name: 'Save', exact: true }).click()
+  expect((await unchecked).postDataJSON()).not.toHaveProperty('reapproveDelegations')
+  await expect(review).toHaveCount(0)
+  // Checked deliberately, it is reapproved.
+  await describe('Answers support questions on Acme')
+  await earlier.check()
+  const checked = page.waitForRequest(request => request.method() === 'PUT' && new URL(request.url()).pathname.endsWith(`/agents/${helper.id}`))
+  await review.getByRole('button', { name: 'Save', exact: true }).click()
+  expect((await checked).postDataJSON().reapproveDelegations).toEqual([botId])
+  await expect(review).toHaveCount(0)
   await page.goto(workspacePath('/plugins/discord'))
 
   await bot.getByRole('button', { name: 'Delete #support on Acme' }).click()
