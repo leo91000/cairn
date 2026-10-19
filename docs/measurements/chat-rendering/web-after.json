@@ -1,0 +1,1361 @@
+{
+  "timestamp": "2026-10-19T15:14:29.883Z",
+  "commit": "7b04f7ff544aa50dbb9d25b4ef7e56527a866aec",
+  "sourceSha256": {
+    "apps/web/src/components/ActivityFeed.vue": "c9c1051a2e6b334cad0bc26d9c0cc380cc7e5f222c1181bceaed8394bc0ce899",
+    "apps/web/src/components/Markdown.vue": "60f8263855913a3a8a9847e28d36ee29b7f8e2dd54a6af214e55853a63eec04e",
+    "apps/web/src/highlight-cache.ts": "6710bfc417c4ed4e35467a903792d11d831771c970cb930afb4ab1a75d4a3bd3",
+    "apps/web/src/markdown-html.ts": "9daa154c15981a3b61fa6dcc6444b2070550e45f0333108879d4aa6079457020",
+    "apps/web/src/message-times.ts": "757afcd4dce6ff2fa838c5025184944f297986d4b07de04c5637ee37982d1346"
+  },
+  "node": "v24.21.0",
+  "browser": "153.0.8010.12",
+  "rawProps": false,
+  "histories": [
+    40,
+    400,
+    2000
+  ],
+  "characterSizes": [
+    2000,
+    20000,
+    100000
+  ],
+  "browserIsolation": "Fresh Chromium process per scenario; warmup remains inside each scenario",
+  "host": {
+    "cpu": "Intel(R) Xeon(R) Processor",
+    "logicalCpus": 12,
+    "memoryBytes": 33140260864,
+    "load": [
+      1.2,
+      1.66,
+      5.09
+    ],
+    "platform": "linux",
+    "arch": "x64"
+  },
+  "conditions": "Headless Chromium, production Vite build, local synthetic props, no network/backend/storage; warmed engine, fresh component mounts; unthrottled CPU. Main-thread update and synchronous layout are timed separately. Scroll is driven at requestAnimationFrame cadence, not touch input.",
+  "harnessSha256": "939ddaf460f08c07015ede1161b78606d32f32e91a03dc5378fd2928c11c95c9",
+  "bootId": "cdb084d4-badf-4c91-8904-4ba1e185c419",
+  "runs": [
+    {
+      "viewport": {
+        "width": 1440,
+        "height": 900
+      },
+      "render": [
+        {
+          "history": 40,
+          "characters": 2000,
+          "workload": "prose",
+          "component": "feed",
+          "rawProps": false,
+          "mount": {
+            "samples": 5,
+            "p50Ms": 17.700000000186265,
+            "p95Ms": 18.200000000186265,
+            "maxMs": 18.200000000186265
+          },
+          "update": {
+            "samples": 30,
+            "p50Ms": 2,
+            "p95Ms": 3,
+            "maxMs": 5.100000000093132
+          },
+          "layout": {
+            "samples": 30,
+            "p50Ms": 0.2999999998137355,
+            "p95Ms": 0.40000000037252903,
+            "maxMs": 0.5
+          },
+          "longTasksIncludingWarmup": [],
+          "nodes": 709,
+          "messages": 41,
+          "prefixNodeRetained": true,
+          "finalTextPresent": true,
+          "rendererTaskMsIncludingMountsAndWarmup": 354.498,
+          "heapBeforeBytes": 2253280,
+          "heapAfterUnmountBeforeGcBytes": 6302844
+        },
+        {
+          "history": 40,
+          "characters": 20000,
+          "workload": "prose",
+          "component": "feed",
+          "rawProps": false,
+          "mount": {
+            "samples": 5,
+            "p50Ms": 29.899999999906868,
+            "p95Ms": 41.5,
+            "maxMs": 41.5
+          },
+          "update": {
+            "samples": 30,
+            "p50Ms": 9.600000000093132,
+            "p95Ms": 12.200000000186265,
+            "maxMs": 17.5
+          },
+          "layout": {
+            "samples": 30,
+            "p50Ms": 0.599999999627471,
+            "p95Ms": 1.1999999997206032,
+            "maxMs": 1.2000000001862645
+          },
+          "longTasksIncludingWarmup": [],
+          "nodes": 1710,
+          "messages": 41,
+          "prefixNodeRetained": true,
+          "finalTextPresent": true,
+          "rendererTaskMsIncludingMountsAndWarmup": 809.134,
+          "heapBeforeBytes": 2253280,
+          "heapAfterUnmountBeforeGcBytes": 14182528
+        },
+        {
+          "history": 40,
+          "characters": 100000,
+          "workload": "prose",
+          "component": "feed",
+          "rawProps": false,
+          "mount": {
+            "samples": 5,
+            "p50Ms": 94.1999999997206,
+            "p95Ms": 99,
+            "maxMs": 99
+          },
+          "update": {
+            "samples": 30,
+            "p50Ms": 41.39999999990687,
+            "p95Ms": 47.1999999997206,
+            "maxMs": 49.700000000186265
+          },
+          "layout": {
+            "samples": 30,
+            "p50Ms": 2.6999999997206032,
+            "p95Ms": 3,
+            "maxMs": 3.2000000001862645
+          },
+          "longTasksIncludingWarmup": [
+            53,
+            50,
+            52
+          ],
+          "nodes": 6154,
+          "messages": 41,
+          "prefixNodeRetained": true,
+          "finalTextPresent": true,
+          "rendererTaskMsIncludingMountsAndWarmup": 2757.275,
+          "heapBeforeBytes": 2253280,
+          "heapAfterUnmountBeforeGcBytes": 23697308
+        },
+        {
+          "history": 400,
+          "characters": 2000,
+          "workload": "prose",
+          "component": "feed",
+          "rawProps": false,
+          "mount": {
+            "samples": 5,
+            "p50Ms": 232.8000000002794,
+            "p95Ms": 299,
+            "maxMs": 299
+          },
+          "update": {
+            "samples": 30,
+            "p50Ms": 8.099999999627471,
+            "p95Ms": 13.599999999627471,
+            "maxMs": 14.200000000186265
+          },
+          "layout": {
+            "samples": 30,
+            "p50Ms": 1.2999999998137355,
+            "p95Ms": 2.1000000000931323,
+            "maxMs": 2.1999999997206032
+          },
+          "longTasksIncludingWarmup": [],
+          "nodes": 5929,
+          "messages": 401,
+          "prefixNodeRetained": true,
+          "finalTextPresent": true,
+          "rendererTaskMsIncludingMountsAndWarmup": 2856.5190000000002,
+          "heapBeforeBytes": 2253280,
+          "heapAfterUnmountBeforeGcBytes": 46928304
+        },
+        {
+          "history": 400,
+          "characters": 20000,
+          "workload": "prose",
+          "component": "feed",
+          "rawProps": false,
+          "mount": {
+            "samples": 5,
+            "p50Ms": 175.89999999990687,
+            "p95Ms": 341.39999999990687,
+            "maxMs": 341.39999999990687
+          },
+          "update": {
+            "samples": 30,
+            "p50Ms": 12.399999999906868,
+            "p95Ms": 15.200000000186265,
+            "maxMs": 15.5
+          },
+          "layout": {
+            "samples": 30,
+            "p50Ms": 1.3999999999068677,
+            "p95Ms": 1.7000000001862645,
+            "maxMs": 2.1999999997206032
+          },
+          "longTasksIncludingWarmup": [],
+          "nodes": 6930,
+          "messages": 401,
+          "prefixNodeRetained": true,
+          "finalTextPresent": true,
+          "rendererTaskMsIncludingMountsAndWarmup": 2658.115,
+          "heapBeforeBytes": 2253280,
+          "heapAfterUnmountBeforeGcBytes": 16601460
+        },
+        {
+          "history": 400,
+          "characters": 100000,
+          "workload": "prose",
+          "component": "feed",
+          "rawProps": false,
+          "mount": {
+            "samples": 5,
+            "p50Ms": 237.70000000018626,
+            "p95Ms": 282.39999999990687,
+            "maxMs": 282.39999999990687
+          },
+          "update": {
+            "samples": 30,
+            "p50Ms": 99.1999999997206,
+            "p95Ms": 107.20000000018626,
+            "maxMs": 111
+          },
+          "layout": {
+            "samples": 30,
+            "p50Ms": 8.800000000279397,
+            "p95Ms": 12.699999999720603,
+            "maxMs": 17.5
+          },
+          "longTasksIncludingWarmup": [
+            59,
+            53,
+            52,
+            51,
+            51,
+            51,
+            50,
+            85,
+            102,
+            99,
+            108,
+            108,
+            100,
+            100,
+            103,
+            104,
+            107,
+            106,
+            106,
+            115,
+            110,
+            107,
+            109,
+            109,
+            107,
+            115,
+            111,
+            116,
+            114,
+            116,
+            112,
+            120,
+            115,
+            121,
+            99,
+            115,
+            79,
+            56,
+            63,
+            58
+          ],
+          "nodes": 11374,
+          "messages": 401,
+          "prefixNodeRetained": true,
+          "finalTextPresent": true,
+          "rendererTaskMsIncludingMountsAndWarmup": 6645.12,
+          "heapBeforeBytes": 2253280,
+          "heapAfterUnmountBeforeGcBytes": 14777188
+        },
+        {
+          "history": 2000,
+          "characters": 2000,
+          "workload": "prose",
+          "component": "feed",
+          "rawProps": false,
+          "mount": {
+            "samples": 5,
+            "p50Ms": 700.5,
+            "p95Ms": 1025.3000000002794,
+            "maxMs": 1025.3000000002794
+          },
+          "update": {
+            "samples": 30,
+            "p50Ms": 15.200000000186265,
+            "p95Ms": 35.60000000009313,
+            "maxMs": 36.10000000009313
+          },
+          "layout": {
+            "samples": 30,
+            "p50Ms": 4.599999999627471,
+            "p95Ms": 14.5,
+            "maxMs": 14.5
+          },
+          "longTasksIncludingWarmup": [
+            51,
+            50,
+            50
+          ],
+          "nodes": 29129,
+          "messages": 2001,
+          "prefixNodeRetained": true,
+          "finalTextPresent": true,
+          "rendererTaskMsIncludingMountsAndWarmup": 8569.449999999999,
+          "heapBeforeBytes": 2253280,
+          "heapAfterUnmountBeforeGcBytes": 56568412
+        },
+        {
+          "history": 2000,
+          "characters": 20000,
+          "workload": "prose",
+          "component": "feed",
+          "rawProps": false,
+          "mount": {
+            "samples": 5,
+            "p50Ms": 610.3999999999069,
+            "p95Ms": 665.5,
+            "maxMs": 665.5
+          },
+          "update": {
+            "samples": 30,
+            "p50Ms": 29,
+            "p95Ms": 57.799999999813735,
+            "maxMs": 61
+          },
+          "layout": {
+            "samples": 30,
+            "p50Ms": 7.2999999998137355,
+            "p95Ms": 13.699999999720603,
+            "maxMs": 14.299999999813735
+          },
+          "longTasksIncludingWarmup": [
+            65,
+            56,
+            63,
+            68,
+            54,
+            60,
+            51,
+            54
+          ],
+          "nodes": 30130,
+          "messages": 2001,
+          "prefixNodeRetained": true,
+          "finalTextPresent": true,
+          "rendererTaskMsIncludingMountsAndWarmup": 7473.269,
+          "heapBeforeBytes": 2253280,
+          "heapAfterUnmountBeforeGcBytes": 142328788
+        },
+        {
+          "history": 2000,
+          "characters": 100000,
+          "workload": "prose",
+          "component": "feed",
+          "rawProps": false,
+          "mount": {
+            "samples": 5,
+            "p50Ms": 669.3999999999069,
+            "p95Ms": 757,
+            "maxMs": 757
+          },
+          "update": {
+            "samples": 30,
+            "p50Ms": 66.10000000009313,
+            "p95Ms": 157.10000000009313,
+            "maxMs": 159.59999999962747
+          },
+          "layout": {
+            "samples": 30,
+            "p50Ms": 8.5,
+            "p95Ms": 17.600000000093132,
+            "maxMs": 18.5
+          },
+          "longTasksIncludingWarmup": [
+            77,
+            75,
+            105,
+            92,
+            66,
+            81,
+            67,
+            70,
+            102,
+            79,
+            175,
+            105,
+            70,
+            71,
+            63,
+            74,
+            74,
+            87,
+            77,
+            80,
+            84,
+            73,
+            92,
+            75,
+            80,
+            120,
+            81,
+            95,
+            167,
+            88,
+            95,
+            62,
+            113,
+            69,
+            68,
+            65,
+            67,
+            159,
+            109,
+            67
+          ],
+          "nodes": 34574,
+          "messages": 2001,
+          "prefixNodeRetained": true,
+          "finalTextPresent": true,
+          "rendererTaskMsIncludingMountsAndWarmup": 10874.77,
+          "heapBeforeBytes": 2253280,
+          "heapAfterUnmountBeforeGcBytes": 190848956
+        },
+        {
+          "history": 0,
+          "characters": 2000,
+          "workload": "code",
+          "component": "markdown",
+          "mount": {
+            "samples": 5,
+            "p50Ms": 3,
+            "p95Ms": 6.899999999906868,
+            "maxMs": 6.899999999906868
+          },
+          "update": {
+            "samples": 30,
+            "p50Ms": 1.8999999999068677,
+            "p95Ms": 2.8999999999068677,
+            "maxMs": 3
+          },
+          "layout": {
+            "samples": 30,
+            "p50Ms": 0.5,
+            "p95Ms": 0.8999999999068677,
+            "maxMs": 1
+          },
+          "longTasksIncludingWarmup": [],
+          "nodes": 239,
+          "messages": 0,
+          "prefixNodeRetained": true,
+          "finalTextPresent": true
+        },
+        {
+          "history": 0,
+          "characters": 20000,
+          "workload": "code",
+          "component": "markdown",
+          "mount": {
+            "samples": 5,
+            "p50Ms": 16.100000000093132,
+            "p95Ms": 18.100000000093132,
+            "maxMs": 18.100000000093132
+          },
+          "update": {
+            "samples": 30,
+            "p50Ms": 7.2999999998137355,
+            "p95Ms": 12.600000000093132,
+            "maxMs": 12.899999999906868
+          },
+          "layout": {
+            "samples": 30,
+            "p50Ms": 0.7999999998137355,
+            "p95Ms": 1.2000000001862645,
+            "maxMs": 1.5
+          },
+          "longTasksIncludingWarmup": [],
+          "nodes": 2008,
+          "messages": 0,
+          "prefixNodeRetained": true,
+          "finalTextPresent": true
+        },
+        {
+          "history": 0,
+          "characters": 100000,
+          "workload": "code",
+          "component": "markdown",
+          "mount": {
+            "samples": 5,
+            "p50Ms": 67.8000000002794,
+            "p95Ms": 75.5,
+            "maxMs": 75.5
+          },
+          "update": {
+            "samples": 30,
+            "p50Ms": 29.5,
+            "p95Ms": 47,
+            "maxMs": 48.200000000186265
+          },
+          "layout": {
+            "samples": 30,
+            "p50Ms": 1.7000000001862645,
+            "p95Ms": 2.8999999999068677,
+            "maxMs": 3.8999999999068677
+          },
+          "longTasksIncludingWarmup": [
+            68,
+            66,
+            59,
+            60,
+            52
+          ],
+          "nodes": 9828,
+          "messages": 0,
+          "prefixNodeRetained": true,
+          "finalTextPresent": true
+        },
+        {
+          "history": 0,
+          "characters": 2000,
+          "workload": "paragraph",
+          "component": "markdown",
+          "mount": {
+            "samples": 5,
+            "p50Ms": 2.1000000000931323,
+            "p95Ms": 2.5,
+            "maxMs": 2.5
+          },
+          "update": {
+            "samples": 30,
+            "p50Ms": 1,
+            "p95Ms": 1.2000000001862645,
+            "maxMs": 1.2000000001862645
+          },
+          "layout": {
+            "samples": 30,
+            "p50Ms": 0.6000000000931323,
+            "p95Ms": 0.7000000001862645,
+            "maxMs": 0.7999999998137355
+          },
+          "longTasksIncludingWarmup": [],
+          "nodes": 27,
+          "messages": 0,
+          "prefixNodeRetained": false,
+          "finalTextPresent": true
+        },
+        {
+          "history": 0,
+          "characters": 20000,
+          "workload": "paragraph",
+          "component": "markdown",
+          "mount": {
+            "samples": 5,
+            "p50Ms": 9.5,
+            "p95Ms": 14.100000000093132,
+            "maxMs": 14.100000000093132
+          },
+          "update": {
+            "samples": 30,
+            "p50Ms": 4.5,
+            "p95Ms": 5.100000000093132,
+            "maxMs": 5.2000000001862645
+          },
+          "layout": {
+            "samples": 30,
+            "p50Ms": 3.7000000001862645,
+            "p95Ms": 4.2000000001862645,
+            "maxMs": 4.2000000001862645
+          },
+          "longTasksIncludingWarmup": [],
+          "nodes": 252,
+          "messages": 0,
+          "prefixNodeRetained": false,
+          "finalTextPresent": true
+        },
+        {
+          "history": 0,
+          "characters": 100000,
+          "workload": "paragraph",
+          "component": "markdown",
+          "mount": {
+            "samples": 5,
+            "p50Ms": 27.700000000186265,
+            "p95Ms": 30.59999999962747,
+            "maxMs": 30.59999999962747
+          },
+          "update": {
+            "samples": 30,
+            "p50Ms": 9.900000000372529,
+            "p95Ms": 11.800000000279397,
+            "maxMs": 12.600000000093132
+          },
+          "layout": {
+            "samples": 30,
+            "p50Ms": 8.200000000186265,
+            "p95Ms": 9.299999999813735,
+            "maxMs": 9.299999999813735
+          },
+          "longTasksIncludingWarmup": [],
+          "nodes": 1252,
+          "messages": 0,
+          "prefixNodeRetained": false,
+          "finalTextPresent": true
+        }
+      ],
+      "scroll": [
+        {
+          "history": 40,
+          "frameIntervals": {
+            "samples": 120,
+            "p50Ms": 16.699999999999818,
+            "p95Ms": 16.700000000000045,
+            "maxMs": 16.800000000000068
+          },
+          "over25Ms": 0,
+          "totalFrames": 120,
+          "nodes": 591
+        },
+        {
+          "history": 400,
+          "frameIntervals": {
+            "samples": 120,
+            "p50Ms": 16.699999999999932,
+            "p95Ms": 16.799999999999955,
+            "maxMs": 100
+          },
+          "over25Ms": 1,
+          "totalFrames": 120,
+          "nodes": 5811
+        },
+        {
+          "history": 2000,
+          "frameIntervals": {
+            "samples": 120,
+            "p50Ms": 16.699999999999818,
+            "p95Ms": 16.700000000000728,
+            "maxMs": 216.5999999999999
+          },
+          "over25Ms": 2,
+          "totalFrames": 120,
+          "nodes": 29011
+        }
+      ],
+      "algorithms": [
+        {
+          "events": 40,
+          "accumulator": {
+            "samples": 100,
+            "p50Ms": 0,
+            "p95Ms": 0,
+            "maxMs": 0.10000000009313226
+          },
+          "timeline": {
+            "samples": 100,
+            "p50Ms": 0,
+            "p95Ms": 0.10000000009313226,
+            "maxMs": 0.7999999998137355
+          }
+        },
+        {
+          "events": 400,
+          "accumulator": {
+            "samples": 100,
+            "p50Ms": 0,
+            "p95Ms": 0,
+            "maxMs": 0.10000000009313226
+          },
+          "timeline": {
+            "samples": 100,
+            "p50Ms": 0.10000000009313226,
+            "p95Ms": 0.20000000018626451,
+            "maxMs": 0.8000000002793968
+          }
+        },
+        {
+          "events": 2000,
+          "accumulator": {
+            "samples": 100,
+            "p50Ms": 0,
+            "p95Ms": 0,
+            "maxMs": 0.10000000009313226
+          },
+          "timeline": {
+            "samples": 100,
+            "p50Ms": 0.20000000018626451,
+            "p95Ms": 0.5,
+            "maxMs": 2.2000000001862645
+          }
+        }
+      ]
+    },
+    {
+      "viewport": {
+        "width": 390,
+        "height": 844
+      },
+      "render": [
+        {
+          "history": 40,
+          "characters": 2000,
+          "workload": "prose",
+          "component": "feed",
+          "rawProps": false,
+          "mount": {
+            "samples": 5,
+            "p50Ms": 17.600000000093132,
+            "p95Ms": 22.200000000186265,
+            "maxMs": 22.200000000186265
+          },
+          "update": {
+            "samples": 30,
+            "p50Ms": 2,
+            "p95Ms": 2.3999999999068677,
+            "maxMs": 3.1999999997206032
+          },
+          "layout": {
+            "samples": 30,
+            "p50Ms": 0.2999999998137355,
+            "p95Ms": 0.40000000037252903,
+            "maxMs": 0.5
+          },
+          "longTasksIncludingWarmup": [],
+          "nodes": 709,
+          "messages": 41,
+          "prefixNodeRetained": true,
+          "finalTextPresent": true,
+          "rendererTaskMsIncludingMountsAndWarmup": 359.471,
+          "heapBeforeBytes": 2253280,
+          "heapAfterUnmountBeforeGcBytes": 5241624
+        },
+        {
+          "history": 40,
+          "characters": 20000,
+          "workload": "prose",
+          "component": "feed",
+          "rawProps": false,
+          "mount": {
+            "samples": 5,
+            "p50Ms": 32.89999999990687,
+            "p95Ms": 45.8000000002794,
+            "maxMs": 45.8000000002794
+          },
+          "update": {
+            "samples": 30,
+            "p50Ms": 9.5,
+            "p95Ms": 11.399999999906868,
+            "maxMs": 11.799999999813735
+          },
+          "layout": {
+            "samples": 30,
+            "p50Ms": 0.6000000000931323,
+            "p95Ms": 0.6000000000931323,
+            "maxMs": 0.7000000001862645
+          },
+          "longTasksIncludingWarmup": [],
+          "nodes": 1710,
+          "messages": 41,
+          "prefixNodeRetained": true,
+          "finalTextPresent": true,
+          "rendererTaskMsIncludingMountsAndWarmup": 808.504,
+          "heapBeforeBytes": 2253280,
+          "heapAfterUnmountBeforeGcBytes": 6794556
+        },
+        {
+          "history": 40,
+          "characters": 100000,
+          "workload": "prose",
+          "component": "feed",
+          "rawProps": false,
+          "mount": {
+            "samples": 5,
+            "p50Ms": 97.79999999981374,
+            "p95Ms": 106.10000000009313,
+            "maxMs": 106.10000000009313
+          },
+          "update": {
+            "samples": 30,
+            "p50Ms": 41,
+            "p95Ms": 60.200000000186265,
+            "maxMs": 61.5
+          },
+          "layout": {
+            "samples": 30,
+            "p50Ms": 2.3000000002793968,
+            "p95Ms": 3.3999999999068677,
+            "maxMs": 3.5
+          },
+          "longTasksIncludingWarmup": [
+            51,
+            54,
+            55,
+            50,
+            73,
+            63,
+            64
+          ],
+          "nodes": 6154,
+          "messages": 41,
+          "prefixNodeRetained": true,
+          "finalTextPresent": true,
+          "rendererTaskMsIncludingMountsAndWarmup": 2875.609,
+          "heapBeforeBytes": 2253280,
+          "heapAfterUnmountBeforeGcBytes": 7384024
+        },
+        {
+          "history": 400,
+          "characters": 2000,
+          "workload": "prose",
+          "component": "feed",
+          "rawProps": false,
+          "mount": {
+            "samples": 5,
+            "p50Ms": 118,
+            "p95Ms": 134.29999999981374,
+            "maxMs": 134.29999999981374
+          },
+          "update": {
+            "samples": 30,
+            "p50Ms": 3.7999999998137355,
+            "p95Ms": 5.099999999627471,
+            "maxMs": 7.100000000093132
+          },
+          "layout": {
+            "samples": 30,
+            "p50Ms": 0.6000000000931323,
+            "p95Ms": 1.2999999998137355,
+            "maxMs": 1.3000000002793968
+          },
+          "longTasksIncludingWarmup": [],
+          "nodes": 5929,
+          "messages": 401,
+          "prefixNodeRetained": true,
+          "finalTextPresent": true,
+          "rendererTaskMsIncludingMountsAndWarmup": 1339.855,
+          "heapBeforeBytes": 2253280,
+          "heapAfterUnmountBeforeGcBytes": 29581164
+        },
+        {
+          "history": 400,
+          "characters": 20000,
+          "workload": "prose",
+          "component": "feed",
+          "rawProps": false,
+          "mount": {
+            "samples": 5,
+            "p50Ms": 132,
+            "p95Ms": 138.09999999962747,
+            "maxMs": 138.09999999962747
+          },
+          "update": {
+            "samples": 30,
+            "p50Ms": 10.700000000186265,
+            "p95Ms": 12.100000000093132,
+            "maxMs": 14
+          },
+          "layout": {
+            "samples": 30,
+            "p50Ms": 1.1000000000931323,
+            "p95Ms": 1.3999999999068677,
+            "maxMs": 1.400000000372529
+          },
+          "longTasksIncludingWarmup": [],
+          "nodes": 6930,
+          "messages": 401,
+          "prefixNodeRetained": true,
+          "finalTextPresent": true,
+          "rendererTaskMsIncludingMountsAndWarmup": 1807.627,
+          "heapBeforeBytes": 2253280,
+          "heapAfterUnmountBeforeGcBytes": 14347252
+        },
+        {
+          "history": 400,
+          "characters": 100000,
+          "workload": "prose",
+          "component": "feed",
+          "rawProps": false,
+          "mount": {
+            "samples": 5,
+            "p50Ms": 408.8000000002794,
+            "p95Ms": 598,
+            "maxMs": 598
+          },
+          "update": {
+            "samples": 30,
+            "p50Ms": 45.6999999997206,
+            "p95Ms": 132.39999999990687,
+            "maxMs": 155.70000000018626
+          },
+          "layout": {
+            "samples": 30,
+            "p50Ms": 3.5,
+            "p95Ms": 9.799999999813735,
+            "maxMs": 9.800000000279397
+          },
+          "longTasksIncludingWarmup": [
+            72,
+            74,
+            50,
+            62,
+            50,
+            52,
+            78,
+            120,
+            143,
+            56,
+            56,
+            68,
+            160,
+            134,
+            141,
+            107,
+            110,
+            117,
+            121,
+            113,
+            96,
+            113,
+            97,
+            52,
+            56
+          ],
+          "nodes": 11374,
+          "messages": 401,
+          "prefixNodeRetained": true,
+          "finalTextPresent": true,
+          "rendererTaskMsIncludingMountsAndWarmup": 6557.314,
+          "heapBeforeBytes": 2253280,
+          "heapAfterUnmountBeforeGcBytes": 65429836
+        },
+        {
+          "history": 2000,
+          "characters": 2000,
+          "workload": "prose",
+          "component": "feed",
+          "rawProps": false,
+          "mount": {
+            "samples": 5,
+            "p50Ms": 510.6999999997206,
+            "p95Ms": 599.7000000001863,
+            "maxMs": 599.7000000001863
+          },
+          "update": {
+            "samples": 30,
+            "p50Ms": 13.5,
+            "p95Ms": 21.899999999906868,
+            "maxMs": 31.899999999906868
+          },
+          "layout": {
+            "samples": 30,
+            "p50Ms": 5.7000000001862645,
+            "p95Ms": 8.300000000279397,
+            "maxMs": 9.100000000093132
+          },
+          "longTasksIncludingWarmup": [],
+          "nodes": 29129,
+          "messages": 2001,
+          "prefixNodeRetained": true,
+          "finalTextPresent": true,
+          "rendererTaskMsIncludingMountsAndWarmup": 5816.125,
+          "heapBeforeBytes": 2253280,
+          "heapAfterUnmountBeforeGcBytes": 68434912
+        },
+        {
+          "history": 2000,
+          "characters": 20000,
+          "workload": "prose",
+          "component": "feed",
+          "rawProps": false,
+          "mount": {
+            "samples": 5,
+            "p50Ms": 527.2999999998137,
+            "p95Ms": 577,
+            "maxMs": 577
+          },
+          "update": {
+            "samples": 30,
+            "p50Ms": 23.199999999720603,
+            "p95Ms": 31.700000000186265,
+            "maxMs": 55
+          },
+          "layout": {
+            "samples": 30,
+            "p50Ms": 4.900000000372529,
+            "p95Ms": 6.199999999720603,
+            "maxMs": 9.799999999813735
+          },
+          "longTasksIncludingWarmup": [
+            60
+          ],
+          "nodes": 30130,
+          "messages": 2001,
+          "prefixNodeRetained": true,
+          "finalTextPresent": true,
+          "rendererTaskMsIncludingMountsAndWarmup": 6148.539,
+          "heapBeforeBytes": 2253280,
+          "heapAfterUnmountBeforeGcBytes": 49613240
+        },
+        {
+          "history": 2000,
+          "characters": 100000,
+          "workload": "prose",
+          "component": "feed",
+          "rawProps": false,
+          "mount": {
+            "samples": 5,
+            "p50Ms": 589.8999999999069,
+            "p95Ms": 748.0999999996275,
+            "maxMs": 748.0999999996275
+          },
+          "update": {
+            "samples": 30,
+            "p50Ms": 54.89999999990687,
+            "p95Ms": 73,
+            "maxMs": 84
+          },
+          "layout": {
+            "samples": 30,
+            "p50Ms": 6.899999999906868,
+            "p95Ms": 12,
+            "maxMs": 14
+          },
+          "longTasksIncludingWarmup": [
+            75,
+            67,
+            94,
+            77,
+            63,
+            59,
+            59,
+            56,
+            57,
+            58,
+            60,
+            62,
+            58,
+            77,
+            91,
+            62,
+            59,
+            65,
+            63,
+            64,
+            60,
+            73,
+            69,
+            58,
+            61,
+            65,
+            62,
+            58,
+            60,
+            63,
+            66,
+            62,
+            61,
+            60,
+            85,
+            61,
+            66,
+            58,
+            58,
+            61
+          ],
+          "nodes": 34574,
+          "messages": 2001,
+          "prefixNodeRetained": true,
+          "finalTextPresent": true,
+          "rendererTaskMsIncludingMountsAndWarmup": 8359.748,
+          "heapBeforeBytes": 2253280,
+          "heapAfterUnmountBeforeGcBytes": 235373072
+        },
+        {
+          "history": 0,
+          "characters": 2000,
+          "workload": "code",
+          "component": "markdown",
+          "mount": {
+            "samples": 5,
+            "p50Ms": 6.800000000279397,
+            "p95Ms": 7.300000000279397,
+            "maxMs": 7.300000000279397
+          },
+          "update": {
+            "samples": 30,
+            "p50Ms": 2.6000000000931323,
+            "p95Ms": 3.5,
+            "maxMs": 4.7000000001862645
+          },
+          "layout": {
+            "samples": 30,
+            "p50Ms": 0.7000000001862645,
+            "p95Ms": 1,
+            "maxMs": 1.1000000000931323
+          },
+          "longTasksIncludingWarmup": [],
+          "nodes": 239,
+          "messages": 0,
+          "prefixNodeRetained": true,
+          "finalTextPresent": true
+        },
+        {
+          "history": 0,
+          "characters": 20000,
+          "workload": "code",
+          "component": "markdown",
+          "mount": {
+            "samples": 5,
+            "p50Ms": 18.5,
+            "p95Ms": 35.89999999990687,
+            "maxMs": 35.89999999990687
+          },
+          "update": {
+            "samples": 30,
+            "p50Ms": 13.200000000186265,
+            "p95Ms": 37,
+            "maxMs": 37.700000000186265
+          },
+          "layout": {
+            "samples": 30,
+            "p50Ms": 1.2000000001862645,
+            "p95Ms": 1.7000000001862645,
+            "maxMs": 1.8000000002793968
+          },
+          "longTasksIncludingWarmup": [],
+          "nodes": 2008,
+          "messages": 0,
+          "prefixNodeRetained": true,
+          "finalTextPresent": true
+        },
+        {
+          "history": 0,
+          "characters": 100000,
+          "workload": "code",
+          "component": "markdown",
+          "mount": {
+            "samples": 5,
+            "p50Ms": 156.70000000018626,
+            "p95Ms": 212.20000000018626,
+            "maxMs": 212.20000000018626
+          },
+          "update": {
+            "samples": 30,
+            "p50Ms": 34.1999999997206,
+            "p95Ms": 74.8000000002794,
+            "maxMs": 97.09999999962747
+          },
+          "layout": {
+            "samples": 30,
+            "p50Ms": 2.1000000000931323,
+            "p95Ms": 16.399999999906868,
+            "maxMs": 21
+          },
+          "longTasksIncludingWarmup": [
+            57,
+            77,
+            50,
+            73,
+            79,
+            65,
+            118,
+            59
+          ],
+          "nodes": 9828,
+          "messages": 0,
+          "prefixNodeRetained": true,
+          "finalTextPresent": true
+        },
+        {
+          "history": 0,
+          "characters": 2000,
+          "workload": "paragraph",
+          "component": "markdown",
+          "mount": {
+            "samples": 5,
+            "p50Ms": 2.6999999997206032,
+            "p95Ms": 3.1000000000931323,
+            "maxMs": 3.1000000000931323
+          },
+          "update": {
+            "samples": 30,
+            "p50Ms": 0.8999999999068677,
+            "p95Ms": 1.1000000000931323,
+            "maxMs": 1.1999999997206032
+          },
+          "layout": {
+            "samples": 30,
+            "p50Ms": 0.5,
+            "p95Ms": 0.7999999998137355,
+            "maxMs": 0.7999999998137355
+          },
+          "longTasksIncludingWarmup": [],
+          "nodes": 27,
+          "messages": 0,
+          "prefixNodeRetained": false,
+          "finalTextPresent": true
+        },
+        {
+          "history": 0,
+          "characters": 20000,
+          "workload": "paragraph",
+          "component": "markdown",
+          "mount": {
+            "samples": 5,
+            "p50Ms": 6.7999999998137355,
+            "p95Ms": 9,
+            "maxMs": 9
+          },
+          "update": {
+            "samples": 30,
+            "p50Ms": 2.7000000001862645,
+            "p95Ms": 3.3999999999068677,
+            "maxMs": 3.7000000001862645
+          },
+          "layout": {
+            "samples": 30,
+            "p50Ms": 2.2999999998137355,
+            "p95Ms": 2.7999999998137355,
+            "maxMs": 3.599999999627471
+          },
+          "longTasksIncludingWarmup": [],
+          "nodes": 252,
+          "messages": 0,
+          "prefixNodeRetained": false,
+          "finalTextPresent": true
+        },
+        {
+          "history": 0,
+          "characters": 100000,
+          "workload": "paragraph",
+          "component": "markdown",
+          "mount": {
+            "samples": 5,
+            "p50Ms": 21.100000000093132,
+            "p95Ms": 25.700000000186265,
+            "maxMs": 25.700000000186265
+          },
+          "update": {
+            "samples": 30,
+            "p50Ms": 9.5,
+            "p95Ms": 11.100000000093132,
+            "maxMs": 11.699999999720603
+          },
+          "layout": {
+            "samples": 30,
+            "p50Ms": 8.700000000186265,
+            "p95Ms": 10.199999999720603,
+            "maxMs": 10.799999999813735
+          },
+          "longTasksIncludingWarmup": [],
+          "nodes": 1252,
+          "messages": 0,
+          "prefixNodeRetained": false,
+          "finalTextPresent": true
+        }
+      ],
+      "scroll": [
+        {
+          "history": 40,
+          "frameIntervals": {
+            "samples": 120,
+            "p50Ms": 16.699999999999932,
+            "p95Ms": 16.700000000000045,
+            "maxMs": 16.800000000000068
+          },
+          "over25Ms": 0,
+          "totalFrames": 120,
+          "nodes": 591
+        },
+        {
+          "history": 400,
+          "frameIntervals": {
+            "samples": 120,
+            "p50Ms": 16.699999999999818,
+            "p95Ms": 16.799999999999955,
+            "maxMs": 49.976
+          },
+          "over25Ms": 1,
+          "totalFrames": 120,
+          "nodes": 5811
+        },
+        {
+          "history": 2000,
+          "frameIntervals": {
+            "samples": 120,
+            "p50Ms": 16.699999999999818,
+            "p95Ms": 16.700000000000273,
+            "maxMs": 183.29999999999995
+          },
+          "over25Ms": 1,
+          "totalFrames": 120,
+          "nodes": 29011
+        }
+      ],
+      "algorithms": [
+        {
+          "events": 40,
+          "accumulator": {
+            "samples": 100,
+            "p50Ms": 0,
+            "p95Ms": 0,
+            "maxMs": 0.10000000009313226
+          },
+          "timeline": {
+            "samples": 100,
+            "p50Ms": 0,
+            "p95Ms": 0.10000000009313226,
+            "maxMs": 0.5
+          }
+        },
+        {
+          "events": 400,
+          "accumulator": {
+            "samples": 100,
+            "p50Ms": 0,
+            "p95Ms": 0,
+            "maxMs": 0.10000000009313226
+          },
+          "timeline": {
+            "samples": 100,
+            "p50Ms": 0.09999999962747097,
+            "p95Ms": 0.20000000018626451,
+            "maxMs": 0.3000000002793968
+          }
+        },
+        {
+          "events": 2000,
+          "accumulator": {
+            "samples": 100,
+            "p50Ms": 0,
+            "p95Ms": 0,
+            "maxMs": 0.10000000009313226
+          },
+          "timeline": {
+            "samples": 100,
+            "p50Ms": 0.20000000018626451,
+            "p95Ms": 0.39999999990686774,
+            "maxMs": 1.7000000001862645
+          }
+        }
+      ]
+    }
+  ]
+}
