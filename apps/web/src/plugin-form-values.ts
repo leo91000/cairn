@@ -47,7 +47,7 @@ export function pluginSettings(fields: SettingField[], values: Record<string, un
         settings[field.key] = value
     }
     else {
-      const text = value === null || value === undefined ? '' : String(value).trim()
+      const text = value === null || value === undefined ? '' : pluginText(String(value))
       if (!text)
         continue
       if (field.type === 'number') {
@@ -68,6 +68,12 @@ export function pluginSettings(fields: SettingField[], values: Record<string, un
 
 /** Blank secrets keep saved credentials. View actions receive the typed, untrimmed value. */
 export function pluginSecrets(secrets: Record<string, string>, trim = true): Record<string, string> {
-  return Object.fromEntries(Object.entries(secrets).filter(([, value]) => value.trim())
-    .map(([key, value]) => [key, trim ? value.trim() : value]))
+  return Object.fromEntries(Object.entries(secrets)
+    .map(([key, value]) => [key, trim ? pluginText(value) : value])
+    .filter(([, value]) => trim ? value : value.trim()))
+}
+
+/** Rust str::trim uses Unicode White_Space; JS trim also strips the meaningful U+FEFF. */
+function pluginText(value: string): string {
+  return value.replace(/^\p{White_Space}+|\p{White_Space}+$/gu, '')
 }

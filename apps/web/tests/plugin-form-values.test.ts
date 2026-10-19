@@ -33,6 +33,12 @@ describe('declarative plugin forms (shared Android corpus)', () => {
     expect(pluginFieldAnswer(undefined, 'title')).toBeUndefined()
   })
 
+  it('uses instance blankness for format-only credentials and keeps action filtering unchanged', () => {
+    const drafts = { plain: '\uFEFF', padded: ' \uFEFF ', blank: '\u00A0\u2007\u202F' }
+    expect(pluginSecrets(drafts)).toEqual({ plain: '\uFEFF', padded: '\uFEFF' })
+    expect(pluginSecrets(drafts, false)).toEqual({})
+  })
+
   for (const scenario of corpus) {
     it(scenario.name, () => {
       const fields = scenario.fields as SettingField[]
@@ -43,7 +49,9 @@ describe('declarative plugin forms (shared Android corpus)', () => {
       expect(Object.keys(opened)).not.toContain('password')
       const edited = { ...opened, ...scenario.edits }
       expect(pluginSettings(fields, edited)).toEqual(scenario.settings)
-      expect(pluginSecrets(secrets)).toEqual(scenario.instanceSecrets)
+      // Instance normalization and legacy action blankness have distinct contracts.
+      const instanceSecrets = ('instanceSecretsInput' in scenario ? scenario.instanceSecretsInput : secrets) as Record<string, string>
+      expect(pluginSecrets(instanceSecrets)).toEqual(scenario.instanceSecrets)
       expect({ ...pluginSettings(fields, edited), ...pluginSecrets(secrets, false) })
         .toEqual({ ...scenario.settings, ...scenario.actionSecrets })
       expect(scenario).toEqual(before)

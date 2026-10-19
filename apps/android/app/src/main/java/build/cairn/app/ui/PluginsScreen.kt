@@ -766,7 +766,9 @@ private fun InstanceEditor(
                 fields.none {
                     it.required &&
                         it.type !in setOf("boolean", "secret", "multiselect") &&
-                        values[it.key].isNullOrBlank()
+                        // A choice is an exact identifier; only text uses blankness.
+                        (if (it.type == "select") values[it.key].isNullOrEmpty()
+                        else values[it.key].isNullOrBlank())
                 } &&
                 (!manifest.delegates || (agent != null && problem(agent) == null)) &&
                 !completing,

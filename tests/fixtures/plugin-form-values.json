@@ -528,5 +528,141 @@
     },
     "instanceSecrets": {},
     "actionSecrets": {}
+  },
+  {
+    "name": "format characters retain meaningful boundary bytes",
+    "fields": [
+      {
+        "key": "text",
+        "title": "Text",
+        "type": "string",
+        "default": "\ufeff\u200b\u2060credential\u2060\u200b\ufeff"
+      },
+      {
+        "key": "note",
+        "title": "Note",
+        "type": "text",
+        "required": true,
+        "default": "\ufeff\u200b\u2060credential\u2060\u200b\ufeff"
+      }
+    ],
+    "initial": {},
+    "edits": {
+      "text": "\ufeff\u200b\u2060credential\u2060\u200b\ufeff"
+    },
+    "secrets": {
+      "password": "\ufeff\u200b\u2060credential\u2060\u200b\ufeff"
+    },
+    "opened": {
+      "text": "\ufeff\u200b\u2060credential\u2060\u200b\ufeff",
+      "note": "\ufeff\u200b\u2060credential\u2060\u200b\ufeff"
+    },
+    "settings": {
+      "text": "\ufeff\u200b\u2060credential\u2060\u200b\ufeff",
+      "note": "\ufeff\u200b\u2060credential\u2060\u200b\ufeff"
+    },
+    "instanceSecrets": {
+      "password": "\ufeff\u200b\u2060credential\u2060\u200b\ufeff",
+      "formatOnly": "\ufeff",
+      "paddedFormatOnly": "\ufeff"
+    },
+    "actionSecrets": {
+      "password": "\ufeff\u200b\u2060credential\u2060\u200b\ufeff"
+    },
+    "instanceSecretsInput": {
+      "password": "\ufeff\u200b\u2060credential\u2060\u200b\ufeff",
+      "formatOnly": "\ufeff",
+      "paddedFormatOnly": " \ufeff "
+    }
+  },
+  {
+    "name": "Unicode whitespace normalizes around retained format characters",
+    "fields": [
+      {
+        "key": "text",
+        "title": "Text",
+        "type": "string",
+        "default": "\u00a0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a\u2028\u2029\u202f\u205f\u3000\ufeff\u200b\u2060credential\u2060\u200b\ufeff\u00a0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a\u2028\u2029\u202f\u205f\u3000"
+      },
+      {
+        "key": "note",
+        "title": "Note",
+        "type": "text",
+        "required": true,
+        "default": "\u00a0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a\u2028\u2029\u202f\u205f\u3000\ufeff\u200b\u2060credential\u2060\u200b\ufeff\u00a0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a\u2028\u2029\u202f\u205f\u3000"
+      }
+    ],
+    "initial": {},
+    "edits": {
+      "text": "\u00a0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a\u2028\u2029\u202f\u205f\u3000\ufeff\u200b\u2060credential\u2060\u200b\ufeff\u00a0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a\u2028\u2029\u202f\u205f\u3000"
+    },
+    "secrets": {
+      "password": "\u00a0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a\u2028\u2029\u202f\u205f\u3000\ufeff\u200b\u2060credential\u2060\u200b\ufeff\u00a0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a\u2028\u2029\u202f\u205f\u3000"
+    },
+    "opened": {
+      "text": "\ufeff\u200b\u2060credential\u2060\u200b\ufeff",
+      "note": "\ufeff\u200b\u2060credential\u2060\u200b\ufeff"
+    },
+    "settings": {
+      "text": "\ufeff\u200b\u2060credential\u2060\u200b\ufeff",
+      "note": "\ufeff\u200b\u2060credential\u2060\u200b\ufeff"
+    },
+    "instanceSecrets": {
+      "password": "\ufeff\u200b\u2060credential\u2060\u200b\ufeff"
+    },
+    "actionSecrets": {
+      "password": "\u00a0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a\u2028\u2029\u202f\u205f\u3000\ufeff\u200b\u2060credential\u2060\u200b\ufeff\u00a0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a\u2028\u2029\u202f\u205f\u3000"
+    }
+  },
+  {
+    "name": "Unicode whitespace alone is blank",
+    "fields": [
+      {
+        "key": "text",
+        "title": "Text",
+        "type": "string",
+        "default": "\u00a0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a\u2028\u2029\u202f\u205f\u3000"
+      }
+    ],
+    "initial": {},
+    "edits": {
+      "text": "\u00a0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a\u2028\u2029\u202f\u205f\u3000"
+    },
+    "secrets": {
+      "password": "\u00a0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a\u2028\u2029\u202f\u205f\u3000"
+    },
+    "opened": {},
+    "settings": {},
+    "instanceSecrets": {},
+    "actionSecrets": {}
+  },
+  {
+    "name": "required whitespace-only choice identifiers remain exact",
+    "fields": [
+      {
+        "key": "region",
+        "title": "Region",
+        "type": "select",
+        "required": true,
+        "default": " ",
+        "options": [
+          {
+            "value": " ",
+            "label": "Space option"
+          }
+        ]
+      }
+    ],
+    "initial": {},
+    "edits": {},
+    "secrets": {},
+    "opened": {
+      "region": " "
+    },
+    "settings": {
+      "region": " "
+    },
+    "instanceSecrets": {},
+    "actionSecrets": {}
   }
 ]
