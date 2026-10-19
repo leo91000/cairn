@@ -13,11 +13,18 @@ use axum::response::{
 };
 use serde::Serialize;
 use serde_json::Value;
-use std::{sync::Arc, time::Duration};
+use std::{
+    collections::HashMap,
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 const PAGE_EVENTS: i64 = 100;
 const PAGE_BYTES: usize = 256 * 1024;
 const MAX_HISTORY_VERSION: usize = 200;
+/// Every commit wakes every stream. The list stream rebuilds the conversation list at
+/// most this often, so an agent writing output does not rebuild it per event.
+const LIST_INTERVAL: Duration = Duration::from_millis(250);
 
 #[derive(Clone)]
 struct Scope {
@@ -25,6 +32,9 @@ struct Scope {
     id: String,
     /// The subscriber's Cairn account, whose read marks the conversation list carries.
     account: String,
+    /// A conversation's stream also carries the list, so a browser tab reading a
+    /// conversation keeps a single stream within its account's stream capacity.
+    with_list: bool,
 }
 
 impl Scope {
@@ -33,11 +43,44 @@ impl Scope {
             chat: kind == "chats",
             id: id.to_owned(),
             account: account.to_owned(),
+            with_list: false,
         }
     }
 
     fn single_chat(&self) -> bool {
         self.chat && !self.id.is_empty()
+    }
+
+    /// The conversation list stream.
+    fn list(&self) -> bool {
+        self.chat && self.id.is_empty()
+    }
+
+    fn carries_list(&self) -> bool {
+        self.list() || (self.single_chat() && self.with_list)
+    }
+}
+
+/// The conversation list of each account at the store revision it was read for. Every
+/// commit wakes every stream: the streams carrying the list share one rebuild per commit.
+#[derive(Default)]
+pub struct ConversationLists(std::sync::Mutex<HashMap<String, (u64, Vec<Value>)>>);
+
+impl ConversationLists {
+    /// A read at `revision` sees at least that commit, so a list built for the same
+    /// revision is never older than the reader's own snapshot.
+    fn get(&self, db: &Db<'_>, scope: &Scope, revision: u64) -> Result<Vec<Value>> {
+        if let Some((built, chats)) = self.0.lock().unwrap().get(&scope.account)
+            && *built == revision
+        {
+            return Ok(chats.clone());
+        }
+        let chats = conversations(db, scope)?;
+        self.0
+            .lock()
+            .unwrap()
+            .insert(scope.account.clone(), (revision, chats.clone()));
+        Ok(chats)
     }
 }
 
@@ -84,7 +127,7 @@ struct Batch {
 struct HistoryPage {
     events: Vec<crate::store::Event>,
     history: String,
-    oldest: Option<i64>,
+    oldest: i64,
     has_older: bool,
 }
 
@@ -94,7 +137,8 @@ struct Request {
     window: bool,
     /// The viewer follows the latest output, so a long backlog may become the recent window.
     recent: bool,
-    before: Option<i64>,
+    /// The connection's first page: a reader resuming from its saved cursor.
+    resume: bool,
 }
 
 /// Oldest and newest retained event IDs of a run, 0 when it has none.
@@ -130,13 +174,19 @@ fn scoped_run(db: &Db<'_>, scope: &Scope, chat: &Value) -> Result<Value> {
     crate::error::required(db.run(&scope.id)?, "Run not found")
 }
 
-fn read_page(db: &Db<'_>, scope: &Scope, request: Request) -> Result<Page> {
+fn read_page(
+    db: &Db<'_>,
+    scope: &Scope,
+    request: Request,
+    lists: &ConversationLists,
+    revision: u64,
+) -> Result<Page> {
     let Request {
         after,
         expected,
         window,
         recent,
-        before,
+        resume,
     } = request;
     let chat = if scope.single_chat() {
         crate::chats::detail(db, &scope.id)?
@@ -152,17 +202,12 @@ fn read_page(db: &Db<'_>, scope: &Scope, request: Request) -> Result<Page> {
     let mut reset = after > max
         || (after > 0 && after < first)
         || expected.as_ref().is_some_and(|value| *value != history);
-    if before.is_some() && reset {
-        return Err(Error::conflict(
-            "History changed. Reconnect before loading older messages.",
-        ));
-    }
     // Stop reading rows at the byte budget, rather than allocating an
     // entire page of large historical outputs for every subscriber.
     let start = if reset { 0 } else { after };
-    let mut tail = before.is_some() || (window && (after == 0 || reset));
+    let mut tail = window && (after == 0 || reset);
     let (mut events, mut has_older) = if tail {
-        db.events_before(run_id, before.unwrap_or(i64::MAX))?
+        db.events_before(run_id, i64::MAX)?
     } else {
         (
             db.event_batch(run_id, start, PAGE_EVENTS, PAGE_BYTES)?,
@@ -170,15 +215,23 @@ fn read_page(db: &Db<'_>, scope: &Scope, request: Request) -> Result<Page> {
         )
     };
 
-    // A viewer at the latest output skips a backlog longer than one page: it reopens
-    // on the recent window, and older messages load from the window's boundary.
-    let long_backlog = events.last().is_some_and(|event| event.id < max);
-    if recent && !tail && long_backlog {
-        (events, has_older) = db.events_before(run_id, i64::MAX)?;
-        reset = true;
-        tail = true;
+    // A backlog longer than one page is mostly text snapshots that later snapshots
+    // replaced. When the newest window reaches back to the cursor, it is the whole
+    // catch-up: the reader keeps its history and only receives what it lacks.
+    let long_backlog = !tail && events.last().is_some_and(|event| event.id < max);
+    if window && resume && long_backlog {
+        let (missing, gap) = db.events_between(run_id, start, i64::MAX)?;
+        if !gap {
+            events = missing;
+        } else if recent {
+            // A viewer at the latest output skips the rest: it reopens on the recent
+            // window, and older messages load from the window's boundary.
+            (events, has_older) = db.events_before(run_id, i64::MAX)?;
+            reset = true;
+            tail = true;
+        }
     }
-    let oldest = tail.then(|| events.first().map_or(before.unwrap_or(0), |e| e.id));
+    let oldest = tail.then(|| events.first().map_or(0, |e| e.id));
     let cursor = events.last().map_or(start, |e| e.id);
     let mut state = State {
         artifacts: artifacts(db, run_id)?,
@@ -187,7 +240,10 @@ fn read_page(db: &Db<'_>, scope: &Scope, request: Request) -> Result<Page> {
         cache_revision: db
             .kv("conversation-cache-revision")?
             .unwrap_or_else(|| "initial".into()),
-        chats: scope.chat.then(|| conversations(db, scope)).transpose()?,
+        chats: scope
+            .carries_list()
+            .then(|| lists.get(db, scope, revision))
+            .transpose()?,
     };
     // Delivered messages already live in the event history. Do not resend
     // the entire conversation as metadata on every paginated stream update.
@@ -215,6 +271,9 @@ fn conversations(db: &Db<'_>, scope: &Scope) -> Result<Vec<Value>> {
 }
 
 async fn page(s: &Service, scope: Scope, request: Request) -> Result<Page> {
+    // Read before the snapshot starts, so the snapshot includes this revision.
+    let revision = s.store.revision();
+    let lists = s.conversation_lists.clone();
     s.store
         .read(move |db| {
             // A single SQLite snapshot covers metadata and the event boundary.
@@ -222,7 +281,7 @@ async fn page(s: &Service, scope: Scope, request: Request) -> Result<Page> {
                 db.0,
                 rusqlite::TransactionBehavior::Deferred,
             )?;
-            read_page(&Db(&tx), &scope, request)
+            read_page(&Db(&tx), &scope, request, &lists, revision)
         })
         .await
 }
@@ -251,7 +310,10 @@ pub async fn http(s: Arc<Service>, kind: &str, id: &str, input: Input) -> Result
     if kind == "chats" {
         crate::reads::begin(&s, account).await?;
     }
-    let scope = Scope::new(kind, id, account);
+    let scope = Scope {
+        with_list: input.query.get("list").is_some_and(|v| v == "1"),
+        ..Scope::new(kind, id, account)
+    };
     // Subscribe before reading: commits during replay remain observable.
     let changes = s.store.subscribe();
     let expected = input.query.get("history").cloned();
@@ -268,7 +330,7 @@ pub async fn http(s: Arc<Service>, kind: &str, id: &str, input: Input) -> Result
         expected,
         window,
         recent,
-        before: None,
+        resume: true,
     };
     let first = page(&s, scope.clone(), request).await?;
     let subscription = Subscription {
@@ -281,6 +343,7 @@ pub async fn http(s: Arc<Service>, kind: &str, id: &str, input: Input) -> Result
         previous: None,
         history: None,
         deltas: crate::live_text::TextDeltas::default(),
+        read_at: Instant::now(),
     };
     let stream = futures_util::stream::try_unfold(subscription, |mut subscription| async move {
         let event = subscription.next().await?;
@@ -307,16 +370,19 @@ struct Subscription {
     previous: Option<State>,
     history: Option<String>,
     deltas: crate::live_text::TextDeltas,
+    /// When the last page was read, to pace rebuilding the conversation list.
+    read_at: Instant,
 }
 
 impl Subscription {
-    async fn read(&self, after: i64, expected: Option<String>) -> Result<Page> {
+    async fn read(&mut self, after: i64, expected: Option<String>) -> Result<Page> {
+        self.read_at = Instant::now();
         let request = Request {
             after,
             expected,
             window: self.window,
             recent: false,
-            before: None,
+            resume: false,
         };
         page(&self.s, self.scope.clone(), request).await
     }
@@ -326,11 +392,19 @@ impl Subscription {
             if self.s.shutdown.is_cancelled() {
                 return Ok(None);
             }
+            if self.scope.list() && self.pending.is_none() {
+                tokio::select! {
+                    () = self.s.shutdown.cancelled() => return Ok(None),
+                    () = tokio::time::sleep_until((self.read_at + LIST_INTERVAL).into()) => {},
+                }
+            }
             // Mark observed changes before reading the next durable page.
             self.changes.borrow_and_update();
+            let opening = self.pending.is_some();
             if let Some((event, has_backlog)) = self.poll().await? {
-                // Coalesce live updates without throttling pages already stored for replay.
-                if !has_backlog {
+                // Coalesce live updates without delaying the opening page or
+                // throttling pages already stored for replay.
+                if !opening && !has_backlog {
                     tokio::time::sleep(Duration::from_millis(25)).await;
                 }
                 return Ok(Some(event));
@@ -390,6 +464,7 @@ impl Subscription {
 }
 
 /// Backwards pages use full persisted snapshots, never connection-local deltas.
+/// They need only the run and its events, not the metadata a stream carries.
 pub async fn history(s: &Service, kind: &str, id: &str, input: &Input) -> Result<Value> {
     uuid(id)?;
     let before = input.number("before", i64::MAX, 1, i64::MAX)?;
@@ -400,18 +475,35 @@ pub async fn history(s: &Service, kind: &str, id: &str, input: &Input) -> Result
     {
         return Err(Error::bad("A history revision is required."));
     }
-    let request = Request {
-        after: 0,
-        expected,
-        window: true,
-        recent: false,
-        before: Some(before),
-    };
-    let page = page(s, Scope::new(kind, id, ""), request).await?;
-    Ok(serde_json::to_value(HistoryPage {
-        events: page.events,
-        history: page.history,
-        oldest: page.oldest,
-        has_older: page.has_older,
-    })?)
+    let scope = Scope::new(kind, id, "");
+    let page = s
+        .store
+        .read(move |db| {
+            let tx = rusqlite::Transaction::new_unchecked(
+                db.0,
+                rusqlite::TransactionBehavior::Deferred,
+            )?;
+            let db = Db(&tx);
+            let run = if scope.chat {
+                crate::chats::history_run(&db, &scope.id)?
+            } else {
+                text(&scoped_run(&db, &scope, &Value::Null)?, "id").to_owned()
+            };
+            let (first, _) = event_bounds(&db, &run)?;
+            let history = format!("v1:{run}:{first}");
+            if expected.is_some_and(|value| value != history) {
+                return Err(Error::conflict(
+                    "History changed. Reconnect before loading older messages.",
+                ));
+            }
+            let (events, has_older) = db.events_before(&run, before)?;
+            Ok(HistoryPage {
+                oldest: events.first().map_or(before, |e| e.id),
+                events,
+                history,
+                has_older,
+            })
+        })
+        .await?;
+    Ok(serde_json::to_value(page)?)
 }

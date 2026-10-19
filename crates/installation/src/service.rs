@@ -36,6 +36,7 @@ pub struct Service {
     pub connections: Arc<crate::connections::Connections>,
     pub conversation_storage_lock: Arc<tokio::sync::Mutex<()>>,
     pub attachment_upload: Arc<tokio::sync::Mutex<()>>,
+    pub conversation_lists: Arc<crate::live::ConversationLists>,
     pub config: Config,
     pub store: Store,
     pub vault: Vault,
@@ -83,6 +84,7 @@ impl Service {
             connections: Arc::default(),
             conversation_storage_lock: Arc::default(),
             attachment_upload: Arc::default(),
+            conversation_lists: Arc::default(),
             skills: Skills {
                 config: config.clone(),
             },
