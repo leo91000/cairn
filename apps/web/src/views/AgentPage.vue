@@ -6,6 +6,7 @@ import type {
   ChipTone,
   Context,
   DelegationEffect,
+  GithubMode,
   Preview,
   ReviewLine,
   SectionId,
@@ -27,15 +28,17 @@ import {
   alwaysAvailable,
   changes,
   draftOf,
+  effectiveExclusive,
   errorSection,
   issues as findIssues,
+  githubTokenChange,
   grantablePackages,
   mainLockedSections,
   newAgentDraft,
   nodeName,
   rebaseDraft,
+  restrictedGithubMode,
   reviewLines,
-  runsOn,
   sandboxOptions,
   selectionSummary,
   skillKey,
@@ -120,6 +123,9 @@ const githubConfigured = ref(false)
 const githubToken = ref('')
 const dedicated = ref(false)
 const savedDedicated = ref(false)
+const removeToken = ref(false)
+// Restricting projects switched the shared connection to the saved dedicated token.
+const switchedToToken = ref(false)
 const suspended = ref<string[]>([])
 const busy = ref(false)
 const serverError = ref('')
@@ -143,24 +149,26 @@ const context = computed<Context>(() => ({
 }))
 const access = computed(() => draft.value.access)
 const availableNodes = computed(() => nodes.value.filter(node => !node.revoked))
+// The owner's own choice: "No GitHub" or "Remove saved token" removes the saved token.
 const githubMode = computed({
-  get: () => draft.value.access.github ? 'shared' : dedicated.value ? 'dedicated' : 'none',
-  set: (mode: 'shared' | 'dedicated' | 'none') => {
+  get: (): GithubMode => draft.value.access.github ? 'shared' : dedicated.value ? 'dedicated' : 'none',
+  set: (mode: GithubMode) => {
     draft.value.access.github = mode === 'shared'
     dedicated.value = mode === 'dedicated'
+    removeToken.value = mode === 'none'
+    switchedToToken.value = false
     if (mode !== 'dedicated')
       githubToken.value = ''
   },
 })
-const tokenChange = computed<'set' | 'remove' | null>(() => {
-  if (isMain.value)
-    return null
-  if (githubMode.value === 'dedicated' && githubToken.value.trim())
-    return 'set'
-  if (githubConfigured.value && githubMode.value === 'none')
-    return 'remove'
-  return null
-})
+const tokenChange = computed(() => githubTokenChange({
+  main: isMain.value,
+  mode: githubMode.value,
+  token: githubToken.value,
+  configured: githubConfigured.value,
+  removeRequested: removeToken.value,
+}))
+const usesSavedToken = computed(() => githubMode.value === 'dedicated' && githubConfigured.value && !githubToken.value.trim())
 const changed = computed(() => [...changes(saved.value, draft.value), ...(tokenChange.value ? ['github' as const] : [])])
 const dirty = computed(() => loaded.value && !notFound.value && changed.value.length > 0)
 const issues = computed(() => loaded.value ? findIssues(draft.value, context.value, isMain.value) : [])
@@ -169,9 +177,14 @@ const allProjects = computed({
   get: () => draft.value.access.projects,
   set: (value: string[] | null) => {
     draft.value.access.projects = value
-    // Shared GitHub credentials reach every repository, so restricted agents lose them.
-    if (value !== null && draft.value.access.github)
-      githubMode.value = 'none'
+    // Shared GitHub credentials reach every repository, so restricted agents lose them and use
+    // their saved dedicated token, narrower, when they have one. Only the owner removes it.
+    if (value !== null && draft.value.access.github) {
+      const mode = restrictedGithubMode('shared', githubConfigured.value && !removeToken.value)
+      draft.value.access.github = false
+      dedicated.value = mode === 'dedicated'
+      switchedToToken.value = mode === 'dedicated'
+    }
   },
 })
 const projectItems = computed<SelectionItem[]>(() => state.projects.map(project => ({ id: project.id, name: project.name, detail: project.description || undefined })))
@@ -209,7 +222,8 @@ const projectName = (project: string) => state.projects.find(item => item.id ===
 const connectionName = (connection: string) => catalog.value.connections.find(item => item.id === connection)?.name ?? 'Removed instance'
 const provider = computed(() => codingAgents[draft.value.provider] ?? codingAgents.codex)
 const sandbox = computed(() => sandboxOptions.find(option => option.value === access.value.sandbox) ?? sandboxOptions[0])
-const exclusiveNodes = computed(() => draft.value.exclusiveNodes.filter(node => availableNodes.value.some(item => item.id === node) && runsOn(access.value, node)))
+// Only grants that take effect: the agent may run there and the runtime supports exclusive reservations.
+const exclusiveNodes = computed(() => effectiveExclusive(draft.value, nodes.value))
 const delegations = computed(() => isNew.value ? [] : catalog.value.connections.filter(connection => connection.agentId === id.value))
 const pluginSummary = computed(() => {
   const counts = new Map<string, number>()
@@ -349,6 +363,8 @@ function apply(found: Agent) {
   saved.value = draftOf(found)
   draft.value = draftOf(found)
   githubToken.value = ''
+  removeToken.value = false
+  switchedToToken.value = false
   savedDedicated.value = !found.access.github && githubConfigured.value
   dedicated.value = savedDedicated.value
   fieldErrors.value = {}
@@ -450,7 +466,7 @@ async function requestSave() {
     return
   }
 
-  let lines = reviewLines(saved.value, draft.value, context.value, undefined, tokenChange.value)
+  let lines = reviewLines(saved.value, draft.value, context.value, undefined, tokenChange.value, usesSavedToken.value)
   let effects: DelegationEffect[] = []
   let affected = 0
   // A pending GitHub token alone changes no access: it is saved without a preview.
@@ -459,7 +475,7 @@ async function requestSave() {
     try {
       // The server says which queued or running work and which delegations the change affects.
       const preview = await api<Preview>(`/agents/${id.value}/preview`, { method: 'POST', body: JSON.stringify(body()) })
-      lines = reviewLines(saved.value, draft.value, context.value, preview.runs, tokenChange.value)
+      lines = reviewLines(saved.value, draft.value, context.value, preview.runs, tokenChange.value, usesSavedToken.value)
       effects = preview.delegations.filter(item => item.suspended)
       affected = preview.runs.queued + preview.runs.running
     }
@@ -507,6 +523,8 @@ async function commit(reapprove: string[]) {
   // After a saved profile and a failed token, a retry only saves what is still pending.
   const profileChanged = isNew.value || changes(saved.value, draft.value).length > 0
   let result: Agent
+  // A replayed creation, after a lost response, is followed by an update with the newer edits.
+  const createdBefore = creation.savedId.value
   try {
     if (isNew.value) {
       result = await creation.save<Agent>('/agents', {
@@ -527,11 +545,14 @@ async function commit(reapprove: string[]) {
   }
   catch (e) {
     failed(e)
-    if (isNew.value && creation.pendingCreation.value) {
-      const detail = (e as Error).message
-      const summary = 'Could not confirm whether the agent was saved. Retry to recover it safely.'
+    const detail = (e as Error).message
+    let summary = ''
+    if (isNew.value && !createdBefore && creation.savedId.value)
+      summary = 'Agent saved, but the latest changes could not be saved.'
+    else if (isNew.value && creation.pendingCreation.value)
+      summary = 'Could not confirm whether the agent was saved. Retry to recover it safely.'
+    if (summary)
       serverError.value = detail ? `${summary} ${detail}` : summary
-    }
 
     busy.value = false
     return
@@ -558,6 +579,8 @@ async function commit(reapprove: string[]) {
     }
 
     githubToken.value = ''
+    removeToken.value = false
+    switchedToToken.value = false
     savedDedicated.value = !result.access.github && githubConfigured.value
     dedicated.value = savedDedicated.value
     phase = 'refresh'
@@ -624,6 +647,8 @@ async function reloadAgent() {
 function discard() {
   draft.value = structuredClone(JSON.parse(JSON.stringify(saved.value)))
   githubToken.value = ''
+  removeToken.value = false
+  switchedToToken.value = false
   dedicated.value = savedDedicated.value
   fieldErrors.value = {}
   attempted.value = false
@@ -968,9 +993,12 @@ const errorCount = computed(() => Object.keys(fieldErrors.value).length)
                   value="none"
                   class="mt-1 size-4 w-4!"
                 ><span class="text-sm font-semibold">No GitHub</span>
-                <small class="col-start-2">{{ githubConfigured && savedDedicated ? 'The saved token is removed when you save.' : 'The agent works without GitHub credentials.' }}</small>
+                <small class="col-start-2">{{ githubConfigured && removeToken ? 'The saved token is removed when you save.' : 'The agent works without GitHub credentials.' }}</small>
               </label>
             </fieldset>
+            <p v-if="switchedToToken && githubMode === 'dedicated'" class="rounded-xl bg-soft px-4 py-3 text-sm" role="status">
+              The shared connection was turned off: this agent will use its saved dedicated token.
+            </p>
             <div v-if="githubMode === 'dedicated'" class="grid gap-3 rounded-xl border border-line bg-surface p-4">
               <p v-if="githubConfigured" class="flex flex-wrap items-center gap-2 text-sm">
                 <AccessChip tone="granted">

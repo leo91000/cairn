@@ -4,6 +4,7 @@ import type { AgentAccess, ChipTone } from '../agent-access'
 import { computed, ref } from 'vue'
 import { formatMiB } from '../../../../packages/contracts/nodes'
 import {
+  effectiveExclusive,
   nodeName,
   nodeState,
   runsOn,
@@ -33,7 +34,7 @@ const visible = computed(() => {
 })
 // Exclusive grants whose node was revoked or deleted.
 const missing = computed(() => exclusiveNodes.value.filter(id => !available.value.some(node => node.id === id)))
-const exclusiveCount = computed(() => exclusiveNodes.value.filter(id => available.value.some(node => node.id === id) && runsOn(access.value, id)).length)
+const exclusiveCount = computed(() => effectiveExclusive({ access: access.value, exclusiveNodes: exclusiveNodes.value }, props.nodes).length)
 const stateTones: Record<string, ChipTone> = {
   online: 'granted',
   offline: 'unavailable',
@@ -160,9 +161,9 @@ function exclusiveBlocked(node: ExecutionNode) {
             <span class="block text-sm" :class="exclusiveBlocked(node) && !exclusiveNodes.includes(node.id) ? 'text-muted' : ''">Can reserve exclusively</span>
             <span class="block text-2xs text-muted">{{ exclusiveBlocked(node) || 'Suspends other conversations' }}</span>
           </span>
-          <template v-if="exclusiveNodes.includes(node.id) && !runsOn(access, node.id)">
+          <template v-if="exclusiveNodes.includes(node.id) && exclusiveBlocked(node)">
             <span class="flex min-w-0 flex-wrap items-center gap-2 compact:justify-end">
-              <AccessChip tone="unavailable">Inactive: cannot run here</AccessChip>
+              <AccessChip tone="unavailable">{{ runsOn(access, node.id) ? 'Inactive: unavailable on this runtime' : 'Inactive: cannot run here' }}</AccessChip>
               <UiButton size="small" :aria-label="`Remove exclusive reservation on ${nodeName(node, node.id)}`" @click="setExclusive(node.id, false)">Remove</UiButton>
             </span>
           </template>

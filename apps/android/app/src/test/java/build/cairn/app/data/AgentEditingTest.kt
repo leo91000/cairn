@@ -1,6 +1,8 @@
 package build.cairn.app.data
 
+import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.json.JsonNull
+import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
@@ -335,6 +337,142 @@ class AgentEditingTest {
         assertFalse(restricted.github)
         val lines = agentReview(shared, shared.copy(access = restricted), resources, null)
         assertTrue(lines.any { it.text.startsWith("Connexion GitHub partagée désactivée") })
+    }
+
+    @Test
+    fun restrictingProjectsMovesASharedAgentToItsSavedTokenAndSaysSo() {
+        val shared = agent.copy(access = agent.access.copy(projects = null, github = true))
+        val draft = AgentDraft(shared).withAllProjects(false, tokenSaved = true)
+
+        // The saved token, made for this agent, replaces the shared connection; it is kept.
+        assertEquals(GithubMode.Dedicated, draft.githubMode(tokenSaved = true))
+        assertFalse(draft.resolved(tokenSaved = true).access.github)
+        assertNull(draft.tokenChange(tokenSaved = true, newToken = ""))
+        assertTrue(draft.switchedToSavedToken(tokenSaved = true))
+        assertEquals(
+            listOf(AgentSection.Projects, AgentSection.Github),
+            agentChanges(shared, draft, tokenSaved = true, newToken = ""),
+        )
+        val lines = agentReview(shared, draft.resolved(true), resources, null, savedToken = true)
+        assertTrue(
+            lines.any {
+                it.kind == ReviewKind.Reduction &&
+                    it.text ==
+                        "Connexion GitHub partagée désactivée : l’agent utilisera son jeton dédié enregistré."
+            }
+        )
+        // The choice survives a reload; an explicit choice clears the notice.
+        assertTrue(draft.rebased(shared, shared).switchedToSavedToken(tokenSaved = true))
+        assertFalse(draft.withGithub(GithubMode.Dedicated).switchedToSavedToken(tokenSaved = true))
+
+        // Without a saved token GitHub is switched off, with the existing explanation.
+        val none = AgentDraft(shared).withAllProjects(false, tokenSaved = false)
+        assertEquals(GithubMode.None, none.githubMode(tokenSaved = false))
+        assertNull(none.tokenChange(tokenSaved = false, newToken = ""))
+        assertFalse(none.switchedToSavedToken(tokenSaved = false))
+        assertTrue(
+            agentReview(shared, none.resolved(false), resources, null).any {
+                it.text ==
+                    "Connexion GitHub partagée désactivée : les projets choisis exigent un jeton dédié."
+            }
+        )
+
+        // An agent not using the shared connection keeps its GitHub choice.
+        val dedicated =
+            AgentDraft(agent.copy(access = agent.access.copy(projects = null, github = false)))
+        val kept = dedicated.withAllProjects(false, tokenSaved = true)
+        assertEquals(GithubMode.Dedicated, kept.githubMode(tokenSaved = true))
+        assertFalse(kept.sharedTurnedOff)
+    }
+
+    @Test
+    fun reviewNamesTheRemovedTokenNewToolChoicesAndOtherwiseInterruptedWork() {
+        val dedicated = AgentDraft(agent).withGithub(GithubMode.None)
+        val tokenRemoved = dedicated.tokenChange(tokenSaved = true, newToken = "") == ""
+        assertEquals(
+            "Retrait : jeton GitHub dédié.",
+            agentReview(agent, agent, resources, null, tokenRemoved).single().text,
+        )
+
+        // Tools chosen on a connection granted in the same edit are not a restriction.
+        val limited = agent.copy(access = agent.access.copy(mcps = listOf("a")))
+        val added =
+            limited.copy(
+                access =
+                    limited.access.copy(mcps = listOf("a", "b"), mcpTools = mapOf("b" to listOf()))
+            )
+        assertEquals(emptyList<String>(), agentReductions(limited, added, resources))
+        val narrowed =
+            limited.copy(access = limited.access.copy(mcpTools = mapOf("a" to listOf("x"))))
+        assertEquals(listOf("outils MCP restreints"), agentReductions(limited, narrowed, resources))
+
+        // Work the server says stops is reported even when nothing listed is removed.
+        val runs = AgentPreview(AgentPreviewRuns(queued = 2, running = 1))
+        val renamed = agent.copy(name = "Renamed")
+        val line = agentReview(agent, renamed, resources, runs).single()
+        assertEquals(ReviewKind.Reduction, line.kind)
+        assertEquals(
+            "Accès modifié. 2 exécutions en file et 1 conversation en cours ne pourront pas continuer avec les anciens accès.",
+            line.text,
+        )
+        assertTrue(needsReview(listOf(line), runs))
+    }
+
+    @Test
+    fun nodesAreNeverRestrictedWithoutTheMachineList() {
+        val everywhere = agent.access.copy(nodes = null)
+        assertEquals(everywhere, everywhere.withAllNodes(false, emptyList()))
+        assertEquals(
+            listOf(LOCAL_NODE_ID, "gpu", "mac"),
+            everywhere.withAllNodes(false, nodes).nodes,
+        )
+    }
+
+    @Test
+    fun anOlderInstallationWithoutPreviewIsReviewedLocally() = runBlocking {
+        assertNull(optionalPreview<AgentPreview> { throw ApiException(404, "Not found") })
+        assertNull(optionalPreview<AgentPreview> { throw ApiException(405, "Not allowed") })
+        assertEquals(AgentPreview(), optionalPreview { AgentPreview() })
+        val refused = runCatching {
+            optionalPreview<AgentPreview> { throw ApiException(400, "Refusé") }
+        }
+        assertEquals(400, (refused.exceptionOrNull() as ApiException).status)
+    }
+
+    @Test
+    fun nodeGrantsOnlyAddAndFallBackToTheMergedListOnOlderInstallations() = runBlocking {
+        val sent = mutableListOf<JsonObject>()
+        grantNodeAgents(listOf("agent", "agent"), setOf("other")) { sent += it }
+        assertEquals(1, sent.size)
+        assertEquals(
+            listOf("agent"),
+            sent.single()["agentIds"]!!.jsonArray.map { it.jsonPrimitive.content },
+        )
+        assertEquals(true, sent.single()["add"]!!.jsonPrimitive.content.toBoolean())
+
+        // An installation that predates `add` rejects it: the full list is sent once without it.
+        sent.clear()
+        grantNodeAgents(listOf("agent"), setOf("other")) { body ->
+            sent += body
+            if ("add" in body) throw ApiException(400, "Unknown field add")
+        }
+        assertEquals(2, sent.size)
+        assertFalse("add" in sent.last())
+        assertEquals(
+            setOf("other", "agent"),
+            sent.last()["agentIds"]!!.jsonArray.map { it.jsonPrimitive.content }.toSet(),
+        )
+
+        // Other failures are not retried.
+        sent.clear()
+        val failed = runCatching {
+            grantNodeAgents(listOf("agent"), setOf("other")) { body ->
+                sent += body
+                throw ApiException(500, "Erreur")
+            }
+        }
+        assertTrue(failed.isFailure)
+        assertEquals(1, sent.size)
     }
 
     @Test

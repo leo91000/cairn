@@ -107,6 +107,9 @@ private fun AgentPage(
     var newToken by remember { mutableStateOf("") }
     var section by rememberSaveable { mutableStateOf<String?>(null) }
     var nodes by remember { mutableStateOf<List<ExecutionNode>>(emptyList()) }
+    // Without the machine list, node access cannot be changed safely.
+    var nodesFailed by remember { mutableStateOf(false) }
+    var nodesAttempt by remember { mutableIntStateOf(0) }
     var catalog by remember { mutableStateOf<PluginCatalog?>(null) }
     var tokenSaved by remember { mutableStateOf(false) }
     var saving by remember { mutableStateOf(false) }
@@ -116,6 +119,7 @@ private fun AgentPage(
     var review by remember { mutableStateOf<PendingReview?>(null) }
     var reapprove by remember { mutableStateOf(emptySet<String>()) }
     var discarding by remember { mutableStateOf(false) }
+    var reloadFailed by remember { mutableStateOf(false) }
     var deleting by remember { mutableStateOf(false) }
     // A new agent keeps one creation identity: retrying after a lost response or a failed
     // token never creates a second agent.
@@ -124,11 +128,13 @@ private fun AgentPage(
     val agentId = baseline.id
     val main = agentId == MAIN_AGENT_ID
 
-    LaunchedEffect(agentId) {
+    LaunchedEffect(agentId, nodesAttempt) {
         try {
             nodes = vm.api.get("/nodes")
+            nodesFailed = false
         } catch (e: Exception) {
             if (e is CancellationException) throw e
+            nodesFailed = true
         }
     }
     LaunchedEffect(agentId) {
@@ -195,15 +201,33 @@ private fun AgentPage(
                     // Once created, the agent's revision guards the recovery update, so a change
                     // made elsewhere meanwhile is reported as a conflict instead of overwritten.
                     val response =
-                        creation.save(
-                            vm.api,
-                            "/agents",
-                            value = {
-                                agentSaveBody(edited.copy(revision = baseline.revision), approved)
-                            },
-                            createValue = { agentSaveBody(edited.copy(revision = ""), approved) },
-                            onCreated = { baseline = wireJson.decodeFromJsonElement<Agent>(it) },
-                        )
+                        try {
+                            creation.save(
+                                vm.api,
+                                "/agents",
+                                value = {
+                                    agentSaveBody(
+                                        edited.copy(revision = baseline.revision),
+                                        approved,
+                                    )
+                                },
+                                createValue = {
+                                    agentSaveBody(edited.copy(revision = ""), approved)
+                                },
+                                onCreated = {
+                                    baseline = wireJson.decodeFromJsonElement<Agent>(it)
+                                },
+                            )
+                        } catch (e: Exception) {
+                            if (e is CancellationException) throw e
+                            // The agent exists; only the edits made since its creation failed.
+                            val conflicting = e is ApiException && e.status == 409
+                            if (creation.id.isBlank() || conflicting) throw e
+                            throw IllegalStateException(
+                                "Agent enregistré, mais les dernières modifications n’ont pas été enregistrées. Réessayez. ${e.message.orEmpty()}"
+                                    .trim()
+                            )
+                        }
                     wireJson.decodeFromJsonElement<Agent>(response)
                 }
                 else ->
@@ -236,8 +260,17 @@ private fun AgentPage(
         newToken = ""
         baseline = saved
         draft = AgentDraft(saved)
-        // The page is saved; the workspace reloads in the background.
-        scope.launch { runCatching { vm.refresh() } }
+        try {
+            vm.refresh()
+        } catch (e: Exception) {
+            if (e is CancellationException) throw e
+            // The agent is saved; saving again only retries the reload.
+            reloadFailed = true
+            throw IllegalStateException(
+                "Agent enregistré, mais le rechargement a échoué. Réessayez."
+            )
+        }
+        reloadFailed = false
         vm.notify(if (creating) "Agent créé" else "Agent enregistré")
         if (creating) back()
     }
@@ -260,15 +293,25 @@ private fun AgentPage(
         saveError = null
         scope.launch {
             try {
+                // The agent is saved; only its reload failed.
+                if (reloadFailed && !dirty && !creating) {
+                    commit(edited, emptyList())
+                    return@launch
+                }
                 val preview =
                     if (creating) null
                     else
-                        vm.api.send<AgentPreview>(
-                            "POST",
-                            "/agents/${segment(agentId)}/preview",
-                            agentSaveBody(edited),
-                        )
-                val lines = agentReview(baseline, edited, resources, preview)
+                        optionalPreview {
+                            vm.api.send<AgentPreview>(
+                                "POST",
+                                "/agents/${segment(agentId)}/preview",
+                                agentSaveBody(edited),
+                            )
+                        }
+                val tokenRemoved = draft.tokenChange(tokenSaved, newToken) == ""
+                val savedToken = draft.githubMode(tokenSaved) == GithubMode.Dedicated && tokenSaved
+                val lines =
+                    agentReview(baseline, edited, resources, preview, tokenRemoved, savedToken)
                 if (needsReview(lines, preview)) {
                     val suspended = preview?.suspendedDelegations().orEmpty()
                     reapprove = preview?.preselectedReapprovals().orEmpty()
@@ -337,7 +380,15 @@ private fun AgentPage(
                     AgentSection.Projects ->
                         if (main) LockedSection()
                         else
-                            ProjectsSection(draft.agent.access, state.projects) { change ->
+                            ProjectsSection(
+                                draft.agent.access,
+                                state.projects,
+                                chooseAll = { all ->
+                                    draft = draft.withAllProjects(all, tokenSaved)
+                                    saveError = null
+                                    conflict = false
+                                },
+                            ) { change ->
                                 access(change)
                             }
                     AgentSection.Skills ->
@@ -365,13 +416,20 @@ private fun AgentPage(
                                 newToken,
                                 { newToken = it },
                                 { mode ->
-                                    draft = draft.copy(github = mode.value)
+                                    draft = draft.withGithub(mode)
                                     saveError = null
                                 },
                             )
                     AgentSection.Plugins ->
                         PluginsSection(draft.agent, catalog, { navigate(it) }, ::update)
-                    AgentSection.Nodes -> NodesSection(draft.agent, nodes, ::update)
+                    AgentSection.Nodes ->
+                        NodesSection(
+                            draft.agent,
+                            nodes,
+                            nodesFailed,
+                            retry = { nodesAttempt++ },
+                            change = ::update,
+                        )
                     AgentSection.Sandbox ->
                         SandboxSection(draft.agent.access.sandbox) { value ->
                             access { it.copy(sandbox = value) }
@@ -389,7 +447,8 @@ private fun AgentPage(
                 }
             }
         }
-        if (dirty || creating || saveError != null)
+        // Kept while saving: the save ends once the workspace has reloaded.
+        if (dirty || creating || saving || saveError != null)
             SaveBar(
                 changes.size,
                 creating,
@@ -398,6 +457,7 @@ private fun AgentPage(
                 saveError.takeIf { errorSection == null || errorSection != current },
                 errorSection,
                 conflict,
+                retryable = reloadFailed,
                 discard = {
                     if (creating) discarding = true
                     else {
@@ -875,6 +935,7 @@ private fun SaveBar(
     serverError: String?,
     errorSection: AgentSection?,
     conflict: Boolean,
+    retryable: Boolean,
     discard: () -> Unit,
     save: () -> Unit,
     reload: () -> Unit,
@@ -911,7 +972,11 @@ private fun SaveBar(
             }
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text(
-                    if (creating) "● Nouvel agent" else "● ${changesLabel(count)}",
+                    when {
+                        creating -> "● Nouvel agent"
+                        count == 0 && saving -> "Enregistrement…"
+                        else -> "● ${changesLabel(count)}"
+                    },
                     Modifier.weight(1f),
                     style = MaterialTheme.typography.bodyMedium,
                     fontWeight = FontWeight.SemiBold,
@@ -920,7 +985,7 @@ private fun SaveBar(
                     TextButton(onClick = discard, enabled = !saving) { Text("Annuler") }
                 Button(
                     onClick = save,
-                    enabled = !saving && errors.isEmpty() && (count > 0 || creating),
+                    enabled = !saving && errors.isEmpty() && (count > 0 || creating || retryable),
                 ) {
                     Text(if (creating) "Créer l’agent" else "Enregistrer")
                 }
@@ -1158,14 +1223,13 @@ private fun ChooseList(
 private fun ProjectsSection(
     access: AccessPolicy,
     projects: List<Project>,
+    chooseAll: (Boolean) -> Unit,
     change: ((AccessPolicy) -> AccessPolicy) -> Unit,
 ) {
     Note(
         "Les projets que cet agent peut ouvrir. Une réduction vaut pour les prochaines exécutions : le travail en file qui n’est plus couvert ne démarrera pas."
     )
-    ScopeChoice(access.projects == null, false) { all ->
-        change { it.withAllProjects(all) }
-    }
+    ScopeChoice(access.projects == null, false, chooseAll)
     if (access.projects == null) {
         Note("Les nouveaux projets seront accessibles dès leur ajout.")
         return
@@ -1400,7 +1464,11 @@ private fun GithubSection(
             Modifier.padding(start = 40.dp),
             verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
-            if (tokenSaved) Note("Un jeton est enregistré.")
+            if (draft.switchedToSavedToken(tokenSaved))
+                Note(
+                    "La connexion partagée a été désactivée : cet agent utilisera son jeton dédié enregistré."
+                )
+            else if (tokenSaved) Note("Un jeton est enregistré.")
             SecretField(
                 if (tokenSaved) "Nouveau jeton (facultatif)" else "Jeton GitHub dédié",
                 token,
@@ -1631,9 +1699,22 @@ private fun nodeStatus(node: ExecutionNode): PluginBadge =
 private fun NodesSection(
     agent: Agent,
     nodes: List<ExecutionNode>,
+    failed: Boolean,
+    retry: () -> Unit,
     change: ((Agent) -> Agent) -> Unit,
 ) {
     val access = agent.access
+    // Without the machine list, any change could restrict the agent to the current runner.
+    val editable = !failed
+    if (failed)
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text(
+                "Impossible de charger les nodes. Leurs accès ne peuvent pas être modifiés pour l’instant.",
+                Modifier.weight(1f),
+                color = MaterialTheme.colorScheme.error,
+            )
+            TextButton(onClick = retry) { Text("Réessayer") }
+        }
     var explain by remember { mutableStateOf(false) }
     var query by rememberSaveable { mutableStateOf("") }
     val choices = agentNodeChoices(nodes)
@@ -1641,6 +1722,7 @@ private fun NodesSection(
         "Toutes les nodes, y compris futures",
         "Les nouvelles machines seront utilisables par cet agent dès leur inscription.",
         access.nodes == null,
+        enabled = editable,
     ) { all ->
         change { it.copy(access = it.access.withAllNodes(all, nodes)) }
     }
@@ -1682,7 +1764,7 @@ private fun NodesSection(
                     "Exécuter ses conversations",
                     if (access.nodes == null) "Inclus dans « Toutes les nodes »" else "",
                     runs,
-                    enabled = access.nodes != null,
+                    enabled = editable && access.nodes != null,
                     description = "Exécuter ses conversations sur ${node.name}",
                 ) { on ->
                     change { it.withNodeRun(node.id, on) }
@@ -1697,7 +1779,7 @@ private fun NodesSection(
                         else -> "Suspend les autres conversations"
                     },
                     exclusive,
-                    enabled = runs && supported,
+                    enabled = editable && runs && supported,
                     power = true,
                     description = "Réserver ${node.name} en exclusivité",
                 ) { on ->

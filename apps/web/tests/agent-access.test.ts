@@ -8,12 +8,15 @@ import {
   accessSummary,
   changes,
   draftOf,
+  effectiveExclusive,
   errorSection,
+  githubTokenChange,
   grantableConnection,
   grantablePackages,
   issues,
   newAgentDraft,
   rebaseDraft,
+  restrictedGithubMode,
   reviewLines,
   selectionSummary,
   skillLabel,
@@ -310,4 +313,63 @@ it('lists every addition and removal of powers and grants', () => {
   expect(reviewLines(granted, revoked, context).map(line => line.text)).toEqual([
     'Removed: node gpu-box, exclusive reservation on gpu-box, 1Password “Production”, installation management.',
   ])
+})
+
+it('removes a saved GitHub token only when the owner asks for it', () => {
+  const kept = {
+    main: false,
+    mode: 'none' as const,
+    token: '',
+    configured: true,
+    removeRequested: false,
+  }
+  // Restricting projects switches the shared connection to a saved token, narrower, or to no GitHub.
+  expect(restrictedGithubMode('shared', true)).toBe('dedicated')
+  expect(restrictedGithubMode('shared', false)).toBe('none')
+  expect(restrictedGithubMode('none', true)).toBe('none')
+  expect(githubTokenChange({ ...kept, mode: restrictedGithubMode('shared', true) })).toBeNull()
+  // A saved token is removed only on the owner's explicit choice.
+  expect(githubTokenChange(kept)).toBeNull()
+  expect(githubTokenChange({ ...kept, removeRequested: true })).toBe('remove')
+  expect(githubTokenChange({ ...kept, configured: false, removeRequested: true })).toBeNull()
+  expect(githubTokenChange({ ...kept, mode: 'dedicated', token: ' new ' })).toBe('set')
+  expect(githubTokenChange({ ...kept, mode: 'dedicated' })).toBeNull()
+  expect(githubTokenChange({ ...kept, main: true, removeRequested: true })).toBeNull()
+})
+
+it('treats an exclusive reservation on a runtime without support as inactive', () => {
+  const old = {
+    ...gpu,
+    id: 'old',
+    name: 'old-box',
+    exclusiveReservations: false,
+  } as ExecutionNode
+  const nodes = [gpu, old]
+  const draft = newAgentDraft()
+  draft.access.nodes = ['gpu', 'old']
+  draft.exclusiveNodes = ['gpu', 'old']
+  expect(effectiveExclusive(draft, nodes)).toEqual(['gpu'])
+  expect(issues(draft, { ...context, nodes }, false).map(issue => issue.text)).toEqual([
+    'The exclusive reservation on old-box is inactive: its runtime must be updated for exclusive reservations.',
+  ])
+  draft.exclusiveNodes = ['old']
+  expect(effectiveExclusive(draft, nodes)).toEqual([])
+  const agent = {
+    id: 'a',
+    name: 'Agent',
+    access: draft.access,
+    exclusiveNodes: ['old'],
+  } as unknown as Agent
+  expect(accessSummary(agent, { ...context, nodes })).toBe('No projects · 2 nodes')
+})
+
+it('says when restricted projects move the agent to its saved GitHub token', () => {
+  const saved = newAgentDraft()
+  saved.access.projects = null
+  saved.access.github = true
+  const draft = structuredClone(saved)
+  draft.access.projects = ['p1']
+  draft.access.github = false
+  expect(reviewLines(saved, draft, context, undefined, null, true).at(-1)!.text).toBe('Shared GitHub connection turned off: the agent will use its saved dedicated token.')
+  expect(reviewLines(saved, draft, context).at(-1)!.text).toBe('Shared GitHub connection turned off: selected projects require a dedicated token.')
 })

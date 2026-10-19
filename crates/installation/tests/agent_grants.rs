@@ -399,7 +399,9 @@ async fn startup_rebuilds_agent_grants_from_resources_an_older_release_edited() 
     let owner = Owner::serve(service, TempDir::new().unwrap()).await;
     owner.add_node().await;
     let account = owner.add_service_account(json!([])).await;
-    let agent = owner.create_agent("Legacy").await;
+    let mut agent = owner.create_agent("Legacy").await;
+    agent["access"]["nodes"] = json!([LOCAL_NODE_ID, NODE]);
+    let (_, agent) = owner.send("PUT", &path(&agent), agent).await;
     let id = text(&agent, "id").to_owned();
 
     // An older release only writes the resource side, possibly naming deleted agents.
@@ -731,4 +733,26 @@ async fn adding_agents_to_a_new_node_never_revokes_existing_access() {
             "{stored}"
         );
     }
+}
+
+#[tokio::test]
+async fn startup_drops_reservations_an_older_release_left_without_node_access() {
+    let root = TempDir::new().unwrap();
+    std::fs::create_dir(root.path().join("home")).unwrap();
+    let owner = Owner::serve(start(root.path()).await, TempDir::new().unwrap()).await;
+    owner.add_node().await;
+    let agent = owner.create_agent("Rolled back").await;
+    let id = text(&agent, "id").to_owned();
+    // The previous release removed node access but kept the node's copy.
+    let mut node = owner.stored("nodes", NODE).await;
+    node["exclusiveAgents"] = json!([id]);
+    owner.service.store.put("nodes", node).await.unwrap();
+    owner.service.shutdown.cancel();
+    drop(owner);
+
+    let restarted = start(root.path()).await;
+    let agent = restarted.store.get("agents", &id).await.unwrap().unwrap();
+    assert_eq!(agent["exclusiveNodes"], json!([]));
+    let node = restarted.store.get("nodes", NODE).await.unwrap().unwrap();
+    assert_eq!(node["exclusiveAgents"], json!([]));
 }

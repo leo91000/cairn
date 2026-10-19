@@ -1,6 +1,11 @@
 package build.cairn.app.data
 
 import kotlinx.serialization.Serializable
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.buildJsonArray
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.put
 
 const val LOCAL_NODE_ID = "00000000-0000-4000-8000-000000000002"
 
@@ -60,6 +65,29 @@ data class ExecutionNode(
 fun ExecutionNode.grantedAgents(agents: List<Agent> = emptyList()): Set<String> =
     this.agents.filter { !it.allNodes }.map { it.id }.toSet() +
         agents.filter { it.access.nodes?.contains(id) == true }.map { it.id }
+
+/**
+ * Grants [chosen] agents a node with `PUT /nodes/{id}/agents` `{ agentIds, add: true }`, which
+ * never revokes anyone. An older installation rejects `add` (400): the request is then sent once
+ * without it, with the full list ([granted] plus [chosen]) since that form replaces the node's
+ * list.
+ */
+suspend fun grantNodeAgents(
+    chosen: List<String>,
+    granted: Set<String>,
+    send: suspend (JsonObject) -> Unit,
+) {
+    fun body(ids: List<String>, grantOnly: Boolean) = buildJsonObject {
+        put("agentIds", buildJsonArray { ids.forEach { add(JsonPrimitive(it)) } })
+        if (grantOnly) put("add", true)
+    }
+    try {
+        send(body(chosen.distinct(), grantOnly = true))
+    } catch (e: ApiException) {
+        if (e.status != 400) throw e
+        send(body((granted + chosen).distinct(), grantOnly = false))
+    }
+}
 
 @Serializable
 data class ExclusiveReservation(

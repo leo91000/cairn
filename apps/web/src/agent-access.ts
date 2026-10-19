@@ -139,6 +139,36 @@ export function rebaseDraft(base: AgentDraft, mine: AgentDraft, theirs: AgentDra
   return JSON.parse(JSON.stringify(rebased))
 }
 
+export type GithubMode = 'shared' | 'dedicated' | 'none'
+
+/**
+ * What saving does to the dedicated GitHub token. It is removed only when the owner asked for it
+ * (chose "No GitHub" or "Remove saved token"): restricting projects turns the shared connection off
+ * and switches to a saved token instead.
+ */
+/** The GitHub mode once projects are restricted: the shared connection reaches every repository. */
+export function restrictedGithubMode(mode: GithubMode, tokenSaved: boolean): GithubMode {
+  if (mode !== 'shared')
+    return mode
+  return tokenSaved ? 'dedicated' : 'none'
+}
+
+export function githubTokenChange(input: {
+  main: boolean
+  mode: GithubMode
+  token: string
+  configured: boolean
+  removeRequested: boolean
+}): 'set' | 'remove' | null {
+  if (input.main)
+    return null
+  if (input.mode === 'dedicated' && input.token.trim())
+    return 'set'
+  if (input.configured && input.mode === 'none' && input.removeRequested)
+    return 'remove'
+  return null
+}
+
 /** "All, including future" | "3 of 12" | "None". */
 export function selectionSummary(selected: string[] | null, total: number) {
   if (selected === null)
@@ -175,6 +205,14 @@ export function runsOn(access: AgentAccess, node: string) {
 /** The runtime can suspend other conversations for an exclusive reservation. */
 export function supportsExclusive(node: ExecutionNode) {
   return node.exclusiveReservations === true
+}
+
+/** Exclusive grants that take effect: the node exists, the agent may run there and its runtime supports it. */
+export function effectiveExclusive(draft: Pick<AgentDraft, 'access' | 'exclusiveNodes'>, nodes: ExecutionNode[]) {
+  return (draft.exclusiveNodes ?? []).filter((id) => {
+    const node = nodes.find(item => item.id === id)
+    return node !== undefined && !node.revoked && runsOn(draft.access, id) && supportsExclusive(node)
+  })
 }
 
 export type NodeState = 'online' | 'offline' | 'paused' | 'update'
@@ -302,9 +340,10 @@ function restrictedTools(saved: AgentAccess, draft: AgentAccess) {
 /**
  * What saving would grant or take away that deserves a look first: new powers and
  * secrets, and removed access when `runs` says work is affected. `githubToken` is the
- * pending change of the dedicated GitHub token, saved with the page.
+ * pending change of the dedicated GitHub token, saved with the page; `dedicatedToken` says the
+ * agent will use its saved dedicated token.
  */
-export function reviewLines(saved: AgentDraft, draft: AgentDraft, context: Context, runs = { queued: 0, running: 0 }, githubToken: 'set' | 'remove' | null = null) {
+export function reviewLines(saved: AgentDraft, draft: AgentDraft, context: Context, runs = { queued: 0, running: 0 }, githubToken: 'set' | 'remove' | null = null, dedicatedToken = false) {
   const lines: ReviewLine[] = []
   const node = (id: string) => nodeName(context.nodes.find(item => item.id === id), id)
 
@@ -358,7 +397,7 @@ export function reviewLines(saved: AgentDraft, draft: AgentDraft, context: Conte
   else if (affected)
     lines.push({ kind: 'reduction', section: 'projects', text: `Changed access.${consequence}` })
   if (saved.access.github && !draft.access.github && saved.access.projects === null && draft.access.projects !== null)
-    lines.push({ kind: 'reduction', section: 'github', text: 'Shared GitHub connection turned off: selected projects require a dedicated token.' })
+    lines.push({ kind: 'reduction', section: 'github', text: dedicatedToken ? 'Shared GitHub connection turned off: the agent will use its saved dedicated token.' : 'Shared GitHub connection turned off: selected projects require a dedicated token.' })
   return lines
 }
 
@@ -412,6 +451,8 @@ export function issues(draft: AgentDraft, context: Context, isMain: boolean) {
       found.push({ section: 'nodes', text: 'An exclusive reservation targets a node that no longer exists.' })
     else if (!runsOn(access, id))
       found.push({ section: 'nodes', text: `The exclusive reservation on ${nodeName(node, id)} is inactive: this agent cannot run there.` })
+    else if (!supportsExclusive(node))
+      found.push({ section: 'nodes', text: `The exclusive reservation on ${nodeName(node, id)} is inactive: its runtime must be updated for exclusive reservations.` })
   }
 
   for (const id of draft.plugins ?? []) {
@@ -428,7 +469,7 @@ export function issues(draft: AgentDraft, context: Context, isMain: boolean) {
 }
 
 /** "3 projects · 2 nodes · 1Password" for the agents list. */
-export function accessSummary(agent: Agent, context: Pick<Context, 'packages' | 'connections'>) {
+export function accessSummary(agent: Agent, context: Pick<Context, 'packages' | 'connections'> & { nodes?: ExecutionNode[] }) {
   const access = agent.access ?? {} as AgentAccess
   const count = (value: string[] | null | undefined, noun: string, all: string) => value === null || value === undefined
     ? all
@@ -446,7 +487,7 @@ export function accessSummary(agent: Agent, context: Pick<Context, 'packages' | 
   }
 
   parts.push(...packages)
-  if (agent.exclusiveNodes?.length)
+  if (agent.exclusiveNodes?.length && (!context.nodes || effectiveExclusive({ access, exclusiveNodes: agent.exclusiveNodes }, context.nodes).length))
     parts.push('Exclusive reservation')
   if (access.installation)
     parts.push('Installation management')

@@ -253,7 +253,20 @@ pub(crate) fn reconcile(db: &Db<'_>) -> Result<()> {
                 .map(|resource| resource["id"].clone())
                 .collect::<Vec<_>>()
         };
-        let exclusive = lists(&nodes, "exclusiveAgents", true);
+        let access = crate::service::policy(&agent);
+        let (exclusive, unrunnable): (Vec<_>, Vec<_>) = lists(&nodes, "exclusiveAgents", true)
+            .into_iter()
+            .partition(|node| {
+                crate::service::allowed(&access["nodes"], node.as_str().unwrap_or(""))
+            });
+        // A previous release can remove node access without the reservation.
+        for node in &unrunnable {
+            if let Some(record) = nodes.iter_mut().find(|record| record["id"] == *node)
+                && set_member(&mut record["exclusiveAgents"], text(&agent, "id"), false)
+            {
+                db.put("nodes", record)?;
+            }
+        }
         let instance_grants = lists(&instances, "agentIds", false);
         let same = |key: &str, expected: &[Value]| {
             let saved = ids(&agent[key]);

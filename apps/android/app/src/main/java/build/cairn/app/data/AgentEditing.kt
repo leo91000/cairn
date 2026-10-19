@@ -69,15 +69,38 @@ enum class GithubMode(val value: String, val label: String) {
 
 /**
  * The page's single draft. [timeout] keeps the field text so it can be validated; [github] is null
- * until the owner picks a GitHub option. The dedicated token itself is never part of the draft, so
- * it never reaches saved instance state.
+ * until the owner picks a GitHub option. [sharedTurnedOff] records that restricting projects
+ * switched the shared connection off for the owner. The dedicated token itself is never part of the
+ * draft, so it never reaches saved instance state.
  */
 @Serializable
 data class AgentDraft(
     val agent: Agent,
     val timeout: String = agent.timeoutMinutes.toString(),
     val github: String? = null,
+    val sharedTurnedOff: Boolean = false,
 )
+
+/** The owner picks a GitHub option. */
+fun AgentDraft.withGithub(mode: GithubMode) = copy(github = mode.value, sharedTurnedOff = false)
+
+/**
+ * « Tous » / « Choisir » for projects. Restricting the projects of an agent using the shared
+ * connection switches it off explicitly: to its saved dedicated token, narrower than the shared
+ * connection and never deleted, or to no GitHub without one.
+ */
+fun AgentDraft.withAllProjects(all: Boolean, tokenSaved: Boolean): AgentDraft {
+    val turnedOff =
+        !all && agent.access.projects == null && githubMode(tokenSaved) == GithubMode.Shared
+    val restricted = agent.copy(access = agent.access.withAllProjects(all))
+    if (!turnedOff) return copy(agent = restricted)
+    val mode = if (tokenSaved) GithubMode.Dedicated else GithubMode.None
+    return copy(agent = restricted, github = mode.value, sharedTurnedOff = true)
+}
+
+/** Restricting projects moved this agent from the shared connection to its saved token. */
+fun AgentDraft.switchedToSavedToken(tokenSaved: Boolean) =
+    sharedTurnedOff && tokenSaved && githubMode(tokenSaved) == GithubMode.Dedicated
 
 /**
  * The draft of a new agent: it starts with no access and gains only what the owner grants. The
@@ -283,19 +306,26 @@ fun Agent.withNodeRun(node: String, run: Boolean): Agent {
 
 /**
  * "All nodes, including future": turning it off keeps every machine known today, so nothing is
- * removed except future machines.
+ * removed except future machines. Without the machine list (it failed to load), nothing changes:
+ * restricting then would keep the current runner only.
  */
 fun AccessPolicy.withAllNodes(all: Boolean, nodes: List<ExecutionNode>): AccessPolicy =
-    if (all) copy(nodes = null)
-    else copy(nodes = this.nodes ?: agentNodeChoices(nodes).map { it.id })
+    when {
+        all -> copy(nodes = null)
+        this.nodes != null -> this
+        nodes.isEmpty() -> this
+        else -> copy(nodes = agentNodeChoices(nodes).map { it.id })
+    }
 
 fun Agent.withExclusive(node: String, granted: Boolean): Agent =
     copy(
         exclusiveNodes = if (granted) (exclusiveNodes + node).distinct() else exclusiveNodes - node
     )
 
-/** Turning "all projects" off also turns the shared GitHub connection off. */
-/** Choosing projects starts with none selected, as on the web. */
+/**
+ * Choosing projects starts with none selected, as on the web, and turns the shared GitHub
+ * connection off. See [AgentDraft.withAllProjects] for the GitHub choice.
+ */
 fun AccessPolicy.withAllProjects(all: Boolean): AccessPolicy =
     if (all) copy(projects = null)
     else copy(projects = this.projects ?: emptyList(), github = false)
@@ -525,89 +555,98 @@ private val sandboxStrictness = mapOf("yolo" to 0, "workspace-write" to 1, "read
 private fun quoted(names: List<String>) = names.joinToString(", ") { "« $it »" }
 
 /** What the draft removes from the saved access, in words. */
-fun agentReductions(original: Agent, edited: Agent, resources: AgentResources): List<String> =
-    buildList {
-        val before = original.access
-        val after = edited.access
-        fun removed(
-            old: List<String>?,
-            new: List<String>?,
-            noun: String,
-            plural: String,
-            name: (String) -> String,
-            feminine: Boolean = false,
-        ) {
-            if (new == null) return
-            if (old == null) {
-                add(
-                    if (new.isEmpty()) "plus ${if (feminine) "aucune" else "aucun"} $noun"
-                    else "accès limité à ${plural(new.size, noun, plural)}"
-                )
-                return
-            }
-            val gone = old.filter { it !in new }
-            if (gone.isNotEmpty())
-                add("${if (gone.size == 1) noun else plural} ${quoted(gone.map(name))}")
+fun agentReductions(
+    original: Agent,
+    edited: Agent,
+    resources: AgentResources,
+    tokenRemoved: Boolean = false,
+): List<String> = buildList {
+    val before = original.access
+    val after = edited.access
+    fun removed(
+        old: List<String>?,
+        new: List<String>?,
+        noun: String,
+        plural: String,
+        name: (String) -> String,
+        feminine: Boolean = false,
+    ) {
+        if (new == null) return
+        if (old == null) {
+            add(
+                if (new.isEmpty()) "plus ${if (feminine) "aucune" else "aucun"} $noun"
+                else "accès limité à ${plural(new.size, noun, plural)}"
+            )
+            return
         }
-        removed(
-            before.projects,
-            after.projects,
-            "projet",
-            "projets",
-            { id ->
-                resources.projects.find { it.id == id }?.name ?: id
-            },
-        )
-        removed(
-            before.skills,
-            after.skills,
-            "skill",
-            "skills",
-            { key ->
-                skillKeyLabel(key, resources.projects)
-            },
-            feminine = true,
-        )
-        removed(
-            before.mcps,
-            after.mcps,
-            "connexion MCP",
-            "connexions MCP",
-            { id ->
-                resources.mcps.find { it.id == id }?.name ?: id
-            },
-            feminine = true,
-        )
-        if (
-            after.mcpTools.any { (id, tools) ->
-                // A narrower choice, or a choice where every enabled tool was allowed.
-                before.mcpTools[id]?.let { previous -> !tools.containsAll(previous) } ?: true
-            }
-        )
-            add("outils MCP restreints")
-        val nodes = agentNodeChoices(resources.nodes)
-        removed(
-            before.nodes,
-            after.nodes,
-            "node",
-            "nodes",
-            { id ->
-                nodes.find { it.id == id }?.name ?: id
-            },
-        )
-        original.exclusiveNodes
-            .filter { it !in edited.exclusiveNodes }
-            .forEach { id ->
-                add("réservation exclusive sur « ${nodes.find { it.id == id }?.name ?: id} »")
-            }
-        original.plugins
-            .filter { it !in edited.plugins }
-            .forEach { id -> add(pluginGrantLabel(id, resources.catalog)) }
-        if (before.installation && !after.installation) add("gestion de l’installation")
-        if (before.github && !after.github) add("connexion GitHub partagée")
-        if ((sandboxStrictness[after.sandbox] ?: 0) > (sandboxStrictness[before.sandbox] ?: 0))
-            add("mode d’exécution « ${sandboxLabel(after.sandbox)} »")
+        val gone = old.filter { it !in new }
+        if (gone.isNotEmpty())
+            add("${if (gone.size == 1) noun else plural} ${quoted(gone.map(name))}")
     }
+    removed(
+        before.projects,
+        after.projects,
+        "projet",
+        "projets",
+        { id ->
+            resources.projects.find { it.id == id }?.name ?: id
+        },
+    )
+    removed(
+        before.skills,
+        after.skills,
+        "skill",
+        "skills",
+        { key ->
+            skillKeyLabel(key, resources.projects)
+        },
+        feminine = true,
+    )
+    removed(
+        before.mcps,
+        after.mcps,
+        "connexion MCP",
+        "connexions MCP",
+        { id ->
+            resources.mcps.find { it.id == id }?.name ?: id
+        },
+        feminine = true,
+    )
+    if (
+        after.mcpTools.any { (id, tools) ->
+            // A connection granted just now, or removed, is reported as such.
+            val kept =
+                (before.mcps == null || id in before.mcps) &&
+                    (after.mcps == null || id in after.mcps)
+            // A narrower choice, or a choice where every enabled tool was allowed.
+            kept && before.mcpTools[id]?.let { previous -> !tools.containsAll(previous) } ?: true
+        }
+    )
+        add("outils MCP restreints")
+    val nodes = agentNodeChoices(resources.nodes)
+    removed(
+        before.nodes,
+        after.nodes,
+        "node",
+        "nodes",
+        { id ->
+            nodes.find { it.id == id }?.name ?: id
+        },
+    )
+    original.exclusiveNodes
+        .filter { it !in edited.exclusiveNodes }
+        .forEach { id ->
+            add("réservation exclusive sur « ${nodes.find { it.id == id }?.name ?: id} »")
+        }
+    original.plugins
+        .filter { it !in edited.plugins }
+        .forEach { id -> add(pluginGrantLabel(id, resources.catalog)) }
+    if (before.installation && !after.installation) add("gestion de l’installation")
+    if (before.github && !after.github) add("connexion GitHub partagée")
+    if (tokenRemoved) add("jeton GitHub dédié")
+    if ((sandboxStrictness[after.sandbox] ?: 0) > (sandboxStrictness[before.sandbox] ?: 0))
+        add("mode d’exécution « ${sandboxLabel(after.sandbox)} »")
+}
 
 /** "1Password « Production »": a granted plugin instance and its package. */
 private fun pluginGrantLabel(id: String, catalog: PluginCatalog?): String {
@@ -636,6 +675,9 @@ fun agentReview(
     edited: Agent,
     resources: AgentResources,
     preview: AgentPreview?,
+    tokenRemoved: Boolean = false,
+    /** GitHub goes through the agent's saved dedicated token once saved. */
+    savedToken: Boolean = false,
 ): List<ReviewLine> = buildList {
     val before = original.access
     val after = edited.access
@@ -668,25 +710,37 @@ fun agentReview(
                 )
             )
         }
-    val reductions = agentReductions(original, edited, resources)
+    val reductions = agentReductions(original, edited, resources, tokenRemoved)
     val runs = preview?.runs ?: AgentPreviewRuns()
+    val affected = runs.queued + runs.running > 0
     if (reductions.isNotEmpty()) {
         val text = "Retrait : ${reductions.joinToString(", ")}."
-        add(
-            ReviewLine(
-                ReviewKind.Reduction,
-                if (runs.queued + runs.running > 0) "$text ${runsSentence(runs)}" else text,
-            )
-        )
-    }
+        add(ReviewLine(ReviewKind.Reduction, if (affected) "$text ${runsSentence(runs)}" else text))
+    } else if (affected)
+        // The server reports work the change stops even when nothing listed here is removed.
+        add(ReviewLine(ReviewKind.Reduction, "Accès modifié. ${runsSentence(runs)}"))
     if (before.github && !after.github && after.projects != null && before.projects == null)
         add(
             ReviewLine(
                 ReviewKind.Reduction,
-                "Connexion GitHub partagée désactivée : les projets choisis exigent un jeton dédié.",
+                if (savedToken)
+                    "Connexion GitHub partagée désactivée : l’agent utilisera son jeton dédié enregistré."
+                else
+                    "Connexion GitHub partagée désactivée : les projets choisis exigent un jeton dédié.",
             )
         )
 }
+
+/**
+ * The preview of a save, or null when the installation predates it (404/405): the page then reviews
+ * what it computes locally.
+ */
+suspend fun <T> optionalPreview(load: suspend () -> T): T? =
+    try {
+        load()
+    } catch (e: ApiException) {
+        if (e.status == 404 || e.status == 405) null else throw e
+    }
 
 /** Delegations the save would suspend: these get a reapproval checkbox. */
 fun AgentPreview.suspendedDelegations() = delegations.filter { it.suspended }

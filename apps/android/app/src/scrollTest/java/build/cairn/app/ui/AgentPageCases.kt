@@ -103,6 +103,12 @@ abstract class AgentPageCases {
         val tokens: CopyOnWriteArrayList<String>,
         /** The preview reports the delegation as suspended by an earlier change. */
         val alreadySuspended: AtomicBoolean = AtomicBoolean(false),
+        /** The next agent update is rejected. */
+        val rejectUpdate: AtomicBoolean = AtomicBoolean(false),
+        /** Workspace reloads fail. */
+        val failRefresh: AtomicBoolean = AtomicBoolean(false),
+        /** The machine list fails to load. */
+        val failNodes: AtomicBoolean = AtomicBoolean(false),
     )
 
     private fun fixture(): Fixture {
@@ -113,6 +119,9 @@ abstract class AgentPageCases {
         val rejectToken = AtomicBoolean(false)
         val tokens = CopyOnWriteArrayList<String>()
         val alreadySuspended = AtomicBoolean(false)
+        val rejectUpdate = AtomicBoolean(false)
+        val failRefresh = AtomicBoolean(false)
+        val failNodes = AtomicBoolean(false)
         val server = MockWebServer()
         server.dispatcher =
             object : Dispatcher() {
@@ -153,6 +162,10 @@ abstract class AgentPageCases {
                     ) {
                         val body = wireJson.parseToJsonElement(text).jsonObject
                         saved += path to body
+                        if (rejectUpdate.getAndSet(false))
+                            return response
+                                .setResponseCode(429)
+                                .setBody("""{"error":"Trop de requêtes"}""")
                         // Like the server: a stale revision is refused, an absent one is not
                         // checked.
                         val sent = body["revision"]?.jsonPrimitive?.content.orEmpty()
@@ -175,6 +188,14 @@ abstract class AgentPageCases {
                         agents.set(agents.get().map { if (it.id == updated.id) updated else it })
                         return response.setBody(wireJson.encodeToString(updated))
                     }
+                    if (path == "/tasks" && failRefresh.get())
+                        return response
+                            .setResponseCode(409)
+                            .setBody("""{"error":"Rechargement impossible"}""")
+                    if (path == "/nodes" && failNodes.get())
+                        return response
+                            .setResponseCode(409)
+                            .setBody("""{"error":"Nodes indisponibles"}""")
                     val body =
                         when {
                             path.endsWith("/preview") ->
@@ -208,6 +229,9 @@ abstract class AgentPageCases {
             rejectToken,
             tokens,
             alreadySuspended,
+            rejectUpdate,
+            failRefresh,
+            failNodes,
         )
     }
 
@@ -487,6 +511,76 @@ abstract class AgentPageCases {
             confirmReview()
             compose.waitUntil(15000) { fixture.saved.isNotEmpty() }
             assertFalse("reapproveDelegations" in fixture.saved.single().second)
+        }
+    }
+
+    @Test
+    fun aReplayedCreationReportsFailedLatestEditsAndAFailedReload() {
+        journey("") { fixture ->
+            fixture.loseCreation.set(true)
+            open(AgentSection.Identity)
+            compose.onNodeWithText("Nom").performTextReplacement("Nouvel agent")
+            back()
+            compose.onNodeWithText("Créer l’agent").performClick()
+            waitForText("Sauvegarde de l’agent non confirmée", substring = true)
+
+            // Edited meanwhile: the replay recovers the agent, then its update is rejected.
+            open(AgentSection.Identity)
+            compose.onNodeWithText("Nom").performTextReplacement("Agent de release")
+            back()
+            fixture.rejectUpdate.set(true)
+            waitForEnabled("Créer l’agent")
+            compose.onNodeWithText("Créer l’agent").performClick()
+            waitForText(
+                "Agent enregistré, mais les dernières modifications n’ont pas été enregistrées. Réessayez.",
+                substring = true,
+            )
+            assertFalse(left.get())
+
+            // The update is saved, but the workspace reload fails: it is reported, not swallowed.
+            fixture.failRefresh.set(true)
+            waitForEnabled("Créer l’agent")
+            compose.onNodeWithText("Créer l’agent").performClick()
+            waitForText("Agent enregistré, mais le rechargement a échoué. Réessayez.")
+            assertFalse(left.get())
+
+            // Retrying only reloads.
+            fixture.failRefresh.set(false)
+            waitForEnabled("Créer l’agent")
+            compose.onNodeWithText("Créer l’agent").performClick()
+            compose.waitUntil(15000) { left.get() }
+            assertEquals(
+                listOf("/agents", "/agents", "/agents/created", "/agents/created"),
+                fixture.saved.map { it.first },
+            )
+            assertEquals(
+                listOf("Agent de release"),
+                fixture.agents.get().filter { it.id == "created" }.map { it.name },
+            )
+        }
+    }
+
+    @Test
+    fun nodeAccessCannotChangeUntilTheMachinesLoad() {
+        journey("agent", prepare = { it.failNodes.set(true) }) { fixture ->
+            open(AgentSection.Nodes)
+            waitForText("Impossible de charger les nodes", substring = true)
+            compose
+                .onNodeWithContentDescription("Toutes les nodes, y compris futures")
+                .assertIsNotEnabled()
+            compose
+                .onNodeWithContentDescription("Exécuter ses conversations sur Runner actuel")
+                .assertIsNotEnabled()
+
+            fixture.failNodes.set(false)
+            compose.onNodeWithText("Réessayer").performClick()
+            waitForDescription("Exécuter ses conversations sur gpu-box")
+            compose
+                .onNodeWithText("Impossible de charger les nodes", substring = true)
+                .assertDoesNotExist()
+            compose
+                .onNodeWithContentDescription("Toutes les nodes, y compris futures")
+                .assertIsEnabled()
         }
     }
 

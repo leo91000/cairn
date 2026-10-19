@@ -9,7 +9,6 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import build.cairn.app.data.*
 import java.util.Date
-import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.encodeToJsonElement
 import kotlinx.serialization.json.put
@@ -354,23 +353,11 @@ fun NodesScreen(
         val node = nodes.find { it.id == opened.id } ?: opened
         FirstAgents(node, state, { granting = null }) { chosen ->
             vm.perform {
-                // `add` only grants the chosen agents: finishing never revokes one, including an
-                // agent allowed meanwhile from another window.
-                api.request(
-                    "PUT",
-                    "/nodes/${node.id}/agents",
-                    buildJsonObject {
-                        put(
-                            "agentIds",
-                            buildJsonArray {
-                                chosen.distinct().forEach {
-                                    add(kotlinx.serialization.json.JsonPrimitive(it))
-                                }
-                            },
-                        )
-                        put("add", true)
-                    },
-                )
+                // Only grants the chosen agents: finishing never revokes one, including an agent
+                // allowed meanwhile from another window.
+                grantNodeAgents(chosen, node.grantedAgents(state.agents)) { body ->
+                    api.request("PUT", "/nodes/${node.id}/agents", body)
+                }
                 granting = null
                 notify("${node.name} est prête")
                 load()

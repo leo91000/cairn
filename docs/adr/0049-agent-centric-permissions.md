@@ -37,7 +37,7 @@ ils ne font pas partie de `access`, donc de `policy()`. Les retirer n’interrom
 suspend pas une délégation externe. Le catalogue MCP de gestion ne les expose pas :
 un agent qui gère l’installation ne peut pas s’accorder un compte 1Password ni une
 réservation exclusive, et ses modifications conservent ceux que le propriétaire a
-réglés.
+réglés, sauf la réservation d’une node sur laquelle il retire le droit d’exécuter.
 
 Chaque enregistrement change la `revision` de l’agent. Un éditeur qui renvoie une
 révision périmée reçoit un conflit au lieu d’écraser des droits plus récents.
