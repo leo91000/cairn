@@ -457,7 +457,11 @@ fn claim_reservation(
         .iter()
         .find(|n| n["id"] == node.as_str())
         .ok_or_else(|| Error::conflict("Destination removed."))?;
-    if record["capabilities"]["fuse"] != true {
+    let native = crate::native::policy::native(&request.run["snapshot"]["agent"]);
+    if native != crate::native::policy::node_native(record) {
+        return Err(Error::conflict("Destination execution backend changed."));
+    }
+    if !native && record["capabilities"]["fuse"] != true {
         return Err(Error::conflict(
             "Destination no longer supports on-demand disks.",
         ));

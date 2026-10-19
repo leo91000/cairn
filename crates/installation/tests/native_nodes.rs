@@ -199,6 +199,127 @@ async fn native_placement_works_without_kvm_or_fuse_and_never_falls_back_to_a_vm
 }
 
 #[tokio::test]
+async fn moved_conversations_claim_reservations_for_their_execution_backend() {
+    for (backend, changed_backend) in [("native", false), ("firecracker", false), ("native", true)]
+    {
+        let f = Fixture::new().await;
+        let native = backend == "native";
+        let mut node = f.node.clone();
+        node["capabilities"]["backend"] = backend.into();
+        node["capabilities"]["kvm"] = (!native).into();
+        node["capabilities"]["fuse"] = (!native).into();
+        f.service.store.put("nodes", node.clone()).await.unwrap();
+        let mut agent = f.agent.clone();
+        agent["access"]["backend"] = backend.into();
+        f.service.store.put("agents", agent.clone()).await.unwrap();
+
+        let mut run = f.run();
+        run["snapshot"]["agent"] = agent;
+        run["placementTransition"] = true.into();
+        run["targetNodeId"] = node["id"].clone();
+        common::add_run(&f.service.store, &run).await;
+        let run_id = run["id"].as_str().unwrap();
+        let reservation = id();
+        placement::reserve(&f.service, &run, &reservation)
+            .await
+            .unwrap();
+        let held = f
+            .service
+            .store
+            .get("node-attempts", &reservation)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(held["role"], "destination");
+
+        // An active/automatic move persists this state after restoring files.
+        let resumed = f
+            .service
+            .store
+            .patch_run(
+                run_id,
+                json!({
+                    "placementTransition": false,
+                    "targetNodeId": null,
+                    "moveReservation": reservation,
+                    "nodeId": node["id"],
+                    "nodeState": "resuming",
+                    "recoveryPending": true,
+                    "status": "queued",
+                }),
+            )
+            .await
+            .unwrap();
+        common::set_checkpoint(
+            &f.service.store,
+            run_id,
+            json!({ "nodeId": node["id"], "runtimeId": "development" }),
+        )
+        .await;
+
+        if changed_backend {
+            node["capabilities"]["backend"] = "firecracker".into();
+            node["capabilities"]["kvm"] = true.into();
+            node["capabilities"]["fuse"] = true.into();
+        } else if !native {
+            node["capabilities"]["fuse"] = false.into();
+        }
+        f.service.store.put("nodes", node).await.unwrap();
+        let attempt = id();
+        let claimed = placement::reserve(&f.service, &resumed, &attempt).await;
+        let succeeds = native && !changed_backend;
+        if succeeds {
+            let claimed = claimed.unwrap();
+            assert_eq!(claimed["nodeId"], f.node["id"]);
+            assert_eq!(claimed["resources"], held["resources"]);
+            assert_eq!(claimed["runtimeId"], held["runtimeId"]);
+            let execution = f
+                .service
+                .store
+                .get("node-attempts", &attempt)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(execution["role"], "execution");
+            assert!(execution["leaseExpiresAt"].as_i64().unwrap() > now());
+        } else {
+            let error = claimed.unwrap_err();
+            assert_eq!(error.status, 409);
+            assert_eq!(
+                error.message,
+                if changed_backend {
+                    "Destination execution backend changed."
+                } else {
+                    "Destination no longer supports on-demand disks."
+                }
+            );
+            assert!(
+                f.service
+                    .store
+                    .get("node-attempts", &attempt)
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
+        }
+        let previous = f
+            .service
+            .store
+            .get("node-attempts", &reservation)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(previous["released"], succeeds);
+        let persisted = f.service.store.run(run_id).await.unwrap();
+        if succeeds {
+            assert!(persisted["moveReservation"].is_null());
+        } else {
+            assert_eq!(persisted["moveReservation"], reservation);
+        }
+    }
+}
+
+#[tokio::test]
 async fn retained_conversations_exhaust_the_shared_native_admission_budget() {
     let f = Fixture::new().await;
     let mut node = f.node.clone();
