@@ -69,8 +69,8 @@ export function pluginSettings(fields: SettingField[], values: Record<string, un
 /** Blank secrets keep saved credentials. View actions receive the typed, untrimmed value. */
 export function pluginSecrets(secrets: Record<string, string>, trim = true): Record<string, string> {
   return Object.fromEntries(Object.entries(secrets)
-    .map(([key, value]) => [key, trim ? pluginText(value) : value])
-    .filter(([, value]) => trim ? value : value.trim()))
+    .filter(([, value]) => pluginText(value))
+    .map(([key, value]) => [key, trim ? pluginText(value) : value]))
 }
 
 /** Rust str::trim uses Unicode White_Space; JS trim also strips the meaningful U+FEFF. */

@@ -30,11 +30,7 @@ class PluginFormValuesTest {
             assertEquals(name, scenario["settings"], settings)
             val secrets =
                 scenario.getValue("secrets").jsonObject.mapValues { it.value.jsonPrimitive.content }
-            val instanceSecrets =
-                (scenario["instanceSecretsInput"] ?: scenario.getValue("secrets"))
-                    .jsonObject
-                    .mapValues { it.value.jsonPrimitive.content }
-            assertEquals(name, scenario["instanceSecrets"], pluginSecrets(instanceSecrets))
+            assertEquals(name, scenario["instanceSecrets"], pluginSecrets(secrets))
             val expectedAction =
                 JsonObject(
                     scenario.getValue("settings").jsonObject +

@@ -551,7 +551,9 @@
       "text": "\ufeff\u200b\u2060credential\u2060\u200b\ufeff"
     },
     "secrets": {
-      "password": "\ufeff\u200b\u2060credential\u2060\u200b\ufeff"
+      "password": "\ufeff\u200b\u2060credential\u2060\u200b\ufeff",
+      "formatOnly": "\ufeff",
+      "paddedFormatOnly": " \ufeff "
     },
     "opened": {
       "text": "\ufeff\u200b\u2060credential\u2060\u200b\ufeff",
@@ -567,9 +569,6 @@
       "paddedFormatOnly": "\ufeff"
     },
     "actionSecrets": {
-      "password": "\ufeff\u200b\u2060credential\u2060\u200b\ufeff"
-    },
-    "instanceSecretsInput": {
       "password": "\ufeff\u200b\u2060credential\u2060\u200b\ufeff",
       "formatOnly": "\ufeff",
       "paddedFormatOnly": " \ufeff "
