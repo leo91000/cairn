@@ -43,6 +43,9 @@ coverage used, not a claim that every production account/provider was exercised.
 
 - Navigation uses Android system Back, bottom sheets and a navigation rail on wide
   windows. Chat and run readers hide the global phone navigation to maximize room.
+- The web Atelier section bar stays visible on its overview and marks the overview
+  icon as the current page. Android keeps its native Atelier resource cards and
+  selected Atelier dock/rail item; it has no equivalent section bar.
 - A subagent's activity opens in a bottom sheet on every window size, where the wide web
   layout shows a side panel. A team row opens that sheet directly instead of expanding inline.
 - The plan bar opens the whole plan in a bottom sheet, where the web shows it in a popover

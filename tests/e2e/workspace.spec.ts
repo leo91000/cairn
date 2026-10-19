@@ -36,7 +36,7 @@ test('sign in, author skills, schedule work, inspect results, and sign out', asy
   await page.emulateMedia({ colorScheme: 'light' })
   await authenticateWorkspace(page)
   await page.getByRole('link', { name: 'Atelier', exact: true }).click()
-  await page.getByRole('link', { name: 'Agents', exact: true }).click()
+  await page.getByRole('navigation', { name: 'Atelier sections' }).getByRole('link', { name: 'Agents', exact: true }).click()
   await page.getByRole('button', { name: 'New agent', exact: true }).click()
   await page
     .getByRole('dialog')
@@ -147,7 +147,7 @@ test('edits supporting files, cancels work, and archives without losing history'
   await page.goto(workspacePath('/'))
   await authenticateWorkspace(page)
   await page.getByRole('link', { name: 'Atelier', exact: true }).click()
-  await page.getByRole('link', { name: 'Skills', exact: true }).click()
+  await page.getByRole('navigation', { name: 'Atelier sections' }).getByRole('link', { name: 'Skills', exact: true }).click()
   await page.getByRole('button', { name: 'Edit review', exact: true }).click()
   await page.getByRole('button', { name: 'New file', exact: true }).click()
   await page.getByLabel('New file path').fill('references/checks.md')
@@ -202,7 +202,7 @@ test('edits supporting files, cancels work, and archives without losing history'
     page.getByRole('heading', { name: 'Weekly dependency review' }),
   ).toBeVisible()
   await page.getByRole('link', { name: 'Atelier', exact: true }).click()
-  await page.getByRole('link', { name: 'Runs', exact: true }).click()
+  await page.getByRole('navigation', { name: 'Atelier sections' }).getByRole('link', { name: 'Runs', exact: true }).click()
   await expect(page.locator('tbody tr')).toHaveCount(2)
 })
 
