@@ -76,6 +76,7 @@ const summary = computed(() => [current.value.label, modelLabel.value, effective
 // Claude lists its own "default" alias. When the default row already resolves to it,
 // show one row instead of two equivalent choices.
 const alias = computed(() => !props.inherit || !props.defaultModel ? catalog.value.models.find(item => item.model === 'default') : undefined)
+const defaultName = computed(() => provider.value === 'claude' && alias.value?.displayName && !alias.value.displayName.startsWith('Default') ? alias.value.displayName : '')
 const visible = computed(() => catalog.value.models.filter(item => (!item.hidden || matches(item, model.value)) && (item !== alias.value || model.value === item.model)))
 const models = computed(() => {
   const words = query.value.trim().toLowerCase()
@@ -90,7 +91,7 @@ const choices = computed(() => [
     ? [
         {
           value: '',
-          label: props.inherit ? inheritedLabel.value : `${current.value.label} default`,
+          label: props.inherit ? inheritedLabel.value : [`${current.value.label} default`, defaultName.value].filter(Boolean).join(' · '),
           description: (!props.inherit && alias.value?.description) || (fallback.value
             ? `${fallback.value} · ${props.inherit ? inheritedDescription.value : `chosen by ${current.value.label}`}`
             : props.inherit ? 'Follow the agent’s model' : 'Follow provider settings'),

@@ -123,7 +123,8 @@ test('the Fil, rail and shortcuts lead through the workspace', async ({ page, wo
   await page.keyboard.press('g')
   await page.keyboard.press('a')
   await expect(page.getByRole('heading', { name: 'Atelier', exact: true })).toBeVisible()
-  await expect(page.getByRole('link', { name: /Agents/ })).toBeVisible()
+  await expect(page.getByRole('navigation', { name: 'Atelier sections' }).getByRole('link', { name: 'Atelier overview' })).toHaveAttribute('aria-current', 'page')
+  await expect(page.getByRole('region', { name: 'Resources' }).getByRole('link', { name: 'Agents', exact: true })).toBeVisible()
   await capture(page, testInfo, 'signal-atelier-desktop')
 
   await page.keyboard.press('Shift+Slash')

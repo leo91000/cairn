@@ -45,7 +45,7 @@ async function checkMobileLayouts(page: Page, workspace: Workspace, testInfo: Te
       '/mcps': 'MCPs',
     }
     if (sections[destination]) {
-      await expect(page.getByRole('heading', { name: 'Atelier', exact: true }).or(page.getByRole('navigation', { name: 'Atelier sections' }))).toBeVisible()
+      await expect(page.getByRole('navigation', { name: 'Atelier sections' })).toBeVisible()
       await page.getByRole('link', { name: sections[destination], exact: true }).first().click()
     }
 
