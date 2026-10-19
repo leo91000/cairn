@@ -136,7 +136,7 @@ pub(crate) fn has_unhandled_input(db: &Db<'_>, chat: &Value) -> Result<bool> {
 }
 
 /// The wakeup can still resume the turn that scheduled it.
-fn resumable(chat: &Value, run: Option<&Value>) -> bool {
+pub(super) fn resumable(chat: &Value, run: Option<&Value>) -> bool {
     chat["wakeup"].is_object()
         && is_active(chat)
         && chat["paused"] != true

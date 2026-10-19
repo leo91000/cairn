@@ -42,6 +42,8 @@ fs.appendFileSync(`${__dirname}/github-calls.jsonl`, JSON.stringify({
   agentToken: process.env.GH_TOKEN === 'fixture-only-token',
   storage: Object.keys(process.env).some(key => /^(AWS_|ARCHIVE_|STORAGE_S3_)/.test(key)),
 }) + '\n');
+while (state.waitForRelease && !fs.existsSync(`${__dirname}/github-release`))
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10);
 if (state.delay) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, state.delay);
 if (state.error) { console.error('fixture-secret-must-not-leak'); process.exit(1); }
 const args = process.argv.slice(2);
@@ -365,6 +367,88 @@ async fn github_monitor_pins_identity_and_wakes_on_failure_without_polling_the_l
         assert_eq!(call["args"][3], "repos/fixture/repo/actions/runs/42");
         assert_eq!(call["storage"], false);
     }
+}
+
+#[tokio::test]
+async fn github_monitor_only_probes_resumable_wakeups() {
+    let f = Fixture::new().await;
+    f.schedule(f.github_condition()).await;
+    f.finish().await;
+    let chat = f.s.get("chats", &f.chat).await.unwrap();
+    let run = f.s.store.run(&f.run).await.unwrap();
+
+    for (field, value) in [
+        ("paused", json!(true)),
+        ("sessionRestartRequested", json!(true)),
+        ("lifecycle", json!("trash")),
+    ] {
+        let mut blocked = chat.clone();
+        blocked[field] = value;
+        f.s.store.put("chats", blocked.clone()).await.unwrap();
+        wait_for::github::poll_once(&f.s).await.unwrap();
+        assert_eq!(f.calls().len(), 1, "chat guard: {field}");
+        assert_eq!(f.s.get("chats", &f.chat).await.unwrap(), blocked);
+    }
+    f.s.store.put("chats", chat.clone()).await.unwrap();
+
+    for (field, value) in [
+        ("status", json!("running")),
+        ("recoveryPending", json!(true)),
+        ("cancelRequestedAt", json!(1)),
+        ("workspaceCleanedAt", json!(1)),
+        ("chatExecution", json!({ "messageId": "another-turn" })),
+    ] {
+        f.s.store
+            .patch_run(&f.run, json!({ (field): value }))
+            .await
+            .unwrap();
+        wait_for::github::poll_once(&f.s).await.unwrap();
+        assert_eq!(f.calls().len(), 1, "run guard: {field}");
+        assert_eq!(f.s.get("chats", &f.chat).await.unwrap(), chat);
+        f.s.store
+            .patch_run(&f.run, json!({ (field): run[field] }))
+            .await
+            .unwrap();
+    }
+
+    // The original, still-resumable wait remains observable after the guards clear.
+    f.github_state("completed", Some("success"), 0);
+    wait_for::github::poll_once(&f.s).await.unwrap();
+    assert_eq!(f.calls().len(), 2);
+    assert_eq!(
+        f.s.get("chats", &f.chat).await.unwrap()["wakeup"]["observation"]["conclusion"],
+        "success"
+    );
+}
+
+#[tokio::test]
+async fn github_monitor_rechecks_session_restart_after_the_probe() {
+    let f = Fixture::new().await;
+    f.schedule(f.github_condition()).await;
+    f.finish().await;
+    f.github_state("completed", Some("success"), 0);
+    let state_path = f.root.path().join("github-state.json");
+    let mut state: Value = serde_json::from_slice(&std::fs::read(&state_path).unwrap()).unwrap();
+    state["waitForRelease"] = true.into();
+    std::fs::write(state_path, state.to_string()).unwrap();
+    let s = f.s.clone();
+    let observer = tokio::spawn(async move { wait_for::github::poll_once(&s).await });
+    common::eventually(
+        Duration::from_secs(3),
+        Duration::from_millis(10),
+        || async { (f.calls().len() == 2).then_some(()) },
+    )
+    .await;
+
+    // Preserve the wakeup deliberately to isolate the eligibility guard from
+    // new-session's normal cancellation of the wakeup and pause of the chat.
+    let mut chat = f.s.get("chats", &f.chat).await.unwrap();
+    chat["sessionRestartRequested"] = true.into();
+    f.s.store.put("chats", chat.clone()).await.unwrap();
+    std::fs::write(f.root.path().join("github-release"), "").unwrap();
+    observer.await.unwrap().unwrap();
+    assert_eq!(f.s.get("chats", &f.chat).await.unwrap(), chat);
+    assert_eq!(f.calls().len(), 2);
 }
 
 #[tokio::test]
