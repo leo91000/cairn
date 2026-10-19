@@ -205,6 +205,18 @@ pub(super) fn message(
 
 impl Service {
     pub(crate) async fn chat_cancel_sleep(&self, id: &str) -> Result<()> {
+        // The scheduler snapshot can predate a concurrent wakeup. Read the
+        // current record before skipping the writer; cancel rechecks it there
+        // before changing anything, preserving unrelated concurrent edits.
+        let chat_id = id.to_owned();
+        let waiting = self
+            .store
+            .read(move |db| Ok(chat(db, &chat_id)?["wakeup"].is_object()))
+            .await?;
+        if !waiting {
+            return Ok(());
+        }
+
         let id = id.to_owned();
         self.store.write(move |db| cancel(db, &id)).await
     }
