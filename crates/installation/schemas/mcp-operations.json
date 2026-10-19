@@ -25,6 +25,15 @@
           "minLength": 1,
           "maxLength": 100
         },
+        "provider": {
+          "default": "codex",
+          "type": "string",
+          "enum": [
+            "codex",
+            "claude",
+            "opencode"
+          ]
+        },
         "description": {
           "default": "",
           "type": "string",
@@ -38,12 +47,8 @@
         "reasoning": {
           "default": "high",
           "type": "string",
-          "enum": [
-            "low",
-            "medium",
-            "high",
-            "xhigh"
-          ]
+          "maxLength": 40,
+          "pattern": "^(?:[a-z][a-z0-9_-]*)?$"
         },
         "instructions": {
           "default": "",
@@ -191,6 +196,7 @@
       },
       "required": [
         "name",
+        "provider",
         "description",
         "model",
         "reasoning",
@@ -218,6 +224,14 @@
         "agent": {
           "type": "object",
           "properties": {
+            "provider": {
+              "type": "string",
+              "enum": [
+                "codex",
+                "claude",
+                "opencode"
+              ]
+            },
             "name": {
               "type": "string",
               "minLength": 1,
@@ -233,12 +247,8 @@
             },
             "reasoning": {
               "type": "string",
-              "enum": [
-                "low",
-                "medium",
-                "high",
-                "xhigh"
-              ]
+              "maxLength": 40,
+              "pattern": "^(?:[a-z][a-z0-9_-]*)?$"
             },
             "instructions": {
               "type": "string",

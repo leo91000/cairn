@@ -321,6 +321,13 @@ onBeforeUnmount(() => {
     <p v-if="loaded && !entry" class="mt-6 text-sm text-muted">
       This plugin isn’t installed.
     </p>
+    <div v-else-if="entry && !manifest" class="mt-6 flex items-center gap-3 rounded-2xl bg-danger-surface px-4 py-3 text-xs text-danger" role="status">
+      <Icon :name="TriangleAlert" :size="17" />
+      <span class="min-w-0 flex-1">No version of this plugin can be used. Review it to see why.</span>
+      <UiButton size="small" class="bg-surface" @click="reviewing = true">
+        Review
+      </UiButton>
+    </div>
     <template v-if="entry && manifest">
       <div class="mt-4.5 flex items-center justify-between gap-4 phone:flex-wrap">
         <div class="flex items-center gap-4">

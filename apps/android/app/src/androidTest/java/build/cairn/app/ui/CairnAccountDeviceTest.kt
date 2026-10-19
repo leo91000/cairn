@@ -21,6 +21,21 @@ class CairnAccountDeviceTest : CairnAccountCases() {
         switchingToASharedInstallationHidesManagementAndRestoresTheSelection()
 
     @Test
+    fun revokedLastAccessExplainsTheAccountPage() =
+        revokedLastInstallationShowsTheAccountPageAndExplainsTheChange()
+
+    override fun captureRevokedAccess() {
+        val instrumentation =
+            androidx.test.platform.app.InstrumentationRegistry.getInstrumentation()
+        val screenshot = checkNotNull(instrumentation.uiAutomation.takeScreenshot())
+        val file = java.io.File(instrumentation.targetContext.filesDir, "revoked-last-access.png")
+        file.outputStream().use {
+            screenshot.compress(android.graphics.Bitmap.CompressFormat.PNG, 100, it)
+        }
+        screenshot.recycle()
+    }
+
+    @Test
     fun storedSessionSurvivesNetworkFailure() =
         unavailableBeaconServiceRetriesTheStoredSessionAndOnlyRejectionSignsOut()
 }

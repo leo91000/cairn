@@ -35,6 +35,10 @@ class CairnAccountJourneyTest : CairnAccountCases() {
         switchingToASharedInstallationHidesManagementAndRestoresTheSelection()
 
     @Test
+    fun revokedLastAccessExplainsTheAccountPage() =
+        revokedLastInstallationShowsTheAccountPageAndExplainsTheChange()
+
+    @Test
     fun storedSessionSurvivesNetworkFailure() =
         unavailableBeaconServiceRetriesTheStoredSessionAndOnlyRejectionSignsOut()
 }
