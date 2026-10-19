@@ -62,6 +62,7 @@ const atelierSections = computed(() => [
   { to: '/settings', label: 'Settings' },
 ].filter(item => state.installationRole === 'owner' || !ownerPage(item.to)))
 const atelierSection = computed(() => atelierSections.value.find(item => route.path === item.to || (item.to === '/settings' && route.path.startsWith('/settings/'))))
+const atelierOverview = computed(() => route.path === '/atelier')
 const places: Array<{
   to: string
   label: string
@@ -320,8 +321,14 @@ function openShortcuts() {
           :selected-run="route.path.startsWith('/fil/runs/') ? route.params.id as string : undefined"
         />
       </aside>
-      <nav v-if="atelierSection" class="atelier-sections -mx-1 mb-6 flex items-center gap-1 overflow-x-auto px-1 pb-1 [scrollbar-width:none] phone:mb-4" aria-label="Atelier sections">
-        <RouterLink to="/atelier" class="grid size-9 shrink-0 place-items-center rounded-full text-muted hover:bg-hover hover:text-ink" aria-label="Atelier overview">
+      <nav v-if="atelierSection || atelierOverview" class="atelier-sections -mx-1 mb-6 flex items-center gap-1 overflow-x-auto px-1 pb-1 [scrollbar-width:none] phone:mb-4" aria-label="Atelier sections">
+        <RouterLink
+          to="/atelier"
+          class="press grid size-9 shrink-0 place-items-center rounded-full transition-colors"
+          :class="atelierOverview ? 'bg-ink text-canvas' : 'text-muted hover:bg-hover hover:text-ink'"
+          :aria-current="atelierOverview ? 'page' : undefined"
+          aria-label="Atelier overview"
+        >
           <Icon :name="Layers" :size="17" />
         </RouterLink>
         <RouterLink
