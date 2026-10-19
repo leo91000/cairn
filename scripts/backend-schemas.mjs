@@ -26,16 +26,16 @@ const schemas = {
 }
 await writeFile('crates/installation/schemas/inputs.json', `${JSON.stringify(Object.fromEntries(Object.entries(schemas).map(([name, schema]) => [name, z.toJSONSchema(schema, { unrepresentable: 'any' })])), null, 2)}\n`)
 
-// Keep both owner interfaces aligned, including the distinction between creation
-// defaults and partial updates that must preserve existing node restrictions.
+// Derive the full agent payloads from the product contracts. Creation applies
+// defaults; partial updates preserve omitted settings, including node restrictions.
 const tools = JSON.parse(await readFile('crates/installation/schemas/mcp-operations.json', 'utf8'))
 for (const [name, schema] of Object.entries({ save_agent: agentInput, update_agent: agentUpdate })) {
   const tool = tools.find(tool => tool.name === name)
   if (!tool)
     throw new Error(`Missing MCP tool: ${name}`)
-  const properties = name === 'save_agent' ? tool.inputSchema.properties : tool.inputSchema.properties.agent.properties
-  const access = z.toJSONSchema(schema).properties.access
+  const inputSchema = z.toJSONSchema(schema, { unrepresentable: 'any' })
   // Exclusive node and plugin grants (such as 1Password) stay with the owner's app.
+  const access = inputSchema.properties.access
   for (const key of ['exclusiveNodes', 'plugins']) {
     delete access.properties[key]
     access.required = access.required?.filter(name => name !== key)
@@ -43,7 +43,13 @@ for (const [name, schema] of Object.entries({ save_agent: agentInput, update_age
       delete access.default[key]
   }
 
-  properties.access = access
+  if (name === 'save_agent') {
+    tool.inputSchema = inputSchema
+  }
+  else {
+    delete inputSchema.$schema
+    tool.inputSchema.properties.agent = inputSchema
+  }
 }
 
 for (const tool of tools) {

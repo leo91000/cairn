@@ -1,5 +1,11 @@
 <script setup lang="ts">
-import type { GithubRepository } from '../../../../packages/contracts/contracts'
+import type { z } from 'zod'
+import type {
+  Agent,
+  GithubRepository,
+  Project,
+  projectInput,
+} from '../../../../packages/contracts/contracts'
 import type { Catalog } from '../plugins'
 import {
   computed,
@@ -75,10 +81,16 @@ const pendingCreation = resourceSave.pendingCreation
 let openedId: string | null = null
 const saveAlert = ref<InstanceType<typeof UiAlert>>()
 const open = ref(false)
-const deleting = ref<any>(null)
+const deleting = ref<Agent | Project | null>(null)
 const busy = ref(false)
 const error = ref('')
-const form = ref<any>({})
+const form = ref<z.infer<typeof projectInput>>({
+  name: '',
+  description: '',
+  path: '',
+  baseBranch: 'main',
+  sourceMode: 'remote',
+})
 const projectMode = ref('local')
 const repository = ref('')
 
@@ -98,7 +110,7 @@ onMounted(async () => {
 })
 const primaryLink = [buttonBase, buttonVariants.primary, buttonSizes.default].join(' ')
 
-function edit(item?: any) {
+function edit(item?: Project) {
   if (state.installationRole === 'member')
     return
 
@@ -128,7 +140,7 @@ async function save() {
   let phase: 'save' | 'refresh' = 'save'
   try {
     const importing = githubImport.value
-    await resourceSave.save(`/${props.kind}`, {
+    await resourceSave.save<Project>(`/${props.kind}`, {
       body: () => form.value,
       createPath: importing ? '/projects/github' : undefined,
       createBody: importing
@@ -139,7 +151,7 @@ async function save() {
             baseBranch: form.value.baseBranch,
           })
         : undefined,
-      onCreated: (created: any) => {
+      onCreated: (created) => {
         if (importing) {
           form.value.path = created.path
           form.value.sourceMode = created.sourceMode
@@ -174,6 +186,9 @@ async function save() {
 }
 
 async function remove() {
+  if (!deleting.value)
+    return
+
   try {
     await api(`/${props.kind}/${deleting.value.id}`, { method: 'DELETE' })
     await refresh()
@@ -227,7 +242,7 @@ async function remove() {
               v-else-if="state.installationRole === 'owner'"
               class="max-w-full truncate text-left hover:text-accent focus-visible:rounded"
               :title="item.name"
-              @click="edit(item)"
+              @click="edit(item as Project)"
             >
               {{ item.name }}
             </button>
@@ -268,7 +283,7 @@ async function remove() {
             :class="iconButton"
             :aria-label="`Edit ${item.name}`"
             :title="`Edit ${item.name}`"
-            @click="edit(item)"
+            @click="edit(item as Project)"
           >
             <Icon :name="Pencil" :size="15" />
           </button>

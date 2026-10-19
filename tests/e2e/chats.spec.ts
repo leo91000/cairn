@@ -194,6 +194,39 @@ test('a durable scheduled wait survives restart and resumes without a user messa
   expect(resumed.wakeup).toBeNull()
 })
 
+test('a scheduled wait card follows the turn that scheduled it and clamps a long reason', async ({ page, workspace }) => {
+  const chat = await workspace.api('/api/chats', 'POST', {})
+  await workspace.api(`/api/chats/${chat.id}/messages`, 'POST', { id: randomUUID(), text: 'Ship the batch and check CI' })
+  await expect.poll(async () => (await workspace.api(`/api/chats/${chat.id}`)).run?.status).toBe('succeeded')
+  const detail = await workspace.api(`/api/chats/${chat.id}`)
+  const reason = Array.from({ length: 12 }).fill('Check Quality and Android on the PR, fix failures, then continue the next batch.').join(' ')
+  const wakeup = {
+    id: randomUUID(),
+    messageId: detail.run.chatExecution.messageId,
+    seconds: 420,
+    reason,
+    createdAt: Date.now(),
+    wakeAt: Date.now() + 420000,
+  }
+  workspace.service.store.put('chats', { ...workspace.service.store.get('chats', chat.id)!, wakeup })
+  workspace.service.store.event(detail.run.id, 'chat.sleep', reason, wakeup)
+  workspace.service.store.event(detail.run.id, 'item.completed', '', { item: { id: 'after-wait', type: 'agent_message', text: 'CI is running; I will resume to check it.' } })
+  await page.goto(workspacePath(`/chats/${chat.id}`))
+  await authenticateWorkspace(page)
+  const card = page.locator('.chat-wait')
+  const reply = page.getByText('CI is running; I will resume to check it.')
+  await expect(card).toHaveCount(1)
+  await expect(reply).toBeVisible()
+  // The wait starts once the turn ends: its card follows what the agent said after the call.
+  expect((await card.boundingBox())!.y).toBeGreaterThan((await reply.boundingBox())!.y)
+  const text = card.getByText(reason)
+  const clamped = (await text.boundingBox())!.height
+  await card.getByRole('button', { name: 'Show more', exact: true }).click()
+  expect((await text.boundingBox())!.height).toBeGreaterThan(clamped * 2)
+  await card.getByRole('button', { name: 'Show less', exact: true }).click()
+  expect((await text.boundingBox())!.height).toBe(clamped)
+})
+
 test('stopping a scheduled wait cancels its wakeup and pauses the conversation', async ({ page, workspace }) => {
   const chat = await workspace.api('/api/chats', 'POST', {})
   await workspace.api(`/api/chats/${chat.id}/messages`, 'POST', { id: randomUUID(), text: 'Wait for a remote review' })
@@ -1346,7 +1379,7 @@ test('deletion from another client removes the open transcript', async ({ page, 
   await expect(page.locator('.activity-message').getByText(message, { exact: true })).toHaveCount(0)
 })
 
-test('a failed fresh-session action keeps its confirmation available for retry', async ({ page, workspace }) => {
+test('a failed fresh-session action keeps its confirmation available for retry', async ({ page, workspace }, testInfo) => {
   await useRelayForHttpMocks(page)
   const chat = await workspace.api('/api/chats', 'POST', {})
   const original = workspace.service.store.runs().find(run => run.status === 'succeeded')!
@@ -1355,10 +1388,13 @@ test('a failed fresh-session action keeps its confirmation available for retry',
     id: randomUUID(),
     status: 'failed',
     trigger: 'chat',
+    restoredAt: Date.now(),
   })
-  workspace.service.store.put('chats', { ...chat, runId: run.id, restoredAt: Date.now() })
+  workspace.service.store.put('chats', { ...chat, runId: run.id })
   await page.goto(workspacePath(`/chats/${chat.id}`))
   await authenticateWorkspace(page)
+  await expect(page.getByRole('button', { name: 'Start a fresh agent session', exact: true })).toBeVisible()
+  await page.screenshot({ path: testInfo.outputPath('restored-session-offer.png'), animations: 'disabled' })
   await page.getByRole('button', { name: 'Start a fresh agent session', exact: true }).click()
   let attempts = 0
   await page.route(`**/chats/${chat.id}/new-session`, async (route) => {
@@ -1370,6 +1406,7 @@ test('a failed fresh-session action keeps its confirmation available for retry',
   await expect(confirmation.getByRole('status').filter({ hasText: 'Connection unavailable. Please try again.' })).toBeVisible()
   await expect(confirmation).toBeVisible()
   expect(attempts).toBe(1)
+  await page.screenshot({ path: testInfo.outputPath('restored-session-retry.png'), animations: 'disabled' })
 })
 
 test('an explicit immediate result replaces the wait despite changed wording', async ({ page, workspace }) => {

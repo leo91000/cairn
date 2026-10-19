@@ -149,6 +149,8 @@ fn view(db: &Db<'_>, mut chat: Value) -> Result<Value> {
         record_name(db, &chat, "projects", "projectName", "Deleted project")?
     };
     let run = db.run(text(&chat, "runId"))?;
+    chat["canRequestNewSession"] =
+        crate::conversation_lifecycle::can_request_new_session(&chat, run.as_ref()).into();
     chat["status"] = run
         .as_ref()
         .map_or_else(|| "idle".into(), |run| run["status"].clone());
@@ -531,7 +533,9 @@ fn continue_run(
         None => return Err(Error::conflict("Run checkpoint not found")),
     };
     let provider = Provider::of_run(snapshot)?;
-    if provider != Provider::of_run(run)? || checkpoint["freshSession"] == true {
+    let restart_requested =
+        chat["sessionRestartRequested"] == true || checkpoint["freshSession"] == true;
+    if provider != Provider::of_run(run)? || restart_requested {
         // The next provider cannot resolve requests from the session being replaced.
         questions::release(db, run_id, None)?;
         checkpoint["freshSession"] = false.into();
@@ -878,6 +882,110 @@ impl Service {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn continuation_consumes_durable_and_legacy_fresh_session_requests_once() {
+        use crate::store::Store;
+
+        for legacy in [false, true] {
+            for isolated in [false, true] {
+                let root = tempfile::tempdir().unwrap();
+                let store = Store::open(root.path()).unwrap();
+                store
+                    .transaction(move |db| {
+                        let run = json!({
+                            "id": "run",
+                            "taskId": "chat",
+                            "createdAt": 0,
+                            "status": "failed",
+                            "sessionId": "old-native",
+                            "snapshot": { "agent": { "provider": "codex" } },
+                        });
+                        db.add_run(&run, None)?;
+                        db.event("run", "chat.user", "Context to preserve", None)?;
+                        let chat = json!({
+                            "id": "chat",
+                            "runId": "run",
+                            "sessionRestartRequested": !legacy,
+                        });
+                        db.put("chats", &chat)?;
+                        db.set(
+                            "chat-question:chat:old-session",
+                            &json!({
+                                "id": "old-session",
+                                "chatId": "chat",
+                                "runId": "run",
+                                "status": "pending",
+                                "blocking": true,
+                                "fields": [],
+                            }),
+                            None,
+                        )?;
+                        let prepared = json!({ "isolated": isolated, "workspace": "preserved" });
+                        db.set(
+                            "run-checkpoint:run",
+                            &json!({
+                                "freshSession": legacy,
+                                "completed": true,
+                                "launched": true,
+                                "prepared": prepared,
+                                "controllerRecoveries": 2,
+                            }),
+                            None,
+                        )?;
+                        let message = json!({
+                            "id": "next",
+                            "chatId": "chat",
+                            "text": "Continue",
+                            "status": "queued",
+                            "createdAt": 1,
+                        });
+                        db.put_message(&message)?;
+                        launch_turn(db, "chat", Some(run.clone()), message, run)?;
+                        let queued = db.run("run")?.unwrap();
+                        assert_eq!(queued["status"], "queued");
+                        assert!(queued["sessionId"].is_null());
+                        assert_eq!(queued["resumeAvailable"], false);
+                        assert!(
+                            text(&queued["chatExecution"], "context")
+                                .contains("Context to preserve")
+                        );
+                        let checkpoint = db.kv("run-checkpoint:run")?.unwrap();
+                        assert_eq!(checkpoint["prepared"], prepared);
+                        assert_eq!(checkpoint["launched"], false);
+                        assert_eq!(checkpoint["freshSession"], false);
+                        assert!(checkpoint["controllerRecoveries"].is_null());
+                        let chat = db.get("chats", "chat")?.unwrap();
+                        assert_eq!(chat["sessionRestartRequested"], false);
+                        let question = db.kv("chat-question:chat:old-session")?.unwrap();
+                        assert_eq!(question["status"], "cancelled");
+                        assert_eq!(question["blocking"], false);
+
+                        // A later ordinary continuation resumes the newly established session.
+                        let resumed = db.patch_run("run", &json!({ "sessionId": "new-native" }))?;
+                        continue_run(
+                            db,
+                            &chat,
+                            &resumed,
+                            &resumed,
+                            ChatExecution {
+                                message_id: "later".into(),
+                                text: "Keep going".into(),
+                                attachments: json!([]),
+                                recovery: false,
+                                context: None,
+                            },
+                        )?;
+                        let next = db.run("run")?.unwrap();
+                        assert_eq!(next["sessionId"], "new-native");
+                        assert!(next["chatExecution"]["context"].is_null());
+                        Ok(())
+                    })
+                    .await
+                    .unwrap();
+            }
+        }
+    }
 
     #[test]
     fn implicit_follow_up_inherits_the_previous_engine_model_and_reasoning() {

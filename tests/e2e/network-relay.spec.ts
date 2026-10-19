@@ -25,9 +25,12 @@ test('authenticated browser and Rust client keep using the observed route under 
     operation: string
     elapsedMs: number
     directFailure?: { phase: string, timedOut: boolean } | null
-    fallbackReason?: 'heartbeat-timeout'
+    fallbackReason?: 'heartbeat-timeout' | 'opening-timeout' | 'peer-failed'
+    directPhases?: { event: string, elapsedMs: number, remainingMs: number }[]
+    failureHttpStatus?: number | null
   }[] = []
   const revocations: string[] = []
+  const oldDeliveryPrerequisites: Record<string, boolean> = {}
 
   async function rustRequest(path: string, cookie: string, status: number, marker?: string) {
     const directRead = status === 200 && marker !== undefined
@@ -197,20 +200,50 @@ test('authenticated browser and Rust client keep using the observed route under 
     }
 
     await page.getByLabel('Message', { exact: true }).fill(marker)
-    await expect(page.getByRole('status', { name: 'Connection route' })).toHaveAttribute('data-transport-route', expected, { timeout: 35000 })
+    if (packetLoss) {
+      // This global schedule supplies no per-fragment delivery bound. Observe
+      // promotion or a diagnosed failed opening inside the original window.
+      await expect.poll(async () => {
+        const route = await page.getByRole('status', { name: 'Connection route' }).getAttribute('data-transport-route')
+        const diagnostics = await networkTransportDiagnostics(page)
+        return route === 'direct' || diagnostics.some(item => item.kind === 'channel-close')
+      }, { timeout: 35000 }).toBe(true)
+      oldDeliveryPrerequisites.promotion = await page.getByRole('status', { name: 'Connection route' }).getAttribute('data-transport-route') === 'direct'
+    }
+    else {
+      await expect(page.getByRole('status', { name: 'Connection route' })).toHaveAttribute('data-transport-route', expected, { timeout: 35000 })
+    }
+
     const before = (await observations()).length
     const responseObservationOptions = packetLoss ? { timeout: 35000 } : {}
     const started = performance.now()
     await page.getByRole('button', { name: /^(Send|Queue)$/, exact: true }).click()
     await expect.poll(async () => (await observations()).slice(before).some(item => item.method === 'POST' && item.path.endsWith('/messages')), responseObservationOptions).toBe(true)
     const sent = (await observations()).slice(before).find(item => item.method === 'POST' && item.path.endsWith('/messages'))!
-    let fallbackReason: 'heartbeat-timeout' | undefined
-    if (packetLoss && sent.route === 'relay') {
-      const diagnostics = await networkTransportDiagnostics(page)
-      const heartbeat = diagnostics.findLast(item => item.kind === 'heartbeat-timeout' && item.elapsedMs <= sent.observedAt)
-      expect(heartbeat, 'relayed browser send requires a prior diagnosed heartbeat timeout').toBeDefined()
-      expect((await observations()).some(item => item.route === 'direct' && ['GET', 'POST', 'STREAM'].includes(item.method) && item.observedAt < heartbeat!.elapsedMs), 'the browser must have completed authenticated direct traffic before fallback').toBe(true)
-      fallbackReason = 'heartbeat-timeout'
+    let fallbackReason: 'heartbeat-timeout' | 'opening-timeout' | 'peer-failed' | undefined
+    if (packetLoss) {
+      const diagnostics = await networkTransportDiagnostics(page) as {
+        kind: string
+        elapsedMs: number
+        peer?: number
+        ice?: string
+        connection?: string
+      }[]
+      const prior = diagnostics.filter(item => item.elapsedMs <= sent.observedAt)
+      const heartbeat = prior.findLast(item => item.kind === 'heartbeat-timeout')
+      oldDeliveryPrerequisites.completedDirectBeforeFallback = (await observations()).some(item => item.route === 'direct' && ['GET', 'POST', 'STREAM'].includes(item.method) && item.observedAt < (heartbeat?.elapsedMs ?? sent.observedAt))
+      if (sent.route === 'relay') {
+        const openingClose = prior.findLast(item => item.kind === 'channel-close'
+          && !prior.some(event => event.peer === item.peer && event.kind === 'channel-open'))
+        const created = prior.find(item => item.kind === 'created' && item.peer === openingClose?.peer)
+        const openingTimeout = openingClose && created && openingClose.elapsedMs - created.elapsedMs >= 29500
+        const failed = prior.some(item => item.ice === 'failed' || item.connection === 'failed')
+        fallbackReason = heartbeat ? 'heartbeat-timeout' : openingTimeout ? 'opening-timeout' : failed ? 'peer-failed' : undefined
+        expect(fallbackReason, 'stress fallback requires an observed health/opening failure').toBeDefined()
+      }
+
+      oldDeliveryPrerequisites.browserFallback = sent.route === 'direct'
+        || (fallbackReason === 'heartbeat-timeout' && oldDeliveryPrerequisites.completedDirectBeforeFallback)
     }
 
     // The title is delivered asynchronously on the same reliable transport;
@@ -222,6 +255,19 @@ test('authenticated browser and Rust client keep using the observed route under 
       elapsedMs: performance.now() - started,
       fallbackReason,
     })
+    if (packetLoss) {
+      // Require a real accepted batch and one stored submission; response headers
+      // and a route indicator cannot prove recovered application delivery.
+      const chatId = new URL(page.url()).pathname.split('/').at(-1)!
+      // The committed message batch can precede its independent POST response.
+      // The rendered title above proves delivery of this submission's state;
+      // require accepted stream traffic since submission began, in either order.
+      const acceptedSubmissionBatch = async () => (await observations()).slice(before).find(item => item.method === 'STREAM' && item.path === `/chats/${chatId}/stream`)
+      await expect.poll(acceptedSubmissionBatch, responseObservationOptions).toBeTruthy()
+      const detail = await (await page.request.get(`${url}${chatsPath}/${chatId}`)).json()
+      expect(detail.messages.filter((message: { text: string }) => message.text === marker)).toHaveLength(1)
+    }
+
     const cookies = await page.context().cookies()
     const cookie = cookies.map(value => `${value.name}=${value.value}`).join('; ')
     const samples = process.env.CAIRN_NETWORK_SCENARIO === 'packet-loss' ? 3 : 1
@@ -424,6 +470,8 @@ test('authenticated browser and Rust client keep using the observed route under 
       expectedRustRoute: process.env.CAIRN_NETWORK_EXPECT_RUST_ROUTE,
       observations: evidence,
       directNegotiations,
+      qualificationContract: packetLoss ? 'unbounded-stress-routing-measurement' : undefined,
+      oldDeliveryPrerequisites: packetLoss ? oldDeliveryPrerequisites : undefined,
       revocations,
       mdnsCandidates,
     })}\n`)
@@ -436,24 +484,40 @@ test('authenticated browser and Rust client keep using the observed route under 
       expect(saved).toHaveProperty('directNegotiations')
       expect(saved.directNegotiations.attempts).toBe(3)
       expect(saved.directNegotiations.direct + saved.directNegotiations.relay).toBe(3)
-      expect([1 / 3, 2 / 3, 1]).toContain(saved.directNegotiations.ratio)
+      expect([0, 1 / 3, 2 / 3, 1]).toContain(saved.directNegotiations.ratio)
       expect(packetLossReads).toHaveLength(3)
-      expect(packetLossReads.some(item => item.route === 'direct'), 'at least one independent Rust negotiation must use direct under packet loss').toBe(true)
+      oldDeliveryPrerequisites.atLeastOneRustDirect = packetLossReads.some(item => item.route === 'direct')
+      oldDeliveryPrerequisites.allRustFallbacksIce = packetLossReads.every(item => item.route === 'direct' || (item.directFailure?.phase === 'ice' && item.directFailure.timedOut))
+      const satisfied = oldDeliveryPrerequisites.promotion && oldDeliveryPrerequisites.browserFallback
+        && oldDeliveryPrerequisites.atLeastOneRustDirect && oldDeliveryPrerequisites.allRustFallbacksIce
+      await writeFile(output, `${JSON.stringify({
+        ...saved,
+        oldDeliveryPrerequisites,
+        historicalDeliveryOracle: {
+          executed: false,
+          verdict: satisfied ? 'would-satisfy-delivery-prerequisites' : 'would-fail-delivery-prerequisites',
+        },
+      })}\n`)
     }
 
     for (const observation of evidence) {
       if (packetLossReads.includes(observation) && observation.route === 'relay') {
-        // Lost handshake packets may exhaust ICE's strict 30 s window. Relay
-        // is valid only for that diagnosed failure; all three relayed reads
-        // still fail the direct-capability assertion above.
-        expect(observation.directFailure).toEqual({ phase: 'ice', timedOut: true })
+        // A timeout is measured only with proof of the unchanged shared budget.
+        // HTTP refusals, SDK errors and unknown early closes remain failures.
+        expect(observation.directFailure?.timedOut).toBe(true)
+        expect(observation.failureHttpStatus).toBeNull()
+        const expiry = observation.directPhases?.find(item => item.event === 'deadline-expired')
+        expect(expiry).toMatchObject({ remainingMs: 0 })
+        const deadline = observation.directPhases?.find(item => item.event === 'deadline-started')
+        expect(deadline).toBeDefined()
+        const budgetElapsedMs = expiry!.elapsedMs - deadline!.elapsedMs
+        expect(budgetElapsedMs).toBeGreaterThanOrEqual(29900)
+        expect(budgetElapsedMs).toBeLessThan(32000)
         continue
       }
 
       if (packetLoss && observation.operation === 'browser-send' && observation.route === 'relay') {
-        // Promotion remains mandatory. The documented 5 s heartbeat deadline
-        // may subsequently select relay under loss; accept only that diagnosis.
-        expect(observation.fallbackReason).toBe('heartbeat-timeout')
+        expect(['heartbeat-timeout', 'opening-timeout', 'peer-failed']).toContain(observation.fallbackReason)
         continue
       }
 

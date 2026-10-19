@@ -107,6 +107,9 @@ export interface ActivityWait {
 
 /** Historical marker for events that predate the explicit immediate boolean. */
 const immediateResult = 'Wait condition already completed'
+// Where a scheduled wait's card is placed: its turn ended, or a message or another wait event came.
+const waitBoundaries = new Set(['turn.started', 'turn.completed', 'turn.failed', 'chat.user', 'chat.sleep', 'chat.wait', 'chat.wait_ready', 'chat.wakeup'])
+const terminalStatuses = new Set(['succeeded', 'failed', 'cancelled', 'interrupted'])
 
 // Codex names the workspace server; Claude and OpenCode prefix the tool with it.
 const workspaceWaitTool = /^(?:mcp__)?cairn_workspace(?:__|_|\.)(?:sleep|wait_for)$/
@@ -213,9 +216,21 @@ export function activityEntries(events: RunEvent[], chat = false, groups = new A
   let waitReason = ''
   // The call whose reason was used: its later updates must not lend it again.
   let spentCall = ''
+  // A scheduled wait only starts once its turn ends: its card follows what the agent did after
+  // the call, and is placed when the turn ends, another wait or a message comes, or the
+  // history does.
+  let scheduled: Extract<ActivityEntry, { kind: 'wait' }> | undefined
+  const placeScheduled = () => {
+    if (scheduled)
+      entries.push(scheduled)
+    scheduled = undefined
+  }
+
   for (const [eventIndex, event] of events.entries()) {
     if (event.type === 'artifact')
       continue
+    if (waitBoundaries.has(event.type) || (event.type === 'status' && terminalStatuses.has(event.text)))
+      placeScheduled()
     if (event.type === 'chat.sleep' || event.type === 'chat.wait') {
       const wakeup = record(event.payload) as unknown as ChatWakeup
       if (!wakeup.id || waits.has(wakeup.id))
@@ -226,12 +241,12 @@ export function activityEntries(events: RunEvent[], chat = false, groups = new A
       waits.set(wakeup.id, openWait)
       waitReason = ''
       spentCall = waitCall
-      entries.push({
+      scheduled = {
         kind: 'wait',
         id: `wait:${wakeup.id}`,
         time: event.createdAt,
         wait: openWait,
-      })
+      }
       continue
     }
 
@@ -693,6 +708,7 @@ export function activityEntries(events: RunEvent[], chat = false, groups = new A
       legacyTool = Object.assign(artifact, { kind: 'output' as const, title: 'Recorded step', historical: true })
   }
 
+  placeScheduled()
   const knownWait = pendingWakeup && waits.get(pendingWakeup.id)
   if (knownWait && pendingWakeup?.observation && knownWait.observation === undefined)
     knownWait.observation = pendingWakeup.observation

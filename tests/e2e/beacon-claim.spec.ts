@@ -187,8 +187,10 @@ test('claims, detaches and reclaims the same private installation through the ap
     await expect(page.getByRole('button', { name: 'Confirm revocation', exact: true })).toBeVisible()
     await page.getByRole('button', { name: 'Confirm identity', exact: true }).click()
     await page.getByRole('button', { name: 'Confirm with a passkey', exact: true }).click()
+    const forgotten = page.waitForResponse(response => response.url() === `${url}/api/installations/${renewed.installationId}` && response.request().method() === 'DELETE')
     await page.getByRole('button', { name: 'Confirm revocation', exact: true }).click()
-    await expect(page).not.toHaveURL(new RegExp(renewed.installationId))
+    expect((await forgotten).status()).toBe(204)
+    await page.waitForURL(`${url}/`)
     const revoked = await page.request.get(`${url}/api/installations/${renewed.installationId}/api/chats`)
     expect(revoked.status()).toBe(404)
   }

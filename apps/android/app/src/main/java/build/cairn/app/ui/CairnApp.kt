@@ -196,6 +196,7 @@ private fun CairnAppContent(
                 TextButton(onClick = { vm.perform { logout() } }) { Text("Se déconnecter") }
                 state.error?.let { ErrorNotice(it, vm::clearMessage) }
             }
+            SnackbarHost(snackbar, Modifier.align(Alignment.BottomCenter))
         }
         return
     }

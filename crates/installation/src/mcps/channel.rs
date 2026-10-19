@@ -112,8 +112,9 @@ async fn bind(path: &Path) -> Result<(UnixListener, Socket)> {
     Ok((listener, socket))
 }
 
-/// Answers HTTP on the run socket until `stop`. Connections are bounded like the
-/// VM relay's, and end with the attempt rather than with their last request.
+/// Answers HTTP on the run socket until `stop`. Each complete response closes
+/// its connection so idle client pools cannot exhaust the bounded relay slots.
+/// Active tool calls can still run until their response or the attempt ends.
 async fn serve_connections(
     listener: UnixListener,
     app: Router,
@@ -123,8 +124,9 @@ async fn serve_connections(
     crate::microvm::listener::serve(
         || listener.accept(),
         |(stream, _)| {
-            let connection =
-                http1::Builder::new().serve_connection(TokioIo::new(stream), service.clone());
+            let connection = http1::Builder::new()
+                .keep_alive(false)
+                .serve_connection(TokioIo::new(stream), service.clone());
             async move {
                 if let Err(error) = connection.await {
                     tracing::debug!(%error, "Run MCP connection closed");
@@ -338,6 +340,79 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
         panic!("{} never answered", socket.display());
+    }
+
+    /// Separate retained clients model the independent MCP clients of an agent
+    /// and its subagents. Their idle pools must not fill the channel's limit.
+    async fn completed_calls(socket: &Path) {
+        let mut clients = Vec::new();
+        for index in 0..crate::microvm::mcp::CONNECTIONS * 2 + 1 {
+            let client = reqwest::Client::builder()
+                .unix_socket(socket)
+                .pool_idle_timeout(None)
+                .timeout(Duration::from_secs(2))
+                .build()
+                .unwrap();
+            let response = client
+                .post("http://127.0.0.1:5202/mcp-workspace")
+                .json(&json!({
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "tools/list"
+                }))
+                .send()
+                .await
+                .unwrap_or_else(|error| panic!("call {} did not finish: {error}", index + 1));
+            assert!(response.status().is_success());
+            assert_eq!(response.json::<Value>().await.unwrap()["result"], json!({}));
+            clients.push(client);
+        }
+    }
+
+    #[tokio::test]
+    async fn completed_calls_do_not_exhaust_the_local_channel() {
+        let directory = tempfile::tempdir().unwrap();
+        let socket = directory.path().join("channel.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        let stop = CancellationToken::new();
+        let app = Router::new().fallback(|| async {
+            Json(json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "result": {}
+            }))
+        });
+        let channel = tokio::spawn(serve_connections(listener, app, stop.clone()));
+
+        completed_calls(&socket).await;
+
+        stop.cancel();
+        channel.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn forwarded_calls_keep_capacity_while_a_tool_call_is_pending() {
+        let (address, master, mut received) = master().await;
+        let directory = tempfile::tempdir().unwrap();
+        let socket = directory.path().join("channel.sock");
+        let stop = CancellationToken::new();
+        let channel = tokio::spawn(forward(socket.clone(), session(address), stop.clone()));
+        let pending = tokio::spawn(in_flight(socket.clone()));
+        received.recv().await.unwrap();
+
+        completed_calls(&socket).await;
+        assert!(
+            !pending.is_finished(),
+            "the active tool call was interrupted"
+        );
+
+        master.release.notify_one();
+        let response = pending.await.unwrap().unwrap();
+        assert!(response.status().is_success());
+        assert_eq!(response.json::<Value>().await.unwrap()["result"], json!({}));
+
+        stop.cancel();
+        channel.await.unwrap().unwrap();
     }
 
     #[tokio::test]

@@ -94,12 +94,14 @@ for(const pid of fs.readdirSync('/proc').filter(v=>/^\\d+$/.test(v))){
       await mkdir(path.join(source, directory), { recursive: true })
     await writeFile(path.join(source, 'chat-input/messages.json'), '[]')
     await copyFile(new URL('./fixtures/nested-kvm-resume.c', import.meta.url), path.join(source, 'workspace/nested-kvm-resume.c'))
+    await copyFile(new URL('./fixtures/exclusive-inbox.mjs', import.meta.url), path.join(source, 'workspace/exclusive-inbox.mjs'))
     const fixture = `
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import {createHash} from 'node:crypto';
 import {execFileSync,spawn} from 'node:child_process';
 import {setTimeout as delay} from 'node:timers/promises';
+import {finishRequested} from './exclusive-inbox.mjs';
 const root=${JSON.stringify(runRoot)},mode=${JSON.stringify(mode)},android=${android && mode === 'victim'};
 fs.appendFileSync(root+'/workspace/invocations',process.pid+'\\n');
 const bytes=Buffer.alloc(mode==='victim'?384*1024**2:16*1024**2,0x5a);
@@ -123,7 +125,7 @@ if(android){
 }
 console.log('ready '+mode+' pid='+process.pid+' memory='+original+(android?' android='+androidBoot:''));
 let ticks=0;
-while(!fs.readFileSync('/run/cairn-chat/messages.json','utf8').includes('finish')){
+while(!finishRequested('/run/cairn-chat/messages.json')){
   console.log('tick '+mode+' pid='+process.pid+' count='+(++ticks));
   await delay(100);
 }
