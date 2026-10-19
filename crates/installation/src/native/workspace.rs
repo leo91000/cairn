@@ -144,8 +144,31 @@ pub async fn sync_directories(root: &Path) -> Result<()> {
 }
 
 /// Call only while holding the conversation's physical lock and after its cgroup is empty.
-pub async fn capture(state: &Path, run: &str, attempt: &str, budget: u64) -> Result<Value> {
+pub async fn capture(
+    state: &Path,
+    run: &str,
+    attempt: &str,
+    budget: u64,
+    growth: u64,
+) -> Result<Value> {
     let root = directory(state, run)?;
+    // Reuse the old pointer as the failure marker before allocating new files.
+    // Even ENOSPC while starting a replacement must not expose the old point.
+    let marker = root.join("checkpoint-error");
+    match tokio::fs::rename(root.join("completed.json"), &marker).await {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            if !tokio::fs::try_exists(&marker).await? {
+                atomic_write(
+                    &marker,
+                    b"Native checkpoint creation did not finish; retry the stopped capture.",
+                )
+                .await?;
+            }
+        }
+        Err(error) => return Err(error.into()),
+    }
+    tokio::fs::File::open(&root).await?.sync_all().await?;
     let snapshots_root = state.join("snapshots");
     private_dir(&snapshots_root).await?;
     let id = crate::config::id();
@@ -160,7 +183,15 @@ pub async fn capture(state: &Path, run: &str, attempt: &str, budget: u64) -> Res
             "Native files exceed their disk budget; local work is retained.",
         ));
     }
-    let maximum = budget.saturating_mul(2).saturating_add(16 * 1024 * 1024);
+    let maximum = budget
+        .saturating_mul(2)
+        .saturating_add(16 * 1024 * 1024)
+        .min(growth.saturating_sub(super::disk::MIB));
+    if maximum == 0 {
+        return Err(Error::unavailable(
+            "Insufficient shared native disk budget for a checkpoint; local work is retained.",
+        ));
+    }
     let needed = logical.saturating_mul(2).saturating_add(16 * 1024 * 1024);
     let path = std::ffi::CString::new(snapshots_root.as_os_str().as_encoded_bytes())
         .map_err(Error::internal)?;
@@ -187,6 +218,7 @@ pub async fn capture(state: &Path, run: &str, attempt: &str, budget: u64) -> Res
     }
     send.await.map_err(Error::internal)??;
     archive.sync_all().await?;
+    let archive_bytes = archive.metadata().await?.len();
     drop(archive);
     let mut manifest = snapshots::index(&temporary.path().join("disk")).await?;
     manifest["kind"] = KIND.into();
@@ -205,11 +237,19 @@ pub async fn capture(state: &Path, run: &str, attempt: &str, budget: u64) -> Res
     manifest["capturedAt"] = crate::config::now().into();
     manifest["indexMs"] = (started.elapsed().as_millis() as u64).into();
     manifest["incremental"] = false.into();
-    atomic_write(
-        &temporary.path().join("manifest.json"),
-        &serde_json::to_vec(&manifest)?,
-    )
-    .await?;
+    let snapshot = json!({ "id": id, "manifest": manifest });
+    let encoded_manifest = serde_json::to_vec(&snapshot["manifest"])?;
+    let encoded_snapshot = serde_json::to_vec(&snapshot)?;
+    let added = archive_bytes
+        .saturating_add(encoded_manifest.len() as u64)
+        .saturating_add(encoded_snapshot.len() as u64)
+        .saturating_add(run.len() as u64);
+    if added > growth {
+        return Err(Error::unavailable(
+            "Insufficient shared native disk budget for checkpoint metadata; local work is retained.",
+        ));
+    }
+    atomic_write(&temporary.path().join("manifest.json"), &encoded_manifest).await?;
     atomic_write(&temporary.path().join("run"), run.as_bytes()).await?;
     let destination = snapshots_root.join(&id);
     tokio::fs::rename(temporary.path(), destination).await?;
@@ -217,12 +257,9 @@ pub async fn capture(state: &Path, run: &str, attempt: &str, budget: u64) -> Res
         .await?
         .sync_all()
         .await?;
-    let snapshot = json!({ "id": id, "manifest": manifest });
-    atomic_write(
-        &root.join("completed.json"),
-        &serde_json::to_vec(&snapshot)?,
-    )
-    .await?;
+    atomic_write(&root.join("completed.json"), &encoded_snapshot).await?;
+    tokio::fs::remove_file(root.join("checkpoint-error")).await?;
+    tokio::fs::File::open(&root).await?.sync_all().await?;
     Ok(snapshot)
 }
 
@@ -247,7 +284,7 @@ pub async fn collect_archives(state: &Path, run: &str, keep: Option<&str>) -> Re
 }
 
 pub async fn retained_bytes(state: &Path, run: &str) -> Result<u64> {
-    let mut retained = bytes(&directory(state, run)?).await.unwrap_or(0);
+    let mut retained = super::disk::bytes_if_present(&directory(state, run)?).await?;
     let parent = state.join("snapshots");
     if !parent.exists() {
         return Ok(retained);
@@ -283,7 +320,13 @@ pub async fn completed(state: &Path, run: &str) -> Result<Value> {
     Ok(snapshot)
 }
 
-pub async fn restore(state: &Path, run: &str, request: &Value, budget: u64) -> Result<Value> {
+pub async fn restore(
+    state: &Path,
+    run: &str,
+    request: &Value,
+    budget: u64,
+    growth: u64,
+) -> Result<Value> {
     let manifest = &request["manifest"];
     if manifest["kind"] != KIND
         || manifest["runtime"]["os"] != std::env::consts::OS
@@ -315,6 +358,16 @@ pub async fn restore(state: &Path, run: &str, request: &Value, budget: u64) -> R
             return Ok(json!({ "ready": true }));
         }
     }
+    let archive_bytes = manifest["size"]
+        .as_u64()
+        .ok_or_else(|| Error::bad("Missing native archive length."))?;
+    let available = growth.saturating_sub(super::disk::MIB);
+    if archive_bytes >= available {
+        return Err(Error::unavailable(
+            "Insufficient shared native disk budget for restore staging; local work is retained.",
+        ));
+    }
+    let extracted_budget = budget.min(available - archive_bytes);
     let temporary = tempfile::Builder::new()
         .prefix("restore-")
         .tempdir_in(&root)?;
@@ -348,7 +401,7 @@ pub async fn restore(state: &Path, run: &str, request: &Value, budget: u64) -> R
     .await?;
     let extracted = temporary.path().join("data");
     let file = tokio::fs::File::open(archive).await?;
-    files::receive(&mut BufReader::new(file), &extracted, budget).await?;
+    files::receive(&mut BufReader::new(file), &extracted, extracted_budget).await?;
     for entry in ["home", "workspaces", "output"] {
         let path = extracted.join(entry);
         if tokio::fs::symlink_metadata(&path)
@@ -583,9 +636,15 @@ mod tests {
         tokio::fs::write(root.join("data/tmp/transient"), b"not-persisted")
             .await
             .unwrap();
-        let point = capture(state.path(), &run, &crate::config::id(), 1024 * 1024)
-            .await
-            .unwrap();
+        let point = capture(
+            state.path(),
+            &run,
+            &crate::config::id(),
+            1024 * 1024,
+            u64::MAX,
+        )
+        .await
+        .unwrap();
         assert_eq!(point["manifest"]["kind"], KIND);
         let snapshot = state.path().join("snapshots").join(text(&point, "id"));
         let captured = snapshot.clone();
@@ -604,9 +663,15 @@ mod tests {
         let destination = tempfile::tempdir().unwrap();
         let restored_run = crate::config::id();
         let request = json!({ "manifest": point["manifest"], "master": origin, "grant": "synthetic-scoped-grant", "backupId": crate::config::id() });
-        restore(destination.path(), &restored_run, &request, 1024 * 1024)
-            .await
-            .unwrap();
+        restore(
+            destination.path(),
+            &restored_run,
+            &request,
+            1024 * 1024,
+            u64::MAX,
+        )
+        .await
+        .unwrap();
         let restored = directory(destination.path(), &restored_run)
             .unwrap()
             .join("data");
@@ -642,9 +707,15 @@ mod tests {
                 "managed credentials and temporary files must not be durable: {private}"
             );
         }
-        restore(destination.path(), &restored_run, &request, 1024 * 1024)
-            .await
-            .unwrap();
+        restore(
+            destination.path(),
+            &restored_run,
+            &request,
+            1024 * 1024,
+            u64::MAX,
+        )
+        .await
+        .unwrap();
         let owner = execution_ownership(destination.path(), &restored_run)
             .await
             .unwrap();
@@ -655,9 +726,15 @@ mod tests {
         .await
         .unwrap();
         drop(owner);
-        restore(destination.path(), &restored_run, &request, 1024 * 1024)
-            .await
-            .unwrap();
+        restore(
+            destination.path(),
+            &restored_run,
+            &request,
+            1024 * 1024,
+            u64::MAX,
+        )
+        .await
+        .unwrap();
         assert_eq!(
             tokio::fs::read(restored.join("workspaces/game/main.rs"))
                 .await
@@ -669,19 +746,52 @@ mod tests {
 
     #[tokio::test]
     async fn a_failed_native_capture_never_reuses_an_older_completed_checkpoint() {
+        use std::os::unix::fs::MetadataExt;
+
         let state = tempfile::tempdir().unwrap();
         let run = crate::config::id();
         let root = directory(state.path(), &run).unwrap();
         private_dir(&root.join("data/workspaces")).await.unwrap();
-        capture(state.path(), &run, &crate::config::id(), 1024)
+        let attempt = crate::config::id();
+        let original = capture(state.path(), &run, &attempt, 1024, u64::MAX)
             .await
             .unwrap();
         assert!(completed(state.path(), &run).await.is_ok());
-        atomic_write(&root.join("checkpoint-error"), b"Synthetic disk failure")
+        let pointer = tokio::fs::metadata(root.join("completed.json"))
             .await
             .unwrap();
+        // Fail immediately after invalidation, before any new archive bytes.
+        assert!(
+            capture(state.path(), &run, &attempt, 1024, 0)
+                .await
+                .is_err()
+        );
         assert!(completed(state.path(), &run).await.is_err());
+        assert!(!root.join("completed.json").exists());
+        assert_eq!(
+            tokio::fs::metadata(root.join("checkpoint-error"))
+                .await
+                .unwrap()
+                .ino(),
+            pointer.ino(),
+            "invalidating an existing point must reuse its inode, even with no allocation budget"
+        );
+        assert!(
+            state
+                .path()
+                .join("snapshots")
+                .join(text(&original, "id"))
+                .exists()
+        );
         assert!(root.join("data/workspaces").exists());
+        let recovered = capture(state.path(), &run, &attempt, 1024, u64::MAX)
+            .await
+            .unwrap();
+        assert_ne!(recovered["id"], original["id"]);
+        assert_eq!(
+            completed(state.path(), &run).await.unwrap()["id"],
+            recovered["id"]
+        );
     }
 
     #[tokio::test]
@@ -734,9 +844,15 @@ mod tests {
         let reference_write =
             json!({ "wallMs": start.elapsed().as_secs_f64() * 1000.0, "cpuMs": cpu_ms() - cpu });
         let (start, cpu) = (Instant::now(), cpu_ms());
-        let captured = capture(state.path(), &run, &crate::config::id(), 32 * 1024 * 1024)
-            .await
-            .unwrap();
+        let captured = capture(
+            state.path(),
+            &run,
+            &crate::config::id(),
+            32 * 1024 * 1024,
+            u64::MAX,
+        )
+        .await
+        .unwrap();
         let native_write =
             json!({ "wallMs": start.elapsed().as_secs_f64() * 1000.0, "cpuMs": cpu_ms() - cpu });
         let snapshot = state.path().join("snapshots").join(text(&captured, "id"));
@@ -879,9 +995,15 @@ mod tests {
             json!({ "kind": KIND, "runtime": { "os": "windows", "arch": "x86_64" } }),
         ] {
             assert!(
-                restore(state.path(), &run, &json!({ "manifest": manifest }), 1024)
-                    .await
-                    .is_err()
+                restore(
+                    state.path(),
+                    &run,
+                    &json!({ "manifest": manifest }),
+                    1024,
+                    u64::MAX
+                )
+                .await
+                .is_err()
             );
             assert_eq!(
                 tokio::fs::read(root.join("data/keep")).await.unwrap(),

@@ -289,7 +289,7 @@ pub(crate) fn chat_grant(db: &Db<'_>, chat: &Value, source: &Origin) -> Result<V
     let legacy = chat["id"].is_string()
         && run["id"].is_string()
         && !chat["nativeProvenanceUnknown"].is_boolean();
-    let unknown = legacy
+    let mut unknown = legacy
         || chat["nativeProvenanceUnknown"] == true
         || incoming["nativeProvenanceUnknown"] == true;
     let mut people = chat["nativePrincipals"]
@@ -312,11 +312,16 @@ pub(crate) fn chat_grant(db: &Db<'_>, chat: &Value, source: &Origin) -> Result<V
     if chat["nativeParentRunId"].is_string()
         && incoming["nativeParentRunId"].is_string()
         && chat["nativeParentRunId"] != incoming["nativeParentRunId"]
-        && native(&agent)
     {
-        return Err(Error::forbidden(
-            "A native conversation cannot combine unrelated delegation grants.",
-        ));
+        if native(&agent) {
+            return Err(Error::forbidden(
+                "A native conversation cannot combine unrelated delegation grants.",
+            ));
+        }
+        // One parent pointer cannot retain both revocation paths. The VM may
+        // continue ordinary work, but neither existing nor new native descendants
+        // may inherit a partial lineage.
+        unknown = true;
     }
     let mut nodes = Vec::new();
     for node in db.list("nodes")? {

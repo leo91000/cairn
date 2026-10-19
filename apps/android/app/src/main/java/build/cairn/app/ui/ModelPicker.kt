@@ -225,6 +225,10 @@ fun ModelPicker(
                 catalog.models
                     .find { it.model == "default" }
                     ?.takeIf { !inherit || defaultModel.isBlank() }
+            val defaultName =
+                alias?.displayName?.takeIf {
+                    provider == "claude" && it.isNotBlank() && !it.startsWith("Default")
+                }
             val visible =
                 catalog.models.filter {
                     (!it.hidden || it.matches(model)) && (it != alias || model == it.model)
@@ -358,7 +362,7 @@ fun ModelPicker(
                         if (inherit) {
                             if (conversationDefault) "Modèle de la conversation"
                             else "Modèle de l’agent"
-                        } else "Modèle par défaut",
+                        } else listOfNotNull("Modèle par défaut", defaultName).joinToString(" · "),
                         if (inherit)
                             fallback
                                 .ifBlank { null }

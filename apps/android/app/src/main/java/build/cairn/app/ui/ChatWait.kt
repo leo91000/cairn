@@ -1,18 +1,22 @@
 package build.cairn.app.ui
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import build.cairn.app.data.Chat
 import build.cairn.app.data.ChatWakeup
@@ -457,7 +461,7 @@ internal fun WaitCard(wait: ActivityWait) {
                     false,
                     CairnIcons.Clock,
                     "Reprise à l’heure prévue",
-                    listOf(reason, duration()).filter { it.isNotBlank() }.joinToString(" · "),
+                    duration(),
                 )
             finished -> {
                 val outcome = waitOutcome(observation)
@@ -482,10 +486,9 @@ internal fun WaitCard(wait: ActivityWait) {
                     false,
                     icon,
                     outcome.title,
-                    // A finished card still says why and what it waited for; a timer's outcome
-                    // says the latter.
+                    // A finished card still says why, above this, and what it waited for; a
+                    // timer's outcome says the latter.
                     listOf(
-                            reason,
                             if (wakeup == null) observedTarget(observation)
                             else if (wakeup.condition != null) waitTarget(wakeup, now).short
                             else "",
@@ -502,11 +505,10 @@ internal fun WaitCard(wait: ActivityWait) {
                     true,
                     CairnIcons.Hourglass,
                     "Remplacée par un nouvel appel d’attente",
-                    reason,
+                    "",
                 )
-            cancelled -> WaitView(null, true, CairnIcons.Hourglass, "Attente annulée", reason)
-            paused ->
-                WaitView(null, true, CairnIcons.Pause, waitTarget(wakeup!!, now).title, reason)
+            cancelled -> WaitView(null, true, CairnIcons.Hourglass, "Attente annulée", "")
+            paused -> WaitView(null, true, CairnIcons.Pause, waitTarget(wakeup!!, now).title, "")
             // A run's history cannot tell whether the wait still stands: it is shown as recorded.
             else -> {
                 val target = waitTarget(wakeup!!, now)
@@ -515,7 +517,7 @@ internal fun WaitCard(wait: ActivityWait) {
                     false,
                     waitIcon(target.kind),
                     if (live != null) target.title else recordedTitle(wakeup, now),
-                    reason,
+                    "",
                 )
             }
         }
@@ -563,6 +565,7 @@ internal fun WaitCard(wait: ActivityWait) {
                 Spacer(Modifier.width(12.dp))
                 Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
                     Text(view.title, style = MaterialTheme.typography.titleSmall)
+                    if (reason.isNotBlank()) WaitReason(reason)
                     if (view.detail.isNotBlank())
                         Text(
                             view.detail,
@@ -691,4 +694,29 @@ private fun WaitChip(
         color = content,
         maxLines = 1,
     )
+}
+
+/** Why the agent waits: a long reason is clamped so the card stays small, and can be expanded. */
+@Composable
+private fun WaitReason(reason: String) {
+    var expanded by rememberSaveable(reason) { mutableStateOf(false) }
+    var clamped by remember(reason) { mutableStateOf(false) }
+    Text(
+        reason,
+        style = MaterialTheme.typography.bodySmall,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+        maxLines = if (expanded) Int.MAX_VALUE else 3,
+        overflow = TextOverflow.Ellipsis,
+        onTextLayout = { if (!expanded) clamped = it.hasVisualOverflow },
+    )
+    if (clamped || expanded)
+        Text(
+            if (expanded) "Voir moins" else "Voir plus",
+            style = MaterialTheme.typography.labelMedium,
+            fontWeight = FontWeight.SemiBold,
+            color = MaterialTheme.colorScheme.primary,
+            modifier =
+                Modifier.clickable(role = Role.Button) { expanded = !expanded }
+                    .padding(vertical = 4.dp),
+        )
 }

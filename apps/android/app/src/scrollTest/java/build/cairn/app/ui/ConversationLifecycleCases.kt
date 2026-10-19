@@ -22,6 +22,14 @@ abstract class ConversationLifecycleCases {
 
     protected open fun captureSwipe() = Unit
 
+    protected open fun captureFreshSession(name: String) = Unit
+
+    @Test
+    fun restoredRunOffersConfirmedFreshSession() = withConversation(false, freshSession = true)
+
+    @Test
+    fun freshSessionAvailabilityComesFromTheServer() = withConversation(false, freshSession = false)
+
     @Test fun swipeRequiresConfirmationAndPermanentlyDeletes() = withConversation(false)
 
     @Test fun swipeFromFilConfirmsBeforePermanentlyDeleting() = withConversation(true)
@@ -29,11 +37,16 @@ abstract class ConversationLifecycleCases {
     @Test
     fun deletingWorkingConversationFromFilRequiresConfirmation() = withConversation(true, true)
 
-    private fun withConversation(fromFil: Boolean, working: Boolean = false) {
+    private fun withConversation(
+        fromFil: Boolean,
+        working: Boolean = false,
+        freshSession: Boolean? = null,
+    ) {
         MockWebServer().use { server ->
             val deleted = AtomicBoolean(false)
             val deletes = CopyOnWriteArrayList<String>()
             val restores = CopyOnWriteArrayList<String>()
+            val restarts = CopyOnWriteArrayList<String>()
             val chat =
                 Chat(
                     "chat",
@@ -41,6 +54,17 @@ abstract class ConversationLifecycleCases {
                     agentName = "Agent principal",
                     updatedAt = System.currentTimeMillis(),
                     status = if (working) "running" else "succeeded",
+                    run =
+                        if (freshSession != null) Run("run", status = "failed", restoredAt = 10)
+                        else null,
+                    restoredAt = if (freshSession == false) 10 else null,
+                    canRequestNewSession = freshSession == true,
+                )
+            val restarted =
+                chat.copy(
+                    canRequestNewSession = false,
+                    sessionRestartRequested = true,
+                    paused = true,
                 )
             server.dispatcher =
                 object : Dispatcher() {
@@ -56,7 +80,7 @@ abstract class ConversationLifecycleCases {
                         }
                         if (path == "/api/installations/fixture/api/chats/chat/stream") {
                             val current =
-                                chat.copy(
+                                (if (restarts.size == 2) restarted else chat).copy(
                                     lifecycle = if (deleted.get()) "trash" else "active",
                                     purgeAt =
                                         if (deleted.get()) System.currentTimeMillis() + 86400000
@@ -70,6 +94,16 @@ abstract class ConversationLifecycleCases {
                         }
                         val body =
                             when {
+                                path == "/api/installations/fixture/api/chats/chat/new-session" -> {
+                                    restarts += request.body.readUtf8()
+                                    if (restarts.size == 1)
+                                        return MockResponse()
+                                            .setResponseCode(409)
+                                            .setBody(
+                                                """{"error":"Réessayez la nouvelle session."}"""
+                                            )
+                                    wireJson.encodeToString(restarted)
+                                }
                                 path == "/api/installations/fixture/api/chats/chat/restore" &&
                                     request.method == "POST" -> {
                                     restores += request.body.readUtf8()
@@ -149,6 +183,63 @@ abstract class ConversationLifecycleCases {
             }
             compose.waitUntil(20000) {
                 compose.onAllNodesWithText(chat.title).fetchSemanticsNodes().isNotEmpty()
+            }
+            if (freshSession != null) {
+                compose.onNodeWithText(chat.title).performClick()
+                val offer = "Repartir avec une nouvelle session agent"
+                if (!freshSession) {
+                    compose.waitUntil(10000) {
+                        compose
+                            .onAllNodesWithTag("conversation-history")
+                            .fetchSemanticsNodes()
+                            .isNotEmpty()
+                    }
+                    compose.onNodeWithText(offer).assertDoesNotExist()
+                } else {
+                    compose.waitUntil(10000) {
+                        compose.onAllNodesWithText(offer).fetchSemanticsNodes().isNotEmpty()
+                    }
+                    captureFreshSession("offer")
+                    compose.onNodeWithText(offer).performClick()
+                    compose.onNodeWithText("Nouvelle session agent ?").assertIsDisplayed()
+                    assertTrue(restarts.isEmpty())
+                    compose.onNodeWithText("Annuler", substring = false).performClick()
+                    assertTrue(restarts.isEmpty())
+                    compose.onNodeWithText(offer).performClick()
+                    compose.onNodeWithText("Confirmer", substring = false).performClick()
+                    compose.waitUntil(10000) {
+                        compose
+                            .onAllNodesWithText("Réessayez la nouvelle session.")
+                            .fetchSemanticsNodes()
+                            .isNotEmpty()
+                    }
+                    compose.onNodeWithText("Nouvelle session agent ?").assertIsDisplayed()
+                    captureFreshSession("retry")
+                    compose.onNodeWithText("Confirmer", substring = false).performClick()
+                    compose.waitUntil(10000) { restarts.size == 2 }
+                    compose.waitUntil(15000) {
+                        compose.onAllNodesWithText(offer).fetchSemanticsNodes().isEmpty()
+                    }
+                    compose.onNodeWithText("Nouvelle session agent ?").assertDoesNotExist()
+                    compose
+                        .onNodeWithText(
+                            "Écrivez un nouveau message, puis reprenez la file pour continuer."
+                        )
+                        .assertIsDisplayed()
+                    captureFreshSession("accepted")
+                    restarts.forEach {
+                        assertTrue(
+                            wireJson
+                                .parseToJsonElement(it)
+                                .jsonObject
+                                .getValue("confirm")
+                                .jsonPrimitive
+                                .boolean
+                        )
+                    }
+                }
+                vm.api.closeStreams()
+                return
             }
             compose.onNodeWithText("Corbeille").assertDoesNotExist()
             val row = compose.onNodeWithText(chat.title)

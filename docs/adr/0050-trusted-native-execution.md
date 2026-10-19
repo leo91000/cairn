@@ -21,10 +21,12 @@ bounded, revocable agent delegation. Shared installation membership alone never
 grants native execution. Unknown historical/plugin provenance fails closed. The
 manager requires fresh Beacon membership evidence before extending host leases.
 
-The reviewed compatibility epoch advances from 4 to 5 for persisted native backend,
+The reviewed compatibility epoch advances from 5 to 6 for persisted native backend,
 provenance, node grants and checkpoint formats. Forward migration is additive;
 legacy VM data is unchanged and the legacy tree stays fixed. Epoch transitions
 require reviewed rollout as in [production releases](../PRODUCTION-CAIRN.md#installation-data-compatibility).
-Rollback to epoch 4 requires its matching prepared data backup and binary; automatic
+Epoch 5 already preserves F2's durable session-restart intention; its behavior is
+retained. Epoch-5 binaries cannot interpret the native records introduced here.
+Rollback to epoch 5 requires its matching prepared data backup and binary; automatic
 updates do not cross epochs or restore data. Windows/macOS and desktop-session
 access remain separate future work.

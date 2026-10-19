@@ -246,10 +246,16 @@ fn route(method: &str, path: &str) -> Result<()> {
 }
 
 /// How long the controller may take to answer, by operation.
-fn controller_timeout(path: &str) -> Duration {
+fn controller_timeout(method: &str, path: &str, native: bool) -> Duration {
     Duration::from_secs(if path.ends_with("/restore") {
         120
-    } else if path.ends_with("snapshot") || path.ends_with("snapshot-completed") {
+    } else if path.ends_with("snapshot")
+        || path.ends_with("snapshot-completed")
+        || native
+            && method == "DELETE"
+            && path.starts_with("/runs/")
+            && path.matches('/').count() == 2
+    {
         300
     } else {
         25
@@ -282,7 +288,11 @@ async fn forward(
         return master.send(&End::with_status(id, status)).await;
     }
     let operation = call_controller(master, runner, runner_token, command, executor);
-    let Ok(Ok(mut response)) = tokio::time::timeout(controller_timeout(path), operation).await
+    let Ok(Ok(mut response)) = tokio::time::timeout(
+        controller_timeout(method, path, crate::native::enabled()),
+        operation,
+    )
+    .await
     else {
         let unavailable = End {
             data: Some(STANDARD.encode(b"VM controller unavailable")),
@@ -508,7 +518,27 @@ mod tests {
         assert!(route("POST", &path).is_ok());
         assert!(route("GET", &path).is_err());
         assert!(route("POST", "/disks/not-a-conversation/snapshot-completed").is_err());
-        assert_eq!(controller_timeout(&path), Duration::from_secs(300));
+        assert_eq!(
+            controller_timeout("POST", &path, false),
+            Duration::from_secs(300)
+        );
+    }
+
+    #[test]
+    fn native_stop_allows_the_stopped_checkpoint_to_finish_before_relay_timeout() {
+        let path = format!("/runs/{}", crate::config::id());
+        assert_eq!(
+            controller_timeout("DELETE", &path, true),
+            Duration::from_secs(300)
+        );
+        assert_eq!(
+            controller_timeout("DELETE", &path, false),
+            Duration::from_secs(25)
+        );
+        assert_eq!(
+            controller_timeout("POST", &format!("{path}/lease"), true),
+            Duration::from_secs(25)
+        );
     }
 
     #[test]

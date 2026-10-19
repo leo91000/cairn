@@ -61,12 +61,23 @@ files and surface in the execution-node details.
 Root-private data is under `/var/lib/cairn-native`: transfer staging in `data/`,
 conversation files in `state/native/<run>/data/`, stopped archives in `state/snapshots/`.
 The local controller socket is root-private at `state/controller.sock`.
-Disk budgets are monitored logical limits, not hard filesystem quotas. Checkpoint
-creation needs spare space for a full framed archive plus a safety reserve.
+Disk budgets cover the shared logical size of all retained conversations, archives,
+seed/restore staging, logs and artifact copies on this node. Each conversation also
+has its own workspace ceiling; those ceilings are not preallocated reservations.
+Controlled copies use the remaining shared budget, and running work is stopped
+when either ceiling is exceeded. These are monitored limits, not hard filesystem
+quotas. Checkpoint creation needs spare space for a full framed archive and its
+metadata while the prior archive is retained, plus a safety reserve.
 Previous work displaced by restore remains in `stale-*` until explicit prune or
 delete. Restore staging is journaled. If a restore is interrupted, retry that same
 backup before resuming execution. Never delete a lock or active marker to force
 concurrent writers. Stop the service before manually inspecting or repairing state.
+
+Stopping for maintenance waits for fencing, final capture and workspace ownership
+release within the maintenance deadline. A failed capture keeps local work and
+invalidates its previous checkpoint. After freeing space or fixing the cause,
+retry synchronization: the stopped capture is retried safely, and only a successful
+replacement clears the error.
 
 Cross-node recovery requires native Linux x86-64 and the pinned coding-engine
 runtime on the destination. Different installed application dependencies can still

@@ -278,6 +278,7 @@ async fn drain(s: &Service, node: &str) -> Result<()> {
         })
     {
         let run = s.store.run(text(&attempt, "runId")).await?;
+        let native = crate::native::policy::native(&run["snapshot"]["agent"]);
         let run_id = text(&run, "id");
         let checkpoint = super::checkpoint(s, run_id).await?;
         if checkpoint["nodeId"] != node || checkpoint["runnerId"] != attempt["id"] {
@@ -302,7 +303,7 @@ async fn drain(s: &Service, node: &str) -> Result<()> {
                 text(&attempt, "id")
             ))
             .bearer_auth(super::runner_secret(s).await?)
-            .timeout(Duration::from_secs(20))
+            .timeout(Duration::from_secs(if native { 300 } else { 20 }))
             .send()
             .await;
         if !stopped.is_ok_and(|r| r.status().is_success()) {
@@ -311,11 +312,29 @@ async fn drain(s: &Service, node: &str) -> Result<()> {
             ));
             continue;
         }
-        super::placement::release(s, text(&attempt, "id")).await?;
-        if run["sessionId"].is_string()
-            && let Err(error) = super::publication::capture(s, &run).await
-        {
-            failure = Some(error);
+        if !native {
+            super::placement::release(s, text(&attempt, "id")).await?;
+        }
+        let mut synchronized = true;
+        if run["sessionId"].is_string() {
+            loop {
+                match super::publication::capture(s, &run).await {
+                    Ok(_) => break,
+                    Err(error) if native && error.status == 425 => {
+                        // The enclosing drain deadline bounds this wait. Keep
+                        // placement until the node's stopped archive is ready.
+                        tokio::time::sleep(Duration::from_millis(100)).await;
+                    }
+                    Err(error) => {
+                        failure = Some(error);
+                        synchronized = false;
+                        break;
+                    }
+                }
+            }
+        }
+        if native && synchronized {
+            super::placement::release(s, text(&attempt, "id")).await?;
         }
     }
     failure.map_or(Ok(()), Err)

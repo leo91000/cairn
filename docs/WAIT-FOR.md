@@ -217,5 +217,7 @@ La suite proposée est maintenant les groupes de dépendances. Les autres source
 les usages observés, avec un identifiant stable, une lecture autorisée, un
 résultat explicite et un timeout. Le Fil distingue désormais une conversation
 différée dans sa section « Waiting » (« Reprise prévue » sur Android), avec une
-carte unique par attente dans la conversation ; les notifications doivent encore
-la distinguer d’un travail achevé.
+carte unique par attente dans la conversation. L’attente ne commence qu’à la fin
+du tour : sa carte suit donc ce que l’agent a fait après l’appel, et sa raison est
+limitée à trois lignes, dépliables. Les notifications doivent encore la distinguer
+d’un travail achevé.

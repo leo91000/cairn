@@ -251,6 +251,24 @@ pub async fn seed(
     target: &Path,
 ) -> Result<()> {
     use futures_util::StreamExt;
+    let _disk = if crate::native::enabled() {
+        Some(crate::native::disk::lock(&crate::native::state_dir()).await?)
+    } else {
+        None
+    };
+    let budget = if crate::native::enabled() {
+        let available = crate::native::disk::staging_budget().await?;
+        // Inbox refresh copies into an inode already mounted by the workload;
+        // its received temporary tree and the replacement can coexist briefly.
+        let available = if selection["kind"] == "inbox" {
+            available / 2
+        } else {
+            available
+        };
+        SEED_BUDGET_BYTES.min(available)
+    } else {
+        SEED_BUDGET_BYTES
+    };
     let response = fetch(client, master, token, attempt, "seed", &selection).await?;
     let parent = target
         .parent()
@@ -261,7 +279,7 @@ pub async fn seed(
         .bytes_stream()
         .map(|r| r.map_err(std::io::Error::other));
     let mut reader = BufReader::new(tokio_util::io::StreamReader::new(stream));
-    super::files::receive(&mut reader, temp.path(), SEED_BUDGET_BYTES).await?;
+    super::files::receive(&mut reader, temp.path(), budget).await?;
     // Preserve the directory inode mounted into a native workload. Replacing a
     // bind-mounted directory would leave it reading the previous inbox forever.
     if crate::native::enabled() && selection["kind"] == "inbox" {

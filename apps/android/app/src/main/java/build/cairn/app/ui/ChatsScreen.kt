@@ -1096,17 +1096,20 @@ internal fun ChatPage(
                             .fillMaxWidth()
                             .align(Alignment.CenterHorizontally)
                     ) {
-                        if (
-                            chat?.restoredAt != null &&
-                                chat.run?.status in setOf("failed", "interrupted") &&
-                                !chat.sessionRestartRequested
-                        )
-                            TextButton({ newSession = true }) {
+                        // Labels align with the error banner above.
+                        if (chat?.canRequestNewSession == true)
+                            TextButton(
+                                { newSession = true },
+                                Modifier.padding(horizontal = 8.dp),
+                            ) {
                                 Text("Repartir avec une nouvelle session agent")
                             }
                         if (chat?.sessionRestartRequested == true)
                             Text(
-                                "Écrivez un nouveau message, puis reprenez la file pour continuer."
+                                "Écrivez un nouveau message, puis reprenez la file pour continuer.",
+                                Modifier.padding(horizontal = 20.dp, vertical = 4.dp),
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
                             )
                         val cancelled = chat?.messages.orEmpty().filter { it.status == "cancelled" }
                         if (cancelled.isNotEmpty()) {

@@ -14,7 +14,7 @@ use cairn_installation::{
 };
 use common::{RelayContext, read_json};
 use serde_json::{Value, json};
-use std::sync::Arc;
+use std::{collections::HashSet, sync::Arc};
 
 const TRUSTED: &str = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee";
 const OTHER: &str = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
@@ -196,6 +196,27 @@ async fn native_placement_works_without_kvm_or_fuse_and_never_falls_back_to_a_vm
     node["nativeEnabled"] = false.into();
     f.service.store.put("nodes", node).await.unwrap();
     assert!(placement::check(&f.service, &run).await.is_err());
+}
+
+#[tokio::test]
+async fn retained_conversations_exhaust_the_shared_native_admission_budget() {
+    let f = Fixture::new().await;
+    let mut node = f.node.clone();
+    node["usage"] = json!({ "diskMiB": 20 * 1024 });
+    f.service.store.put("nodes", node.clone()).await.unwrap();
+    let first = f.run();
+    common::add_run(&f.service.store, &first).await;
+    let attempt = id();
+    placement::reserve(&f.service, &first, &attempt)
+        .await
+        .unwrap();
+    placement::release(&f.service, &attempt).await.unwrap();
+    // Heartbeats include all retained conversations, not just a running slot.
+    node["usage"] = json!({ "diskMiB": 40 * 1024 });
+    f.service.store.put("nodes", node).await.unwrap();
+    let next = f.run();
+    common::add_run(&f.service.store, &next).await;
+    assert!(placement::reserve(&f.service, &next, &id()).await.is_err());
 }
 
 #[tokio::test]
@@ -384,7 +405,12 @@ async fn delegated_call(f: &Fixture, configuration: &Value, name: &str, args: Va
             .to_string(),
         ))
         .unwrap();
-    read_json(common::send(&router, request).await).await
+    let response = common::send(&router, request).await;
+    let status = response.status();
+    let value = read_json(response).await;
+    assert_eq!(status, StatusCode::OK, "{value}");
+    assert!(value["result"].is_object(), "{value}");
+    value
 }
 
 #[tokio::test]
@@ -429,6 +455,188 @@ async fn unattributed_vm_work_cannot_acquire_native_access_through_delegation() 
     let f = Fixture::new().await;
     let (_, response) = delegate(&f, false).await;
     assert_eq!(response["result"]["isError"], true, "{response}");
+}
+
+#[tokio::test]
+async fn a_vm_coordinator_directed_by_unrelated_parents_loses_native_delegation() {
+    let f = Fixture::new().await;
+    let (parent_a, _) = delegate(&f, true).await;
+    let parent_b_agent = f
+        .service
+        .agent(
+            json!({
+                "name": "Other VM director", "access": { "installation": true }
+            }),
+            None,
+        )
+        .await
+        .unwrap();
+    let mut parent_b = parent_a.clone();
+    parent_b["id"] = id().into();
+    parent_b["taskId"] = id().into();
+    parent_b["snapshot"]["agent"] = parent_b_agent.clone();
+    common::add_run(&f.service.store, &parent_b).await;
+    let coordinator = f
+        .service
+        .agent(
+            json!({
+                "name": "Shared VM coordinator", "access": { "installation": true }
+            }),
+            None,
+        )
+        .await
+        .unwrap();
+    let a = f
+        .service
+        .mcps
+        .run_configuration(&f.service, &parent_a)
+        .await
+        .unwrap();
+    let b = f
+        .service
+        .mcps
+        .run_configuration(&f.service, &parent_b)
+        .await
+        .unwrap();
+    let created = delegated_call(
+        &f,
+        &a,
+        "create_chat",
+        json!({ "agentId": coordinator["id"] }),
+    )
+    .await;
+    assert_ne!(created["result"]["isError"], true, "{created}");
+    let chat_id = created["result"]["structuredContent"]["result"]["id"].clone();
+    let sent = delegated_call(
+        &f,
+        &a,
+        "send_chat_message",
+        json!({
+            "chatId": chat_id, "message": { "id": id(), "text": "Coordinate trusted work" }
+        }),
+    )
+    .await;
+    assert_ne!(sent["result"]["isError"], true, "{sent}");
+    f.service.chat_tick(&HashSet::new()).await.unwrap();
+    let chat = f
+        .service
+        .get("chats", chat_id.as_str().unwrap())
+        .await
+        .unwrap();
+    let coordinator_run = f
+        .service
+        .store
+        .run(chat["runId"].as_str().unwrap())
+        .await
+        .unwrap();
+    let coordinator_run = f
+        .service
+        .store
+        .patch_run(
+            coordinator_run["id"].as_str().unwrap(),
+            json!({ "status": "running" }),
+        )
+        .await
+        .unwrap();
+    let c = f
+        .service
+        .mcps
+        .run_configuration(&f.service, &coordinator_run)
+        .await
+        .unwrap();
+    let child = delegated_call(&f, &c, "create_chat", json!({ "agentId": f.agent["id"] })).await;
+    assert_ne!(child["result"]["isError"], true, "{child}");
+    let child_id = child["result"]["structuredContent"]["result"]["id"].clone();
+    let sent = delegated_call(
+        &f,
+        &c,
+        "send_chat_message",
+        json!({
+            "chatId": child_id, "message": { "id": id(), "text": "Use the native node" }
+        }),
+    )
+    .await;
+    assert_ne!(sent["result"]["isError"], true, "{sent}");
+    f.service.chat_tick(&HashSet::new()).await.unwrap();
+    let child_chat = f
+        .service
+        .get("chats", child_id.as_str().unwrap())
+        .await
+        .unwrap();
+    let existing_native = f
+        .service
+        .store
+        .run(child_chat["runId"].as_str().unwrap())
+        .await
+        .unwrap();
+    assert_eq!(existing_native["nativeParentRunId"], coordinator_run["id"]);
+    let valid = existing_native.clone();
+    let node = f.node.clone();
+    assert!(
+        f.service
+            .store
+            .read(move |db| policy::allows(db, &valid, &node))
+            .await
+            .unwrap()
+    );
+
+    let directed = delegated_call(
+        &f,
+        &b,
+        "send_chat_message",
+        json!({
+            "chatId": chat_id, "message": { "id": id(), "text": "Also act on my instructions" }
+        }),
+    )
+    .await;
+    assert_ne!(directed["result"]["isError"], true, "{directed}");
+    let updated = f
+        .service
+        .store
+        .run(chat["runId"].as_str().unwrap())
+        .await
+        .unwrap();
+    assert_eq!(updated["nativeProvenanceUnknown"], true);
+
+    for reduction in [
+        json!({ "cancelRequestedAt": now() }),
+        json!({ "cancelRequestedAt": null, "nativeAuthorityNodes": [] }),
+    ] {
+        f.service
+            .store
+            .patch_run(parent_b["id"].as_str().unwrap(), reduction)
+            .await
+            .unwrap();
+        let run = existing_native.clone();
+        let node = f.node.clone();
+        assert!(
+            !f.service
+                .store
+                .read(move |db| policy::allows(db, &run, &node))
+                .await
+                .unwrap()
+        );
+        let denied =
+            delegated_call(&f, &c, "create_chat", json!({ "agentId": f.agent["id"] })).await;
+        assert_eq!(denied["result"]["isError"], true, "{denied}");
+    }
+    f.service
+        .agent(
+            json!({
+                "name": "Other VM director", "access": { "installation": false }
+            }),
+            parent_b_agent["id"].as_str(),
+        )
+        .await
+        .unwrap();
+    let node = f.node.clone();
+    assert!(
+        !f.service
+            .store
+            .read(move |db| policy::allows(db, &existing_native, &node))
+            .await
+            .unwrap()
+    );
 }
 
 #[tokio::test]

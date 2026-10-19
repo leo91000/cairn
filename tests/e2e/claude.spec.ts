@@ -71,8 +71,8 @@ test('switching coding agents preserves one chat, context and provider selection
   await expect(menu.getByText('The next message starts a new Claude Code session', { exact: false })).toBeVisible()
   // Claude's own "default" alias is the same choice as the provider default row.
   await expect(menu.getByRole('radio', { name: 'Default (recommended)', exact: true })).toHaveCount(0)
-  await expect(menu.getByRole('radio', { name: 'Claude Code default', exact: true })).toHaveAccessibleDescription('Opus with 1M context · Best for everyday tasks')
-  await expect(menu.getByRole('radio', { name: 'Claude Code default', exact: true })).toHaveAttribute('aria-checked', 'true')
+  await expect(menu.getByRole('radio', { name: 'Claude Code default · Opus Fixture (1M context)', exact: true })).toHaveAccessibleDescription('Opus with 1M context · Best for everyday tasks')
+  await expect(menu.getByRole('radio', { name: 'Claude Code default · Opus Fixture (1M context)', exact: true })).toHaveAttribute('aria-checked', 'true')
   // The picker value names the model and effort behind the default, not the alias.
   await expect(picker).toHaveAccessibleName('Agent, model and reasoning: Claude Code · Opus Fixture (1M context) · Medium reasoning')
   await menu.getByRole('radio', { name: 'Sonnet', exact: true }).click()
@@ -142,4 +142,76 @@ test('an agent idle until its background build finishes says it is waiting, not 
   await expect.poll(async () => (await workspace.api(`/api/chats/${chat.id}`)).run?.status, { timeout: 20000 }).toBe('succeeded')
   await expect(waiting).toHaveCount(0)
   await expect(page.getByText('Build checked and task finished', { exact: true })).toBeVisible()
+})
+
+test('Claude default names follow available metadata without pinning the model', async ({ page, workspace }, testInfo) => {
+  await useRelayForHttpMocks(page)
+  let displayName = 'Opus Fixture (1M context)'
+  let description = 'Model recommended for your subscription'
+  await page.route('**/claude/models', route => route.fulfill({
+    json: {
+      models: [
+        {
+          model: 'default',
+          displayName,
+          description,
+          isDefault: true,
+          hidden: false,
+          defaultReasoningEffort: '',
+          supportedReasoningEfforts: [],
+        },
+        {
+          model: 'sonnet',
+          displayName: 'Sonnet',
+          description: '',
+          isDefault: false,
+          hidden: false,
+          defaultReasoningEffort: '',
+          supportedReasoningEfforts: [],
+        },
+      ],
+      checkedAt: Date.now(),
+      stale: false,
+      error: '',
+    },
+  }))
+  await page.goto(workspacePath('/agents'))
+  await authenticateWorkspace(page)
+  await page.getByRole('button', { name: 'New agent', exact: true }).click()
+  await page.getByLabel('Name', { exact: true }).fill('Claude default labels')
+  const picker = page.getByRole('button', { name: /^Agent, model and reasoning/ })
+  await picker.click()
+  const menu = page.getByRole('dialog', { name: 'Agent & model' })
+  await menu.getByRole('radio', { name: 'Claude Code', exact: true }).click()
+  for (const [name, details] of [
+    ['Opus Fixture (1M context)', 'Model recommended for your subscription'],
+    ['Opus description', 'Opus description · Details'],
+    ['claude-opus-fixture[1m]', ''],
+    ['Default (recommended)', ''],
+  ]) {
+    displayName = name
+    description = details
+    await menu.getByRole('button', { name: 'Refresh models', exact: true }).click()
+    const title = name.startsWith('Default') ? 'Claude Code default' : `Claude Code default · ${name}`
+    const choice = menu.getByRole('radio', { name: title, exact: true })
+    await expect(choice).toBeVisible()
+    await menu.getByRole('radio', { name: 'Sonnet', exact: true }).click()
+    await choice.click()
+    await expect(choice).toHaveAttribute('aria-checked', 'true')
+    await menu.getByRole('button', { name: 'Close', exact: true }).click()
+    await expect(picker).toHaveAccessibleName(`Agent, model and reasoning: Claude Code · ${name}`)
+    await picker.click()
+  }
+
+  displayName = 'Opus Fixture (1M context)'
+  await menu.getByRole('button', { name: 'Refresh models', exact: true }).click()
+  await expect(menu.getByRole('radio', { name: 'Claude Code default · Opus Fixture (1M context)', exact: true })).toHaveAttribute('aria-checked', 'true')
+  await page.setViewportSize({ width: 390, height: 844 })
+  await page.emulateMedia({ colorScheme: 'dark' })
+  await page.screenshot({ path: testInfo.outputPath('claude-default-mobile-dark.png'), animations: 'disabled' })
+  await menu.getByRole('button', { name: 'Close', exact: true }).click()
+  await page.getByRole('button', { name: 'Save agent', exact: true }).click()
+  await expect(page.getByRole('dialog')).toHaveCount(0)
+  const saved = (await workspace.api('/api/agents')).find((agent: { name: string }) => agent.name === 'Claude default labels')
+  expect(saved).toMatchObject({ provider: 'claude', model: '', reasoning: '' })
 })

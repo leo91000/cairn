@@ -137,8 +137,9 @@ are collected without changing a conversation's runtime silently.
 
 [The native-execution decision](adr/0050-trusted-native-execution.md) extends the
 GPU and mandatory S3-disk decisions for this backend. Compatibility epoch advances
-from 4 to 5; the legacy tree remains unchanged. This is additive for existing VM
-state, but epoch-4 binaries cannot interpret native backends, provenance, grants
+from 5 to 6, retaining epoch 5's durable session-restart contract; the legacy tree
+remains unchanged. This is additive for existing VM state, but epoch-5 binaries
+cannot interpret native backends, provenance, grants
 or file manifests. Routine deployment must stop at this transition. Deployment
 rollback requires a matching pre-transition data backup and prior binary; no
 automatic rollback restores installation data.

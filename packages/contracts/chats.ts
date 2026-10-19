@@ -58,6 +58,7 @@ export interface Chat {
   purgeAt?: number | null
   restoredAt?: number
   sessionRestartRequested?: boolean
+  canRequestNewSession?: boolean
   lifecycleError?: string | null
   pendingMessages?: number
   id: string

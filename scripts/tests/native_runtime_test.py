@@ -142,6 +142,12 @@ def main():
             first = start(lease=5000)
             fenced(first)
             assert (managed / 'persisted').read_text() == 'changed'
+            assert api('/health', method='GET')['usage']['diskBytes'] > 0
+            stopped = start()
+            api('/runs/' + stopped, method='DELETE')
+            assert (state / (stopped + '.exit')).exists(), 'Stop acknowledged before final checkpoint completion.'
+            fenced(stopped)
+            assert api('/disks/' + run + '/snapshot-completed')['manifest']['attempt'] == stopped
             # Repeated attempts preserve the existing workspace instead of reseeding it.
             (workspace / 'persisted').write_text('replacement seed must be ignored')
             second = start()

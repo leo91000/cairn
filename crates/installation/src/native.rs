@@ -1,4 +1,5 @@
 //! Host execution. Permissions and lifecycle are separate from coding-engine adapters.
+pub(crate) mod disk;
 pub mod policy;
 pub mod releases;
 mod service;

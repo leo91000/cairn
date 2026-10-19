@@ -289,13 +289,12 @@ async fn incompatible_restored_session_requires_consent_and_never_restarts_on_it
     let mut chat = app.create_chat().await;
     let run = id();
     chat["runId"] = run.clone().into();
-    chat["restoredAt"] = 10.into();
     chat["paused"] = true.into();
     app.service.store.put("chats", chat.clone()).await.unwrap();
     app.add_finished_run(
         &run,
         RunStatus::Failed,
-        json!({ "sessionId": "old-native" }),
+        json!({ "sessionId": "old-native", "restoredAt": 10 }),
         "Context to preserve",
     )
     .await;
@@ -328,6 +327,85 @@ async fn incompatible_restored_session_requires_consent_and_never_restarts_on_it
     assert_ne!(run["status"], RunStatus::Queued);
     assert_ne!(run["status"], RunStatus::Running);
     assert!(run["sessionId"].is_null());
+}
+
+#[tokio::test]
+async fn fresh_session_availability_uses_current_and_legacy_restorations_and_keeps_its_lifetime() {
+    for historical_chat in [false, true] {
+        let app = App::new().await;
+        let mut chat = app.create_chat().await;
+        let run = id();
+        chat["runId"] = run.clone().into();
+        if historical_chat {
+            chat["restoredAt"] = 10.into();
+        }
+        app.service.store.put("chats", chat.clone()).await.unwrap();
+        app.add_finished_run(&run, RunStatus::Failed, json!({}), "History")
+            .await;
+        let path = chat_path(&chat);
+        assert_eq!(
+            app.get(&path).await.1["canRequestNewSession"],
+            historical_chat
+        );
+        if !historical_chat {
+            assert_eq!(
+                app.request(
+                    "POST",
+                    &format!("{path}/new-session"),
+                    json!({ "confirm": true })
+                )
+                .await
+                .0,
+                StatusCode::CONFLICT
+            );
+            app.service
+                .store
+                .patch_run(&run, json!({ "restoredAt": 10 }))
+                .await
+                .unwrap();
+        }
+        for (status, available) in [
+            ("failed", true),
+            ("succeeded", false),
+            ("running", false),
+            ("interrupted", true),
+            ("failed", true),
+        ] {
+            app.service
+                .store
+                .patch_run(&run, json!({ "status": status }))
+                .await
+                .unwrap();
+            assert_eq!(app.get(&path).await.1["canRequestNewSession"], available);
+            assert_eq!(app.get(CHATS).await.1[0]["canRequestNewSession"], available);
+        }
+        // No checkpoint access is needed to record the durable request.
+        assert_eq!(
+            app.request(
+                "POST",
+                &format!("{path}/new-session"),
+                json!({ "confirm": true })
+            )
+            .await
+            .0,
+            StatusCode::OK
+        );
+        assert_eq!(app.get(&path).await.1["canRequestNewSession"], false);
+        // A lost HTTP response can cause the same confirmation to be retried.
+        let (status, pending) = app
+            .request(
+                "POST",
+                &format!("{path}/new-session"),
+                json!({ "confirm": true }),
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(pending["sessionRestartRequested"], true);
+        assert_eq!(pending["paused"], true);
+        chat["lifecycle"] = "trash".into();
+        app.service.store.put("chats", chat).await.unwrap();
+        assert_eq!(app.get(&path).await.1["canRequestNewSession"], false);
+    }
 }
 
 #[tokio::test]

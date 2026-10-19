@@ -21,6 +21,8 @@ import org.robolectric.annotation.GraphicsMode
 class ModelPickerTest : ModelPickerCases() {
     override fun captureReasoning() = capture("reasoning")
 
+    override fun captureDefaultModel() = capture("claude-default")
+
     private fun capture(name: String, tag: String = "model-settings-sheet") {
         val file = java.io.File("build/reports/model-picker/$name.png")
         file.parentFile!!.mkdirs()
