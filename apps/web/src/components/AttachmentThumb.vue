@@ -36,6 +36,17 @@ const source = computed(() => {
   return kind.value === 'image' && media.previewFailed.value && props.attachment.chatId ? attachmentUrl(props.attachment) : undefined
 })
 const pending = computed(() => !source.value && !broken.value && wantsPreview.value && !media.previewFailed.value && !!props.attachment.chatId)
+// A single image's box, from the size recorded when it was sent: the placeholder and the
+// picture take the same space, so the conversation does not move when it appears.
+// In rem, as the 240 × 320 bounds of the classes it replaces.
+const box = computed(() => {
+  const { width, height } = props.attachment
+  if (!props.natural || !width || !height)
+    return undefined
+  const scale = Math.min(1, 240 / width, 320 / height)
+  const rem = (pixels: number, min: number, max: number) => `${Math.min(max, Math.max(min, pixels * scale)) / 16}rem`
+  return { width: rem(width, 80, 240), height: rem(height, 120, 320) }
+})
 </script>
 
 <template>
@@ -45,11 +56,17 @@ const pending = computed(() => !source.value && !broken.value && wantsPreview.va
       :src="source"
       :alt="decorative ? '' : attachment.name"
       class="block object-cover"
-      :class="natural ? 'h-auto max-h-80 min-h-30 w-auto min-w-20 max-w-60' : 'size-full'"
+      :class="!natural ? 'size-full' : box ? 'max-w-full' : 'h-auto max-h-80 min-h-30 w-auto min-w-20 max-w-60'"
+      :style="box"
       draggable="false"
       @error="broken = true"
     >
-    <span v-else-if="pending" class="block animate-pulse bg-variant" :class="natural ? 'h-40 w-60 max-w-full' : 'size-full'" />
+    <span
+      v-else-if="pending"
+      class="block animate-pulse bg-variant"
+      :class="!natural ? 'size-full' : box ? 'max-w-full' : 'h-40 w-60 max-w-full'"
+      :style="box"
+    />
     <span
       v-else
       class="grid place-items-center text-[9px] font-extrabold text-white"

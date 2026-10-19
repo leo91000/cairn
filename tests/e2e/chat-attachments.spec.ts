@@ -251,7 +251,17 @@ test('uploads images and files, previews them and preserves attachments while ed
   await page.getByLabel('Attach files', { exact: true }).setInputFiles([{ ...image, name: 'image-only.png' }])
   await expect(page.getByRole('textbox', { name: 'Message', exact: true })).toHaveValue('')
   await page.getByRole('button', { name: 'Send', exact: true }).click()
-  await expect(page.locator('.activity-message').getByRole('button', { name: 'Preview image-only.png', exact: true })).toBeVisible()
+  const single = page.locator('.activity-message').getByRole('button', { name: 'Preview image-only.png', exact: true })
+  await expect(single).toBeVisible()
+  // The installation records the picture's 1440 × 1000 size, so its box keeps those
+  // proportions before the preview loads, and the conversation does not move when it does.
+  const size = (element: HTMLElement) => [getComputedStyle(element).width, getComputedStyle(element).height]
+  const reserved = await single.locator('img, .animate-pulse').first().evaluate(size)
+  await expect(single.locator('img')).toHaveJSProperty('complete', true)
+  const loaded = await single.locator('img').evaluate(size)
+  expect(loaded).toEqual(reserved)
+  expect(Number.parseFloat(loaded[0]!) / Number.parseFloat(loaded[1]!)).toBeCloseTo(1.44, 2)
+  await expect(single.locator('img')).toHaveAttribute('style', /^width: 15rem; height: 10\.416\d*rem;$/)
   await expectChatReady(page)
   // A file over 10 MB stays in the draft with its reason and blocks sending until it is removed.
   await page.getByLabel('Attach files', { exact: true }).setInputFiles([{ name: 'large.dat', mimeType: 'application/octet-stream', buffer: Buffer.alloc(10 * 1024 * 1024 + 1) }])

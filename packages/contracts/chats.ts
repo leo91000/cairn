@@ -25,6 +25,9 @@ export interface ChatAttachment {
   size: number
   mediaType: string
   kind: 'image' | 'file'
+  /** An image's pixel size as it displays; absent for files and older uploads. */
+  width?: number
+  height?: number
 }
 export type ConversationLifecycle = 'active' | 'trash' | 'purging'
 export interface ChatWakeup {
