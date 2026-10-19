@@ -7,6 +7,7 @@ export const id = z.string().uuid()
 export const reasoningEffort = z.string().max(40).regex(/^(?:[a-z][a-z0-9_-]*)?$/)
 export { MAIN_AGENT_ID } from './constants'
 export const accessPolicy = z.object({
+  backend: z.enum(['firecracker', 'native']).default('firecracker'),
   nodes: z.array(id).max(100).nullable().default(() => [LOCAL_NODE_ID]),
   projects: z.array(id).max(100).nullable().default(null),
   skills: z.array(z.string().max(160)).max(100).nullable().default(null),
@@ -38,6 +39,7 @@ export const agentUpdate = z.object({
   access: accessPolicy.extend({
     // A partial update from an older client must not restore local-runner access.
     nodes: accessPolicy.shape.nodes.removeDefault().optional(),
+    backend: accessPolicy.shape.backend.removeDefault().optional(),
     installation: accessPolicy.shape.installation.removeDefault().optional(),
   }).optional(),
 })
@@ -98,6 +100,7 @@ export interface TaskOutcome {
   messageId?: string | null
 }
 export interface Run {
+  executionBackend?: 'firecracker' | 'native' | null
   suspendedByExclusive?: import('./nodes').ExclusiveReservation | null
   retry?: {
     attempt: number

@@ -90,6 +90,18 @@ impl Transport {
         path: &str,
         body: Vec<u8>,
     ) -> Result<Response> {
+        self.request_before(node, method, path, body, head_timeout(method, path, false))
+            .await
+    }
+
+    async fn request_before(
+        self: &Arc<Self>,
+        node: &str,
+        method: &str,
+        path: &str,
+        body: Vec<u8>,
+        deadline: Duration,
+    ) -> Result<Response> {
         let id = crate::config::id();
         let (head_tx, head_rx) = oneshot::channel();
         let (body_tx, body_rx) = mpsc::channel(8);
@@ -125,7 +137,7 @@ impl Transport {
             id,
         };
         self.changed.notify_waiters();
-        let (status, length, kind) = tokio::time::timeout(head_timeout(path), head_rx)
+        let (status, length, kind) = tokio::time::timeout(deadline, head_rx)
             .await
             .map_err(|_| Error::unavailable("Node did not acknowledge execution."))?
             .map_err(|_| Error::unavailable("Node disconnected."))?;
@@ -348,7 +360,7 @@ fn is_retry(call: &Call, sequence: u64) -> Result<bool> {
 }
 
 /// How long a node may take to start answering, by operation.
-fn head_timeout(path: &str) -> Duration {
+fn head_timeout(method: &str, path: &str, native: bool) -> Duration {
     Duration::from_secs(if path.starts_with("/exclusive/") {
         150
     } else if path.ends_with("/restore") {
@@ -356,6 +368,10 @@ fn head_timeout(path: &str) -> Duration {
     } else if path.starts_with("/prepare/")
         || path.ends_with("snapshot")
         || path.ends_with("snapshot-completed")
+        || native
+            && method == "DELETE"
+            && path.starts_with("/runs/")
+            && path.matches('/').count() == 2
     {
         300
     } else {
@@ -430,7 +446,13 @@ pub async fn proxy(State(app): State<App>, request: Request) -> Result<Response>
         .await
         .map_err(|_| Error::bad("Execution request too large."))?;
     s.node_transport
-        .request(&node, &method, &path, body.to_vec())
+        .request_before(
+            &node,
+            &method,
+            &path,
+            body.to_vec(),
+            head_timeout(&method, &path, crate::native::policy::node_native(&record)),
+        )
         .await
 }
 
@@ -446,5 +468,55 @@ pub async fn url(s: &Service, run: &str) -> Result<String> {
             s.config.public_url.trim_end_matches('/')
         )),
         None => Ok(s.config.runner_url.clone()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test(start_paused = true)]
+    async fn native_stop_accepts_a_checkpoint_header_after_the_normal_transport_deadline() {
+        for native in [false, true] {
+            let hub = Arc::new(Transport::default());
+            let node = crate::config::id();
+            let path = format!("/runs/{}", crate::config::id());
+            let timeout = head_timeout("DELETE", &path, native);
+            let (request_hub, request_node) = (hub.clone(), node.clone());
+            let request = tokio::spawn(async move {
+                request_hub
+                    .request_before(&request_node, "DELETE", &path, vec![], timeout)
+                    .await
+            });
+            let command = hub.poll(&node).await.unwrap();
+            tokio::time::advance(Duration::from_secs(40)).await;
+            tokio::task::yield_now().await;
+            if native {
+                assert!(!request.is_finished());
+                hub.reply(
+                    &node,
+                    json!({
+                        "id": command["id"],
+                        "sequence": 0,
+                        "status": 200,
+                        "length": 2,
+                        "data": STANDARD.encode(b"{}"),
+                        "done": true,
+                    }),
+                )
+                .await
+                .unwrap();
+                let response = request.await.unwrap().unwrap();
+                assert_eq!(response.status(), axum::http::StatusCode::OK);
+                assert_eq!(
+                    axum::body::to_bytes(response.into_body(), 1024)
+                        .await
+                        .unwrap(),
+                    "{}"
+                );
+            } else {
+                assert_eq!(request.await.unwrap().unwrap_err().status, 503);
+            }
+        }
     }
 }

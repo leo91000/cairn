@@ -46,6 +46,7 @@ COPY plugins ./plugins
 COPY crates/installation ./crates/installation
 COPY crates/protocol ./crates/protocol
 COPY deploy/nodes ./deploy/nodes
+COPY deploy/installations/data-compatibility.json ./deploy/installations/data-compatibility.json
 RUN --mount=type=cache,id=cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
     touch crates/installation/src/main.rs crates/installation/src/lib.rs crates/protocol/src/lib.rs \
     crates/plugin-api/src/lib.rs crates/plugin-host/src/lib.rs crates/plugin-runtime/src/lib.rs && \
@@ -238,4 +239,5 @@ COPY --from=guest-control /control.squashfs /opt/cairn-vm/control.squashfs
 COPY --from=guest-disk /root.ext4.zst /opt/cairn-vm/root.ext4.zst
 COPY --chmod=755 deploy/microvm/init deploy/microvm/docker deploy/microvm/install-docker /opt/cairn-vm/
 COPY --chmod=755 deploy/nodes /opt/cairn-node
+RUN node /opt/cairn-node/bundle-native-tools.mjs && rm -rf /opt/cairn-native-tools
 USER node

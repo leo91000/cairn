@@ -46,16 +46,45 @@ pub fn open_export(path: &Path, root: &Path) -> Result<std::fs::File> {
 }
 
 pub async fn snapshot(path: &Path, root: &Path) -> Result<(tempfile::NamedTempFile, u64)> {
+    snapshot_to(path, root, tempfile::NamedTempFile::new()?, MAX_FILE).await
+}
+
+pub(crate) async fn snapshot_in(
+    path: &Path,
+    root: &Path,
+    directory: &Path,
+    budget: u64,
+) -> Result<(tempfile::NamedTempFile, u64)> {
+    let temporary = tempfile::Builder::new()
+        .prefix("native-artifact-")
+        .tempfile_in(directory)?;
+    snapshot_to(path, root, temporary, budget.min(MAX_FILE)).await
+}
+
+async fn snapshot_to(
+    path: &Path,
+    root: &Path,
+    temporary: tempfile::NamedTempFile,
+    maximum: u64,
+) -> Result<(tempfile::NamedTempFile, u64)> {
     use std::os::unix::fs::MetadataExt;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     let source = open_export(path, root)?;
     let before = source.metadata()?;
-    let temporary = tempfile::NamedTempFile::new()?;
+    if before.len() > maximum {
+        return Err(Error::unavailable(
+            "Insufficient disk budget for artifact staging.",
+        ));
+    }
     let mut output = tokio::fs::File::from_std(temporary.reopen()?);
     let mut source = tokio::fs::File::from_std(source);
-    let size = tokio::io::copy(&mut (&mut source).take(MAX_FILE + 1), &mut output).await?;
+    let size = tokio::io::copy(
+        &mut (&mut source).take(maximum.saturating_add(1)),
+        &mut output,
+    )
+    .await?;
     let after = source.metadata().await?;
-    if size > MAX_FILE
+    if size > maximum
         || size != before.len()
         || before.mtime() != after.mtime()
         || before.mtime_nsec() != after.mtime_nsec()

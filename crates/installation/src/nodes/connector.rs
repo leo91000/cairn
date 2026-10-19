@@ -51,6 +51,8 @@ struct HeartbeatRequest<'a> {
     budget: &'a Value,
     budget_error: &'a Value,
     exclusive_reservations: bool,
+    backend: &'a Value,
+    node_protocol: &'a Value,
 }
 
 pub(crate) fn master(input: &str) -> Result<url::Url> {
@@ -222,6 +224,12 @@ pub fn capabilities(path: &Path) -> Result<Value> {
     let detected = Capabilities {
         os: "linux".into(),
         arch: "x86_64".into(),
+        backend: if crate::native::enabled() {
+            "native"
+        } else {
+            "firecracker"
+        }
+        .into(),
         kvm,
         fuse: device_opens("/dev/fuse").is_some(),
         cpu: u32::try_from(cpu).unwrap_or(u32::MAX),
@@ -391,11 +399,12 @@ async fn heartbeat(
     identity: &Identity,
     stop: &CancellationToken,
 ) -> Result<()> {
+    let controller = super::local_client()?;
     let mut budget_error_value = Value::Null;
     loop {
         let started = super::boot_ms();
         let runner = std::env::var("RUNNER_URL").unwrap_or_default();
-        let health = local_health(client, &runner).await;
+        let health = local_health(&controller, &runner).await;
         let ready = controller_ready(&health);
         let report = HeartbeatRequest {
             image_digest: std::env::var("CAIRN_NODE_IMAGE").ok(),
@@ -413,6 +422,8 @@ async fn heartbeat(
             budget: &health["budget"],
             budget_error: &budget_error_value,
             exclusive_reservations: health["exclusiveReservations"] == true,
+            backend: &health["backend"],
+            node_protocol: &health["nodeProtocol"],
         };
         let request = client
             .post(
@@ -439,10 +450,10 @@ async fn heartbeat(
                     .await
                     .map_err(|_| Error::bad("Invalid master heartbeat."))?;
                 if ready {
-                    forward_leases(client, &runner, &value, started).await?;
+                    forward_leases(&controller, &runner, &value, started).await?;
                     let budget = json!({ "slots": value["slots"], "limits": value["limits"] });
                     if health["budget"].is_object() && health["budget"] != budget {
-                        let response = client
+                        let response = controller
                             .post(format!("{}/node-budget", runner.trim_end_matches('/')))
                             .bearer_auth(runner_credential().await?)
                             .json(&budget)

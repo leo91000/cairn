@@ -962,6 +962,7 @@ async fn runs_install_the_files_frozen_when_they_were_created() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn snapshots_describe_the_manifest_version_that_was_frozen() {
     use cairn_installation::skills::bundle::{self, Base, Change};
+    use std::os::unix::fs::OpenOptionsExt;
 
     let api = Api::new().await;
     let saved = api
@@ -989,7 +990,10 @@ async fn snapshots_describe_the_manifest_version_that_was_frozen() {
         .await
         .unwrap();
     let project = api._root.path().join("project");
-    std::fs::create_dir(&project).unwrap();
+    let gate = project.join(".agents/skills/listing-gate/SKILL.md");
+    std::fs::create_dir_all(gate.parent().unwrap()).unwrap();
+    let gate_path = std::ffi::CString::new(gate.as_os_str().as_encoded_bytes()).unwrap();
+    assert_eq!(unsafe { libc::mkfifo(gate_path.as_ptr(), 0o600) }, 0);
     api.service
         .store
         .save(
@@ -1005,11 +1009,21 @@ async fn snapshots_describe_the_manifest_version_that_was_frozen() {
         .unwrap();
     let service = api.service.clone();
     let snapshot = tokio::spawn(async move { service.snapshot(task, "manual").await.unwrap() });
-    // A project listing starts after the global listing. Its first directory creation
-    // marks that point; queue the writer behind its read lock and ahead of freeze's read.
-    tokio::time::timeout(std::time::Duration::from_secs(10), async {
-        while !project.join(".agents").exists() {
-            tokio::task::yield_now().await;
+    // Hold the project listing inside its read lock after the global listing.
+    // A FIFO writer opens only once the listing has reached the blocked read.
+    let listing = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            match std::fs::OpenOptions::new()
+                .write(true)
+                .custom_flags(libc::O_NONBLOCK)
+                .open(&gate)
+            {
+                Ok(writer) => break writer,
+                Err(error) if error.raw_os_error() == Some(libc::ENXIO) => {
+                    tokio::task::yield_now().await;
+                }
+                Err(error) => panic!("Unable to open listing gate: {error}"),
+            }
         }
     })
     .await
@@ -1018,18 +1032,24 @@ async fn snapshots_describe_the_manifest_version_that_was_frozen() {
         "Review the current changes",
         "Use the latest branch conventions",
     );
-    bundle::save(
-        api.skill_dir("review").parent().unwrap(),
+    let directory = api.skill_dir("review");
+    let changes = [Change::Write {
+        path: "SKILL.md".into(),
+        bytes: content.as_bytes().to_vec(),
+        executable: None,
+    }];
+    let update = bundle::save(
+        directory.parent().unwrap(),
         "review",
         Base::Edit(text(&saved, "revision")),
-        &[Change::Write {
-            path: "SKILL.md".into(),
-            bytes: content.as_bytes().to_vec(),
-            executable: None,
-        }],
-    )
-    .await
-    .unwrap();
+        &changes,
+    );
+    tokio::pin!(update);
+    // Poll once to queue the writer before releasing the read lock. Tokio's
+    // fair lock puts the later freeze read behind this already queued writer.
+    assert!(futures_util::poll!(&mut update).is_pending());
+    drop(listing);
+    update.await.unwrap();
     let run = snapshot.await.unwrap();
     let selected = &run["snapshot"]["skills"][0];
     assert_eq!(

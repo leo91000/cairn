@@ -64,10 +64,19 @@ pub async fn authorize(s: &Service, credential: &str) -> Result<Option<Value>> {
     let run = s.store.run(text(&grant, "runId")).await?;
     let node = text(&grant, "nodeId");
     let agent = s.get("agents", super::run_agent(&run)).await?;
-    let revoked = s.get("nodes", node).await?["revoked"] == true;
+    let record = s.get("nodes", node).await?;
+    let native_allowed = if crate::native::policy::node_native(&record) {
+        let (run, record) = (run.clone(), record.clone());
+        s.store
+            .read(move |db| crate::native::policy::allows(db, &run, &record))
+            .await?
+    } else {
+        true
+    };
+    let revoked = record["revoked"] == true;
     let owner = super::owner_node(&run) == node || run["moveRequest"]["nodeId"] == node;
     let cancelling = run["status"] == RunStatus::Running && !run["cancelRequestedAt"].is_null();
-    if revoked || !owner || cancelling || !super::agent_allows(&agent, node) {
+    if !native_allowed || revoked || !owner || cancelling || !super::agent_allows(&agent, node) {
         return Err(Error::forbidden("Disk ownership or authorization changed."));
     }
     Ok(Some(grant))

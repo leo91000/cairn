@@ -153,7 +153,37 @@ pub(super) async fn invoke(
     args: Value,
     bearer: Option<&str>,
 ) -> Result<Value> {
-    let authorize = management_authorization(bearer);
+    let origin = crate::native::policy::origin();
+    let control = matches!(
+        name,
+        "restore_chat" | "resume_chat" | "restart_chat_session"
+    ) || (name == "set_chat_paused" && args["paused"] != true);
+    if control && origin.known() {
+        crate::native::policy::refresh_chat(s, text(&args, "chatId")).await?;
+    }
+    let management = management_authorization(bearer);
+    let control_id = control.then(|| text(&args, "chatId").to_owned());
+    let commit_id = control_id.clone();
+    let control_origin = origin.clone();
+    let authorize = move |db: &Db<'_>| -> Result<()> {
+        management(db)?;
+        if let Some(id) = &control_id {
+            let chat = required(db.get("chats", id)?, "Chat not found")?;
+            crate::native::policy::chat_grant(db, &chat, &control_origin)?;
+        }
+        Ok(())
+    };
+    let commit_authority = {
+        let check = authorize.clone();
+        let source = origin.clone();
+        move |db: &Db<'_>| -> Result<()> {
+            check(db)?;
+            if let Some(id) = &commit_id {
+                crate::native::policy::authorize_chat_in(db, id, &source)?;
+            }
+            Ok(())
+        }
+    };
     if matches!(
         name,
         "list_chats" | "get_chat" | "list_chat_questions" | "read_chat_content"
@@ -184,7 +214,7 @@ pub(super) async fn invoke(
     }
     if name == "restore_chat" {
         return s
-            .chat_restore_authorized(text(&args, "chatId"), authorize)
+            .chat_restore_authorized(text(&args, "chatId"), commit_authority)
             .await;
     }
     if name == "resume_chat" {
@@ -199,7 +229,10 @@ pub(super) async fn invoke(
                 required(chat["runId"].as_str().map(str::to_owned), "Run not found")
             })
             .await?;
-        return s.worker.resume_authorized(s, &run_id, authorize).await;
+        return s
+            .worker
+            .resume_authorized(s, &run_id, commit_authority)
+            .await;
     }
     if name == "answer_chat_question" {
         return s
@@ -207,27 +240,38 @@ pub(super) async fn invoke(
                 text(&args, "chatId"),
                 text(&args, "questionId"),
                 args["answer"].clone(),
-                authorize,
+                commit_authority,
             )
             .await;
     }
     if name == "delete_chat" {
         return s
-            .chat_trash_authorized(text(&args, "chatId"), args["confirm"] == true, authorize)
+            .chat_trash_authorized(
+                text(&args, "chatId"),
+                args["confirm"] == true,
+                commit_authority,
+            )
             .await;
     }
     if name == "stop_chat" {
         return s
             .worker
-            .stop_chat_authorized(s, text(&args, "chatId"), authorize)
+            .stop_chat_authorized(s, text(&args, "chatId"), commit_authority)
             .await;
     }
 
+    if origin.known() {
+        if name == "create_chat" {
+            crate::native::policy::refresh_agent(s, text(&args, "agentId")).await?;
+        } else if matches!(name, "send_chat_message" | "edit_chat_message") {
+            crate::native::policy::refresh_chat(s, text(&args, "chatId")).await?;
+        }
+    }
     let name = name.to_owned();
     let result = s
         .store
         .transaction(move |db| {
-            authorize(db)?;
+            commit_authority(db)?;
             let id = text(&args, "chatId");
             match name.as_str() {
                 "restart_chat_session" => {
@@ -236,13 +280,13 @@ pub(super) async fn invoke(
                     }
                     crate::conversation_lifecycle::request_new_session(db, id)
                 }
-                "create_chat" => chats::create_in(db, args),
-                "send_chat_message" => chats::send_in(db, id, args["message"].clone()),
+                "create_chat" => chats::create_as(db, args, &origin),
+                "send_chat_message" => chats::send(db, id, crate::validation::parse("message", args["message"].clone())?, None, &origin),
                 "edit_chat_message" => {
                     let mut message = args["message"].clone();
                     message["id"] = args["messageId"].clone();
                     let message = crate::validation::parse("message", message)?;
-                    chats::edit(db, id, text(&args, "messageId"), Some(message))
+                    chats::edit_as(db, id, text(&args, "messageId"), Some(message), &origin)
                 }
                 "delete_chat_message" => chats::edit(db, id, text(&args, "messageId"), None),
                 "set_chat_paused" => chats::pause_in(db, id, args["paused"] == true),

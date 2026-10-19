@@ -33,7 +33,13 @@ pub async fn start(s: &Service, run: &Value, node: &str, backup: &Value) -> Resu
     let _operation = s.node_backup_operation.lock(text(run, "id")).await;
     let manifest = super::publication::manifest(s, backup).await?;
     let record = s.get("nodes", node).await?;
-    if record["capabilities"]["fuse"] != true {
+    let native = crate::native::policy::node_native(&record);
+    if native != (manifest["kind"] == "native-files-v1") {
+        return Err(Error::conflict(
+            "Conversation moves cannot change execution backend.",
+        ));
+    }
+    if !native && record["capabilities"]["fuse"] != true {
         return Err(Error::conflict("Destination has no FUSE device."));
     }
     let policy = crate::storage::policy::Policy::for_node(&record["storage"])?;

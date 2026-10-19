@@ -33,6 +33,14 @@ async fn write_frame(
 }
 
 pub async fn send(root: &Path, writer: &mut (impl tokio::io::AsyncWrite + Unpin)) -> Result<()> {
+    send_filtered(root, writer, |_| true).await
+}
+
+pub async fn send_filtered(
+    root: &Path,
+    writer: &mut (impl tokio::io::AsyncWrite + Unpin),
+    include: fn(&Path) -> bool,
+) -> Result<()> {
     let root = tokio::fs::canonicalize(root).await?;
     let mut directories = vec![root.clone()];
     while let Some(directory) = directories.pop() {
@@ -40,6 +48,9 @@ pub async fn send(root: &Path, writer: &mut (impl tokio::io::AsyncWrite + Unpin)
         while let Some(entry) = entries.next_entry().await? {
             let path = entry.path();
             let relative = path.strip_prefix(&root).map_err(Error::internal)?;
+            if !include(relative) {
+                continue;
+            }
             let relative = relative
                 .to_str()
                 .ok_or_else(|| Error::bad("Workspace path is not UTF-8."))?;

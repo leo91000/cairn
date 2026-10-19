@@ -102,7 +102,7 @@ fn import_allowed(source: &Path, target: &Path, run_root: &Path) -> bool {
     normalized(source) && source.starts_with(run_root) && normalized(target) && target_allowed
 }
 
-pub(super) fn validate(plan: &Plan, id: &str, data: &Path) -> Result<()> {
+pub(crate) fn validate(plan: &Plan, id: &str, data: &Path) -> Result<()> {
     uuid(plan.run_id())?;
     if plan.id() != id || !valid_expiry(plan.expires()) {
         return Err(Error::bad("Invalid or expired execution plan."));

@@ -35,7 +35,11 @@ fn startup_rejection(status: StatusCode, reason: Option<&str>) -> String {
     let capacity = status == StatusCode::SERVICE_UNAVAILABLE
         && matches!(
             reason,
-            Some("All VM slots are occupied." | "Shared node resources are under pressure.")
+            Some(
+                "All VM slots are occupied."
+                    | "The native execution slot is occupied."
+                    | "Shared node resources are under pressure."
+            )
         );
     if capacity {
         return format!(

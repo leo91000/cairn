@@ -58,7 +58,8 @@ def main():
                            cwd=args.repo, env=env, check=True)
             return
         if args.case:
-            subprocess.run(['pnpm', 'test:backend', '--test', 'nodes', args.case,
+            # Keep isolated installation fixtures on the same dependency feature graph.
+            subprocess.run(['pnpm', 'test:backend', '-p', 'cairn-installation', '--test', 'nodes', args.case,
                             '--', '--ignored', '--nocapture'], cwd=args.repo, env=env, check=True)
             return
         if args.benchmark:
@@ -79,7 +80,7 @@ def main():
         assert remaining.get('KeyCount', 0) == 0, 'Conversation purge must remove all remote recovery objects'
         subprocess.run(['node', 'scripts/test-backend.mjs', '-p', 'cairn-installation', '--test', 'storage_startup_migration',
                         'startup_migration_', '--', '--ignored', '--nocapture', '--test-threads=1'], cwd=args.repo, env=env, check=True)
-        for case in ['idle_conversations_move_twice', 'queued_capacity_transfer', 'active_captures_name', 'obsolete_object_collection', 'interrupted_first_publication', 'shared_publications', 'compressed_publications', 'coalesced_final_publication']:
+        for case in ['idle_conversations_move_twice', 'queued_capacity_transfer', 'active_captures_name', 'obsolete_object_collection', 'interrupted_first_publication', 'shared_publications', 'compressed_publications', 'coalesced_final_publication', 'native_stopped_publications']:
             subprocess.run(['pnpm', 'test:backend', '--test', 'nodes', case, '--', '--ignored'],
                            cwd=Path(__file__).resolve().parents[2], env=env, check=True)
 

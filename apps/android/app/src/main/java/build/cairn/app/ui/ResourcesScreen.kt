@@ -243,13 +243,36 @@ internal fun AgentEditor(vm: CairnViewModel, state: Workspace, initial: Agent, c
                 keyboardOptions = InputKeyboards.Number,
             )
         }
-        Toggle("Toutes les nodes, y compris futures", form.access.nodes == null) {
-            form = form.copy(access = form.access.copy(nodes = if (it) null else emptyList()))
+        Toggle("Exécution native sur l’hôte", form.access.backend == "native") { native ->
+            form =
+                form.copy(
+                    access =
+                        form.access.copy(
+                            backend = if (native) "native" else "firecracker",
+                            nodes = emptyList(),
+                        )
+                )
         }
+        if (form.access.backend == "native")
+            Text(
+                "Partage le GPU et les outils de l’hôte, avec une isolation plus faible qu’une VM. Chaque node doit aussi autoriser les personnes qui dirigent cet agent."
+            )
+        if (form.access.backend != "native")
+            Toggle("Toutes les nodes VM, y compris futures", form.access.nodes == null) {
+                form = form.copy(access = form.access.copy(nodes = if (it) null else emptyList()))
+            }
         if (form.access.nodes != null) {
             val choices =
-                listOf(LOCAL_NODE_ID to "Runner actuel") +
-                    nodes.filter { !it.local && !it.revoked }.map { it.id to it.name }
+                (if (form.access.backend == "native") emptyList()
+                else listOf(LOCAL_NODE_ID to "Runner actuel")) +
+                    nodes
+                        .filter {
+                            !it.local &&
+                                !it.revoked &&
+                                (it.capabilities.backend == "native") ==
+                                    (form.access.backend == "native")
+                        }
+                        .map { it.id to it.name }
             choices.forEach { (id, name) ->
                 Toggle(name, id in form.access.nodes.orEmpty()) { enabled ->
                     val selected = form.access.nodes.orEmpty()

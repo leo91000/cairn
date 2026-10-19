@@ -21,6 +21,41 @@ abstract class NodePlacementCases {
 
     @get:Rule val compose = createComposeRule()
 
+    @Test
+    fun nativeNodeEditorRequiresExplicitPeopleAndKeepsOneExecutionSlot() {
+        var saved: NodeConfiguration? = null
+        val node =
+            ExecutionNode(
+                id = "native",
+                name = "Desktop",
+                status = "online",
+                slots = 1,
+                capabilities = NodeCapabilities(backend = "native"),
+            )
+        compose.setContent {
+            CairnTheme {
+                NodeEditor(
+                    node,
+                    Workspace(),
+                    listOf(NativeCaller("trusted", "trusted@example.test")),
+                    {},
+                    { saved = it },
+                )
+            }
+        }
+        compose.onNodeWithText("Slots d’exécution").assertIsNotEnabled()
+        compose.onNodeWithText("Réservation exclusive").assertDoesNotExist()
+        compose.onNodeWithText("Activer l’exécution native").performScrollTo().performClick()
+        compose.onNodeWithText("trusted@example.test").performScrollTo().performClick()
+        capture("native-node-trust")
+        compose.onNodeWithText("Enregistrer").performClick()
+        compose.runOnIdle {
+            assertEquals(true, saved?.nativeEnabled)
+            assertEquals(listOf("trusted"), saved?.nativeAccounts)
+            assertEquals(1, saved?.slots)
+        }
+    }
+
     @Test fun suspendedChatTimelineShowsAStaticNoticeInsteadOfWorking() = suspendedTimeline(true)
 
     @Test fun suspendedRunTimelineAndResultDescribeThePause() = suspendedTimeline(false)
