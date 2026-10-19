@@ -18,6 +18,8 @@ import UiSwitch from './UiSwitch.vue'
 // Per node: may the agent run there, and may it reserve the node exclusively.
 const props = defineProps<{ nodes: ExecutionNode[] }>()
 const access = defineModel<AgentAccess>('access', { required: true })
+// Nodes the agent may reserve exclusively, a live grant kept beside `access`.
+const exclusiveNodes = defineModel<string[]>('exclusiveNodes', { required: true })
 const query = ref('')
 const selectedOnly = ref(false)
 const unavailableOnly = ref(false)
@@ -26,12 +28,12 @@ const searchable = computed(() => available.value.length >= 8)
 const visible = computed(() => {
   const words = query.value.trim().toLowerCase()
   return available.value.filter(node => (!words || [nodeName(node, node.id), ...node.tags, ...(node.systemTags ?? [])].join(' ').toLowerCase().includes(words))
-    && (!selectedOnly.value || runsOn(access.value, node.id) || access.value.exclusiveNodes.includes(node.id))
+    && (!selectedOnly.value || runsOn(access.value, node.id) || exclusiveNodes.value.includes(node.id))
     && (!unavailableOnly.value || nodeState(node).state !== 'online'))
 })
 // Exclusive grants whose node was revoked or deleted.
-const missing = computed(() => access.value.exclusiveNodes.filter(id => !available.value.some(node => node.id === id)))
-const exclusiveCount = computed(() => access.value.exclusiveNodes.filter(id => available.value.some(node => node.id === id) && runsOn(access.value, id)).length)
+const missing = computed(() => exclusiveNodes.value.filter(id => !available.value.some(node => node.id === id)))
+const exclusiveCount = computed(() => exclusiveNodes.value.filter(id => available.value.some(node => node.id === id) && runsOn(access.value, id)).length)
 const stateTones: Record<string, ChipTone> = {
   online: 'granted',
   offline: 'unavailable',
@@ -65,8 +67,8 @@ function setRun(node: string, on: boolean) {
 }
 
 function setExclusive(node: string, on: boolean) {
-  const granted = access.value.exclusiveNodes.filter(id => id !== node)
-  access.value.exclusiveNodes = on ? [...granted, node] : granted
+  const granted = exclusiveNodes.value.filter(id => id !== node)
+  exclusiveNodes.value = on ? [...granted, node] : granted
 }
 
 function exclusiveBlocked(node: ExecutionNode) {
@@ -155,10 +157,10 @@ function exclusiveBlocked(node: ExecutionNode) {
         </div>
         <div class="flex min-w-0 items-center gap-3 compact:col-span-2 compact:justify-between compact:border-t compact:border-line/60 compact:pt-2">
           <span class="hidden min-w-0 compact:block">
-            <span class="block text-sm" :class="exclusiveBlocked(node) && !access.exclusiveNodes.includes(node.id) ? 'text-muted' : ''">Can reserve exclusively</span>
+            <span class="block text-sm" :class="exclusiveBlocked(node) && !exclusiveNodes.includes(node.id) ? 'text-muted' : ''">Can reserve exclusively</span>
             <span class="block text-2xs text-muted">{{ exclusiveBlocked(node) || 'Suspends other conversations' }}</span>
           </span>
-          <template v-if="access.exclusiveNodes.includes(node.id) && !runsOn(access, node.id)">
+          <template v-if="exclusiveNodes.includes(node.id) && !runsOn(access, node.id)">
             <span class="flex min-w-0 flex-wrap items-center gap-2 compact:justify-end">
               <AccessChip tone="unavailable">Inactive: cannot run here</AccessChip>
               <UiButton size="small" :aria-label="`Remove exclusive reservation on ${nodeName(node, node.id)}`" @click="setExclusive(node.id, false)">Remove</UiButton>
@@ -167,8 +169,8 @@ function exclusiveBlocked(node: ExecutionNode) {
           <span v-else class="flex min-w-0 flex-col items-start gap-0.5 compact:items-end">
             <UiSwitch
               power
-              :model-value="access.exclusiveNodes.includes(node.id)"
-              :disabled="Boolean(exclusiveBlocked(node)) && !access.exclusiveNodes.includes(node.id)"
+              :model-value="exclusiveNodes.includes(node.id)"
+              :disabled="Boolean(exclusiveBlocked(node)) && !exclusiveNodes.includes(node.id)"
               :label="`Can reserve ${nodeName(node, node.id)} exclusively`"
               @update:model-value="setExclusive(node.id, $event)"
             />

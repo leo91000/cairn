@@ -1,21 +1,16 @@
 //! Live grants an agent holds on resources: exclusive reservations of nodes and
 //! plugin instances such as 1Password service accounts.
 //!
-//! The owner edits them on the agent (`access.exclusiveNodes`, `access.plugins`).
-//! Nodes and plugin instances keep a copy (`exclusiveAgents`, `agentIds`) written in
-//! the same transaction: enforcement reads it, and so do releases that predate
-//! agent-side grants. Those releases only edit the copy, so at startup any
-//! difference means the copy is newer and the agent side is rebuilt from it.
+//! The owner edits them on the agent (`exclusiveNodes`, `plugins`). Nodes and plugin
+//! instances keep a copy (`exclusiveAgents`, `agentIds`) written in the same
+//! transaction: enforcement reads it, and so do releases that predate agent-side
+//! grants. Those releases only edit the copy, so at startup any difference means the
+//! copy is newer and the agent side is rebuilt from it.
 //!
-//! These grants are live, not part of a run's snapshot: [`crate::service::policy`]
-//! leaves them out, so changing them neither blocks queued work nor suspends a
-//! plugin delegation.
-//!
-//! Compatibility with the previous release, whose `policy()` merges every `access`
-//! key: an empty grant list is stored as an absent key, and the access approved for a
-//! plugin delegation (`grantedAccess`) includes the non-empty lists. That release then
-//! computes the same approved access for an unchanged agent, while this one compares
-//! approvals without the live grants ([`same_approval`]).
+//! These grants are live, not part of a run's snapshot. They sit beside `access`
+//! rather than in it: [`crate::service::policy`] (and the previous release's, which
+//! merges every `access` key) never sees them, so changing them neither blocks queued
+//! work nor suspends a plugin delegation, before or after a rollback.
 
 use crate::{
     error::{Error, Result},
@@ -48,71 +43,29 @@ fn ids(value: &Value) -> Vec<String> {
 
 /// Nodes on which the agent may suspend other conversations.
 pub fn exclusive_nodes(agent: &Value) -> Vec<String> {
-    ids(&agent["access"][EXCLUSIVE_NODES])
+    ids(&agent[EXCLUSIVE_NODES])
 }
 
 /// Plugin instances whose commands, tools and instructions the agent receives.
 pub fn plugins(agent: &Value) -> Vec<String> {
-    ids(&agent["access"][PLUGINS])
+    ids(&agent[PLUGINS])
 }
 
-/// The access a plugin delegation approves for an agent: its policy and, when present,
-/// its live grants, as the previous release computes it.
-pub fn approved_access(agent: &Value) -> Value {
-    let mut access = crate::service::policy(agent);
-    for (key, grants) in [
-        (EXCLUSIVE_NODES, exclusive_nodes(agent)),
-        (PLUGINS, plugins(agent)),
-    ] {
-        if !grants.is_empty() {
-            access[key] = json!(grants);
-        }
-    }
-    access
+/// Stores both grant lists without duplicates. Exclusive reservations need permission
+/// to run on the node, so turning that off also removes them.
+pub(crate) fn normalize(agent: &mut Value) {
+    let access = crate::service::policy(agent);
+    let exclusive = exclusive_nodes(agent)
+        .into_iter()
+        .filter(|node| crate::service::allowed(&access["nodes"], node))
+        .collect::<Vec<_>>();
+    agent[EXCLUSIVE_NODES] = json!(exclusive);
+    agent[PLUGINS] = json!(plugins(agent));
 }
 
-/// Whether a delegation's approved access still matches the agent. Live grants are
-/// checked on their own and never require reapproval.
-pub fn same_approval(agent: &Value, granted: &Value) -> bool {
-    let mut granted = granted.clone();
-    if let Some(fields) = granted.as_object_mut() {
-        fields.remove(EXCLUSIVE_NODES);
-        fields.remove(PLUGINS);
-    }
-    crate::service::policy(agent) == granted
-}
-
-/// Stores empty grant lists as absent keys (see the module documentation).
-pub(crate) fn tidy(agent: &mut Value) {
-    let Some(access) = agent["access"].as_object_mut() else {
-        return;
-    };
-    for key in [EXCLUSIVE_NODES, PLUGINS] {
-        if access.get(key).is_some_and(|grants| ids(grants).is_empty()) {
-            access.remove(key);
-        }
-    }
-}
-
-/// Keeps the approved access of the agent's unchanged delegations equal to what the
-/// previous release would compute, after its live grants changed.
-pub(crate) fn refresh_delegations(db: &Db<'_>, agent: &Value) -> Result<()> {
-    let approved = approved_access(agent);
-    for mut instance in db.list(PLUGIN_INSTANCES)? {
-        let current = instance["agentId"] == agent["id"]
-            && same_approval(agent, &instance["grantedAccess"])
-            && instance["grantedAccess"] != approved;
-        if current {
-            instance["grantedAccess"] = approved.clone();
-            db.put(PLUGIN_INSTANCES, &instance)?;
-        }
-    }
-    Ok(())
-}
-
-/// Checks the grants an owner selected: unique, existing, not revoked, and only on
-/// plugin instances that give agents access. Instances the agent already holds stay
-/// accepted while their package awaits review, so unrelated edits still save.
+/// Checks the grants an owner selected: existing, not revoked, and only on plugin
+/// instances that give agents access. Instances the agent already holds stay accepted
+/// while their package awaits review, so unrelated edits still save.
 pub(crate) fn validate(db: &Db<'_>, agent: &Value, accepts_agents: &[String]) -> Result<()> {
     let held = db
         .get("agents", text(agent, "id"))?
@@ -200,14 +153,9 @@ fn set_member(list: &mut Value, id: &str, present: bool) -> bool {
 fn grant_resource(db: &Db<'_>, key: &str, resource: &str, agents: &[String]) -> Result<()> {
     for mut agent in db.list("agents")? {
         let granted = agents.iter().any(|id| agent["id"] == *id);
-        if !agent["access"].is_object() {
-            agent["access"] = json!({});
-        }
-        if set_member(&mut agent["access"][key], resource, granted) {
-            tidy(&mut agent);
+        if set_member(&mut agent[key], resource, granted) {
             crate::service::touch(&mut agent);
             db.put("agents", &agent)?;
-            refresh_delegations(db, &agent)?;
         }
     }
     Ok(())
@@ -224,6 +172,19 @@ pub(crate) fn set_node_agents(db: &Db<'_>, node: &mut Value, agents: &[String]) 
 /// instance itself stores the same list as `agentIds`.
 pub(crate) fn set_instance_agents(db: &Db<'_>, instance: &str, agents: &[String]) -> Result<()> {
     grant_resource(db, PLUGINS, instance, agents)
+}
+
+/// Removes one agent's exclusive reservation of a node, on the agent and the node.
+pub(crate) fn release_node(db: &Db<'_>, agent: &mut Value, node: &str) -> Result<()> {
+    if !set_member(&mut agent[EXCLUSIVE_NODES], node, false) {
+        return Ok(());
+    }
+    if let Some(mut record) = db.get("nodes", node)?
+        && set_member(&mut record["exclusiveAgents"], text(agent, "id"), false)
+    {
+        db.put("nodes", &record)?;
+    }
+    Ok(())
 }
 
 /// Removes a deleted agent from every resource copy.
@@ -283,31 +244,32 @@ pub(crate) fn reconcile(db: &Db<'_>) -> Result<()> {
         };
         let exclusive = lists(&nodes, "exclusiveAgents", true);
         let instance_grants = lists(&instances, "agentIds", false);
-        if !agent["access"].is_object() {
-            agent["access"] = json!({});
-        }
         let same = |key: &str, expected: &[Value]| {
-            let saved = ids(&agent["access"][key]);
-            saved.len() == expected.len()
+            let saved = ids(&agent[key]);
+            agent[key].is_array()
+                && saved.len() == expected.len()
                 && expected
                     .iter()
                     .all(|id| saved.iter().any(|known| id == known))
         };
         let changed = !(same(EXCLUSIVE_NODES, &exclusive) && same(PLUGINS, &instance_grants));
-        if changed {
-            agent["access"][EXCLUSIVE_NODES] = exclusive.into();
-            agent["access"][PLUGINS] = instance_grants.into();
-            tidy(&mut agent);
-        }
+        // Drafts of this change stored the grants inside `access`, where the previous
+        // release would merge them into the delegation policy.
+        let nested = agent["access"].as_object_mut().is_some_and(|access| {
+            let exclusive = access.remove(EXCLUSIVE_NODES).is_some();
+            let plugins = access.remove(PLUGINS).is_some();
+            exclusive || plugins
+        });
         // Agents saved before revisions existed get one, so editors detect later changes.
         let unversioned = !agent["revision"]
             .as_str()
             .is_some_and(|revision| !revision.is_empty());
-        if changed || unversioned {
+        if changed || nested || unversioned {
+            agent[EXCLUSIVE_NODES] = exclusive.into();
+            agent[PLUGINS] = instance_grants.into();
             crate::service::touch(&mut agent);
             db.put("agents", &agent)?;
         }
-        refresh_delegations(db, &agent)?;
     }
     Ok(())
 }

@@ -267,7 +267,7 @@ fn selected_tools(server: &McpServer, selection: &Value) -> Option<Vec<String>> 
 /// including live grants such as 1Password, are kept as saved.
 fn revoke_agent_access(db: &Db<'_>, id: &str) -> Result<()> {
     for mut agent in db.list("agents")? {
-        let mut access = crate::agent_grants::approved_access(&agent);
+        let mut access = policy(&agent);
         let mut changed = false;
         if let Some(mcps) = access["mcps"].as_array_mut() {
             let before = mcps.len();

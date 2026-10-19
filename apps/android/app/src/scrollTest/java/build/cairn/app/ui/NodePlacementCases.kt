@@ -686,15 +686,17 @@ abstract class NodePlacementCases {
                         .fetchSemanticsNodes()
                         .isEmpty()
             }
-            assertEquals(
-                setOf("agent", "other", "late"),
+            // Only the newly chosen agent is sent, as a grant: the agents already allowed here,
+            // including the one allowed meanwhile, are never revoked.
+            val grant =
                 writes
                     .first { it.first == "/api/installations/fixture/api/nodes/fresh/agents" }
-                    .second["agentIds"]!!
-                    .jsonArray
-                    .map { it.jsonPrimitive.content }
-                    .toSet(),
+                    .second
+            assertEquals(
+                listOf("agent"),
+                grant["agentIds"]!!.jsonArray.map { it.jsonPrimitive.content },
             )
+            assertEquals(true, grant["add"]?.jsonPrimitive?.booleanOrNull)
         }
     }
 }

@@ -200,7 +200,7 @@ pub(crate) fn authorize(db: &Db<'_>, expected: &Connection) -> Result<Connection
     }
     if !current.agent_id.is_empty() {
         let agent = db.get("agents", &current.agent_id)?.ok_or_else(denied)?;
-        if !crate::agent_grants::same_approval(&agent, &current.granted_access) {
+        if policy(&agent) != current.granted_access {
             return Err(denied());
         }
         // Plugin grants can change without changing the agent's policy.
@@ -703,7 +703,7 @@ pub async fn save(
                 let access = policy(&agent);
                 let plugins = plugin_granted(db, &connection.agent_id)?;
                 delegation_rules(db, &connection, &access, plugins)?;
-                connection.granted_access = crate::agent_grants::approved_access(&agent);
+                connection.granted_access = access;
             }
             if connection.access_mode != AccessMode::Requests {
                 for request in db.list("plugin-requests")? {
@@ -805,7 +805,7 @@ pub(crate) fn reapprove(db: &Db<'_>, connection_id: &str, agent: &Value) -> Resu
             connection.name
         ))
     })?;
-    connection.granted_access = crate::agent_grants::approved_access(agent);
+    connection.granted_access = access;
     connection.revision = id();
     connection.updated_at = now();
     db.put(KIND, &serde_json::to_value(&connection)?)?;
@@ -837,7 +837,7 @@ pub(crate) fn delegation_effects(db: &Db<'_>, agent_id: &str, agent: &Value) -> 
             "name": connection.name,
             "enabled": connection.enabled,
             "suspended": blocked.is_some()
-                || !crate::agent_grants::same_approval(agent, &connection.granted_access),
+                || access != connection.granted_access,
             "blocked": blocked,
         }));
     }

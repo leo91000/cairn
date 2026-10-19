@@ -206,8 +206,12 @@ abstract class AgentPageCases {
      * Shows the agent page against a fresh fixture, runs [body], then unmounts the page and clears
      * its view model before the server closes, so no work leaks into the next journey.
      */
-    private fun journey(agentId: String, body: (Fixture) -> Unit) {
-        val fixture = fixture()
+    private fun journey(
+        agentId: String,
+        prepare: (Fixture) -> Unit = {},
+        body: (Fixture) -> Unit,
+    ) {
+        val fixture = fixture().also(prepare)
         fixture.server.use {
             val vm =
                 CairnViewModel(
@@ -328,7 +332,9 @@ abstract class AgentPageCases {
             val (path, body) = fixture.saved.single()
             assertEquals("/agents/$MAIN_AGENT_ID", path)
             val access = body["access"]!!.jsonObject
-            assertEquals(JsonArray(listOf(JsonPrimitive("prod"))), access["plugins"])
+            // Live grants are sent next to the access policy, never inside it.
+            assertEquals(JsonArray(listOf(JsonPrimitive("prod"))), body["plugins"])
+            assertFalse("plugins" in access)
             assertEquals(JsonNull, access["projects"])
             assertEquals("m1", body["revision"]!!.jsonPrimitive.content)
             assertFalse("reapproveDelegations" in body)
@@ -389,7 +395,8 @@ abstract class AgentPageCases {
                 listOf(LOCAL_NODE_ID, "gpu"),
                 access["nodes"]!!.jsonArray.map { it.jsonPrimitive.content },
             )
-            assertEquals(JsonArray(listOf(JsonPrimitive("gpu"))), access["exclusiveNodes"])
+            assertEquals(JsonArray(listOf(JsonPrimitive("gpu"))), body["exclusiveNodes"])
+            assertFalse("exclusiveNodes" in access)
             assertEquals(JsonArray(listOf(JsonPrimitive("bot"))), body["reapproveDelegations"])
             assertEquals("r1", body["revision"]!!.jsonPrimitive.content)
         }
@@ -442,11 +449,39 @@ abstract class AgentPageCases {
             confirmReview()
             compose.waitUntil(15000) { fixture.saved.isNotEmpty() }
             val body = fixture.saved.single().second
-            assertEquals(
-                JsonArray(listOf(JsonPrimitive("prod"))),
-                body["access"]!!.jsonObject["plugins"],
-            )
+            assertEquals(JsonArray(listOf(JsonPrimitive("prod"))), body["plugins"])
             assertFalse("reapproveDelegations" in body)
+        }
+    }
+
+    @Test
+    fun aHeldGrantOnAnUngrantablePluginIsShownAndCanBeRemoved() {
+        // The Discord package gives agents nothing: an old grant on its bot is kept but useless.
+        journey(
+            "agent",
+            prepare = { fixture ->
+                fixture.agents.set(
+                    fixture.agents.get().map {
+                        if (it.id == "agent") it.copy(plugins = listOf("bot")) else it
+                    }
+                )
+            },
+        ) { fixture ->
+            waitForText("⚠ 1 point à vérifier")
+            open(AgentSection.Plugins)
+            waitForDescription("Retirer #support")
+            compose.onNodeWithText("Indisponible").assertExists()
+            compose
+                .onNodeWithText("Ce plugin ne donne plus d’accès aux agents", substring = true)
+                .assertExists()
+            compose.onNodeWithContentDescription("Retirer #support").performClick()
+            compose.onNodeWithText("Indisponible").assertDoesNotExist()
+            back()
+            compose.onNodeWithText("⚠ 1 point à vérifier").assertDoesNotExist()
+            compose.onNodeWithText("Enregistrer").performClick()
+            confirmReview()
+            compose.waitUntil(15000) { fixture.saved.isNotEmpty() }
+            assertEquals(JsonArray(emptyList()), fixture.saved.single().second["plugins"])
         }
     }
 
@@ -473,7 +508,12 @@ abstract class AgentPageCases {
             fixture.conflict.set(true)
             fixture.agents.set(
                 fixture.agents.get().map {
-                    if (it.id == "agent") it.copy(description = "Changée ailleurs", revision = "r2")
+                    if (it.id == "agent")
+                        it.copy(
+                            description = "Changée ailleurs",
+                            timeoutMinutes = 45,
+                            revision = "r2",
+                        )
                     else it
                 }
             )
@@ -499,6 +539,8 @@ abstract class AgentPageCases {
             val body = fixture.saved.last().second
             assertEquals("Release bot", body["name"]!!.jsonPrimitive.content)
             assertEquals("Changée ailleurs", body["description"]!!.jsonPrimitive.content)
+            // The untouched time limit takes the newer value instead of restoring the old one.
+            assertEquals(45, body["timeoutMinutes"]!!.jsonPrimitive.int)
             assertEquals("r2", body["revision"]!!.jsonPrimitive.content)
 
             // Discarding restores the saved agent.

@@ -15,7 +15,8 @@ introuvables.
 
 ## Décision
 
-L’agent porte toutes ses permissions. Deux champs s’ajoutent à `access` :
+L’agent porte toutes ses permissions. Deux champs s’ajoutent à l’agent, à côté de
+`access` :
 
 - `exclusiveNodes` : nodes sur lesquelles l’agent peut suspendre les autres
   conversations ;
@@ -27,10 +28,12 @@ page d’agent : un résumé des accès effectifs, une section par domaine, un b
 unique et une revue des changements sensibles avant l’enregistrement. Les ressources
 gardent leurs réglages techniques et n’affichent plus les agents qu’en lecture seule.
 Seule l’étape finale d’ajout d’une machine propose encore de choisir qui peut
-l’utiliser, avec l’API existante `PUT /nodes/{id}/agents`.
+l’utiliser, avec l’API existante `PUT /nodes/{id}/agents` en mode `add`, qui accorde
+sans jamais retirer. Une réservation exclusive exige le droit d’exécuter sur la node :
+le retirer retire aussi la réservation.
 
 Ces deux droits restent appliqués en direct, pas figés au moment de la mise en file :
-`policy()` les exclut. Les retirer n’interrompt donc pas le travail en file et ne
+ils ne font pas partie de `access`, donc de `policy()`. Les retirer n’interrompt donc pas le travail en file et ne
 suspend pas une délégation externe. Le catalogue MCP de gestion ne les expose pas :
 un agent qui gère l’installation ne peut pas s’accorder un compte 1Password ni une
 réservation exclusive, et ses modifications conservent ceux que le propriétaire a
@@ -56,13 +59,12 @@ supprimés sont retirés des copies. Les anciens clients qui envoient encore
 et leur omission conserve les droits existants.
 
 La version précédente fusionne toutes les clés de `access` dans sa politique, et
-compare cette politique à l’accès approuvé d’une délégation externe. Une liste vide
-est donc enregistrée comme une clé absente, et l’accès approuvé (`grantedAccess`)
-inclut les listes non vides. Cette version compare les approbations sans les droits
-en direct ; elle met à jour l’accès approuvé d’une délégation inchangée quand ces
-droits changent. Après un retour arrière, la version précédente calcule ainsi le même
-accès approuvé et ne suspend pas les délégations. Le démarrage donne aussi une
-révision aux agents enregistrés avant son introduction.
+compare cette politique à l’accès approuvé d’une délégation externe. Les deux droits
+sont donc enregistrés hors de `access` : les deux versions calculent la même
+politique, y compris après un enregistrement par la version précédente, qui ignore
+ces champs (les copies sur les ressources restent, et le démarrage suivant reconstruit
+l’agent). Le démarrage donne aussi une révision aux agents enregistrés avant son
+introduction.
 
 Les autres modifications d’un agent conservent ses droits en direct, par exemple
 la suppression d’une connexion MCP, qui change aussi sa révision. Un droit déjà

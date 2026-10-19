@@ -15,10 +15,6 @@ export const accessPolicy = z.object({
   installation: z.boolean().default(false),
   github: z.boolean().default(true),
   sandbox: z.enum(['yolo', 'workspace-write', 'read-only']).default('yolo'),
-  // Live grants, checked on every use: nodes this agent may reserve exclusively
-  // (suspending other conversations) and plugin instances such as 1Password accounts.
-  exclusiveNodes: z.array(id).max(100).default([]),
-  plugins: z.array(id).max(100).default([]),
 })
 export const agentInput = z.object({
   name,
@@ -30,6 +26,12 @@ export const agentInput = z.object({
   // Zero means no time limit; positive values are an optional execution budget.
   timeoutMinutes: z.number().int().min(0).max(720).default(0),
   access: accessPolicy.default(() => accessPolicy.parse({})),
+  // Live grants, checked on every use rather than captured with a run, and kept out of
+  // `access` so earlier releases compare the same policy: nodes this agent may reserve
+  // exclusively (suspending other conversations) and plugin instances such as 1Password
+  // service accounts.
+  exclusiveNodes: z.array(id).max(100).default([]),
+  plugins: z.array(id).max(100).default([]),
 })
 export const agentUpdate = z.object({
   provider: agentInput.shape.provider.removeDefault().optional(),
@@ -43,9 +45,9 @@ export const agentUpdate = z.object({
     // A partial update from an older client must not restore local-runner access.
     nodes: accessPolicy.shape.nodes.removeDefault().optional(),
     installation: accessPolicy.shape.installation.removeDefault().optional(),
-    exclusiveNodes: accessPolicy.shape.exclusiveNodes.removeDefault().optional(),
-    plugins: accessPolicy.shape.plugins.removeDefault().optional(),
   }).optional(),
+  exclusiveNodes: agentInput.shape.exclusiveNodes.removeDefault().optional(),
+  plugins: agentInput.shape.plugins.removeDefault().optional(),
 })
 export const projectInput = z.object({
   name,

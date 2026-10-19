@@ -209,11 +209,11 @@ const projectName = (project: string) => state.projects.find(item => item.id ===
 const connectionName = (connection: string) => catalog.value.connections.find(item => item.id === connection)?.name ?? 'Removed instance'
 const provider = computed(() => codingAgents[draft.value.provider] ?? codingAgents.codex)
 const sandbox = computed(() => sandboxOptions.find(option => option.value === access.value.sandbox) ?? sandboxOptions[0])
-const exclusiveNodes = computed(() => access.value.exclusiveNodes.filter(node => availableNodes.value.some(item => item.id === node) && runsOn(access.value, node)))
+const exclusiveNodes = computed(() => draft.value.exclusiveNodes.filter(node => availableNodes.value.some(item => item.id === node) && runsOn(access.value, node)))
 const delegations = computed(() => isNew.value ? [] : catalog.value.connections.filter(connection => connection.agentId === id.value))
 const pluginSummary = computed(() => {
   const counts = new Map<string, number>()
-  for (const granted of access.value.plugins) {
+  for (const granted of draft.value.plugins) {
     const connection = catalog.value.connections.find(item => item.id === granted)
     const name = catalog.value.packages.find(entry => entry.id === connection?.pluginId)?.manifest?.name ?? 'Plugin'
     counts.set(name, (counts.get(name) ?? 0) + 1)
@@ -236,7 +236,7 @@ const summaries = computed<Record<SectionId, { short: string, long: string }>>((
   skills: { short: isMain.value ? 'Fixed' : short(access.value.skills, permittedSkills.value.length), long: isMain.value ? 'All, including future' : selectionSummary(access.value.skills, permittedSkills.value.length) },
   mcps: { short: isMain.value ? 'Fixed' : short(access.value.mcps, state.mcps.length), long: isMain.value ? 'All, including future' : `${selectionSummary(access.value.mcps, state.mcps.length)}${limitedMcps.value.length ? ` · tools limited on ${limitedMcps.value.length}` : ''}${disabledMcps.value.length ? ` · ${disabledMcps.value.length} disabled` : ''}` },
   github: { short: isMain.value ? 'Fixed' : githubMode.value === 'shared' ? 'Shared' : githubMode.value === 'dedicated' ? 'Token' : 'None', long: githubSummary.value },
-  plugins: { short: access.value.plugins.length ? String(access.value.plugins.length) : 'None', long: pluginSummary.value || 'None' },
+  plugins: { short: draft.value.plugins.length ? String(draft.value.plugins.length) : 'None', long: pluginSummary.value || 'None' },
   nodes: { short: short(access.value.nodes, availableNodes.value.length), long: `${selectionSummary(access.value.nodes, availableNodes.value.length)}${exclusiveNodes.value.length ? ` · exclusive on ${exclusiveNodes.value.length}` : ''}` },
   sandbox: { short: sandbox.value.label, long: sandbox.value.label },
   powers: { short: powers.value ? String(powers.value) : 'None', long: [exclusiveNodes.value.length ? 'Exclusive reservation' : '', access.value.installation ? 'Installation management' : ''].filter(Boolean).join(' · ') || 'None' },
@@ -284,8 +284,8 @@ const overview = computed(() => [
         section: 'plugins' as const,
         title: 'Secrets & plugins',
         summary: pluginSummary.value || 'No access',
-        detail: [names(access.value.plugins, connectionName), ...delegations.value.map(item => `Answers on ${item.name} (delegation)`)].filter(Boolean).join(' · ') || 'No plugin access by default, including Main',
-        chip: access.value.plugins.length ? { tone: 'granted' as const, label: 'Granted' } : { tone: 'none' as const, label: 'None' },
+        detail: [names(draft.value.plugins, connectionName), ...delegations.value.map(item => `Answers on ${item.name} (delegation)`)].filter(Boolean).join(' · ') || 'No plugin access by default, including Main',
+        chip: draft.value.plugins.length ? { tone: 'granted' as const, label: 'Granted' } : { tone: 'none' as const, label: 'None' },
       },
     ],
   },
@@ -992,7 +992,7 @@ const errorCount = computed(() => Object.keys(fieldErrors.value).length)
 
           <template v-else-if="section === 'plugins'">
             <AgentPluginsSection
-              v-model:access="draft.access"
+              v-model:plugins="draft.plugins"
               :agent-id="isNew ? null : id"
               :packages="catalog.packages"
               :connections="catalog.connections"
@@ -1004,7 +1004,7 @@ const errorCount = computed(() => Object.keys(fieldErrors.value).length)
           </template>
 
           <template v-else-if="section === 'nodes'">
-            <AgentNodesSection v-model:access="draft.access" :nodes="nodes" />
+            <AgentNodesSection v-model:access="draft.access" v-model:exclusive-nodes="draft.exclusiveNodes" :nodes="nodes" />
           </template>
 
           <template v-else-if="section === 'sandbox'">

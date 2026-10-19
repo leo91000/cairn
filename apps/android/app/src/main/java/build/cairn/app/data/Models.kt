@@ -44,14 +44,6 @@ data class AccessPolicy(
     val installation: Boolean = false,
     val github: Boolean = true,
     val sandbox: String = "yolo",
-    /**
-     * Nodes on which the agent may suspend every other conversation during intensive work. Only
-     * effective where it may also run. A live grant: it applies immediately, even in running
-     * conversations.
-     */
-    val exclusiveNodes: List<String> = emptyList(),
-    /** Plugin instances (e.g. 1Password service accounts) whose commands and tools it gets. */
-    val plugins: List<String> = emptyList(),
 )
 
 @Serializable
@@ -72,6 +64,17 @@ data class Agent(
     val instructions: String = "",
     val timeoutMinutes: Int = 0,
     val access: AccessPolicy = AccessPolicy(),
+    /**
+     * Nodes on which the agent may suspend every other conversation during intensive work. Only
+     * effective where it may also run. A live grant: it applies immediately, even in running
+     * conversations. Kept outside [access] so it never enters a run's frozen policy.
+     */
+    val exclusiveNodes: List<String> = emptyList(),
+    /**
+     * Plugin instances (e.g. 1Password service accounts) whose commands and tools it gets. A live
+     * grant, kept outside [access] like [exclusiveNodes].
+     */
+    val plugins: List<String> = emptyList(),
     val provider: String = "codex",
     val avatar: AgentPortrait? = null,
     /** Changes on every save; sent back so a stale editor cannot overwrite newer access. */

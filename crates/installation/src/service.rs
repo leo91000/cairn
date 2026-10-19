@@ -124,7 +124,7 @@ impl Service {
     async fn migrate_agents(&self) -> Result<()> {
         for mut agent in self.store.list("agents").await? {
             if agent["access"].get("mcps").is_none() || agent["access"].get("nodes").is_none() {
-                agent["access"] = crate::agent_grants::approved_access(&agent);
+                agent["access"] = policy(&agent);
                 self.store.put("agents", agent).await?;
             }
         }
@@ -278,18 +278,19 @@ impl Service {
         if let Some(existing) = &existing {
             inherit_agent_settings(&mut input, existing);
         }
-        if editor == AgentEditor::Installation && input["access"].is_object() {
+        if editor == AgentEditor::Installation && input.is_object() {
             // Exclusive reservations and plugin grants such as 1Password stay with the owner.
             for key in [
                 crate::agent_grants::EXCLUSIVE_NODES,
                 crate::agent_grants::PLUGINS,
             ] {
-                input["access"][key] = existing
+                input[key] = existing
                     .as_ref()
                     .map_or_else(|| json!([]), |agent| json!(live_grant(agent, key)));
             }
         }
         let mut agent = parse("agent", input)?;
+        crate::agent_grants::normalize(&mut agent);
         crate::provider::Provider::of_agent(&agent)?
             .adapter()
             .validate_agent(&agent)?;
@@ -904,20 +905,22 @@ fn inherit_agent_settings(input: &mut Value, existing: &Value) {
             .cloned()
             .unwrap_or_else(|| "codex".into());
     }
+    if input.is_object() {
+        for key in [
+            crate::agent_grants::EXCLUSIVE_NODES,
+            crate::agent_grants::PLUGINS,
+        ] {
+            if input.get(key).is_none() {
+                input[key] = json!(live_grant(existing, key));
+            }
+        }
+    }
     if !input["access"].is_object() {
         return;
     }
     for key in ["nodes", "installation"] {
         if input["access"].get(key).is_none() {
             input["access"][key] = policy(existing)[key].clone();
-        }
-    }
-    for key in [
-        crate::agent_grants::EXCLUSIVE_NODES,
-        crate::agent_grants::PLUGINS,
-    ] {
-        if input["access"].get(key).is_none() {
-            input["access"][key] = json!(live_grant(existing, key));
         }
     }
 }
@@ -995,11 +998,9 @@ fn save_agent(db: &Db<'_>, mut agent: Value, access: &Value) -> Result<Value> {
     {
         agent["avatar"] = avatar.clone();
     }
-    crate::agent_grants::tidy(&mut agent);
     touch(&mut agent);
     db.put("agents", &agent)?;
     crate::agent_grants::mirror(db, &agent)?;
-    crate::agent_grants::refresh_delegations(db, &agent)?;
     db.audit("agent.saved", &json!({ "id": agent["id"] }))?;
     Ok(agent)
 }
@@ -1016,11 +1017,6 @@ pub fn policy(agent: &Value) -> Value {
         "nodes": [crate::nodes::LOCAL_NODE_ID],
     });
     merge(&mut value, &agent["access"]);
-    // Live grants are checked on every use, never captured with a run.
-    if let Some(fields) = value.as_object_mut() {
-        fields.remove(crate::agent_grants::EXCLUSIVE_NODES);
-        fields.remove(crate::agent_grants::PLUGINS);
-    }
     // Agents restricted before MCP permissions existed get no MCP connection.
     let legacy_restricted = agent["id"] != MAIN_AGENT_ID
         && agent["access"].is_object()

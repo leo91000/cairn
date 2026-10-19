@@ -90,9 +90,9 @@ fun newAgent() =
                 installation = false,
                 github = false,
                 sandbox = "yolo",
-                exclusiveNodes = emptyList(),
-                plugins = emptyList(),
-            )
+            ),
+        exclusiveNodes = emptyList(),
+        plugins = emptyList(),
     )
 
 /** Everything the page shows the agent's access against. */
@@ -173,9 +173,10 @@ fun agentChanges(
         if (after.mcps != before.mcps || after.mcpTools != before.mcpTools) add(AgentSection.Mcp)
         if (after.github != before.github || draft.tokenChange(tokenSaved, newToken) != null)
             add(AgentSection.Github)
-        if (after.plugins.toSet() != before.plugins.toSet()) add(AgentSection.Plugins)
+        if (edited.plugins.toSet() != original.plugins.toSet()) add(AgentSection.Plugins)
         if (after.nodes?.toSet() != before.nodes?.toSet()) add(AgentSection.Nodes)
-        if (after.exclusiveNodes.toSet() != before.exclusiveNodes.toSet()) add(AgentSection.Nodes)
+        if (edited.exclusiveNodes.toSet() != original.exclusiveNodes.toSet())
+            add(AgentSection.Nodes)
         if (after.sandbox != before.sandbox) add(AgentSection.Sandbox)
         if (after.installation != before.installation) add(AgentSection.Powers)
     }
@@ -261,16 +262,16 @@ fun agentNodeChoices(nodes: List<ExecutionNode>): List<ExecutionNode> {
 fun AccessPolicy.runsOn(node: String) = nodes == null || node in nodes
 
 /** Exclusive grants that take effect: the agent may also run there and the runtime supports it. */
-fun AccessPolicy.effectiveExclusive(nodes: List<ExecutionNode>): List<ExecutionNode> =
+fun Agent.effectiveExclusive(nodes: List<ExecutionNode>): List<ExecutionNode> =
     agentNodeChoices(nodes).filter {
-        it.id in exclusiveNodes && runsOn(it.id) && it.exclusiveReservations
+        it.id in exclusiveNodes && access.runsOn(it.id) && it.exclusiveReservations
     }
 
 /** Allows or stops running on one node. Stopping also drops the exclusive grant there. */
-fun AccessPolicy.withNodeRun(node: String, run: Boolean): AccessPolicy {
-    val current = nodes ?: return this
+fun Agent.withNodeRun(node: String, run: Boolean): Agent {
+    val current = access.nodes ?: return this
     return copy(
-        nodes = if (run) (current + node).distinct() else current - node,
+        access = access.copy(nodes = if (run) (current + node).distinct() else current - node),
         exclusiveNodes = if (run) exclusiveNodes else exclusiveNodes - node,
     )
 }
@@ -283,7 +284,7 @@ fun AccessPolicy.withAllNodes(all: Boolean, nodes: List<ExecutionNode>): AccessP
     if (all) copy(nodes = null)
     else copy(nodes = this.nodes ?: agentNodeChoices(nodes).map { it.id })
 
-fun AccessPolicy.withExclusive(node: String, granted: Boolean): AccessPolicy =
+fun Agent.withExclusive(node: String, granted: Boolean): Agent =
     copy(
         exclusiveNodes = if (granted) (exclusiveNodes + node).distinct() else exclusiveNodes - node
     )
@@ -311,29 +312,46 @@ fun choosableSkills(skills: List<Skill>, access: AccessPolicy): List<Skill> = sk
     it.valid && (it.scope == "global" || access.projects == null || it.scope in access.projects)
 }
 
+/**
+ * Whether the package's instances can be granted to agents: an approved version runs and its
+ * manifest gives agents commands, tools or instructions.
+ */
+fun PluginEntry.agentGrantable() =
+    manifest?.agentAccess != null && (status == "active" || status == "update")
+
 /** Plugin instances whose package gives agents access, grouped by package. */
 fun PluginCatalog.agentGrantable(): List<Pair<PluginEntry, List<PluginConnection>>> =
     packages
-        .filter { it.manifest?.agentAccess != null }
+        .filter { it.agentGrantable() }
         .map { entry -> entry to connections.filter { it.pluginId == entry.id } }
         .filter { it.second.isNotEmpty() }
+
+/**
+ * Instances the agent holds whose package no longer gives agents access (not approved, invalid or
+ * without agent access): the grant is kept but has no effect, so it is shown to be removed.
+ */
+fun PluginCatalog.unavailableGrants(plugins: List<String>): List<PluginConnection> =
+    connections.filter { connection ->
+        connection.id in plugins &&
+            packages.find { it.id == connection.pluginId }?.agentGrantable() != true
+    }
 
 private fun plural(count: Int, singular: String, plural: String = "${singular}s") =
     "$count ${if (count == 1) singular else plural}"
 
 /** "1Password : 1 compte · Discord", or empty when the agent has no plugin grant. */
-fun pluginSummary(access: AccessPolicy, catalog: PluginCatalog?): String {
-    if (access.plugins.isEmpty()) return ""
-    if (catalog == null) return plural(access.plugins.size, "instance")
+fun pluginSummary(agent: Agent, catalog: PluginCatalog?): String {
+    if (agent.plugins.isEmpty()) return ""
+    if (catalog == null) return plural(agent.plugins.size, "instance")
     val groups =
         catalog.connections
-            .filter { it.id in access.plugins }
+            .filter { it.id in agent.plugins }
             .groupBy { it.pluginId }
             .map { (pluginId, granted) ->
                 val name = catalog.packages.find { it.id == pluginId }?.name ?: pluginId
                 if (pluginId == "onepassword") "$name : ${plural(granted.size, "compte")}" else name
             }
-    return groups.joinToString(" · ").ifBlank { plural(access.plugins.size, "instance") }
+    return groups.joinToString(" · ").ifBlank { plural(agent.plugins.size, "instance") }
 }
 
 fun githubSummary(mode: GithubMode) = mode.label
@@ -357,7 +375,8 @@ val SANDBOX_CHOICES =
     )
 
 /** "2 sur 4 · exclusivité sur 1", "Runner actuel seulement", "Toutes, y compris futures". */
-fun nodesSummary(access: AccessPolicy, nodes: List<ExecutionNode>): String {
+fun nodesSummary(agent: Agent, nodes: List<ExecutionNode>): String {
+    val access = agent.access
     val choices = agentNodeChoices(nodes)
     val run =
         when {
@@ -367,7 +386,7 @@ fun nodesSummary(access: AccessPolicy, nodes: List<ExecutionNode>): String {
             else ->
                 "${access.nodes.count { id -> choices.any { it.id == id } }} sur ${choices.size}"
         }
-    val exclusive = access.effectiveExclusive(nodes).size
+    val exclusive = agent.effectiveExclusive(nodes).size
     return if (exclusive > 0) "$run · exclusivité sur $exclusive" else run
 }
 
@@ -380,8 +399,8 @@ fun agentAccessSummary(agent: Agent): String {
     return buildList {
             add(access.projects?.let { plural(it.size, "projet") } ?: "Tous les projets")
             add(access.nodes?.let { plural(it.size, "node") } ?: "Toutes les nodes")
-            if (access.plugins.isNotEmpty()) add(plural(access.plugins.size, "plugin"))
-            if (access.exclusiveNodes.isNotEmpty()) add("Exclusivité")
+            if (agent.plugins.isNotEmpty()) add(plural(agent.plugins.size, "plugin"))
+            if (agent.exclusiveNodes.isNotEmpty()) add("Exclusivité")
             if (access.installation) add("Gestion de l’installation")
         }
         .joinToString(" · ")
@@ -416,7 +435,7 @@ fun agentIssues(agent: Agent, resources: AgentResources): List<AgentIssue> = bui
     }
     if (resources.nodes.isNotEmpty()) {
         val choices = agentNodeChoices(resources.nodes)
-        access.exclusiveNodes.forEach { id ->
+        agent.exclusiveNodes.forEach { id ->
             val node = choices.find { it.id == id }
             when {
                 node == null ->
@@ -444,7 +463,8 @@ fun agentIssues(agent: Agent, resources: AgentResources): List<AgentIssue> = bui
         }
     }
     resources.catalog?.let { catalog ->
-        access.plugins.forEach { id ->
+        val unavailable = catalog.unavailableGrants(agent.plugins)
+        agent.plugins.forEach { id ->
             val connection = catalog.connections.find { it.id == id }
             when {
                 connection == null ->
@@ -452,6 +472,13 @@ fun agentIssues(agent: Agent, resources: AgentResources): List<AgentIssue> = bui
                         AgentIssue(
                             AgentSection.Plugins,
                             "Une instance de plugin accordée n’existe plus.",
+                        )
+                    )
+                connection in unavailable ->
+                    add(
+                        AgentIssue(
+                            AgentSection.Plugins,
+                            "« ${connection.name} » n’est plus disponible pour les agents : l’accès est conservé, mais ne donne rien.",
                         )
                     )
                 !connection.enabled ->
@@ -581,8 +608,8 @@ fun agentReview(
     val before = original.access
     val after = edited.access
     val nodes = agentNodeChoices(resources.nodes)
-    after.exclusiveNodes
-        .filter { it !in before.exclusiveNodes }
+    edited.exclusiveNodes
+        .filter { it !in original.exclusiveNodes }
         .forEach { id ->
             val name = nodes.find { it.id == id }?.name ?: id
             add(
@@ -599,8 +626,8 @@ fun agentReview(
                 "Ajout : gestion de l’installation. Cet agent pourra créer et modifier les agents (y compris leurs permissions), projets, skills, connexions MCP, missions et exécutions de toute l’installation.",
             )
         )
-    after.plugins
-        .filter { it !in before.plugins }
+    edited.plugins
+        .filter { it !in original.plugins }
         .forEach { id ->
             val connection = resources.catalog?.connections?.find { it.id == id }
             val plugin =
@@ -664,6 +691,8 @@ fun rebaseAgent(base: Agent, mine: Agent, theirs: Agent): Agent {
         provider = pick(base.provider, mine.provider, theirs.provider),
         instructions = pick(base.instructions, mine.instructions, theirs.instructions),
         timeoutMinutes = pick(base.timeoutMinutes, mine.timeoutMinutes, theirs.timeoutMinutes),
+        exclusiveNodes = pick(base.exclusiveNodes, mine.exclusiveNodes, theirs.exclusiveNodes),
+        plugins = pick(base.plugins, mine.plugins, theirs.plugins),
         access =
             AccessPolicy(
                 nodes = pick(a.nodes, m.nodes, t.nodes),
@@ -674,9 +703,19 @@ fun rebaseAgent(base: Agent, mine: Agent, theirs: Agent): Agent {
                 installation = pick(a.installation, m.installation, t.installation),
                 github = pick(a.github, m.github, t.github),
                 sandbox = pick(a.sandbox, m.sandbox, t.sandbox),
-                exclusiveNodes = pick(a.exclusiveNodes, m.exclusiveNodes, t.exclusiveNodes),
-                plugins = pick(a.plugins, m.plugins, t.plugins),
             ),
+    )
+}
+
+/**
+ * The draft rebased on the newest saved agent ([rebaseAgent]), including the time limit text: an
+ * untouched limit takes the newer value, an edited one is kept. The GitHub choice is kept.
+ */
+fun AgentDraft.rebased(base: Agent, theirs: Agent): AgentDraft {
+    val limitEdited = timeout.trim() != base.timeoutMinutes.toString()
+    return copy(
+        agent = rebaseAgent(base, agent, theirs),
+        timeout = if (limitEdited) timeout else theirs.timeoutMinutes.toString(),
     )
 }
 

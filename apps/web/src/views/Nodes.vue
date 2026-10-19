@@ -45,7 +45,15 @@ const busy = ref(false)
 const recovery = ref<NodeSyncSettings | null>(null)
 const recoveryBudgetGiB = ref(0)
 const revoking = ref<ExecutionNode | null>(null)
-const granting = ref<ExecutionNode | null>(null)
+const grantingId = ref<string | null>(null)
+// The page keeps polling: grants made meanwhile, as from an agent page in another window, show up
+// in the "Who can use it?" step and are kept.
+const granting = computed({
+  get: () => nodes.value.find(node => node.id === grantingId.value) ?? null,
+  set: (node: ExecutionNode | null) => {
+    grantingId.value = node?.id ?? null
+  },
+})
 const cleaning = ref<ExecutionNode | null>(null)
 const granted = ref<string[]>([])
 const showRevoked = ref(false)
@@ -156,8 +164,11 @@ function saveGrants() {
   const node = granting.value
   if (!node)
     return
+  // `add` only grants the chosen agents: finishing never revokes one allowed meanwhile.
+  const agentIds = granted.value.filter(agentId => !allowed(agentId))
   return action(async () => {
-    await api(`/nodes/${node.id}/agents`, { method: 'PUT', body: JSON.stringify({ agentIds: [...new Set([...granted.value, ...(node.agents ?? []).filter(agent => !agent.allNodes).map(agent => agent.id)])] }) })
+    if (agentIds.length)
+      await api(`/nodes/${node.id}/agents`, { method: 'PUT', body: JSON.stringify({ agentIds, add: true }) })
     granting.value = null
     notify(`${node.name} is ready`)
     await refresh()
@@ -176,7 +187,13 @@ function freeStaleDisks() {
 }
 
 function allNodes(agentId: string) {
-  return granting.value?.agents?.some(agent => agent.id === agentId && agent.allNodes) ?? false
+  return state.agents.some(agent => agent.id === agentId && agent.access?.nodes === null)
+    || (granting.value?.agents?.some(agent => agent.id === agentId && agent.allNodes) ?? false)
+}
+
+/** Already allowed on the node being granted, from its latest data, or on every node. */
+function allowed(agentId: string) {
+  return allNodes(agentId) || (granting.value?.agents?.some(agent => agent.id === agentId) ?? false)
 }
 
 function agentNames(ids: string[]) {
@@ -491,7 +508,7 @@ function statusLabel(node: ExecutionNode) {
         </p>
         <label v-for="agent in state.agents" :key="agent.id" class="access-row">
           <input
-            v-if="allNodes(agent.id)"
+            v-if="allowed(agent.id)"
             type="checkbox"
             checked
             disabled
@@ -502,7 +519,7 @@ function statusLabel(node: ExecutionNode) {
             type="checkbox"
             :value="agent.id"
           >
-          <span class="min-w-0">{{ agent.name }}<span v-if="allNodes(agent.id)" class="text-muted"> (allowed on all nodes)</span></span>
+          <span class="min-w-0">{{ agent.name }}<span v-if="allNodes(agent.id)" class="block text-xs text-muted">Allowed on all nodes</span><span v-else-if="allowed(agent.id)" class="block text-xs text-muted">Already allowed on this machine</span></span>
         </label>
         <p class="text-xs text-muted">
           You can change this later on each agent’s page.

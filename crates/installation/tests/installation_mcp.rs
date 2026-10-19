@@ -1972,7 +1972,8 @@ async fn installation_access_cannot_grant_secrets_or_exclusive_reservations() {
         .agent(
             json!({
                 "name": "Manager",
-                "access": { "installation": true, "plugins": [account] }
+                "access": { "installation": true },
+                "plugins": [account]
             }),
             None,
         )
@@ -1987,7 +1988,7 @@ async fn installation_access_cannot_grant_secrets_or_exclusive_reservations() {
         "update_agent",
         json!({
             "id": manager["id"],
-            "agent": { "description": "Edited", "access": { "plugins": [], "exclusiveNodes": [] } }
+            "agent": { "description": "Edited", "plugins": [], "exclusiveNodes": [] }
         }),
     )
     .await;
@@ -1995,21 +1996,20 @@ async fn installation_access_cannot_grant_secrets_or_exclusive_reservations() {
         .get("agents", manager["id"].as_str().unwrap())
         .await
         .unwrap();
-    assert_eq!(stored["access"]["plugins"], json!([account]));
+    assert_eq!(stored["plugins"], json!([account]));
 
     let created = call(
         &s,
         &configuration,
         "save_agent",
-        json!({ "name": "Escalation", "access": { "plugins": [account] } }),
+        json!({ "name": "Escalation", "plugins": [account] }),
     )
     .await;
+    // The published contract has no live grants: the request is refused or ignored.
     let agents = s.store.list("agents").await.unwrap();
-    let escalation = agents
-        .iter()
-        .find(|agent| agent["name"] == "Escalation")
-        .expect("the agent is created without the requested grant");
-    assert!(escalation["access"].get("plugins").is_none(), "{created}");
+    for agent in agents.iter().filter(|agent| agent["id"] != manager["id"]) {
+        assert_eq!(agent["plugins"], json!([]), "{created}");
+    }
     let instance = s
         .store
         .get(

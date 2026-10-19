@@ -64,16 +64,17 @@ class AgentEditingTest {
             wireJson.decodeFromString<Agent>(
                 """{"id":"a","name":"Old","access":{"projects":null,"future":1},"later":true}"""
             )
-        assertEquals(emptyList<String>(), old.access.exclusiveNodes)
-        assertEquals(emptyList<String>(), old.access.plugins)
+        assertEquals(emptyList<String>(), old.exclusiveNodes)
+        assertEquals(emptyList<String>(), old.plugins)
         assertEquals("", old.revision)
 
+        // Live grants sit next to the access policy, never inside it.
         val current =
             wireJson.decodeFromString<Agent>(
-                """{"id":"a","name":"New","revision":"r9","access":{"exclusiveNodes":["gpu"],"plugins":["prod"]}}"""
+                """{"id":"a","name":"New","revision":"r9","access":{},"exclusiveNodes":["gpu"],"plugins":["prod"]}"""
             )
-        assertEquals(listOf("gpu"), current.access.exclusiveNodes)
-        assertEquals(listOf("prod"), current.access.plugins)
+        assertEquals(listOf("gpu"), current.exclusiveNodes)
+        assertEquals(listOf("prod"), current.plugins)
         assertEquals("r9", current.revision)
     }
 
@@ -82,8 +83,8 @@ class AgentEditingTest {
         val body =
             agentSaveBody(
                 agent.copy(
-                    access =
-                        agent.access.copy(nodes = null, skills = null, plugins = listOf("prod"))
+                    access = agent.access.copy(nodes = null, skills = null),
+                    plugins = listOf("prod"),
                 ),
                 listOf("bot"),
             )
@@ -92,7 +93,9 @@ class AgentEditingTest {
         assertEquals(JsonNull, access["skills"])
         assertEquals(JsonNull, access["mcps"])
         assertEquals(2, access["projects"]!!.jsonArray.size)
-        assertEquals("prod", access["plugins"]!!.jsonArray.single().jsonPrimitive.content)
+        assertEquals("prod", body["plugins"]!!.jsonArray.single().jsonPrimitive.content)
+        assertFalse("plugins" in access)
+        assertFalse("exclusiveNodes" in access)
         assertEquals("r1", body["revision"]!!.jsonPrimitive.content)
         assertEquals("bot", body["reapproveDelegations"]!!.jsonArray.single().jsonPrimitive.content)
         assertFalse("avatar" in body)
@@ -105,29 +108,26 @@ class AgentEditingTest {
 
     @Test
     fun exclusiveNeedsExecutionAndStoppingExecutionDropsIt() {
-        val granted = agent.access.withExclusive("gpu", true)
+        val granted = agent.withExclusive("gpu", true)
         assertEquals(listOf(gpu), granted.effectiveExclusive(nodes))
         assertEquals("2 sur 3 · exclusivité sur 1", nodesSummary(granted, nodes))
 
         val stopped = granted.withNodeRun("gpu", false)
-        assertEquals(listOf(LOCAL_NODE_ID), stopped.nodes)
+        assertEquals(listOf(LOCAL_NODE_ID), stopped.access.nodes)
         assertTrue(stopped.exclusiveNodes.isEmpty())
         assertEquals("Runner actuel seulement", nodesSummary(stopped, nodes))
 
         // Legacy data: an exclusive grant where the agent cannot run is inactive and reported.
         val legacy = stopped.copy(exclusiveNodes = listOf("gpu"))
         assertTrue(legacy.effectiveExclusive(nodes).isEmpty())
-        assertEquals(
-            AgentSection.Nodes,
-            agentIssues(agent.copy(access = legacy), resources).single().section,
-        )
+        assertEquals(AgentSection.Nodes, agentIssues(legacy, resources).single().section)
 
         // "All nodes" counts every node as executable; turning it off keeps today's machines.
-        val all = legacy.withAllNodes(true, nodes)
+        val all = legacy.copy(access = legacy.access.withAllNodes(true, nodes))
         assertEquals(listOf(gpu), all.effectiveExclusive(nodes))
         assertEquals(
             listOf(LOCAL_NODE_ID, "gpu", "mac"),
-            all.withAllNodes(false, nodes).nodes,
+            all.access.withAllNodes(false, nodes).nodes,
         )
     }
 
@@ -137,10 +137,10 @@ class AgentEditingTest {
         assertEquals("Toutes, y compris futures", selectionSummary(null, 12, feminine = true))
         assertEquals("3 sur 12", selectionSummary(listOf("a", "b", "c"), 12))
         assertEquals("Aucun", selectionSummary(emptyList(), 12))
-        assertEquals("", pluginSummary(agent.access, catalog))
+        assertEquals("", pluginSummary(agent, catalog))
         assertEquals(
             "1Password : 2 comptes",
-            pluginSummary(agent.access.copy(plugins = listOf("prod", "staging")), catalog),
+            pluginSummary(agent.copy(plugins = listOf("prod", "staging")), catalog),
         )
         assertEquals("review · Global", skillLabel(Skill("review", scope = "global"), projects))
         assertEquals("lint · cairn", skillKeyLabel("p1/lint", projects))
@@ -158,11 +158,8 @@ class AgentEditingTest {
                 agent =
                     agent.copy(
                         name = "Releases",
-                        access =
-                            agent.access.copy(
-                                plugins = listOf("prod"),
-                                exclusiveNodes = listOf("gpu"),
-                            ),
+                        plugins = listOf("prod"),
+                        exclusiveNodes = listOf("gpu"),
                     ),
                 github = GithubMode.Dedicated.value,
             )
@@ -203,13 +200,9 @@ class AgentEditingTest {
     fun reviewListsPowersSecretsAndWorkAReductionStops() {
         val edited =
             agent.copy(
-                access =
-                    agent.access.copy(
-                        projects = listOf("p1"),
-                        exclusiveNodes = listOf("gpu"),
-                        plugins = listOf("prod"),
-                        installation = true,
-                    )
+                access = agent.access.copy(projects = listOf("p1"), installation = true),
+                exclusiveNodes = listOf("gpu"),
+                plugins = listOf("prod"),
             )
         val preview =
             AgentPreview(
@@ -243,7 +236,7 @@ class AgentEditingTest {
         val reduced =
             agentReview(
                 agent,
-                edited.copy(access = agent.access.copy(projects = listOf("p1"))),
+                agent.copy(access = agent.access.copy(projects = listOf("p1"))),
                 resources,
                 AgentPreview(),
             )
@@ -265,8 +258,8 @@ class AgentEditingTest {
     fun issuesFlagDisabledAccountsAndMissingSkills() {
         val withGrants =
             agent.copy(
-                access =
-                    agent.access.copy(plugins = listOf("staging"), skills = listOf("global/gone"))
+                access = agent.access.copy(skills = listOf("global/gone")),
+                plugins = listOf("staging"),
             )
         val issues =
             agentIssues(
@@ -279,19 +272,90 @@ class AgentEditingTest {
 
     @Test
     fun reloadKeepsMyEditsOnTopOfTheNewestVersion() {
-        val mine = agent.copy(name = "Mine", access = agent.access.copy(plugins = listOf("prod")))
+        val mine = agent.copy(name = "Mine", plugins = listOf("prod"))
         val theirs =
             agent.copy(
                 description = "Theirs",
                 revision = "r2",
                 access = agent.access.copy(sandbox = "read-only"),
+                exclusiveNodes = listOf("gpu"),
             )
         val rebased = rebaseAgent(agent, mine, theirs)
         assertEquals("Mine", rebased.name)
         assertEquals("Theirs", rebased.description)
         assertEquals("read-only", rebased.access.sandbox)
-        assertEquals(listOf("prod"), rebased.access.plugins)
+        assertEquals(listOf("prod"), rebased.plugins)
+        assertEquals(listOf("gpu"), rebased.exclusiveNodes)
         assertEquals("r2", rebased.revision)
+    }
+
+    @Test
+    fun reloadTakesTheNewerTimeLimitUnlessIEditedIt() {
+        val base = agent.copy(timeoutMinutes = 30)
+        val theirs = base.copy(timeoutMinutes = 90, revision = "r2")
+
+        // Untouched limit: the newer value replaces the field, so saving does not restore 30.
+        val untouched = AgentDraft(base.copy(name = "Mine")).rebased(base, theirs)
+        assertEquals("90", untouched.timeout)
+        assertEquals(90, untouched.resolved(tokenSaved = false).timeoutMinutes)
+        assertEquals("Mine", untouched.agent.name)
+        assertEquals(
+            listOf(AgentSection.Identity),
+            agentChanges(theirs, untouched, tokenSaved = false, newToken = ""),
+        )
+
+        // Edited limit: my value is kept on top of the newer version.
+        val edited = AgentDraft(base, timeout = "45").rebased(base, theirs)
+        assertEquals("45", edited.timeout)
+        assertEquals(45, edited.resolved(tokenSaved = false).timeoutMinutes)
+
+        // The GitHub choice is kept as well.
+        val github = AgentDraft(base, github = GithubMode.None.value).rebased(base, theirs).github
+        assertEquals(GithubMode.None.value, github)
+    }
+
+    @Test
+    fun heldGrantsOnUngrantablePackagesAreShownAndReported() {
+        val ungrantable =
+            catalog.copy(
+                packages =
+                    catalog.packages +
+                        listOf(
+                            // Uploaded, never approved: no version runs.
+                            PluginEntry(
+                                "vault",
+                                status = "needs_approval",
+                                manifest =
+                                    PluginManifest(
+                                        id = "vault",
+                                        name = "Vault",
+                                        agentAccess = PluginAgentAccess("Lecture"),
+                                    ),
+                            ),
+                            PluginEntry("broken", status = "invalid"),
+                        ),
+                connections =
+                    catalog.connections +
+                        listOf(
+                            PluginConnection("v1", "vault", "Coffre"),
+                            PluginConnection("b1", "broken", "Cassé"),
+                        ),
+            )
+        // The Discord package gives agents nothing; the others no longer run.
+        val holder = agent.copy(plugins = listOf("prod", "bot", "v1", "b1"))
+        assertEquals(
+            listOf("bot", "v1", "b1"),
+            ungrantable.unavailableGrants(holder.plugins).map { it.id },
+        )
+        assertEquals(listOf("onepassword"), ungrantable.agentGrantable().map { it.first.id })
+        val issues = agentIssues(holder, resources.copy(catalog = ungrantable))
+        assertEquals(3, issues.size)
+        assertTrue(issues.all { it.section == AgentSection.Plugins })
+        assertTrue(issues.any { "« Coffre » n’est plus disponible" in it.text })
+        assertEquals("3 points à vérifier", issuesLabel(issues.size))
+
+        // An instance it does not hold is not reported.
+        assertTrue(ungrantable.unavailableGrants(listOf("prod")).isEmpty())
     }
 
     @Test
@@ -341,8 +405,9 @@ class AgentEditingTest {
         assertEquals(0, access["skills"]!!.jsonArray.size)
         assertEquals(0, access["mcps"]!!.jsonArray.size)
         assertEquals(0, access["mcpTools"]!!.jsonObject.size)
-        assertEquals(0, access["exclusiveNodes"]!!.jsonArray.size)
-        assertEquals(0, access["plugins"]!!.jsonArray.size)
+        val body = agentSaveBody(created)
+        assertEquals(0, body["exclusiveNodes"]!!.jsonArray.size)
+        assertEquals(0, body["plugins"]!!.jsonArray.size)
         assertEquals(LOCAL_NODE_ID, access["nodes"]!!.jsonArray.single().jsonPrimitive.content)
         assertFalse(access["github"]!!.jsonPrimitive.content.toBoolean())
         assertFalse(access["installation"]!!.jsonPrimitive.content.toBoolean())
@@ -363,7 +428,7 @@ class AgentEditingTest {
             )
         val explicit =
             wireJson.decodeFromString<Agent>(
-                """{"id":"agent","name":"Release","revision":"r1","access":{"nodes":["$LOCAL_NODE_ID"],"exclusiveNodes":[],"plugins":[]}}"""
+                """{"id":"agent","name":"Release","revision":"r1","access":{"nodes":["$LOCAL_NODE_ID"]},"exclusiveNodes":[],"plugins":[]}"""
             )
         assertEquals(explicit, omitted)
         assertTrue(agentChanges(omitted, AgentDraft(explicit), false, "").isEmpty())

@@ -35,12 +35,9 @@ for (const [name, schema] of Object.entries({ save_agent: agentInput, update_age
     throw new Error(`Missing MCP tool: ${name}`)
   const inputSchema = z.toJSONSchema(schema, { unrepresentable: 'any' })
   // Exclusive node and plugin grants (such as 1Password) stay with the owner's app.
-  const access = inputSchema.properties.access
   for (const key of ['exclusiveNodes', 'plugins']) {
-    delete access.properties[key]
-    access.required = access.required?.filter(name => name !== key)
-    if (access.default)
-      delete access.default[key]
+    delete inputSchema.properties[key]
+    inputSchema.required = inputSchema.required?.filter(name => name !== key)
   }
 
   if (name === 'save_agent') {

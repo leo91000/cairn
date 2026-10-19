@@ -80,7 +80,7 @@ test('1Password service accounts are plugin instances with private tokens, grant
   await expect(review).toHaveCount(0)
   saved = await accounts()
   expect(saved[0].agentIds).toEqual([MAIN_AGENT_ID])
-  expect((await workspace.api('/api/agents')).find((agent: { id: string }) => agent.id === MAIN_AGENT_ID).access.plugins).toEqual([saved[0].id])
+  expect((await workspace.api('/api/agents')).find((agent: { id: string }) => agent.id === MAIN_AGENT_ID).plugins).toEqual([saved[0].id])
 
   await workspace.restart()
   await page.goto(workspacePath('/plugins/onepassword'))

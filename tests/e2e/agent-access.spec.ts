@@ -393,7 +393,8 @@ test('exclusive reservation is granted per node from the agent page once the age
   await review.getByRole('button', { name: 'Save', exact: true }).click()
   await expect(review).toHaveCount(0)
   const saved = (await workspace.api('/api/agents')).find((item: { id: string }) => item.id === agent.id)
-  expect(saved.access.exclusiveNodes).toEqual([gpu])
+  expect(saved.exclusiveNodes).toEqual([gpu])
+  expect(saved.access).not.toHaveProperty('exclusiveNodes')
   expect(saved.access.nodes).toContain(gpu)
   expect((await workspace.api('/api/nodes')).find((node: { id: string }) => node.id === gpu).exclusiveAgents).toEqual([agent.id])
 
@@ -608,4 +609,76 @@ test('tool choices stay visible and editable when every MCP connection is grante
   await expect(bar).toHaveCount(0)
   await page.getByRole('link', { name: 'Overview', exact: true }).click()
   await expect(page.getByRole('button', { name: /^MCP & tools/ })).toContainText('Tools limited on Design tools')
+})
+
+test('a held plugin grant whose package cannot give agents access is shown, counted and removable', async ({ page, workspace }) => {
+  await useRelayForHttpMocks(page)
+  const agent = await workspace.api('/api/agents', 'POST', { name: 'Ticket triager' })
+  // The agent holds a grant on an instance whose package now waits for review.
+  await page.route('**/api/agents', async (route) => {
+    if (route.request().method() !== 'GET') {
+      await route.continue()
+      return
+    }
+
+    const response = await route.fetch()
+    const agents = await response.json()
+    await route.fulfill({ response, json: agents.map((item: { id: string }) => item.id === agent.id ? { ...item, plugins: ['queue'] } : item) })
+  })
+  await page.route('**/api/plugins', route => route.fulfill({
+    json: {
+      packages: [{
+        id: 'tickets',
+        builtin: false,
+        status: 'needs_approval',
+        active: null,
+        manifest: {
+          id: 'tickets',
+          name: 'Tickets',
+          version: '2.0.0',
+          agentAccess: { description: 'Read tickets.' },
+        },
+        versions: [],
+      }],
+      capabilities: [],
+      connections: [{
+        id: 'queue',
+        pluginId: 'tickets',
+        name: 'Support queue',
+        enabled: true,
+        settings: {},
+        agentIds: [agent.id],
+        userIds: [],
+        people: [],
+        accessMode: 'allowlist',
+        agentId: '',
+        projectId: null,
+        maxMessagesPerHour: 0,
+        status: { state: 'ready' },
+        usage: { hour: 0 },
+        requests: [],
+        activity: [],
+      }],
+    },
+  }))
+  await page.goto(workspacePath(`/agents/${agent.id}`))
+  await authenticateWorkspace(page)
+  const checks = page.getByRole('status').filter({ hasText: 'to check' })
+  await expect(checks).toContainText('1 thing to check')
+  await expect(checks).toContainText('Tickets “Support queue” is unavailable: its plugin needs review or no longer gives agents access.')
+
+  await openAgentSection(page, 'Secrets & plugins')
+  const unavailable = page.getByRole('region', { name: 'Unavailable plugin access' })
+  await expect(unavailable).toContainText('Tickets · Support queue')
+  await expect(unavailable.getByText('Unavailable', { exact: true })).toBeVisible()
+  await expect(unavailable).toContainText('Its plugin needs review or no longer gives agents access.')
+  await expect(page.getByRole('switch', { name: 'Access to Tickets Support queue' })).toHaveCount(0)
+  await unavailable.getByRole('button', { name: 'Remove access to Tickets Support queue' }).click()
+  await expect(unavailable).toHaveCount(0)
+
+  const saving = page.waitForRequest(request => request.method() === 'PUT' && new URL(request.url()).pathname.endsWith(`/agents/${agent.id}`))
+  await page.getByRole('region', { name: 'Unsaved changes' }).getByRole('button', { name: 'Save', exact: true }).click()
+  const body = (await saving).postDataJSON()
+  expect(body.plugins).toEqual([])
+  expect(body.access).not.toHaveProperty('plugins')
 })

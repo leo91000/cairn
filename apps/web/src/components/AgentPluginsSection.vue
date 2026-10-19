@@ -1,5 +1,4 @@
 <script setup lang="ts">
-import type { AgentAccess } from '../agent-access'
 import type { PluginConnection, PluginEntry } from '../plugins'
 import { computed, ref } from 'vue'
 import { grantablePackages, instanceState } from '../agent-access'
@@ -23,7 +22,8 @@ const props = defineProps<{
   // Delegations currently stopped until their new access is reapproved.
   suspended: string[]
 }>()
-const access = defineModel<AgentAccess>('access', { required: true })
+// Granted plugin instance ids.
+const plugins = defineModel<string[]>('plugins', { required: true })
 const query = ref('')
 const grantable = computed(() => grantablePackages(props.packages))
 const instances = computed(() => props.connections.filter(connection => grantable.value.some(entry => entry.id === connection.pluginId)))
@@ -39,15 +39,17 @@ const groups = computed(() => {
     .filter(group => group.instances.length || !words)
 })
 const delegations = computed(() => props.agentId ? props.connections.filter(connection => connection.agentId === props.agentId) : [])
-const missing = computed(() => access.value.plugins.filter(id => !props.connections.some(connection => connection.id === id)))
+const missing = computed(() => plugins.value.filter(id => !props.connections.some(connection => connection.id === id)))
+// Held grants on instances whose package is invalid, awaits review or no longer gives agents access.
+const unusable = computed(() => props.connections.filter(connection => plugins.value.includes(connection.id) && !grantable.value.some(entry => entry.id === connection.pluginId)))
 
 function packageName(pluginId: string) {
   return props.packages.find(entry => entry.id === pluginId)?.manifest?.name ?? pluginId
 }
 
 function set(id: string, on: boolean) {
-  const granted = access.value.plugins.filter(value => value !== id)
-  access.value.plugins = on ? [...granted, id] : granted
+  const granted = plugins.value.filter(value => value !== id)
+  plugins.value = on ? [...granted, id] : granted
 }
 </script>
 
@@ -77,21 +79,21 @@ function set(id: string, on: boolean) {
       <ul v-if="rows.length" class="divide-y divide-line">
         <li v-for="connection in rows" :key="connection.id" class="flex min-w-0 items-center gap-3 px-5 py-3 phone:flex-wrap phone:px-4">
           <UiSwitch
-            :model-value="access.plugins.includes(connection.id)"
+            :model-value="plugins.includes(connection.id)"
             :label="`Access to ${packageName(connection.pluginId)} ${connection.name}`"
             @update:model-value="set(connection.id, $event)"
           />
           <div class="min-w-0 flex-1">
             <p class="flex flex-wrap items-center gap-2 text-sm">
               <span class="min-w-0 truncate font-semibold">{{ connection.name }}</span>
-              <AccessChip v-if="!access.plugins.includes(connection.id)" tone="none">
+              <AccessChip v-if="!plugins.includes(connection.id)" tone="none">
                 Not granted
               </AccessChip>
               <AccessChip v-else :tone="instanceState(connection).tone">
                 {{ instanceState(connection).label }}
               </AccessChip>
             </p>
-            <p v-if="access.plugins.includes(connection.id) && !connection.enabled" class="text-2xs text-muted">
+            <p v-if="plugins.includes(connection.id) && !connection.enabled" class="text-2xs text-muted">
               The access is kept, but the agent cannot use it while it stays disabled.
             </p>
             <p v-else-if="connection.status.message" class="truncate text-2xs text-muted">
@@ -124,12 +126,44 @@ function set(id: string, on: boolean) {
       </RouterLink>
     </p>
 
+    <section v-if="unusable.length" class="min-w-0 overflow-hidden rounded-xl border border-line bg-surface" aria-label="Unavailable plugin access">
+      <header class="border-b border-line px-5 py-3.5 phone:px-4">
+        <h3 class="text-sm! font-semibold">
+          Unavailable access
+        </h3>
+        <p class="text-2xs text-muted">
+          Granted instances whose plugin needs review or no longer gives agents access. The agent cannot use them.
+        </p>
+      </header>
+      <ul class="divide-y divide-line">
+        <li v-for="connection in unusable" :key="connection.id" class="flex min-w-0 items-center gap-3 px-5 py-3 phone:flex-wrap phone:px-4">
+          <div class="min-w-0 flex-1">
+            <p class="flex flex-wrap items-center gap-2 text-sm">
+              <span class="min-w-0 truncate font-semibold">{{ packageName(connection.pluginId) }} · {{ connection.name }}</span>
+              <AccessChip tone="unavailable">
+                Unavailable
+              </AccessChip>
+            </p>
+            <p class="text-2xs text-muted">
+              Its plugin needs review or no longer gives agents access. The access is kept, but the agent cannot use it.
+            </p>
+          </div>
+          <RouterLink :to="`/plugins/${connection.pluginId}`" class="inline-flex min-h-11 items-center gap-1 text-xs font-medium text-accent hover:underline">
+            Review<Icon :name="ArrowUpRight" :size="13" />
+          </RouterLink>
+          <UiButton size="small" :aria-label="`Remove access to ${packageName(connection.pluginId)} ${connection.name}`" @click="set(connection.id, false)">
+            <Icon :name="X" :size="13" />Remove
+          </UiButton>
+        </li>
+      </ul>
+    </section>
+
     <div v-if="missing.length" class="flex flex-wrap items-center gap-3 rounded-xl border border-line px-5 py-3 text-sm">
       <span class="min-w-0 flex-1 text-muted">{{ missing.length === 1 ? 'A granted instance was deleted.' : `${missing.length} granted instances were deleted.` }}</span>
       <AccessChip tone="missing">
         Not found
       </AccessChip>
-      <UiButton size="small" aria-label="Remove deleted plugin instances" @click="access.plugins = access.plugins.filter(id => !missing.includes(id))">
+      <UiButton size="small" aria-label="Remove deleted plugin instances" @click="plugins = plugins.filter(id => !missing.includes(id))">
         <Icon :name="X" :size="13" />Remove
       </UiButton>
     </div>

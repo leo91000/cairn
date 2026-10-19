@@ -1324,7 +1324,7 @@ async fn preview_reports_a_plugin_grant_that_would_stop_a_bot_anyone_can_reach()
 
     // The approved policy is unchanged, but anyone could then reach a secret.
     let mut secret = public.clone();
-    secret["access"]["plugins"] = json!([account["id"]]);
+    secret["plugins"] = json!([account["id"]]);
     let preview = s.agent_preview(secret.clone(), &id).await.unwrap();
     let effect = &preview["delegations"][0];
     assert_eq!(effect["id"], saved["id"]);

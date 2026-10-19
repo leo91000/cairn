@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto'
+import { MAIN_AGENT_ID } from '../../packages/contracts/constants'
 import {
   signIn as authenticateWorkspace,
   expect,
@@ -263,4 +264,59 @@ test('conversation placement distinguishes a preference from a strict pin and sh
   await composer.focus()
   await page.setViewportSize({ width: 390, height: 700 })
   await expect(composer).toBeFocused()
+})
+
+test('finishing the first step keeps an agent allowed while it was open', async ({ page, workspace }) => {
+  test.setTimeout(60000)
+  const nightShift = await workspace.api('/api/agents', 'POST', { name: 'Night shift', access: { nodes: [] } })
+  // The finishing request is observed below, so it must go through HTTP.
+  await useRelayForHttpMocks(page)
+  await page.goto(workspacePath('/'))
+  await authenticateWorkspace(page)
+  await expect(page.locator('.shell')).toBeVisible({ timeout: 30000 })
+  await page.goto(workspacePath('/nodes'))
+  await page.getByRole('button', { name: 'Add a machine', exact: true }).click()
+  await page.getByLabel('Machine name').fill('Shared Linux')
+  await page.getByLabel('Direct manager address').fill(workspace.url)
+  await page.getByRole('button', { name: 'Create enrollment code' }).click()
+  const code = await page.getByLabel('Single-use enrollment code').textContent()
+  const response = await page.request.post(`${workspace.installationUrl}/internal/nodes/enroll`, {
+    data: {
+      code,
+      name: 'Shared Linux',
+      protocol: 1,
+      runtimeId: 'fixture',
+      capabilities: {
+        os: 'linux',
+        arch: 'x86_64',
+        kvm: true,
+        cpu: 8,
+        memoryMiB: 16384,
+        diskMiB: 65536,
+      },
+    },
+  })
+  expect(response.ok()).toBe(true)
+  const { nodeId } = await response.json()
+  const grant = page.getByRole('dialog', { name: 'Who can use “Shared Linux”?' })
+  await expect(grant).toBeVisible({ timeout: 20000 })
+  const night = grant.getByRole('checkbox', { name: /^Night shift/ })
+  await expect(night).not.toBeChecked()
+  await expect(night).toBeEnabled()
+
+  // Meanwhile, the owner allows Night shift on this machine from its agent page in another window.
+  const agent = (await workspace.api('/api/agents')).find((item: { id: string }) => item.id === nightShift.id)
+  await workspace.api(`/api/agents/${agent.id}`, 'PUT', { ...agent, access: { ...agent.access, nodes: [nodeId] } })
+  await expect(night).toBeChecked({ timeout: 15000 })
+  await expect(night).toBeDisabled()
+  await expect(grant.locator('label').filter({ hasText: 'Night shift' })).toContainText('Already allowed on this machine')
+
+  const finishing = page.waitForRequest(request => request.method() === 'PUT' && new URL(request.url()).pathname.endsWith(`/nodes/${nodeId}/agents`))
+  await grant.getByRole('checkbox', { name: 'Main agent', exact: true }).check()
+  await grant.getByRole('button', { name: 'Finish', exact: true }).click()
+  await expect(grant).toHaveCount(0)
+  // Finishing only adds the chosen agents: it never replaces the machine's list.
+  expect((await finishing).postDataJSON()).toEqual({ agentIds: [MAIN_AGENT_ID], add: true })
+  const saved = (await workspace.api('/api/nodes')).find((node: { id: string }) => node.id === nodeId)
+  expect(saved.agents.map((item: { id: string }) => item.id).sort()).toEqual([MAIN_AGENT_ID, nightShift.id].sort())
 })

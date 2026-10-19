@@ -5,12 +5,9 @@ import { agentInput, agentUpdate } from '../../packages/contracts/contracts'
 
 // Exclusive node and plugin grants (such as 1Password) are set only from the owner's app.
 function withoutOwnerGrants(schema: any) {
-  const access = schema.properties.access
   for (const key of ['exclusiveNodes', 'plugins']) {
-    delete access.properties[key]
-    access.required = access.required?.filter((name: string) => name !== key)
-    if (access.default)
-      delete access.default[key]
+    delete schema.properties[key]
+    schema.required = schema.required?.filter((name: string) => name !== key)
   }
 
   return schema

@@ -16,6 +16,10 @@ export interface AgentDraft {
   reasoning: string
   timeoutMinutes: number
   access: AgentAccess
+  // Live grants, kept beside `access` rather than inside it: nodes the agent may reserve
+  // exclusively and plugin instances it may use.
+  exclusiveNodes: string[]
+  plugins: string[]
 }
 
 export type SectionId
@@ -71,8 +75,6 @@ export function newAgentDraft(): AgentDraft {
     timeoutMinutes: 0,
     access: {
       nodes: [LOCAL_NODE_ID],
-      exclusiveNodes: [],
-      plugins: [],
       projects: [],
       skills: [],
       mcps: [],
@@ -81,6 +83,8 @@ export function newAgentDraft(): AgentDraft {
       github: false,
       sandbox: 'yolo',
     },
+    exclusiveNodes: [],
+    plugins: [],
   }
 }
 
@@ -97,8 +101,6 @@ export function draftOf(agent: Agent): AgentDraft {
     timeoutMinutes: agent.timeoutMinutes ?? 0,
     access: {
       nodes: access.nodes === undefined ? [LOCAL_NODE_ID] : access.nodes === null ? null : [...access.nodes],
-      exclusiveNodes: [...(access.exclusiveNodes ?? [])],
-      plugins: [...(access.plugins ?? [])],
       projects: access.projects ? [...access.projects] : null,
       skills: access.skills ? [...access.skills] : null,
       mcps: access.mcps ? [...access.mcps] : null,
@@ -107,6 +109,9 @@ export function draftOf(agent: Agent): AgentDraft {
       github: access.github ?? true,
       sandbox: access.sandbox ?? 'yolo',
     },
+    // Responses omit empty live grants: absent means none.
+    exclusiveNodes: [...(agent.exclusiveNodes ?? [])],
+    plugins: [...(agent.plugins ?? [])],
   }
 }
 
@@ -128,6 +133,8 @@ export function rebaseDraft(base: AgentDraft, mine: AgentDraft, theirs: AgentDra
     reasoning: pick(base.reasoning, mine.reasoning, theirs.reasoning),
     timeoutMinutes: pick(base.timeoutMinutes, mine.timeoutMinutes, theirs.timeoutMinutes),
     access: access as AgentAccess,
+    exclusiveNodes: pick(base.exclusiveNodes, mine.exclusiveNodes, theirs.exclusiveNodes),
+    plugins: pick(base.plugins, mine.plugins, theirs.plugins),
   }
   return JSON.parse(JSON.stringify(rebased))
 }
@@ -181,9 +188,20 @@ export function nodeState(node: ExecutionNode): { state: NodeState, label: strin
   return { state: 'online', label: 'Online' }
 }
 
-/** Packages whose instances give agents something: commands, tools or instructions. */
+/**
+ * Packages whose instances give agents something (commands, tools or instructions) with an
+ * approved active version, as the server requires to use a grant.
+ */
 export function grantablePackages(packages: PluginEntry[]) {
-  return packages.filter(entry => entry.manifest?.agentAccess)
+  return packages.filter(entry => (entry.status === 'active' || entry.status === 'update') && entry.manifest?.agentAccess)
+}
+
+/**
+ * Whether an agent can use a grant on this instance. A grant on any other instance is kept
+ * but unusable, e.g. until its package is reviewed again.
+ */
+export function grantableConnection(connection: Pick<PluginConnection, 'pluginId'>, packages: PluginEntry[]) {
+  return grantablePackages(packages).some(entry => entry.id === connection.pluginId)
 }
 
 export function instanceState(connection: PluginConnection): { tone: 'granted' | 'unavailable', label: string } {
@@ -250,8 +268,8 @@ export function changes(saved: AgentDraft, draft: AgentDraft) {
   add('powers', Number(saved.access.installation !== draft.access.installation))
   add('nodes', listCount(saved.access.nodes, draft.access.nodes))
   // Responses omit empty live grants: absent means none.
-  add('nodes', listCount(saved.access.exclusiveNodes ?? [], draft.access.exclusiveNodes ?? []))
-  add('plugins', listCount(saved.access.plugins ?? [], draft.access.plugins ?? []))
+  add('nodes', listCount(saved.exclusiveNodes ?? [], draft.exclusiveNodes ?? []))
+  add('plugins', listCount(saved.plugins ?? [], draft.plugins ?? []))
   return changed
 }
 
@@ -275,11 +293,11 @@ export function reviewLines(saved: AgentDraft, draft: AgentDraft, context: Conte
   const lines: ReviewLine[] = []
   const node = (id: string) => nodeName(context.nodes.find(item => item.id === id), id)
 
-  for (const id of listChanges(saved.access.exclusiveNodes ?? [], draft.access.exclusiveNodes ?? []).added)
+  for (const id of listChanges(saved.exclusiveNodes ?? [], draft.exclusiveNodes ?? []).added)
     lines.push({ kind: 'power', section: 'nodes', text: `Added: exclusive reservation on ${node(id)}. This agent will be able to suspend other agents’ conversations on this machine.` })
   if (draft.access.installation && !saved.access.installation)
     lines.push({ kind: 'power', section: 'powers', text: 'Added: installation management. This agent will be able to create and change agents, projects, skills, MCP connections, missions and runs on your behalf.' })
-  for (const id of listChanges(saved.access.plugins ?? [], draft.access.plugins ?? []).added)
+  for (const id of listChanges(saved.plugins ?? [], draft.plugins ?? []).added)
     lines.push({ kind: 'secret', section: 'plugins', text: `Added: ${connectionLabel(id, context)} — effective immediately, including in running conversations.` })
 
   if (saved.access.github && !draft.access.github && draft.access.projects !== null)
@@ -300,9 +318,9 @@ export function reviewLines(saved: AgentDraft, draft: AgentDraft, context: Conte
   described('skill', saved.access.skills, draft.access.skills, key => skillLabel(key, context.projects).name)
   described('MCP connection', saved.access.mcps, draft.access.mcps, mcp)
   described('node', saved.access.nodes, draft.access.nodes, node)
-  for (const id of listChanges(saved.access.exclusiveNodes ?? [], draft.access.exclusiveNodes ?? []).removed)
+  for (const id of listChanges(saved.exclusiveNodes ?? [], draft.exclusiveNodes ?? []).removed)
     removed.push(`exclusive reservation on ${node(id)}`)
-  for (const id of listChanges(saved.access.plugins ?? [], draft.access.plugins ?? []).removed)
+  for (const id of listChanges(saved.plugins ?? [], draft.plugins ?? []).removed)
     removed.push(connectionLabel(id, context))
   if (saved.access.installation && !draft.access.installation)
     removed.push('installation management')
@@ -362,7 +380,7 @@ export function issues(draft: AgentDraft, context: Context, isMain: boolean) {
     }
   }
 
-  for (const id of access.exclusiveNodes ?? []) {
+  for (const id of draft.exclusiveNodes ?? []) {
     const node = context.nodes.find(item => item.id === id)
     if (!node || node.revoked)
       found.push({ section: 'nodes', text: 'An exclusive reservation targets a node that no longer exists.' })
@@ -370,10 +388,12 @@ export function issues(draft: AgentDraft, context: Context, isMain: boolean) {
       found.push({ section: 'nodes', text: `The exclusive reservation on ${nodeName(node, id)} is inactive: this agent cannot run there.` })
   }
 
-  for (const id of access.plugins ?? []) {
+  for (const id of draft.plugins ?? []) {
     const connection = context.connections.find(item => item.id === id)
     if (!connection)
       found.push({ section: 'plugins', text: 'A granted plugin instance no longer exists.' })
+    else if (!grantableConnection(connection, context.packages))
+      found.push({ section: 'plugins', text: `${connectionLabel(id, context)} is unavailable: its plugin needs review or no longer gives agents access.` })
     else if (!connection.enabled)
       found.push({ section: 'plugins', text: `${connectionLabel(id, context)} is disabled: the access is kept but cannot be used.` })
   }
@@ -393,14 +413,14 @@ export function accessSummary(agent: Agent, context: Pick<Context, 'packages' | 
     count(nodes, 'node', 'All nodes'),
   ]
   const packages = new Set<string>()
-  for (const id of access.plugins ?? []) {
+  for (const id of agent.plugins ?? []) {
     const connection = context.connections.find(item => item.id === id)
     const name = context.packages.find(entry => entry.id === connection?.pluginId)?.manifest?.name
     packages.add(name ?? 'Plugin')
   }
 
   parts.push(...packages)
-  if (access.exclusiveNodes?.length)
+  if (agent.exclusiveNodes?.length)
     parts.push('Exclusive reservation')
   if (access.installation)
     parts.push('Installation management')

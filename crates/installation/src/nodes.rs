@@ -713,6 +713,10 @@ async fn delete_stale_disks(s: &Service, node: &str) -> Result<Value> {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct Grants {
     agent_ids: Vec<String>,
+    /// Only grants the listed agents and never revokes, for example after adding a
+    /// machine while an agent page grants it at the same time.
+    #[serde(default)]
+    add: bool,
 }
 
 async fn grant_agents(s: &Service, node: &str, body: Value) -> Result<Value> {
@@ -731,6 +735,9 @@ async fn grant_agents(s: &Service, node: &str, body: Value) -> Result<Value> {
             }
             for agent in db.list("agents")? {
                 let granted = request.agent_ids.iter().any(|id| agent["id"] == *id);
+                if request.add && !granted {
+                    continue;
+                }
                 set_node_grant(db, agent, &node, granted)?;
             }
             db.audit(
@@ -760,6 +767,10 @@ fn set_node_grant(db: &Db<'_>, mut agent: Value, node: &str, granted: bool) -> R
         agent["access"] = json!({});
     }
     agent["access"]["nodes"] = nodes.into();
+    // Exclusive reservations need permission to run on the node.
+    if !granted {
+        crate::agent_grants::release_node(db, &mut agent, node)?;
+    }
     crate::service::touch(&mut agent);
     db.put("agents", &agent)?;
     Ok(())

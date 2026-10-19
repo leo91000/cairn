@@ -55,7 +55,7 @@ data class ExecutionNode(
 
 /**
  * Agents already allowed to run on this machine without being allowed everywhere, from the node
- * itself or from each agent's page. Replacing the node's list must keep them.
+ * itself or from each agent's page. They are shown locked: granting more agents never revokes them.
  */
 fun ExecutionNode.grantedAgents(agents: List<Agent> = emptyList()): Set<String> =
     this.agents.filter { !it.allNodes }.map { it.id }.toSet() +

@@ -288,7 +288,7 @@ private fun AgentPage(
                 val theirs =
                     vm.api.get<List<Agent>>("/agents").find { it.id == agentId }
                         ?: error("Cet agent n’existe plus.")
-                draft = draft.copy(agent = rebaseAgent(baseline, draft.agent, theirs))
+                draft = draft.rebased(baseline, theirs)
                 baseline = theirs
                 saveError = null
                 conflict = false
@@ -370,14 +370,14 @@ private fun AgentPage(
                                 },
                             )
                     AgentSection.Plugins ->
-                        PluginsSection(draft.agent, catalog, { navigate(it) }, ::access)
-                    AgentSection.Nodes -> NodesSection(draft.agent.access, nodes, ::access)
+                        PluginsSection(draft.agent, catalog, { navigate(it) }, ::update)
+                    AgentSection.Nodes -> NodesSection(draft.agent, nodes, ::update)
                     AgentSection.Sandbox ->
                         SandboxSection(draft.agent.access.sandbox) { value ->
                             access { it.copy(sandbox = value) }
                         }
                     AgentSection.Powers ->
-                        PowersSection(draft.agent.access, nodes, { section = it.name }, ::access)
+                        PowersSection(draft.agent, nodes, { section = it.name }, ::access)
                     AgentSection.Identity ->
                         IdentitySection(vm, state, baseline, draft.agent, creating, ::update)
                     AgentSection.Engine -> EngineSection(vm, state, draft.agent, ::update)
@@ -736,8 +736,8 @@ private fun AgentOverview(
     val disabledMcps =
         access.mcps.orEmpty().count { id -> resources.mcps.find { it.id == id }?.enabled == false }
     val mode = draft.githubMode(resources.tokenSaved)
-    val plugins = pluginSummary(access, resources.catalog)
-    val exclusive = access.effectiveExclusive(resources.nodes)
+    val plugins = pluginSummary(agent, resources.catalog)
+    val exclusive = agent.effectiveExclusive(resources.nodes)
     Column {
         Eyebrow("Accès", Modifier.padding(start = 16.dp, top = 8.dp, bottom = 6.dp))
         OverviewRow(
@@ -803,7 +803,7 @@ private fun AgentOverview(
         Eyebrow("Exécution", Modifier.padding(start = 16.dp, top = 16.dp, bottom = 6.dp))
         OverviewRow(
             AgentSection.Nodes,
-            nodesSummary(access, resources.nodes),
+            nodesSummary(agent, resources.nodes),
             error = AgentSection.Nodes in errors,
             changed = AgentSection.Nodes in changed,
         ) {
@@ -1469,14 +1469,16 @@ private fun PluginsSection(
     agent: Agent,
     catalog: PluginCatalog?,
     navigate: (String) -> Unit,
-    change: ((AccessPolicy) -> AccessPolicy) -> Unit,
+    change: ((Agent) -> Agent) -> Unit,
 ) {
     if (catalog == null) {
         LinearProgressIndicator(Modifier.fillMaxWidth())
         return
     }
-    val granted = agent.access.plugins
+    val granted = agent.plugins
     val groups = catalog.agentGrantable()
+    // Held grants whose package no longer gives agents anything: kept, but shown to be removed.
+    val unavailable = catalog.unavailableGrants(granted)
     if (groups.isEmpty())
         Empty(
             "Aucun plugin ne donne d’accès aux agents",
@@ -1547,6 +1549,29 @@ private fun PluginsSection(
             else Note("Effectif immédiatement, y compris dans les conversations en cours.")
         }
     }
+    unavailable.forEach { connection ->
+        val plugin = catalog.packages.find { it.id == connection.pluginId }?.name
+        Column(Modifier.fillMaxWidth().testTag("agent-plugin-unavailable-${connection.id}")) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    connection.name + (plugin?.let { " · $it" } ?: ""),
+                    Modifier.weight(1f),
+                    style = MaterialTheme.typography.titleSmall,
+                )
+                ToneChip(PluginBadge("Indisponible", PluginTone.ATTENTION))
+                TextButton(
+                    onClick = { change { it.copy(plugins = it.plugins - connection.id) } },
+                    modifier =
+                        Modifier.semantics { contentDescription = "Retirer ${connection.name}" },
+                ) {
+                    Text("Retirer")
+                }
+            }
+            Note(
+                "Ce plugin ne donne plus d’accès aux agents (version non approuvée, invalide ou sans accès agent). L’accès est conservé, mais ne donne rien tant qu’il ne redevient pas disponible."
+            )
+        }
+    }
     val missing = granted.filter { id -> catalog.connections.none { it.id == id } }
     missing.forEach { id ->
         Row(verticalAlignment = Alignment.CenterVertically) {
@@ -1579,7 +1604,7 @@ private fun PluginsSection(
                 "Modifier les accès de cet agent suspend ces bots jusqu’à leur reconfirmation (vous pourrez les réapprouver en enregistrant)."
             )
         }
-    if (groups.isEmpty() && delegations.isEmpty())
+    if (groups.isEmpty() && delegations.isEmpty() && unavailable.isEmpty())
         TextButton(onClick = { navigate("plugins") }) { Text("Ouvrir les plugins ›") }
 }
 
@@ -1595,10 +1620,11 @@ private fun nodeStatus(node: ExecutionNode): PluginBadge =
 
 @Composable
 private fun NodesSection(
-    access: AccessPolicy,
+    agent: Agent,
     nodes: List<ExecutionNode>,
-    change: ((AccessPolicy) -> AccessPolicy) -> Unit,
+    change: ((Agent) -> Agent) -> Unit,
 ) {
+    val access = agent.access
     var explain by remember { mutableStateOf(false) }
     var query by rememberSaveable { mutableStateOf("") }
     val choices = agentNodeChoices(nodes)
@@ -1607,7 +1633,7 @@ private fun NodesSection(
         "Les nouvelles machines seront utilisables par cet agent dès leur inscription.",
         access.nodes == null,
     ) { all ->
-        change { it.withAllNodes(all, nodes) }
+        change { it.copy(access = it.access.withAllNodes(all, nodes)) }
     }
     if (choices.size >= 8) SearchField("Rechercher une node ou un tag", query) { query = it }
     choices
@@ -1618,7 +1644,7 @@ private fun NodesSection(
         }
         .forEach { node ->
             val runs = access.runsOn(node.id)
-            val exclusive = node.id in access.exclusiveNodes
+            val exclusive = node.id in agent.exclusiveNodes
             Column(
                 Modifier.fillMaxWidth().testTag("agent-node-${node.id}"),
                 verticalArrangement = Arrangement.spacedBy(2.dp),
@@ -1683,7 +1709,7 @@ private fun NodesSection(
             }
         }
     if (nodes.isNotEmpty())
-        access.exclusiveNodes
+        agent.exclusiveNodes
             .filter { id -> choices.none { it.id == id } }
             .forEach { id ->
                 Row(verticalAlignment = Alignment.CenterVertically) {
@@ -1727,11 +1753,12 @@ private fun SandboxSection(value: String, change: (String) -> Unit) {
 
 @Composable
 private fun PowersSection(
-    access: AccessPolicy,
+    agent: Agent,
     nodes: List<ExecutionNode>,
     open: (AgentSection) -> Unit,
     change: ((AccessPolicy) -> AccessPolicy) -> Unit,
 ) {
+    val access = agent.access
     val (container, content) = powerColors()
     Column(
         Modifier.fillMaxWidth()
@@ -1750,7 +1777,7 @@ private fun PowersSection(
             change { it.copy(installation = on) }
         }
     }
-    val exclusive = access.effectiveExclusive(nodes)
+    val exclusive = agent.effectiveExclusive(nodes)
     Panel {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Text(

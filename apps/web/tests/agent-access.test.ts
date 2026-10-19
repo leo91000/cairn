@@ -9,6 +9,8 @@ import {
   changes,
   draftOf,
   errorSection,
+  grantableConnection,
+  grantablePackages,
   issues,
   newAgentDraft,
   rebaseDraft,
@@ -76,12 +78,13 @@ it('labels skills by name and origin, never by their key', () => {
 
 it('fills the live grants older agents omit and counts every changed value', () => {
   const saved = draftOf({ id: 'a', name: 'Agent', access: { projects: null } } as unknown as Agent)
-  expect(saved.access).toMatchObject({ nodes: [LOCAL_NODE_ID], exclusiveNodes: [], plugins: [] })
+  expect(saved.access).toMatchObject({ nodes: [LOCAL_NODE_ID] })
+  expect(saved).toMatchObject({ exclusiveNodes: [], plugins: [] })
   const draft = structuredClone(saved)
   draft.name = 'Renamed'
   draft.access.projects = ['p1']
-  draft.access.exclusiveNodes = ['gpu']
-  draft.access.plugins = ['prod']
+  draft.exclusiveNodes = ['gpu']
+  draft.plugins = ['prod']
   expect(changes(saved, draft)).toEqual(['identity', 'projects', 'nodes', 'plugins'])
 })
 
@@ -90,8 +93,8 @@ it('asks for a review when a power or a secret is added, and explains reductions
   saved.access.projects = ['p1', 'p2']
   saved.access.nodes = [LOCAL_NODE_ID, 'gpu']
   const draft = structuredClone(saved)
-  draft.access.exclusiveNodes = ['gpu']
-  draft.access.plugins = ['prod']
+  draft.exclusiveNodes = ['gpu']
+  draft.plugins = ['prod']
   draft.access.projects = ['p2']
   const lines = reviewLines(saved, draft, context, { queued: 2, running: 1 })
   expect(lines.map(line => line.kind)).toEqual(['power', 'secret', 'reduction'])
@@ -102,13 +105,18 @@ it('asks for a review when a power or a secret is added, and explains reductions
 
 it('reports grants that cannot be used', () => {
   const draft = newAgentDraft()
-  draft.access.exclusiveNodes = ['gpu']
-  draft.access.plugins = ['gone']
+  draft.exclusiveNodes = ['gpu']
+  draft.plugins = ['gone']
   expect(issues(draft, context, false).map(issue => issue.section)).toEqual(['nodes', 'plugins'])
 })
 
 it('summarizes an agent for the list and places server errors in their section', () => {
-  const agent = { id: 'a', name: 'Agent', access: { projects: ['p1', 'p2', 'p3'], nodes: [LOCAL_NODE_ID, 'gpu'], plugins: ['prod'] } } as unknown as Agent
+  const agent = {
+    id: 'a',
+    name: 'Agent',
+    access: { projects: ['p1', 'p2', 'p3'], nodes: [LOCAL_NODE_ID, 'gpu'] },
+    plugins: ['prod'],
+  } as unknown as Agent
   expect(accessSummary(agent, context)).toBe('3 projects · 2 nodes · 1Password')
   expect(errorSection('A selected plugin instance no longer exists.')).toBe('plugins')
   expect(errorSection('A revoked node cannot be reserved.')).toBe('nodes')
@@ -117,8 +125,6 @@ it('summarizes an agent for the list and places server errors in their section',
 it('starts new agents restricted until the owner widens their access', () => {
   expect(newAgentDraft().access).toEqual({
     nodes: [LOCAL_NODE_ID],
-    exclusiveNodes: [],
-    plugins: [],
     projects: [],
     skills: [],
     mcps: [],
@@ -127,6 +133,7 @@ it('starts new agents restricted until the owner widens their access', () => {
     github: false,
     sandbox: 'yolo',
   })
+  expect(newAgentDraft()).toMatchObject({ exclusiveNodes: [], plugins: [] })
   expect(issues(newAgentDraft(), context, false)).toEqual([])
   expect(reviewLines(newAgentDraft(), newAgentDraft(), context)).toEqual([])
 })
@@ -146,10 +153,12 @@ it('treats live grants the server omits as none, so a loaded agent is not change
     },
   } as unknown as Agent
   const loaded = draftOf(agent)
-  expect(loaded.access).toMatchObject({ exclusiveNodes: [], plugins: [], mcpTools: {} })
+  expect(loaded.access).toMatchObject({ mcpTools: {} })
+  expect(loaded).toMatchObject({ exclusiveNodes: [], plugins: [] })
   expect(changes(loaded, draftOf(agent))).toEqual([])
   // A draft compared against the raw response, keys absent, is unchanged too.
-  const raw = { ...loaded, access: agent.access } as typeof loaded
+  const { exclusiveNodes: _nodes, plugins: _plugins, ...omitted } = loaded
+  const raw = { ...omitted, access: agent.access } as typeof loaded
   expect(changes(raw, loaded)).toEqual([])
   expect(reviewLines(raw, loaded, context)).toEqual([])
   expect(issues(raw, context, false)).toEqual([])
@@ -165,16 +174,87 @@ it('rebases the owner\'s edits onto a newer agent, like Android', () => {
   theirs.name = 'Documentation writer'
   theirs.description = 'Changed elsewhere'
   theirs.access.projects = ['p1', 'p2']
-  theirs.access.plugins = ['prod']
+  theirs.plugins = ['prod']
   const rebased = rebaseDraft(base, mine, theirs)
   // Edited values keep the draft; the others take the newer agent.
   expect(rebased.description).toBe('Keeps the documentation current')
   expect(rebased.access.mcpTools).toEqual({ m1: ['echo'] })
   expect(rebased.name).toBe('Documentation writer')
   expect(rebased.access.projects).toEqual(['p1', 'p2'])
-  expect(rebased.access.plugins).toEqual(['prod'])
+  expect(rebased.plugins).toEqual(['prod'])
   expect(changes(theirs, rebased)).toEqual(['identity', 'mcps'])
   // The result is independent of its inputs.
   rebased.access.projects!.push('p3')
   expect(theirs.access.projects).toEqual(['p1', 'p2'])
+})
+
+it('keeps the live grants out of the access policy sent to the server', () => {
+  const agent = {
+    id: 'a',
+    name: 'Agent',
+    access: { nodes: [LOCAL_NODE_ID, 'gpu'], projects: null },
+    exclusiveNodes: ['gpu'],
+    plugins: ['prod'],
+  } as unknown as Agent
+  const draft = draftOf(agent)
+  expect(draft).toMatchObject({ exclusiveNodes: ['gpu'], plugins: ['prod'] })
+  expect(draft.access).not.toHaveProperty('exclusiveNodes')
+  expect(draft.access).not.toHaveProperty('plugins')
+  // A grant left inside an older response's access is not a live grant.
+  const legacy = draftOf({ id: 'a', name: 'Agent', access: { exclusiveNodes: ['gpu'], plugins: ['prod'] } } as unknown as Agent)
+  expect(legacy).toMatchObject({ exclusiveNodes: [], plugins: [] })
+  expect(accessSummary(agent, context)).toBe('All projects · 2 nodes · 1Password · Exclusive reservation')
+
+  // A grant on another agent's page or window, made meanwhile, is kept when rebasing.
+  const mine = structuredClone(draft)
+  mine.exclusiveNodes = []
+  const theirs = structuredClone(draft)
+  theirs.plugins = ['prod', 'staging']
+  const rebased = rebaseDraft(draft, mine, theirs)
+  expect(rebased).toMatchObject({ exclusiveNodes: [], plugins: ['prod', 'staging'] })
+  expect(changes(theirs, rebased)).toEqual(['nodes'])
+})
+
+it('reports a held grant whose plugin cannot give agents access any more', () => {
+  const review = {
+    ...onePassword,
+    id: 'tickets',
+    builtin: false,
+    status: 'needs_approval',
+    manifest: { id: 'tickets', name: 'Tickets', agentAccess: {} },
+  } as unknown as PluginEntry
+  const broken = {
+    ...onePassword,
+    id: 'broken',
+    builtin: false,
+    status: 'invalid',
+    manifest: null,
+  } as unknown as PluginEntry
+  const withdrawn = {
+    ...onePassword,
+    id: 'notes',
+    builtin: false,
+    manifest: { id: 'notes', name: 'Notes' },
+  } as unknown as PluginEntry
+  const instance = (id: string, pluginId: string) => ({
+    ...production,
+    id,
+    pluginId,
+    name: id,
+  }) as PluginConnection
+  const held: Context = {
+    ...context,
+    packages: [onePassword, review, broken, withdrawn],
+    connections: [production, instance('queue', 'tickets'), instance('old', 'broken'), instance('memo', 'notes')],
+  }
+  expect(grantablePackages(held.packages).map(entry => entry.id)).toEqual(['onepassword'])
+  expect(grantableConnection(production, held.packages)).toBe(true)
+  expect(grantableConnection(instance('memo', 'notes'), held.packages)).toBe(false)
+
+  const draft = newAgentDraft()
+  draft.plugins = ['prod', 'queue', 'old', 'memo']
+  const found = issues(draft, held, false)
+  expect(found.map(issue => issue.section)).toEqual(['plugins', 'plugins', 'plugins'])
+  expect(found[0]!.text).toBe('Tickets “queue” is unavailable: its plugin needs review or no longer gives agents access.')
+  expect(found[1]!.text).toBe('Plugin “old” is unavailable: its plugin needs review or no longer gives agents access.')
 })
