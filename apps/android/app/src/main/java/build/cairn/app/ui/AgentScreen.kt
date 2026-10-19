@@ -111,6 +111,7 @@ private fun AgentPage(
     var newToken by remember { mutableStateOf("") }
     var section by rememberSaveable { mutableStateOf<String?>(null) }
     var nodes by remember { mutableStateOf<List<ExecutionNode>>(emptyList()) }
+    var nodesLoaded by remember { mutableStateOf(false) }
     // Without the machine list, node access cannot be changed safely.
     var nodesFailed by remember { mutableStateOf(false) }
     var nodesAttempt by remember { mutableIntStateOf(0) }
@@ -119,6 +120,10 @@ private fun AgentPage(
     var catalogFailed by remember { mutableStateOf(false) }
     var catalogAttempt by remember { mutableIntStateOf(0) }
     var tokenSaved by remember { mutableStateOf(false) }
+    // Until the token's state is known, GitHub is shown as unknown and no token change is sent.
+    var tokenLoaded by remember { mutableStateOf(false) }
+    var tokenFailed by remember { mutableStateOf(false) }
+    var tokenAttempt by remember { mutableIntStateOf(0) }
     var saving by remember { mutableStateOf(false) }
     var saveError by remember { mutableStateOf<String?>(null) }
     var errorSection by remember { mutableStateOf<AgentSection?>(null) }
@@ -138,6 +143,7 @@ private fun AgentPage(
     LaunchedEffect(agentId, nodesAttempt) {
         try {
             nodes = vm.api.get("/nodes")
+            nodesLoaded = true
             nodesFailed = false
         } catch (e: Exception) {
             if (e is CancellationException) throw e
@@ -158,11 +164,16 @@ private fun AgentPage(
             try {
                 tokenSaved =
                     vm.api.get<Configured>("/agents/${segment(agentId)}/github-token").configured
+                tokenLoaded = true
+                tokenFailed = false
             } catch (e: Exception) {
                 if (e is CancellationException) throw e
+                tokenFailed = true
             }
     }
-    LaunchedEffect(agentId) { loadToken() }
+    LaunchedEffect(agentId, tokenAttempt) { loadToken() }
+    // A new agent has no token yet.
+    val tokenKnown = agentId.isBlank() || tokenLoaded
 
     val changes = agentChanges(baseline, draft, tokenSaved, newToken)
     val dirty = changes.isNotEmpty()
@@ -176,7 +187,18 @@ private fun AgentPage(
     }
 
     val resources =
-        AgentResources(state.projects, state.skills, state.mcps, nodes, catalog, tokenSaved)
+        AgentResources(
+            state.projects,
+            state.skills,
+            state.mcps,
+            nodes,
+            catalog,
+            tokenSaved,
+            tokenKnown = tokenKnown,
+            nodesLoaded = nodesLoaded,
+            // Skills arrive with the agents, in the same workspace load.
+            skillsLoaded = state.agents.isNotEmpty(),
+        )
     val errors = agentErrors(draft, tokenSaved, newToken)
     val issues = agentIssues(draft.agent, resources)
     // An older installation keeps live grants on its resources and ignores them on the agent:
@@ -191,8 +213,9 @@ private fun AgentPage(
         saveError = null
         conflict = false
     }
+    // Tool choices of connections no longer granted are dropped: the server rejects them.
     fun access(change: (AccessPolicy) -> AccessPolicy) = update {
-        it.copy(access = change(it.access))
+        it.copy(access = change(it.access).withGrantedTools())
     }
     fun leave() {
         when {
@@ -425,6 +448,7 @@ private fun AgentPage(
                             )
                     AgentSection.Github ->
                         if (main) LockedSection()
+                        else if (!tokenKnown) UnknownGithub(tokenFailed, retry = { tokenAttempt++ })
                         else
                             GithubSection(
                                 draft,
@@ -432,7 +456,7 @@ private fun AgentPage(
                                 newToken,
                                 { newToken = it },
                                 { mode ->
-                                    draft = draft.withGithub(mode)
+                                    draft = draft.withGithub(mode, tokenSaved)
                                     saveError = null
                                 },
                             )
@@ -451,6 +475,7 @@ private fun AgentPage(
                             shown.agent,
                             nodes,
                             legacy,
+                            nodesLoaded,
                             nodesFailed,
                             retry = { nodesAttempt++ },
                             change = ::update,
@@ -460,7 +485,13 @@ private fun AgentPage(
                             access { it.copy(sandbox = value) }
                         }
                     AgentSection.Powers ->
-                        PowersSection(shown.agent, nodes, { section = it.name }, ::access)
+                        PowersSection(
+                            shown.agent,
+                            nodes,
+                            nodesLoaded,
+                            { section = it.name },
+                            ::access,
+                        )
                     AgentSection.Identity ->
                         IdentitySection(vm, state, baseline, draft.agent, creating, ::update)
                     AgentSection.Engine -> EngineSection(vm, state, draft.agent, ::update)
@@ -867,7 +898,11 @@ private fun AgentOverview(
         }
         OverviewRow(
             AgentSection.Github,
-            if (main) GithubMode.Shared.label else githubSummary(mode),
+            when {
+                main -> GithubMode.Shared.label
+                !resources.tokenKnown -> NOT_LOADED
+                else -> githubSummary(mode)
+            },
             locked = main,
             error = AgentSection.Github in errors,
             changed = AgentSection.Github in changed,
@@ -888,7 +923,7 @@ private fun AgentOverview(
         Eyebrow("Exécution", Modifier.padding(start = 16.dp, top = 16.dp, bottom = 6.dp))
         OverviewRow(
             AgentSection.Nodes,
-            nodesSummary(agent, resources.nodes),
+            if (resources.nodesLoaded) nodesSummary(agent, resources.nodes) else NOT_LOADED,
             error = AgentSection.Nodes in errors,
             changed = AgentSection.Nodes in changed,
         ) {
@@ -905,6 +940,7 @@ private fun AgentOverview(
         OverviewRow(
             AgentSection.Powers,
             when {
+                !resources.nodesLoaded && !access.installation -> NOT_LOADED
                 exclusive.isEmpty() && !access.installation -> "Aucun"
                 exclusive.isEmpty() -> ""
                 access.installation -> ""
@@ -1459,6 +1495,23 @@ private fun RadioRow(
 }
 
 @Composable
+private fun UnknownGithub(failed: Boolean, retry: () -> Unit) {
+    if (!failed) {
+        LinearProgressIndicator(Modifier.fillMaxWidth())
+        return
+    }
+    // Showing « Pas de GitHub » here could lead to deleting a token nobody chose to remove.
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Text(
+            "Impossible de savoir si un jeton GitHub dédié est enregistré. L’accès GitHub ne peut pas être modifié pour l’instant.",
+            Modifier.weight(1f),
+            color = MaterialTheme.colorScheme.error,
+        )
+        TextButton(onClick = retry) { Text("Réessayer") }
+    }
+}
+
+@Composable
 private fun GithubSection(
     draft: AgentDraft,
     tokenSaved: Boolean,
@@ -1751,14 +1804,16 @@ private fun NodesSection(
     agent: Agent,
     nodes: List<ExecutionNode>,
     legacy: Boolean,
+    loaded: Boolean,
     failed: Boolean,
     retry: () -> Unit,
     change: ((Agent) -> Agent) -> Unit,
 ) {
     val access = agent.access
     // Without the machine list, any change could restrict the agent to the current runner.
-    val editable = !failed
+    val editable = loaded && !failed
     if (legacy) Note(UPDATE_FOR_GRANTS)
+    if (!loaded && !failed) LinearProgressIndicator(Modifier.fillMaxWidth())
     if (failed)
         Row(verticalAlignment = Alignment.CenterVertically) {
             Text(
@@ -1901,6 +1956,7 @@ private fun SandboxSection(value: String, change: (String) -> Unit) {
 private fun PowersSection(
     agent: Agent,
     nodes: List<ExecutionNode>,
+    nodesLoaded: Boolean,
     open: (AgentSection) -> Unit,
     change: ((AccessPolicy) -> AccessPolicy) -> Unit,
 ) {
@@ -1935,8 +1991,11 @@ private fun PowersSection(
                 PowerChip(if (exclusive.size == 1) "1 node" else "${exclusive.size} nodes")
         }
         Text(
-            if (exclusive.isEmpty()) "Aucune node"
-            else "Accordée sur ${exclusive.joinToString(", ") { it.name }}"
+            when {
+                !nodesLoaded -> NOT_LOADED
+                exclusive.isEmpty() -> "Aucune node"
+                else -> "Accordée sur ${exclusive.joinToString(", ") { it.name }}"
+            }
         )
         TextButton(onClick = { open(AgentSection.Nodes) }) { Text("Régler par node ›") }
     }

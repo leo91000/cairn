@@ -142,17 +142,20 @@ export function rebaseDraft(base: AgentDraft, mine: AgentDraft, theirs: AgentDra
 export type GithubMode = 'shared' | 'dedicated' | 'none'
 
 /**
- * What saving does to the dedicated GitHub token. It is removed only when the owner asked for it
- * (chose "No GitHub" or "Remove saved token"): restricting projects turns the shared connection off
- * and switches to a saved token instead.
+ * The GitHub mode once projects are restricted: the shared connection reaches every repository, so
+ * the agent moves to its saved dedicated token, narrower, or to no GitHub.
  */
-/** The GitHub mode once projects are restricted: the shared connection reaches every repository. */
 export function restrictedGithubMode(mode: GithubMode, tokenSaved: boolean): GithubMode {
   if (mode !== 'shared')
     return mode
   return tokenSaved ? 'dedicated' : 'none'
 }
 
+/**
+ * What saving does to the dedicated GitHub token. It is removed only when the owner asked for it
+ * (chose "No GitHub" or "Remove saved token"): restricting projects turns the shared connection off
+ * and switches to a saved token instead.
+ */
 export function githubTokenChange(input: {
   main: boolean
   mode: GithubMode
@@ -167,6 +170,18 @@ export function githubTokenChange(input: {
   if (input.configured && input.mode === 'none' && input.removeRequested)
     return 'remove'
   return null
+}
+
+/**
+ * The draft as it is saved: tool choices only for granted MCP connections, as the server requires.
+ * The page keeps the others while editing, so switching back to "All" restores them.
+ */
+export function savedDraft(draft: AgentDraft): AgentDraft {
+  const { mcps, mcpTools } = draft.access
+  if (mcps === null)
+    return draft
+  const granted = Object.fromEntries(Object.entries(mcpTools ?? {}).filter(([id]) => mcps.includes(id)))
+  return { ...draft, access: { ...draft.access, mcpTools: granted } }
 }
 
 /** "All, including future" | "3 of 12" | "None". */

@@ -19,6 +19,7 @@ import {
   rebaseDraft,
   restrictedGithubMode,
   reviewLines,
+  savedDraft,
   selectionSummary,
   skillLabel,
 } from '../src/agent-access'
@@ -443,4 +444,18 @@ it('raises no node issue while the nodes are not loaded', () => {
   draft.exclusiveNodes = ['gone']
   expect(issues(draft, { ...context, nodes: [], nodesUnavailable: true }, false)).toEqual([])
   expect(issues(draft, { ...context, nodes: [] }, false).map(issue => issue.section)).toEqual(['nodes'])
+})
+
+it('saves tool choices only for granted MCP connections', () => {
+  const draft = newAgentDraft()
+  draft.access.mcps = null
+  draft.access.mcpTools = { m1: ['echo'], m2: [] }
+  expect(savedDraft(draft)).toBe(draft)
+  // "All" → "Choose" keeps the choices while editing, but the server only accepts granted ones.
+  draft.access.mcps = []
+  expect(savedDraft(draft).access.mcpTools).toEqual({})
+  draft.access.mcps = ['m2']
+  expect(savedDraft(draft).access.mcpTools).toEqual({ m2: [] })
+  // The draft itself is unchanged.
+  expect(draft.access.mcpTools).toEqual({ m1: ['echo'], m2: [] })
 })

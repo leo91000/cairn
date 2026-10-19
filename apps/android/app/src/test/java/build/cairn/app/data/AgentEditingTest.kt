@@ -183,7 +183,7 @@ class AgentEditingTest {
             setOf(AgentSection.Github),
             agentErrors(edited, tokenSaved = false, newToken = "").keys,
         )
-        assertEquals("", draft.copy(github = GithubMode.None.value).tokenChange(true, ""))
+        assertEquals("", draft.withGithub(GithubMode.None, tokenSaved = true).tokenChange(true, ""))
     }
 
     @Test
@@ -363,7 +363,11 @@ class AgentEditingTest {
         )
         // The choice survives a reload; an explicit choice clears the notice.
         assertTrue(draft.rebased(shared, shared).switchedToSavedToken(tokenSaved = true))
-        assertFalse(draft.withGithub(GithubMode.Dedicated).switchedToSavedToken(tokenSaved = true))
+        assertFalse(
+            draft
+                .withGithub(GithubMode.Dedicated, tokenSaved = true)
+                .switchedToSavedToken(tokenSaved = true)
+        )
 
         // Without a saved token GitHub is switched off, with the existing explanation.
         val none = AgentDraft(shared).withAllProjects(false, tokenSaved = false)
@@ -386,8 +390,62 @@ class AgentEditingTest {
     }
 
     @Test
+    fun aSavedTokenIsOnlyRemovedByAnExplicitChoice() {
+        val shared = agent.copy(access = agent.access.copy(projects = null, github = true))
+
+        // Scenario A: projects are restricted before the token's state has loaded.
+        val early = AgentDraft(shared).withAllProjects(false, tokenSaved = false)
+        assertEquals(GithubMode.None, early.githubMode(tokenSaved = false))
+        // The token then turns out to be saved: the agent uses it, nothing is deleted.
+        assertEquals(GithubMode.Dedicated, early.githubMode(tokenSaved = true))
+        assertNull(early.tokenChange(tokenSaved = true, newToken = ""))
+        assertTrue(early.switchedToSavedToken(tokenSaved = true))
+
+        // Scenario B: « Pas de GitHub » chosen while no token was saved, then a reload shows
+        // one saved elsewhere: it is kept and used.
+        val dedicated = agent.copy(access = agent.access.copy(github = false))
+        val chosen = AgentDraft(dedicated).withGithub(GithubMode.None, tokenSaved = false)
+        val reloaded = chosen.rebased(dedicated, dedicated.copy(revision = "r2"))
+        assertNull(reloaded.tokenChange(tokenSaved = true, newToken = ""))
+        assertEquals(GithubMode.Dedicated, reloaded.githubMode(tokenSaved = true))
+
+        // The explicit removal of a known token.
+        val removed = AgentDraft(dedicated).withGithub(GithubMode.None, tokenSaved = true)
+        assertTrue(removed.removeToken)
+        assertEquals(GithubMode.None, removed.githubMode(tokenSaved = true))
+        assertEquals("", removed.tokenChange(tokenSaved = true, newToken = ""))
+        // Picking another option cancels it.
+        assertNull(
+            removed.withGithub(GithubMode.Dedicated, tokenSaved = true).tokenChange(true, "")
+        )
+    }
+
+    @Test
+    fun toolChoicesOfConnectionsNoLongerGrantedAreDropped() {
+        val tools = mapOf("a" to listOf("x"), "b" to listOf("y"))
+        val all = agent.access.copy(mcps = null, mcpTools = tools)
+        assertEquals(tools, all.withGrantedTools().mcpTools)
+        val chosen = all.copy(mcps = listOf("a"))
+        assertEquals(mapOf("a" to listOf("x")), chosen.withGrantedTools().mcpTools)
+
+        val body = agentSaveBody(agent.copy(access = all.copy(mcps = emptyList())))
+        assertEquals(0, body["access"]!!.jsonObject["mcpTools"]!!.jsonObject.size)
+    }
+
+    @Test
+    fun aMissingSkillIsReportedOnceSkillsHaveLoadedEvenWhenNoneExist() {
+        val holder = agent.copy(access = agent.access.copy(skills = listOf("global/gone")))
+        val none = resources.copy(skills = emptyList())
+        assertEquals(
+            listOf("La skill « gone » n’existe plus."),
+            agentIssues(holder, none).map { it.text },
+        )
+        assertTrue(agentIssues(holder, none.copy(skillsLoaded = false)).isEmpty())
+    }
+
+    @Test
     fun reviewNamesTheRemovedTokenNewToolChoicesAndOtherwiseInterruptedWork() {
-        val dedicated = AgentDraft(agent).withGithub(GithubMode.None)
+        val dedicated = AgentDraft(agent).withGithub(GithubMode.None, tokenSaved = true)
         val tokenRemoved = dedicated.tokenChange(tokenSaved = true, newToken = "") == ""
         assertEquals(
             "Retrait : jeton GitHub dédié.",
@@ -678,7 +736,7 @@ class AgentEditingTest {
         // A pending removal of the saved token stays pending the same way.
         val removal =
             AgentDraft(agent)
-                .copy(github = GithubMode.None.value)
+                .withGithub(GithubMode.None, tokenSaved = true)
                 .afterProfileSaved(agent.copy(revision = "r2"))
         assertEquals("", removal.tokenChange(tokenSaved = true, newToken = ""))
         assertEquals(

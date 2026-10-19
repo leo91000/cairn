@@ -652,6 +652,15 @@ test('tool choices stay visible and editable when every MCP connection is grante
   await expect(bar).toHaveCount(0)
   await page.getByRole('link', { name: 'Overview', exact: true }).click()
   await expect(page.getByRole('button', { name: /^MCP & tools/ })).toContainText('Tools limited on Design tools')
+
+  // Choosing no connection saves: tool choices of connections no longer granted are not sent.
+  await openAgentSection(page, 'MCP & tools')
+  await group.getByRole('button', { name: 'Choose', exact: true }).click()
+  const saving = page.waitForRequest(request => request.method() === 'PUT' && new URL(request.url()).pathname.endsWith(`/agents/${agent.id}`))
+  await bar.getByRole('button', { name: 'Save', exact: true }).click()
+  expect((await saving).postDataJSON().access).toMatchObject({ mcps: [], mcpTools: {} })
+  await expect(bar).toHaveCount(0)
+  expect((await workspace.api('/api/agents')).find((item: { id: string }) => item.id === agent.id).access).toMatchObject({ mcps: [], mcpTools: {} })
 })
 
 test('a held plugin grant whose package cannot give agents access is shown, counted and removable', async ({ page, workspace }) => {
@@ -789,6 +798,9 @@ test('when plugins cannot be loaded, plugin access is read-only and no grant loo
   const failure = page.getByRole('alert').filter({ hasText: 'Plugins could not be loaded' })
   await expect(failure).toContainText('Plugin host unavailable')
   await expect(page.getByRole('button', { name: 'Remove deleted plugin instances' })).toHaveCount(0)
+  // The held grant stays listed, read-only.
+  await expect(failure.getByRole('list', { name: 'Held plugin access' })).toHaveText('Granted instance queue…')
+  await expect(failure.getByRole('button', { name: /Remove/ })).toHaveCount(0)
   // Once loaded, the grant is checked again: here its instance is really gone.
   catalogFails = false
   await failure.getByRole('button', { name: 'Try again', exact: true }).click()
@@ -799,6 +811,8 @@ test('when plugins cannot be loaded, plugin access is read-only and no grant loo
 test('when nodes cannot be loaded, the page stays usable and node access is read-only', async ({ page, workspace }) => {
   await useRelayForHttpMocks(page)
   const agent = await workspace.api('/api/agents', 'POST', { name: 'Node reader', access: { nodes: null } })
+  const gpu = await enroll(page, workspace, 'held-gpu', true)
+  await workspace.api(`/api/agents/${agent.id}`, 'PUT', { name: 'Node reader', exclusiveNodes: [gpu] })
   let nodesFail = true
   await page.route('**/api/nodes', route => nodesFail
     ? route.fulfill({ status: 500, json: { error: 'Node registry unavailable' } })
@@ -821,6 +835,10 @@ test('when nodes cannot be loaded, the page stays usable and node access is read
   const failure = page.getByRole('alert').filter({ hasText: 'Nodes could not be loaded, so this agent’s node access cannot be shown or changed.' })
   await expect(failure).toContainText('Node registry unavailable')
   await expect(page.getByRole('switch', { name: 'All nodes, including future' })).toHaveCount(0)
+  // Held access stays listed, read-only.
+  const held = failure.getByRole('list', { name: 'Held node access' })
+  await expect(held).toContainText('Can run on all nodes, including future')
+  await expect(held).toContainText(`Can reserve node ${gpu.slice(0, 8)}… exclusively`)
   nodesFail = false
   await failure.getByRole('button', { name: 'Try again', exact: true }).click()
   await expect(failure).toHaveCount(0)

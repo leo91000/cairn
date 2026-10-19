@@ -118,6 +118,8 @@ abstract class AgentPageCases {
          * (instance `agentIds`, node `exclusiveAgents`).
          */
         val older: AtomicBoolean = AtomicBoolean(false),
+        /** Reading the dedicated GitHub token's state fails. */
+        val failToken: AtomicBoolean = AtomicBoolean(false),
     )
 
     private fun fixture(): Fixture {
@@ -134,6 +136,7 @@ abstract class AgentPageCases {
         val failPlugins = AtomicBoolean(false)
         val tokenConfigured = AtomicBoolean(false)
         val older = AtomicBoolean(false)
+        val failToken = AtomicBoolean(false)
         val server = MockWebServer()
         server.dispatcher =
             object : Dispatcher() {
@@ -208,6 +211,10 @@ abstract class AgentPageCases {
                         return response
                             .setResponseCode(409)
                             .setBody("""{"error":"Plugins indisponibles"}""")
+                    if (path.endsWith("/github-token") && failToken.get())
+                        return response
+                            .setResponseCode(409)
+                            .setBody("""{"error":"Jeton illisible"}""")
                     if (path == "/nodes" && failNodes.get())
                         return response
                             .setResponseCode(409)
@@ -270,6 +277,7 @@ abstract class AgentPageCases {
             failPlugins,
             tokenConfigured,
             older,
+            failToken,
         )
     }
 
@@ -633,6 +641,32 @@ abstract class AgentPageCases {
     }
 
     @Test
+    fun anUnknownTokenStateNeverOffersNoGithub() {
+        journey("agent", prepare = { it.failToken.set(true) }) { fixture ->
+            waitForDescription("GitHub, Non chargé")
+            open(AgentSection.Github)
+            waitForText("Impossible de savoir si un jeton GitHub dédié est enregistré", true)
+            compose.onNodeWithText(GithubMode.None.label).assertDoesNotExist()
+
+            // Saving something else sends no token change.
+            back()
+            open(AgentSection.Identity)
+            compose.onNodeWithText("Nom").performTextReplacement("Release bot")
+            back()
+            compose.onNodeWithText("Enregistrer").performClick()
+            confirmReview()
+            compose.waitUntil(15000) { fixture.saved.isNotEmpty() }
+            assertTrue(fixture.tokens.isEmpty())
+
+            // Once readable, the GitHub choice is offered again.
+            fixture.failToken.set(false)
+            open(AgentSection.Github)
+            compose.onNodeWithText("Réessayer").performClick()
+            waitForText(GithubMode.None.label)
+        }
+    }
+
+    @Test
     fun pluginGrantsStayAsTheyAreWhenTheCatalogFailsToLoad() {
         journey(
             "agent",
@@ -712,6 +746,9 @@ abstract class AgentPageCases {
     @Test
     fun nodeAccessCannotChangeUntilTheMachinesLoad() {
         journey("agent", prepare = { it.failNodes.set(true) }) { fixture ->
+            // Summaries computed from machines do not pretend there are none.
+            waitForDescription("Nodes, Non chargé")
+            compose.onNodeWithContentDescription("Pouvoirs spéciaux, Non chargé").assertExists()
             open(AgentSection.Nodes)
             waitForText("Impossible de charger les nodes", substring = true)
             compose

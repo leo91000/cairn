@@ -69,9 +69,11 @@ enum class GithubMode(val value: String, val label: String) {
 
 /**
  * The page's single draft. [timeout] keeps the field text so it can be validated; [github] is null
- * until the owner picks a GitHub option. [sharedTurnedOff] records that restricting projects
- * switched the shared connection off for the owner. The dedicated token itself is never part of the
- * draft, so it never reaches saved instance state.
+ * until the owner picks a GitHub option. [removeToken] is the owner's explicit removal of the saved
+ * dedicated token (« Pas de GitHub » or « Retirer le jeton enregistré »): nothing else ever deletes
+ * it. [sharedTurnedOff] records that restricting projects switched the shared connection off for
+ * the owner. The dedicated token itself is never part of the draft, so it never reaches saved
+ * instance state.
  */
 @Serializable
 data class AgentDraft(
@@ -79,23 +81,32 @@ data class AgentDraft(
     val timeout: String = agent.timeoutMinutes.toString(),
     val github: String? = null,
     val sharedTurnedOff: Boolean = false,
+    val removeToken: Boolean = false,
 )
 
-/** The owner picks a GitHub option. */
-fun AgentDraft.withGithub(mode: GithubMode) = copy(github = mode.value, sharedTurnedOff = false)
+/**
+ * The owner picks a GitHub option. « Pas de GitHub » removes the token only when one is known to be
+ * saved: a token saved later, elsewhere, is never deleted by an earlier choice.
+ */
+fun AgentDraft.withGithub(mode: GithubMode, tokenSaved: Boolean) =
+    copy(
+        github = mode.value,
+        sharedTurnedOff = false,
+        removeToken = mode == GithubMode.None && tokenSaved,
+    )
 
 /**
  * « Tous » / « Choisir » for projects. Restricting the projects of an agent using the shared
- * connection switches it off explicitly: to its saved dedicated token, narrower than the shared
- * connection and never deleted, or to no GitHub without one.
+ * connection switches it off without choosing for the owner: the agent then uses its saved
+ * dedicated token (narrower than the shared connection, never deleted), or no GitHub without one,
+ * resolved again once the token is known.
  */
 fun AgentDraft.withAllProjects(all: Boolean, tokenSaved: Boolean): AgentDraft {
     val turnedOff =
         !all && agent.access.projects == null && githubMode(tokenSaved) == GithubMode.Shared
     val restricted = agent.copy(access = agent.access.withAllProjects(all))
     if (!turnedOff) return copy(agent = restricted)
-    val mode = if (tokenSaved) GithubMode.Dedicated else GithubMode.None
-    return copy(agent = restricted, github = mode.value, sharedTurnedOff = true)
+    return copy(agent = restricted, github = null, sharedTurnedOff = true, removeToken = false)
 }
 
 /** Restricting projects moved this agent from the shared connection to its saved token. */
@@ -150,15 +161,41 @@ data class AgentResources(
     val catalog: PluginCatalog? = null,
     /** Whether the agent has a dedicated GitHub token saved. */
     val tokenSaved: Boolean = false,
+    /** False while the dedicated token is loading or failed to load: GitHub is shown as unknown. */
+    val tokenKnown: Boolean = true,
+    /** False while the machine list is loading or failed to load. */
+    val nodesLoaded: Boolean = true,
+    /** Whether the installation's skills have loaded, so a missing one can be reported. */
+    val skillsLoaded: Boolean = true,
 )
 
+/** Shown instead of a summary computed from something that has not loaded. */
+const val NOT_LOADED = "Non chargé"
+
+/**
+ * MCP tool choices only for connections the agent is granted: the server rejects the others. All
+ * are kept when every connection is granted.
+ */
+fun AccessPolicy.withGrantedTools(): AccessPolicy =
+    if (mcps == null) this else copy(mcpTools = mcpTools.filterKeys { it in mcps })
+
+/**
+ * How the agent will reach GitHub. Without the shared connection, a saved token is used unless the
+ * owner explicitly removes it: the server hands it to runs whenever shared GitHub is off.
+ */
 fun AgentDraft.githubMode(tokenSaved: Boolean): GithubMode =
-    GithubMode.entries.find { it.value == github }
-        ?: when {
-            agent.access.github -> GithubMode.Shared
-            tokenSaved -> GithubMode.Dedicated
-            else -> GithubMode.None
-        }
+    when (github) {
+        GithubMode.Shared.value -> GithubMode.Shared
+        GithubMode.Dedicated.value -> GithubMode.Dedicated
+        GithubMode.None.value ->
+            if (tokenSaved && !removeToken) GithubMode.Dedicated else GithubMode.None
+        else ->
+            when {
+                agent.access.github -> GithubMode.Shared
+                tokenSaved -> GithubMode.Dedicated
+                else -> GithubMode.None
+            }
+    }
 
 /** The agent as it will be sent: parsed time limit and the GitHub choice applied. */
 fun AgentDraft.resolved(tokenSaved: Boolean): Agent {
@@ -176,7 +213,7 @@ fun AgentDraft.resolved(tokenSaved: Boolean): Agent {
 fun AgentDraft.tokenChange(tokenSaved: Boolean, newToken: String): String? =
     when (githubMode(tokenSaved)) {
         GithubMode.Dedicated -> newToken.trim().takeIf { it.isNotEmpty() }
-        GithubMode.None -> "".takeIf { tokenSaved }
+        GithubMode.None -> "".takeIf { tokenSaved && removeToken }
         GithubMode.Shared -> null
     }
 
@@ -191,7 +228,8 @@ fun profileChanged(base: Agent, edited: Agent): Boolean =
  * The draft once its profile is saved: the saved agent, keeping the GitHub choice so a token that
  * failed to save stays pending and the next save only retries it, from the new revision.
  */
-fun AgentDraft.afterProfileSaved(saved: Agent) = AgentDraft(saved, github = github)
+fun AgentDraft.afterProfileSaved(saved: Agent) =
+    AgentDraft(saved, github = github, removeToken = removeToken)
 
 /** The section of every unsaved change, once per changed setting. */
 fun agentChanges(
@@ -474,7 +512,7 @@ fun agentIssues(agent: Agent, resources: AgentResources): List<AgentIssue> = bui
             if (resources.projects.none { it.id == id })
                 add(AgentIssue(AgentSection.Projects, "Un projet sélectionné n’existe plus."))
         }
-        if (resources.skills.isNotEmpty())
+        if (resources.skillsLoaded)
             access.skills.orEmpty().forEach { key ->
                 if (resources.skills.none { skillKey(it) == key })
                     add(
@@ -851,7 +889,11 @@ fun AgentDraft.rebased(base: Agent, theirs: Agent): AgentDraft {
  * back so a concurrent save is refused instead of overwritten.
  */
 fun agentSaveBody(agent: Agent, reapprove: List<String> = emptyList()): JsonObject {
-    val fields = wireJson.encodeToJsonElement(agent).jsonObject.toMutableMap()
+    val fields =
+        wireJson
+            .encodeToJsonElement(agent.copy(access = agent.access.withGrantedTools()))
+            .jsonObject
+            .toMutableMap()
     fields.remove("avatar")
     fields.remove("revision")
     if (agent.revision.isNotBlank()) fields["revision"] = JsonPrimitive(agent.revision)

@@ -24,6 +24,7 @@ import {
 import { onBeforeRouteLeave, useRoute, useRouter } from 'vue-router'
 import { providers as codingAgents } from '../../../../packages/contracts/accounts'
 import { MAIN_AGENT_ID } from '../../../../packages/contracts/constants'
+import { LOCAL_NODE_ID } from '../../../../packages/contracts/nodes'
 import {
   alwaysAvailable,
   changes,
@@ -41,6 +42,7 @@ import {
   restrictedGithubMode,
   reviewLines,
   sandboxOptions,
+  savedDraft,
   selectionSummary,
   skillKey,
   skillLabel,
@@ -515,7 +517,7 @@ function body(reapprove: string[] = []) {
   // Also set once a new agent exists: a recovery update must not overwrite another client's change.
   const revision = agent.value?.revision
   return {
-    ...draft.value,
+    ...savedDraft(draft.value),
     ...(revision ? { revision } : {}),
     ...(reapprove.length ? { reapproveDelegations: reapprove } : {}),
   }
@@ -1092,6 +1094,11 @@ const errorCount = computed(() => Object.keys(fieldErrors.value).length)
               <p class="text-sm">
                 Plugins could not be loaded, so this agent’s plugin access cannot be shown or changed. {{ catalogError }}
               </p>
+              <ul v-if="draft.plugins.length" class="grid gap-1 text-sm text-muted" aria-label="Held plugin access">
+                <li v-for="grant in draft.plugins" :key="grant">
+                  Granted instance {{ grant.slice(0, 8) }}…
+                </li>
+              </ul>
               <div>
                 <UiButton size="small" :disabled="catalogLoading" @click="retryCatalog">
                   {{ catalogLoading ? 'Loading…' : 'Try again' }}
@@ -1116,6 +1123,20 @@ const errorCount = computed(() => Object.keys(fieldErrors.value).length)
               <p class="text-sm">
                 Nodes could not be loaded, so this agent’s node access cannot be shown or changed. {{ nodesError }}
               </p>
+              <ul class="grid gap-1 text-sm text-muted" aria-label="Held node access">
+                <li v-if="access.nodes === null">
+                  Can run on all nodes, including future
+                </li>
+                <li v-for="node in access.nodes ?? []" :key="`run-${node}`">
+                  Can run on {{ node === LOCAL_NODE_ID ? 'the current runner' : `node ${node.slice(0, 8)}…` }}
+                </li>
+                <li v-if="access.nodes?.length === 0">
+                  Cannot run on any node
+                </li>
+                <li v-for="node in draft.exclusiveNodes" :key="`exclusive-${node}`">
+                  Can reserve {{ node === LOCAL_NODE_ID ? 'the current runner' : `node ${node.slice(0, 8)}…` }} exclusively
+                </li>
+              </ul>
               <div>
                 <UiButton size="small" :disabled="nodesLoading" @click="retryNodes">
                   {{ nodesLoading ? 'Loading…' : 'Try again' }}
