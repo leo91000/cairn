@@ -38,7 +38,13 @@ presence in that node's trusted-person list. Wildcards, tags, installation
 membership and an agent name never grant native execution by themselves.
 
 Authenticated human requests record their Cairn account identity after input
-validation. A Firecracker coordinator with installation-management permission can
+validation, in the same transaction as the accepted directing action. Admission
+preflight does not persist provenance. Stop, cancel and pause controls retain
+ordinary installation management authorization even when native admission is
+revoked or authority is unavailable; they do not add directing provenance.
+Resuming and unpausing still require current native admission.
+
+A Firecracker coordinator with installation-management permission can
 delegate to a selected native agent. Its authenticated MCP grant supplies the
 parent run identity. Descendants inherit the originating people and a node
 ceiling; they cannot enlarge either. Current parent permissions, cancellation,
@@ -96,8 +102,9 @@ each attempt; the working skill copy is not treated as the authoritative bundle.
 `native-files-v1` is a versioned file stream, divided into the existing immutable
 4 MiB hash-verified blocks and published with the existing encrypted/compressed
 S3 representation. It is never mounted as an ext4 image. Checkpoints require the
-workload to stop. Final publication is attempted before handing the execution
-slot to the next turn. Active status reports local dirty work rather than claiming
+workload to stop. Final publication is requested durably and attempted for every
+fenced native turn, including failure, cancellation and pause, before handing the
+execution slot to the next turn. Upload failure retains demand for background retry. Active status reports local dirty work rather than claiming
 a live filesystem scan is a coherent backup.
 
 Persist workspaces, outputs, coding-engine sessions and ordinary user-installed

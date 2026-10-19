@@ -246,7 +246,7 @@ pub fn allows(db: &Db<'_>, run: &Value, node: &Value) -> Result<bool> {
             .unwrap_or_default();
         if !parent["cancelRequestedAt"].is_null()
             || policy(&current)["installation"] != true
-            || !crate::service::covers(&current, &parent["snapshot"]["agent"])
+            || !crate::installation_mcp::agent_allowed(&current, &parent["snapshot"]["agent"])
         {
             return Ok(false);
         }
@@ -377,6 +377,57 @@ pub(crate) fn authorize_chat(db: &Db<'_>, chat: &mut Value, source: &Origin) -> 
     Ok(())
 }
 
+/// Commit a directing control's provenance in the same transaction as its effect.
+pub(crate) fn authorize_chat_in(db: &Db<'_>, id: &str, source: &Origin) -> Result<()> {
+    let mut chat = crate::error::required(db.get("chats", id)?, "Chat not found")?;
+    authorize_chat(db, &mut chat, source)?;
+    db.put("chats", &chat)?;
+    Ok(())
+}
+
+pub(crate) fn chat_authorization(
+    id: &str,
+) -> impl Fn(&Db<'_>) -> Result<()> + Clone + Send + 'static {
+    let (id, source) = (id.to_owned(), origin());
+    move |db| authorize_chat_in(db, &id, &source)
+}
+
+/// Task runs have the same retained caller and delegation bounds as chat runs.
+/// This read-only grant can also constrain destination selection before a move.
+pub(crate) fn run_grant(db: &Db<'_>, run: &Value, source: &Origin) -> Result<Value> {
+    let chat = crate::chats::chat_for_run(db, text(run, "id"))?.unwrap_or_else(|| {
+        let mut record = run.clone();
+        record["agentId"] = crate::nodes::run_agent(run).into();
+        record["runId"] = run["id"].clone();
+        record
+    });
+    chat_grant(db, &chat, source)
+}
+
+pub(crate) fn authorize_run_in(db: &Db<'_>, id: &str, source: &Origin) -> Result<()> {
+    let run = crate::error::required(db.run(id)?, "Run not found")?;
+    let grant = run_grant(db, &run, source)?;
+    if let Some(mut chat) = crate::chats::chat_for_run(db, id)? {
+        apply(&mut chat, &grant);
+        db.put("chats", &chat)?;
+        if let Some(current) = chat["runId"].as_str()
+            && current != id
+            && db.run(current)?.is_some()
+        {
+            db.patch_run(current, &grant)?;
+        }
+    }
+    db.patch_run(id, &grant)?;
+    Ok(())
+}
+
+pub(crate) fn run_authorization(
+    id: &str,
+) -> impl Fn(&Db<'_>) -> Result<()> + Clone + Send + 'static {
+    let (id, source) = (id.to_owned(), origin());
+    move |db| authorize_run_in(db, &id, &source)
+}
+
 pub async fn refresh(s: &Service) -> Result<()> {
     let recent = s.store.kv("native-authority").await?.is_some_and(|value| {
         value["observedAt"].as_i64().is_some_and(|at| {
@@ -411,6 +462,8 @@ pub async fn refresh_chat(s: &Service, chat: &str) -> Result<()> {
 
 /// Cover resume, retries, question responses and other mutation routes, including
 /// routes which reuse a previously authorized conversation rather than queueing one.
+/// This admission preflight is read-only. Accepted effects record provenance in
+/// their own transaction so invalid or unsupported requests never acquire it.
 pub async fn authorize_request(s: &Service, input: &crate::http::Input) -> Result<()> {
     if matches!(input.method.as_str(), "GET" | "HEAD" | "DELETE") {
         return Ok(());
@@ -420,6 +473,15 @@ pub async fn authorize_request(s: &Service, input: &crate::http::Input) -> Resul
         .trim_start_matches("/api/")
         .split('/')
         .collect::<Vec<_>>();
+    let reduces_execution = input.method == "POST"
+        && match parts.as_slice() {
+            ["runs", _, "cancel" | "cleanup"] | ["chats", _, "stop"] => true,
+            ["chats", _, "pause"] => input.body["paused"] == true,
+            _ => false,
+        };
+    if reduces_execution {
+        return Ok(());
+    }
     let agent = match parts.as_slice() {
         ["chats", id, ..] => {
             let chat = s.get("chats", id).await?;
@@ -443,21 +505,21 @@ pub async fn authorize_request(s: &Service, input: &crate::http::Input) -> Resul
         .as_ref()
         .filter(|identity| identity.mcp_scopes.is_none())
         .map(|identity| identity.account_id.clone());
-    let target = match parts.as_slice() {
-        ["chats", id, ..] => Some((*id).to_owned()),
-        ["runs", id, ..] | ["nodes", "placement", id, ..] => {
-            s.store.run(id).await?["chatId"].as_str().map(str::to_owned)
-        }
-        _ => None,
+    let (target, chat_target) = match parts.as_slice() {
+        ["chats", id, ..] => ((*id).to_owned(), true),
+        ["runs", id, ..] | ["nodes", "placement", id, ..] => ((*id).to_owned(), false),
+        _ => return Ok(()),
     };
     s.store
-        .transaction(move |db| {
+        .read(move |db| {
             let origin = caller.map_or(Origin::Unknown, Origin::Human);
             authorize_origin(db, &agent, &origin)?;
-            if let Some(id) = target {
-                let mut chat = crate::error::required(db.get("chats", &id)?, "Chat not found")?;
-                authorize_chat(db, &mut chat, &origin)?;
-                db.put("chats", &chat)?;
+            if chat_target {
+                let chat = crate::error::required(db.get("chats", &target)?, "Chat not found")?;
+                chat_grant(db, &chat, &origin)?;
+            } else {
+                let run = crate::error::required(db.run(&target)?, "Run not found")?;
+                run_grant(db, &run, &origin)?;
             }
             Ok(())
         })

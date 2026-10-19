@@ -503,8 +503,17 @@ pub async fn admin(s: &Service, input: &Input) -> Result<Value> {
     }
     match (input.method.as_str(), segments.as_slice()) {
         ("GET" | "PUT", ["nodes", "placement", run]) => {
-            let selection = (input.method == "PUT").then(|| input.body.clone());
-            placement::configure(s, run, selection).await
+            if input.method == "GET" {
+                placement::configure(s, run, None).await
+            } else {
+                placement::configure_authorized(
+                    s,
+                    run,
+                    Some(input.body.clone()),
+                    crate::native::policy::run_authorization(run),
+                )
+                .await
+            }
         }
         ("POST", ["nodes", "placement", run, "move"]) => {
             crate::validation::uuid(run)?;

@@ -1633,7 +1633,7 @@ fn publication_due(
     let requested = run["backup"]["requestedRevision"].as_u64().unwrap_or(0);
     let acknowledged = run["backup"]["acknowledgedRevision"].as_u64().unwrap_or(0);
     protected(run)
-        && (run["sessionId"].is_string() || on_demand)
+        && (run["sessionId"].is_string() || on_demand || requested > acknowledged)
         && (!run["moveRequest"].is_object() || requested > acknowledged)
         && !synchronized
         && since_last_ms
@@ -1764,6 +1764,28 @@ mod capture_policy_tests {
         run["moveRequest"] = json!({ "idle": false });
         assert_eq!(snapshot_request(&run, false)["consistency"], "filesystem");
         assert_eq!(snapshot_request(&run, false)["baseline"], "previous");
+    }
+
+    #[test]
+    fn requested_native_work_retries_without_an_engine_session() {
+        for status in ["failed", "cancelled", "queued"] {
+            let mut run = json!({
+                "isolated": true,
+                "status": status,
+                "storage": { "mode": "native", "dirtyBytes": 4096 },
+                "backup": {
+                    "requestedRevision": 1,
+                    "acknowledgedRevision": 0,
+                    "status": "error",
+                },
+            });
+            assert!(!publication_due(&run, 4999, 60_000, 0));
+            assert!(publication_due(&run, 5000, 60_000, 0), "{status}");
+            assert!(!publication_due(&run, 5000, 60_000, 1));
+            assert!(publication_due(&run, retry_delay_ms(1), 60_000, 1));
+            run["backup"]["acknowledgedRevision"] = 1.into();
+            assert!(!publication_due(&run, 60_000, 60_000, 0));
+        }
     }
 
     #[test]

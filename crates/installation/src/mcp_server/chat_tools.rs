@@ -162,31 +162,27 @@ pub(super) async fn invoke(
         crate::native::policy::refresh_chat(s, text(&args, "chatId")).await?;
     }
     let management = management_authorization(bearer);
-    if control {
-        let (check, id, source) = (
-            management.clone(),
-            text(&args, "chatId").to_owned(),
-            origin.clone(),
-        );
-        s.store
-            .transaction(move |db| {
-                check(db)?;
-                let mut chat = required(db.get("chats", &id)?, "Chat not found")?;
-                crate::native::policy::authorize_chat(db, &mut chat, &source)?;
-                db.put("chats", &chat)?;
-                Ok(())
-            })
-            .await?;
-    }
     let control_id = control.then(|| text(&args, "chatId").to_owned());
+    let commit_id = control_id.clone();
     let control_origin = origin.clone();
-    let authorize = move |db: &Db<'_>| {
+    let authorize = move |db: &Db<'_>| -> Result<()> {
         management(db)?;
         if let Some(id) = &control_id {
             let chat = required(db.get("chats", id)?, "Chat not found")?;
             crate::native::policy::chat_grant(db, &chat, &control_origin)?;
         }
         Ok(())
+    };
+    let commit_authority = {
+        let check = authorize.clone();
+        let source = origin.clone();
+        move |db: &Db<'_>| -> Result<()> {
+            check(db)?;
+            if let Some(id) = &commit_id {
+                crate::native::policy::authorize_chat_in(db, id, &source)?;
+            }
+            Ok(())
+        }
     };
     if matches!(
         name,
@@ -218,7 +214,7 @@ pub(super) async fn invoke(
     }
     if name == "restore_chat" {
         return s
-            .chat_restore_authorized(text(&args, "chatId"), authorize)
+            .chat_restore_authorized(text(&args, "chatId"), commit_authority)
             .await;
     }
     if name == "resume_chat" {
@@ -233,7 +229,10 @@ pub(super) async fn invoke(
                 required(chat["runId"].as_str().map(str::to_owned), "Run not found")
             })
             .await?;
-        return s.worker.resume_authorized(s, &run_id, authorize).await;
+        return s
+            .worker
+            .resume_authorized(s, &run_id, commit_authority)
+            .await;
     }
     if name == "answer_chat_question" {
         return s
@@ -241,19 +240,23 @@ pub(super) async fn invoke(
                 text(&args, "chatId"),
                 text(&args, "questionId"),
                 args["answer"].clone(),
-                authorize,
+                commit_authority,
             )
             .await;
     }
     if name == "delete_chat" {
         return s
-            .chat_trash_authorized(text(&args, "chatId"), args["confirm"] == true, authorize)
+            .chat_trash_authorized(
+                text(&args, "chatId"),
+                args["confirm"] == true,
+                commit_authority,
+            )
             .await;
     }
     if name == "stop_chat" {
         return s
             .worker
-            .stop_chat_authorized(s, text(&args, "chatId"), authorize)
+            .stop_chat_authorized(s, text(&args, "chatId"), commit_authority)
             .await;
     }
 
@@ -268,7 +271,7 @@ pub(super) async fn invoke(
     let result = s
         .store
         .transaction(move |db| {
-            authorize(db)?;
+            commit_authority(db)?;
             let id = text(&args, "chatId");
             match name.as_str() {
                 "restart_chat_session" => {

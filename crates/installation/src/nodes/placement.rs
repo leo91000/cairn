@@ -637,10 +637,25 @@ struct Selection {
 
 /// Owner controls still obey the selected agent's current node grants.
 pub async fn configure(s: &Service, run: &str, input: Option<Value>) -> Result<Value> {
+    configure_authorized(s, run, input, |_| Ok(())).await
+}
+
+pub(crate) async fn configure_authorized<F>(
+    s: &Service,
+    run: &str,
+    input: Option<Value>,
+    authorize: F,
+) -> Result<Value>
+where
+    F: FnOnce(&Db<'_>) -> Result<()> + Send + 'static,
+{
     crate::validation::uuid(run)?;
     let run = run.to_owned();
     s.store
-        .transaction(move |db| configure_in(db, &run, input))
+        .transaction(move |db| {
+            authorize(db)?;
+            configure_in(db, &run, input)
+        })
         .await
 }
 

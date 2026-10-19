@@ -187,6 +187,17 @@ async fn requested(s: &Service, run: &Value, args: &Value, by_agent: bool) -> Re
         return Err(Error::bad("Capacity wait exceeds the configured maximum."));
     }
     validate_destination(args)?;
+    let source = (!by_agent).then(crate::native::policy::origin);
+    let mut proposed = run.clone();
+    if let Some(source) = &source {
+        let (record, source) = (run.clone(), source.clone());
+        let grant = s
+            .store
+            .read(move |db| crate::native::policy::run_grant(db, &record, &source))
+            .await?;
+        crate::native::policy::apply(&mut proposed, &grant);
+    }
+    let run = &proposed;
     let run_id = text(run, "id");
     if run["moveRequest"].is_object() {
         return Err(Error::conflict("A movement is already pending."));
@@ -225,7 +236,7 @@ async fn requested(s: &Service, run: &Value, args: &Value, by_agent: bool) -> Re
     } else {
         RunStatus::Running
     };
-    if let Err(error) = record_request(s, run_id, move_request, idle, expected).await {
+    if let Err(error) = record_request(s, run_id, move_request, idle, expected, source).await {
         super::placement::release(s, &reservation).await?;
         return Err(error);
     }
@@ -296,6 +307,7 @@ async fn record_request(
     move_request: Value,
     idle: bool,
     expected: RunStatus,
+    source: Option<crate::native::policy::Origin>,
 ) -> Result<()> {
     let owner = run_id.to_owned();
     s.store
@@ -311,6 +323,20 @@ async fn record_request(
                 return Err(Error::conflict(
                     "Conversation changed while reserving capacity.",
                 ));
+            }
+            if let Some(source) = source {
+                crate::native::policy::authorize_run_in(db, &owner, &source)?;
+                let directed = db.run(&owner)?.unwrap_or_default();
+                if crate::native::policy::native(&directed["snapshot"]["agent"]) {
+                    let node = db
+                        .get("nodes", text(&move_request, "nodeId"))?
+                        .unwrap_or_default();
+                    if !crate::native::policy::allows(db, &directed, &node)? {
+                        return Err(Error::forbidden(
+                            "Destination native authorization changed.",
+                        ));
+                    }
+                }
             }
             let mut patch = json!({
                 "movementError": null,
@@ -439,7 +465,7 @@ pub async fn queue_capacity_move(s: &Service, run: &Value) -> Result<bool> {
         required_tags: None,
         backup_id: None,
     })?;
-    if let Err(error) = record_request(s, run_id, movement, false, RunStatus::Queued).await {
+    if let Err(error) = record_request(s, run_id, movement, false, RunStatus::Queued, None).await {
         super::placement::release(s, &reservation).await?;
         return Err(error);
     }

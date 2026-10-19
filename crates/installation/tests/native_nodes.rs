@@ -99,7 +99,22 @@ impl Fixture {
         path: &str,
         body: Value,
     ) -> (StatusCode, Value) {
-        let request = session
+        self.call_as(session, method, path, body, false).await
+    }
+
+    async fn owner_call(&self, method: &str, path: &str, body: Value) -> (StatusCode, Value) {
+        self.call_as(&self.other, method, path, body, true).await
+    }
+
+    async fn call_as(
+        &self,
+        session: &RelayContext,
+        method: &str,
+        path: &str,
+        body: Value,
+        owner: bool,
+    ) -> (StatusCode, Value) {
+        let mut request = session
             .authorize(
                 Request::builder()
                     .method(method)
@@ -109,9 +124,49 @@ impl Fixture {
             .header("content-type", "application/json")
             .body(Body::from(body.to_string()))
             .unwrap();
+        if owner {
+            request
+                .extensions_mut()
+                .insert(auth::InstallationIdentity::trusted(
+                    auth::InstallationRole::Owner,
+                    OTHER,
+                ));
+        }
         let response = common::send(&self.router, request).await;
         let status = response.status();
         (status, read_json(response).await)
+    }
+
+    async fn conversation(&self) -> (Value, Value) {
+        let (status, chat) = self
+            .call(
+                &self.trusted,
+                "POST",
+                "/api/chats",
+                json!({ "agentId": self.agent["id"] }),
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK, "{chat}");
+        let chat_id = chat["id"].as_str().unwrap();
+        let (status, message) = self
+            .call(
+                &self.trusted,
+                "POST",
+                &format!("/api/chats/{chat_id}/messages"),
+                json!({ "id": id(), "text": "Build the project" }),
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK, "{message}");
+        self.service.chat_tick(&HashSet::new()).await.unwrap();
+        let chat = self.service.get("chats", chat_id).await.unwrap();
+        let run = self
+            .service
+            .store
+            .run(chat["runId"].as_str().unwrap())
+            .await
+            .unwrap();
+        assert_eq!(run["nativePrincipals"], json!([TRUSTED]));
+        (chat, run)
     }
 
     fn run(&self) -> Value {
@@ -126,6 +181,285 @@ impl Fixture {
             "nativeProvenanceUnknown": false,
             "snapshot": { "agent": self.agent },
         })
+    }
+}
+
+#[tokio::test]
+async fn rejected_native_mutations_do_not_become_historical_directors() {
+    let f = Fixture::new().await;
+    let (chat, run) = f.conversation().await;
+    let (chat_id, run_id) = (chat["id"].as_str().unwrap(), run["id"].as_str().unwrap());
+    let mut node = f.node.clone();
+    node["nativeAccounts"] = json!([TRUSTED, OTHER]);
+    f.service.store.put("nodes", node.clone()).await.unwrap();
+    let mutations = [
+        (
+            "POST",
+            format!("/api/chats/{chat_id}/messages"),
+            json!({ "id": "invalid", "text": "Rejected" }),
+            StatusCode::BAD_REQUEST,
+        ),
+        (
+            "POST",
+            format!("/api/chats/{chat_id}/messages"),
+            json!({ "id": id(), "text": "x".repeat(50_001) }),
+            StatusCode::BAD_REQUEST,
+        ),
+        (
+            "POST",
+            format!("/api/chats/{chat_id}/unsupported"),
+            json!({}),
+            StatusCode::NOT_FOUND,
+        ),
+        (
+            "POST",
+            format!("/api/runs/{run_id}/resume"),
+            json!({}),
+            StatusCode::CONFLICT,
+        ),
+        (
+            "POST",
+            format!("/api/chats/{chat_id}/new-session"),
+            json!({ "confirm": false }),
+            StatusCode::CONFLICT,
+        ),
+        (
+            "POST",
+            format!("/api/chats/{chat_id}/restore"),
+            json!({}),
+            StatusCode::CONFLICT,
+        ),
+        (
+            "POST",
+            format!("/api/chats/{chat_id}/questions/{}/cancel", id()),
+            json!({}),
+            StatusCode::NOT_FOUND,
+        ),
+        (
+            "PUT",
+            format!("/api/nodes/placement/{run_id}"),
+            json!({ "unsupported": true }),
+            StatusCode::BAD_REQUEST,
+        ),
+        (
+            "POST",
+            format!("/api/nodes/placement/{run_id}/move"),
+            json!({ "nodeId": node["id"], "cpu": 1 }),
+            StatusCode::BAD_REQUEST,
+        ),
+    ];
+    for (method, path, body, expected) in mutations {
+        let (status, response) = f.owner_call(method, &path, body).await;
+        assert_eq!(status, expected, "{method} {path}: {response}");
+        let current_chat = f.service.get("chats", chat_id).await.unwrap();
+        let current_run = f.service.store.run(run_id).await.unwrap();
+        for key in [
+            "nativePrincipals",
+            "nativeAuthorityNodes",
+            "nativeParentRunId",
+            "nativeProvenanceUnknown",
+        ] {
+            assert_eq!(current_chat[key], chat[key], "{path}: chat {key}");
+            assert_eq!(current_run[key], run[key], "{path}: run {key}");
+        }
+    }
+
+    // The MCP control path must also keep rejected resumes out of provenance.
+    let director = f
+        .service
+        .agent(
+            json!({ "name": "Other director", "access": { "installation": true } }),
+            None,
+        )
+        .await
+        .unwrap();
+    let mut parent = f.run();
+    parent["snapshot"]["agent"] = director;
+    parent["status"] = "running".into();
+    parent["nativePrincipals"] = json!([OTHER]);
+    common::add_run(&f.service.store, &parent).await;
+    let configuration = f
+        .service
+        .mcps
+        .run_configuration(&f.service, &parent)
+        .await
+        .unwrap();
+    let response = delegated_call(
+        &f,
+        &configuration,
+        "resume_chat",
+        json!({ "chatId": chat_id }),
+    )
+    .await;
+    assert_eq!(response["result"]["isError"], true, "{response}");
+    let current_chat = f.service.get("chats", chat_id).await.unwrap();
+    let current_run = f.service.store.run(run_id).await.unwrap();
+    for key in [
+        "nativePrincipals",
+        "nativeAuthorityNodes",
+        "nativeParentRunId",
+        "nativeProvenanceUnknown",
+    ] {
+        assert_eq!(current_chat[key], chat[key], "MCP chat {key}");
+        assert_eq!(current_run[key], run[key], "MCP run {key}");
+    }
+
+    // Revoking a rejected caller must leave the original person's work authorized.
+    node["nativeAccounts"] = json!([TRUSTED]);
+    f.service.store.put("nodes", node.clone()).await.unwrap();
+    let record = current_run;
+    let target = node.clone();
+    assert!(
+        f.service
+            .store
+            .read(move |db| policy::allows(db, &record, &target))
+            .await
+            .unwrap()
+    );
+
+    // A successful unpause records the accepted director in the same effect.
+    node["nativeAccounts"] = json!([TRUSTED, OTHER]);
+    f.service.store.put("nodes", node.clone()).await.unwrap();
+    f.service.chat_pause(chat_id, true).await.unwrap();
+    let (status, response) = f
+        .owner_call(
+            "POST",
+            &format!("/api/chats/{chat_id}/pause"),
+            json!({ "paused": false }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{response}");
+    let directed = f.service.store.run(run_id).await.unwrap();
+    assert_eq!(directed["nativePrincipals"], json!([TRUSTED, OTHER]));
+    assert_eq!(response["nativePrincipals"], directed["nativePrincipals"]);
+    node["nativeAccounts"] = json!([TRUSTED]);
+    f.service.store.put("nodes", node.clone()).await.unwrap();
+    assert!(
+        !f.service
+            .store
+            .read(move |db| policy::allows(db, &directed, &node))
+            .await
+            .unwrap()
+    );
+}
+
+#[tokio::test]
+async fn native_stop_controls_remain_available_without_host_admission() {
+    for action in ["pause", "cancel", "stop"] {
+        let f = Fixture::new().await;
+        let (mut chat, run) = f.conversation().await;
+        let chat_id = chat["id"].as_str().unwrap().to_owned();
+        let run_id = run["id"].as_str().unwrap().to_owned();
+        if action == "stop" {
+            f.service
+                .store
+                .patch_run(&run_id, json!({ "status": "succeeded" }))
+                .await
+                .unwrap();
+            chat["wakeup"] = json!({ "at": now() + 60_000, "reason": "Saved continuation" });
+            f.service.store.put("chats", chat).await.unwrap();
+        }
+        let mut node = f.node.clone();
+        node["nativeEnabled"] = false.into();
+        node["nativeAccounts"] = json!([]);
+        f.service.store.put("nodes", node).await.unwrap();
+        // The synthetic Beacon has no native-authority endpoint. A refresh
+        // would fail; execution-reducing controls must not depend on it.
+        f.service
+            .store
+            .set(
+                "native-authority",
+                json!({ "observedAt": 0, "accounts": {} }),
+                None,
+            )
+            .await
+            .unwrap();
+        let path = if action == "cancel" {
+            format!("/api/runs/{run_id}/cancel")
+        } else {
+            format!("/api/chats/{chat_id}/{action}")
+        };
+        let (status, response) = f
+            .call(&f.other, "POST", &path, json!({ "paused": true }))
+            .await;
+        assert_eq!(status, StatusCode::OK, "{action}: {response}");
+        let chat = f.service.get("chats", &chat_id).await.unwrap();
+        let run = f.service.store.run(&run_id).await.unwrap();
+        assert_eq!(chat["nativePrincipals"], json!([TRUSTED]));
+        assert_eq!(run["nativePrincipals"], json!([TRUSTED]));
+        if action != "cancel" {
+            assert_eq!(chat["paused"], true);
+        }
+        if action == "stop" {
+            assert!(chat["wakeup"].is_null());
+        }
+        if action == "cancel" {
+            assert_eq!(run["status"], "cancelled");
+        }
+        if action == "pause" {
+            let (status, response) = f
+                .call(&f.other, "POST", &path, json!({ "paused": false }))
+                .await;
+            assert_eq!(
+                status,
+                StatusCode::FORBIDDEN,
+                "unpause must still fail closed: {response}"
+            );
+            assert_eq!(
+                f.service.get("chats", &chat_id).await.unwrap()["paused"],
+                true
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn accepted_native_run_controls_retain_the_director_on_the_chat_and_run() {
+    for action in ["resume", "placement"] {
+        let f = Fixture::new().await;
+        let (chat, run) = f.conversation().await;
+        let (chat_id, run_id) = (chat["id"].as_str().unwrap(), run["id"].as_str().unwrap());
+        assert_eq!(chat["runId"], run["id"]);
+        let mut node = f.node.clone();
+        node["nativeAccounts"] = json!([TRUSTED, OTHER]);
+        f.service.store.put("nodes", node.clone()).await.unwrap();
+        let (method, path, body) = if action == "resume" {
+            f.service
+                .store
+                .patch_run(run_id, json!({ "status": "cancelled" }))
+                .await
+                .unwrap();
+            ("POST", format!("/api/runs/{run_id}/resume"), json!({}))
+        } else {
+            (
+                "PUT",
+                format!("/api/nodes/placement/{run_id}"),
+                json!({ "pinnedNodeId": node["id"] }),
+            )
+        };
+        let (status, response) = f.owner_call(method, &path, body).await;
+        assert_eq!(status, StatusCode::OK, "{action}: {response}");
+        let chat = f.service.get("chats", chat_id).await.unwrap();
+        let run = f.service.store.run(run_id).await.unwrap();
+        assert_eq!(
+            chat["nativePrincipals"],
+            json!([TRUSTED, OTHER]),
+            "{action}"
+        );
+        assert_eq!(
+            run["nativePrincipals"], chat["nativePrincipals"],
+            "{action}"
+        );
+        node["nativeAccounts"] = json!([TRUSTED]);
+        f.service.store.put("nodes", node.clone()).await.unwrap();
+        assert!(
+            !f.service
+                .store
+                .read(move |db| policy::allows(db, &run, &node))
+                .await
+                .unwrap(),
+            "{action}"
+        );
     }
 }
 
@@ -576,6 +910,90 @@ async fn unattributed_vm_work_cannot_acquire_native_access_through_delegation() 
     let f = Fixture::new().await;
     let (_, response) = delegate(&f, false).await;
     assert_eq!(response["result"]["isError"], true, "{response}");
+}
+
+#[tokio::test]
+async fn parent_node_grant_reductions_revoke_existing_native_delegation() {
+    let f = Fixture::new().await;
+    let vm_nodes = [id(), id()];
+    for node_id in &vm_nodes {
+        let mut node = f.node.clone();
+        node["id"] = node_id.clone().into();
+        node["capabilities"]["backend"] = "firecracker".into();
+        node["capabilities"]["kvm"] = true.into();
+        node["capabilities"]["fuse"] = true.into();
+        f.service.store.put("nodes", node).await.unwrap();
+    }
+    let agent = f
+        .service
+        .agent(
+            json!({
+                "name": "Bounded coordinator", "access": { "installation": true, "nodes": vm_nodes }
+            }),
+            None,
+        )
+        .await
+        .unwrap();
+    let mut parent = f.run();
+    parent["snapshot"]["agent"] = agent.clone();
+    parent["status"] = "running".into();
+    common::add_run(&f.service.store, &parent).await;
+    let configuration = f
+        .service
+        .mcps
+        .run_configuration(&f.service, &parent)
+        .await
+        .unwrap();
+    let response = delegated_call(
+        &f,
+        &configuration,
+        "create_chat",
+        json!({ "agentId": f.agent["id"] }),
+    )
+    .await;
+    assert_ne!(response["result"]["isError"], true, "{response}");
+    let chat_id = response["result"]["structuredContent"]["result"]["id"]
+        .as_str()
+        .unwrap();
+    let response = delegated_call(
+        &f,
+        &configuration,
+        "send_chat_message",
+        json!({
+            "chatId": chat_id, "message": { "id": id(), "text": "Run native work" }
+        }),
+    )
+    .await;
+    assert_ne!(response["result"]["isError"], true, "{response}");
+    f.service.chat_tick(&HashSet::new()).await.unwrap();
+    let chat = f.service.get("chats", chat_id).await.unwrap();
+    let child = f
+        .service
+        .store
+        .run(chat["runId"].as_str().unwrap())
+        .await
+        .unwrap();
+    assert_eq!(child["nativeParentRunId"], parent["id"]);
+
+    for (nodes, retains_grant) in [
+        (json!(vm_nodes), true),
+        (json!([vm_nodes[0], vm_nodes[1], f.node["id"]]), true),
+        (json!([vm_nodes[0]]), false),
+        (json!([vm_nodes[0], f.node["id"]]), false),
+        (json!([]), false),
+    ] {
+        let mut current = agent.clone();
+        current["access"]["nodes"] = nodes.clone();
+        f.service.store.put("agents", current).await.unwrap();
+        let (run, node) = (child.clone(), f.node.clone());
+        let existing_allowed = f
+            .service
+            .store
+            .read(move |db| policy::allows(db, &run, &node))
+            .await
+            .unwrap();
+        assert_eq!(existing_allowed, retains_grant, "parent nodes {nodes}");
+    }
 }
 
 #[tokio::test]

@@ -249,8 +249,18 @@ async fn chat_routes(s: &Arc<Service>, input: &Input, route: Route<'_>) -> Resul
                 .into()
         }
         ("DELETE", ["chats", id]) => s.chat_trash(id, confirmed).await?,
-        ("POST", ["chats", id, "new-session"]) => s.chat_new_session(id, confirmed).await?,
-        ("POST", ["chats", id, "restore"]) => s.chat_restore(id).await?,
+        ("POST", ["chats", id, "new-session"]) => {
+            s.chat_new_session_authorized(
+                id,
+                confirmed,
+                crate::native::policy::chat_authorization(id),
+            )
+            .await?
+        }
+        ("POST", ["chats", id, "restore"]) => {
+            s.chat_restore_authorized(id, crate::native::policy::chat_authorization(id))
+                .await?
+        }
         ("POST", ["chats"]) => s.chat_create(input.body.clone()).await?,
         ("GET", ["chats", id]) => chat_detail(s, id).await?,
         ("POST", ["chats", id, "messages"]) => s.chat_send(id, input.body.clone()).await?,
@@ -259,7 +269,12 @@ async fn chat_routes(s: &Arc<Service>, input: &Input, route: Route<'_>) -> Resul
         }
         ("DELETE", ["chats", id, "messages", message]) => s.chat_edit(id, message, None).await?,
         ("POST", ["chats", id, "questions", question, "cancel"]) => {
-            s.question_cancel(id, question).await?
+            s.question_cancel_authorized(
+                id,
+                question,
+                crate::native::policy::chat_authorization(id),
+            )
+            .await?
         }
         ("POST", ["chats", id, "questions", question, "answer"]) => {
             s.question_answer(id, question, input.body.clone()).await?

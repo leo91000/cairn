@@ -242,9 +242,9 @@ fn adopt_opened_projects(run: &Value, prepared: &mut Value) -> Result<()> {
 }
 
 async fn verify_project_locations(run: &Value, prepared: &Value, config: &Config) -> Result<()> {
-    let firecracker = is_firecracker(prepared);
+    let managed = is_firecracker(prepared) || prepared["backend"] == Backend::Native.as_str();
     for project in run_projects(run) {
-        if firecracker && !has_workspace(prepared, &project["id"]) {
+        if managed && !has_workspace(prepared, &project["id"]) {
             continue;
         }
         let path = Path::new(text(&project, "path"));

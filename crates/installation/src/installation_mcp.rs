@@ -39,7 +39,7 @@ pub(crate) fn authorize_in(db: &Db<'_>, bearer: &str) -> Result<Value> {
 }
 
 /// Reducing the calling agent's permissions invalidates its active grant.
-fn agent_allowed(caller: &Value, target: &Value) -> bool {
+pub(crate) fn agent_allowed(caller: &Value, target: &Value) -> bool {
     if caller["id"] != target["id"] {
         return false;
     }
