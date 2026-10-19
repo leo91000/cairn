@@ -356,17 +356,12 @@ impl Service {
         use crate::{auth::InstallationRole, plugins::requesters};
 
         let actor = match identity {
-            Some(identity) => Some(requesters::account(self, &identity.account_id).await?),
+            Some(identity) => Some(requesters::message_actor(self, &identity.account_id).await?),
             None => None,
         };
-        let owner_control =
-            if let Some(identity) = identity.filter(|i| i.role == InstallationRole::Owner) {
-                crate::relay::task_author_policy(self)
-                    .await?
-                    .is_some_and(|policy| policy.owner.account_id == identity.account_id)
-            } else {
-                false
-            };
+        // The role is supplied by the authenticated relay/direct lease. Owner
+        // control suspends personal credentials; it never supplies their proof.
+        let owner_control = identity.is_some_and(|i| i.role == InstallationRole::Owner);
 
         self.question_answer_authorized(
             chat_id,

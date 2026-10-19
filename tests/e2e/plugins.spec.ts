@@ -1934,3 +1934,75 @@ test('setup drafts load every page before resuming and discarding the last draft
   await expect(page.getByRole('button', { name: `Continue ${last.name}`, exact: true })).not.toBeVisible()
   expect((await workspace.api('/api/plugins/draft-pages/setup-drafts')).items.map((item: any) => item.id)).not.toContain(last.id)
 })
+
+for (const prepared of [false, true]) {
+  test(`uncertain ${prepared ? 'prepared' : 'active'} resource creation requires reconciliation without a second POST`, async ({ page, workspace }) => {
+    test.setTimeout(90000)
+    await useRelayForHttpMocks(page)
+    const id = `reconcile-${prepared ? 'prepared' : 'active'}`
+    const manifest = {
+      id,
+      name: 'Resource reconcile',
+      description: 'Save result verification.',
+      version: '1',
+      apiVersion: 2,
+      capabilities: ['resources'],
+      resources: [{ name: 'workspace', title: 'Workspaces', singular: 'Workspace' }],
+    }
+    const installed = await workspace.api('/api/plugins/packages', 'POST', { manifest, source: 'return {}' })
+    await workspace.api(`/api/plugins/packages/${id}/approve`, 'POST', { version: '1', digest: installed.digest })
+    const instance = await workspace.api(`/api/plugins/${id}/${prepared ? 'setup-drafts' : 'connections'}`, 'POST', { name: 'Application', ...(prepared ? {} : { enabled: true }) })
+    const root = `/plugins/${id}/${prepared ? 'setup-drafts' : 'connections'}/${instance.id}/resources/workspace`
+    let writes = 0
+    let reads = 0
+    let failRead = false
+    let committed = false
+    await page.route(`**${root}`, async (route) => {
+      if (route.request().method() === 'GET') {
+        reads++
+        if (failRead) {
+          failRead = false
+          return route.fulfill({ status: 503, json: { error: 'Synthetic read outage.' } })
+        }
+
+        return route.fallback()
+      }
+
+      if (route.request().method() !== 'POST')
+        return route.fallback()
+      writes++
+      const response = await route.fetch()
+      expect(response.ok()).toBe(true)
+      committed = true
+      await route.abort('failed')
+    })
+    await page.goto(workspacePath(`/plugins/${id}`))
+    await signIn(page)
+    if (prepared)
+      await page.getByRole('button', { name: 'Continue Application', exact: true }).click()
+    await page.getByRole('button', { name: 'Add workspace', exact: true }).click()
+    const form = page.getByRole('form', { name: 'New workspace', exact: true })
+    await form.getByLabel('Name', { exact: true }).fill('Accepted but unacknowledged')
+    const save = form.getByRole('button', { name: 'Save workspace', exact: true })
+    await save.click()
+    await expect.poll(() => committed).toBe(true)
+    await expect(form.getByRole('button', { name: 'Cancel', exact: true })).toBeEnabled()
+    expect((await workspace.api(`/api${root}`)).items).toHaveLength(1)
+    await expect(save).toBeDisabled()
+    expect(writes).toBe(1)
+    const before = reads
+    failRead = true
+    const reconcile = form.getByRole('button', { name: prepared ? 'Cancel' : 'Check save result', exact: true })
+    await reconcile.click()
+    await expect.poll(() => reads).toBeGreaterThan(before)
+    await expect(reconcile).toBeEnabled()
+    await expect(save).toBeDisabled()
+    await expect(page.getByRole('button', { name: 'Add workspace', exact: true })).toBeDisabled()
+    expect(writes).toBe(1)
+    await reconcile.click()
+    await expect(form).toHaveCount(0)
+    await expect(page.getByRole('article', { name: 'Accepted but unacknowledged', exact: true })).toHaveCount(1)
+    expect((await workspace.api(`/api${root}`)).items).toHaveLength(1)
+    expect(writes).toBe(1)
+  })
+}

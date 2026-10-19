@@ -7,6 +7,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import build.cairn.app.data.*
 import java.util.concurrent.atomic.AtomicInteger
+import kotlinx.coroutines.CancellationException
+import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.*
 
 /** Selects a management namespace explicitly; a setup never resolves a live instance. */
@@ -26,6 +28,14 @@ internal data class PluginResourceActivity(
     val pending: Boolean = false,
 )
 
+/** Only an open editor's identity is saved, rather than its resource list. */
+@Serializable
+private data class ResourceEditorTarget(
+    val id: String,
+    val collection: String,
+    val revision: String,
+)
+
 @Composable
 internal fun PluginResources(
     vm: CairnViewModel,
@@ -40,28 +50,28 @@ internal fun PluginResources(
             mutableStateOf(mapOf<String, PluginPage<PluginResource>>())
         }
     var editing by
-        remember(location.plugin, location.instance) {
-            mutableStateOf<Pair<PluginResourceCollection, PluginResource?>?>(null)
-        }
+        rememberForm<Pair<PluginResourceCollection, PluginResource?>?>(null, location.path)
     var removing by
         remember(location.plugin, location.instance) { mutableStateOf<PluginResource?>(null) }
-    var accessEditors by
-        remember(location.plugin, location.instance) { mutableStateOf(mapOf<String, Boolean>()) }
-    val accessLocked = accessEditors.values.any { it }
+    var accessEditors by rememberForm(emptyMap<String, ResourceEditorTarget>(), location.path)
+    val accessLocked = accessEditors.isNotEmpty()
     var authorizations by
         remember(location.plugin, location.instance) {
             mutableStateOf(mapOf<String, PluginAuthorizationActivity>())
         }
     var loading by remember(location.plugin, location.instance) { mutableStateOf(false) }
+    var ready by remember(location.plugin, location.instance) { mutableStateOf(false) }
     val loads = remember(location.plugin, location.instance) { AtomicInteger() }
-    fun accessBlocked(own: String) = accessEditors.any { (key, active) -> key != own && active }
-    fun accessActivity(key: String, active: Boolean) {
-        accessEditors = if (active) accessEditors + (key to true) else accessEditors - key
+    fun accessBlocked(own: String) = accessEditors.keys.any { it != own }
+    fun accessActivity(key: String, resource: PluginResource, active: Boolean) {
+        val target = ResourceEditorTarget(resource.id, resource.collection, resource.revision)
+        if (active) accessEditors = accessEditors + (key to target)
+        else if (accessEditors[key] == target) accessEditors = accessEditors - key
     }
     val oauthBusy = authorizations.values.any { it.busy }
     val oauthPending = authorizations.values.any { it.pending }
     val controlsEnabled =
-        enabled && !state.busy && !loading && !oauthBusy && !oauthPending && !accessLocked
+        enabled && ready && !state.busy && !loading && !oauthBusy && !oauthPending && !accessLocked
     LaunchedEffect(loading, oauthBusy, oauthPending, editing, removing, accessLocked) {
         stateChanged(
             PluginResourceActivity(
@@ -80,12 +90,21 @@ internal fun PluginResources(
     suspend fun load() {
         val request = loads.incrementAndGet()
         loading = true
+        ready = false
         try {
             val refreshed =
                 manifest.resources.associate { collection ->
                     // Keep the previously visible IDs so later-page consent stays composed.
                     val remaining =
                         pages[collection.name]?.items.orEmpty().map { it.id }.toMutableSet()
+                    remaining +=
+                        accessEditors.values
+                            .filter { it.collection == collection.name }
+                            .map { it.id }
+                    editing
+                        ?.takeIf { it.first.name == collection.name }
+                        ?.second
+                        ?.let { remaining += it.id }
                     val items = mutableListOf<PluginResource>()
                     var page =
                         vm.api.get<PluginPage<PluginResource>>(
@@ -103,7 +122,15 @@ internal fun PluginResources(
                     }
                     collection.name to PluginPage(items.toList(), page.nextCursor)
                 }
-            if (request == loads.get()) pages = refreshed
+            if (request == loads.get()) {
+                pages = refreshed
+                accessEditors = accessEditors.filterValues { target ->
+                    refreshed[target.collection]?.items.orEmpty().any {
+                        it.id == target.id && it.revision == target.revision
+                    }
+                }
+                ready = true
+            }
         } finally {
             if (request == loads.get()) loading = false
         }
@@ -123,13 +150,14 @@ internal fun PluginResources(
         try {
             load()
         } catch (e: Exception) {
+            if (e is CancellationException) throw e
             vm.report(e)
         }
     }
     Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
         TextButton(
             onClick = { vm.perform { load() } },
-            enabled = !state.busy && !loading && !accessLocked,
+            enabled = !state.busy && !loading && (!accessLocked || !ready),
         ) {
             Text("Actualiser les ressources")
         }
@@ -187,6 +215,7 @@ internal fun PluginResources(
                                     resource.name,
                                     resourceOperations,
                                     enabled &&
+                                        ready &&
                                         !state.busy &&
                                         !loading &&
                                         editing == null &&
@@ -195,7 +224,7 @@ internal fun PluginResources(
                                         !oauthPending &&
                                         !accessBlocked("grants/${resource.id}"),
                                     activity = { active ->
-                                        accessActivity("grants/${resource.id}", active)
+                                        accessActivity("grants/${resource.id}", resource, active)
                                     },
                                 )
                             }
@@ -208,6 +237,7 @@ internal fun PluginResources(
                                     "${location.path}/${segment(collection.name)}/${segment(resource.id)}",
                                     resource.name,
                                     enabled &&
+                                        ready &&
                                         !state.busy &&
                                         !loading &&
                                         editing == null &&
@@ -216,7 +246,7 @@ internal fun PluginResources(
                                         !oauthPending &&
                                         !accessBlocked("routes/${resource.id}"),
                                     activity = { active ->
-                                        accessActivity("routes/${resource.id}", active)
+                                        accessActivity("routes/${resource.id}", resource, active)
                                     },
                                 )
                             }
@@ -236,6 +266,7 @@ internal fun PluginResources(
                                         provider,
                                         location.setupRevision,
                                         enabled &&
+                                            ready &&
                                             !state.busy &&
                                             !loading &&
                                             editing == null &&
@@ -264,7 +295,7 @@ internal fun PluginResources(
             if (pages[collection.name]?.nextCursor != null)
                 TextButton(
                     onClick = { vm.perform { more(collection.name) } },
-                    enabled = !state.busy && !loading && !accessLocked,
+                    enabled = ready && !state.busy && !loading && !accessLocked,
                 ) {
                     Text("Voir plus · ${collection.title}")
                 }
@@ -283,17 +314,27 @@ internal fun PluginResources(
         }
     }
     editing?.let { (collection, initial) ->
-        ResourceEditor(
-            vm,
-            state,
-            location,
-            collection,
-            initial,
-            pages[collection.parent]?.items.orEmpty(),
-            close = { editing = null },
-        ) {
-            editing = null
-            load()
+        key(location.path, collection.name, initial?.id) {
+            val unchanged =
+                initial == null ||
+                    pages[collection.name]?.items.orEmpty().any {
+                        it.id == initial.id && it.revision == initial.revision
+                    }
+            ResourceEditor(
+                vm,
+                state,
+                location,
+                collection,
+                initial,
+                pages[collection.parent]?.items.orEmpty(),
+                ready = controlsEnabled && unchanged,
+                stale = ready && !unchanged,
+                reload = if (!ready && !loading) ({ vm.perform { load() } }) else null,
+                close = { editing = null },
+            ) {
+                editing = null
+                load()
+            }
         }
     }
     removing?.let { resource ->
@@ -328,60 +369,101 @@ private fun ResourceEditor(
     collection: PluginResourceCollection,
     initial: PluginResource?,
     parents: List<PluginResource>,
+    ready: Boolean,
+    stale: Boolean,
+    reload: (() -> Unit)?,
     close: () -> Unit,
     saved: suspend () -> Unit,
 ) {
-    var name by remember { mutableStateOf(initial?.name.orEmpty()) }
-    var parent by remember { mutableStateOf(initial?.parentId.orEmpty()) }
-    var enabled by remember { mutableStateOf(initial?.enabled ?: true) }
-    var values by remember {
-        mutableStateOf(
+    var name by rememberForm(initial?.name.orEmpty())
+    var parent by rememberForm(initial?.parentId.orEmpty())
+    var enabled by rememberForm(initial?.enabled ?: true)
+    val ordinaryDraft =
+        rememberPluginSettingsDraft(
+            collection.settings,
             collection.settings
                 .filter { it.type != "secret" }
-                .associate { it.key to formValue(it, initial?.settings?.get(it.key)) }
+                .associate { it.key to formValue(it, initial?.settings?.get(it.key)) },
+            "${location.path}/${collection.name}/${initial?.id.orEmpty()}@${initial?.revision.orEmpty()}@${location.setupRevision.orEmpty()}",
         )
-    }
+    var values by ordinaryDraft.state
     var secrets by remember { mutableStateOf(mapOf<String, String>()) }
+    var submitted by rememberForm(false)
+    val controls = ready && !state.busy && !submitted
+    fun reconcile() {
+        vm.perform { saved() }
+    }
     Editor(
         if (initial == null) "Nouveau · ${collection.singular}" else "Modifier ${initial.name}",
         state.busy,
         state.error,
-        close,
-        valid = name.isNotBlank() && (collection.parent == null || parent.isNotBlank()),
-        save = {
-            vm.perform {
-                api.request(
-                    if (initial == null) "POST" else "PUT",
-                    "${location.path}/${segment(collection.name)}${initial?.let { "/${segment(it.id)}" }.orEmpty()}",
-                    buildJsonObject {
-                        put("name", name.trim())
-                        put("settings", pluginSettings(collection.settings, values))
-                        put(
-                            "secrets",
-                            JsonObject(
-                                secrets
-                                    .filterValues { it.isNotBlank() }
-                                    .mapValues { JsonPrimitive(it.value.trim()) }
-                            ),
-                        )
-                        put("enabled", enabled)
-                        if (collection.parent != null) put("parentId", parent)
-                        initial?.let { put("revision", it.revision) }
-                        location.setupRevision?.let { put("setupRevision", it) }
-                    },
-                )
-                secrets = emptyMap()
-                saved()
+        {
+            if (submitted) reconcile()
+            else {
+                ordinaryDraft.discard()
+                close()
             }
         },
+        valid = controls && name.isNotBlank() && (collection.parent == null || parent.isNotBlank()),
+        save = save@{
+                if (!controls || submitted) return@save
+                vm.perform {
+                    submitted = true
+                    try {
+                        api.request(
+                            if (initial == null) "POST" else "PUT",
+                            "${location.path}/${segment(collection.name)}${initial?.let { "/${segment(it.id)}" }.orEmpty()}",
+                            buildJsonObject {
+                                put("name", name.trim())
+                                put("settings", pluginSettings(collection.settings, values))
+                                put(
+                                    "secrets",
+                                    JsonObject(
+                                        secrets
+                                            .filterValues { it.isNotBlank() }
+                                            .mapValues { JsonPrimitive(it.value.trim()) }
+                                    ),
+                                )
+                                put("enabled", enabled)
+                                if (collection.parent != null) put("parentId", parent)
+                                initial?.let { put("revision", it.revision) }
+                                location.setupRevision?.let { put("setupRevision", it) }
+                            },
+                        )
+                        secrets = emptyMap()
+                        ordinaryDraft.discard()
+                        saved()
+                    } catch (e: Exception) {
+                        if (e is ApiException && e.status == 400) submitted = false
+                        throw e
+                    }
+                }
+            },
     ) {
+        ordinaryDraft.notice?.let { FormError(it) }
+        if (stale)
+            FormError("La ressource a changé. Fermez cet éditeur puis actualisez les ressources.")
+        if (!submitted)
+            reload?.let { retry ->
+                TextButton(onClick = retry, enabled = !state.busy) {
+                    Text("Réessayer le chargement")
+                }
+            }
+        if (submitted && !state.busy) {
+            FormError(
+                "Actualisez les ressources pour vérifier la sauvegarde avant une autre modification."
+            )
+            TextButton(onClick = { reconcile() }, enabled = !state.busy) {
+                Text("Vérifier la sauvegarde")
+            }
+        }
         Field(
             "Nom · ${collection.singular}",
             name,
             { name = it },
-            enabled = !state.busy,
+            enabled = controls,
         )
-        if (collection.parent != null && !state.busy)
+        if (collection.parent != null && controls)
             Choice("Parent", parent, parents.map { it.id to it.name }) { parent = it }
         PluginFields(
             collection.settings,
@@ -390,9 +472,9 @@ private fun ResourceEditor(
             secrets,
             { key, value -> secrets = secrets + (key to value) },
             initial?.secretKeys.orEmpty(),
-            enabled = !state.busy,
+            enabled = controls,
         )
-        Toggle("Activé", enabled) { if (!state.busy) enabled = it }
+        Toggle("Activé", enabled) { if (controls) enabled = it }
     }
     DisposableEffect(Unit) { onDispose { secrets = emptyMap() } }
 }

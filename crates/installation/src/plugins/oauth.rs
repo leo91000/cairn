@@ -37,7 +37,7 @@ mod setup;
 pub(crate) use setup::activate_in as activate_setup_in;
 pub(crate) use setup::routes as setup_routes;
 
-pub(crate) use external::call;
+pub(crate) use external::{call, remove_event_receipts_in};
 
 const TTL: i64 = 600_000;
 const MAX_PENDING: i64 = 128;
@@ -561,10 +561,40 @@ async fn begin(
     let vault = s.vault.clone();
     s.store
         .transaction(move |db| {
-            if let Some(target) = setup_target { target.current(db)?; }
+            if let Some(target) = setup_target {
+                target.current(db)?;
+            }
             current(db, &pending)?;
+
+            let receipt = if let Some(person) = &pending.external {
+                let event = db.get(super::work::EVENTS, &pending.source_event)?
+                    .ok_or_else(expired)?;
+                if event["connectionId"] != pending.instance
+                    || event["authorId"] != person.subject
+                    || event["routing"] != serde_json::to_value(&person.binding)?
+                {
+                    return Err(expired());
+                }
+                let receipt = external::receipt_key(
+                    &pending.source_event,
+                    &pending.resource,
+                    &pending.provider,
+                    &person.subject,
+                );
+                if db.kv(&receipt)?.is_some() {
+                    return Err(Error::conflict(
+                        "This event already started authorization. Use a new request.",
+                    ));
+                }
+                Some(receipt)
+            } else {
+                None
+            };
+
             let previous = pending.external.as_ref()
-                .map(|person| external::flow_key(&pending.resource, &pending.provider, &person.subject))
+                .map(|person| external::flow_key(
+                    &pending.resource, &pending.provider, &person.subject,
+                ))
                 .map(|index| db.kv(&index))
                 .transpose()?
                 .flatten()
@@ -597,6 +627,18 @@ async fn begin(
                     "event": pending.source_event,
                 }), Some(pending.expires_at))?;
             }
+
+            if let Some(receipt) = receipt {
+                db.set(
+                    &receipt,
+                    &json!({
+                        "key": key,
+                        "scopes": pending.scopes,
+                    }),
+                    None,
+                )?;
+            }
+
             if pending.setup.is_some() {
                 db.set(&setup_pending_index(&pending.resource, &key), &json!(key), Some(pending.expires_at))?;
             }
@@ -1051,7 +1093,7 @@ async fn finish_pending(
                     let previous: SubjectLink = serde_json::from_value(previous)?;
                     if previous.actor != *actor {
                         let still_member = membership.grant(&previous.actor.account)
-                            .is_some_and(|grant| grant.access_id == previous.actor.access_id);
+                            .is_some_and(|grant| previous.actor.access_id.as_deref() == Some(grant.access_id.as_str()));
                         if still_member {
                             return Err(Error::conflict("This external identity is already linked to another installation account."));
                         }

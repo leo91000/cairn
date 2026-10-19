@@ -20,20 +20,21 @@ internal fun PluginResourceGrants(
     enabled: Boolean,
     activity: (Boolean) -> Unit,
 ) {
-    var opened by remember { mutableStateOf(false) }
+    var opened by rememberForm(false, path)
     var ready by remember { mutableStateOf(false) }
     var busy by remember { mutableStateOf(false) }
     var writing by remember { mutableStateOf(false) }
+    var pendingWrite by rememberForm(false, path)
     var generation by remember { mutableIntStateOf(0) }
     var pending by remember { mutableStateOf<Job?>(null) }
     var error by remember { mutableStateOf<String?>(null) }
     var rules by remember { mutableStateOf(emptyList<PluginResourceGrant>()) }
-    var adding by remember { mutableStateOf(false) }
+    var adding by rememberForm(false, path)
     var removing by remember { mutableStateOf<PluginResourceGrant?>(null) }
-    var agentId by remember { mutableStateOf("") }
-    var profile by remember { mutableStateOf<PluginAccessProfile?>(null) }
-    var overrides by remember { mutableStateOf(emptyMap<String, String>()) }
-    var limits by remember { mutableStateOf(emptyMap<String, String>()) }
+    var agentId by rememberForm("", path)
+    var profile by rememberForm<PluginAccessProfile?>(null, path)
+    var overrides by rememberForm(emptyMap<String, String>(), path)
+    var limits by rememberForm(emptyMap<String, String>(), path)
     val scope = rememberCoroutineScope()
     val scopeNames = operations.flatMap { it.scopes }.distinct()
     fun currentRule() =
@@ -66,6 +67,7 @@ internal fun PluginResourceGrants(
         if (current == generation) {
             rules = result
             ready = true
+            pendingWrite = false
         }
     }
     fun refresh() {
@@ -124,6 +126,7 @@ internal fun PluginResourceGrants(
             else buildJsonObject {}
         busy = true
         writing = true
+        pendingWrite = true
         ready = false
         error = null
         val current = ++generation
@@ -131,6 +134,7 @@ internal fun PluginResourceGrants(
             try {
                 vm.api.request(if (revoking == null) "POST" else "DELETE", target, body)
                 if (current != generation) return@launch
+                pendingWrite = false
                 writing = false
                 adding = false
                 removing = null
@@ -150,6 +154,15 @@ internal fun PluginResourceGrants(
                     pending = null
                 }
             }
+        }
+    }
+    LaunchedEffect(Unit) {
+        if (opened) {
+            activity(true)
+            if (pendingWrite) {
+                adding = false
+                error = "Actualisez les règles avant une autre modification."
+            } else refresh()
         }
     }
     DisposableEffect(Unit) {
@@ -186,7 +199,10 @@ internal fun PluginResourceGrants(
                 "Les permissions du service et les autorisations personnelles restent nécessaires.",
                 style = MaterialTheme.typography.bodySmall,
             )
-            TextButton(onClick = { refresh() }, enabled = !busy && !adding && removing == null) {
+            TextButton(
+                onClick = { refresh() },
+                enabled = !busy && (!adding || !ready) && removing == null,
+            ) {
                 Text(if (busy) "Chargement des règles…" else "Actualiser les règles")
             }
             if (ready && !adding) {
@@ -235,7 +251,7 @@ internal fun PluginResourceGrants(
                     adding = true
                 }
             }
-            if (ready && adding) {
+            if (adding) {
                 ChoiceList(
                     "Agent",
                     agentId,

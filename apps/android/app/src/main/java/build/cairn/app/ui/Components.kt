@@ -67,13 +67,14 @@ fun duration(run: Run): String =
     } ?: "—"
 
 @Composable
-inline fun <reified T : Any> rememberForm(initial: T): MutableState<T> =
+inline fun <reified T> rememberForm(initial: T, vararg inputs: Any?): MutableState<T> =
     rememberSaveable(
+        *inputs,
         stateSaver =
             Saver(
                 save = { wireJson.encodeToString(it) },
                 restore = { wireJson.decodeFromString<T>(it) },
-            )
+            ),
     ) {
         mutableStateOf(initial)
     }

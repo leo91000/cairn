@@ -14,7 +14,8 @@ use serde_json::{Value, json};
 #[serde(rename_all = "camelCase")]
 pub(crate) struct Actor {
     pub account: String,
-    pub access_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub access_id: Option<String>,
 }
 
 #[derive(Clone, Deserialize, Serialize, PartialEq)]
@@ -78,8 +79,22 @@ pub(crate) async fn account(s: &Service, account: &str) -> Result<Actor> {
     })?;
     Ok(Actor {
         account: account.into(),
-        access_id: grant.access_id.clone(),
+        access_id: Some(grant.access_id.clone()),
     })
+}
+
+/// Keep the authenticated account even when live personal proof is unavailable.
+/// Missing proof can never be upgraded within this turn. Positive identity and
+/// membership refusals remain enforced.
+pub(crate) async fn message_actor(s: &Service, account_id: &str) -> Result<Actor> {
+    match account(s, account_id).await {
+        Ok(actor) => Ok(actor),
+        Err(error) if error.status == 503 => Ok(Actor {
+            account: account_id.into(),
+            access_id: None,
+        }),
+        Err(error) => Err(error),
+    }
 }
 
 pub(crate) fn prefix(chat: &str) -> String {
@@ -113,6 +128,10 @@ fn control_key_for(chat: &str, run: &str, message: &str) -> String {
     format!("{}{run}:{message}", control_prefix(chat))
 }
 
+fn owner_answer_key(chat: &str, message: &str) -> String {
+    format!("{}answer:{message}", control_prefix(chat))
+}
+
 fn suspended(db: &Db<'_>, chat: &str, run: &Value) -> Result<bool> {
     Ok(db.kv(&control_key(chat, run))?.is_some())
 }
@@ -142,6 +161,49 @@ pub(crate) enum Capture {
     OwnerAnswer,
 }
 
+/// Steering keeps the current turn's authority, including across a stopped
+/// execution. A new requester must enter as a separate queued turn.
+fn has_turn_authority(
+    db: &Db<'_>,
+    chat: &str,
+    run: &Value,
+    actor: Option<&Principal>,
+) -> Result<bool> {
+    // Credential suspension never changes who originally authored this turn.
+    let current = recorded(db, chat, text(&run["chatExecution"], "messageId"))?;
+    Ok(match (current.as_ref(), actor) {
+        (Some(Principal::Account(current)), Some(Principal::Account(actor)))
+            if current.access_id.is_none() =>
+        {
+            current.account == actor.account
+        }
+        (Some(current), Some(actor)) => current.same_authority(actor),
+        (None, None) => true,
+        _ => false,
+    })
+}
+
+/// Revalidate queued inputs when the native process is about to consume them.
+pub(crate) fn steering_authorized(
+    db: &Db<'_>,
+    chat: &str,
+    run: &Value,
+    message: &Value,
+) -> Result<bool> {
+    let message_id = text(message, "id");
+    let actor = recorded(db, chat, message_id)?;
+
+    if has_turn_authority(db, chat, run, actor.as_ref())? {
+        return Ok(true);
+    }
+
+    // Only the exact answer admitted by the authenticated owner can cross this
+    // boundary. A suspended credential alone cannot authorize anonymous inputs.
+    Ok(actor.is_none()
+        && suspended(db, chat, run)?
+        && db.kv(&owner_answer_key(chat, message_id))? == Some(json!(control_key(chat, run))))
+}
+
 /// Called in the same transaction as the message write. Reusing another
 /// requester's message ID cannot transfer authority, even with identical text.
 pub(crate) fn capture(
@@ -163,38 +225,24 @@ pub(crate) fn capture_principal(
     kind: Capture,
 ) -> Result<()> {
     let message_id = text(message, "id");
+    let mut owner_answer = None;
     if message["mode"] == "steer"
         && let Some(chat) = db.get("chats", chat)?
         && let Some(run) = db.run(text(&chat, "runId"))?
-        && RunStatus::of(&run).is_some_and(RunStatus::is_active)
+        && !has_turn_authority(db, text(&chat, "id"), &run, actor)?
     {
-        let current = if suspended(db, text(&chat, "id"), &run)? {
-            None
-        } else {
-            recorded(
-                db,
-                text(&chat, "id"),
-                text(&run["chatExecution"], "messageId"),
-            )?
-        };
-        let same = match (current.as_ref(), actor) {
-            (Some(current), Some(actor)) => current.same_authority(actor),
-            (None, None) => true,
-            _ => false,
-        };
-        if !same {
-            if !matches!(kind, Capture::OwnerAnswer) {
-                return Err(Error::conflict(
-                    "Queue this message to use your own permissions on the next turn.",
-                ));
-            }
-            db.set(&control_key(text(&chat, "id"), &run), &json!(true), None)?;
-            db.audit(
-                "chat.personal_authority.suspended",
-                &json!({ "chatId": chat["id"], "runId": run["id"] }),
-            )?;
-            actor = None;
+        if !matches!(kind, Capture::OwnerAnswer) {
+            return Err(Error::conflict(
+                "Queue this message to use your own permissions on the next turn.",
+            ));
         }
+        db.set(&control_key(text(&chat, "id"), &run), &json!(true), None)?;
+        db.audit(
+            "chat.personal_authority.suspended",
+            &json!({ "chatId": chat["id"], "runId": run["id"] }),
+        )?;
+        owner_answer = Some(json!(control_key(text(&chat, "id"), &run)));
+        actor = None;
     }
     if !matches!(kind, Capture::Edit)
         && db.messages(chat)?.iter().any(|m| m["id"] == message_id)
@@ -204,6 +252,13 @@ pub(crate) fn capture_principal(
             "This message belongs to another requester.",
         ));
     }
+
+    let owner_key = owner_answer_key(chat, message_id);
+    match owner_answer {
+        Some(binding) => db.set(&owner_key, &binding, None)?,
+        None => db.delete(&owner_key)?,
+    }
+
     match actor {
         Some(actor) => db.set(&key(chat, message_id), &serde_json::to_value(actor)?, None),
         None => db.delete(&key(chat, message_id)),
@@ -310,7 +365,7 @@ pub(crate) async fn for_run(s: &Service, run: &Value) -> Result<Option<RunReques
 pub(crate) async fn recheck(s: &Service, requester: &RunRequester) -> Result<()> {
     match &requester.principal {
         Principal::Account(actor) => {
-            if account(s, &actor.account).await? != *actor {
+            if actor.access_id.is_some() && account(s, &actor.account).await? != *actor {
                 return Err(Error::forbidden(
                     "The requester's installation access changed.",
                 ));
@@ -362,6 +417,13 @@ fn recheck_turn_in(db: &Db<'_>, requester: &RunRequester) -> Result<Value> {
 /// Owner intervention suspends personal credentials, while retaining the original
 /// source boundaries for the agent's bot/resource operations.
 pub(crate) async fn personal(s: &Service, requester: &RunRequester) -> Result<()> {
+    if let Principal::Account(actor) = &requester.principal
+        && actor.access_id.is_none()
+    {
+        return Err(Error::forbidden(
+            "Personal authority was unavailable when this turn was admitted. Queue a new turn.",
+        ));
+    }
     recheck(s, requester).await?;
     if requester.suspended {
         return Err(Error::forbidden(

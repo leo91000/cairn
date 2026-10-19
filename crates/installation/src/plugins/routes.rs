@@ -520,7 +520,13 @@ fn apply(db: &Db<'_>, mut root: Connection, route: Route, binding: Binding) -> R
         ));
     }
     if route.access_mode == AccessMode::Everyone {
-        connections::public_safe(db, &route.agent_id, &route.granted_access)?;
+        connections::public_safe(db, &route.agent_id, &route.granted_access).map_err(|error| {
+            if error.status == 400 {
+                Error::forbidden("The route's public delegation is no longer eligible.")
+            } else {
+                error
+            }
+        })?;
     }
     root.agent_id = route.agent_id;
     root.project_id = route.project_id;
@@ -558,7 +564,11 @@ pub(crate) fn authorize(
             return Err(denied());
         }
     }
-    let route = selected(db, &root.id, &binding.resource, &binding.context)?.ok_or_else(denied)?;
+    // New admission reports ambiguity as a conflict. An admitted binding loses
+    // authority instead, so its pending delivery cannot stall unrelated routes.
+    let route = selected(db, &root.id, &binding.resource, &binding.context)
+        .map_err(|error| if error.status == 409 { denied() } else { error })?
+        .ok_or_else(denied)?;
     if !route.enabled
         || route.id != binding.id
         || route.revision != binding.revision

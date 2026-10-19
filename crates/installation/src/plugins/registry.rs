@@ -198,14 +198,31 @@ fn segment(value: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, b'.' | b'-' | b'+'))
 }
 
+/// A broken package is local to its admitted work, rather than an internal
+/// scheduler failure. Retain other I/O diagnostics as temporary unavailability;
+/// database failures keep their separate internal-error semantics.
+fn package_io<T>(result: std::io::Result<T>) -> Result<T> {
+    use std::io::ErrorKind;
+
+    result.map_err(|error| match error.kind() {
+        ErrorKind::NotFound => {
+            Error::not_found("A plugin package file is missing. Review it in Plugins.")
+        }
+        ErrorKind::InvalidData | ErrorKind::NotADirectory => {
+            Error::bad("Plugin package files must contain valid UTF-8 in regular directories.")
+        }
+        _ => Error::unavailable(format!("Cannot read the plugin package: {error}")),
+    })
+}
+
 fn read_limited(path: &Path, limit: u64) -> Result<String> {
-    let metadata = std::fs::symlink_metadata(path)?;
+    let metadata = package_io(std::fs::symlink_metadata(path))?;
     if !metadata.is_file() || metadata.len() > limit {
         return Err(Error::bad(
             "Plugin files must be regular files within size limits.",
         ));
     }
-    std::fs::read_to_string(path).map_err(Into::into)
+    package_io(std::fs::read_to_string(path))
 }
 
 /// Reads one installed version. Its directory names must match the manifest.
@@ -214,12 +231,15 @@ fn read_version(s: &Service, id: &str, version: &str) -> Result<Package> {
         return Err(Error::not_found("Plugin version not found."));
     }
     let directory = root(s).join(id).join(version);
-    if !std::fs::symlink_metadata(&directory).is_ok_and(|metadata| metadata.is_dir()) {
+    if !package_io(std::fs::symlink_metadata(&directory))?.is_dir() {
         return Err(Error::not_found("Plugin version not found."));
     }
     let json = directory.join("manifest.json");
     let toml = directory.join("manifest.toml");
-    let (format, path) = match (json.try_exists()?, toml.try_exists()?) {
+    let (format, path) = match (
+        package_io(json.try_exists())?,
+        package_io(toml.try_exists())?,
+    ) {
         (true, false) => ("json", json),
         (false, true) => ("toml", toml),
         _ => {
@@ -247,8 +267,8 @@ fn read_version(s: &Service, id: &str, version: &str) -> Result<Package> {
 /// and oversized packages are refused rather than skipped.
 fn read_modules(directory: &Path, prefix: &str, source: &mut Sources) -> Result<()> {
     let invalid = || Error::bad("Plugin files must be like lib/name.luau, without links.");
-    let mut entries = std::fs::read_dir(directory)?
-        .collect::<std::io::Result<Vec<_>>>()?
+    let directory_entries = package_io(std::fs::read_dir(directory))?;
+    let mut entries = package_io(directory_entries.collect::<std::io::Result<Vec<_>>>())?
         .into_iter()
         .map(|entry| entry.path())
         .collect::<Vec<_>>();
@@ -259,7 +279,7 @@ fn read_modules(directory: &Path, prefix: &str, source: &mut Sources) -> Result<
             .and_then(|name| name.to_str())
             .ok_or_else(invalid)?;
         let relative = format!("{prefix}{name}");
-        let metadata = std::fs::symlink_metadata(&path)?;
+        let metadata = package_io(std::fs::symlink_metadata(&path))?;
         if metadata.is_dir() {
             if prefix.matches('/').count() >= 3 {
                 return Err(invalid());
@@ -318,7 +338,13 @@ pub(crate) async fn approved(s: &Service, id: &str) -> Result<ApprovedPackage> {
     let version = record["active"]
         .as_str()
         .ok_or_else(|| Error::forbidden("Approve this plugin before connecting it."))?;
-    let package = read_version(s, id, version)?;
+    let package = read_version(s, id, version).map_err(|error| {
+        if matches!(error.status, 400 | 413) {
+            Error::forbidden("This plugin package is invalid. Review it in Plugins.")
+        } else {
+            error
+        }
+    })?;
     if record["approvals"][version] != package.digest {
         return Err(Error::forbidden(
             "This plugin changed since it was approved. Review it in Plugins.",

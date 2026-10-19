@@ -251,7 +251,7 @@ impl Session {
 
     async fn write(&mut self, frame: &Frame) -> Result<(), String> {
         let mut bytes = serde_json::to_vec(frame).map_err(|_| "Invalid plugin input.")?;
-        if bytes.len() >= MAX_FRAME_BYTES {
+        if bytes.len() >= frame.encoded_limit() {
             return Err("Plugin frame is too large.".into());
         }
         bytes.push(b'\n');

@@ -25,6 +25,9 @@ pub use webhooks::{Webhook, WebhookSetup, WebhookSignature, WebhookTimestamp};
 /// Worker protocol and manifest version. Manifests must declare exactly this one.
 pub const API_VERSION: u32 = 2;
 pub const MAX_FRAME_BYTES: usize = 1_048_576;
+/// Host events include encoded settings and raw signed bodies. JSON escaping
+/// must not prevent an otherwise bounded request from reaching its handler.
+pub const MAX_EVENT_FRAME_BYTES: usize = 2 * MAX_FRAME_BYTES;
 
 /// Host capabilities a package may request, with the sentence the owner approves.
 pub const CAPABILITIES: &[(&str, &str)] = &[
@@ -590,6 +593,18 @@ pub enum Frame {
     Failure,
     /// Worker → host: the handler called `cairn.fail(message)`, a message for people.
     Rejected { message: String },
+}
+
+impl Frame {
+    /// Includes the newline. Calls, results and package loads retain their
+    /// existing limit; only host-to-worker event input gets the larger budget.
+    pub fn encoded_limit(&self) -> usize {
+        if matches!(self, Self::Event { .. }) {
+            MAX_EVENT_FRAME_BYTES
+        } else {
+            MAX_FRAME_BYTES
+        }
+    }
 }
 
 #[cfg(test)]

@@ -291,6 +291,10 @@ and authorization headers are never exposed to the script. Limits are 128 KiB of
 request body, 16 KiB of headers, 64 KiB of response body and 2.5 seconds for the
 whole operation, including body reading and worker startup. A failed or timed-out
 handler is an error response, never an empty successful acknowledgement.
+Host-to-worker event frames allow 2 MiB of encoded JSON, including the newline,
+so settings and an escaped 128 KiB UTF-8 body can arrive together. Package loads,
+capability calls/results and handler output retain their 1 MiB frame limit. The
+HTTP body, header, response and deadline bounds above remain independent.
 
 `cairn.inbound.deliver(message)` returns `{status}`: `accepted`, `duplicate`,
 `denied`, `requested` or `busy`. `accepted` means the event and its deduplication
@@ -401,6 +405,12 @@ deletion. Owners can also manage shared resource OAuth and resource agent access
 on both clients. Routes and provider-side revocation remain separate unfinished
 delivery slices in the Slack checklist.
 
+Root instance settings, including partial instance/setup form values, are limited
+to 512 KiB of encoded JSON in aggregate. A larger configuration is refused with
+HTTP 413 before it can be persisted or sent to a worker; individual field limits
+still apply and no values are truncated. The separate owner configuration request
+budget can carry secret inputs without putting them in the worker's event.
+
 ### Resource collections
 
 The `resources` capability declares related collections in `resources`:
@@ -412,7 +422,10 @@ values and encrypted secrets are bounded to 64 KiB each.
 
 Owner management uses
 `/api/plugins/<plugin>/connections/<instance>/resources/<collection>`: POST creates,
-GET lists `{items, nextCursor}` in pages of 100. Append `/<resource>` for GET, PUT
+GET lists `{items, nextCursor}` in pages of at most 100 records, also bounded to
+512 KiB of encoded JSON so the same page fits the Luau capability frame. Follow
+every non-null cursor even when a page has fewer than 100 records. Append
+`/<resource>` for GET, PUT
 and DELETE. PUT includes the last `revision`; concurrent/stale edits return 409.
 Secret fields are submitted separately; blank keeps the existing secret. Responses
 contain `secretKeys` (names), never values. Deleting a parent deletes its descendants
@@ -665,6 +678,15 @@ authorization again immediately before sending a code or refresh token.
 
 #### Personal providers
 
+An external OAuth start also records a host-owned receipt bound to its native
+event and resource/provider/person. Retrying the current consent returns the same
+URL. After a newer request replaces it, the older event is refused without
+creating another consent or invalidating the newer URL. Receipt creation shares
+the pending-consent transaction; a removed/stale event cannot create one. Receipts
+are removed atomically with successful, exhausted or obsolete native events and
+on instance deletion; pending consent may outlive successful URL delivery until
+its own expiry. One event cannot change its requested scopes on replay.
+
 Native sleep and condition wakeups continue the captured requester's authority.
 Owner intervention suspends personal OAuth for that task, including later wakeups;
 it retains the original external resource and channel restrictions for bot tools.
@@ -714,12 +736,25 @@ the message; an input's claimed account, the conversation's first author and the
 installation owner cannot supply a fallback. Tool calls recheck the author, turn,
 membership, agent grant and authorization around network operations. Retrying
 another person's message ID cannot transfer its authority. Steering another
-person's active turn is refused; queue a new turn to use your own permissions.
+person's current or resumable turn is refused; queue a new turn to use your own
+permissions. The native execution worker rechecks queued steering before delivery,
+including inputs accepted before a stop or restart.
 Editing a queued message reattributes it to the authenticated editor.
+An already authenticated native chat request can still send or edit ordinary
+messages when Beacon cannot supply live personal-authority proof. Such an input
+gets no personal authority for its turn, including after Beacon returns. Explicit
+identity or membership refusals still block the request. Owner question control
+uses the authenticated request role and suspends personal authority when needed;
+it supplies no replacement credential or fallback to the owner’s OAuth.
 Question answers follow the same check. The current installation owner can still
 answer another person's question from Cairn; doing so suspends personal credentials
 for that turn, including calls already in flight. The original author and their
-authorization remain unchanged, and a new turn can use its own requester again.
+authorization remain unchanged. The original author can answer subsequent
+questions and continue steering; personal OAuth stays suspended. The native worker
+accepts only an exact owner-answer provenance record for cross-author control,
+never an arbitrary anonymous input. A turn admitted without personal proof can
+still be steered by that same authenticated account after Beacon recovers, without
+upgrading the turn's proof. A new turn can use its own requester again.
 
 Finishing personal OAuth also links its proved external subject to that account
 for this resource and provider. An active external identity cannot be linked to

@@ -31,20 +31,34 @@ internal fun PluginSetup(
 ) {
     var resources by remember(initial.id) { mutableStateOf(PluginResourceActivity()) }
     var draft by remember(initial.id) { mutableStateOf(initial) }
-    var name by remember(initial.id) { mutableStateOf(initial.name) }
-    var values by
-        remember(initial.id) {
-            mutableStateOf(
-                manifest.settings
-                    .filter { it.type != "secret" }
-                    .associate { it.key to formValue(it, initial.settings[it.key]) }
-            )
-        }
+    var revision by rememberForm(initial.revision, initial.id)
+    var name by rememberForm(initial.name, initial.id)
+    val localSettings =
+        rememberPluginSettingsDraft(
+            manifest.settings,
+            manifest.settings
+                .filter { it.type != "secret" }
+                .associate { it.key to formValue(it, initial.settings[it.key]) },
+            wireJson.encodeToString(
+                listOf(
+                    state.origin,
+                    state.session.account?.id,
+                    state.installation?.id,
+                    initial.pluginId,
+                    initial.id,
+                )
+            ),
+        )
+    var values by localSettings.state
+    fun dismiss() {
+        localSettings.discard()
+        close()
+    }
     var token by remember(initial.id) { mutableStateOf("") }
     var secrets by remember(initial.id) { mutableStateOf(mapOf<String, String>()) }
-    var granted by remember(initial.id) { mutableStateOf(listOf<String>()) }
-    var agentId by remember(initial.id) { mutableStateOf("") }
-    var enabled by remember(initial.id) { mutableStateOf(true) }
+    var granted by rememberForm(listOf<String>(), initial.id)
+    var agentId by rememberForm("", initial.id)
+    var enabled by rememberForm(true, initial.id)
     var completion by remember(initial.id) { mutableStateOf<PluginForm?>(null) }
     var completing by remember(initial.id) { mutableStateOf(manifest.instanceForm) }
     var asking by remember(initial.id) { mutableStateOf(0) }
@@ -56,7 +70,27 @@ internal fun PluginSetup(
             pluginSettings(manifest.settings, values) != draft.settings ||
             token.isNotBlank() ||
             secrets.values.any { it.isNotBlank() }
-    val available = draft.status == "setup" && !expired
+    var ready by remember(initial.id) { mutableStateOf(false) }
+    var readError by remember(initial.id) { mutableStateOf<String?>(null) }
+    var readAttempt by remember(initial.id) { mutableIntStateOf(0) }
+    val validDraft = draft.status == "setup" && !expired
+    val available = validDraft && ready
+    LaunchedEffect(initial.id, readAttempt) {
+        ready = false
+        readError = null
+        try {
+            val current = vm.api.get<PluginSetupDraft>(path)
+            if (current.revision != revision) {
+                readError = "La configuration a changé. Fermez-la puis actualisez le plugin."
+            } else {
+                draft = current
+                ready = true
+            }
+        } catch (e: Exception) {
+            if (e is kotlinx.coroutines.CancellationException) throw e
+            readError = e.message ?: "Impossible de recharger la configuration."
+        }
+    }
     val resourceWork = resources.busy || resources.pending || resources.editing
     fun refresh(changed: String? = null) {
         if (manifest.instanceForm) {
@@ -72,8 +106,8 @@ internal fun PluginSetup(
             expired = true
         }
     }
-    if (manifest.instanceForm)
-        LaunchedEffect(draft.revision, asking) {
+    if (manifest.instanceForm && ready)
+        LaunchedEffect(revision, asking) {
             completing = true
             if (asking > 0) delay(350)
             try {
@@ -83,7 +117,7 @@ internal fun PluginSetup(
                             "POST",
                             "$path/form",
                             buildJsonObject {
-                                put("revision", draft.revision)
+                                put("revision", revision)
                                 put("settings", pluginSettings(manifest.settings, values))
                                 put(
                                     "secrets",
@@ -114,7 +148,7 @@ internal fun PluginSetup(
             completing = false
         }
     Dialog(
-        onDismissRequest = { if (!state.busy) close() },
+        onDismissRequest = { if (!state.busy) dismiss() },
         properties =
             DialogProperties(usePlatformDefaultWidth = false, decorFitsSystemWindows = false),
     ) {
@@ -124,7 +158,7 @@ internal fun PluginSetup(
                 TopAppBar(
                     title = { Text("Configurer ${manifest.name}") },
                     navigationIcon = {
-                        IconButton(onClick = close, enabled = !state.busy) {
+                        IconButton(onClick = ::dismiss, enabled = !state.busy) {
                             Icon(Icons.AutoMirrored.Filled.ArrowBack, "Fermer")
                         }
                     },
@@ -142,9 +176,20 @@ internal fun PluginSetup(
                     "La configuration est conservée 24 heures et reste inactive jusqu’à sa validation. Seules les modifications enregistrées sont conservées à la fermeture.",
                     style = MaterialTheme.typography.bodySmall,
                 )
-                if (state.busy || completing) LinearProgressIndicator(Modifier.fillMaxWidth())
+                if (state.busy || completing || (!ready && readError == null))
+                    LinearProgressIndicator(Modifier.fillMaxWidth())
                 state.error?.let { FormError(it) }
-                if (!available)
+                localSettings.notice?.let { FormError(it) }
+                readError?.let {
+                    FormError(it)
+                    TextButton(
+                        onClick = { readAttempt++ },
+                        enabled = !state.busy && !resourceWork,
+                    ) {
+                        Text("Réessayer le chargement")
+                    }
+                }
+                if (!validDraft)
                     FormError(
                         "Cette configuration a expiré ou le package doit être approuvé. Fermez-la puis actualisez le plugin."
                     )
@@ -219,7 +264,7 @@ internal fun PluginSetup(
                                 "PATCH",
                                 path,
                                 buildJsonObject {
-                                    put("revision", draft.revision)
+                                    put("revision", revision)
                                     put("name", name.trim())
                                     put("settings", pluginSettings(manifest.settings, values))
                                     put(
@@ -233,6 +278,7 @@ internal fun PluginSetup(
                                     if (token.isNotBlank()) put("token", token.trim())
                                 },
                             )
+                        revision = draft.revision
                         changedField = null
                         name = draft.name
                         values =
@@ -318,7 +364,7 @@ internal fun PluginSetup(
                             "POST",
                             "$path/activate",
                             buildJsonObject {
-                                put("revision", draft.revision)
+                                put("revision", revision)
                                 put("enabled", enabled)
                                 put("agentIds", JsonArray(granted.map(::JsonPrimitive)))
                                 if (manifest.delegates) {
@@ -336,6 +382,7 @@ internal fun PluginSetup(
                                 }
                             },
                         )
+                        localSettings.discard()
                         activated()
                     }
                 }

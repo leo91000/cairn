@@ -551,6 +551,149 @@ async fn disabled_ambiguous_and_revised_routes_cannot_fall_back_or_keep_queued_a
 }
 
 #[tokio::test]
+async fn an_ambiguous_route_retires_only_its_pending_delivery() {
+    let (sent, mut received) = tokio::sync::mpsc::unbounded_channel();
+    let platform = axum::Router::new().route(
+        "/reply-result",
+        axum::routing::post(move |axum::Json(reply): axum::Json<Value>| {
+            sent.send(reply).unwrap();
+            async { axum::Json(json!({ "ok": true })) }
+        }),
+    );
+    let (origin, server) = common::serve_locally(platform).await;
+    let (_root, s, instance, resource, app) = fixture().await;
+    s.plugins.route_http_to(Some(origin));
+    let agent = s.agent(json!({
+        "name": "Scoped", "access": { "projects": [], "installation": false, "github": false },
+    }), None).await.unwrap();
+    for channel in ["C1", "C2"] {
+        create_route(
+            &app,
+            &instance,
+            &resource,
+            json!({
+                "name": channel, "enabled": true, "match": { "channel": channel },
+                "agentId": agent["id"], "userIds": ["alice"],
+            }),
+        )
+        .await;
+    }
+    let package = registry::active(&s, "router").await.unwrap();
+    let connection = connections::get(&s, "router", &instance).await.unwrap();
+    let mut session = s
+        .plugins
+        .host
+        .start(
+            &PathBuf::from(env!("CARGO_BIN_EXE_cairn")),
+            &package.manifest,
+            &package.source,
+        )
+        .await
+        .unwrap();
+    runtime::begin(&s, &connection, &mut session).await.unwrap();
+    let request = |channel: &str, id: &str| {
+        json!({
+            "id": id, "resource": resource, "author": { "id": "alice" },
+            "context": { "channel": channel, "kind": channel, "thread": channel },
+            "body": { "text": channel, "trace": true },
+        })
+    };
+    for channel in ["C2", "C1"] {
+        assert_eq!(
+            deliver(&app, &instance, request(channel, channel)).await.1["status"],
+            "accepted"
+        );
+        runtime::pump(&s, &connection, &mut session).await.unwrap();
+    }
+    s.chat_tick(&std::collections::HashSet::new())
+        .await
+        .unwrap();
+    let deliveries = s.store.list("plugin-deliveries").await.unwrap();
+    assert_eq!(deliveries.len(), 2);
+    for delivery in &deliveries {
+        let chat = s.get("chats", text(delivery, "chatId")).await.unwrap();
+        s.store
+            .patch_run(
+                text(&chat, "runId"),
+                json!({
+                    "status": "cancelled", "recoveryPending": false,
+                }),
+            )
+            .await
+            .unwrap();
+    }
+    let blocked = deliveries
+        .iter()
+        .find(|value| value["reply"]["channel"] == "C1")
+        .unwrap();
+    let blocked_id = text(blocked, "id").to_owned();
+    // Exercise the adverse queue order deterministically, without a timing race.
+    s.store
+        .transaction(move |db| {
+            db.0.execute(
+                "UPDATE records SET updated_at=?1 WHERE kind='plugin-deliveries' AND id=?2",
+                rusqlite::params![now() + 1000, blocked_id],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        s.store.list("plugin-deliveries").await.unwrap()[0]["id"],
+        blocked["id"]
+    );
+    create_route(
+        &app,
+        &instance,
+        &resource,
+        json!({
+            "name": "Overlapping C1", "enabled": true, "match": { "kind": "C1" },
+            "agentId": agent["id"], "userIds": ["alice"],
+        }),
+    )
+    .await;
+    assert_eq!(
+        deliver(&app, &instance, request("C1", "new-ambiguous"))
+            .await
+            .0,
+        StatusCode::CONFLICT
+    );
+
+    runtime::pump(&s, &connection, &mut session).await.unwrap();
+    assert!(
+        session.alive(),
+        "A route conflict stopped the shared worker"
+    );
+    assert!(s.store.list("plugin-deliveries").await.unwrap().is_empty());
+    let reply = received
+        .try_recv()
+        .expect("The unaffected route's reply was stranded");
+    assert_eq!(reply["reply"]["channel"], "C2");
+    assert_eq!(reply["status"], "cancelled");
+    assert!(
+        received.try_recv().is_err(),
+        "A revoked route published a reply"
+    );
+    let activity = s.store.list("plugin-activity").await.unwrap();
+    for delivery in deliveries {
+        let completed = activity
+            .iter()
+            .find(|entry| entry["deliveryId"] == delivery["id"])
+            .unwrap();
+        assert_eq!(
+            completed["status"],
+            if delivery["reply"]["channel"] == "C1" {
+                "failed"
+            } else {
+                "stopped"
+            }
+        );
+    }
+    session.stop().await;
+    server.abort();
+}
+
+#[tokio::test]
 async fn access_requests_and_approvals_are_isolated_to_the_selected_route() {
     let (_root, s, instance, resource, app) = fixture().await;
     let agent = s
@@ -1921,8 +2064,7 @@ async fn external_oauth_uses_only_the_owner_configured_https_callback_origin() {
     }
 }
 
-#[tokio::test]
-async fn a_replayed_consent_start_keeps_the_url_the_person_already_received() {
+async fn assert_consent_replay(interleave: bool, remove_instance: bool) {
     let (_root, s, instance, resource, app) = fixture().await;
     let (results, mut received) = tokio::sync::mpsc::unbounded_channel();
     let replies = Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -1992,6 +2134,45 @@ async fn a_replayed_consent_start_keeps_the_url_the_person_already_received() {
     )
     .await;
     assert!(first["url"].is_string());
+    assert_eq!(s.store.keys("plugin-oauth-event:").await.unwrap().len(), 1);
+    if remove_instance {
+        let path = format!("/api/plugins/router/connections/{instance}");
+        let response = common::send(&app, owner_request("DELETE", &path, Value::Null)).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(
+            s.store
+                .keys("plugin-oauth-event:")
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        session.stop().await;
+        server.abort();
+        return;
+    }
+
+    let latest = if interleave {
+        oauth_action(
+            &s,
+            &app,
+            &connection,
+            &mut session,
+            json!({
+                "id": "second-person-action",
+                "kind": "interaction",
+                "resource": resource,
+                "author": {"id": "U111"},
+                "context": {"channel": "C1", "thread": "thread"},
+                "body": {"oauth": "start"},
+            }),
+            &mut received,
+        )
+        .await
+    } else {
+        first.clone()
+    };
+    assert!(latest["url"].is_string());
+    assert_eq!(s.store.keys("plugin-oauth-event:").await.unwrap().len(), 1);
     // Recreate the actual worker, then let the durable event's retry become due.
     session.stop().await;
     let mut session = s
@@ -2010,11 +2191,13 @@ async fn a_replayed_consent_start_keeps_the_url_the_person_already_received() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(
-        retried["url"], first["url"],
-        "the retry invalidated an OAuth link already delivered to its person"
-    );
-    let url = url::Url::parse(text(&first, "url")).unwrap();
+    if !interleave {
+        assert_eq!(
+            retried["url"], first["url"],
+            "the retry invalidated an OAuth link already delivered to its person"
+        );
+    }
+    let url = url::Url::parse(text(&latest, "url")).unwrap();
     let state = url
         .query_pairs()
         .find(|(key, _)| key == "state")
@@ -2031,10 +2214,40 @@ async fn a_replayed_consent_start_keeps_the_url_the_person_already_received() {
         )
         .await
         .status(),
-        StatusCode::OK
+        StatusCode::OK,
+        "Replaying an older consent invalidated the latest delivered link"
+    );
+    if interleave {
+        assert_eq!(
+            retried["status"], "refused",
+            "A superseded event started a new consent"
+        );
+        assert!(retried["url"].is_null());
+    }
+    assert!(
+        s.store
+            .keys("plugin-oauth-event:")
+            .await
+            .unwrap()
+            .is_empty()
     );
     session.stop().await;
     server.abort();
+}
+
+#[tokio::test]
+async fn a_replayed_consent_start_keeps_the_url_the_person_already_received() {
+    assert_consent_replay(false, false).await;
+}
+
+#[tokio::test]
+async fn an_old_consent_retry_cannot_replace_a_newer_person_request() {
+    assert_consent_replay(true, false).await;
+}
+
+#[tokio::test]
+async fn removing_an_instance_retires_its_pending_event_consent_receipts() {
+    assert_consent_replay(false, true).await;
 }
 
 #[tokio::test]
@@ -2211,10 +2424,8 @@ async fn an_interrupted_external_code_exchange_is_never_replayed() {
     server.abort();
 }
 
-#[tokio::test]
-async fn repeated_question_ids_are_delivered_for_their_own_shared_turn() {
-    let (_root, s, instance, resource, app) = fixture().await;
-    let original = registry::active(&s, "router").await.unwrap();
+async fn install_question_handler(s: &Arc<Service>) {
+    let original = registry::active(s, "router").await.unwrap();
     let mut manifest = serde_json::to_value(&original.manifest).unwrap();
     manifest["version"] = json!("2");
     let source = original.source.main.replacen(
@@ -2229,7 +2440,7 @@ async fn repeated_question_ids_are_delivered_for_their_own_shared_turn() {
         1,
     );
     let package = registry::install(
-        &s,
+        s,
         &json!({
             "manifest": manifest,
             "source": source,
@@ -2237,9 +2448,15 @@ async fn repeated_question_ids_are_delivered_for_their_own_shared_turn() {
     )
     .await
     .unwrap();
-    registry::approve(&s, "router", "2", text(&package, "digest"))
+    registry::approve(s, "router", "2", text(&package, "digest"))
         .await
         .unwrap();
+}
+
+#[tokio::test]
+async fn repeated_question_ids_are_delivered_for_their_own_shared_turn() {
+    let (_root, s, instance, resource, app) = fixture().await;
+    install_question_handler(&s).await;
 
     let (results, mut received) = tokio::sync::mpsc::unbounded_channel();
     let upstream = axum::Router::new().route(
@@ -5344,6 +5561,10 @@ struct QueuedRoutedRequest {
 }
 
 async fn queued_routed_request() -> QueuedRoutedRequest {
+    queued_routed_request_with_mode("requests").await
+}
+
+async fn queued_routed_request_with_mode(mode: &str) -> QueuedRoutedRequest {
     let (_root, s, instance, resource, app) = fixture().await;
     s.accounts
         .create(
@@ -5353,12 +5574,14 @@ async fn queued_routed_request() -> QueuedRoutedRequest {
         )
         .await
         .unwrap();
+    let mut access = json!({"projects": [], "installation": false, "github": false});
+    if mode == "everyone" {
+        access["sandbox"] = json!("read-only");
+        access["mcps"] = json!([]);
+    }
     let agent = s
         .agent(
-            json!({
-                "name": "Queued request fixture",
-                "access": { "projects": [], "installation": false, "github": false },
-            }),
+            json!({"name": "Queued request fixture", "access": access}),
             None,
         )
         .await
@@ -5369,7 +5592,7 @@ async fn queued_routed_request() -> QueuedRoutedRequest {
         &resource,
         json!({
             "name": "Engineering", "enabled": true, "match": { "channel": "C1" },
-            "agentId": agent["id"], "accessMode": "requests", "userIds": ["alice", "bob"],
+            "agentId": agent["id"], "accessMode": mode, "userIds": ["alice", "bob"],
         }),
     )
     .await;
@@ -5638,4 +5861,319 @@ async fn native_source_is_retained_across_owner_lookup_and_temporary_failures() 
         }
         authority_server.abort();
     }
+}
+
+#[tokio::test]
+async fn a_new_instance_grant_retires_public_routed_work_without_stalling_the_scheduler() {
+    let QueuedRoutedRequest {
+        _root,
+        s,
+        instance,
+        resource,
+        app,
+        route,
+        run,
+    } = queued_routed_request_with_mode("everyone").await;
+    let installed = registry::install(&s, &json!({
+        "manifest": {"id": "private-credential", "name": "Private credential", "version": "1", "apiVersion": 2,
+            "capabilities": [], "agentAccess": {}},
+        "source": "return {}",
+    })).await.unwrap();
+    registry::approve(&s, "private-credential", "1", text(&installed, "digest"))
+        .await
+        .unwrap();
+    connections::save(
+        &s,
+        "private-credential",
+        &json!({
+            "name": "Private access", "enabled": true, "agentIds": [route["agentId"]],
+        }),
+        None,
+    )
+    .await
+    .unwrap();
+    let result = s.worker.tick(&s).await;
+    let current = s.store.run(&run).await.unwrap();
+    assert!(
+        result.is_ok(),
+        "A withdrawn public source aborted scheduling: {result:?}"
+    );
+    assert_eq!(current["status"], "cancelled");
+    assert!(s.worker.active.lock().await.is_empty());
+    // Revoked public eligibility also refuses new ingress instead of retaining
+    // a reusable input-validation error or widening the route's permissions.
+    let response = deliver(
+        &app,
+        &instance,
+        json!({
+            "id": "after-private-grant", "resource": resource, "author": {"id": "alice"},
+            "context": {"channel": "C1", "thread": "fresh"}, "body": {"text": "Hello"},
+        }),
+    )
+    .await;
+    assert_eq!(response.0, StatusCode::FORBIDDEN);
+}
+
+async fn assert_invalid_package_does_not_stall_scheduler(change: &str) {
+    let QueuedRoutedRequest {
+        _root,
+        s,
+        route,
+        run,
+        ..
+    } = queued_routed_request().await;
+    let chat = s
+        .chat_create(json!({"agentId": route["agentId"]}))
+        .await
+        .unwrap();
+    s.chat_send(
+        text(&chat, "id"),
+        json!({"id": cairn_installation::config::id(), "text": "Independent ordinary request"}),
+    )
+    .await
+    .unwrap();
+    s.chat_tick(&std::collections::HashSet::new())
+        .await
+        .unwrap();
+    let detail = s.chat_detail(text(&chat, "id")).await.unwrap();
+    let control = text(&detail["run"], "id").to_owned();
+    assert!(s.store.run(&control).await.unwrap()["accountWaitReason"].is_null());
+    let directory = s.config.data_dir.join("plugins/router/1");
+    match change {
+        "json" => std::fs::write(directory.join("manifest.json"), "{").unwrap(),
+        "missing-source" => std::fs::remove_file(directory.join("main.luau")).unwrap(),
+        "manifest-utf8" => std::fs::write(directory.join("manifest.json"), [0xff]).unwrap(),
+        "source-utf8" => std::fs::write(directory.join("main.luau"), [0xff]).unwrap(),
+        _ => unreachable!(),
+    }
+    let result = s.worker.tick(&s).await;
+    assert!(
+        result.is_ok(),
+        "An invalid integration aborted unrelated scheduling: {result:?}"
+    );
+    assert_eq!(s.store.run(&run).await.unwrap()["status"], "cancelled");
+    let independent = s.store.run(&control).await.unwrap();
+    assert_eq!(independent["status"], "queued");
+    assert!(
+        independent["accountWaitReason"]
+            .as_str()
+            .is_some_and(|reason| !reason.is_empty()),
+        "The independent run did not reach its capacity check: {independent}"
+    );
+    assert!(s.worker.active.lock().await.is_empty());
+}
+
+#[tokio::test]
+async fn an_invalid_admitted_package_does_not_block_an_unrelated_queued_run() {
+    assert_invalid_package_does_not_stall_scheduler("json").await;
+}
+
+#[tokio::test]
+async fn a_missing_admitted_source_file_does_not_block_an_unrelated_queued_run() {
+    assert_invalid_package_does_not_stall_scheduler("missing-source").await;
+}
+
+#[tokio::test]
+async fn invalid_utf8_admitted_package_files_do_not_block_an_unrelated_queued_run() {
+    for change in ["manifest-utf8", "source-utf8"] {
+        assert_invalid_package_does_not_stall_scheduler(change).await;
+    }
+}
+
+#[tokio::test]
+async fn revoking_a_person_during_a_question_keeps_other_routes_running() {
+    let (_root, s, instance, resource, app) = fixture().await;
+    install_question_handler(&s).await;
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let (sent, mut received) = tokio::sync::mpsc::unbounded_channel();
+    let platform = axum::Router::new()
+        .route(
+            "/question-result",
+            axum::routing::post({
+                let (entered, release) = (entered.clone(), release.clone());
+                move || {
+                    let (entered, release) = (entered.clone(), release.clone());
+                    async move {
+                        entered.notify_one();
+                        release.notified().await;
+                        axum::Json(json!({"ok": true}))
+                    }
+                }
+            }),
+        )
+        .route(
+            "/reply-result",
+            axum::routing::post(move |axum::Json(value): axum::Json<Value>| {
+                sent.send(value).unwrap();
+                async { axum::Json(json!({"ok": true})) }
+            }),
+        );
+    let (origin, server) = common::serve_locally(platform).await;
+    s.plugins.route_http_to(Some(origin));
+    let agent = s
+        .agent(
+            json!({
+                "name": "Scoped",
+                "access": {"projects": [], "installation": false, "github": false},
+            }),
+            None,
+        )
+        .await
+        .unwrap();
+    let mut alice_route = Value::Null;
+    for (channel, person) in [("C1", "alice"), ("C2", "bob")] {
+        let route = create_route(
+            &app,
+            &instance,
+            &resource,
+            json!({
+                "name": channel,
+                "enabled": true,
+                "match": {"channel": channel},
+                "agentId": agent["id"],
+                "userIds": [person],
+            }),
+        )
+        .await;
+        if person == "alice" {
+            alice_route = route;
+        }
+    }
+    let package = registry::active(&s, "router").await.unwrap();
+    let connection = connections::get(&s, "router", &instance).await.unwrap();
+    let mut session = s
+        .plugins
+        .host
+        .start(
+            &PathBuf::from(env!("CARGO_BIN_EXE_cairn")),
+            &package.manifest,
+            &package.source,
+        )
+        .await
+        .unwrap();
+    let request = |person: &str, channel: &str| {
+        json!({
+            "id": format!("question-race-{person}"),
+            "resource": resource,
+            "author": {"id": person},
+            "context": {"channel": channel, "thread": person},
+            "body": {"text": "Work in my own thread", "trace": true},
+        })
+    };
+    assert_eq!(
+        deliver(&app, &instance, request("alice", "C1")).await.1["status"],
+        "accepted"
+    );
+    runtime::pump(&s, &connection, &mut session).await.unwrap();
+    s.chat_tick(&std::collections::HashSet::new())
+        .await
+        .unwrap();
+    let chat = s.chat_list().await.unwrap()[0].clone();
+    let detail = s.chat_detail(text(&chat, "id")).await.unwrap();
+    let run = s
+        .store
+        .patch_run(
+            text(&detail["run"], "id"),
+            json!({
+                "status": "running",
+                "isolated": true,
+            }),
+        )
+        .await
+        .unwrap();
+    s.chat_acknowledge(text(&run, "id"), text(&run["chatExecution"], "messageId"))
+        .await
+        .unwrap();
+    s.question_receive(
+        text(&run, "id"),
+        json!({
+            "id": "d".repeat(64),
+            "blocking": false,
+            "fields": [{"id": "choice", "title": "Continue?", "options": []}],
+        }),
+    )
+    .await
+    .unwrap();
+    let mut delivery = s.store.list("plugin-deliveries").await.unwrap()[0].clone();
+    delivery["progressAt"] = json!(now() - 9_000);
+    s.store.put("plugin-deliveries", delivery).await.unwrap();
+    let pump = tokio::spawn({
+        let (s, connection) = (s.clone(), connection.clone());
+        async move {
+            let result = runtime::pump(&s, &connection, &mut session).await;
+            (session, result)
+        }
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(3), entered.notified())
+        .await
+        .unwrap();
+    let path = format!(
+        "/api/plugins/router/connections/{instance}/resources/workspace/{resource}/routes/{}/people/alice",
+        text(&alice_route, "id"),
+    );
+    let removed = common::send(
+        &app,
+        owner_request(
+            "POST",
+            &path,
+            json!({
+                "action": "remove",
+                "revision": alice_route["revision"],
+            }),
+        ),
+    )
+    .await;
+    assert_eq!(removed.status(), StatusCode::OK);
+    release.notify_one();
+    let (mut session, result) = pump.await.unwrap();
+    assert!(
+        result.is_ok(),
+        "One person's question/progress revocation stopped the shared worker: {result:?}"
+    );
+    assert!(session.alive());
+    assert!(s.store.list("plugin-deliveries").await.unwrap().is_empty());
+
+    assert_eq!(
+        deliver(&app, &instance, request("bob", "C2")).await.1["status"],
+        "accepted"
+    );
+    runtime::pump(&s, &connection, &mut session).await.unwrap();
+    s.chat_tick(&std::collections::HashSet::new())
+        .await
+        .unwrap();
+    let delivery = s.store.list("plugin-deliveries").await.unwrap()[0].clone();
+    let chat = s.get("chats", text(&delivery, "chatId")).await.unwrap();
+    let run = text(&chat, "runId");
+    s.chat_acknowledge(run, text(&delivery, "id"))
+        .await
+        .unwrap();
+    s.store
+        .event(
+            run,
+            "item.completed",
+            "",
+            Some(json!({
+                "item": {"type": "agent_message", "text": "Bob's own result"},
+            })),
+        )
+        .await
+        .unwrap();
+    s.store
+        .event(run, "turn.completed", "", None)
+        .await
+        .unwrap();
+    s.store
+        .patch_run(run, json!({"status": "succeeded"}))
+        .await
+        .unwrap();
+    runtime::pump(&s, &connection, &mut session).await.unwrap();
+    let reply = tokio::time::timeout(std::time::Duration::from_secs(3), received.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(reply["userId"], "bob");
+    assert_eq!(reply["text"], "Bob's own result");
+    session.stop().await;
+    server.abort();
 }

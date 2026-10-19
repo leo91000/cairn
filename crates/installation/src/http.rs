@@ -461,10 +461,32 @@ impl Input {
                 path.split('/').collect::<Vec<_>>().as_slice(),
                 ["", "api", "skills", _, _, "bundle"]
             );
+        let plugin_configuration = matches!(
+            (
+                parts.method.as_str(),
+                path.split('/').collect::<Vec<_>>().as_slice()
+            ),
+            (
+                "POST",
+                [
+                    "",
+                    "api",
+                    "plugins",
+                    _,
+                    "form" | "connections" | "setup-drafts"
+                ]
+            ) | ("POST", ["", "api", "plugins", _, "setup-drafts", _, "form"])
+                | ("PUT", ["", "api", "plugins", _, "connections", _])
+                | ("PATCH", ["", "api", "plugins", _, "setup-drafts", _])
+        );
         let limit = if path.starts_with("/internal/node-workspace/") && large {
             2_000_000
         } else if skill_batch {
             // A folder move can carry hundreds of paths even when all file contents are staged.
+            cairn_protocol::MAX_BODY
+        } else if plugin_configuration {
+            // Expanding declared defaults can make a valid configuration larger
+            // than an ordinary JSON request. Keep it within the transport bound.
             cairn_protocol::MAX_BODY
         } else {
             150000

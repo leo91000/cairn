@@ -10,7 +10,9 @@ import { twMerge } from 'tailwind-merge'
 import {
   computed,
   nextTick,
+  onBeforeMount,
   onBeforeUnmount,
+  onBeforeUpdate,
   ref,
   shallowRef,
   watch,
@@ -20,6 +22,7 @@ import { activityEntries, ActivityGroups } from '../activity'
 import { currentPlan } from '../agent-plan'
 import { deliveryEntries } from '../deliverables'
 import { ArrowDown, Maximize2, Minimize2 } from '../icons'
+import { MessageTimes } from '../message-times'
 import { exclusiveSuspensionLabel } from '../run-status'
 import { backgroundWait, waitingStep, workingStep } from '../signal'
 import { mentionSegments } from '../skill-mentions'
@@ -67,6 +70,9 @@ const props = defineProps<{
 }>()
 const emit = defineEmits<{ load: [], position: [value: ReadingPosition, key?: string], pauseWait: [] }>()
 const skillNames = computed(() => new Set(props.skills ?? []))
+const messageTimes = new MessageTimes()
+onBeforeMount(() => messageTimes.beginRender())
+onBeforeUpdate(() => messageTimes.beginRender())
 const activityGroups = shallowRef(new ActivityGroups())
 watch([() => props.cacheKey, () => props.chat, () => props.events[0]?.runId], () => {
   activityGroups.value = new ActivityGroups()
@@ -384,18 +390,18 @@ defineExpose({
                     </p>
                     <p class="mt-1.5! mb-0! flex justify-end gap-2 text-2xs text-muted">
                       <span v-if="entry.delivery" role="status">{{ entry.delivery }}</span>
-                      <time :datetime="new Date(entry.time).toISOString()" :title="new Date(entry.time).toLocaleString()">{{ new Date(entry.time).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) }}</time>
+                      <time :datetime="messageTimes.format(entry.time).datetime" :title="messageTimes.format(entry.time).title">{{ messageTimes.format(entry.time).label }}</time>
                     </p>
                   </div>
                   <p v-else class="m-0! flex justify-end gap-2 text-2xs text-muted">
                     <span v-if="entry.delivery" role="status">{{ entry.delivery }}</span>
-                    <time :datetime="new Date(entry.time).toISOString()" :title="new Date(entry.time).toLocaleString()">{{ new Date(entry.time).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) }}</time>
+                    <time :datetime="messageTimes.format(entry.time).datetime" :title="messageTimes.format(entry.time).title">{{ messageTimes.format(entry.time).label }}</time>
                   </p>
                 </article>
                 <article v-else-if="entry.kind === 'message'" class="activity-message chat-message my-3 py-2" :class="visibleOutcome && entry.id === outcomeEntryId ? 'mb-1!' : ''">
                   <p class="mb-1.5! flex justify-between gap-3 text-2xs text-muted">
                     <span class="truncate">{{ agent }}<template v-if="entry.via"> · via {{ entry.via }}</template></span>
-                    <time :datetime="new Date(entry.time).toISOString()" :title="new Date(entry.time).toLocaleString()">{{ new Date(entry.time).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) }}</time>
+                    <time :datetime="messageTimes.format(entry.time).datetime" :title="messageTimes.format(entry.time).title">{{ messageTimes.format(entry.time).label }}</time>
                   </p>
                   <ActivityContent :content="entry.text" />
                 </article>

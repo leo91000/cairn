@@ -4,6 +4,7 @@ import type { LiveWait, WaitTone } from '../chat-wait'
 import type { IconName } from '../icons'
 import {
   computed,
+  nextTick,
   onBeforeUnmount,
   ref,
   watch,
@@ -71,20 +72,39 @@ const icons: Record<string, IconName> = {
   run: Bot,
 }
 
+// Why the agent waits, shown apart from the status: a long one is clamped so the card stays small.
+const reason = computed(() => wakeup.value?.reason ?? props.wait.reason ?? '')
+const reasonText = ref<HTMLElement>()
+const expanded = ref(false)
+const clamped = ref(false)
+const observer = typeof ResizeObserver === 'undefined' ? undefined : new ResizeObserver(measure)
+
+function measure() {
+  const element = reasonText.value
+  clamped.value = !!element && !expanded.value && element.scrollHeight > element.clientHeight + 1
+}
+
+watch(reasonText, (element) => {
+  observer?.disconnect()
+  if (element)
+    observer?.observe(element)
+}, { flush: 'post' })
+watch(reason, () => nextTick(measure))
+onBeforeUnmount(() => observer?.disconnect())
+
 const view = computed<{
   tone: WaitTone | 'live' | 'paused'
   icon: IconName
   title: string
   detail: string
 }>(() => {
-  const reason = wakeup.value?.reason ?? props.wait.reason ?? ''
   if (finished.value) {
     if (!wakeup.value?.condition && !observation.value) {
       return {
         tone: 'neutral',
         icon: Clock,
         title: 'Resumed as scheduled',
-        detail: [reason, duration()].filter(Boolean).join(' · '),
+        detail: duration(),
       }
     }
 
@@ -94,8 +114,8 @@ const view = computed<{
       tone: outcome.tone,
       icon,
       title: outcome.title,
-      // Like a pending one, a finished card says why it waited.
-      detail: [reason, awaited(), outcome.detail, resolution()].filter(Boolean).join(' · '),
+      // Like a pending one, a finished card says why it waited, above this.
+      detail: [awaited(), outcome.detail, resolution()].filter(Boolean).join(' · '),
     }
   }
 
@@ -104,7 +124,7 @@ const view = computed<{
       tone: 'paused',
       icon: Hourglass,
       title: 'Replaced by a later wait call',
-      detail: reason,
+      detail: '',
     }
   }
 
@@ -113,7 +133,7 @@ const view = computed<{
       tone: 'paused',
       icon: Hourglass,
       title: 'Wait cancelled',
-      detail: reason,
+      detail: '',
     }
   }
 
@@ -122,7 +142,7 @@ const view = computed<{
       tone: 'paused',
       icon: Pause,
       title: target.value!.title,
-      detail: reason,
+      detail: '',
     }
   }
 
@@ -131,7 +151,7 @@ const view = computed<{
     tone: props.live ? 'live' : 'neutral',
     icon: icons[target.value!.kind]!,
     title: props.live ? target.value!.title : recordedTitle(wakeup.value!, now.value),
-    detail: reason,
+    detail: '',
   }
 })
 
@@ -200,6 +220,20 @@ const tones: Record<string, string> = {
         <p class="m-0! text-sm font-semibold leading-snug text-ink">
           {{ view.title }}
         </p>
+        <template v-if="reason">
+          <p ref="reasonText" class="m-0! mt-0.5 text-xs text-muted wrap-anywhere whitespace-pre-line" :class="{ 'line-clamp-3': !expanded }">
+            {{ reason }}
+          </p>
+          <button
+            v-if="clamped || expanded"
+            type="button"
+            class="mt-0.5 text-xs font-semibold text-accent hover:underline"
+            :aria-expanded="expanded"
+            @click="expanded = !expanded; nextTick(measure)"
+          >
+            {{ expanded ? 'Show less' : 'Show more' }}
+          </button>
+        </template>
         <p v-if="view.detail" class="m-0! mt-0.5 text-xs text-muted wrap-anywhere">
           {{ view.detail }}
         </p>

@@ -18,8 +18,11 @@ un code ; une interaction admise de cette même personne termine l’échange.
 La preuve du fournisseur doit correspondre à son identifiant exact et à l’identifiant
 stable de la ressource configurée. Elle ne crée aucun compte ni accès à Cairn.
 
-Une reprise du même événement conserve le lien déjà envoyé. Le code est consommé
-avant l’appel au fournisseur et ne peut pas être rejoué après une panne. La
+Une reprise du même événement conserve le lien déjà envoyé tant que ce consentement
+reste valide. Si une nouvelle demande l’a remplacé, ou si la personne s’est
+déconnectée, l’ancien événement est refusé sans recréer de consentement ni invalider
+le lien plus récent. Le code est consommé avant l’appel au fournisseur et ne peut
+pas être rejoué après une panne. La
 déconnexion invalide les échanges en cours et les éventuelles autorisations liées
 à cette même identité ; une autre autorisation personnelle ne sert pas de repli
 silencieux. Le choix d’une URL directe appartient à la configuration du propriétaire,

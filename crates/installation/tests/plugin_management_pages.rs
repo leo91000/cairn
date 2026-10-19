@@ -308,9 +308,27 @@ async fn large_allowed_setup_drafts_remain_resumable_and_discardable_within_the_
             }
         );
     }
+    // Both clients send the fully expanded settings when resaving a draft. A
+    // valid persisted draft must remain editable even when defaults grew on read.
+    let input = json!({
+        "revision": saved["revision"],
+        "name": "Renamed setup",
+        "settings": saved["settings"],
+    });
+    assert!(serde_json::to_vec(&input).unwrap().len() > 150_000);
+    let response = common::send(&app, owner_request("PATCH", &target, input)).await;
+    assert_eq!(
+        response.status(),
+        StatusCode::OK,
+        "{}",
+        common::read_text(response).await
+    );
+    let updated = common::read_json(response).await;
+    assert_eq!(updated["name"], "Renamed setup");
+    assert_eq!(updated["settings"], saved["settings"]);
     let response = common::send(
         &app,
-        owner_request("DELETE", &target, json!({"revision": last["revision"]})),
+        owner_request("DELETE", &target, json!({"revision": updated["revision"]})),
     )
     .await;
     assert_eq!(
@@ -325,4 +343,163 @@ async fn large_allowed_setup_drafts_remain_resumable_and_discardable_within_the_
             .status(),
         StatusCode::NOT_FOUND
     );
+}
+
+#[tokio::test]
+async fn owner_configuration_rejects_settings_that_cannot_reach_the_worker() {
+    let root = TempDir::new().unwrap();
+    let s = Service::new(common::config(root.path())).await.unwrap();
+    common::relay_fixture::claimed(&s).await.unwrap();
+    s.plugins
+        .use_worker(std::path::PathBuf::from(env!("CARGO_BIN_EXE_cairn")));
+    let fields = (0..30)
+        .map(|n| {
+            json!({
+                "key": format!("field{n}"), "title": format!("Field {n}"),
+                "type": "string", "maxLength": 10_000,
+            })
+        })
+        .collect::<Vec<_>>();
+    let values = |value: &str| {
+        Value::Object(
+            (0..30)
+                .map(|n| (format!("field{n}"), json!(value.repeat(10_000))))
+                .collect(),
+        )
+    };
+    let ordinary = values("x");
+    let oversized = values("😀");
+    assert!(ordinary.to_string().len() > 150_000);
+    assert!(oversized.to_string().len() > cairn_plugin_api::MAX_FRAME_BYTES);
+    let app = cairn_installation::http::router(s.clone()).await.unwrap();
+    for instance_form in [false, true] {
+        let plugin = if instance_form {
+            "bounded-form"
+        } else {
+            "bounded-settings"
+        };
+        let manifest = json!({
+            "id": plugin, "name": "Bounded settings", "version": "1", "apiVersion": 2,
+            "capabilities": [], "settings": fields, "instanceView": true, "instanceForm": instance_form,
+        });
+        let installed = registry::install(&s, &json!({
+            "manifest": manifest,
+            "source": "return {form = function(event) return {} end, view = function(event) assert(#event.instance.settings.field0 == 10000); return {{type='text', text='Configured'}} end}",
+        })).await.unwrap();
+        registry::approve(&s, plugin, "1", text(&installed, "digest"))
+            .await
+            .unwrap();
+        let path = format!("/api/plugins/{plugin}/connections");
+        let response = common::send(
+            &app,
+            owner_request(
+                "POST",
+                &path,
+                json!({"name": "Too large", "enabled": true, "settings": oversized}),
+            ),
+        )
+        .await;
+        assert_eq!(
+            response.status(),
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "Oversized settings must be refused before persistence or worker invocation"
+        );
+        let response = common::send(
+            &app,
+            owner_request(
+                "POST",
+                &path,
+                json!({"name": "Fits", "enabled": true, "settings": ordinary}),
+            ),
+        )
+        .await;
+        assert_eq!(
+            response.status(),
+            StatusCode::OK,
+            "{}",
+            common::read_text(response).await
+        );
+        let instance = common::read_json(response).await;
+        assert_eq!(instance["settings"], ordinary);
+        let id = text(&instance, "id");
+        let view = cairn_installation::plugins::panels::view(&s, plugin, id)
+            .await
+            .unwrap();
+        assert_eq!(view["view"][0]["text"], "Configured");
+        let response = common::send(
+            &app,
+            owner_request(
+                "PUT",
+                &format!("{path}/{id}"),
+                json!({"name": "Too large", "enabled": true, "settings": oversized}),
+            ),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        assert_eq!(
+            connections::get(&s, plugin, id).await.unwrap().settings,
+            ordinary
+        );
+        if instance_form {
+            let response = common::send(
+                &app,
+                owner_request(
+                    "POST",
+                    &format!("/api/plugins/{plugin}/form"),
+                    json!({"instance": id, "settings": oversized}),
+                ),
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        }
+        let path = format!("/api/plugins/{plugin}/setup-drafts");
+        let response = common::send(
+            &app,
+            owner_request(
+                "POST",
+                &path,
+                json!({"name": "Too large", "settings": oversized}),
+            ),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        let response = common::send(
+            &app,
+            owner_request("POST", &path, json!({"name": "Fits", "settings": ordinary})),
+        )
+        .await;
+        assert_eq!(
+            response.status(),
+            StatusCode::OK,
+            "{}",
+            common::read_text(response).await
+        );
+        let draft = common::read_json(response).await;
+        let path = format!("{path}/{}", text(&draft, "id"));
+        let response = common::send(
+            &app,
+            owner_request(
+                "PATCH",
+                &path,
+                json!({"name": "Too large", "settings": oversized, "revision": draft["revision"]}),
+            ),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        let response = common::send(&app, owner_request("GET", &path, Value::Null)).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(common::read_json(response).await, draft);
+        if instance_form {
+            let response = common::send(
+                &app,
+                owner_request(
+                    "POST",
+                    &format!("{path}/form"),
+                    json!({"settings": oversized, "revision": draft["revision"]}),
+                ),
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        }
+    }
 }

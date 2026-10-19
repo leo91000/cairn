@@ -1354,6 +1354,112 @@ async fn personal_oauth_isolated_by_verified_account_and_provider_subject() {
             .unwrap();
         assert_eq!(result["subject"], subject);
         let other = if account == "alice" { "bob" } else { "alice" };
+        for stopped in ["cancelled", "interrupted"] {
+            s.store
+                .patch_run(
+                    text(&run, "id"),
+                    json!({
+                        "status": stopped, "recoveryPending": false,
+                    }),
+                )
+                .await
+                .unwrap();
+            let steering = cairn_installation::config::id();
+            let response = common::send(&app, member_request("POST", &message_path,
+                json!({"id": steering, "text": "Use my instruction on the resumed turn", "mode": "steer"}), other)).await;
+            if response.status() == StatusCode::OK {
+                // A native resume retains this turn's original requester. Publish
+                // the queued steering through the actual native chat tick.
+                s.store
+                    .patch_run(text(&run, "id"), json!({"status": "running"}))
+                    .await
+                    .unwrap();
+                s.chat_tick(&HashSet::new()).await.unwrap();
+                let input = s
+                    .config
+                    .data_dir
+                    .join("runs")
+                    .join(text(&run, "id"))
+                    .join("chat-input/messages.json");
+                let published: Value =
+                    serde_json::from_slice(&std::fs::read(input).unwrap()).unwrap();
+                let retained =
+                    agents::call_tool(&s, bearer, "example_read", &json!({"resource": resource}))
+                        .await
+                        .unwrap()
+                        .unwrap();
+                assert_eq!(retained["subject"], subject);
+                assert!(
+                    published
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .all(|m| m["id"] != steering),
+                    "Another author's steering entered a resumed turn that retained {account}'s OAuth: {published}"
+                );
+            }
+            assert_eq!(
+                response.status(),
+                StatusCode::CONFLICT,
+                "A stopped execution accepted another requester's steering"
+            );
+            s.store
+                .patch_run(text(&run, "id"), json!({"status": "running"}))
+                .await
+                .unwrap();
+        }
+        // A persisted input from a formerly accepted stopped-turn admission
+        // must also be refused at consumption, independently of the new gate.
+        let stale = cairn_installation::config::id();
+        let queued = common::send(
+            &app,
+            member_request(
+                "POST",
+                &message_path,
+                json!({"id": stale, "text": "Earlier foreign steering"}),
+                other,
+            ),
+        )
+        .await;
+        assert_eq!(queued.status(), StatusCode::OK);
+        let stale_chat = text(&chat, "id").to_owned();
+        let stale_id = stale.clone();
+        s.store
+            .transaction(move |db| {
+                let mut pending = db
+                    .messages(&stale_chat)?
+                    .into_iter()
+                    .find(|m| m["id"] == stale_id)
+                    .unwrap();
+                pending["mode"] = json!("steer");
+                db.put_message(&pending)?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        s.chat_tick(&HashSet::new()).await.unwrap();
+        let input = s
+            .config
+            .data_dir
+            .join("runs")
+            .join(text(&run, "id"))
+            .join("chat-input/messages.json");
+        let published: Value = serde_json::from_slice(&std::fs::read(input).unwrap()).unwrap();
+        assert!(
+            published
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|m| m["id"] != stale),
+            "A queued input inherited another requester's execution authority"
+        );
+        assert!(
+            s.chat_detail(text(&chat, "id")).await.unwrap()["messages"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|m| m["id"] == stale && m["status"] == "cancelled")
+        );
         let retry = common::send(&app, member_request("POST", &message_path, message, other)).await;
         assert_eq!(
             retry.status(),
@@ -1443,9 +1549,78 @@ async fn personal_oauth_isolated_by_verified_account_and_provider_subject() {
                     .is_err(),
                 "owner control inherited the original requester's personal authorization"
             );
-            s.chat_edit(text(&chat, "id"), text(&answer, "id"), None)
+            let next_question = "c".repeat(64);
+            s.question_receive(
+                text(&run, "id"),
+                json!({
+                    "id": next_question,
+                    "blocking": false,
+                    "fields": [{"id": "choice", "title": "Continue again?", "options": []}],
+                }),
+            )
+            .await
+            .unwrap();
+            let next_path = format!(
+                "/api/chats/{}/questions/{next_question}/answer",
+                text(&chat, "id")
+            );
+            let next_answer = json!({
+                "id": cairn_installation::config::id(),
+                "answers": {"choice": ["Continue"]},
+            });
+            assert_eq!(
+                common::send(
+                    &app,
+                    member_request("POST", &next_path, next_answer.clone(), other)
+                )
                 .await
-                .unwrap();
+                .status(),
+                StatusCode::CONFLICT
+            );
+            let continued = common::send(
+                &app,
+                member_request("POST", &next_path, next_answer.clone(), account),
+            )
+            .await;
+            assert_eq!(
+                continued.status(),
+                StatusCode::OK,
+                "The original author lost question control after owner intervention"
+            );
+            let anonymous = s
+                .chat_send(
+                    text(&chat, "id"),
+                    json!({
+                        "id": cairn_installation::config::id(),
+                        "text": "Unattributed control",
+                        "mode": "steer",
+                    }),
+                )
+                .await;
+            assert!(
+                anonymous.is_err(),
+                "Suspending OAuth authorized an unrelated anonymous input"
+            );
+            s.chat_tick(&HashSet::new()).await.unwrap();
+            let file = s
+                .config
+                .data_dir
+                .join("runs")
+                .join(text(&run, "id"))
+                .join("chat-input/messages.json");
+            let published: Value = serde_json::from_slice(&std::fs::read(file).unwrap()).unwrap();
+            for id in [text(&answer, "id"), text(&next_answer, "id")] {
+                assert!(
+                    published.as_array().unwrap().iter().any(|m| m["id"] == id),
+                    "An authorized owner/original-author answer was not delivered"
+                );
+            }
+            assert!(
+                agents::call_tool(&s, bearer, "example_read", &json!({"resource": resource}))
+                    .await
+                    .is_err(),
+                "Original-author control restored suspended personal OAuth"
+            );
         }
         if account == "bob" {
             let own_steer = common::send(&app, member_request("POST", &message_path,
@@ -3452,4 +3627,245 @@ async fn mcp_management_call(s: &Arc<Service>, name: &str, args: Value) -> Value
     let response = common::send(&endpoint, request).await;
     assert_eq!(response.status(), StatusCode::OK);
     common::read_json(response).await
+}
+
+#[tokio::test]
+async fn authenticated_chat_mutations_survive_personal_authority_unavailability() {
+    let (_root, s, instance, resource, _path, app) = configured_fixture(false, true).await;
+    let grant_path = format!(
+        "/api/plugins/example/connections/{instance}/resources/workspace/{resource}/grants"
+    );
+    assert_eq!(
+        common::send(
+            &app,
+            request(
+                "POST",
+                &grant_path,
+                json!({"agentId": MAIN_AGENT_ID, "profile": "read"}),
+                Some("fixture-owner")
+            )
+        )
+        .await
+        .status(),
+        StatusCode::OK
+    );
+    let original = s
+        .chat_create(json!({"agentId": MAIN_AGENT_ID}))
+        .await
+        .unwrap();
+    let original_id = cairn_installation::config::id();
+    let original_path = format!("/api/chats/{}/messages", text(&original, "id"));
+    assert_eq!(
+        common::send(
+            &app,
+            request(
+                "POST",
+                &original_path,
+                json!({"id": original_id, "text": "Before outage"}),
+                Some("fixture-owner")
+            )
+        )
+        .await
+        .status(),
+        StatusCode::OK
+    );
+    let authority = axum::Router::new().route(
+        "/api/relay/00000000-0000-4000-8000-000000000055/task-authors",
+        axum::routing::get(|| async { StatusCode::SERVICE_UNAVAILABLE }),
+    );
+    let (origin, server) = common::serve_locally(authority).await;
+    let identity_path = s.config.data_dir.join("installation-relay/identity.json");
+    let original_identity = std::fs::read(&identity_path).unwrap();
+    let mut identity: Value = serde_json::from_slice(&original_identity).unwrap();
+    identity["origin"] = json!(origin);
+    std::fs::write(&identity_path, serde_json::to_vec(&identity).unwrap()).unwrap();
+    let chat = s
+        .chat_create(json!({"agentId": MAIN_AGENT_ID}))
+        .await
+        .unwrap();
+    let message = cairn_installation::config::id();
+    let path = format!("/api/chats/{}/messages", text(&chat, "id"));
+    // The authenticated HTTP context is exactly what an unexpired direct lease
+    // supplies. This tests the native dispatch seam, not a WebRTC handshake.
+    let sent = common::send(
+        &app,
+        request(
+            "POST",
+            &path,
+            json!({"id": message, "text": "Ordinary request during outage"}),
+            Some("fixture-owner"),
+        ),
+    )
+    .await;
+    assert_eq!(
+        sent.status(),
+        StatusCode::OK,
+        "{}",
+        common::read_text(sent).await
+    );
+    let edited = common::send(
+        &app,
+        request(
+            "PUT",
+            &format!("{path}/{message}"),
+            json!({"text": "Edited while authority unavailable"}),
+            Some("fixture-owner"),
+        ),
+    )
+    .await;
+    assert_eq!(
+        edited.status(),
+        StatusCode::OK,
+        "{}",
+        common::read_text(edited).await
+    );
+    let key = format!("plugin-message-requester:{}:{message}", text(&chat, "id"));
+    let principal = s.store.read(move |db| db.kv(&key)).await.unwrap().unwrap();
+    assert_eq!(principal["account"], "fixture-owner");
+    assert!(
+        principal["accessId"].is_null(),
+        "An unavailable proof must not acquire personal credentials"
+    );
+    s.chat_tick(&HashSet::new()).await.unwrap();
+    let ordinary = s.chat_detail(text(&chat, "id")).await.unwrap();
+    let ordinary_run = s
+        .store
+        .patch_run(
+            text(&ordinary["run"], "id"),
+            json!({"status": "running", "isolated": true}),
+        )
+        .await
+        .unwrap();
+    let foreign = common::send(
+        &app,
+        member_request(
+            "POST",
+            &path,
+            json!({
+                "id": cairn_installation::config::id(),
+                "text": "Different unverified account", "mode": "steer",
+            }),
+            "another-member",
+        ),
+    )
+    .await;
+    assert_eq!(foreign.status(), StatusCode::CONFLICT);
+    let same = common::send(
+        &app,
+        request(
+            "POST",
+            &path,
+            json!({
+                "id": cairn_installation::config::id(),
+                "text": "Same authenticated account", "mode": "steer",
+            }),
+            Some("fixture-owner"),
+        ),
+    )
+    .await;
+    assert_eq!(same.status(), StatusCode::OK);
+    let detail = s.chat_detail(text(&original, "id")).await.unwrap();
+    let run = s
+        .store
+        .patch_run(
+            text(&detail["run"], "id"),
+            json!({"status": "running", "isolated": true}),
+        )
+        .await
+        .unwrap();
+    let question = "b".repeat(64);
+    s.question_receive(
+        text(&run, "id"),
+        json!({
+            "id": question, "blocking": false,
+            "fields": [{"id": "choice", "title": "Continue?", "options": []}],
+        }),
+    )
+    .await
+    .unwrap();
+    let answer = common::send(
+        &app,
+        request(
+            "POST",
+            &format!(
+                "/api/chats/{}/questions/{question}/answer",
+                text(&original, "id")
+            ),
+            json!({"id": cairn_installation::config::id(), "answers": {"choice": ["Yes"]}}),
+            Some("fixture-owner"),
+        ),
+    )
+    .await;
+    assert_eq!(
+        answer.status(),
+        StatusCode::OK,
+        "{}",
+        common::read_text(answer).await
+    );
+    let suspended = format!(
+        "plugin-requester-suspended:{}:{}:{original_id}",
+        text(&original, "id"),
+        text(&run, "id")
+    );
+    assert_eq!(
+        s.store.read(move |db| db.kv(&suspended)).await.unwrap(),
+        Some(json!(true))
+    );
+    std::fs::write(&identity_path, original_identity).unwrap();
+    let configuration = s.mcps.run_configuration(&s, &ordinary_run).await.unwrap();
+    let bearer = text(&configuration["env"], "CAIRN_MCP_RUN_TOKEN");
+    let error = agents::call_tool(&s, bearer, "example_read", &json!({"resource": resource}))
+        .await
+        .expect_err("The original input gained personal proof after Beacon recovered");
+    assert!(
+        error
+            .message
+            .contains("Personal authority was unavailable when this turn was admitted"),
+        "{error:?}"
+    );
+    let recovered_id = cairn_installation::config::id();
+    let recovered = common::send(
+        &app,
+        request(
+            "POST",
+            &path,
+            json!({
+                "id": recovered_id,
+                "text": "Continue without upgrading this turn's permissions",
+                "mode": "steer",
+            }),
+            Some("fixture-owner"),
+        ),
+    )
+    .await;
+    assert_eq!(
+        recovered.status(),
+        StatusCode::OK,
+        "Restored proof prevented the same account from controlling its ordinary turn"
+    );
+    s.chat_tick(&HashSet::new()).await.unwrap();
+    let file = s
+        .config
+        .data_dir
+        .join("runs")
+        .join(text(&ordinary_run, "id"))
+        .join("chat-input/messages.json");
+    let published: Value = serde_json::from_slice(&std::fs::read(file).unwrap()).unwrap();
+    assert!(
+        published
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|m| m["id"] == recovered_id)
+    );
+    let still_unproved =
+        agents::call_tool(&s, bearer, "example_read", &json!({"resource": resource}))
+            .await
+            .expect_err("Steering upgraded the original turn's personal proof");
+    assert!(
+        still_unproved
+            .message
+            .contains("Personal authority was unavailable when this turn was admitted")
+    );
+    server.abort();
 }

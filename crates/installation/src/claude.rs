@@ -423,8 +423,7 @@ fn present(catalog: &mut Catalog, cached: &[CachedModel]) {
             && row
                 .display_name
                 .as_deref()
-                .unwrap_or_default()
-                .starts_with("Default");
+                .is_none_or(|name| name.trim().is_empty() || name.starts_with("Default"));
         if named_default && let Some(name) = default_name(entry, &resolved, row) {
             row.display_name = Some(name);
         }
@@ -445,7 +444,9 @@ fn default_name(entry: Option<&CachedModel>, resolved: &str, row: &CatalogModel)
             .unwrap_or_default()
             .split(" · ")
             .next()
+            .map(str::trim)
             .filter(|name| !name.is_empty())
+            .or_else(|| (!resolved.is_empty()).then_some(resolved))
             .map(str::to_owned),
     }
 }

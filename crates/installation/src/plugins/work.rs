@@ -20,6 +20,13 @@ use std::sync::Arc;
 pub const EVENTS: &str = "plugin-events";
 pub const DELIVERIES: &str = "plugin-deliveries";
 
+/// Remove the native event and its idempotency receipts atomically. Consent
+/// remains valid independently of whether its URL delivery has finished.
+pub(crate) fn remove_event(db: &Db<'_>, event: &str) -> Result<()> {
+    super::oauth::remove_event_receipts_in(db, event)?;
+    db.remove(EVENTS, event)
+}
+
 /// Event names the host sends itself; packages can't admit messages under them.
 pub const RESERVED: &[&str] = &[
     "start",

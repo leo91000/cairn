@@ -30,6 +30,21 @@ async fn fixture_with(
     capabilities: &[&str],
     input: serde_json::Value,
 ) -> (TempDir, Router, Arc<Service>, String) {
+    fixture_with_settings(
+        source,
+        capabilities,
+        json!([{ "key": "signingSecret", "title": "Signing secret", "type": "secret" }]),
+        input,
+    )
+    .await
+}
+
+async fn fixture_with_settings(
+    source: &str,
+    capabilities: &[&str],
+    fields: serde_json::Value,
+    input: serde_json::Value,
+) -> (TempDir, Router, Arc<Service>, String) {
     let root = TempDir::new().unwrap();
     let s = Service::new(common::config(root.path())).await.unwrap();
     common::relay_fixture::claimed(&s).await.unwrap();
@@ -37,19 +52,24 @@ async fn fixture_with(
         .use_worker(PathBuf::from(env!("CARGO_BIN_EXE_cairn")));
     let mut requested = vec!["webhooks"];
     requested.extend(capabilities);
-    let installed = registry::install(&s, &json!({
-        "manifest": {
-            "id": "inbox", "name": "Inbox", "version": "1", "apiVersion": 2,
-            "capabilities": requested,
-            "settings": [{ "key": "signingSecret", "title": "Signing secret", "type": "secret" }],
-            "webhooks": [{ "name": "events", "signature": {
-                "secret": "signingSecret", "header": "x-example-signature", "prefix": "v0=",
-                "template": "v0:{{timestamp}}:{{body}}",
-                "timestamp": { "header": "x-example-timestamp", "maxAgeSeconds": 300 }
-            } }]
-        },
-        "source": source
-    })).await.unwrap();
+    let installed = registry::install(
+        &s,
+        &json!({
+            "manifest": {
+                "id": "inbox", "name": "Inbox", "version": "1", "apiVersion": 2,
+                "capabilities": requested,
+                "settings": fields,
+                "webhooks": [{ "name": "events", "signature": {
+                    "secret": "signingSecret", "header": "x-example-signature", "prefix": "v0=",
+                    "template": "v0:{{timestamp}}:{{body}}",
+                    "timestamp": { "header": "x-example-timestamp", "maxAgeSeconds": 300 }
+                } }]
+            },
+            "source": source
+        }),
+    )
+    .await
+    .unwrap();
     registry::approve(&s, "inbox", "1", text(&installed, "digest"))
         .await
         .unwrap();
@@ -1094,4 +1114,33 @@ async fn owner_setup_forms_use_saved_secrets_and_stable_draft_identity_without_a
         StatusCode::NOT_FOUND | StatusCode::FORBIDDEN | StatusCode::CONFLICT
     ));
     server.abort();
+}
+
+#[tokio::test]
+async fn maximum_signed_utf8_body_reaches_the_handler_with_large_valid_settings() {
+    let mut fields =
+        vec![json!({"key": "signingSecret", "title": "Signing secret", "type": "secret"})];
+    let mut settings = serde_json::Map::new();
+    for n in 0..29 {
+        let key = format!("field{n}");
+        fields.push(json!({"key": key, "title": key, "type": "string", "maxLength": 10000}));
+        settings.insert(key, json!("x".repeat(10000)));
+    }
+    let source = r#"return { webhook = function(event)
+        assert(event.instance.settings.field0 == string.rep('x', 10000))
+        assert(event.instance.settings.field28 == string.rep('x', 10000))
+        assert(event.body == string.rep(string.char(1), 128 * 1024))
+        return {status = 200, body = 'complete', headers = {['content-type'] = 'text/plain'}}
+    end }"#;
+    let (_root, app, _s, path) =
+        fixture_with_settings(source, &[], json!(fields), json!({"settings": settings})).await;
+    let body = "\u{1}".repeat(128 * 1024);
+    let response = common::send(&app, signed(&path, now() / 1000, &body)).await;
+    assert_eq!(
+        response.status(),
+        StatusCode::OK,
+        "{}",
+        common::read_text(response).await
+    );
+    assert_eq!(common::read_text(response).await, "complete");
 }

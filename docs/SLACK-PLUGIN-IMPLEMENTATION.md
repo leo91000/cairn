@@ -122,10 +122,13 @@ and Android, including exact choice IDs, numeric values, empty values and secret
 whitespace. Web dictionaries for plugin-defined collection and field names have
 no inherited entries.
 
-The current integration includes main through `d01b5198`, whose compatibility
-baseline is epoch 4. The route-authority measurements document bounded record
-shape and their limits; full native/storage and release qualification remains
-open. Catalogue totals, route usage summaries, guided selectors and scoped
+The current integration includes main through `cf07bea9`. New persisted plugin
+manifests require a separate compatibility boundary: epoch 6, above the inherited
+epoch 4 and upstream main's reserved epoch 5. The [persistent-format inventory and
+forward recovery plan](SLACK-PLUGIN-COMPATIBILITY.md) retain the unchanged legacy
+tree and require a separately reviewed production transition. The route-authority
+measurements document bounded record shape and their limits; full native/storage
+and release qualification remains open. Catalogue totals, route usage summaries, guided selectors and scoped
 resource forms are still pending, along with the remaining Slack delivery list.
 Validation and independent review of this checkpoint are still in progress.
 
@@ -705,3 +708,242 @@ provider request count while revoking those authorities at controlled barriers.
 This integration still requires fresh checkpoint qualification after resolving the
 merge. Its prior checkpoint results do not qualify the new source, and all unchecked
 Slack deliveries above remain required before final whole-PR validation.
+
+## Android form restoration and CI synchronization
+
+The Android route-edit journey now holds its second eligibility response: Save
+must remain disabled until that response arrives, including while the route is
+paused. This reproduces and corrects the premature enabled-button assertion in
+the preceding PR CI run, without changing production eligibility or test deadlines.
+
+Ordinary route, grant, resource and setup inputs, together with their editor
+identity, survive Android recreation. Credentials, typed secrets and OAuth
+consents stay in memory only. The restored editor reloads its target and authority
+before enabling a mutation and keeps the original revision rather than rebasing
+stale input. Failed reads can be retried without discarding the draft. Resource
+paging restores only the active editor's small identity reference, not entire
+resource lists. An uncertain creation requires an explicit fresh read before
+another mutation; recreation never replays the creation.
+
+Four shared JVM/device regressions first reproduced the lost drafts, then passed
+with saved ordinary state and cleared secrets. A further regression reproduced a
+disabled reload after a failed restoration read. Expanded held-read, retry,
+uncertain-creation and later-page coverage is undergoing qualification, along with
+the complete Android checks and fresh independent whole-PR review. This is still
+an unfinished Slack checkpoint.
+
+The previous exact-commit Quality job passed all 1,276 Rust tests (40 explicit
+ignores) and all five browser groups, but its overall result was cancelled at the
+30-minute job deadline. The global job budget is now 45 minutes; individual test
+and product deadlines are unchanged. The previous full manual Android run passed
+502 JVM and 159 API 36 device cases, including 28 plugin journeys, plus lint,
+APKs and release/JNI smoke. Those results predate the restoration correction and
+do not qualify the new source. Storage passed on that previous commit too.
+
+The [token lifecycle research](SLACK-TOKEN-LIFECYCLE.md) records remaining OAuth
+provider work and the documented uncertainty around static app-level migration.
+It does not implement those remaining features or establish live Slack behavior.
+
+Three further client-boundary regressions were reproduced during independent
+review. Web resource creation could be repeated after the native server committed
+but its response was lost. It now keeps a submission barrier until an explicit
+read succeeds, including when the first reconciliation read fails. Both active
+and prepared resources use this rule.
+
+A valid setup with expanded defaults could exceed the generic 150,000-byte
+request limit. Owner instance/setup configuration routes now use the existing
+bounded transport budget, while ordinary API and public ingress limits retain
+their existing bounds. The native regression first failed with HTTP 413.
+
+The same setup produced 1,543,572 bytes of Android saved instance state. Setup
+editors now save their identity and expected revision, reload their server
+snapshot and keep larger ordinary setting inputs in device-private, backup-excluded
+files behind a small scoped reference. The file store filters declared ordinary
+fields, expires snapshots after 24 hours and bounds retained files. Scope, session
+and logout cleanup delete those files and retire open editors so a late save
+cannot recreate them. Credentials and OAuth consent remain memory-only.
+
+The large setup's recreation regression passed on unchanged sources after an
+initial fixture-startup timeout, without increasing its deadlines. Storage
+contracts cover scope/credential isolation, atomic recovery, expiry, retirement
+and retention, and include a reproducible local read/write/CPU measurement harness. These
+corrections still require complete client/native qualification and a fresh
+independent review; they do not complete the Slack contract.
+
+
+## Worker frame and compatibility follow-up
+
+Independent review reproduced a resource-list worker failure: eighteen accepted
+resources with 60,049-byte settings produced a 1,086,434-byte capability reply,
+above the worker's 1 MiB frame. Resource pages now retain the 100-record ceiling
+and add an encoded-byte bound, with ordinary continuation cursors on both HTTP
+and Luau. No record is truncated. The real HTTP/worker reproduction and native
+regression both failed on the previous source.
+
+The wider configuration HTTP budget also exposed a second boundary: thirty
+individually valid Unicode values could be persisted as more than 1 MiB of root
+settings. A native HTTP regression reproduced HTTP 200 instead of a safe refusal.
+Root settings and partial form inputs now have a 512 KiB encoded aggregate limit,
+checked before persistence or worker invocation. Large valid configurations below
+that bound retain their complete values. These corrections are undergoing native
+qualification.
+
+New persisted manifest declarations require the epoch-6 boundary and the
+[forward/recovery inventory](SLACK-PLUGIN-COMPATIBILITY.md). Main is integrated
+through `cf07bea9`; its epoch 5 remains distinct. The previous routing slice's
+additive-field analysis did not establish whole-plugin compatibility.
+
+The pre-merge Android correction passes 518 JVM cases, including forty shared
+plugin journeys, four local-store contracts and nine scope transitions. Its
+[reproducible local reference](performance/ANDROID-PLUGIN-DRAFT-STATE.md) records
+1,280 bytes of saved state versus the reproduced 1,543,572-byte baseline, with a
+260,251-byte private file. This is Robolectric/tmpfs evidence, not device storage
+or live Slack evidence. Current merged-source validation and new independent
+whole-PR review remain required. Six TypeScript fixture tests failed while lint
+was active; their unchanged quiet qualification is pending, without deadline or
+assertion changes. This checkpoint does not complete Slack Q1–Q20.
+
+
+## Pending-delivery isolation follow-up
+
+A full independent review identified a route-selection conflict during binding
+revalidation. An equally specific overlapping route added after admission could
+return 409 from the reply pump and repeatedly restart its shared worker, leaving
+unrelated replies queued. A real-worker regression reproduces that exact error
+before the correction, with the ambiguous delivery first in the queue. Existing
+bindings now lose authority with 403; ambiguous new admission continues to return
+409. The regression also checks that the revoked route publishes no reply and
+the unaffected route finishes through the same live worker. Qualification and a
+fresh complete review follow the correction.
+
+A separate intermittent legacy TypeScript fixture assertion observed failed
+status before asynchronous account cleanup. The unchanged reference worker on
+main exposes that ordering under a held cleanup probe. The test now waits for
+the same zero-lease condition and covers a process starting after its original
+execution budget; no product timeout is increased. This concerns the retained
+reference test fixture, not a Slack transport or the native execution runtime.
+
+The merged native configuration/resource suites pass ten tests, including the
+real-worker frame regressions. The prior Android inputs pass 518 JVM cases, lint
+and APK builds; those results do not qualify Android changes inherited from the
+latest main integration. Full current-source checks, browser/device evidence,
+exact-commit CI and the remaining Slack Q1–Q20 lots remain required.
+
+
+## Requester and runtime-revocation follow-up
+
+A full independent review reproduced cross-author steering into a stopped turn.
+On native resume, the old input was delivered while tools still carried the
+original author's personal OAuth authority. Admission now checks the current or
+resumable turn, and native consumption separately rechecks each queued input
+against the current chat, run, delivering message and recorded requester. Owner
+question answers retain their existing control and suspend personal authority.
+The regression exercises actual native delivery and the authenticated tool call;
+a second case covers a formerly accepted input already in persistent storage.
+
+Granting an agent private whole-instance plugin access could also invalidate an
+accepted public route with HTTP 400. The scheduler treated that as an internal
+failure instead of retiring the source. Runtime public-route revalidation now
+returns 403 for that policy refusal, retaining internal errors and the 400
+configuration validation contract. The real scheduler reproduction fails before
+the correction. Native green qualification is still pending.
+
+On Android, a routed participant request no longer shows the root-instance
+approval actions, which target a different endpoint. The regression first found
+the incorrect visible controls. Large ordinary inputs in an unsaved resource
+editor now use the same scoped private store as setup inputs; typed secrets stay
+in memory. The saved-state reproduction failed at 1,173,992 bytes before the
+correction and now restores the ordinary inputs and clears the credential within
+a 65,536-byte saved-state ceiling. These inputs each meet the field limit but
+exceed the aggregate limit for saving a resource; the test does not claim that
+such an oversized resource can be persisted. Full current-source Android checks
+and fresh whole-PR review remain required.
+
+The reference TypeScript worker's zero-budget resume assertion also waited on
+status before asynchronous workspace restoration finished. A held-restore probe
+on unchanged main proves that ordering. The regression now waits for actual
+worker settlement, still requires failed/time-limit status and no restarted
+agent thread, and covers immediate and 1,250-ms workspace restoration without
+changing the execution budget or test deadline. This reference fixture work does
+not implement the remaining Slack transport, tools, automations or RTS contract.
+
+
+## Package invalidation, direct availability and encoded ingress follow-up
+
+The next complete independent review found three further boundaries. Actual
+regressions reproduce all three on unchanged production sources: an invalid
+approved disk manifest returns 400 from a native scheduling tick and blocks a
+later ordinary run; a signed 128 KiB UTF-8 control-character body plus valid large
+settings returns 502 before its worker handler; an ordinary authenticated chat
+message returns 503 when live personal-authority lookup is unavailable.
+
+Approved-package validation now treats an invalid manifest or package-size
+refusal as loss of approval, so its admitted source is retired while unrelated
+work reaches its capacity check. Owner review/installation still report actual
+package validation errors, and internal failures keep their diagnostics.
+
+Ordinary native message/edit/question mutations retain their authenticated
+request authority during a Beacon outage. Unavailable personal proof retains the authenticated account but no
+personal membership generation, with no retroactive OAuth upgrade or owner-token
+fallback. Distinct unverified accounts cannot steer one another’s turns. Explicit identity/membership refusals still fail. Owner question
+control follows the authenticated relay/direct role and suspends personal
+authority as before. The regression exercises native authenticated HTTP dispatch,
+including editing and owner question control; it does not claim a WebRTC handshake.
+
+Generic host event frames now have a 2 MiB encoded budget, while package loads,
+capability calls/results and worker output retain the 1 MiB budget. The raw HTTP
+bounds and 2.5-second deadline remain intact. The regression requires the complete
+control-character body and the first/last large setting to reach the real Luau
+handler, which returns a short response within the separate 64 KiB response bound.
+The previous red request failed at the input frame before that response boundary.
+
+The preceding twenty-group native run passes 332 cases, with only the two newly
+introduced route/frame regressions red and three intentional measurement ignores;
+targeted native dispatch reproduction is also red before correction. The current
+web run passes 599/602 cases; its three failures are in the retained reference
+restart fixtures under concurrent builds/tests, with quiet qualification pending.
+Corrected native green checks, fresh complete review, current Android/browser
+qualification, exact-commit CI and all remaining Slack lots are still required.
+
+
+## Requester control and package-file validation
+
+A missing or non-UTF-8 approved package file now loses its source admission
+without aborting unrelated scheduling. Other package filesystem failures remain
+explicit temporary unavailability with their I/O diagnostics; genuine database
+errors retain their normal error handling.
+
+Owner answers carry exact host-owned provenance for native delivery while the
+original author keeps later question/steering control. Personal OAuth remains
+suspended, including in-flight results and wakeups. Ordinary turns admitted
+without membership proof retain that restriction after Beacon recovery, while the
+same authenticated account can continue the turn. Storage-shape measurements and
+their host limitations are recorded in [requester control](performance/REQUESTER-CONTROL.md).
+Actual failing regressions were captured before these corrections; current final
+qualification and fresh independent review remain pending. This does not finish
+the Slack package or the complete contract.
+
+
+## Interleaved external consent replay
+
+The actual Luau-worker regression A → B → retry A reproduced invalidation of B's
+delivered URL. External OAuth starts now retain event-owned idempotency receipts
+in the same transaction as pending consent. The subject/provider lock serializes
+starts and finishes; receipt validation refuses superseded or disconnected old
+starts without creating another flow. Still-current replays retain their URL.
+Event completion, retry exhaustion, obsolete event removal and instance deletion
+retire the receipts; pending consent keeps its independent expiry.
+[Storage-shape measurements](performance/OAUTH-EVENT-REPLAY.md) record bytes,
+read/write timings, CPU, reference and host limits. Targeted and
+whole-checkpoint qualification remain pending, as do all unfinished Slack lots.
+
+
+## Revocation during question and progress delivery
+
+A real-worker regression revoked Alice while her question's HTTP response was
+held, before the due progress read. The old pump returned 403 and its supervisor
+would stop all routes on that instance. Follow-up source failures now finish only
+the revoked delivery, as reply failures already do. The regression also requires
+Bob's unrelated route to deliver its answer through the same live worker.
+Clippy's two reported form issues are corrected without suppressions. Current
+whole-checkpoint validation and a fresh independent review remain pending.

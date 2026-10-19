@@ -211,6 +211,7 @@ export type Cairn = {
         -- temporary; "requested" stores identity/routing only, never message content.
         deliver: (message: Inbound) -> {status: "accepted" | "duplicate" | "denied" | "requested" | "busy"},
     },
+    -- Pages are bounded by records and encoded bytes; follow every non-nil nextCursor.
     resources: {
         get: (options: {collection: string, resource: string, instance: string?}) -> Resource,
         list: (options: {collection: string, cursor: string?, instance: string?}) -> {items: {Resource}, nextCursor: string?},

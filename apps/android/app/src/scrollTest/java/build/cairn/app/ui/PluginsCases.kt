@@ -7,6 +7,7 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.semantics.SemanticsProperties
 import androidx.compose.ui.test.*
+import androidx.compose.ui.test.junit4.StateRestorationTester
 import androidx.compose.ui.test.junit4.v2.createComposeRule
 import androidx.lifecycle.ViewModelStore
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -869,6 +870,7 @@ abstract class PluginsCases {
                                         connections = listOfNotNull(active.get()),
                                     )
                                 )
+                            path.endsWith("$root/setup1") -> draft.get()?.toString()
                             path.endsWith(root) -> buildJsonObject {
                                     put("items", JsonArray(listOfNotNull(draft.get())))
                                 }
@@ -1151,6 +1153,8 @@ abstract class PluginsCases {
                         when {
                             path.endsWith("/plugins") ->
                                 wireJson.encodeToString(PluginCatalog(packages = listOf(entry)))
+                            path.endsWith("/setup-drafts/${last.id}") ->
+                                wireJson.encodeToString(last)
                             path.substringBefore('?').endsWith("/setup-drafts") -> {
                                 val cursor = android.net.Uri.parse(path).getQueryParameter("cursor")
                                 if (cursor != null) {
@@ -1329,6 +1333,8 @@ abstract class PluginsCases {
                         when {
                             path.endsWith("/plugins") ->
                                 wireJson.encodeToString(PluginCatalog(packages = listOf(entry)))
+                            path.endsWith("/setup-drafts/setup-feedback1") ->
+                                wireJson.encodeToString(draft.get())
                             path.endsWith("/resources/workspace") -> """{"items":[]}"""
                             else -> null
                         }
@@ -1636,6 +1642,8 @@ abstract class PluginsCases {
                                             else emptyList(),
                                     )
                                 )
+                            path.endsWith("/setup-drafts/${draft.id}") ->
+                                wireJson.encodeToString(draft)
                             path.endsWith("/setup-drafts") ->
                                 wireJson.encodeToString(
                                     PluginPage(if (active.get()) emptyList() else listOf(draft))
@@ -2634,6 +2642,9 @@ abstract class PluginsCases {
         val routes = CopyOnWriteArrayList<PluginRoute>()
         val writes = CopyOnWriteArrayList<JsonObject>()
         val methods = CopyOnWriteArrayList<String>()
+        val eligibilityReads = AtomicInteger()
+        val editPreviewStarted = CountDownLatch(1)
+        val releaseEditPreview = CountDownLatch(1)
         val routePath = "/plugins/routes-ui/connections/app/resources/workspace/engineering"
         val path = "$routePath/routes"
         MockWebServer().use { server ->
@@ -2657,6 +2668,14 @@ abstract class PluginsCases {
                 object : Dispatcher() {
                     override fun dispatch(request: RecordedRequest): MockResponse {
                         val requested = request.path.orEmpty()
+                        if (
+                            request.method == "GET" &&
+                                requested.contains("$routePath/route-eligibility?") &&
+                                eligibilityReads.incrementAndGet() == 2
+                        ) {
+                            editPreviewStarted.countDown()
+                            check(releaseEditPreview.await(20, TimeUnit.SECONDS))
+                        }
                         if (request.method == "GET" || !requested.contains(path))
                             return normal.dispatch(request)
                         if (request.getHeader("X-CSRF-Token") != "fixture-csrf")
@@ -2757,7 +2776,19 @@ abstract class PluginsCases {
                 capture("resource-conversation-route")
                 compose.onNodeWithText("Modifier la route Support").performScrollTo().performClick()
                 compose.onNodeWithText("Valeur de la condition 1").assertTextContains("C1")
-                compose.onNodeWithText("Route activée").performScrollTo().performClick()
+                try {
+                    compose.waitUntil(10000) { editPreviewStarted.count == 0L }
+                    compose.onNodeWithText("Enregistrer").assertIsNotEnabled()
+                    compose.onNodeWithText("Route activée").performScrollTo().performClick()
+                    compose.onNodeWithText("Enregistrer").assertIsNotEnabled()
+                } finally {
+                    releaseEditPreview.countDown()
+                }
+                compose.waitUntil(10000) {
+                    compose.onAllNodesWithText("Enregistrer").fetchSemanticsNodes().any {
+                        !it.config.contains(SemanticsProperties.Disabled)
+                    }
+                }
                 compose.onNodeWithText("Enregistrer").assertIsEnabled().performClick()
                 compose.waitUntil(10000) {
                     methods.size == 2 &&
@@ -3016,7 +3047,853 @@ abstract class PluginsCases {
         }
     }
 
-    /** Answers workspace reads and optional status polling through the fixture. */
+    @Test
+    fun routeRequestsDoNotUseInstanceApprovalActions() {
+        val manifest =
+            PluginManifest(
+                id = "route-inbox",
+                name = "Route inbox",
+                version = "1",
+                capabilities = listOf("conversations.submit"),
+                resources =
+                    listOf(
+                        PluginResourceCollection(
+                            name = "workspace",
+                            title = "Workspaces",
+                            singular = "Workspace",
+                            delegation = true,
+                        )
+                    ),
+            )
+        val catalog =
+            wireJson
+                .encodeToJsonElement(
+                    PluginCatalog(
+                        packages =
+                            listOf(
+                                PluginEntry(id = manifest.id, active = "1", manifest = manifest)
+                            ),
+                        connections =
+                            listOf(
+                                PluginConnection(
+                                    id = "app",
+                                    pluginId = manifest.id,
+                                    name = "Application",
+                                    status = PluginStatus("ready"),
+                                    requests =
+                                        listOf(
+                                            PluginRequest(
+                                                id = "request",
+                                                userId = "pending",
+                                                name = "Route participant",
+                                            )
+                                        ),
+                                )
+                            ),
+                    )
+                )
+                .jsonObject
+        val connection = catalog.getValue("connections").jsonArray.single().jsonObject
+        val request = connection.getValue("requests").jsonArray.single().jsonObject
+        val routed =
+            JsonObject(
+                catalog +
+                    ("connections" to
+                        JsonArray(
+                            listOf(
+                                JsonObject(
+                                    connection +
+                                        ("requests" to
+                                            JsonArray(
+                                                listOf(
+                                                    JsonObject(
+                                                        request +
+                                                            ("routeId" to JsonPrimitive("route1"))
+                                                    )
+                                                )
+                                            ))
+                                )
+                            )
+                        ))
+            )
+        MockWebServer().use { server ->
+            server.dispatcher =
+                dispatcher(
+                    read = { path ->
+                        when {
+                            path.endsWith("/plugins") -> routed.toString()
+                            path.endsWith("/resources/workspace") -> "{\"items\":[]}"
+                            else -> null
+                        }
+                    }
+                ) { _, _ ->
+                    null
+                }
+            server.start()
+            show(server) { vm, state -> PluginScreen(vm, state, manifest.id) {} }
+            compose.waitUntil(10000) {
+                compose
+                    .onAllNodesWithText("Application", substring = false)
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
+            }
+            compose.onNodeWithText("Route participant").assertDoesNotExist()
+            compose.onNodeWithText("Approuver", substring = false).assertDoesNotExist()
+            compose.onNodeWithText("Refuser", substring = false).assertDoesNotExist()
+        }
+    }
+
+    @Test
+    fun largeUnsavedResourceInputsUseSmallSavedStateAndNeverPersistSecrets() {
+        val fields =
+            (0 until 29).map { n ->
+                PluginSetting(key = "field$n", title = "Field $n", maxLength = 10000)
+            } + PluginSetting(key = "secret", title = "Credential", type = "secret")
+        val manifest =
+            PluginManifest(
+                id = "large-resource",
+                name = "Large resource",
+                version = "1",
+                resources =
+                    listOf(
+                        PluginResourceCollection(
+                            name = "workspace",
+                            title = "Workspaces",
+                            singular = "Workspace",
+                            settings = fields,
+                        )
+                    ),
+            )
+        val restoration = StateRestorationTester(compose)
+        val registry = AtomicReference<androidx.compose.runtime.saveable.SaveableStateRegistry>()
+        val writes = CopyOnWriteArrayList<String>()
+        val input = "\"".repeat(10000)
+        MockWebServer().use { server ->
+            server.dispatcher =
+                dispatcher(
+                    read = { path ->
+                        if (path.endsWith("/resources/workspace")) "{\"items\":[]}" else null
+                    }
+                ) { path, _ ->
+                    writes += path
+                    "{}"
+                }
+            server.start()
+            val vm =
+                show(server, restoration) { model, state ->
+                    val current =
+                        androidx.compose.runtime.saveable.LocalSaveableStateRegistry.current
+                    SideEffect { registry.set(checkNotNull(current)) }
+                    PluginResources(
+                        model,
+                        state,
+                        manifest,
+                        PluginResourceLocation(manifest.id, "app"),
+                    )
+                }
+            val models = ViewModelStore().apply { put("fixture", vm) }
+            try {
+                compose.waitUntil(10000) {
+                    compose
+                        .onAllNodes(hasText("Ajouter · Workspace") and isEnabled())
+                        .fetchSemanticsNodes()
+                        .isNotEmpty()
+                }
+                compose.onNodeWithText("Ajouter · Workspace").performClick()
+                compose
+                    .onNodeWithText("Nom · Workspace")
+                    .performTextReplacement("Ordinary resource draft")
+                for (n in 0 until 29) {
+                    compose
+                        .onNodeWithText("Field $n", substring = false)
+                        .performScrollTo()
+                        .performTextReplacement(input)
+                }
+                compose
+                    .onNodeWithText("Credential")
+                    .performScrollTo()
+                    .performTextInput("resource-fixture-secret")
+                val bytes = compose.runOnIdle {
+                    val parcel = android.os.Parcel.obtain()
+                    try {
+                        val saved = registry.get().performSave()
+                        assertFalse(saved.toString().contains("resource-fixture-secret"))
+                        parcel.writeValue(saved)
+                        parcel.dataSize()
+                    } finally {
+                        parcel.recycle()
+                    }
+                }
+                assertTrue(
+                    "Unsaved resource inputs must not inflate activity state: $bytes bytes",
+                    bytes < 65_536,
+                )
+                println("Unsaved resource activity state: $bytes bytes")
+                restoration.emulateSavedInstanceStateRestore()
+                compose.waitUntil(10000) {
+                    compose
+                        .onAllNodes(hasText("Field 0") and isEnabled())
+                        .fetchSemanticsNodes()
+                        .isNotEmpty()
+                }
+                for (n in listOf(0, 28)) {
+                    compose
+                        .onNodeWithText("Field $n", substring = false)
+                        .performScrollTo()
+                        .assertTextContains(input)
+                }
+                assertEquals(
+                    "",
+                    compose
+                        .onNodeWithText("Credential")
+                        .performScrollTo()
+                        .fetchSemanticsNode()
+                        .config[SemanticsProperties.EditableText]
+                        .text,
+                )
+                assertTrue(writes.isEmpty())
+            } finally {
+                models.clear()
+            }
+        }
+    }
+
+    @Test
+    fun largeSetupSavesOnlySmallEditorReferencesAndOrdinaryEdits() {
+        val fields =
+            (0 until 20).map { n ->
+                PluginSetting(
+                    key = "field$n",
+                    title = "Field $n",
+                    maxLength = 10000,
+                    default = if (n < 6) JsonPrimitive("\"".repeat(10000)) else null,
+                )
+            } + PluginSetting(key = "secret", title = "Credential", type = "secret")
+        val manifest =
+            PluginManifest(id = "large-restore", name = "Large restore", settings = fields)
+        val values =
+            JsonObject(
+                (0 until 20).associate {
+                    "field$it" to
+                        JsonPrimitive(if (it < 6) "\"".repeat(10000) else "x".repeat(10000))
+                }
+            )
+        val draft =
+            PluginSetupDraft(
+                id = "large",
+                pluginId = manifest.id,
+                name = "Large setup",
+                revision = "d1",
+                settings = values,
+                expiresAt = System.currentTimeMillis() + 3_600_000,
+            )
+        val restoration = StateRestorationTester(compose)
+        val registry = AtomicReference<androidx.compose.runtime.saveable.SaveableStateRegistry>()
+        val writes = CopyOnWriteArrayList<String>()
+        MockWebServer().use { server ->
+            server.dispatcher =
+                dispatcher(
+                    read = { path ->
+                        when {
+                            path.endsWith("/plugins") ->
+                                wireJson.encodeToString(
+                                    PluginCatalog(
+                                        packages =
+                                            listOf(
+                                                PluginEntry(
+                                                    id = manifest.id,
+                                                    active = "1",
+                                                    manifest = manifest,
+                                                )
+                                            )
+                                    )
+                                )
+                            path.endsWith("/setup-drafts") ->
+                                wireJson.encodeToString(PluginPage(listOf(draft)))
+                            path.endsWith("/setup-drafts/large") -> wireJson.encodeToString(draft)
+                            else -> null
+                        }
+                    }
+                ) { path, _ ->
+                    writes += path
+                    "{}"
+                }
+            server.start()
+            val vm =
+                show(server, restoration) { model, state ->
+                    val current =
+                        androidx.compose.runtime.saveable.LocalSaveableStateRegistry.current
+                    SideEffect { registry.set(checkNotNull(current)) }
+                    PluginScreen(model, state, manifest.id) {}
+                }
+            val models = ViewModelStore().apply { put("fixture", vm) }
+            try {
+                compose.waitUntil(10000) {
+                    compose
+                        .onAllNodes(hasText("Continuer Large setup") and isEnabled())
+                        .fetchSemanticsNodes()
+                        .isNotEmpty()
+                }
+                compose.onNodeWithText("Continuer Large setup").performScrollTo().performClick()
+                compose.waitUntil(10000) {
+                    compose
+                        .onAllNodes(hasText("Field 6") and isEnabled())
+                        .fetchSemanticsNodes()
+                        .isNotEmpty()
+                }
+                compose
+                    .onNodeWithText("Field 6")
+                    .performScrollTo()
+                    .performTextReplacement("edited locally")
+                compose
+                    .onNodeWithText("Credential")
+                    .performScrollTo()
+                    .performTextInput("fixture-secret")
+                val bytes = compose.runOnIdle {
+                    val parcel = android.os.Parcel.obtain()
+                    try {
+                        val saved = registry.get().performSave()
+                        assertFalse(
+                            "Typed credentials must stay outside saved state",
+                            saved.toString().contains("fixture-secret"),
+                        )
+                        parcel.writeValue(saved)
+                        parcel.dataSize()
+                    } finally {
+                        parcel.recycle()
+                    }
+                }
+                assertTrue(
+                    "A reloadable server draft must not inflate saved instance state: $bytes bytes",
+                    bytes < 65_536,
+                )
+                println("Plugin setup saved instance state: $bytes bytes")
+                restoration.emulateSavedInstanceStateRestore()
+                compose.waitUntil(10000) {
+                    compose
+                        .onAllNodes(hasText("Field 6") and isEnabled())
+                        .fetchSemanticsNodes()
+                        .isNotEmpty()
+                }
+                compose
+                    .onNodeWithText("Field 6")
+                    .performScrollTo()
+                    .assertTextContains("edited locally")
+                compose
+                    .onNodeWithText("Field 19")
+                    .performScrollTo()
+                    .assertTextContains("x".repeat(10000))
+                assertEquals(
+                    "",
+                    compose
+                        .onNodeWithText("Credential")
+                        .fetchSemanticsNode()
+                        .config[SemanticsProperties.EditableText]
+                        .text,
+                )
+                assertTrue(writes.isEmpty())
+            } finally {
+                models.clear()
+            }
+        }
+    }
+
+    @Test fun routeDraftSurvivesRecreation() = pluginDraftRecreation("routes")
+
+    @Test fun grantDraftSurvivesRecreation() = pluginDraftRecreation("grants")
+
+    @Test
+    fun resourceDraftSurvivesRecreationWithoutSavingSecrets() = pluginDraftRecreation("resource")
+
+    @Test fun setupDraftSurvivesRecreationWithoutSavingSecrets() = pluginDraftRecreation("setup")
+
+    @Test
+    fun routeDraftRetriesFailedRestorationRead() = pluginDraftRecreation("routes", failRead = true)
+
+    @Test
+    fun grantDraftRetriesFailedRestorationRead() = pluginDraftRecreation("grants", failRead = true)
+
+    @Test
+    fun resourceDraftRetriesFailedRestorationRead() =
+        pluginDraftRecreation("resource", failRead = true)
+
+    @Test
+    fun setupDraftRetriesFailedRestorationRead() = pluginDraftRecreation("setup", failRead = true)
+
+    @Test
+    fun resourceCreationRestoresAReadBarrier() =
+        pluginDraftRecreation("resource", pendingCreation = true)
+
+    @Test fun laterPageGrantDraftSurvivesRecreation() = laterPageGrantRecreation(false)
+
+    @Test fun laterPageGrantDraftRetriesAParentReadFailure() = laterPageGrantRecreation(true)
+
+    private fun laterPageGrantRecreation(failRead: Boolean) {
+        val collection = PluginResourceCollection("workspace", "Workspaces", "Workspace")
+        val operations =
+            listOf(
+                PluginOperation("read", "workspace", PluginAccessProfile.Read, listOf("channel"))
+            )
+        val manifest =
+            PluginManifest(
+                id = "paged-restore",
+                agentAccess = PluginAgentAccess(),
+                resources = listOf(collection),
+                operations = operations,
+            )
+        val intro =
+            PluginResource(
+                id = "intro",
+                connectionId = "app",
+                collection = "workspace",
+                name = "Intro",
+                revision = "i1",
+            )
+        val engineering = intro.copy(id = "engineering", name = "Engineering", revision = "e1")
+        val root = "/plugins/paged-restore/connections/app/resources/workspace"
+        val restoration = StateRestorationTester(compose)
+        val restoring = java.util.concurrent.atomic.AtomicBoolean(false)
+        val failed = java.util.concurrent.atomic.AtomicBoolean(false)
+        val laterReads = AtomicInteger()
+        val writes = CopyOnWriteArrayList<Pair<String, JsonObject>>()
+        val rules = CopyOnWriteArrayList<PluginResourceGrant>()
+        MockWebServer().use { server ->
+            val normal =
+                dispatcher(
+                    read = { path ->
+                        when {
+                            path.endsWith(root) ->
+                                wireJson.encodeToString(PluginPage(listOf(intro), "later"))
+                            path.endsWith("$root?cursor=later") -> {
+                                laterReads.incrementAndGet()
+                                wireJson.encodeToString(PluginPage(listOf(engineering)))
+                            }
+                            path.endsWith("/engineering/grants") ->
+                                wireJson.encodeToString(PluginPage(rules.toList()))
+                            else -> null
+                        }
+                    }
+                ) { path, body ->
+                    writes += path to wireJson.parseToJsonElement(body).jsonObject
+                    val grant =
+                        wireJson
+                            .decodeFromString<PluginResourceGrant>(body)
+                            .copy(id = "saved", resourceId = engineering.id)
+                    rules += grant
+                    wireJson.encodeToString(grant)
+                }
+            server.dispatcher =
+                object : Dispatcher() {
+                    override fun dispatch(request: RecordedRequest): MockResponse {
+                        if (
+                            request.method == "GET" &&
+                                request.path.orEmpty().endsWith(root) &&
+                                failRead &&
+                                restoring.get() &&
+                                failed.compareAndSet(false, true)
+                        )
+                            return MockResponse()
+                                .setResponseCode(503)
+                                .setBody("""{"error":"Temporary fixture outage."}""")
+                        return normal.dispatch(request)
+                    }
+                }
+            server.start()
+            val vm =
+                show(server, restoration) { model, state ->
+                    Page {
+                        PluginResources(
+                            model,
+                            state,
+                            manifest,
+                            PluginResourceLocation(manifest.id, "app"),
+                        )
+                    }
+                }
+            val models = ViewModelStore().apply { put("fixture", vm) }
+            fun waitEnabled(label: String) =
+                compose.waitUntil(10000) {
+                    compose
+                        .onAllNodes(hasText(label) and isEnabled())
+                        .fetchSemanticsNodes()
+                        .isNotEmpty()
+                }
+            try {
+                waitEnabled("Voir plus · Workspaces")
+                compose.onNodeWithText("Voir plus · Workspaces").performScrollTo().performClick()
+                compose.waitUntil(10000) {
+                    compose.onAllNodesWithText("Accès des agents").fetchSemanticsNodes().size == 2
+                }
+                compose.onAllNodesWithText("Accès des agents")[1].performScrollTo().performClick()
+                waitEnabled("Ajouter une règle")
+                compose.onNodeWithText("Ajouter une règle").performScrollTo().performClick()
+                compose.onNodeWithContentDescription("Helper").performScrollTo().performClick()
+                compose.onNodeWithContentDescription("Lecture").performScrollTo().performClick()
+                compose.onNodeWithText("Limiter channel").performScrollTo().performTextInput("C1")
+                waitEnabled("Enregistrer")
+                assertTrue(writes.isEmpty())
+                val before = laterReads.get()
+                restoring.set(true)
+                restoration.emulateSavedInstanceStateRestore()
+                if (failRead) {
+                    compose.waitUntil(10000) {
+                        failed.get() &&
+                            compose
+                                .onAllNodes(hasText("Actualiser les ressources") and isEnabled())
+                                .fetchSemanticsNodes()
+                                .isNotEmpty()
+                    }
+                    assertTrue(writes.isEmpty())
+                    compose
+                        .onNodeWithText("Actualiser les ressources")
+                        .performScrollTo()
+                        .performClick()
+                }
+                waitEnabled("Enregistrer")
+                assertTrue(laterReads.get() > before)
+                compose.onNodeWithText("Accès des agents · Engineering").assertExists()
+                compose.onNodeWithText("Limiter channel").performScrollTo().assertTextContains("C1")
+                assertTrue(writes.isEmpty())
+                compose.onNodeWithText("Enregistrer").performClick()
+                compose.waitUntil(10000) {
+                    writes.size == 1 &&
+                        compose
+                            .onAllNodesWithText("Révoquer la règle")
+                            .fetchSemanticsNodes()
+                            .isNotEmpty()
+                }
+                assertTrue(writes.single().first.endsWith("$root/engineering/grants"))
+                assertEquals("helper", writes.single().second["agentId"]?.jsonPrimitive?.content)
+                assertEquals(
+                    listOf("C1"),
+                    writes.single().second["scopes"]!!.jsonObject["channel"]!!.jsonArray.map {
+                        it.jsonPrimitive.content
+                    },
+                )
+                capture("later-page-grant-restored")
+            } finally {
+                models.clear()
+            }
+        }
+    }
+
+    private fun pluginDraftRecreation(
+        kind: String,
+        failRead: Boolean = false,
+        pendingCreation: Boolean = false,
+    ) {
+        val root = "/plugins/draft-restore/connections/app/resources/workspace/engineering"
+        val operations =
+            listOf(
+                PluginOperation(
+                    name = "messages.read",
+                    collection = "workspace",
+                    profile = PluginAccessProfile.Read,
+                    scopes = listOf("channel"),
+                ),
+                PluginOperation(
+                    name = "messages.send",
+                    collection = "workspace",
+                    profile = PluginAccessProfile.Contribute,
+                    scopes = listOf("channel"),
+                ),
+            )
+        val fields =
+            listOf(
+                PluginSetting(key = "topic", title = "Topic"),
+                PluginSetting(key = "secret", title = "Credential", type = "secret"),
+            )
+        val collection =
+            PluginResourceCollection(
+                name = "workspace",
+                title = "Workspaces",
+                singular = "Workspace",
+                settings = fields,
+            )
+        val manifest =
+            PluginManifest(
+                id = "draft-restore",
+                name = "Restore",
+                settings = fields,
+                resources = listOf(collection),
+            )
+        val draft =
+            PluginSetupDraft(
+                id = "draft",
+                pluginId = manifest.id,
+                name = "Setup",
+                revision = "d1",
+                expiresAt = System.currentTimeMillis() + 3_600_000,
+            )
+        val writes = CopyOnWriteArrayList<String>()
+        val created = AtomicReference<PluginResource?>(null)
+        val resourceReads = AtomicInteger()
+        val restoring = java.util.concurrent.atomic.AtomicBoolean(false)
+        val gated = java.util.concurrent.atomic.AtomicBoolean(false)
+        val readStarted = CountDownLatch(1)
+        val releaseRead = CountDownLatch(1)
+        val writeStarted = CountDownLatch(1)
+        val releaseWrite = CountDownLatch(1)
+        val restoration = StateRestorationTester(compose)
+        fun proofRead(path: String) =
+            when (kind) {
+                "routes" -> path.endsWith("$root/routes")
+                "grants" -> path.endsWith("$root/grants")
+                "resource" -> path.endsWith("/connections/app/resources/workspace")
+                else -> path.endsWith("/setup-drafts/draft")
+            }
+        fun waitEnabled(label: String) =
+            compose.waitUntil(10000) {
+                compose
+                    .onAllNodes(hasText(label) and isEnabled())
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
+            }
+        MockWebServer().use { server ->
+            val normal =
+                dispatcher(
+                    read = { path ->
+                        when {
+                            path.contains("$root/route-eligibility?") ->
+                                wireJson.encodeToString(
+                                    PluginPage(listOf(RouteEligibility("helper", true)))
+                                )
+                            path.endsWith("$root/routes") || path.endsWith("$root/grants") ->
+                                """{"items":[]}"""
+                            path.endsWith("/resources/workspace") ->
+                                wireJson.encodeToString(PluginPage(listOfNotNull(created.get())))
+                            path.endsWith("/plugins/draft-restore/setup-drafts/draft") ->
+                                wireJson.encodeToString(draft)
+                            path.endsWith("/plugins") ->
+                                wireJson.encodeToString(
+                                    PluginCatalog(
+                                        packages =
+                                            listOf(
+                                                PluginEntry(
+                                                    id = manifest.id,
+                                                    active = "1.0.0",
+                                                    manifest = manifest,
+                                                )
+                                            )
+                                    )
+                                )
+                            path.endsWith("/plugins/draft-restore/setup-drafts") ->
+                                wireJson.encodeToString(PluginPage(listOf(draft)))
+                            else -> null
+                        }
+                    }
+                ) { path, body ->
+                    writes += path
+                    if (pendingCreation && path.endsWith("/resources/workspace")) {
+                        val input = wireJson.parseToJsonElement(body).jsonObject
+                        val resource =
+                            PluginResource(
+                                id = "created",
+                                connectionId = "app",
+                                collection = "workspace",
+                                name = input["name"]!!.jsonPrimitive.content,
+                                settings = input["settings"]!!.jsonObject,
+                                secretKeys = listOf("secret"),
+                                revision = "r1",
+                            )
+                        created.set(resource)
+                        writeStarted.countDown()
+                        check(releaseWrite.await(20, TimeUnit.SECONDS))
+                        wireJson.encodeToString(resource)
+                    } else "{}"
+                }
+            server.dispatcher =
+                object : Dispatcher() {
+                    override fun dispatch(request: RecordedRequest): MockResponse {
+                        val path = request.path.orEmpty()
+                        if (request.method == "GET") {
+                            if (path.endsWith("/resources/workspace"))
+                                resourceReads.incrementAndGet()
+                            if (
+                                !pendingCreation &&
+                                    restoring.get() &&
+                                    proofRead(path) &&
+                                    gated.compareAndSet(false, true)
+                            ) {
+                                readStarted.countDown()
+                                check(releaseRead.await(20, TimeUnit.SECONDS))
+                                if (failRead)
+                                    return MockResponse()
+                                        .setResponseCode(503)
+                                        .setBody("""{"error":"Temporary fixture outage."}""")
+                            }
+                        }
+                        return normal.dispatch(request)
+                    }
+                }
+            server.start()
+            val vm =
+                show(server, restoration) { model, state ->
+                    when (kind) {
+                        "routes" -> PluginResourceRoutes(model, state, root, "Engineering", true) {}
+                        "grants" ->
+                            PluginResourceGrants(
+                                model,
+                                state,
+                                "$root/grants",
+                                "Engineering",
+                                operations,
+                                true,
+                            ) {}
+                        "resource" ->
+                            PluginResources(
+                                model,
+                                state,
+                                manifest,
+                                PluginResourceLocation(manifest.id, "app"),
+                            )
+                        else -> PluginScreen(model, state, manifest.id) {}
+                    }
+                }
+            val models = ViewModelStore().apply { put("fixture", vm) }
+            try {
+                val open =
+                    when (kind) {
+                        "routes" -> "Routes de conversation"
+                        "grants" -> "Accès des agents"
+                        "resource" -> "Ajouter · Workspace"
+                        else -> "Continuer Setup"
+                    }
+                waitEnabled(open)
+                if (kind == "setup") compose.onNodeWithText(open).performScrollTo()
+                compose.onNodeWithText(open).performClick()
+                if (kind == "routes" || kind == "grants") {
+                    val add = if (kind == "routes") "Ajouter une route" else "Ajouter une règle"
+                    waitEnabled(add)
+                    compose.onNodeWithText(add).performScrollTo().performClick()
+                }
+                val field =
+                    when (kind) {
+                        "routes" -> "Nom de la route"
+                        "grants" -> "Limiter channel"
+                        "resource" -> "Nom · Workspace"
+                        else -> "Nom"
+                    }
+                compose
+                    .onNodeWithText(field)
+                    .performScrollTo()
+                    .performTextReplacement("Retained draft")
+                if (kind == "routes" || kind == "grants") {
+                    compose.waitUntil(10000) {
+                        compose
+                            .onAllNodesWithContentDescription("Helper")
+                            .fetchSemanticsNodes()
+                            .any { !it.config.contains(SemanticsProperties.Disabled) }
+                    }
+                    compose.onNodeWithContentDescription("Helper").performScrollTo().performClick()
+                    if (kind == "routes") {
+                        compose
+                            .onNodeWithText("Ajouter une condition")
+                            .performScrollTo()
+                            .performClick()
+                        compose
+                            .onNodeWithText("Clé de la condition 1")
+                            .performScrollTo()
+                            .performTextInput("channel")
+                        compose
+                            .onNodeWithText("Valeur de la condition 1")
+                            .performScrollTo()
+                            .performTextInput("C1")
+                    } else
+                        compose
+                            .onNodeWithContentDescription("Contribution")
+                            .performScrollTo()
+                            .performClick()
+                }
+                if (kind == "resource" || kind == "setup") {
+                    compose.onNodeWithText("Topic").performScrollTo().performTextInput("triage")
+                    compose
+                        .onNodeWithText("Credential")
+                        .performScrollTo()
+                        .performTextInput("fixture-secret")
+                }
+                val save = if (kind == "setup") "Enregistrer la configuration" else "Enregistrer"
+                waitEnabled(save)
+                compose.onNodeWithText(field).assertTextContains("Retained draft")
+                if (pendingCreation) {
+                    compose.onNodeWithText(save).performClick()
+                    compose.waitUntil(10000) { writeStarted.count == 0L }
+                    try {
+                        restoring.set(true)
+                        restoration.emulateSavedInstanceStateRestore()
+                        compose.onNodeWithText(save).assertIsNotEnabled()
+                        compose.onNodeWithText(field).assertTextContains("Retained draft")
+                    } finally {
+                        releaseWrite.countDown()
+                    }
+                    waitEnabled("Vérifier la sauvegarde")
+                    compose.onNodeWithText(save).assertIsNotEnabled()
+                    assertEquals(1, writes.size)
+                    val beforeRead = resourceReads.get()
+                    compose
+                        .onNodeWithText("Vérifier la sauvegarde")
+                        .performScrollTo()
+                        .performClick()
+                    compose.waitUntil(10000) {
+                        resourceReads.get() > beforeRead &&
+                            compose
+                                .onAllNodesWithText("Modifier Retained draft")
+                                .fetchSemanticsNodes()
+                                .isNotEmpty() &&
+                            compose.onAllNodesWithText(save).fetchSemanticsNodes().isEmpty()
+                    }
+                    assertEquals(1, writes.size)
+                    capture("resource-creation-restored-with-read-barrier")
+                    return
+                }
+                try {
+                    restoring.set(true)
+                    restoration.emulateSavedInstanceStateRestore()
+                    compose.waitUntil(10000) { readStarted.count == 0L }
+                    compose.onNodeWithText(save).assertIsNotEnabled()
+                } finally {
+                    releaseRead.countDown()
+                }
+                if (failRead) {
+                    val retry =
+                        when (kind) {
+                            "routes" -> "Actualiser les routes"
+                            "grants" -> "Actualiser les règles"
+                            else -> "Réessayer le chargement"
+                        }
+                    compose.waitUntil(10000) {
+                        compose.onAllNodesWithText(retry).fetchSemanticsNodes().isNotEmpty()
+                    }
+                    compose.onNodeWithText(retry).performScrollTo().assertIsEnabled().performClick()
+                }
+                waitEnabled(save)
+                compose.onNodeWithText(field).performScrollTo().assertTextContains("Retained draft")
+                if (kind == "routes")
+                    compose
+                        .onNodeWithText("Valeur de la condition 1")
+                        .performScrollTo()
+                        .assertTextContains("C1")
+                if (kind == "resource" || kind == "setup") {
+                    compose.onNodeWithText("Topic").performScrollTo().assertTextContains("triage")
+                    assertEquals(
+                        "",
+                        compose
+                            .onNodeWithText("Credential")
+                            .fetchSemanticsNode()
+                            .config[SemanticsProperties.EditableText]
+                            .text,
+                    )
+                }
+                assertTrue("Restoration must not issue a mutation", writes.isEmpty())
+                capture("$kind-draft-restored")
+            } finally {
+                releaseRead.countDown()
+                releaseWrite.countDown()
+                models.clear()
+            }
+        }
+    }
+
     private fun dispatcher(
         includeGet: Boolean = false,
         read: (String) -> String? = { null },
@@ -3098,6 +3975,7 @@ abstract class PluginsCases {
     /** Signs in to the fixture, then shows [content] once the workspace has loaded. */
     private fun show(
         server: MockWebServer,
+        restoration: StateRestorationTester? = null,
         content: @Composable (CairnViewModel, Workspace) -> Unit,
     ): CairnViewModel {
         val vm =
@@ -3106,14 +3984,14 @@ abstract class PluginsCases {
                 PluginVault(),
                 beaconOrigin = "",
             )
-        compose.setContent {
+        val render: @Composable () -> Unit = {
             val state by vm.state.collectAsStateWithLifecycle()
             // Once loaded, the screen stays composed even if a refresh briefly empties the agents.
             var loaded by remember { mutableStateOf(false) }
             if (state.agents.isNotEmpty()) loaded = true
             LaunchedEffect(Unit) {
                 vm.state.first { it.ready }
-                vm.connect(server.url("/").toString())
+                if (vm.state.value.installation == null) vm.connect(server.url("/").toString())
             }
             // The app's scaffold keeps screens clear of the system bars; this host does the same.
             CairnTheme {
@@ -3124,6 +4002,7 @@ abstract class PluginsCases {
                 }
             }
         }
+        if (restoration == null) compose.setContent(render) else restoration.setContent(render)
         return vm
     }
 }

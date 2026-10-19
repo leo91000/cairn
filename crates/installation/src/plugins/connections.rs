@@ -385,7 +385,17 @@ pub fn settings(manifest: &Manifest, input: &Value) -> Result<Value> {
         };
         output.insert(key, setting(field, value)?);
     }
-    Ok(Value::Object(output))
+    bounded_settings(Value::Object(output))
+}
+
+/// Reserve room for the enclosing event and instance metadata in a worker frame.
+pub(crate) fn bounded_settings(settings: Value) -> Result<Value> {
+    if serde_json::to_vec(&settings)?.len() > cairn_plugin_api::MAX_FRAME_BYTES / 2 {
+        return Err(Error::too_large(
+            "Plugin settings are limited to 512 KiB of encoded JSON.",
+        ));
+    }
+    Ok(settings)
 }
 
 fn matches_pattern(field: &Value, value: &str) -> bool {
@@ -958,7 +968,11 @@ pub async fn remove(s: &Service, plugin_id: &str, connection_id: &str) -> Result
             for kind in OWNED {
                 for value in db.list(kind)? {
                     if value["connectionId"] == connection_id {
-                        db.remove(kind, text(&value, "id"))?;
+                        if *kind == super::work::EVENTS {
+                            super::work::remove_event(db, text(&value, "id"))?;
+                        } else {
+                            db.remove(kind, text(&value, "id"))?;
+                        }
                     }
                 }
             }

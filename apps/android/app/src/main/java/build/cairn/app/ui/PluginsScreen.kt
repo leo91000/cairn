@@ -170,7 +170,7 @@ private fun PluginCard(entry: PluginEntry, summary: PluginSummary, open: () -> U
 /** One plugin: its instances, what it gives agents, and its review. */
 @Composable
 fun PluginScreen(vm: CairnViewModel, state: Workspace, id: String, openChat: (String) -> Unit) =
-    PluginInstances(vm, state, id, openChat)
+    key(id) { PluginInstances(vm, state, id, openChat) }
 
 @Composable
 private fun PluginInstances(
@@ -183,6 +183,7 @@ private fun PluginInstances(
     var editing by remember { mutableStateOf<PluginConnection?>(null) }
     var removing by remember { mutableStateOf<PluginConnection?>(null) }
     var reviewing by remember { mutableStateOf(false) }
+    var setupId by rememberForm<String?>(null, id)
     var setupDraft by remember(id) { mutableStateOf<PluginSetupDraft?>(null) }
     var drafts by remember(id) { mutableStateOf(emptyList<PluginSetupDraft>()) }
     var discarding by remember(id) { mutableStateOf<PluginSetupDraft?>(null) }
@@ -193,9 +194,20 @@ private fun PluginInstances(
             vm.api.pluginManagementItems<PluginSetupDraft>("/plugins/${segment(id)}/setup-drafts")
         catalog = nextCatalog
         drafts = nextDrafts
+        if (setupId != null && setupDraft == null) {
+            setupDraft = nextDrafts.find { it.id == setupId }
+            if (setupDraft == null) {
+                setupId = null
+                vm.report(
+                    IllegalStateException(
+                        "La configuration n’est plus disponible. Actualisez le plugin."
+                    )
+                )
+            }
+        }
     }
     Poll("plugin-$id" to state.busy, 5000) {
-        if (editing == null && setupDraft == null && !reviewing && !state.busy)
+        if ((catalog == null || (editing == null && setupId == null && !reviewing)) && !state.busy)
             try {
                 load()
             } catch (e: Exception) {
@@ -288,6 +300,7 @@ private fun PluginInstances(
                                     "/plugins/${segment(id)}/setup-drafts",
                                     buildJsonObject { put("name", manifest.name) },
                                 )
+                            setupId = setupDraft?.id
                             load()
                         }
                     } else
@@ -312,6 +325,7 @@ private fun PluginInstances(
                     onClick = {
                         vm.clearMessage()
                         setupDraft = draft
+                        setupId = draft.id
                     },
                     enabled = !state.busy && draft.status == "setup",
                 ) {
@@ -329,23 +343,25 @@ private fun PluginInstances(
                 "Ajoutez-en un pour commencer à utiliser ce plugin.",
             )
         instances.forEach { connection ->
-            InstanceCard(
-                vm,
-                state,
-                manifest,
-                connection,
-                catalog?.grantsOf(connection.agentId).orEmpty(),
-                openChat = openChat,
-                edit = {
-                    vm.clearMessage()
-                    editing = connection
-                },
-                remove = {
-                    vm.clearMessage()
-                    removing = connection
-                },
-                changed = { load() },
-            )
+            key(connection.id) {
+                InstanceCard(
+                    vm,
+                    state,
+                    manifest,
+                    connection,
+                    catalog?.grantsOf(connection.agentId).orEmpty(),
+                    openChat = openChat,
+                    edit = {
+                        vm.clearMessage()
+                        editing = connection
+                    },
+                    remove = {
+                        vm.clearMessage()
+                        removing = connection
+                    },
+                    changed = { load() },
+                )
+            }
         }
         if (entry.active != null && manifest.programs.any { it.installer.isNotBlank() })
             PluginPrograms(vm, state, manifest.id)
@@ -353,18 +369,24 @@ private fun PluginInstances(
     }
     setupDraft?.let { draft ->
         manifest?.let { current ->
-            PluginSetup(
-                vm,
-                state,
-                current,
-                draft,
-                close = { setupDraft = null },
-                changed = { load() },
-                activated = {
-                    setupDraft = null
-                    load()
-                },
-            )
+            key(draft.id) {
+                PluginSetup(
+                    vm,
+                    state,
+                    current,
+                    draft,
+                    close = {
+                        setupId = null
+                        setupDraft = null
+                    },
+                    changed = { load() },
+                    activated = {
+                        setupId = null
+                        setupDraft = null
+                        load()
+                    },
+                )
+            }
         }
     }
     discarding?.let { draft ->
@@ -492,7 +514,7 @@ private fun InstanceCard(
                     style = MaterialTheme.typography.bodySmall,
                     color = signal.attention,
                 )
-            if (connection.requests.isNotEmpty()) {
+            if (manifest.delegates && connection.requests.isNotEmpty()) {
                 Eyebrow("En attente de validation")
                 connection.requests.forEach { request ->
                     val name = request.name.ifBlank { request.userId }

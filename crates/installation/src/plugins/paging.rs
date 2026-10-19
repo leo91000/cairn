@@ -9,7 +9,16 @@ use serde_json::{Value, json};
 const MAX_ITEMS: usize = 32;
 const MAX_BYTES: usize = cairn_protocol::MAX_BODY / 2;
 
-pub(super) fn page(mut values: Vec<Value>, cursor: Option<&str>) -> Result<Value> {
+pub(super) fn page(values: Vec<Value>, cursor: Option<&str>) -> Result<Value> {
+    page_with_bounds(values, cursor, MAX_ITEMS, MAX_BYTES)
+}
+
+pub(super) fn page_with_bounds(
+    mut values: Vec<Value>,
+    cursor: Option<&str>,
+    max_items: usize,
+    max_bytes: usize,
+) -> Result<Value> {
     if let Some(cursor) = cursor {
         uuid(cursor)?;
     }
@@ -21,12 +30,12 @@ pub(super) fn page(mut values: Vec<Value>, cursor: Option<&str>) -> Result<Value
     let mut bytes = 256;
     let mut more = false;
     for value in values {
-        if items.len() == MAX_ITEMS {
+        if items.len() == max_items {
             more = true;
             break;
         }
         let size = serde_json::to_vec(&value)?.len() + 1;
-        if bytes + size > MAX_BYTES {
+        if bytes + size > max_bytes {
             if items.is_empty() {
                 return Err(Error::too_large(
                     "The saved management record is too large to list.",

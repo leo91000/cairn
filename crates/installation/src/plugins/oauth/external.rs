@@ -14,6 +14,33 @@ pub(super) fn flow_key(resource: &str, provider: &str, subject: &str) -> String 
     )
 }
 
+fn receipt_prefix(event: &str) -> String {
+    format!("plugin-oauth-event:{event}:")
+}
+
+pub(super) fn receipt_key(event: &str, resource: &str, provider: &str, subject: &str) -> String {
+    format!(
+        "{}{resource}:{provider}:{}",
+        receipt_prefix(event),
+        hex_digest(subject)
+    )
+}
+
+/// Receipts live exactly as long as their native event, including retry backoff.
+/// The pending consent itself may outlive successful delivery of its URL.
+pub(crate) fn remove_event_receipts_in(db: &Db<'_>, event: &str) -> Result<()> {
+    for (key, _) in db.keys(&receipt_prefix(event))? {
+        db.delete(&key)?;
+    }
+    Ok(())
+}
+
+#[derive(Deserialize)]
+struct StartReceipt {
+    key: String,
+    scopes: Vec<String>,
+}
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct Input {
@@ -179,6 +206,26 @@ pub(crate) async fn call(
             }
             let mut scopes = input.scopes.unwrap_or_default();
             scopes.sort();
+            let index = flow_key(&input.resource, &input.provider, &person.subject);
+            let _lock = s.plugins.oauth.lock(&index).await;
+            let receipt = s
+                .store
+                .kv(&receipt_key(
+                    source_event,
+                    &input.resource,
+                    &input.provider,
+                    &person.subject,
+                ))
+                .await?
+                .map(serde_json::from_value::<StartReceipt>)
+                .transpose()?;
+            let flow = s
+                .store
+                .kv(&index)
+                .await?
+                .map(serde_json::from_value::<Flow>)
+                .transpose()?;
+
             let authorized_key = external_key(&input.resource, &input.provider, &person.subject);
             if let Some(value) = s.vault.get(&authorized_key).await? {
                 let authorized: Authorization = serde_json::from_value(value)?;
@@ -187,31 +234,38 @@ pub(crate) async fn call(
                     return status(s, context, &reference, &person, &input.provider).await;
                 }
             }
-            let index = flow_key(&input.resource, &input.provider, &person.subject);
-            if let Some(value) = s.store.kv(&index).await? {
-                let flow: Flow = serde_json::from_value(value)?;
-                if flow.event == source_event {
-                    let value = s.store.kv(&stored_key(&flow.key)).await?.ok_or_else(|| {
-                        Error::conflict(
-                            "The consent exchange was interrupted. Start authorization again.",
-                        )
-                    })?;
-                    let pending: Pending =
-                        serde_json::from_value(s.vault.decrypt(&flow.key, &value)?)?;
-                    if pending.scopes == scopes && pending.digest == package.digest {
-                        check_initiator(s, provider, &pending).await?;
-                        s.store
-                            .read({
-                                let pending = pending.clone();
-                                move |db| current(db, &pending).map(|_| ())
-                            })
-                            .await?;
-                        return Ok(json!({
-                            "url": pending.start_url.ok_or_else(expired)?,
-                            "redirectUri": pending.redirect_uri,
-                            "expiresAt": pending.expires_at,
-                        }));
-                    }
+            if let Some(receipt) = receipt
+                && (receipt.scopes != scopes
+                    || !flow
+                        .as_ref()
+                        .is_some_and(|flow| flow.key == receipt.key && flow.event == source_event))
+            {
+                return Err(Error::conflict(
+                    "This consent was completed, replaced or disconnected. Use a new authorization request.",
+                ));
+            }
+            if let Some(flow) = flow
+                && flow.event == source_event
+            {
+                let value = s.store.kv(&stored_key(&flow.key)).await?.ok_or_else(|| {
+                    Error::conflict(
+                        "The consent exchange was interrupted. Start authorization again.",
+                    )
+                })?;
+                let pending: Pending = serde_json::from_value(s.vault.decrypt(&flow.key, &value)?)?;
+                if pending.scopes == scopes && pending.digest == package.digest {
+                    check_initiator(s, provider, &pending).await?;
+                    s.store
+                        .read({
+                            let pending = pending.clone();
+                            move |db| current(db, &pending).map(|_| ())
+                        })
+                        .await?;
+                    return Ok(json!({
+                        "url": pending.start_url.ok_or_else(expired)?,
+                        "redirectUri": pending.redirect_uri,
+                        "expiresAt": pending.expires_at,
+                    }));
                 }
             }
             let mut started = begin(

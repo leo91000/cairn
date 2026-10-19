@@ -517,3 +517,140 @@ async fn setup_resource_parent_trees_never_cross_into_other_drafts_or_live_insta
         "T-live"
     );
 }
+
+#[tokio::test]
+async fn large_resources_remain_listable_through_the_real_luau_worker() {
+    let root = TempDir::new().unwrap();
+    let s = Service::new(common::config(root.path())).await.unwrap();
+    common::relay_fixture::claimed(&s).await.unwrap();
+    s.plugins
+        .use_worker(PathBuf::from(env!("CARGO_BIN_EXE_cairn")));
+    let fields = (0..6)
+        .map(|n| {
+            json!({
+                "key": format!("field{n}"), "title": format!("Field {n}"),
+                "type": "string", "maxLength": 10_000,
+            })
+        })
+        .collect::<Vec<_>>();
+    let source = r#"return {action = function(event)
+        local cursor = nil
+        local seen = {}
+        local total = 0
+        local pages = 0
+        repeat
+            local page = cairn.resources.list({collection = 'workspace', cursor = cursor})
+            pages += 1
+            assert(#page.items > 0)
+            for _, value in page.items do
+                assert(seen[value.id] == nil)
+                seen[value.id] = true
+                assert(#value.settings.field0 == 10000)
+                assert(value.settings.token == nil)
+                total += 1
+            end
+            local nextCursor = page.nextCursor
+            assert(nextCursor == nil or nextCursor ~= cursor)
+            cursor = nextCursor
+        until cursor == nil
+        assert(total == 18 and pages > 1)
+        return {notice = 'Listed all 18 resources'}
+    end}"#;
+    let manifest = json!({
+        "id": "resource-pages", "name": "Resource pages", "version": "1", "apiVersion": 2,
+        "capabilities": ["resources"], "instanceView": true,
+        "resources": [{"name": "workspace", "title": "Workspaces", "singular": "Workspace", "settings": fields}],
+    });
+    assert!(manifest.to_string().len() < 2000);
+    let installed = registry::install(&s, &json!({"manifest": manifest, "source": source}))
+        .await
+        .unwrap();
+    registry::approve(&s, "resource-pages", "1", text(&installed, "digest"))
+        .await
+        .unwrap();
+    let instance = connections::save(
+        &s,
+        "resource-pages",
+        &json!({"name": "Large resources", "enabled": true}),
+        None,
+    )
+    .await
+    .unwrap();
+    let instance = text(&instance, "id");
+    let settings = (0..6)
+        .map(|n| (format!("field{n}"), json!("x".repeat(10_000))))
+        .collect::<serde_json::Map<_, _>>();
+    assert!(serde_json::to_vec(&settings).unwrap().len() < 65_536);
+    let mut expected = std::collections::BTreeSet::new();
+    for n in 0..18 {
+        let input = json!({"name": format!("Workspace {n}"), "settings": settings});
+        assert!(input.to_string().len() < 150_000);
+        let resource = resources::save(&s, "resource-pages", instance, "workspace", &input, None)
+            .await
+            .unwrap();
+        expected.insert(text(&resource, "id").to_owned());
+    }
+    let first = resources::list(&s, "resource-pages", instance, "workspace", None)
+        .await
+        .unwrap();
+    eprintln!(
+        "First resource page's worker reply: {} bytes",
+        serde_json::to_vec(&cairn_plugin_api::Frame::Reply { value: first })
+            .unwrap()
+            .len()
+    );
+    let result = panels::action(
+        &s,
+        "resource-pages",
+        instance,
+        &json!({"action": "enumerate"}),
+    )
+    .await;
+    assert!(
+        result.is_ok(),
+        "Real Luau enumeration of accepted resources failed: {result:?}"
+    );
+    assert_eq!(result.unwrap()["notice"], "Listed all 18 resources");
+    let app = cairn_installation::http::router(s.clone()).await.unwrap();
+    let path = format!("/api/plugins/resource-pages/connections/{instance}/resources/workspace");
+    let mut cursor: Option<String> = None;
+    let mut seen = std::collections::BTreeSet::new();
+    let mut pages = 0;
+    loop {
+        let url = cursor
+            .as_ref()
+            .map_or_else(|| path.clone(), |cursor| format!("{path}?cursor={cursor}"));
+        let mut request = common::request("GET", &url).body(Body::empty()).unwrap();
+        request
+            .extensions_mut()
+            .insert(InstallationIdentity::trusted(
+                InstallationRole::Owner,
+                "fixture-owner",
+            ));
+        let response = common::send(&app, request).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let page = common::read_json(response).await;
+        let bytes = serde_json::to_vec(&cairn_plugin_api::Frame::Reply {
+            value: page.clone(),
+        })
+        .unwrap()
+        .len();
+        assert!(
+            bytes < cairn_plugin_api::MAX_FRAME_BYTES,
+            "Resource page exceeds worker frame: {bytes} bytes"
+        );
+        pages += 1;
+        for value in page["items"].as_array().unwrap() {
+            assert!(seen.insert(text(value, "id").to_owned()));
+        }
+        let next = page["nextCursor"].as_str().map(str::to_owned);
+        assert!(next.is_none() || next != cursor);
+        cursor = next;
+        if cursor.is_none() {
+            break;
+        }
+        assert!(pages < 18);
+    }
+    assert_eq!(seen, expected);
+    assert!(pages > 1);
+}

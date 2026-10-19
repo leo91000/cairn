@@ -21,29 +21,30 @@ internal fun PluginResourceRoutes(
     enabled: Boolean,
     activity: (Boolean) -> Unit,
 ) {
-    var opened by remember { mutableStateOf(false) }
+    var opened by rememberForm(false, path)
     var ready by remember { mutableStateOf(false) }
     var busy by remember { mutableStateOf(false) }
     var writing by remember { mutableStateOf(false) }
+    var pendingWrite by rememberForm(false, path)
     var generation by remember { mutableIntStateOf(0) }
     var pending by remember { mutableStateOf<Job?>(null) }
     var error by remember { mutableStateOf<String?>(null) }
     var routes by remember { mutableStateOf(emptyList<PluginRoute>()) }
-    var editing by remember { mutableStateOf(false) }
-    var original by remember { mutableStateOf<PluginRoute?>(null) }
+    var editing by rememberForm(false, path)
+    var original by rememberForm<PluginRoute?>(null, path)
     var removing by remember { mutableStateOf<PluginRoute?>(null) }
     var people by remember { mutableStateOf<PluginRoute?>(null) }
     var requests by remember { mutableStateOf(emptyList<PluginRouteRequest>()) }
-    var name by remember { mutableStateOf("") }
-    var routeEnabled by remember { mutableStateOf(true) }
-    var conditions by remember { mutableStateOf(emptyList<Pair<String, String>>()) }
-    var catchAll by remember { mutableStateOf(false) }
-    var agentId by remember { mutableStateOf("") }
-    var projectId by remember { mutableStateOf("") }
-    var mode by remember { mutableStateOf("requests") }
-    var personIds by remember { mutableStateOf("") }
-    var hourly by remember { mutableStateOf("20") }
-    var personalHourly by remember { mutableStateOf("5") }
+    var name by rememberForm("", path)
+    var routeEnabled by rememberForm(true, path)
+    var conditions by rememberForm(emptyList<Pair<String, String>>(), path)
+    var catchAll by rememberForm(false, path)
+    var agentId by rememberForm("", path)
+    var projectId by rememberForm("", path)
+    var mode by rememberForm("requests", path)
+    var personIds by rememberForm("", path)
+    var hourly by rememberForm("20", path)
+    var personalHourly by rememberForm("5", path)
     var eligibility by remember { mutableStateOf(emptyList<RouteEligibility>()) }
     var previewFor by remember { mutableStateOf<String?>(null) }
     var previewError by remember { mutableStateOf<String?>(null) }
@@ -84,11 +85,21 @@ internal fun PluginResourceRoutes(
         val result = vm.api.pluginManagementItems<PluginRoute>("$path/routes")
         if (current == generation) {
             routes = result
-            ready = true
+            val expected = original
+            val unchanged =
+                !editing ||
+                    expected == null ||
+                    result.any { it.id == expected.id && it.revision == expected.revision }
+            if (unchanged) {
+                ready = true
+                pendingWrite = false
+            } else {
+                error = "La route a changé. Fermez cet éditeur puis actualisez les routes."
+            }
         }
     }
-    fun refresh() {
-        if (busy || editing || removing != null) return
+    fun reload() {
+        if (busy) return
         busy = true
         people = null
         error = null
@@ -143,6 +154,7 @@ internal fun PluginResourceRoutes(
         if (!enabled || !ready || busy) return
         busy = true
         writing = true
+        pendingWrite = true
         ready = false
         error = null
         val current = ++generation
@@ -150,6 +162,7 @@ internal fun PluginResourceRoutes(
             try {
                 vm.api.request(method, target, body)
                 if (current != generation) return@launch
+                pendingWrite = false
                 editing = false
                 removing = null
                 people = null
@@ -260,6 +273,15 @@ internal fun PluginResourceRoutes(
                 previewError = e.message
         }
     }
+    LaunchedEffect(Unit) {
+        if (opened) {
+            activity(true)
+            if (pendingWrite) {
+                editing = false
+                error = "Actualisez les routes avant une autre modification."
+            } else reload()
+        }
+    }
     DisposableEffect(Unit) {
         onDispose {
             generation++
@@ -272,7 +294,7 @@ internal fun PluginResourceRoutes(
         onClick = {
             opened = true
             activity(true)
-            refresh()
+            reload()
         },
         enabled = enabled,
     ) {
@@ -291,7 +313,10 @@ internal fun PluginResourceRoutes(
             Text(
                 "Choisissez l’agent et les personnes autorisées pour chaque source. La route la plus précise est prioritaire ; une route en pause bloque les sources correspondantes. Les correspondances de même précision demandent une révision."
             )
-            TextButton(onClick = { refresh() }, enabled = !busy && !editing && removing == null) {
+            TextButton(
+                onClick = { if ((!editing || !ready) && removing == null) reload() },
+                enabled = !busy && (!editing || !ready) && removing == null,
+            ) {
                 Text(if (busy) "Chargement des routes…" else "Actualiser les routes")
             }
             if (ready && !editing && people == null) {
@@ -407,7 +432,7 @@ internal fun PluginResourceRoutes(
                     Text("Retour aux routes")
                 }
             }
-            if (ready && editing) {
+            if (editing) {
                 Field("Nom de la route", name, { name = it }, enabled = controls)
                 Text("Jusqu’à 100 caractères.", style = MaterialTheme.typography.bodySmall)
                 Toggle("Route activée", routeEnabled) { if (controls) routeEnabled = it }

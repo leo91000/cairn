@@ -25,18 +25,23 @@ internal fun recoveredChatConnections(events: List<RunEvent>, messages: Set<Long
     val recovered = mutableSetOf<Long>()
     for (event in events) {
         if (event.type in listOf("turn.started", "turn.failed", "chat.user")) pending.clear()
+        // Known messages cannot become notices. Avoid serializing their complete
+        // payload just to classify them again, especially during a long answer.
+        if (event.id in messages) {
+            if (event.type != "chat.user") {
+                recovered.addAll(pending)
+                pending.clear()
+            }
+            continue
+        }
+
         val item = event.item()
         val success =
             event.type == "item.completed" &&
                 item.string("type") == "command_execution" &&
                 (item?.get("exit_code") as? JsonPrimitive)?.intOrNull == 0 &&
                 item.string("status") != "failed"
-        if (
-            event.type == "turn.completed" ||
-                item.string("type") == "agent_message" ||
-                (event.id in messages && event.type != "chat.user") ||
-                success
-        ) {
+        if (event.type == "turn.completed" || item.string("type") == "agent_message" || success) {
             recovered.addAll(pending)
             pending.clear()
         }

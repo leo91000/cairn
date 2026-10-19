@@ -138,6 +138,115 @@ async fn assert_signed_in_catalog_describes_the_models(s: &Service) {
     );
 }
 
+/// Presentation must keep the default alias runnable while exposing its known identity,
+/// even when the CLI cache or initialize metadata is incomplete.
+#[tokio::test]
+async fn default_model_labels_survive_missing_metadata_without_pinning() {
+    let root = TempDir::new().unwrap();
+    let s = Service::new(config(&root)).await.unwrap();
+    let directory =
+        accounts::claude::account_home(&s.config, "catalog-fixture").join("cache/model-catalog");
+    std::fs::create_dir_all(&directory).unwrap();
+    let cache = directory.join("fixture.json");
+    let resolved = "claude-opus-fixture[1m]";
+    for (cached_name, display_name, description, identity, expected) in [
+        (
+            Some("Opus Fixture"),
+            Some("Default (recommended)"),
+            Some("Opus description · Details"),
+            Some(resolved),
+            "Opus Fixture (1M context)",
+        ),
+        (
+            None,
+            Some("Default (recommended)"),
+            Some("Opus description · Details"),
+            Some(resolved),
+            "Opus description",
+        ),
+        (
+            Some("Opus Fixture"),
+            None,
+            None,
+            Some(resolved),
+            "Opus Fixture (1M context)",
+        ),
+        (None, None, None, Some(resolved), resolved),
+        (None, Some(""), Some(""), Some(resolved), resolved),
+        (
+            None,
+            Some("Default (recommended)"),
+            None,
+            Some(resolved),
+            resolved,
+        ),
+        (
+            None,
+            Some("Known human name"),
+            None,
+            Some(resolved),
+            "Known human name",
+        ),
+        (
+            None,
+            Some("Default (recommended)"),
+            Some("Opus description · Details"),
+            None,
+            "Opus description",
+        ),
+        (
+            None,
+            Some("Default (recommended)"),
+            None,
+            None,
+            "Default (recommended)",
+        ),
+    ] {
+        if let Some(name) = cached_name {
+            std::fs::write(
+                &cache,
+                json!({
+                    "fetchedAt": now(),
+                    "catalog": { "config": { "models": [{
+                        "id": "claude-opus-fixture",
+                        "name": name,
+                    }] } },
+                })
+                .to_string(),
+            )
+            .unwrap();
+        } else if cache.exists() {
+            std::fs::remove_file(&cache).unwrap();
+        }
+        s.store
+            .set(
+                claude::CATALOG,
+                json!({
+                    "models": [{
+                        "model": "default",
+                        "resolvedModel": identity,
+                        "displayName": display_name,
+                        "description": description,
+                        "isDefault": true,
+                    }],
+                    "source": "catalog-fixture",
+                    "checkedAt": now(),
+                }),
+                None,
+            )
+            .await
+            .unwrap();
+        let catalog = claude::model_catalog(&s).await.unwrap();
+        let row = &catalog["models"][0];
+        assert_eq!(
+            row["displayName"], expected,
+            "cache={cached_name:?}, display={display_name:?}, description={description:?}"
+        );
+        assert_eq!(row["model"], "default");
+        assert_eq!(row["isDefault"], true);
+    }
+}
+
 #[tokio::test]
 async fn sign_in_cancellation_failure_retry_identity_and_removal() {
     let root = TempDir::new().unwrap();

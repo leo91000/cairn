@@ -50,7 +50,7 @@ pub(crate) fn typed_credential(manifest: &Manifest, input: &Value) -> Result<Opt
 }
 
 /// Settings as typed so far: valid values only, nothing required yet.
-fn values(manifest: &Manifest, input: &Value) -> Value {
+fn values(manifest: &Manifest, input: &Value) -> Result<Value> {
     let mut output = Map::new();
     for field in manifest
         .settings
@@ -64,7 +64,7 @@ fn values(manifest: &Manifest, input: &Value) -> Value {
             output.insert(key.to_owned(), value);
         }
     }
-    Value::Object(output)
+    connections::bounded_settings(Value::Object(output))
 }
 
 /// Typed secrets over saved ones, ignoring invalid input.
@@ -168,7 +168,7 @@ pub(crate) async fn form_owned(
     let changed = input["changed"].as_str().filter(|key| {
         *key == "credential" || manifest.settings.iter().any(|field| field["key"] == *key)
     });
-    let settings = values(manifest, &input["settings"]);
+    let settings = values(manifest, &input["settings"])?;
     let result = run(
         s,
         &package,
@@ -202,7 +202,7 @@ pub(crate) async fn setup_form(
     let settings = values(
         &package.manifest,
         input.get("settings").unwrap_or(&setup.settings),
-    );
+    )?;
     let changed = input["changed"].as_str().filter(|key| {
         *key == "credential"
             || package

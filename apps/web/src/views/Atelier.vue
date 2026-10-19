@@ -99,7 +99,7 @@ const workspace = computed<Array<{
 </script>
 
 <template>
-  <div class="atelier mx-auto w-full max-w-240 px-8 pb-16 pt-8 phone:px-4 phone:pb-32 phone:pt-[max(18px,env(safe-area-inset-top))]">
+  <div class="atelier mx-auto w-full max-w-240 px-8 pb-16 phone:px-4 phone:pb-32">
     <p class="eyebrow">
       Your workspace
     </p>

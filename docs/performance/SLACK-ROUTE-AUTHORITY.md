@@ -62,9 +62,12 @@ and vault entries are not rewritten or removed. No forward data conversion is
 needed for these fields; a failed start can be corrected forward while preserving
 the installation directory. Reapproval must never revive an old binding.
 
-After integrating main at `d01b519896c62ab3e51295eb702195975a2414ec`, this
-slice leaves its inherited compatibility metadata at epoch **4**, with its recorded
-legacy tree unchanged. The published reference inspected above is epoch **2**;
+At the measured routing checkpoint, main was integrated at
+`d01b519896c62ab3e51295eb702195975a2414ec` and compatibility metadata still
+inherited epoch **4**, with its recorded legacy tree unchanged. The later
+[whole-PR plugin-format inventory](../SLACK-PLUGIN-COMPATIBILITY.md) declares
+the separate epoch **6** boundary; the slice's additive-record analysis does not
+establish backwards compatibility for the new persisted manifests. The published reference inspected above is epoch **2**;
 the production contract's separate epoch transition review must remain gated before
 deployment. These measurements and the additive-field decision are not whole-PR
 compatibility or deployment approval. The later authorization guards change no

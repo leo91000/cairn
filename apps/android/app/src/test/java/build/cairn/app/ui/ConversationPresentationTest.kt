@@ -9,6 +9,80 @@ class ConversationPresentationTest {
     private val first = ChatMessage("one", text = "Bonjour")
     private val second = ChatMessage("two", text = "Ensuite")
 
+    private val retryRun =
+        Run(
+            "retry",
+            status = "queued",
+            accountWaitReason = "Temporary agent error. Retrying in 30 seconds (attempt 1/3).",
+            retry = RunRetry(1, 3, 31_000, RunRetryCause("timeout", "Temporary timeout")),
+        )
+
+    @Test
+    fun `retry counts down locally with ceiling and never shows negative seconds`() {
+        assertEquals(retryRun.accountWaitReason, retryNotice(retryRun, 1000))
+        assertEquals(
+            "Temporary agent error. Retrying in 20 seconds (attempt 1/3).",
+            chatWaitNotice(retryRun, 11_100)!!.message,
+        )
+        assertTrue(retryNotice(retryRun, 30_999)!!.contains("in 1 seconds"))
+        assertTrue(retryNotice(retryRun, 31_000)!!.contains("Retrying now"))
+        assertTrue(retryNotice(retryRun, 40_000)!!.contains("Retrying now"))
+        assertNotNull(retryNotice(retryRun.copy(accountWaitReason = null), 1000))
+        assertNotNull(retryNotice(retryRun.copy(accountWaitReason = "  "), 1000))
+    }
+
+    @Test
+    fun `retry does not hide account capacity or fencing waits and clears on start or cancellation`() {
+        assertNull(retryNotice(retryRun.copy(accountRequired = "codex"), 1000))
+        listOf("running", "succeeded", "failed", "cancelled", "interrupted").forEach {
+            assertNull(retryNotice(retryRun.copy(status = it), 1000))
+            assertNull(chatWaitNotice(retryRun.copy(status = it), 1000))
+        }
+        listOf("Waiting for capacity.", "Waiting for the previous VM to stop.").forEach {
+            val run = retryRun.copy(accountWaitReason = it)
+            assertNull(retryNotice(run, 1000))
+            assertEquals(ChatWaitNotice(it), chatWaitNotice(run, 1000))
+        }
+        assertEquals(
+            "Codex",
+            chatWaitNotice(retryRun.copy(accountRequired = "codex"), 1000)!!.account,
+        )
+    }
+
+    @Test
+    fun `missing retry deadline retains the server reason`() {
+        listOf<RunRetry?>(null, retryRun.retry!!.copy(nextAttemptAt = null)).forEach {
+            val run = retryRun.copy(retry = it)
+            assertNull(retryNotice(run, 1000))
+            assertEquals(ChatWaitNotice(run.accountWaitReason!!), chatWaitNotice(run, 1000))
+        }
+    }
+
+    @Test
+    fun `retry shared contract decodes nullable and absent records and deadlines`() {
+        val decoded =
+            wireJson.decodeFromString<Run>(
+                """{"id":"retry","status":"queued","retry":{"attempt":2,"limit":3,"nextAttemptAt":31000,"cause":{"kind":"timeout","message":"Temporary timeout"}}}"""
+            )
+        assertEquals(31_000L, decoded.retry!!.nextAttemptAt)
+        assertEquals("timeout", decoded.retry.cause.kind)
+        assertTrue(retryNotice(decoded, 1000)!!.contains("attempt 2/3"))
+        assertEquals(null, wireJson.decodeFromString<Run>("""{"id":"r","status":"queued"}""").retry)
+        assertEquals(
+            null,
+            wireJson.decodeFromString<Run>("""{"id":"r","status":"queued","retry":null}""").retry,
+        )
+        assertEquals(
+            null,
+            wireJson
+                .decodeFromString<Run>(
+                    """{"id":"r","status":"queued","retry":{"attempt":1,"limit":3,"nextAttemptAt":null,"cause":{"kind":"server","message":"Busy"}}}"""
+                )
+                .retry!!
+                .nextAttemptAt,
+        )
+    }
+
     @Test
     fun `exclusive suspension stops working presentation without replacing failures or a user pause`() {
         val reservation = ExclusiveReservation("reservation", "node", "owner", "Build", "acquired")

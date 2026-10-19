@@ -349,10 +349,7 @@ async fn list_for(
     cursor: Option<&str>,
 ) -> Result<Value> {
     declared(target.manifest(), collection)?;
-    if let Some(cursor) = cursor {
-        uuid(cursor)?;
-    }
-    let mut values = s
+    let values = s
         .store
         .read(move |db| {
             target.current(db)?;
@@ -360,16 +357,10 @@ async fn list_for(
         })
         .await?
         .into_iter()
-        .filter(|value| {
-            value["collection"] == collection
-                && cursor.is_none_or(|cursor| text(value, "id") > cursor)
-        })
+        .filter(|value| value["collection"] == collection)
         .collect::<Vec<_>>();
-    values.sort_by(|a, b| text(a, "id").cmp(text(b, "id")));
-    let more = values.len() > 100;
-    values.truncate(100);
-    let next = more.then(|| values.last().unwrap()["id"].clone());
-    Ok(json!({ "items": values, "nextCursor": next }))
+    // The same cursor page also crosses the worker's smaller capability frame.
+    super::paging::page_with_bounds(values, cursor, 100, cairn_plugin_api::MAX_FRAME_BYTES / 2)
 }
 
 pub(crate) async fn call(

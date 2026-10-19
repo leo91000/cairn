@@ -28,7 +28,7 @@ async fn authority(s: &Service, account: &str) -> Result<Authority> {
         owner_access: policy.owner.access_id.clone(),
         actor: Actor {
             account: account.into(),
-            access_id: grant.access_id.clone(),
+            access_id: Some(grant.access_id.clone()),
         },
     })
 }

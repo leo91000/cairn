@@ -4,10 +4,8 @@ mod pr_checks;
 use super::access;
 use crate::{
     config::now,
-    conversation_lifecycle::is_active,
     error::{Error, Result},
     process::{Environment, bounded_output, codex_environment, command},
-    run_status::RunStatus,
     service::{Service, policy},
     store::Db,
     validation::text,
@@ -173,13 +171,7 @@ async fn request(s: &Service, environment: &Environment, args: &[String]) -> Res
 
 fn watchable(chat: &Value, run: &Value, time: i64) -> bool {
     let wakeup = &chat["wakeup"];
-    is_active(chat)
-        && chat["paused"] != true
-        && run["status"] == RunStatus::Succeeded
-        && run["recoveryPending"] != true
-        && run["cancelRequestedAt"].is_null()
-        && run["workspaceCleanedAt"].is_null()
-        && wakeup["messageId"] == run["chatExecution"]["messageId"]
+    crate::chats::sleep::resumable(chat, Some(run))
         && is_condition(&wakeup["condition"])
         && !wakeup["observation"].is_object()
         && wakeup["wakeAt"]

@@ -239,7 +239,13 @@ pub async fn pump(s: &Service, connection: &Connection, session: &mut Session) -
             Err(error) => return Err(error),
         };
         let Some(reply) = reply else {
-            follow(s, connection, session, &mut delivery).await?;
+            if let Err(error) = follow(s, connection, session, &mut delivery).await {
+                if matches!(error.status, 403 | 404) {
+                    work::finish(s, &delivery, "failed").await?;
+                } else {
+                    return Err(error);
+                }
+            }
             if !session.alive() {
                 return Err(Error::bad_gateway("Plugin worker stopped."));
             }
@@ -432,7 +438,15 @@ async fn owned(s: &Service, kind: &str, connection: &Connection) -> Result<Vec<V
 
 async fn remove(s: &Service, kind: &'static str, value: &Value) -> Result<()> {
     let id = text(value, "id").to_owned();
-    s.store.transaction(move |db| db.remove(kind, &id)).await
+    s.store
+        .transaction(move |db| {
+            if kind == EVENTS {
+                work::remove_event(db, &id)
+            } else {
+                db.remove(kind, &id)
+            }
+        })
+        .await
 }
 
 /// Schedules another attempt; returns true when attempts are exhausted and the

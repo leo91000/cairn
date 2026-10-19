@@ -447,28 +447,35 @@ impl Service {
     }
 }
 
+/// A restoration keeps the historical offer lifetime: any later failed or
+/// interrupted turn can offer a fresh session, even after an intervening success.
+/// Both clients consume this availability rather than duplicating the rule.
+pub(crate) fn can_request_new_session(chat: &Value, run: Option<&Value>) -> bool {
+    is_active(chat)
+        && chat["sessionRestartRequested"] != true
+        && run.is_some_and(|run| {
+            (!run["restoredAt"].is_null() || !chat["restoredAt"].is_null())
+                && matches!(
+                    RunStatus::of(run),
+                    Some(RunStatus::Failed | RunStatus::Interrupted)
+                )
+        })
+}
+
 pub(crate) fn request_new_session(db: &Db<'_>, id: &str) -> Result<Value> {
     let mut chat = required(db.get("chats", id)?, "Chat not found")?;
     require_active(&chat)?;
     let run = required(db.run(text(&chat, "runId"))?, "Run not found")?;
-    let restored_session_failed = !chat["restoredAt"].is_null()
-        && matches!(
-            RunStatus::of(&run),
-            Some(RunStatus::Failed | RunStatus::Interrupted)
-        );
-    if !restored_session_failed {
+    // A confirmation retried after a lost response keeps the already recorded intention.
+    if chat["sessionRestartRequested"] == true {
+        return Ok(chat);
+    }
+
+    if !can_request_new_session(&chat, Some(&run)) {
         return Err(Error::conflict(
             "A fresh session is available after a restored session fails.",
         ));
     }
-    let key = format!("run-checkpoint:{}", text(&run, "id"));
-    let mut checkpoint = required(db.kv(&key)?, "Workspace checkpoint not found")?;
-    checkpoint["freshSession"] = true.into();
-    checkpoint["launched"] = false.into();
-    if let Some(checkpoint) = checkpoint.as_object_mut() {
-        checkpoint.remove("controllerRecoveries");
-    }
-    db.set(&key, &checkpoint, None)?;
     db.patch_run(
         text(&run, "id"),
         &json!({
@@ -499,6 +506,64 @@ impl Service {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn fresh_session_intent_survives_a_live_checkpoint_persist() {
+        use crate::{
+            store::Store,
+            worker::checkpoint::{Checkpoint, RunCheckpoint},
+        };
+
+        let root = tempfile::tempdir().unwrap();
+        let store = Store::open(root.path()).unwrap();
+        let state = RunCheckpoint::from_value(json!({
+            "launched": true,
+            "completed": true,
+            "controllerRecoveries": 2,
+            "prepared": { "workspace": "preserved" },
+        }))
+        .unwrap();
+        let checkpoint = Checkpoint::new(store.clone(), "run".into(), state);
+        checkpoint.persist().await.unwrap();
+        let before = store.kv("run-checkpoint:run").await.unwrap();
+        store
+            .transaction(|db| {
+                db.add_run(
+                    &json!({
+                        "id": "run",
+                        "taskId": "chat",
+                        "createdAt": 0,
+                        "status": "failed",
+                        "sessionId": "old-native",
+                        "restoredAt": 10,
+                    }),
+                    None,
+                )?;
+                db.put(
+                    "chats",
+                    &json!({
+                        "id": "chat",
+                        "runId": "run",
+                        "wakeup": { "wakeAt": 100 },
+                    }),
+                )?;
+                request_new_session(db, "chat")
+            })
+            .await
+            .unwrap();
+        assert_eq!(store.kv("run-checkpoint:run").await.unwrap(), before);
+
+        // Force the old worker's late write with the real checkpoint owner.
+        // This is an isolated non-VM interleaving, not production frequency evidence.
+        checkpoint.persist().await.unwrap();
+        let chat = store.get("chats", "chat").await.unwrap().unwrap();
+        assert_eq!(chat["sessionRestartRequested"], true);
+        assert_eq!(chat["paused"], true);
+        assert!(chat["wakeup"].is_null());
+        let run = store.run("run").await.unwrap();
+        assert!(run["sessionId"].is_null());
+        assert_eq!(run["resumeAvailable"], false);
+    }
 
     #[test]
     fn inactivity_boundary_is_inclusive_and_missing_timestamps_are_preserved() {
