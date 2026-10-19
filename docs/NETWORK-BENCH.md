@@ -14,8 +14,9 @@ both real binaries and uses an in-memory email adapter. Agent workers are disabl
 
 ```sh
 pnpm install --frozen-lockfile
-CARGO_PROFILE_DEV_DEBUG=0 CARGO_BUILD_JOBS=4 cargo build --locked --workspace --bin cairn --bin cairn-beacon --example network_direct_client --example network_stun_server
+CARGO_PROFILE_DEV_DEBUG=0 CARGO_BUILD_JOBS=4 cargo build --locked --workspace --bin cairn --bin cairn-beacon --example network_direct_client --example network_qualification --example network_stun_server
 pnpm build
+pnpm exec vite build --config tests/network-qualification.vite.ts
 pnpm exec playwright install --with-deps chromium
 docker run -d --name cairn-network-postgres -e POSTGRES_USER=cairn -e POSTGRES_PASSWORD=test-only -e POSTGRES_DB=cairn_beacon_test -p 127.0.0.1:5432:5432 postgres:17-alpine
 export CAIRN_BEACON_TEST_DATABASE_URL=postgres://cairn:test-only@127.0.0.1:5432/cairn_beacon_test
@@ -38,6 +39,7 @@ python3 tests/network-bench.py symmetric-client --output test-results/network/sy
 python3 tests/network-bench.py same-server --output test-results/network/same-server.json
 python3 tests/network-bench.py network-change --output test-results/network/network-change.json
 python3 tests/network-bench.py packet-loss --output test-results/network/packet-loss.json
+python3 tests/network-bench.py qualification --output test-results/network/qualification.json
 ```
 
 Run sequentially; the bench holds a lock and refuses overlapping runs. It uses
@@ -176,8 +178,8 @@ change these contracts, local authentication, storage or central persistence.
 ## CI
 
 The separate **direct-relay network bench (no KVM)** job downloads the same real
-binaries/frontend as browser journeys, checks network effects, then runs all ten
-scenarios sequentially without retries. JSON reports and Playwright failure diagnostics are retained as
+binaries/frontend as browser journeys, checks network effects, then runs the eleven original scenarios and bounded qualification
+sequentially without retries. JSON reports and Playwright failure diagnostics are retained as
 `direct-relay-network-evidence`.
 Evidence contains no
 cookies, claim codes, machine credentials or conversation exports.
@@ -467,3 +469,26 @@ final head. Exact-head full CI, every qualification run/rerun and measured final
 rates are recorded with the separate Standards/Spec reviews in
 [PR #142](https://github.com/leo91000/cairn/pull/142).
 Qualification remains #105; this change performs no merge, release or deployment.
+
+## Current qualification contract (#308)
+
+The historical universal packet-loss prerequisites described above are superseded
+by [bounded qualification](NETWORK-QUALIFICATION.md). The original 20% router,
+seed, topologies, security checks and product deadlines remain unchanged.
+`packet-loss` retains authenticated recovery, accepted batches, exactly one stored
+message and diagnosed failure/deadline checks. Promotion and three Rust routing
+outcomes (including 0/3 direct) are measured. `oldDeliveryPrerequisites` records
+the old oracle's individual predicates; `historicalDeliveryOracle` evaluates
+their conjunction with `executed: false`. It is a comparison of delivery
+prerequisites, not an execution or pass of the old oracle. A revised pass is never
+an old-oracle pass.
+A Rust stress fallback must prove expiration of the unchanged shared 30-second
+budget, with no HTTP refusal; its phase is reported, not universally permitted
+in bounded direct-delivery cases. Browser fallback requires an observed heartbeat,
+opening deadline or failed peer. Unknown early failures remain red.
+
+Mandatory `qualification` supplies the replacement positive coverage: actual
+recoverable DATA loss must deliver direct, three fresh Rust request and response
+pairs must all complete direct, and named starvation plans must recover precisely
+and safely. Its injector fails closed on unarmed, unobserved or uncorrelated loss.
+No retry or larger product/job deadline is introduced.

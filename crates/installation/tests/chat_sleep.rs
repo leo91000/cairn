@@ -494,3 +494,87 @@ async fn sleep_rejects_invalid_inputs_non_chat_runs_and_pending_steering() {
             .is_err()
     );
 }
+
+#[tokio::test]
+async fn replacing_a_native_session_retires_its_pending_questions_before_startup() {
+    for (provider, fresh_session, expected_pending) in [
+        ("codex", false, 1),
+        ("opencode", false, 0),
+        ("claude", false, 0),
+        ("codex", true, 0),
+    ] {
+        let f = Fixture::new().await;
+        let question = "a".repeat(64);
+        f.service
+            .question_receive(
+                &f.run,
+                json!({
+                    "id": question,
+                    "blocking": false,
+                    "fields": [{ "id": "scope", "title": "Which scope?" }],
+                }),
+            )
+            .await
+            .unwrap();
+        f.service
+            .store
+            .patch_run(&f.run, json!({ "outcome": { "status": "needs_input" } }))
+            .await
+            .unwrap();
+        f.finish().await;
+        if fresh_session {
+            f.service
+                .store
+                .set(
+                    &format!("run-checkpoint:{}", f.run),
+                    json!({ "completed": true, "launched": true, "freshSession": true }),
+                    None,
+                )
+                .await
+                .unwrap();
+        }
+        let model = if provider == "opencode" {
+            "opencode/fixture"
+        } else {
+            ""
+        };
+        f.service
+            .chat_send(
+                &f.chat,
+                json!({
+                    "id": id(),
+                    "text": "Continue the task",
+                    "provider": provider,
+                    "model": model,
+                }),
+            )
+            .await
+            .unwrap();
+        let detail = f.tick().await;
+
+        assert_eq!(detail["run"]["id"], f.run);
+        assert_eq!(
+            detail["run"]["status"], "queued",
+            "provider={provider}: {detail}"
+        );
+        assert_eq!(detail["run"]["snapshot"]["agent"]["provider"], provider);
+        assert_eq!(
+            detail["pendingQuestions"], expected_pending,
+            "provider={provider}, fresh_session={fresh_session}"
+        );
+        if expected_pending == 0 {
+            assert_eq!(detail["questions"][0]["status"], "cancelled");
+            assert!(detail["run"]["sessionId"].is_null());
+            assert!(
+                f.service
+                    .question_answer(
+                        &f.chat,
+                        &question,
+                        json!({ "id": id(), "answers": { "scope": ["Obsolete answer"] } }),
+                    )
+                    .await
+                    .is_err()
+            );
+        }
+    }
+}

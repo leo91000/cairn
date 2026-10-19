@@ -9,7 +9,7 @@ use cairn_installation::{
     validation::text,
 };
 use serde_json::{Value, json};
-use std::time::Duration;
+use std::{path::Path, time::Duration};
 use tempfile::TempDir;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
@@ -305,6 +305,40 @@ async fn persisted_usage_errors_do_not_poison_the_replacement_provider() {
     );
 }
 
+async fn read_startup_pid(pid_file: &Path) -> Option<i32> {
+    let content = match tokio::fs::read_to_string(pid_file).await {
+        Ok(content) => content,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return None,
+        Err(error) => panic!("could not read startup PID: {error}"),
+    };
+
+    if content.is_empty() {
+        return None;
+    }
+
+    let pid = content
+        .parse::<i32>()
+        .expect("fixture must publish an integer PID");
+    assert!(pid > 0, "fixture must publish a positive PID");
+    Some(pid)
+}
+
+#[tokio::test]
+async fn startup_pid_readiness_waits_for_publication() {
+    let root = TempDir::new().unwrap();
+    let pid_file = root.path().join("startup.pid");
+    assert_eq!(read_startup_pid(&pid_file).await, None);
+
+    tokio::fs::write(&pid_file, "").await.unwrap();
+    assert_eq!(read_startup_pid(&pid_file).await, None);
+
+    let expected = i32::try_from(std::process::id()).unwrap();
+    tokio::fs::write(&pid_file, expected.to_string())
+        .await
+        .unwrap();
+    assert_eq!(read_startup_pid(&pid_file).await, Some(expected));
+}
+
 #[tokio::test]
 async fn cancelling_during_native_startup_kills_the_waiting_process() {
     let root = TempDir::new().unwrap();
@@ -328,8 +362,8 @@ async fn cancelling_during_native_startup_kills_the_waiting_process() {
     let task = tokio::spawn(async move { opencode::run(&config, input, tx, cancellation).await });
     let pid = tokio::time::timeout(Duration::from_secs(5), async {
         loop {
-            if let Ok(pid) = tokio::fs::read_to_string(&pid_file).await {
-                break pid.parse::<i32>().unwrap();
+            if let Some(pid) = read_startup_pid(&pid_file).await {
+                break pid;
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
@@ -618,6 +652,49 @@ async fn pinned_native_cli_executes_and_resumes_without_global_plugins() {
             .await
             .unwrap(),
         "Native OpenCode local model passed."
+    );
+}
+
+#[tokio::test]
+async fn withdrawn_questions_reject_the_native_request_without_an_answer() {
+    let root = TempDir::new().unwrap();
+    let s = service(&root).await;
+    connect(&s).await;
+    let lease = s
+        .accounts
+        .acquire(&s, "withdraw-question-test", Provider::Opencode, MODEL)
+        .await
+        .unwrap()
+        .unwrap();
+    let _broker = broker::serve(&s, &lease).await.unwrap();
+    let mut config = s.config.clone();
+    config.home = lease.home.parent().unwrap().to_owned();
+    let input = plan(&root, "fixture:opencode-question");
+    let (tx, mut rx) = mpsc::channel(128);
+    let task =
+        tokio::spawn(
+            async move { opencode::run(&config, input, tx, CancellationToken::new()).await },
+        );
+    let mut completed = false;
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while let Some(event) = rx.recv().await {
+            if event["type"] == "chat.question" {
+                tokio::fs::create_dir_all(root.path().join("inbox")).await.unwrap();
+                tokio::fs::write(root.path().join("inbox/messages.json"), json!([{
+                    "id": "withdrawal", "questionId": event["question"]["id"], "questionCancelled": true,
+                }]).to_string()).await.unwrap();
+            }
+            assert!(!(event["type"] == "chat.delivered" && event["messageId"] == "withdrawal"));
+            completed |= event["type"] == "turn.completed";
+        }
+    }).await.unwrap();
+    task.await.unwrap().unwrap();
+    assert!(completed);
+    assert_eq!(
+        tokio::fs::read_to_string(root.path().join("result.md"))
+            .await
+            .unwrap(),
+        "Question withdrawn without an answer."
     );
 }
 

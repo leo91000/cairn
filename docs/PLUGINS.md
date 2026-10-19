@@ -1,6 +1,6 @@
 # Installation plugins
 
-A plugin is a package: a `manifest.json`, a `main.luau` and, optionally, other Luau
+A plugin is a package: a `manifest.json` or `manifest.toml`, a `main.luau` and, optionally, other Luau
 modules it loads with `require`. Cairn runs each package
 in its own long-lived `cairn plugin-worker` process and reaches it only through
 events; the package reaches Cairn only through host capabilities its manifest
@@ -53,7 +53,7 @@ withdraws the package until it is approved again.
 
 ```text
 plugins/discord/
-  manifest.json
+  manifest.toml        or manifest.json; same validated contract
   main.luau             returns the handler table, nothing else
   gateway.luau          socket: the Gateway session
   setup.luau            form, test and view
@@ -96,8 +96,9 @@ A manifest declares `"apiVersion": 2` (the only version Cairn loads) and:
 - `instances`: `{ singular, plural }`, how the interfaces name an instance;
 - `brand`: `{ color: "#rrggbb", path }`, the package's mark (an SVG path on a
   24×24 grid);
-- `programs` (with `exec`): `[{ name, path, description }]`, absolute paths the
-  package may run;
+- `programs` (with `exec`): `[{ name, path?, installer?, description }]`; exactly
+  one of an absolute administrator-installed `path` or a package-relative Luau
+  `installer`. Installers also require `http` and declared `hosts`; see below;
 - `agentAccess`: `{ description }`; the owner grants agents per instance and
   only granted agents get the package's commands, tools and instructions;
 - `commands`, `tools`, `instructions` (need `agentAccess`), `instanceView`,
@@ -315,7 +316,8 @@ More capabilities:
   at most. `env` values are text or `{ secret = "<setting key>" }`: the host injects the
   instance's secret, which the script never sees. `LD_*`, `DYLD_*` and `HOME` can't be
   set. Returns `{ status, stdout, stderr }`. Programs run outside the Luau sandbox with
-  whatever files and network they can reach: the review screen names each path.
+  whatever files and network they can reach: the review screen names each path or
+  installer.
 - `cairn.http.request{ …, auth = { secret = "<setting key>", header?, prefix? } }`
   adds a secret field to one header of a declared host.
 - `cairn.json.decode(text)` and `cairn.json.encode(value)` convert JSON.
@@ -327,6 +329,103 @@ the generic `POST …/connections/{id}/test` and `POST /api/plugins/{id}/form`
 only returns their names (`secretKeys`). Grants are saved as `agentIds`. Instances of
 packages that need no worker (no socket, inbound messages, conversations or timers)
 start nothing and show as ready while enabled.
+
+## Program installers
+
+Keep exactly one `manifest.json` or `manifest.toml` at the package root. Both
+formats use the same field names, defaults, validation and approval digest. The
+upload endpoint accepts a JSON manifest object as before, or manifest text with
+`manifestFormat: "json" | "toml"`; it persists canonical JSON. The web accepts
+both formats. Android reviews both formats through the normalized interface;
+package file uploads continue to use the web.
+
+For a managed executable, declare:
+
+```toml
+capabilities = [
+  "http",
+  "exec"
+]
+hosts = [ "downloads.example.com" ]
+
+[[programs]]
+name = "tool"
+installer = "programs/tool.luau"
+```
+
+The module must export `resolve(input)` and `install(input)`:
+
+```lua
+return {
+    resolve = function(input)
+        -- Select a compatible stable version for input.platform.os / .arch.
+        local response = cairn.http.request({ url = "https://downloads.example.com/latest" })
+        -- Example publisher returns { version, url, sha256?, format, executable }.
+        assert(response.status == 200)
+        return response.json
+    end,
+    install = function(input)
+        local release = input.release
+        local archive = cairn.download({ url = release.url, sha256 = release.sha256 })
+        return cairn.archive.executable({
+            archive = archive.id, format = release.format, path = release.executable,
+        })
+    end,
+}
+```
+
+`resolve` returns an exact `{ version, url, sha256?, format, executable }` descriptor.
+`format` is `zip` or `binary`. With `binary`, `executable` is a logical filename.
+Discovery can only fetch public HTTPS metadata from declared hosts (GET, 1 MiB,
+15 seconds, no redirects). It cannot read instance credentials or use storage,
+program execution or installation primitives. `install` receives exactly the
+selected descriptor. Its only capabilities are `cairn.download` and
+`cairn.archive.executable`, restricted to that artifact and entry. These operations
+are refused in ordinary instance/agent handlers. Handles never expose file bytes
+or filesystem paths to Luau. Downloads are streamed, limited to 64 MiB and 90
+seconds; the installer event has a 120-second deadline. One-shot calls with an
+unprepared dependency have a 180-second enclosing budget so preparation can finish;
+subsequent calls retain the normal 35-second budget, and each executable still has
+its own 30-second limit. The run-local plugin CLI allows 190 seconds for the
+private channel, covering that cold preparation budget. ZIPs have at most 256
+entries; links and unsafe paths are refused. Only the selected regular executable,
+at most 128 MiB, is written. No arbitrary shell/install scripts are run.
+
+Cairn verifies an expected SHA-256 when provided. Otherwise provenance is HTTPS to
+the approved publisher, and the actual archive hash is recorded at installation;
+this is not publisher signature verification. Both modes record the executable
+hash, checked before each use. A restart reuses that exact binary. A corrupted lock
+or binary fails closed; it does not silently download a replacement.
+
+Uploaded packages prepare their programs when approved, before switching the
+active version. Bundled programs prepare on first use. Preparation is shared by
+all instances and serialized; no instance secrets are available. Web and Android
+show installed/candidate versions and offer Check, Install and Restore. Package
+and program updates are independent. There is no periodic check or automatic
+upgrade in this initial implementation. Owner-only routes are:
+
+- `GET /api/plugins/<id>/programs`: installed, previous and candidate releases.
+- `POST …/programs/<name>/check`: resolve and save a candidate and its digest.
+- `POST …/programs/<name>/install` with `{ digest }`: install that candidate.
+- `POST …/programs/<name>/rollback`: restore the retained previous executable.
+
+These program actions return `{ operation: ID }` immediately. Poll
+`GET /api/plugins/packages/operations/ID` for `{ state, result?, error? }`, where
+state is `running`, `completed` or `failed`. Approval/activation of an uploaded
+installer-backed package uses the same operation response; ordinary packages keep
+their synchronous summary response. This keeps downloads independent of the
+30-second HTTP relay deadline. Operations have a nine-minute total budget, four
+concurrent slots, and 64 recent in-memory results. A server restart loses operation
+status, not the atomic program/package locks; refresh the plugin and retry if
+needed. Web and Android perform this polling, including approval failures. Cold instance tests, views/actions and form handlers
+also use this response when they may prepare an executable; once prepared, their
+ordinary synchronous responses are unchanged. Instance saves without a form
+handler remain synchronous and do not download programs.
+
+Locks and executables live under `<data>/plugin-programs/`, scoped by package
+digest and server platform. Failed preparation preserves the current version;
+older files remain available for rollback. See ADR-0049 for the epoch-3 migration
+and deployment recovery contract.
 
 ## 1Password
 
@@ -505,3 +604,89 @@ through its package form, people management, and installing, approving, connecti
 and uninstalling a package, on desktop and mobile.
 These are local fixture tests, not evidence of a real Discord connection or a
 production deployment.
+
+## Setting constraints and compatibility (F6)
+
+`maxLength`, when present, must be a JSON/TOML integer from 1 through 10,000
+for non-secret fields, or through 16,384 for secrets. Cairn rejects a larger
+text declaration with the explicit 10,000 limit instead of accepting a manifest
+whose declared limit would be silently capped on save. Text lengths count Unicode
+characters; secret lengths count UTF-8 bytes, as before. Without `maxLength`, the
+save limits remain 200 for `string` and dynamic choices, 2,000 for `text`/`url`,
+and 16,384 bytes for secrets. `minimum` and `maximum` must be finite numbers;
+when both are present, `minimum` must not exceed `maximum`.
+
+A non-null `default` must have the field's type and satisfy its length, numeric
+range, choices and whole-value pattern. Text defaults follow save behavior:
+length/control characters are checked before trimming, patterns after trimming;
+required text cannot trim to empty, and nonempty URLs must use HTTP(S). Optional
+empty text retains the existing pattern exemption. Secret defaults and dynamic
+choice defaults remain forbidden. A null default on a non-secret field means
+no default. No values are truncated.
+
+This tightens the set of persisted manifests that the registry can read. The
+installation compatibility epoch advances from 3 to 4; automatic production
+rollout must stop at that boundary under [the production compatibility
+contract](PRODUCTION-CAIRN.md#installation-data-compatibility). This PR does not
+perform a rollout. Both bundled manifests and ordinary valid installed packages
+retain their settings, serialized form and approval digests; no database, secret
+or instance record is rewritten.
+
+Before a separately reviewed epoch transition, inspect installed manifest settings
+for negative, zero, fractional or oversized `maxLength`, reversed numeric bounds,
+and defaults that fail the rules above. The registry revalidates every version on
+read: an incompatible installed version fails with a validation error, remains on
+disk, and cannot run; catalog version errors identify it. Do not silently clamp,
+normalize or reapprove its contents.
+
+Forward repair: publish a corrected package with a new version under the same
+plugin ID, upload it, review and approve that version. Choose bounds that cover
+existing instance values, or deliberately correct those values when editing the
+instance. The registry then activates the approved version; existing instance IDs,
+settings, encrypted secrets and grants stay in place. If repair or approval fails,
+keep the original files and records and fix the package before retrying. Preserve
+the previous binary and an explicitly prepared pre-transition data backup for a
+reviewed rollback; do not run the previous binary on epoch-4 installation data or
+lower the compatibility epoch to bypass the rollout gate. No automatic data
+backup/restoration or production manifest inventory is claimed here.
+
+The Android `Int?` decoder's behavior for a fractional `maxLength` has not been
+executed on a JVM or device in this change. Backend admission now rejects that
+manifest before it can reach either client's field decoder.
+
+## Client form values (F5)
+
+Web instance editors and view forms use pure value transformations, compared with
+Android's native form helpers using `tests/fixtures/plugin-form-values.json`.
+Opening a form applies defaults to missing values; an explicit null or a later
+clear does not reapply a default. Nonprimitive answers do not coerce scalar
+controls: a boolean answer such as `[true]` or `["true"]` becomes false, matching
+Android. Only declared non-secret fields are settings,
+including hidden fields populated by the package. Nonblank text is trimmed,
+numbers are sent as JSON numbers, and blank text/numbers are omitted. Choice
+identifiers are preserved exactly, including whitespace accepted by the manifest;
+an empty single choice is omitted. False and
+empty multiple choices remain explicit. Secrets are never prefilled from a view's
+`values` or instance settings. Blank secrets are omitted, preserving saved instance
+secrets. Instance secrets follow the existing trimmed save contract; nonblank view
+form secrets reach the action exactly as typed, matching Android.
+
+Both clients use Kotlin's existing `Char.isWhitespace` predicate for text trimming
+and secret blankness: Java `Character.isWhitespace || Character.isSpaceChar`.
+The exact set is U+0009–U+000D, U+001C–U+0020, U+00A0, U+1680,
+U+2000–U+200A, U+2028–U+2029, U+202F, U+205F and U+3000.
+U+0085 NEXT LINE and format characters (including U+FEFF, U+200B and U+2060)
+are meaningful. This differs from Rust's Unicode `White_Space` trimming and
+JavaScript's built-in `trim`; neither defines the client contract. The shared
+`plugin-form-whitespace.json` corpus covers all ASCII/C1 controls, separators,
+and format/nonspace boundaries, as singletons and around nonblank text. Its
+blank set is also checked exhaustively against the pinned Kotlin/JDK Char domain.
+Choice IDs use exact bytes and required selects still use null/empty missingness.
+
+These helpers do not make control characters valid instance settings: the server
+independently rejects them on instance saves. Admitted panel `values` can contain
+controls; action secrets keep their raw bytes after the shared blank filter.
+
+These are client value transformations, not validation of an action. A plugin
+still validates its action input. The server's F6 manifest constraints, package
+admission/review, instance validation and completion handler remain unchanged.

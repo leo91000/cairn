@@ -43,6 +43,12 @@ where
             Err(_) => ExitCode::FAILURE,
         };
     }
+    if std::env::args().nth(1).as_deref() == Some("mcp-code-worker") {
+        return match cairn_installation::mcp_server::code_mode::worker() {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(_) => ExitCode::FAILURE,
+        };
+    }
     cairn_installation::tls::install_provider();
 
     let args = std::env::args().skip(1).collect::<Vec<_>>();
@@ -435,8 +441,7 @@ async fn chat(config: &Config, plan: Value, stop: CancellationToken) -> Result<i
                 };
                 activity.output();
                 activity.observe(&value);
-                let mut bytes = value.to_string().into_bytes();
-                bytes.push(b'\n');
+                let bytes = cairn_installation::run_output::event_line(&value);
                 cairn_installation::performance::wait("stdout_write", stdout.write_all(&bytes))
                     .await?;
             }

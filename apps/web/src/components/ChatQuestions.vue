@@ -64,6 +64,25 @@ async function send() {
   catch (e) { error.value = (e as Error).message }
   finally { busy.value = false }
 }
+
+async function withdraw() {
+  const current = question.value
+  if (!current || busy.value)
+    return
+  busy.value = true
+  error.value = ''
+  try {
+    await api(`/chats/${current.chatId}/questions/${current.id}/cancel`, { method: 'POST' })
+    navigator.serviceWorker?.controller?.postMessage({ type: 'question-answered', installationId: state.installationId, questionId: current.id })
+    delete answers.value[current.id]
+    delete custom.value[current.id]
+    submission = undefined
+    emit('answered')
+    open.value = false
+  }
+  catch (e) { error.value = (e as Error).message }
+  finally { busy.value = false }
+}
 </script>
 
 <template>
@@ -146,6 +165,14 @@ async function send() {
       <UiAlert v-if="error">
         {{ error }}
       </UiAlert>
+      <button
+        type="button"
+        class="text-sm text-muted underline hover:text-ink"
+        :disabled="busy"
+        @click="withdraw"
+      >
+        No longer needed
+      </button>
       <div class="flex items-center justify-between gap-3 border-t border-line pt-4">
         <button type="button" class="text-xs text-muted hover:text-ink" @click="open = false">
           Answer later

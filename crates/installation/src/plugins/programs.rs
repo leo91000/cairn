@@ -57,7 +57,7 @@ pub async fn run(s: &Service, context: &Context, args: &Value) -> Result<Value> 
     let program = manifest
         .program(text(args, "program"))
         .ok_or_else(|| Error::forbidden("This program is not declared by the plugin."))?;
-    let path = s.plugins.program_path(&manifest.id, program);
+    let path = super::program_installation::executable(s, manifest, program).await?;
     let arguments = match &args["args"] {
         Value::Null => Vec::new(),
         Value::Array(items) => items

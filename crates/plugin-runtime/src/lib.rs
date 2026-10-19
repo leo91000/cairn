@@ -42,6 +42,10 @@ cairn.conversations = {
 cairn.exec = {
     run = function(request) return call("exec.run", request) end,
 }
+cairn.download = function(request) return call("download", request) end
+cairn.archive = {
+    executable = function(request) return call("archive.executable", request) end,
+}
 cairn.socket = {
     connect = function(request) call("socket.connect", request) end,
     send = function(text, options)
@@ -359,7 +363,7 @@ pub fn worker() -> Result<(), String> {
         write_frame(&mut std::io::stdout().lock(), &Frame::Failure)?;
         return Err("Plugin API version is incompatible.".into());
     }
-    let budget = Duration::from_millis(deadline_ms.clamp(10, 120_000));
+    let budget = Duration::from_millis(deadline_ms.clamp(10, 180_000));
     let sources = Sources {
         main: source,
         modules,
@@ -384,6 +388,10 @@ pub fn worker() -> Result<(), String> {
 }
 
 #[cfg(test)]
+#[path = "../../../plugins/luau_files.rs"]
+mod luau_files;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
@@ -392,38 +400,21 @@ mod tests {
         Runtime::load(source, Duration::from_secs(5)).unwrap_or_else(|_| panic!("load"))
     }
 
-    /// The bundled Discord package, with its modules.
+    /// The bundled Discord package, discovered exactly as in the installation build.
     fn discord() -> Runtime {
-        package(
-            include_str!("../../../plugins/discord/main.luau"),
-            &[
-                (
-                    "gateway.luau",
-                    include_str!("../../../plugins/discord/gateway.luau"),
-                ),
-                (
-                    "setup.luau",
-                    include_str!("../../../plugins/discord/setup.luau"),
-                ),
-                (
-                    "conversation.luau",
-                    include_str!("../../../plugins/discord/conversation.luau"),
-                ),
-                (
-                    "lib/discord.luau",
-                    include_str!("../../../plugins/discord/lib/discord.luau"),
-                ),
-                (
-                    "lib/text.luau",
-                    include_str!("../../../plugins/discord/lib/text.luau"),
-                ),
-                (
-                    "lib/permissions.luau",
-                    include_str!("../../../plugins/discord/lib/permissions.luau"),
-                ),
-            ],
-        )
-        .unwrap_or_else(|_| panic!("load"))
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../plugins/discord");
+        let mut files = Vec::new();
+        luau_files::luau(&root, &root, &mut files);
+        let mut sources = Sources::default();
+        for (name, path) in files {
+            let source = std::fs::read_to_string(path).expect("bundled Luau source");
+            if name == "main.luau" {
+                sources.main = source;
+            } else {
+                sources.modules.insert(name, source);
+            }
+        }
+        Runtime::load_package(sources, Duration::from_secs(5)).unwrap_or_else(|_| panic!("load"))
     }
 
     fn package(main: &str, modules: &[(&str, &str)]) -> mlua::Result<Runtime> {

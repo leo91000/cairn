@@ -269,10 +269,11 @@ pub async fn schedule(s: &Service, bearer: &str, raw: &Value) -> Result<Value> {
             };
             if let Some(observed) = observed {
                 sleep::cancel(db, text(&chat, "id"))?;
-                // Web and Android match this text to show the result on its own card, which
-                // names the agent's reason: no wakeup records it.
+                // An immediate result has its own card; retain the text for older clients.
+                // No wakeup records the reason when the condition is already complete.
                 let mut announced = observed.clone();
                 announced["reason"] = input["reason"].clone();
+                announced["immediate"] = true.into();
                 db.event(
                     text(&run, "id"),
                     "chat.wait_ready",

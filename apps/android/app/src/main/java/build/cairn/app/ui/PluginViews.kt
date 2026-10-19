@@ -59,21 +59,26 @@ internal fun PluginPanel(vm: CairnViewModel, state: Workspace, path: String, nam
         }
     }
     LaunchedEffect(path) {
-        guard { nodes = vm.api.get<JsonObject>("$path/view")["view"] as? JsonArray }
+        guard {
+            nodes =
+                vm.api.pluginOperation("$path/view", method = "GET").jsonObject["view"]
+                    as? JsonArray
+        }
     }
     fun act(action: String, payload: JsonElement, values: JsonObject) {
         scope.launch {
             guard {
                 val result =
-                    vm.api.send<JsonObject>(
-                        "POST",
-                        "$path/actions",
-                        buildJsonObject {
-                            put("action", action)
-                            put("payload", payload)
-                            put("values", values)
-                        },
-                    )
+                    vm.api
+                        .pluginOperation(
+                            "$path/actions",
+                            buildJsonObject {
+                                put("action", action)
+                                put("payload", payload)
+                                put("values", values)
+                            },
+                        )
+                        .jsonObject
                 (result["view"] as? JsonArray)?.let { nodes = it }
                 result.text("notice").takeIf { it.isNotBlank() }?.let(vm::notify)
             }
@@ -339,9 +344,7 @@ private fun PanelForm(node: JsonObject, busy: Boolean, submit: (String, JsonObje
             enabled = !busy,
         ) {
             // A form's secret fields go to the package like its other values.
-            val output =
-                pluginSettings(fields, values) +
-                    secrets.filterValues { it.isNotBlank() }.mapValues { JsonPrimitive(it.value) }
+            val output = pluginSettings(fields, values) + pluginSecrets(secrets, trim = false)
             secrets = emptyMap()
             submit(action, JsonObject(output))
         }

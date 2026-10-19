@@ -229,6 +229,38 @@ class ChatWaitTest {
             shape(replaced),
         )
         assertEquals("replaced", replaced[1].wait?.ended)
+        // A result that was already available stays at its call, whatever its wording, and the
+        // wait it replaced is placed before it.
+        val ready = buildJsonObject {
+            put("state", "completed")
+            put("type", "run_finished")
+            put("status", "succeeded")
+            put("immediate", true)
+        }
+        val immediate =
+            timelineEntries(
+                listOf(
+                    event("turn.started", buildJsonObject {}),
+                    event("chat.wait", scheduled.json()),
+                    message("L’exécution est peut-être finie."),
+                    event("chat.wait_ready", ready, "Résultat prêt"),
+                    message("Elle est finie ; je merge."),
+                ),
+                chat = true,
+            )
+        assertEquals(
+            listOf(
+                "L’exécution est peut-être finie.",
+                "wait",
+                "wait",
+                "Elle est finie ; je merge.",
+            ),
+            shape(immediate),
+        )
+        assertEquals(scheduled, immediate[1].wait?.wakeup)
+        assertEquals("replaced", immediate[1].wait?.ended)
+        assertEquals(null, immediate[2].wait?.wakeup)
+        assertEquals(ready, immediate[2].wait?.observation)
     }
 
     @Test

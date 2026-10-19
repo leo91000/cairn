@@ -242,6 +242,15 @@ async fn call_tool(s: &Service, bearer: &str, name: &str, args: &Value) -> Resul
             let result = crate::nodes::moves::request_by_agent(s, &run, args).await;
             ToolResult::from_result(result, summary)
         }
+        "pending_questions" | "withdraw_question" => ToolResult::from_result(
+            crate::chats::questions::for_agent(
+                s,
+                bearer,
+                (name == "withdraw_question").then_some(args),
+            )
+            .await,
+            summary,
+        ),
         "report_outcome" => {
             ToolResult::from_result(crate::outcome::report(s, bearer, args).await, |_| {
                 "Outcome saved.".into()
@@ -301,6 +310,8 @@ pub async fn rpc(s: &Service, bearer: &str, method: &str, params: &Value) -> Res
         crate::nodes::moves::tool(),
         crate::artifacts::sharing::tool(),
         crate::outcome::tool(),
+        crate::chats::questions::list_tool(),
+        crate::chats::questions::cancel_tool(),
         crate::chats::sleep::tool(),
         crate::chats::wait_for::tool(),
         crate::nodes::exclusive::acquire_tool(),

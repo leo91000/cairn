@@ -234,6 +234,59 @@ abstract class BackgroundWaitCases {
         compose.onNodeWithText("Le résultat était déjà disponible", substring = true).assertExists()
     }
 
+    @Test
+    fun explicitImmediateResultReplacesPendingWaitWithChangedWording() {
+        val wakeup =
+            ChatWakeup(
+                "wake",
+                "message",
+                "Attente initiale",
+                60,
+                0,
+                60000,
+                condition =
+                    buildJsonObject {
+                        put("type", "run_finished")
+                        put("runId", "dependency")
+                    },
+            )
+        val observation = buildJsonObject {
+            put("immediate", true)
+            put("reason", "Revue terminée")
+            put("state", "completed")
+            put("type", "run_finished")
+            put("runId", "dependency")
+            put("status", "succeeded")
+        }
+        val waits =
+            timelineEntries(
+                    listOf(
+                        RunEvent(
+                            1,
+                            1,
+                            "chat.wait",
+                            "",
+                            wireJson.encodeToJsonElement(wakeup).jsonObject,
+                        ),
+                        RunEvent(2, 2, "chat.wait_ready", "Result available", observation),
+                    ),
+                    chat = true,
+                )
+                .mapNotNull { it.wait }
+        compose.setContent {
+            CairnTheme {
+                androidx.compose.foundation.layout.Column { waits.forEach { WaitCard(it) } }
+            }
+        }
+        compose.onAllNodesWithTag("chat-wait").assertCountEquals(2)
+        compose
+            .onNodeWithText("Remplacée par un nouvel appel d’attente", substring = true)
+            .assertExists()
+        compose.onNodeWithText("Le résultat était déjà disponible", substring = true).assertExists()
+        compose.onNodeWithText("Revue terminée", substring = true).assertExists()
+        compose.onNodeWithText("L’exécution est terminée").assertExists()
+    }
+
     private fun conversation(
         status: String,
         sleeping: Boolean = false,

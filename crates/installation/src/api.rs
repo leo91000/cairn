@@ -246,6 +246,9 @@ async fn chat_routes(s: &Arc<Service>, input: &Input, route: Route<'_>) -> Resul
             s.chat_edit(id, message, Some(input.body.clone())).await?
         }
         ("DELETE", ["chats", id, "messages", message]) => s.chat_edit(id, message, None).await?,
+        ("POST", ["chats", id, "questions", question, "cancel"]) => {
+            s.question_cancel(id, question).await?
+        }
         ("POST", ["chats", id, "questions", question, "answer"]) => {
             s.question_answer(id, question, input.body.clone()).await?
         }
@@ -506,6 +509,10 @@ async fn settings_routes(
 ) -> Result<Option<Value>> {
     let result = match route {
         ("GET", ["settings"]) => settings(s),
+        ("GET", ["settings", "conversations"]) => s.conversation_retention().await?,
+        ("PUT", ["settings", "conversations"]) => {
+            s.save_conversation_retention(input.body.clone()).await?
+        }
         ("GET", ["settings", "storage"]) => crate::object_storage::settings(s)?,
         ("PUT", ["settings", "storage"]) => {
             crate::object_storage::save_settings(s, &input.body).await?

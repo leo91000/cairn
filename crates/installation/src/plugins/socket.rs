@@ -13,7 +13,7 @@ use crate::{
     validation::text,
 };
 use cairn_plugin_api::{Frame, MAX_FRAME_BYTES};
-use cairn_plugin_host::{Denied, Session};
+use cairn_plugin_host::{Denied, InvocationError, Session};
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{Map, Value, json};
 use std::{
@@ -310,9 +310,7 @@ pub async fn deliver(
         .await;
     match (result, refused.into_inner().unwrap()) {
         (Ok(value), _) => Ok(value),
-        (Err(message), _) if message.starts_with(cairn_plugin_api::REJECTED) => Err(
-            Error::forbidden(message.trim_start_matches(cairn_plugin_api::REJECTED)),
-        ),
+        (Err(InvocationError::Rejected(message)), _) => Err(Error::forbidden(message)),
         (Err(_), Some(error)) => Err(error),
         (Err(_), None) => Err(Error::bad_gateway(
             "The plugin failed while handling its connection.",

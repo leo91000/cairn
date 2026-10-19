@@ -166,24 +166,17 @@ constructor(
     fun report(error: Throwable) {
         if (error is CancellationException) throw error
         if (error is ApiException && error.status == 401 && state.value.session.authenticated) {
-            clearDrafts()
-            viewModelScope.launch {
-                historyCache.clear()
-                files.clear()
-            }
-            connection?.closeStreams()
-            connection?.clearSession()
-            accountConnection?.clearSession()
-            connection = null
-            clearReads()
-            routeCollection?.cancel()
-            schedule(getApplication(), false)
+            val expiredConnection = connection
             mutable.update {
                 Workspace(
                     ready = true,
                     origin = it.origin,
                     error = "Session expirée. Reconnectez-vous.",
                 )
+            }
+            viewModelScope.launch(start = kotlinx.coroutines.CoroutineStart.UNDISPATCHED) {
+                transitionScope(forgetSession = true, scheduleNotifications = false)
+                if (connection === expiredConnection) connection = null
             }
         } else if (isConnectionFailure(error) && state.value.installation != null) {
             connectionLost()
@@ -213,6 +206,40 @@ constructor(
                     }
                 }
             }
+        }
+    }
+
+    /**
+     * Clears transient installation state on every transition. Storage survives only an unchanged
+     * notification scope and CSRF; a null scope leaves the saved notification scope alone. Callers
+     * keep the old API available until suspending cleanup finishes, then publish their destination
+     * screen and replace or remove the connection without suspension.
+     */
+    private suspend fun transitionScope(
+        notificationScope: String? = null,
+        csrf: String? = null,
+        clearStorage: Boolean = true,
+        forgetSession: Boolean = false,
+        scheduleNotifications: Boolean? = null,
+    ) {
+        connection?.closeStreams()
+        routeCollection?.cancel()
+        routeCollection = null
+        clearReads()
+        clearDrafts()
+
+        if (forgetSession) {
+            connection?.clearSession()
+            accountConnection?.clearSession()
+        }
+
+        if (scheduleNotifications != null) schedule(getApplication(), scheduleNotifications)
+
+        val sessionChanged = csrf != null && connection != null && connection?.csrf != csrf
+        val scopeChanged = notificationScope?.let { notifications.selectScope(it) } ?: false
+        if (clearStorage || scopeChanged || sessionChanged) {
+            historyCache.clear()
+            files.clear()
         }
     }
 
@@ -378,13 +405,8 @@ constructor(
             next.csrf = session.csrf.orEmpty()
             if (session.authenticated) openAccount(session)
             else {
-                historyCache.clear()
-                files.clear()
-                next.clearSession()
+                transitionScope(forgetSession = true, scheduleNotifications = false)
                 connection = null
-                clearReads()
-                routeCollection?.cancel()
-                schedule(getApplication(), false)
                 mutable.update {
                     Workspace(busy = true, origin = origin.toString(), session = session)
                 }
@@ -519,20 +541,14 @@ constructor(
             session.installations.find { it.id == saved } ?: session.installations.firstOrNull()
         if (installation != null) openInstallation(session, installation)
         else {
-            connection?.closeStreams()
-            clearReads()
-            clearDrafts()
-            schedule(getApplication(), notifications.enabled.first())
-
+            transitionScope(
+                notificationScope = "",
+                scheduleNotifications = notifications.enabled.first(),
+            )
             connection = null
-            routeCollection?.cancel()
             mutable.update {
                 Workspace(ready = true, busy = it.busy, origin = it.origin, session = session)
             }
-
-            historyCache.clear()
-            files.clear()
-            notifications.selectScope("")
         }
     }
 
@@ -545,23 +561,13 @@ constructor(
 
     private suspend fun openInstallation(session: Session, installation: Installation) {
         val current = state.value
-        val previous = connection
         val account = checkNotNull(accountConnection)
         mutable.update { it.copy(busy = true) }
 
         try {
-            previous?.closeStreams()
-            clearReads()
-            clearDrafts()
-
             val accountId = checkNotNull(session.account).id
             val scope = "${current.origin}:$accountId:${installation.id}:${installation.role.value}"
-            val scopeChanged = notifications.selectScope(scope)
-            val sessionChanged = previous != null && previous.csrf != session.csrf
-            if (scopeChanged || sessionChanged) {
-                historyCache.clear()
-                files.clear()
-            }
+            transitionScope(notificationScope = scope, csrf = session.csrf, clearStorage = false)
 
             preferences.selectInstallation(current.origin, accountId, installation.id)
             val next =
@@ -571,7 +577,6 @@ constructor(
                     }
                 }
             connection = next
-            routeCollection?.cancel()
             routeCollection = viewModelScope.launch {
                 next.transport.route.collect { route ->
                     if (connection === next) mutable.update { it.copy(transportRoute = route) }
@@ -628,14 +633,9 @@ constructor(
     }
 
     suspend fun logout() {
-        clearReads()
-        clearDrafts()
         emailChallenge = null
         mutable.update { it.copy(signingOut = true) }
-        historyCache.clear()
-        files.clear()
-        connection?.closeStreams()
-        schedule(getApplication(), false)
+        transitionScope(scheduleNotifications = false)
         try {
             try {
                 NativeDeviceRegistrar(getApplication(), vault, beaconOrigin).disable()
@@ -654,12 +654,8 @@ constructor(
                 } catch (_: Exception) {
                     /* Local logout wins over unavailable credential providers. */
                 }
-                withContext(Dispatchers.IO) {
-                    connection?.clearSession()
-                    accountConnection?.clearSession()
-                }
+                transitionScope(clearStorage = false, forgetSession = true)
                 connection = null
-                routeCollection?.cancel()
                 mutable.update { Workspace(ready = true, origin = it.origin, busy = it.busy) }
             }
         }
@@ -787,4 +783,5 @@ data class ChatDraft(
     val submissionId: String = "",
     val submissionKey: String = "",
     val provider: String = "",
+    val rejected: List<RejectedAttachment> = emptyList(),
 )

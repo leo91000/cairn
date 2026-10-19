@@ -7,6 +7,10 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.semantics.LiveRegionMode
+import androidx.compose.ui.semantics.liveRegion
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.LocalLifecycleOwner
@@ -15,7 +19,10 @@ import build.cairn.app.data.*
 import build.cairn.app.diagnostics.PerfOperation
 import build.cairn.app.diagnostics.Performance
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.transformWhile
@@ -35,31 +42,16 @@ fun rememberLive(
     val api = if (enabled) vm.api else null
     var value by remember(path, api) { mutableStateOf(LiveSnapshot()) }
     val session = remember(path, api) { LiveSession() }
-    val scope = rememberCoroutineScope()
-    var older by remember(path, api) { mutableStateOf(emptyList<RunEvent>()) }
-    var olderHistory by remember(path, api) { mutableStateOf<String?>(null) }
-    var olderEpoch by remember(path, api) { mutableIntStateOf(0) }
-    var boundary by remember(path, api) { mutableStateOf<Long?>(null) }
-    var moreOlder by remember(path, api) { mutableStateOf(false) }
+    val parentScope = rememberCoroutineScope()
+    val scope =
+        remember(path, api) {
+            CoroutineScope(parentScope.coroutineContext + Job(parentScope.coroutineContext[Job]))
+        }
+    DisposableEffect(scope) { onDispose { scope.cancel() } }
+    val pages = remember(path, api) { OlderPages() }
     var loadingOlder by remember(path, api) { mutableStateOf(false) }
     var olderError by remember(path, api) { mutableStateOf<String?>(null) }
-    fun display(snapshot: LiveSnapshot): LiveSnapshot {
-        // A replaced history, even with the same revision, no longer continues these pages.
-        if (snapshot.history != olderHistory || snapshot.epoch != olderEpoch) {
-            older = emptyList()
-            boundary = null
-            olderHistory = snapshot.history
-            olderEpoch = snapshot.epoch
-            olderError = null
-        }
-        return if (boundary == null) snapshot
-        else
-            snapshot.copy(
-                events = mergeHistory(older, snapshot.events),
-                oldest = boundary!!,
-                hasOlder = moreOlder,
-            )
-    }
+
     LaunchedEffect(path, api, owner, streaming) {
         if (enabled && api != null) {
             var cacheGeneration = vm.historyCache.generation
@@ -85,7 +77,11 @@ fun rememberLive(
                             .collect {
                                 vm.acceptCacheRevision(it.state?.cacheRevision)
                                 cacheGeneration = vm.historyCache.generation
-                                if (!it.catchingUp || it.httpStatus != null) value = display(it)
+                                if (!it.catchingUp || it.httpStatus != null) {
+                                    if (it.history != value.history || it.epoch != value.epoch)
+                                        olderError = null
+                                    value = pages.display(it)
+                                }
                                 if (it.httpStatus in listOf(401, 403, 404, 409)) {
                                     vm.historyCache.remove(key)
                                     value =
@@ -131,12 +127,12 @@ fun rememberLive(
         loadingOlder = loadingOlder,
         olderError = olderError,
         loadOlder = {
-            val history = value.history
+            val requested = value
+            val history = requested.history
             if (enabled && api != null && history != null && value.hasOlder && !loadingOlder) {
                 loadingOlder = true
                 olderError = null
-                val before = value.oldest
-                val epoch = value.epoch
+                val before = requested.oldest
                 val cacheGeneration = vm.historyCache.generation
                 scope.launch {
                     var pageApplied = false
@@ -146,20 +142,10 @@ fun rememberLive(
                                 path.removeSuffix("/stream") +
                                     "/history?before=$before&history=${segment(history)}"
                             )
-                        if (
-                            value.history == history &&
-                                value.epoch == epoch &&
-                                page.history == history
-                        ) {
-                            require(page.oldest < before || !page.hasOlder) {
-                                "Page d’historique invalide."
-                            }
-                            older = mergeHistory(page.events, older)
-                            olderHistory = history
-                            olderEpoch = epoch
-                            boundary = page.oldest
-                            moreOlder = page.hasOlder
-                            value = display(value)
+
+                        val applied = pages.apply(page, value, requested)
+                        if (applied != null) {
+                            value = applied
                             // Release paging in the same UI turn as insertion. Disk persistence
                             // must not leave the reader on the new rows while restoration waits.
                             pageApplied = true
@@ -271,7 +257,7 @@ internal fun BoxScope.HistoryStatus(
     val atStart by remember(list) { derivedStateOf { !list.canScrollBackward } }
     val error = live.olderError
     Column(
-        Modifier.align(Alignment.TopCenter).padding(top = 8.dp),
+        Modifier.align(Alignment.TopCenter).padding(start = 12.dp, top = 8.dp, end = 12.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.spacedBy(6.dp),
     ) {
@@ -286,7 +272,7 @@ internal fun BoxScope.HistoryStatus(
             StatusPill {
                 Text(
                     shown,
-                    Modifier.widthIn(max = 280.dp),
+                    Modifier.widthIn(max = 280.dp).padding(vertical = 6.dp),
                     style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     maxLines = 2,
@@ -298,22 +284,33 @@ internal fun BoxScope.HistoryStatus(
             enter = androidx.compose.animation.fadeIn(),
             exit = androidx.compose.animation.fadeOut(),
         ) {
-            StatusPill {
+            // Like the web's role="status", accessibility services hear paging progress and errors.
+            StatusPill(Modifier.semantics { liveRegion = LiveRegionMode.Polite }) {
                 if (error == null) {
                     CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 2.dp)
                     Text(
                         "Chargement des messages précédents…",
+                        Modifier.padding(vertical = 6.dp),
                         style = MaterialTheme.typography.labelMedium,
                     )
                 } else {
+                    // The retry action keeps its whole label; the error wraps beside it.
                     Text(
                         error,
-                        Modifier.widthIn(max = 220.dp),
+                        Modifier.weight(1f, fill = false)
+                            .widthIn(max = 220.dp)
+                            .padding(vertical = 6.dp),
                         style = MaterialTheme.typography.labelMedium,
                         color = MaterialTheme.colorScheme.error,
-                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis,
+                        maxLines = 3,
                     )
-                    TextButton(onClick = retry) { Text("Réessayer") }
+                    TextButton(
+                        onClick = retry,
+                        contentPadding = PaddingValues(horizontal = 8.dp),
+                    ) {
+                        Text("Réessayer", softWrap = false)
+                    }
                 }
             }
         }
@@ -321,9 +318,14 @@ internal fun BoxScope.HistoryStatus(
 }
 
 @Composable
-private fun StatusPill(content: @Composable RowScope.() -> Unit) {
+private fun StatusPill(
+    modifier: Modifier = Modifier,
+    content: @Composable RowScope.() -> Unit,
+) {
+    // A capsule on one line; with large text, a rounded rectangle that keeps wrapped lines inside.
     Surface(
-        shape = RoundedCornerShape(50),
+        modifier,
+        shape = RoundedCornerShape(24.dp),
         color = MaterialTheme.colorScheme.surfaceContainerHigh,
         shadowElevation = 2.dp,
     ) {
@@ -675,8 +677,7 @@ internal fun timelineEntries(
         }
         for ((eventIndex, event) in folded.withIndex()) {
             if (
-                event.type.startsWith("chat.") ||
-                    event.type in TURN_BOUNDARIES ||
+                event.type in WAIT_BOUNDARIES ||
                     (event.type == "status" && event.text in TERMINAL_STATUSES)
             )
                 placeScheduled()
@@ -703,9 +704,14 @@ internal fun timelineEntries(
                 }
                 // The condition completed: right away (the agent never waited) or while it waited.
                 "chat.wait_ready" -> {
-                    val observation = event.payload?.let(::JsonObject)
+                    val observation = event.activityData()
                     // Right away, the agent never waited, and this call replaced any wait.
-                    val immediate = event.text == IMMEDIATE_WAIT_RESULT
+                    val immediate =
+                        when (observation?.get("immediate")) {
+                            JsonPrimitive(true) -> true
+                            JsonPrimitive(false) -> false
+                            else -> event.text == IMMEDIATE_WAIT_RESULT
+                        }
                     if (immediate) {
                         openWait?.let { index -> updateWait(index) { it.copy(ended = "replaced") } }
                         openWait = null
@@ -999,7 +1005,18 @@ internal fun timelineEntries(
         }
     }
 
-private val TURN_BOUNDARIES = setOf("turn.started", "turn.completed", "turn.failed")
+// Where a scheduled wait's card is placed: its turn ended, or a message or another wait event came.
+private val WAIT_BOUNDARIES =
+    setOf(
+        "turn.started",
+        "turn.completed",
+        "turn.failed",
+        "chat.user",
+        "chat.sleep",
+        "chat.wait",
+        "chat.wait_ready",
+        "chat.wakeup",
+    )
 private val TERMINAL_STATUSES = setOf("succeeded", "failed", "cancelled", "interrupted")
 
 /**
@@ -1092,88 +1109,101 @@ fun EventRow(vm: CairnViewModel, event: RunEvent, agent: String = "Cairn") {
         val content =
             if (user) (event.payload?.get("text") as? JsonPrimitive)?.contentOrNull ?: event.text
             else item.string("text").ifEmpty { event.text }
-        BoxWithConstraints(
-            Modifier.fillMaxWidth(),
-            contentAlignment = if (user) Alignment.CenterEnd else Alignment.CenterStart,
-        ) {
-            Surface(
-                color =
-                    if (user) MaterialTheme.colorScheme.surfaceContainerHigh
-                    else MaterialTheme.colorScheme.background,
-                shape =
-                    RoundedCornerShape(
-                        topStart = 16.dp,
-                        topEnd = 16.dp,
-                        bottomStart = 16.dp,
-                        bottomEnd = 4.dp,
-                    ),
-                modifier =
-                    if (user) Modifier.widthIn(max = maxWidth * 0.9f) else Modifier.fillMaxWidth(),
-            ) {
-                Column(
-                    Modifier.padding(
-                        horizontal = if (user) 16.dp else 0.dp,
-                        vertical = if (user) 12.dp else 8.dp,
-                    ),
-                    verticalArrangement = Arrangement.spacedBy(6.dp),
-                ) {
-                    if (!user)
-                        Row(
-                            Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                        ) {
-                            Text(
-                                agent,
-                                Modifier.weight(1f),
-                                style = MaterialTheme.typography.labelSmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            )
-                            Text(
-                                java.text
-                                    .SimpleDateFormat(
-                                        "HH:mm",
-                                        androidx.compose.ui.platform.LocalConfiguration.current
-                                            .locales[0],
-                                    )
-                                    .format(java.util.Date(event.createdAt)),
-                                style = MaterialTheme.typography.labelSmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            )
-                        }
-                    if (user)
-                        androidx.compose.foundation.text.selection.SelectionContainer {
-                            Text(
-                                highlightSkills(
-                                    content,
-                                    LocalSkillNames.current,
-                                    skillMentionStyle(),
-                                ),
-                                style = MaterialTheme.typography.bodyLarge,
-                            )
-                        }
-                    else Markdown(content)
-                    if (user)
-                        Text(
-                            java.text
-                                .SimpleDateFormat(
-                                    "HH:mm",
-                                    androidx.compose.ui.platform.LocalConfiguration.current.locales[
-                                            0],
-                                )
-                                .format(java.util.Date(event.createdAt)),
-                            Modifier.align(Alignment.End),
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
-                    val attachments = runCatching {
+        val attachments =
+            if (!user) emptyList()
+            else
+                remember(event) {
+                    runCatching {
                         event.payload?.get("attachments")?.let {
                             wireJson.decodeFromJsonElement<List<ChatAttachment>>(it)
                         }
                     }
                         .getOrNull()
                         .orEmpty()
-                    if (attachments.isNotEmpty()) AttachmentList(vm, attachments)
                 }
+        val time =
+            java.text
+                .SimpleDateFormat(
+                    "HH:mm",
+                    androidx.compose.ui.platform.LocalConfiguration.current.locales[0],
+                )
+                .format(java.util.Date(event.createdAt))
+        BoxWithConstraints(
+            Modifier.fillMaxWidth(),
+            contentAlignment = if (user) Alignment.CenterEnd else Alignment.CenterStart,
+        ) {
+            // Like the web and other chat apps, a message's files stand above its bubble.
+            Column(
+                if (user) Modifier.widthIn(max = maxWidth * 0.9f) else Modifier.fillMaxWidth(),
+                horizontalAlignment = Alignment.End,
+                verticalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
+                if (attachments.isNotEmpty()) MessageAttachments(vm, attachments)
+                if (!user || content.isNotBlank() || attachments.isEmpty())
+                    Surface(
+                        color =
+                            if (user) MaterialTheme.colorScheme.surfaceContainerHigh
+                            else MaterialTheme.colorScheme.background,
+                        shape =
+                            RoundedCornerShape(
+                                topStart = 16.dp,
+                                topEnd = 16.dp,
+                                bottomStart = 16.dp,
+                                bottomEnd = 4.dp,
+                            ),
+                        modifier = if (user) Modifier else Modifier.fillMaxWidth(),
+                    ) {
+                        Column(
+                            Modifier.padding(
+                                horizontal = if (user) 16.dp else 0.dp,
+                                vertical = if (user) 12.dp else 8.dp,
+                            ),
+                            verticalArrangement = Arrangement.spacedBy(6.dp),
+                        ) {
+                            if (!user)
+                                Row(
+                                    Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                ) {
+                                    Text(
+                                        agent,
+                                        Modifier.weight(1f),
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    )
+                                    Text(
+                                        time,
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    )
+                                }
+                            if (user)
+                                androidx.compose.foundation.text.selection.SelectionContainer {
+                                    Text(
+                                        highlightSkills(
+                                            content,
+                                            LocalSkillNames.current,
+                                            skillMentionStyle(),
+                                        ),
+                                        style = MaterialTheme.typography.bodyLarge,
+                                    )
+                                }
+                            else Markdown(content)
+                            if (user)
+                                Text(
+                                    time,
+                                    Modifier.align(Alignment.End),
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                        }
+                    }
+                else
+                    Text(
+                        time,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
             }
         }
     } else ActivityCard(event)

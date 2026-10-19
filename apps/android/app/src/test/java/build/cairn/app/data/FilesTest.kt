@@ -15,6 +15,35 @@ import org.robolectric.annotation.Config
 @Config(sdk = [36])
 class FilesTest {
     @Test
+    fun `reusing attachments keeps the message within count and byte limits`() {
+        val full =
+            (1..4).map {
+                DraftAttachment(
+                    ChatAttachment("file-$it", "chat", "file-$it.zip", MAX_ATTACHMENT_BYTES)
+                )
+            }
+        assertSame(full, reuseAttachment(full, full.first().attachment))
+        val extra = ChatAttachment("extra", "chat", "extra.zip", 1)
+        val sizeFailure =
+            assertThrows(IllegalArgumentException::class.java) {
+                reuseAttachment(full, extra)
+            }
+        assertTrue(sizeFailure.message!!.contains("40 Mo"))
+        val partial = full.dropLast(1)
+        val reused = reuseAttachment(partial, full.last().attachment)
+        assertEquals(full, reused)
+        assertNull(reused.last().localPath)
+        val many = (1..8).map { DraftAttachment(extra.copy(id = "small-$it")) }
+        assertTrue(
+            assertThrows(IllegalArgumentException::class.java) {
+                    reuseAttachment(many, extra)
+                }
+                .message!!
+                .contains("8 fichiers")
+        )
+    }
+
+    @Test
     fun `identical artifact paths remain isolated across installations and account sessions`() =
         runTest {
             MockWebServer().use { server ->

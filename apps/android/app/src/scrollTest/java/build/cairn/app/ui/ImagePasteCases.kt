@@ -123,9 +123,10 @@ abstract class ImagePasteCases {
                     .setPrimaryClip(ClipData.newUri(app.contentResolver, "Capture", uri))
             }
             field.performSemanticsAction(SemanticsActions.PasteText)
+            // The image shows as a thumbnail in the composer tray, labelled with its name.
             compose.waitUntil(15000) {
                 compose
-                    .onAllNodes(hasText("capture.png", substring = true))
+                    .onAllNodesWithContentDescription("capture.png")
                     .fetchSemanticsNodes()
                     .isNotEmpty()
             }

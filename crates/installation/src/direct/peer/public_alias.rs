@@ -183,14 +183,14 @@ impl PublicAliases {
 /// without replacing ICE or changing the socket's bind, packet or destination.
 #[derive(Debug)]
 pub(super) struct AliasRuntime {
-    inner: TokioRuntime,
+    inner: Arc<dyn Runtime>,
     aliases: Arc<PublicAliases>,
 }
 
 impl AliasRuntime {
-    pub(super) fn new(aliases: Arc<PublicAliases>) -> Self {
+    pub(super) fn new(aliases: Arc<PublicAliases>, runtime: Option<Arc<dyn Runtime>>) -> Self {
         Self {
-            inner: TokioRuntime,
+            inner: runtime.unwrap_or_else(|| Arc::new(TokioRuntime)),
             aliases,
         }
     }

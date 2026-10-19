@@ -16,8 +16,6 @@ pub use view::{validate_action_result, validate_view};
 
 /// Worker protocol and manifest version. Manifests must declare exactly this one.
 pub const API_VERSION: u32 = 2;
-/// Prefix of a host error carrying a package's `cairn.fail` message.
-pub const REJECTED: &str = "rejected: ";
 pub const MAX_FRAME_BYTES: usize = 1_048_576;
 
 /// Host capabilities a package may request, with the sentence the owner approves.
@@ -60,7 +58,7 @@ pub fn capability(method: &str) -> Option<&'static str> {
         "conversations.check" | "conversations.answer" | "conversations.cancel" => {
             "conversations.control"
         }
-        "exec.run" => "exec",
+        "exec.run" | "download" | "archive.executable" => "exec",
         "socket.connect" | "socket.send" | "socket.close" | "socket.timer" => "socket",
         "inbound.accept" => "inbound",
         _ => return None,
@@ -88,7 +86,11 @@ pub struct Credential {
 pub struct Program {
     pub name: String,
     /// Absolute path, approved by the owner with the package.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub path: String,
+    /// Package-relative Luau module exporting `resolve` and `install` handlers.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub installer: String,
     #[serde(default)]
     pub description: String,
 }
@@ -283,6 +285,20 @@ fn tool_name(value: &str, plugin: &str) -> bool {
 }
 
 impl Manifest {
+    /// Both source formats produce the same validated contract and approval digest.
+    pub fn parse(format: &str, source: &str) -> Result<Self, &'static str> {
+        if source.len() > 65_536 {
+            return Err("Plugin manifest is too large.");
+        }
+        let manifest: Self = match format {
+            "json" => serde_json::from_str(source).map_err(|_| "Invalid JSON plugin manifest."),
+            "toml" => toml::from_str(source).map_err(|_| "Invalid TOML plugin manifest."),
+            _ => Err("Plugin manifests must be JSON or TOML."),
+        }?;
+        manifest.validate()?;
+        Ok(manifest)
+    }
+
     pub fn validate(&self) -> Result<(), &'static str> {
         if self.api_version != API_VERSION {
             return Err("Plugin API version is incompatible.");
@@ -369,9 +385,15 @@ impl Manifest {
         }
         let mut names = Vec::new();
         for program in &self.programs {
+            let valid_source = match (program.path.is_empty(), program.installer.is_empty()) {
+                (false, true) => program_path(&program.path),
+                (true, false) => module_path(&program.installer) && self.permits_capability("http"),
+                _ => false,
+            };
+
             if !slug(&program.name, 40)
                 || names.contains(&program.name.as_str())
-                || !program_path(&program.path)
+                || !valid_source
                 || !short(&program.description, 200)
             {
                 return Err("Plugin manifest has an invalid program.");
@@ -537,6 +559,57 @@ mod tests {
         serde_json::from_value::<Manifest>(value)
             .map_err(|_| "parse")?
             .validate()
+    }
+
+    #[test]
+    fn json_and_toml_manifests_have_the_same_validated_contract() {
+        let json = r#"{"id":"probe","name":"Probe","version":"1.0.0","apiVersion":2,"capabilities":["exec"],"programs":[{"name":"probe","path":"/usr/bin/probe"}]}"#;
+        let toml = r#"
+id = "probe"
+name = "Probe"
+version = "1.0.0"
+apiVersion = 2
+capabilities = ["exec"]
+[[programs]]
+name = "probe"
+path = "/usr/bin/probe"
+"#;
+        let expected = Manifest::parse("json", json).unwrap();
+        let actual = Manifest::parse("toml", toml).unwrap();
+        assert_eq!(
+            serde_json::to_value(&actual).unwrap(),
+            serde_json::to_value(&expected).unwrap()
+        );
+        assert!(
+            !serde_json::to_string(&actual)
+                .unwrap()
+                .contains("installer")
+        );
+        assert!(Manifest::parse("toml", &format!("{toml}\nunknown = true")).is_err());
+        assert!(Manifest::parse("yaml", json).is_err());
+        assert!(Manifest::parse("toml", "id = [").is_err());
+    }
+
+    #[test]
+    fn programs_declare_exactly_one_path_or_installer() {
+        let mut value = json!({
+            "id": "probe", "name": "Probe", "version": "1", "apiVersion": 2,
+            "capabilities": ["http", "exec"], "hosts": ["downloads.example.com"],
+            "programs": [{ "name": "probe", "installer": "programs/probe.luau" }],
+        });
+        assert!(manifest(value.clone()).is_ok());
+        for invalid in [
+            "/tmp/install.luau",
+            "../install.luau",
+            "main.luau",
+            "install.sh",
+        ] {
+            value["programs"][0]["installer"] = json!(invalid);
+            assert!(manifest(value.clone()).is_err());
+        }
+        value["programs"][0]["installer"] = json!("programs/probe.luau");
+        value["programs"][0]["path"] = json!("/usr/bin/probe");
+        assert!(manifest(value).is_err());
     }
 
     #[test]

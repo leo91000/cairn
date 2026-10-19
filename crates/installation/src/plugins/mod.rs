@@ -7,7 +7,9 @@ pub mod cli;
 pub mod connections;
 pub mod forms;
 pub mod legacy;
+pub mod operations;
 pub mod panels;
+pub mod program_installation;
 pub mod programs;
 pub mod registry;
 pub mod runtime;
@@ -44,6 +46,9 @@ pub struct Plugins {
     socket_origin: Mutex<Option<String>>,
     worker: Mutex<Option<std::path::PathBuf>>,
     programs: Mutex<HashMap<(String, String), PathBuf>>,
+    pub(crate) program_installation: tokio::sync::Mutex<()>,
+    pub(crate) installer_host: Host,
+    pub operations: operations::Operations,
     /// When each paced key (e.g. a bot token's Identify budget) may send next.
     paces: socket::pacing::Paces,
 }
@@ -61,6 +66,9 @@ impl Default for Plugins {
             socket_origin: Mutex::new(None),
             worker: Mutex::new(None),
             programs: Mutex::new(HashMap::new()),
+            program_installation: tokio::sync::Mutex::new(()),
+            installer_host: Host::with_limits(4, std::time::Duration::from_secs(120)),
+            operations: operations::Operations::default(),
             paces: socket::pacing::Paces::default(),
         }
     }
@@ -110,13 +118,12 @@ impl Plugins {
             .insert((plugin.to_owned(), program.to_owned()), path);
     }
 
-    pub(crate) fn program_path(&self, plugin: &str, program: &Program) -> PathBuf {
+    pub(crate) fn program_override(&self, plugin: &str, program: &Program) -> Option<PathBuf> {
         self.programs
             .lock()
             .unwrap()
             .get(&(plugin.to_owned(), program.name.clone()))
             .cloned()
-            .unwrap_or_else(|| PathBuf::from(&program.path))
     }
 
     /// Run-scoped CLI commands declared by any package the run's agent is granted.
@@ -165,6 +172,55 @@ pub async fn routes(s: &Arc<Service>, input: &Input) -> Result<Value> {
         .collect::<Vec<_>>();
     let body = &input.body;
     let version = || crate::validation::text(body, "version").to_owned();
+    // Cold owner handlers may prepare programs. Keep that work outside the relay's
+    // short request lifetime, including views/forms that call exec lazily.
+    let cold_handler = match (input.method.as_str(), parts.as_slice()) {
+        ("POST", ["plugins", id, "form"]) => Some((*id, "", "form")),
+        ("GET", ["plugins", id, "connections", instance, "view"]) => Some((*id, *instance, "view")),
+        ("POST", ["plugins", id, "connections", instance, "test"]) => {
+            Some((*id, *instance, "test"))
+        }
+        ("POST", ["plugins", id, "connections", instance, "actions"]) => {
+            Some((*id, *instance, "action"))
+        }
+        ("POST", ["plugins", id, "connections"]) => Some((*id, "", "save")),
+        ("PUT", ["plugins", id, "connections", instance]) => Some((*id, *instance, "save")),
+        _ => None,
+    };
+    if let Some((id, instance, handler)) = cold_handler {
+        let package = registry::active(s, id).await?;
+        let invokes_handler = match handler {
+            "form" | "save" => package.manifest.instance_form,
+            "view" | "action" => package.manifest.instance_view,
+            "test" => package.manifest.instance_test,
+            _ => false,
+        };
+        if invokes_handler && program_installation::needs_preparation(s, &package) {
+            let (service, id, instance, body) =
+                (s.clone(), id.to_owned(), instance.to_owned(), body.clone());
+            return s.plugins.operations.start(s.clone(), async move {
+                match handler {
+                    "form" => forms::form(&service, &id, &body).await,
+                    "view" => panels::view(&service, &id, &instance).await,
+                    "test" => panels::test(&service, &id, &instance).await,
+                    "action" => panels::action(&service, &id, &instance, &body).await,
+                    "save" => {
+                        if !instance.is_empty() {
+                            connections::get(&service, &id, &instance).await?;
+                        }
+                        connections::save(
+                            &service,
+                            &id,
+                            &body,
+                            (!instance.is_empty()).then_some(instance.as_str()),
+                        )
+                        .await
+                    }
+                    _ => unreachable!("classified owner handler"),
+                }
+            });
+        }
+    }
     match (input.method.as_str(), parts.as_slice()) {
         ("GET", ["plugins"]) => {
             let mut catalog = registry::catalog(s).await?;
@@ -191,14 +247,34 @@ pub async fn routes(s: &Arc<Service>, input: &Input) -> Result<Value> {
             Ok(catalog)
         }
         ("POST", ["plugins", "packages"]) => registry::install(s, body).await,
+        ("GET", ["plugins", "packages", "operations", id]) => s.plugins.operations.get(id),
         ("POST", ["plugins", "packages", id, "approve"]) => {
-            registry::approve(s, id, &version(), crate::validation::text(body, "digest")).await
+            registry::activate_request(
+                s,
+                id,
+                &version(),
+                Some(crate::validation::text(body, "digest")),
+            )
+            .await
         }
         ("POST", ["plugins", "packages", id, "activate"]) => {
-            registry::activate(s, id, &version()).await
+            registry::activate_request(s, id, &version(), None).await
         }
         ("DELETE", ["plugins", "packages", id]) => registry::uninstall(s, id).await,
         ("POST", ["plugins", id, "form"]) => forms::form(s, id, body).await,
+        ("GET", ["plugins", id, "programs"]) => program_installation::list(s, id).await,
+        ("POST", ["plugins", id, "programs", name, action]) => {
+            let (service, id, name, action, body) = (
+                s.clone(),
+                id.to_string(),
+                name.to_string(),
+                action.to_string(),
+                body.clone(),
+            );
+            s.plugins.operations.start(s.clone(), async move {
+                program_installation::action(&service, &id, &name, &action, &body).await
+            })
+        }
         ("POST", ["plugins", id, "connections"]) => connections::save(s, id, body, None).await,
         ("PUT", ["plugins", id, "connections", connection]) => {
             connections::get(s, id, connection).await?;

@@ -4,7 +4,7 @@ use tokio::process::Command;
 
 pub(crate) static JOBS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(1);
 
-fn command(program: &str) -> Command {
+pub(crate) fn command(program: &str) -> Command {
     let mut cmd = Command::new(program);
     cmd.stdin(Stdio::null())
         .stderr(Stdio::null())
@@ -64,7 +64,7 @@ async fn probe(path: &Path, artifact: &mut Value) -> Result<()> {
 }
 
 /// Renders a 960px JPEG of the first PDF page or video frame.
-async fn thumbnail(pdf: bool, path: &Path, target: &Path) -> Result<bool> {
+pub(crate) async fn thumbnail(pdf: bool, path: &Path, target: &Path) -> Result<bool> {
     let status = if pdf {
         command("pdftoppm")
             .args(["-f", "1", "-singlefile", "-scale-to", "960", "-jpeg"])
@@ -101,6 +101,53 @@ async fn thumbnail(pdf: bool, path: &Path, target: &Path) -> Result<bool> {
             .await?
     };
     Ok(status.success() && target.is_file())
+}
+
+/// Renders a JPEG of at most 960px of a raster image, flattening transparency onto white
+/// and never enlarging small images.
+pub(crate) async fn image_thumbnail(path: &Path, target: &Path) -> Result<bool> {
+    let status = command("ffmpeg")
+        .args([
+            "-v",
+            "error",
+            "-nostdin",
+            "-y",
+            "-protocol_whitelist",
+            "file,pipe",
+            "-threads",
+            "1",
+            "-i",
+        ])
+        .arg(path)
+        .args([
+            "-filter_complex",
+            "[0:v]scale='min(960,iw)':'min(960,ih)':force_original_aspect_ratio=decrease,\
+             split[background][image];[background]drawbox=c=white:t=fill[white];\
+             [white][image]overlay=format=auto",
+            "-frames:v",
+            "1",
+            "-threads",
+            "1",
+            "-f",
+            "image2",
+        ])
+        .arg(target)
+        .status()
+        .await?;
+    Ok(status.success() && target.is_file())
+}
+
+/// Reads the page count of a PDF.
+pub(crate) async fn pdf_pages(path: &Path) -> Result<Option<u64>> {
+    let output = command("pdfinfo").arg(path).output().await?;
+    if !output.status.success() || output.stdout.len() >= 65536 {
+        return Ok(None);
+    }
+    let pages = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .find_map(|line| line.strip_prefix("Pages:"))
+        .and_then(|count| count.trim().parse().ok());
+    Ok(pages)
 }
 
 /// Copies the preview fields onto the stored record, if it still exists.

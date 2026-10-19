@@ -25,6 +25,7 @@ import PersonAvatar from '../components/PersonAvatar.vue'
 import PluginFields from '../components/PluginFields.vue'
 import PluginInstancePanel from '../components/PluginInstancePanel.vue'
 import PluginMark from '../components/PluginMark.vue'
+import PluginPrograms from '../components/PluginPrograms.vue'
 import PluginReview from '../components/PluginReview.vue'
 import PluginView from '../components/PluginView.vue'
 import UiAlert from '../components/UiAlert.vue'
@@ -42,6 +43,14 @@ import {
   X,
   Zap,
 } from '../icons'
+import {
+  pluginFormSecrets,
+  pluginFormValue,
+  pluginFormValues,
+  pluginSecrets,
+  pluginSettings,
+} from '../plugin-form-values'
+import { pluginOperation } from '../plugin-operations'
 import {
   capabilityLabels,
   commandUsage,
@@ -65,7 +74,7 @@ const editing = ref<PluginConnection | null>()
 const removing = ref<PluginConnection>()
 const form = ref<Record<string, any>>({})
 const values = ref<Record<string, any>>({})
-const secrets = ref<Record<string, string>>({})
+const secrets = ref<Record<string, string>>(pluginFormSecrets())
 const people = ref<{ id: string, name: string }[]>([])
 const person = ref('')
 const completion = ref<FormResult | null>(null)
@@ -142,11 +151,8 @@ function agentNames(connection: PluginConnection) {
 function edit(connection: PluginConnection | null) {
   error.value = ''
   editing.value = connection
-  values.value = Object.fromEntries(storedFields.value.map(field => [
-    field.key,
-    connection?.settings[field.key] ?? field.default ?? (field.type === 'boolean' ? false : field.type === 'multiselect' ? [] : ''),
-  ]))
-  secrets.value = {}
+  values.value = pluginFormValues(storedFields.value, connection?.settings)
+  secrets.value = pluginFormSecrets()
   people.value = (connection?.userIds ?? []).map(user => ({ id: user, name: connection?.people.find(item => item.id === user)?.name ?? '' }))
   person.value = ''
   completion.value = null
@@ -163,12 +169,6 @@ function edit(connection: PluginConnection | null) {
   void complete()
 }
 
-function settings() {
-  return Object.fromEntries(Object.entries(values.value)
-    .filter(([, value]) => value !== '' && value !== undefined && value !== null)
-    .map(([key, value]) => [key, storedFields.value.find(field => field.key === key)?.type === 'number' ? Number(value) : value]))
-}
-
 /**
  * Asks the package's form handler for choices, derived values, errors and guidance.
  * Only the latest answer counts.
@@ -179,20 +179,20 @@ async function complete(changed?: string) {
   const ask = ++asked
   completing.value = true
   try {
-    const result = await api<FormResult>(`/plugins/${id.value}/form`, {
-      method: 'POST',
-      body: JSON.stringify({
-        instance: editing.value?.id,
-        settings: settings(),
-        secrets: Object.fromEntries(Object.entries(secrets.value).filter(([, value]) => value.trim())),
-        ...(form.value.token ? { token: form.value.token } : {}),
-        ...(changed ? { changed } : {}),
-      }),
+    const result = await pluginOperation<FormResult>(`/plugins/${id.value}/form`, {
+      instance: editing.value?.id,
+      settings: pluginSettings(storedFields.value, values.value),
+      secrets: pluginSecrets(secrets.value),
+      ...(form.value.token ? { token: form.value.token } : {}),
+      ...(changed ? { changed } : {}),
     })
     if (ask !== asked)
       return
-    for (const [key, value] of Object.entries(result.values))
-      values.value[key] = value ?? ''
+    for (const field of storedFields.value) {
+      if (Object.hasOwn(result.values, field.key))
+        values.value[field.key] = pluginFormValue(field, result.values[field.key])
+    }
+
     completion.value = result
   }
   catch (e) {
@@ -235,9 +235,9 @@ async function save() {
     const body = {
       name: form.value.name,
       ...(form.value.token ? { token: form.value.token } : {}),
-      settings: settings(),
+      settings: pluginSettings(storedFields.value, values.value),
       // Blank secret fields keep what is saved.
-      secrets: Object.fromEntries(Object.entries(secrets.value).filter(([, value]) => value.trim())),
+      secrets: pluginSecrets(secrets.value),
       ...(manifest.value?.agentAccess && { agentIds: form.value.agentIds }),
       ...(delegates.value && {
         agentId: form.value.agentId,
@@ -251,9 +251,9 @@ async function save() {
       enabled: form.value.enabled,
     }
     const path = `/plugins/${id.value}/connections${editing.value ? `/${editing.value.id}` : ''}`
-    await api(path, { method: editing.value ? 'PUT' : 'POST', body: JSON.stringify(body) })
+    await pluginOperation(path, body, editing.value ? 'PUT' : 'POST')
     form.value.token = ''
-    secrets.value = {}
+    secrets.value = pluginFormSecrets()
     editing.value = undefined
     await load()
     notify(`${singular.value} saved`)
@@ -269,7 +269,7 @@ async function post(connection: PluginConnection, path: string, body?: unknown) 
 
 async function test(connection: PluginConnection) {
   await action(async () => {
-    const result = await api<{ message?: string }>(`/plugins/${id.value}/connections/${connection.id}/test`, { method: 'POST' })
+    const result = await pluginOperation<{ message?: string }>(`/plugins/${id.value}/connections/${connection.id}/test`)
     notify(`${connection.name}: ${result.message || 'it works'}`)
   })
 }
@@ -285,7 +285,7 @@ async function remove() {
 function closeEditor() {
   clearTimeout(typing)
   asked++
-  secrets.value = {}
+  secrets.value = pluginFormSecrets()
   form.value.token = ''
   completion.value = null
   editing.value = undefined
@@ -302,7 +302,7 @@ onBeforeUnmount(() => {
   clearInterval(timer)
   clearTimeout(typing)
   form.value.token = ''
-  secrets.value = {}
+  secrets.value = pluginFormSecrets()
 })
 </script>
 
@@ -322,6 +322,13 @@ onBeforeUnmount(() => {
     <p v-if="loaded && !entry" class="mt-6 text-sm text-muted">
       This plugin isn’t installed.
     </p>
+    <div v-else-if="entry && !manifest" class="mt-6 flex items-center gap-3 rounded-2xl bg-danger-surface px-4 py-3 text-xs text-danger" role="status">
+      <Icon :name="TriangleAlert" :size="17" />
+      <span class="min-w-0 flex-1">No version of this plugin can be used. Review it to see why.</span>
+      <UiButton size="small" class="bg-surface" @click="reviewing = true">
+        Review
+      </UiButton>
+    </div>
     <template v-if="entry && manifest">
       <div class="mt-4.5 flex items-center justify-between gap-4 phone:flex-wrap">
         <div class="flex items-center gap-4">
@@ -573,7 +580,7 @@ onBeforeUnmount(() => {
               Programs
             </h3>
             <p v-for="program in manifest.programs" :key="program.name" class="text-2xs text-muted">
-              <b class="font-mono text-ink">{{ program.path }}</b><template v-if="program.description">
+              <b class="font-mono text-ink">{{ program.path || program.name }}</b><template v-if="program.description">
                 · {{ program.description }}
               </template>
             </p>
@@ -581,6 +588,13 @@ onBeforeUnmount(() => {
         </aside>
       </div>
     </template>
+
+    <PluginPrograms
+      v-if="entry?.active && manifest?.programs?.some(program => program.installer)"
+      :key="`${id}:${entry.active}`"
+      :plugin="id"
+      class="mt-5"
+    />
 
     <PluginReview
       v-if="reviewing && entry"

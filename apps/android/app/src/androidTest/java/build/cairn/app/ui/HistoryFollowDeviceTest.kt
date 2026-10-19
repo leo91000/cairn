@@ -44,6 +44,11 @@ class HistoryFollowDeviceTest : HistoryFollowCases() {
         object : HistoryPagingCases(compose) {}.pageArrivingAtTheVeryStartKeepsTheFirstParagraph()
     }
 
+    @Test
+    fun olderPageErrorFitsANarrowScreenWithLargeText() {
+        object : HistoryPagingCases(compose) {}.pagingErrorFitsANarrowScreenWithLargeText()
+    }
+
     // The existing CI device entry point also exercises the complete native app.
     @Test
     fun compactConversationAndKeyboard() =

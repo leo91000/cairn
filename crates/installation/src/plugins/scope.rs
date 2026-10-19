@@ -10,7 +10,7 @@ use crate::{
     error::{Error, Result},
     service::Service,
 };
-use cairn_plugin_host::Denied;
+use cairn_plugin_host::{Denied, InvocationError};
 use serde_json::{Value, json};
 use std::sync::{Arc, Mutex};
 
@@ -147,9 +147,13 @@ pub async fn invoke(
 ) -> Result<Value> {
     let refused = Mutex::new(None::<Error>);
     let refused_ref = &refused;
-    let result = s
-        .plugins
-        .host
+    let preparing = super::program_installation::needs_preparation(s, package).then(|| {
+        s.plugins
+            .host
+            .with_deadline(std::time::Duration::from_secs(180))
+    });
+    let host = preparing.as_ref().unwrap_or(&s.plugins.host);
+    let result = host
         .invoke(
             &s.plugins.executable()?,
             &package.manifest,
@@ -169,13 +173,7 @@ pub async fn invoke(
         .await;
     match (result, refused.into_inner().unwrap()) {
         (Ok(value), _) => Ok(value),
-        (Err(error), _) if error.starts_with(cairn_plugin_api::REJECTED) => {
-            Err(Error::bad_gateway(
-                error
-                    .trim_start_matches(cairn_plugin_api::REJECTED)
-                    .to_owned(),
-            ))
-        }
+        (Err(InvocationError::Rejected(message)), _) => Err(Error::bad_gateway(message)),
         (Err(_), Some(error)) => Err(error),
         (Err(_), None) => Err(Error::bad_gateway(format!(
             "The {} plugin failed while handling {event}.",

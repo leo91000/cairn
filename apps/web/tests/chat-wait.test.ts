@@ -1,6 +1,7 @@
 import type { ChatView, ChatWakeup } from '../../../packages/contracts/chats'
 import type { RunEvent } from '../../../packages/contracts/contracts'
 import { describe, expect, it } from 'vitest'
+import sample from '../../../tests/fixtures/activity-events.json'
 import { activityEntries } from '../src/activity'
 import {
   liveWakeup,
@@ -185,6 +186,24 @@ describe('scheduled waits', () => {
     ], true)
     expect(shape(replaced)).toEqual(['Actually, a timer is enough.', 'wait', 'Sleeping.', 'wait'])
     expect(replaced[1]).toMatchObject({ wait: { ended: 'replaced' } })
+    // A result that was already available stays at its call, whatever its wording, and the wait
+    // it replaced is placed before it.
+    const ready = {
+      state: 'completed',
+      type: 'run_finished',
+      status: 'succeeded',
+      immediate: true,
+    }
+    const immediate = activityEntries([
+      event('turn.started', {}),
+      event('chat.wait', scheduled as unknown as Record<string, unknown>),
+      message('The run may already be done.'),
+      event('chat.wait_ready', ready, 'Result ready'),
+      message('It finished; merging now.'),
+    ], true)
+    expect(shape(immediate)).toEqual(['The run may already be done.', 'wait', 'wait', 'It finished; merging now.'])
+    expect(immediate[1]).toMatchObject({ wait: { wakeup: scheduled, ended: 'replaced' } })
+    expect(immediate[2]).toMatchObject({ wait: { wakeup: null, observation: ready } })
   })
 
   it('folds paginated ready and resumption events into the same card', () => {
@@ -422,4 +441,37 @@ describe('scheduled waits', () => {
     expect(fil.live).toEqual([])
     expect(fil.forYou).toEqual([])
   })
+})
+
+describe('shared wait_ready corpus', () => {
+  const immediate = [true, true, false, false, true, false]
+  for (const [index, raw] of sample.slice(15).entries()) {
+    it(`normalizes case ${index + 1} and preserves the pending wait`, () => {
+      const ready: RunEvent = {
+        id: 2,
+        runId: 'chat',
+        createdAt: 2,
+        type: raw.type,
+        text: 'text' in raw ? raw.text! : '',
+        payload: 'payload' in raw ? raw.payload : undefined,
+      }
+      const pending = wakeup({ condition: checks })
+      const scheduled: RunEvent = {
+        id: 1,
+        runId: 'chat',
+        createdAt: 1,
+        type: 'chat.wait',
+        text: '',
+        payload: { ...pending },
+      }
+      const waits = activityEntries([scheduled, ready], true).filter(entry => entry.kind === 'wait')
+      expect(waits).toHaveLength(immediate[index] ? 2 : 1)
+      expect(waits[0]!.wait.ended).toBe(immediate[index] ? 'replaced' : undefined)
+      const result = waits.at(-1)!.wait
+      expect(result.wakeup?.id ?? null).toBe(immediate[index] ? null : pending.id)
+      expect(result.observation).toMatchObject({ state: 'completed', type: 'run_finished', status: 'succeeded' })
+      if (immediate[index])
+        expect(result.reason).toBe('Review finished')
+    })
+  }
 })

@@ -8,6 +8,7 @@ use crate::{
     store::Db,
     validation::{string_enum, text},
 };
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 pub type StorageLock = crate::file_lock::Guard;
@@ -21,6 +22,41 @@ pub fn storage_lock(directory: &std::path::Path) -> Result<StorageLock> {
 
 pub const DAY: i64 = 86_400_000;
 const PURGE_RETRY_MS: i64 = 60_000;
+const RETENTION_KEY: &str = "conversation-expiration";
+
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct Retention {
+    inactivity_days: u32,
+}
+
+impl Default for Retention {
+    fn default() -> Self {
+        Self { inactivity_days: 7 }
+    }
+}
+
+impl Retention {
+    fn load(db: &Db<'_>) -> Result<Self> {
+        Ok(db.kv_as(RETENTION_KEY)?.unwrap_or_default())
+    }
+
+    fn cutoff(&self) -> Option<i64> {
+        (self.inactivity_days > 0).then(|| now() - i64::from(self.inactivity_days) * DAY)
+    }
+}
+
+/// Legacy chats fall back to their last update or creation time. Reads do not count.
+fn inactive_due(chat: &Value, cutoff: Option<i64>) -> bool {
+    let activity = chat["lastActivityAt"]
+        .as_i64()
+        .or_else(|| chat["updatedAt"].as_i64())
+        .or_else(|| chat["createdAt"].as_i64());
+    is_active(chat)
+        && cutoff
+            .zip(activity)
+            .is_some_and(|(cutoff, activity)| activity <= cutoff)
+}
 
 string_enum! {
     /// Persisted in a chat's `lifecycle` field; a missing field means active.
@@ -206,6 +242,31 @@ fn restore(db: &Db<'_>, id: &str) -> Result<Value> {
 }
 
 impl Service {
+    pub async fn conversation_retention(&self) -> Result<Value> {
+        self.store
+            .read(|db| Ok(serde_json::to_value(Retention::load(db)?)?))
+            .await
+    }
+
+    pub async fn save_conversation_retention(&self, input: Value) -> Result<Value> {
+        let policy: Retention = serde_json::from_value(input)
+            .map_err(|_| Error::bad("Choose a whole number of days from 0 to 36500."))?;
+        if policy.inactivity_days > 36500 {
+            return Err(Error::bad("Choose a whole number of days from 0 to 36500."));
+        }
+        let result = self
+            .store
+            .transaction(move |db| {
+                let value = serde_json::to_value(policy)?;
+                db.set(RETENTION_KEY, &value, None)?;
+                db.audit("conversation.retention.updated", &value)?;
+                Ok(value)
+            })
+            .await?;
+        self.worker.notify_conversation_cleanup();
+        Ok(result)
+    }
+
     /// Conversations in `view`, with those `account` has not read since their agent finished.
     pub async fn chat_list_view(&self, view: &str, account: &str) -> Result<Vec<Value>> {
         if View::parse(view).is_none() {
@@ -226,11 +287,26 @@ impl Service {
     }
 
     pub async fn chat_trash(&self, id: &str, confirmed: bool) -> Result<Value> {
+        self.chat_trash_authorized(id, confirmed, |_| Ok(())).await
+    }
+
+    pub(crate) async fn chat_trash_authorized<F>(
+        &self,
+        id: &str,
+        confirmed: bool,
+        authorize: F,
+    ) -> Result<Value>
+    where
+        F: FnOnce(&Db<'_>) -> Result<()> + Send + 'static,
+    {
         crate::validation::uuid(id)?;
         let id = id.to_owned();
         let result = self
             .store
-            .transaction(move |db| trash(db, &id, confirmed))
+            .transaction(move |db| {
+                authorize(db)?;
+                trash(db, &id, confirmed)
+            })
             .await?;
         if let Some(run) = result["runId"].as_str() {
             match self.worker.cancel(self, run).await {
@@ -244,6 +320,13 @@ impl Service {
     }
 
     pub async fn chat_restore(&self, id: &str) -> Result<Value> {
+        self.chat_restore_authorized(id, |_| Ok(())).await
+    }
+
+    pub(crate) async fn chat_restore_authorized<F>(&self, id: &str, authorize: F) -> Result<Value>
+    where
+        F: FnOnce(&Db<'_>) -> Result<()> + Send + 'static,
+    {
         let _process_lock = storage_lock(&self.config.data_dir)?;
         crate::validation::uuid(id)?;
         let _guard = self
@@ -251,7 +334,12 @@ impl Service {
             .try_lock()
             .map_err(|_| Error::conflict("A storage operation is in progress. Retry shortly."))?;
         let id = id.to_owned();
-        self.store.transaction(move |db| restore(db, &id)).await
+        self.store
+            .transaction(move |db| {
+                authorize(db)?;
+                restore(db, &id)
+            })
+            .await
     }
 }
 
@@ -261,10 +349,34 @@ fn purge_due(chat: &Value) -> bool {
         && chat["purgeAt"].as_i64().unwrap_or(i64::MAX) <= now()
 }
 
-/// Claims a trashed conversation for purging unless its agent is still stopping.
+/// Expires an idle conversation or claims due trash, after checking pending work.
 fn mark_purging(db: &Db<'_>, id: &str) -> Result<Option<Value>> {
-    let mut current = required(db.get("chats", id)?, "Chat not found")?;
-    if !in_trash(&current) || run_is_active(db.run(text(&current, "runId"))?.as_ref()) {
+    let Some(mut current) = db.get("chats", id)? else {
+        return Ok(None);
+    };
+    let run = db.run(text(&current, "runId"))?;
+    if run_is_active(run.as_ref()) {
+        return Ok(None);
+    }
+    if is_active(&current) {
+        // Recheck policy, activity and pending work in the same transaction as deletion.
+        let cutoff = Retention::load(db)?.cutoff();
+        let recently_finished = run
+            .as_ref()
+            .and_then(|run| run["finishedAt"].as_i64())
+            .zip(cutoff)
+            .is_some_and(|(finished, cutoff)| finished > cutoff);
+        if !inactive_due(&current, cutoff) || recently_finished {
+            return Ok(None);
+        }
+        match trash(db, id, false) {
+            Ok(chat) => current = chat,
+            Err(error) if error.is_conflict() => return Ok(None),
+            Err(error) => return Err(error),
+        }
+        db.audit("chat.expired", &json!({ "id": id }))?;
+    }
+    if !purge_due(&current) {
         return Ok(None);
     }
     current["lifecycle"] = Lifecycle::Purging.into();
@@ -282,9 +394,15 @@ impl Service {
         let Ok(_guard) = self.conversation_storage_lock.try_lock() else {
             return Ok(());
         };
-        let mut chats = self.store.list("chats").await?;
+        let (mut chats, cutoff) = self
+            .store
+            .read(|db| Ok((db.list("chats")?, Retention::load(db)?.cutoff())))
+            .await?;
         chats.sort_by_key(|chat| chat["retryAfter"].as_i64().unwrap_or(0));
-        for chat in chats.iter().filter(|chat| purge_due(chat)) {
+        for chat in chats
+            .iter()
+            .filter(|chat| purge_due(chat) || inactive_due(chat, cutoff))
+        {
             // Preparation can create run files before execution is registered as active.
             let preparation = self.worker.run_preparation_lock(text(chat, "runId")).await;
             let Ok(_preparation) = preparation.try_lock_owned() else {
@@ -329,7 +447,7 @@ impl Service {
     }
 }
 
-fn request_new_session(db: &Db<'_>, id: &str) -> Result<Value> {
+pub(crate) fn request_new_session(db: &Db<'_>, id: &str) -> Result<Value> {
     let mut chat = required(db.get("chats", id)?, "Chat not found")?;
     require_active(&chat)?;
     let run = required(db.run(text(&chat, "runId"))?, "Run not found")?;
@@ -375,5 +493,24 @@ impl Service {
         self.store
             .transaction(move |db| request_new_session(db, &id))
             .await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn inactivity_boundary_is_inclusive_and_missing_timestamps_are_preserved() {
+        let chat = json!({ "lastActivityAt": 100, "updatedAt": 1 });
+        assert!(!inactive_due(&chat, Some(99)));
+        assert!(inactive_due(&chat, Some(100)));
+        assert!(!inactive_due(&chat, None));
+        assert!(!inactive_due(&json!({}), Some(100)));
+        assert!(!inactive_due(
+            &json!({ "lifecycle": "trash", "updatedAt": 1 }),
+            Some(100)
+        ));
+        assert!(inactive_due(&json!({ "createdAt": 1 }), Some(100)));
     }
 }

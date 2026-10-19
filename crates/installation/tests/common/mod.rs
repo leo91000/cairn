@@ -20,6 +20,20 @@ use std::{
 use tokio::{net::TcpListener, task::JoinHandle};
 use tower::ServiceExt;
 
+/// An operation travels through the compact MCP execute interface; native tools
+/// remain directly callable for discovery and code-composition tests.
+pub fn mcp_arguments(name: &str, args: &Value) -> Value {
+    if matches!(name, "search" | "execute") {
+        serde_json::json!({ "name": name, "arguments": args })
+    } else {
+        let operation = serde_json::to_string(name).unwrap();
+        serde_json::json!({
+            "name": "execute",
+            "arguments": { "code": format!("return await cairn.call({operation}, input);"), "input": args },
+        })
+    }
+}
+
 /// The host every in-process request is addressed to.
 pub const HOST: &str = "localhost:4310";
 /// Largest response body the helpers read.

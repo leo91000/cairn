@@ -224,7 +224,7 @@ internal fun waitStatus(wakeup: ChatWakeup, now: Long = System.currentTimeMillis
         else -> "Reprise dans ${timeLeft(wakeup.wakeAt - now)}"
     }
 
-/** The text Cairn gives `chat.wait_ready` when `wait_for` finds its condition already met. */
+/** Historical marker for events that predate the explicit immediate boolean. */
 internal const val IMMEDIATE_WAIT_RESULT = "Wait condition already completed"
 
 /** What Cairn observed when a wait ended; a plain timer observes nothing and reads as neutral. */

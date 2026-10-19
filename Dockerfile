@@ -167,10 +167,6 @@ RUN ln -s /usr/local/bin/node /pnpm/bin/node
 COPY deploy/toolkit/profile.sh /etc/profile.d/cairn-toolkit.sh
 ENV CAIRN_TOOLKIT_DIR=/opt/cairn-toolkit
 ENV PATH=/usr/local/bin:/home/node/.local/share/mise/shims:/usr/local/share/mise/shims:$PATH
-# Pin and verify the server-side 1Password CLI used by scoped workspace tools.
-RUN curl -fsSL https://cache.agilebits.com/dist/1P/op2/pkg/v2.39.0/op_linux_amd64_v2.39.0.zip -o /tmp/op.zip \
-    && echo '6fba7f376b6c6dec49f41b06408930a43ad064cce103c6a2ce5b3d0413a86434  /tmp/op.zip' | sha256sum -c - \
-    && unzip /tmp/op.zip op -d /usr/local/bin && chmod 755 /usr/local/bin/op && rm /tmp/op.zip
 COPY --from=backend /usr/local/bin/cairn /usr/local/bin/cairn
 COPY --from=build --chown=node:node /app/dist ./dist
 COPY --from=build --chown=node:node /app/package.json ./package.json

@@ -1,4 +1,4 @@
-import type { Page } from '@playwright/test'
+import type { Locator, Page } from '@playwright/test'
 import type { Service } from '../fixtures/legacy/server/service'
 import { execFileSync, spawn } from 'node:child_process'
 import { once } from 'node:events'
@@ -309,6 +309,14 @@ export const test = base.extend<object, { workspace: Workspace }>({
   baseURL: async ({ workspace }, use) => use(workspace.url),
 })
 export { expect } from '@playwright/test'
+
+// Visible in the viewport is not enough inside dialogs: sticky headers and footers can cover feedback.
+export async function expectUncovered(locator: Locator) {
+  await expect.poll(() => locator.evaluate((element) => {
+    const bounds = element.getBoundingClientRect()
+    return element.contains(document.elementFromPoint(bounds.x + bounds.width / 2, bounds.y + bounds.height / 2))
+  })).toBe(true)
+}
 
 export async function expectSingleScroll(page: Page) {
   const report = await page.evaluate(() => {

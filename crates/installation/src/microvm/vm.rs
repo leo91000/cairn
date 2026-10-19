@@ -386,6 +386,13 @@ fn auth_relay(
 }
 
 impl Vm {
+    pub(super) fn bind_stop(&self, stop: &crate::storage::runtime::AttemptStop) -> Result<()> {
+        if let Some(volume) = &self.volume {
+            stop.bind(volume)?;
+        }
+        Ok(())
+    }
+
     pub async fn boot(
         state: &Path,
         image: &Path,
@@ -1049,8 +1056,8 @@ impl Inbox {
         let Some(source) = &self.source else {
             return Ok(());
         };
-        let content = tokio::fs::read(source.join("messages.json"))
-            .await
+        let content = crate::chat_inbox::read(source, crate::chat_inbox::TRANSPORT_LIMIT)
+            .await?
             .unwrap_or_default();
         if content != self.last {
             import(socket, source, CHAT_INBOX).await?;
@@ -1065,6 +1072,34 @@ mod tests {
     use super::*;
     use crate::microvm::budget;
     use std::os::unix::process::CommandExt;
+
+    #[tokio::test]
+    async fn oversized_inbox_is_rejected_before_guest_import_and_can_be_retried() {
+        let root = tempfile::tempdir().unwrap();
+        let mut inbox = Inbox {
+            timer: tokio::time::interval(Duration::from_secs(1)),
+            source: Some(root.path().to_owned()),
+            last: b"[]".to_vec(),
+        };
+        let socket = root.path().join("no-guest.sock");
+        tokio::fs::write(root.path().join("messages.json"), vec![b' '; 16_000_001])
+            .await
+            .unwrap();
+        let error = inbox.forward(&socket).await.unwrap_err();
+        assert_eq!(error.status, 400);
+        assert_eq!(error.message, "Chat inbox is too large.");
+        assert_eq!(inbox.last, b"[]");
+
+        tokio::fs::write(root.path().join("messages.json"), b"[]")
+            .await
+            .unwrap();
+        inbox.forward(&socket).await.unwrap();
+        tokio::fs::remove_file(root.path().join("messages.json"))
+            .await
+            .unwrap();
+        inbox.last.clear();
+        inbox.forward(&socket).await.unwrap();
+    }
 
     #[test]
     fn control_disk_bootstrap_keeps_flat_and_paired_guest_device_names() {
