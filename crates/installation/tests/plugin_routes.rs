@@ -450,9 +450,16 @@ async fn disabled_ambiguous_and_revised_routes_cannot_fall_back_or_keep_queued_a
         text(&blocked, "id")
     );
     assert_eq!(
-        common::send(&app, owner_request("DELETE", &route_path, Value::Null))
-            .await
-            .status(),
+        common::send(
+            &app,
+            owner_request(
+                "DELETE",
+                &route_path,
+                json!({"revision": blocked["revision"]})
+            )
+        )
+        .await
+        .status(),
         StatusCode::OK
     );
     let channel = create_route(
@@ -557,6 +564,7 @@ async fn access_requests_and_approvals_are_isolated_to_the_selected_route() {
         .await
         .unwrap();
     let mut route_ids = Vec::new();
+    let mut route_revisions = Vec::new();
     for channel in ["C1", "C2"] {
         let route = create_route(
             &app,
@@ -573,6 +581,7 @@ async fn access_requests_and_approvals_are_isolated_to_the_selected_route() {
         )
         .await;
         route_ids.push(text(&route, "id").to_owned());
+        route_revisions.push(route["revision"].clone());
         assert_eq!(
             deliver(
                 &app,
@@ -613,7 +622,11 @@ async fn access_requests_and_approvals_are_isolated_to_the_selected_route() {
     );
     let approved = common::send(
         &app,
-        owner_request("POST", &path, json!({ "action": "approve" })),
+        owner_request(
+            "POST",
+            &path,
+            json!({ "action": "approve", "revision": route_revisions[0] }),
+        ),
     )
     .await;
     assert_eq!(approved.status(), StatusCode::OK);
@@ -2850,7 +2863,11 @@ async fn pending_new_turns_respect_owner_pause_revocation_and_workspace_settleme
             );
             let removed = common::send(
                 &app,
-                owner_request("POST", &path, json!({ "action": "remove" })),
+                owner_request(
+                    "POST",
+                    &path,
+                    json!({ "action": "remove", "revision": route["revision"] }),
+                ),
             )
             .await;
             assert_eq!(removed.status(), StatusCode::OK);
@@ -3728,4 +3745,1897 @@ async fn an_authorized_participant_can_reset_a_settled_thread_without_erasing_it
     assert_eq!(received.recv().await.unwrap()["status"], "refused");
     session.stop().await;
     server.abort();
+}
+
+#[tokio::test]
+async fn route_eligibility_uses_native_resource_grants_without_disclosing_owner_data() {
+    let (_root, s, instance, resource, app) = fixture().await;
+    let safe = s.agent(json!({
+        "name": "Dedicated read-only",
+        "access": {"sandbox": "read-only", "projects": [], "installation": false, "github": false, "mcps": []},
+    }), None).await.unwrap();
+    let unsafe_agent = s
+        .agent(
+            json!({
+                "name": "Installation agent",
+                "access": {"projects": [], "installation": true, "github": false, "mcps": []},
+            }),
+            None,
+        )
+        .await
+        .unwrap();
+    let path = format!(
+        "/api/plugins/router/connections/{instance}/resources/workspace/{resource}/route-eligibility?accessMode=everyone"
+    );
+    let read = || owner_request("GET", &path, Value::Null);
+    let response = common::send(&app, read()).await;
+    assert_eq!(
+        response.status(),
+        StatusCode::OK,
+        "{}",
+        common::read_text(response).await
+    );
+    let result = common::read_json(response).await;
+    let items = result["items"].as_array().unwrap();
+    let current = items
+        .iter()
+        .find(|item| item["agentId"] == safe["id"])
+        .unwrap();
+    assert_eq!(current["eligible"], true);
+    assert!(current.get("grantedAccess").is_none());
+    let blocked = items
+        .iter()
+        .find(|item| item["agentId"] == unsafe_agent["id"])
+        .unwrap();
+    assert_eq!(blocked["eligible"], false);
+    assert!(!text(blocked, "reason").is_empty());
+
+    let grants =
+        format!("/api/plugins/router/connections/{instance}/resources/workspace/{resource}/grants");
+    let response = common::send(
+        &app,
+        owner_request(
+            "POST",
+            &grants,
+            json!({
+                "agentId": safe["id"], "operations": ["read"],
+            }),
+        ),
+    )
+    .await;
+    assert_eq!(
+        response.status(),
+        StatusCode::OK,
+        "{}",
+        common::read_text(response).await
+    );
+    let grant = common::read_json(response).await;
+    let response = common::send(&app, read()).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let result = common::read_json(response).await;
+    let current = result["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["agentId"] == safe["id"])
+        .unwrap();
+    assert_eq!(
+        current["eligible"], false,
+        "resource-granted agent must not accept everyone"
+    );
+    assert!(!text(current, "reason").is_empty());
+
+    let route_path =
+        format!("/api/plugins/router/connections/{instance}/resources/workspace/{resource}/routes");
+    let response = common::send(&app, owner_request("POST", &route_path, json!({
+        "name": "Public", "enabled": true, "match": {}, "agentId": safe["id"], "accessMode": "everyone",
+    }))).await;
+    assert_eq!(
+        response.status(),
+        StatusCode::BAD_REQUEST,
+        "preview must match save"
+    );
+
+    let response = common::send(
+        &app,
+        owner_request(
+            "DELETE",
+            &format!("{grants}/{}", text(&grant, "id")),
+            Value::Null,
+        ),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let response = common::send(&app, read()).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let result = common::read_json(response).await;
+    let current = result["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["agentId"] == safe["id"])
+        .unwrap();
+    assert_eq!(current["eligible"], true);
+
+    let mut member = read();
+    member
+        .extensions_mut()
+        .insert(InstallationIdentity::trusted(
+            InstallationRole::Member,
+            "fixture-member",
+        ));
+    let response = common::send(&app, member).await;
+    assert_eq!(
+        response.status(),
+        StatusCode::FORBIDDEN,
+        "eligibility and owner resource metadata stay owner-only"
+    );
+}
+
+#[tokio::test]
+async fn stale_route_edits_cannot_restore_a_revoked_participant() {
+    let (_root, s, instance, resource, app) = fixture().await;
+    let agent = s.agent(json!({
+        "name": "Dedicated", "access": {"projects": [], "installation": false, "github": false, "mcps": []},
+    }), None).await.unwrap();
+    let mut original = json!({
+        "name": "Support", "enabled": true, "match": {"channel": "C1"},
+        "agentId": agent["id"], "accessMode": "allowlist", "userIds": ["alice", "bob"],
+    });
+    let route = create_route(&app, &instance, &resource, original.clone()).await;
+    original["revision"] = route["revision"].clone();
+    for person in ["alice", "bob"] {
+        assert_eq!(
+            deliver(
+                &app,
+                &instance,
+                json!({
+                    "id": person, "resource": resource, "author": {"id": person},
+                    "context": {"channel": "C1", "thread": person}, "body": {"text": person},
+                })
+            )
+            .await
+            .1["status"],
+            "accepted"
+        );
+    }
+    let route_path = format!(
+        "/api/plugins/router/connections/{instance}/resources/workspace/{resource}/routes/{}",
+        text(&route, "id")
+    );
+    let response = common::send(
+        &app,
+        owner_request(
+            "POST",
+            &format!("{route_path}/people/bob"),
+            json!({"action": "remove", "revision": route["revision"]}),
+        ),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let updated = common::read_json(response).await;
+    assert_eq!(updated["userIds"], json!(["alice"]));
+    assert_ne!(updated["revision"], route["revision"]);
+
+    let response = common::send(
+        &app,
+        owner_request(
+            "POST",
+            &format!("{route_path}/people/alice"),
+            json!({"action": "remove", "revision": route["revision"]}),
+        ),
+    )
+    .await;
+    assert_eq!(
+        response.status(),
+        StatusCode::CONFLICT,
+        "stale people controls must refresh too"
+    );
+
+    let response = common::send(&app, owner_request("PUT", &route_path, original)).await;
+    assert_eq!(
+        response.status(),
+        StatusCode::CONFLICT,
+        "an editor opened before revocation must refresh, not restore the revoked participant"
+    );
+    let response = common::send(
+        &app,
+        owner_request(
+            "GET",
+            &format!(
+                "/api/plugins/router/connections/{instance}/resources/workspace/{resource}/routes"
+            ),
+            Value::Null,
+        ),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let routes = common::read_json(response).await;
+    let current = routes["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|current| current["id"] == route["id"])
+        .unwrap();
+    assert_eq!(current["userIds"], json!(["alice"]));
+    assert_eq!(current["revision"], updated["revision"]);
+
+    let package = registry::active(&s, "router").await.unwrap();
+    let connection = connections::get(&s, "router", &instance).await.unwrap();
+    let mut session = s
+        .plugins
+        .host
+        .start(
+            &PathBuf::from(env!("CARGO_BIN_EXE_cairn")),
+            &package.manifest,
+            &package.source,
+        )
+        .await
+        .unwrap();
+    runtime::pump(&s, &connection, &mut session).await.unwrap();
+    let chats = s.chat_list().await.unwrap();
+    assert_eq!(
+        chats.len(),
+        1,
+        "removing Bob must preserve Alice's accepted work, while revoking Bob's"
+    );
+    assert_eq!(
+        s.chat_detail(text(&chats[0], "id")).await.unwrap()["messages"][0]["text"],
+        "alice"
+    );
+    session.stop().await;
+
+    let response = common::send(
+        &app,
+        owner_request(
+            "DELETE",
+            &route_path,
+            json!({"revision": route["revision"]}),
+        ),
+    )
+    .await;
+    assert_eq!(
+        response.status(),
+        StatusCode::CONFLICT,
+        "a stale delete must not remove a changed route"
+    );
+    let response = common::send(
+        &app,
+        owner_request(
+            "DELETE",
+            &route_path,
+            json!({"revision": updated["revision"]}),
+        ),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn route_eligibility_matches_the_exact_project_and_allows_paused_configuration() {
+    let (root, s, instance, resource, app) = fixture().await;
+    let project = s
+        .project(
+            json!({ "name": "Support", "path": root.path().join("home") }),
+            None,
+        )
+        .await
+        .unwrap();
+    let agent = s
+        .agent(
+            json!({
+                "name": "Project helper",
+                "access": {
+                    "projects": [project["id"]],
+                    "installation": false,
+                    "github": false,
+                    "mcps": [],
+                    "sandbox": "read-only",
+                },
+            }),
+            None,
+        )
+        .await
+        .unwrap();
+    let base = format!("/api/plugins/router/connections/{instance}/resources/workspace/{resource}");
+    for (query, eligible) in [
+        ("accessMode=everyone".to_owned(), false),
+        (
+            format!("accessMode=everyone&projectId={}", text(&project, "id")),
+            true,
+        ),
+        (
+            format!("accessMode=requests&projectId={}", text(&project, "id")),
+            true,
+        ),
+    ] {
+        let response = common::send(
+            &app,
+            owner_request(
+                "GET",
+                &format!("{base}/route-eligibility?{query}"),
+                Value::Null,
+            ),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let result = common::read_json(response).await;
+        let item = result["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|item| item["agentId"] == agent["id"])
+            .unwrap();
+        assert_eq!(item["eligible"], eligible, "{query}");
+        for item in result["items"].as_array().unwrap() {
+            assert!(
+                item.as_object()
+                    .unwrap()
+                    .keys()
+                    .all(|key| matches!(key.as_str(), "agentId" | "eligible" | "reason"))
+            );
+        }
+    }
+    for query in [
+        "accessMode=invalid".to_owned(),
+        "projectId=bad".to_owned(),
+        format!("projectId={}", uuid::Uuid::new_v4()),
+    ] {
+        let response = common::send(
+            &app,
+            owner_request(
+                "GET",
+                &format!("{base}/route-eligibility?{query}"),
+                Value::Null,
+            ),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{query}");
+    }
+
+    connections::set_enabled(&s, "router", &instance, &json!({"enabled": false}))
+        .await
+        .unwrap();
+    let saved = resources::get(&s, "router", &instance, "workspace", &resource)
+        .await
+        .unwrap();
+    resources::save(
+        &s,
+        "router",
+        &instance,
+        "workspace",
+        &json!({
+            "name": saved.name,
+            "enabled": false,
+            "settings": saved.settings,
+            "revision": saved.revision,
+        }),
+        Some(&resource),
+    )
+    .await
+    .unwrap();
+    let response = common::send(
+        &app,
+        owner_request(
+            "GET",
+            &format!(
+                "{base}/route-eligibility?accessMode=everyone&projectId={}",
+                text(&project, "id")
+            ),
+            Value::Null,
+        ),
+    )
+    .await;
+    assert_eq!(
+        response.status(),
+        StatusCode::OK,
+        "paused resources still allow owner configuration"
+    );
+    create_route(
+        &app,
+        &instance,
+        &resource,
+        json!({
+            "name": "Prepared route",
+            "enabled": false,
+            "agentId": agent["id"],
+            "projectId": project["id"],
+            "accessMode": "everyone",
+        }),
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn reapproving_a_participant_never_revives_their_old_admitted_work() {
+    let (_root, s, instance, resource, app) = fixture().await;
+    let agent = s
+        .agent(
+            json!({
+                "name": "Dedicated",
+                "access": {
+                    "projects": [],
+                    "installation": false,
+                    "github": false,
+                    "mcps": [],
+                },
+            }),
+            None,
+        )
+        .await
+        .unwrap();
+    let route = create_route(
+        &app,
+        &instance,
+        &resource,
+        json!({
+            "name": "Requests",
+            "enabled": true,
+            "match": { "channel": "C1" },
+            "agentId": agent["id"],
+            "accessMode": "requests",
+            "userIds": ["alice", "bob"],
+        }),
+    )
+    .await;
+    let event = |id: &str, person: &str| {
+        json!({
+            "id": id,
+            "resource": resource,
+            "author": { "id": person },
+            "context": { "channel": "C1", "thread": id },
+            "body": { "text": id },
+        })
+    };
+    for (id, person) in [("old-bob", "bob"), ("alice", "alice")] {
+        assert_eq!(
+            deliver(&app, &instance, event(id, person)).await.1["status"],
+            "accepted"
+        );
+    }
+    let path = format!(
+        "/api/plugins/router/connections/{instance}/resources/workspace/{resource}/routes/{}/people/bob",
+        text(&route, "id")
+    );
+    let response = common::send(
+        &app,
+        owner_request(
+            "POST",
+            &path,
+            json!({
+                "action": "remove",
+                "revision": route["revision"],
+            }),
+        ),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let removed = common::read_json(response).await;
+    assert_eq!(
+        deliver(&app, &instance, event("new-access-request", "bob"))
+            .await
+            .1["status"],
+        "requested"
+    );
+    let response = common::send(
+        &app,
+        owner_request(
+            "POST",
+            &path,
+            json!({
+                "action": "approve",
+                "revision": removed["revision"],
+            }),
+        ),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        deliver(&app, &instance, event("new-bob", "bob")).await.1["status"],
+        "accepted"
+    );
+    let package = registry::active(&s, "router").await.unwrap();
+    let connection = connections::get(&s, "router", &instance).await.unwrap();
+    let mut session = s
+        .plugins
+        .host
+        .start(
+            &PathBuf::from(env!("CARGO_BIN_EXE_cairn")),
+            &package.manifest,
+            &package.source,
+        )
+        .await
+        .unwrap();
+    runtime::pump(&s, &connection, &mut session).await.unwrap();
+    let mut messages = Vec::new();
+    for chat in s.chat_list().await.unwrap() {
+        let detail = s.chat_detail(text(&chat, "id")).await.unwrap();
+        messages.push(text(&detail["messages"][0], "text").to_owned());
+    }
+    messages.sort();
+    assert_eq!(
+        messages,
+        vec!["alice", "new-bob"],
+        "reapproval revived Bob's old admission or revoked unrelated Alice"
+    );
+    session.stop().await;
+}
+
+#[tokio::test]
+async fn reapproving_a_person_cannot_release_their_old_http_result() {
+    let (_root, s, instance, resource, app) = fixture().await;
+    let original = registry::active(&s, "router").await.unwrap();
+    let mut manifest = serde_json::to_value(&original.manifest).unwrap();
+    manifest["version"] = json!("2");
+    let package = registry::install(&s, &json!({
+        "manifest": manifest,
+        "source": r#"return {
+            webhook = function(event)
+                local result = cairn.inbound.deliver(cairn.json.decode(event.body))
+                return {status = 200, body = cairn.json.encode(result)}
+            end,
+            message = function(event)
+                local response = cairn.http.request({url = 'https://api.example.test/held-result'})
+                return cairn.conversations.submit({text = response.text, thread = event.context.thread, shared = true})
+            end,
+        }"#,
+    })).await.unwrap();
+    registry::approve(&s, "router", "2", text(&package, "digest"))
+        .await
+        .unwrap();
+    let agent = s
+        .agent(
+            json!({
+                "name": "Dedicated",
+                "access": {
+                    "projects": [],
+                    "installation": false,
+                    "github": false,
+                    "mcps": [],
+                },
+            }),
+            None,
+        )
+        .await
+        .unwrap();
+    let route = create_route(
+        &app,
+        &instance,
+        &resource,
+        json!({
+            "name": "Requests",
+            "enabled": true,
+            "match": { "channel": "C1" },
+            "agentId": agent["id"],
+            "accessMode": "requests",
+            "userIds": ["bob"],
+        }),
+    )
+    .await;
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let provider = axum::Router::new().route(
+        "/held-result",
+        axum::routing::get({
+            let (entered, release) = (entered.clone(), release.clone());
+            move || {
+                let (entered, release) = (entered.clone(), release.clone());
+                async move {
+                    entered.notify_one();
+                    release.notified().await;
+                    "private-result-from-retired-grant"
+                }
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    s.plugins
+        .route_http_to(Some(format!("http://{}", listener.local_addr().unwrap())));
+    let server = tokio::spawn(async move { axum::serve(listener, provider).await.unwrap() });
+    let event = |id: &str| {
+        json!({
+            "id": id,
+            "resource": resource,
+            "author": { "id": "bob" },
+            "context": { "channel": "C1", "thread": "thread" },
+            "body": { "text": "Read private data" },
+        })
+    };
+    // Prove the handler can export this exact response when authority is intact.
+    // Otherwise an unrelated script error could make the revocation check pass.
+    let mut control = event("control");
+    control["context"]["thread"] = json!("control");
+    assert_eq!(
+        deliver(&app, &instance, control).await.1["status"],
+        "accepted"
+    );
+    let package = registry::active(&s, "router").await.unwrap();
+    let connection = connections::get(&s, "router", &instance).await.unwrap();
+    let mut session = s
+        .plugins
+        .host
+        .start(
+            &PathBuf::from(env!("CARGO_BIN_EXE_cairn")),
+            &package.manifest,
+            &package.source,
+        )
+        .await
+        .unwrap();
+    release.notify_one();
+    runtime::pump(&s, &connection, &mut session).await.unwrap();
+    entered.notified().await;
+    let control_chats = s.chat_list().await.unwrap();
+    assert_eq!(control_chats.len(), 1);
+    let control_chat = text(&control_chats[0], "id").to_owned();
+    assert_eq!(
+        s.chat_detail(&control_chat).await.unwrap()["messages"][0]["text"],
+        "private-result-from-retired-grant"
+    );
+    session.stop().await;
+    assert_eq!(
+        deliver(&app, &instance, event("old-bob")).await.1["status"],
+        "accepted"
+    );
+    let package = registry::active(&s, "router").await.unwrap();
+    let connection = connections::get(&s, "router", &instance).await.unwrap();
+    let mut session = s
+        .plugins
+        .host
+        .start(
+            &PathBuf::from(env!("CARGO_BIN_EXE_cairn")),
+            &package.manifest,
+            &package.source,
+        )
+        .await
+        .unwrap();
+    let worker = {
+        let s = s.clone();
+        tokio::spawn(async move {
+            let result = runtime::pump(&s, &connection, &mut session).await;
+            session.stop().await;
+            result
+        })
+    };
+    tokio::time::timeout(std::time::Duration::from_secs(10), entered.notified())
+        .await
+        .unwrap();
+    let path = format!(
+        "/api/plugins/router/connections/{instance}/resources/workspace/{resource}/routes/{}/people/bob",
+        text(&route, "id")
+    );
+    let response = common::send(
+        &app,
+        owner_request(
+            "POST",
+            &path,
+            json!({
+                "action": "remove",
+                "revision": route["revision"],
+            }),
+        ),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let removed = common::read_json(response).await;
+    assert_eq!(
+        deliver(&app, &instance, event("new-access-request"))
+            .await
+            .1["status"],
+        "requested"
+    );
+    let response = common::send(
+        &app,
+        owner_request(
+            "POST",
+            &path,
+            json!({
+                "action": "approve",
+                "revision": removed["revision"],
+            }),
+        ),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    release.notify_one();
+    tokio::time::timeout(std::time::Duration::from_secs(10), worker)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    server.abort();
+    let chats = s.chat_list().await.unwrap();
+    assert_eq!(
+        chats.len(),
+        1,
+        "the old provider result was exported after reapproval"
+    );
+    assert_eq!(chats[0]["id"], control_chat);
+}
+
+#[tokio::test]
+async fn unversioned_routed_admissions_do_not_acquire_a_persons_current_grant() {
+    let (_root, s, instance, resource, app) = fixture().await;
+    let agent = s
+        .agent(
+            json!({
+                "name": "Dedicated",
+                "access": {
+                    "projects": [],
+                    "installation": false,
+                    "github": false,
+                    "mcps": [],
+                },
+            }),
+            None,
+        )
+        .await
+        .unwrap();
+    create_route(
+        &app,
+        &instance,
+        &resource,
+        json!({
+            "name": "Original grant",
+            "enabled": true,
+            "match": { "channel": "C1" },
+            "agentId": agent["id"],
+            "userIds": ["alice"],
+        }),
+    )
+    .await;
+    assert_eq!(
+        deliver(
+            &app,
+            &instance,
+            json!({
+                "id": "unversioned",
+                "resource": resource,
+                "author": { "id": "alice" },
+                "context": { "channel": "C1", "thread": "thread" },
+                "body": { "text": "A message written by an earlier draft binary" },
+            })
+        )
+        .await
+        .1["status"],
+        "accepted"
+    );
+    let events = s.store.list("plugin-events").await.unwrap();
+    assert_eq!(events.len(), 1);
+    let mut legacy = events[0].clone();
+    legacy["routing"].as_object_mut().unwrap().remove("person");
+    s.store.put("plugin-events", legacy).await.unwrap();
+    let package = registry::active(&s, "router").await.unwrap();
+    let connection = connections::get(&s, "router", &instance).await.unwrap();
+    let mut session = s
+        .plugins
+        .host
+        .start(
+            &PathBuf::from(env!("CARGO_BIN_EXE_cairn")),
+            &package.manifest,
+            &package.source,
+        )
+        .await
+        .unwrap();
+    runtime::pump(&s, &connection, &mut session).await.unwrap();
+    assert!(
+        s.chat_list().await.unwrap().is_empty(),
+        "an old unversioned admission silently acquired current authority"
+    );
+    session.stop().await;
+}
+
+async fn root_scope_call(
+    s: &Service,
+    bearer: &str,
+    command: bool,
+) -> cairn_installation::error::Result<Value> {
+    if command {
+        s.plugins
+            .command(
+                s,
+                bearer,
+                &json!({ "plugin": "rootreader", "command": "read" }),
+            )
+            .await
+            .map(|value| value["value"].clone())
+    } else {
+        agents::call_tool(s, bearer, "rootreader_read", &json!({}))
+            .await
+            .map(|value| value.expect("the explicitly granted tool is available"))
+    }
+}
+
+async fn root_scopes_keep_the_source_participants_authority(command: bool) {
+    let (_root, s, instance, resource, app) = fixture().await;
+    let agent = s
+        .agent(
+            json!({
+                "name": "Dedicated",
+                "access": { "projects": [], "installation": false, "github": false, "mcps": [] },
+            }),
+            None,
+        )
+        .await
+        .unwrap();
+    let package = registry::install(
+        &s,
+        &json!({
+            "manifest": {
+                "id": "rootreader", "name": "Root reader", "version": "1", "apiVersion": 2,
+                "capabilities": ["http"], "hosts": ["api.example.test"], "agentAccess": {},
+                "commands": [{ "name": "read", "output": "json" }],
+                "tools": [{
+                    "name": "rootreader_read", "description": "Read through the granted instance",
+                    "inputSchema": { "type": "object", "additionalProperties": false },
+                }],
+            },
+            "source": r#"local function read(event)
+            return cairn.http.request({url = 'https://api.example.test/root-result',
+                instance = event.instances[1].id}).json
+        end
+        return {command = read, tool = read}"#,
+        }),
+    )
+    .await
+    .unwrap();
+    registry::approve(&s, "rootreader", "1", text(&package, "digest"))
+        .await
+        .unwrap();
+    connections::save(
+        &s,
+        "rootreader",
+        &json!({
+            "name": "Explicit target grant", "enabled": true, "agentIds": [agent["id"]],
+        }),
+        None,
+    )
+    .await
+    .unwrap();
+    let route = create_route(
+        &app,
+        &instance,
+        &resource,
+        json!({
+            "name": "Restricted source", "enabled": true, "match": { "channel": "C1" },
+            "agentId": agent["id"], "accessMode": "requests", "userIds": ["bob"],
+        }),
+    )
+    .await;
+    let hold = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let provider = axum::Router::new().route(
+        "/root-result",
+        axum::routing::get({
+            let (hold, entered, release) = (hold.clone(), entered.clone(), release.clone());
+            move || {
+                let (hold, entered, release) = (hold.clone(), entered.clone(), release.clone());
+                async move {
+                    if hold.swap(false, std::sync::atomic::Ordering::SeqCst) {
+                        entered.notify_one();
+                        release.notified().await;
+                    }
+                    axum::Json(json!({ "value": "root-granted-private-data" }))
+                }
+            }
+        }),
+    );
+    let (origin, server) = common::serve_locally(provider).await;
+    s.plugins.route_http_to(Some(origin));
+    assert_eq!(
+        deliver(
+            &app,
+            &instance,
+            json!({
+                "id": "old-bob", "resource": resource, "author": { "id": "bob" },
+                "context": { "channel": "C1", "thread": "old-bob" },
+                "body": { "text": "Read through my restricted route" },
+            })
+        )
+        .await
+        .1["status"],
+        "accepted"
+    );
+    let package = registry::active(&s, "router").await.unwrap();
+    let connection = connections::get(&s, "router", &instance).await.unwrap();
+    let mut session = s
+        .plugins
+        .host
+        .start(
+            &PathBuf::from(env!("CARGO_BIN_EXE_cairn")),
+            &package.manifest,
+            &package.source,
+        )
+        .await
+        .unwrap();
+    runtime::pump(&s, &connection, &mut session).await.unwrap();
+    session.stop().await;
+    s.chat_tick(&std::collections::HashSet::new())
+        .await
+        .unwrap();
+    let chat = s.chat_list().await.unwrap()[0].clone();
+    let detail = s.chat_detail(text(&chat, "id")).await.unwrap();
+    // Native lifecycle fixture: prepare the admitted turn without launching a VM.
+    let run = s
+        .store
+        .patch_run(
+            text(&detail["run"], "id"),
+            json!({
+                "status": "running", "isolated": true,
+            }),
+        )
+        .await
+        .unwrap();
+    let config = s.mcps.run_configuration(&s, &run).await.unwrap();
+    let bearer = text(&config["env"], "CAIRN_MCP_RUN_TOKEN").to_owned();
+    assert_eq!(
+        root_scope_call(&s, &bearer, command).await.unwrap()["value"],
+        "root-granted-private-data",
+        "positive control must reach the real plugin HTTP effect"
+    );
+    hold.store(true, std::sync::atomic::Ordering::SeqCst);
+    let pending = {
+        let (s, bearer) = (s.clone(), bearer.clone());
+        tokio::spawn(async move { root_scope_call(&s, &bearer, command).await })
+    };
+    tokio::time::timeout(std::time::Duration::from_secs(10), entered.notified())
+        .await
+        .unwrap();
+    let path = format!(
+        "/api/plugins/router/connections/{instance}/resources/workspace/{resource}/routes/{}/people/bob",
+        text(&route, "id"),
+    );
+    let response = common::send(
+        &app,
+        owner_request(
+            "POST",
+            &path,
+            json!({
+                "action": "remove", "revision": route["revision"],
+            }),
+        ),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let removed = common::read_json(response).await;
+    let removed_call = root_scope_call(&s, &bearer, command).await;
+    assert_eq!(
+        deliver(
+            &app,
+            &instance,
+            json!({
+                "id": "new-access-request", "resource": resource, "author": { "id": "bob" },
+                "context": { "channel": "C1", "thread": "new-access-request" },
+                "body": { "text": "Request a fresh grant" },
+            })
+        )
+        .await
+        .1["status"],
+        "requested"
+    );
+    let response = common::send(
+        &app,
+        owner_request(
+            "POST",
+            &path,
+            json!({
+                "action": "approve", "revision": removed["revision"],
+            }),
+        ),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let reapproved_call = root_scope_call(&s, &bearer, command).await;
+    release.notify_one();
+    let old_result = tokio::time::timeout(std::time::Duration::from_secs(10), pending)
+        .await
+        .unwrap()
+        .unwrap();
+    server.abort();
+    assert!(
+        removed_call.is_err() && reapproved_call.is_err() && old_result.is_err(),
+        "root scope escaped source revocation: removed={}, reapproved={}, old_result={}",
+        removed_call.is_ok(),
+        reapproved_call.is_ok(),
+        old_result.is_ok()
+    );
+}
+
+#[tokio::test]
+async fn root_commands_cannot_bypass_the_source_participants_revocation() {
+    root_scopes_keep_the_source_participants_authority(true).await;
+}
+
+#[tokio::test]
+async fn root_tools_cannot_bypass_the_source_participants_revocation() {
+    root_scopes_keep_the_source_participants_authority(false).await;
+}
+
+async fn source_package_root_call(
+    s: &Service,
+    bearer: &str,
+    instance: &str,
+    command: bool,
+) -> cairn_installation::error::Result<Value> {
+    if command {
+        s.plugins
+            .command(
+                s,
+                bearer,
+                &json!({
+                    "plugin": "router", "command": "root-read",
+                    "args": ["--instance", instance, "--channel", "C2"],
+                }),
+            )
+            .await
+            .map(|value| value["value"].clone())
+    } else {
+        agents::call_tool(
+            s,
+            bearer,
+            "router_root",
+            &json!({"instance": instance, "channel": "C2"}),
+        )
+        .await
+        .map(|value| value.expect("the explicitly granted tool is available"))
+    }
+}
+
+async fn a_source_package_root_grant_does_not_replace_a_route_scope(command: bool) {
+    let (_root, s, instance, resource, app) = fixture().await;
+    let original = registry::active(&s, "router").await.unwrap();
+    let mut manifest = serde_json::to_value(&original.manifest).unwrap();
+    manifest["version"] = json!("2");
+    manifest["commands"] = json!([{
+        "name": "root-read", "output": "json", "arguments": [
+            {"name": "instance", "flag": "--instance", "required": true},
+            {"name": "channel", "flag": "--channel", "required": true},
+        ],
+    }]);
+    manifest["tools"].as_array_mut().unwrap().push(json!({
+        "name": "router_root", "description": "Read through an instance-wide grant",
+        "inputSchema": {"type": "object", "required": ["instance", "channel"],
+            "properties": {"instance": {"type": "string"}, "channel": {"type": "string"}}},
+    }));
+    let installed = registry::install(&s, &json!({
+        "manifest": manifest,
+        "source": r#"local function root_read(event)
+            local input = event.arguments or event.input
+            return cairn.http.request({instance = input.instance,
+                url = 'https://api.example.test/root?channel=' .. input.channel,
+                auth = {secret = 'signature', header = 'authorization', prefix = 'Bearer '}}).json
+        end
+        return {
+            command = root_read,
+            tool = function(event)
+                if event.tool == 'router_scope' then return event.input end
+                return root_read(event)
+            end,
+            webhook = function(event)
+                local result = cairn.inbound.deliver(cairn.json.decode(event.body))
+                return {status = 200, body = cairn.json.encode(result)}
+            end,
+            message = function(event)
+                return cairn.conversations.submit({text = event.text, thread = event.context.thread, shared = true})
+            end,
+        }"#,
+    })).await.unwrap();
+    registry::approve(&s, "router", "2", text(&installed, "digest"))
+        .await
+        .unwrap();
+    let agent = s.agent(json!({
+        "name": "Dedicated", "access": {"projects": [], "installation": false, "github": false, "mcps": []},
+    }), None).await.unwrap();
+    connections::save(
+        &s,
+        "router",
+        &json!({
+            "name": "Source app", "enabled": true, "agentIds": [agent["id"]],
+            "settings": {"clientId": "source-client"},
+        }),
+        Some(&instance),
+    )
+    .await
+    .unwrap();
+    let other = connections::save(
+        &s,
+        "router",
+        &json!({
+            "name": "Other app", "enabled": true, "agentIds": [agent["id"]],
+            "settings": {"clientId": "other-client"}, "secrets": {"signature": "other-app-fixture"},
+        }),
+        None,
+    )
+    .await
+    .unwrap();
+    let other = text(&other, "id");
+    create_route(
+        &app,
+        &instance,
+        &resource,
+        json!({
+            "name": "C1 only", "enabled": true, "match": {"channel": "C1"},
+            "agentId": agent["id"], "userIds": ["bob"],
+        }),
+    )
+    .await;
+    let grants =
+        format!("/api/plugins/router/connections/{instance}/resources/workspace/{resource}/grants");
+    assert_eq!(
+        common::send(
+            &app,
+            owner_request(
+                "POST",
+                &grants,
+                json!({
+                    "agentId": agent["id"], "profile": "read",
+                })
+            )
+        )
+        .await
+        .status(),
+        StatusCode::OK
+    );
+    let seen = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let provider = axum::Router::new().route(
+        "/root",
+        axum::routing::get({
+            let seen = seen.clone();
+            move |headers: axum::http::HeaderMap| {
+                let seen = seen.clone();
+                async move {
+                    let auth = headers["authorization"].to_str().unwrap();
+                    assert!(
+                        auth == format!("Bearer {SECRET}") || auth == "Bearer other-app-fixture"
+                    );
+                    seen.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    axum::Json(json!({"channel": "C2", "value": "outside-the-source-route"}))
+                }
+            }
+        }),
+    );
+    let (origin, server) = common::serve_locally(provider).await;
+    s.plugins.route_http_to(Some(origin));
+    // Explicit native task authority has no routed source: the independent
+    // instance grants really permit both reads, with the real injected secrets.
+    let task = s
+        .task(
+            json!({"name": "Control", "agentId": agent["id"], "prompt": "Probe"}),
+            None,
+        )
+        .await
+        .unwrap();
+    let run = s.enqueue(text(&task, "id"), "manual", None).await.unwrap();
+    let run = s
+        .store
+        .patch_run(
+            text(&run, "id"),
+            json!({"status": "running", "isolated": true}),
+        )
+        .await
+        .unwrap();
+    let config = s.mcps.run_configuration(&s, &run).await.unwrap();
+    for target in [instance.as_str(), other] {
+        assert_eq!(
+            source_package_root_call(
+                &s,
+                text(&config["env"], "CAIRN_MCP_RUN_TOKEN"),
+                target,
+                command
+            )
+            .await
+            .unwrap()["value"],
+            "outside-the-source-route"
+        );
+    }
+    s.store
+        .patch_run(text(&run, "id"), json!({"status": "succeeded"}))
+        .await
+        .unwrap();
+    assert_eq!(seen.load(std::sync::atomic::Ordering::SeqCst), 2);
+    assert_eq!(deliver(&app, &instance, json!({
+        "id": "bob", "resource": resource, "author": {"id": "bob"},
+        "context": {"channel": "C1", "thread": "thread"}, "body": {"text": "Work inside C1"},
+    })).await.1["status"], "accepted");
+    let package = registry::active(&s, "router").await.unwrap();
+    let connection = connections::get(&s, "router", &instance).await.unwrap();
+    let mut session = s
+        .plugins
+        .host
+        .start(
+            &PathBuf::from(env!("CARGO_BIN_EXE_cairn")),
+            &package.manifest,
+            &package.source,
+        )
+        .await
+        .unwrap();
+    runtime::pump(&s, &connection, &mut session).await.unwrap();
+    session.stop().await;
+    s.chat_tick(&std::collections::HashSet::new())
+        .await
+        .unwrap();
+    let chat = s.chat_list().await.unwrap()[0].clone();
+    let detail = s.chat_detail(text(&chat, "id")).await.unwrap();
+    let run = s
+        .store
+        .patch_run(
+            text(&detail["run"], "id"),
+            json!({"status": "running", "isolated": true}),
+        )
+        .await
+        .unwrap();
+    let config = s.mcps.run_configuration(&s, &run).await.unwrap();
+    let bearer = text(&config["env"], "CAIRN_MCP_RUN_TOKEN");
+    let scoped = agents::call_tool(
+        &s,
+        bearer,
+        "router_scope",
+        &json!({"resource": resource, "channel": "C1"}),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(scoped["channel"], "C1");
+    assert!(
+        agents::call_tool(
+            &s,
+            bearer,
+            "router_scope",
+            &json!({"resource": resource, "channel": "C2"})
+        )
+        .await
+        .is_err()
+    );
+    let same_instance = source_package_root_call(&s, bearer, &instance, command).await;
+    let other_instance = source_package_root_call(&s, bearer, other, command).await;
+    server.abort();
+    assert!(
+        same_instance.is_err()
+            && other_instance.is_err()
+            && seen.load(std::sync::atomic::Ordering::SeqCst) == 2,
+        "source scope escaped via root grant: same_instance={}, other_instance={}, provider_calls={}",
+        same_instance.is_ok(),
+        other_instance.is_ok(),
+        seen.load(std::sync::atomic::Ordering::SeqCst)
+    );
+}
+
+#[tokio::test]
+async fn source_package_root_commands_cannot_escape_the_admitted_scope() {
+    a_source_package_root_grant_does_not_replace_a_route_scope(true).await;
+}
+
+#[tokio::test]
+async fn source_package_root_tools_cannot_escape_the_admitted_scope() {
+    a_source_package_root_grant_does_not_replace_a_route_scope(false).await;
+}
+
+async fn submit_after_held_attachment_authority_change(
+    changed: &str,
+    queued_upload: bool,
+) -> (usize, usize, usize) {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let (_root, s, instance, resource, app) = fixture().await;
+    let package = registry::active(&s, "router").await.unwrap();
+    let before = "return cairn.conversations.submit({text = event.text,";
+    assert_eq!(package.source.main.matches(before).count(), 1);
+    let source = package.source.main.replace(before,
+        "return cairn.conversations.submit({files = {{url = 'https://api.example.test/download', name = 'note.txt'}}, text = event.text,");
+    let mut manifest = serde_json::to_value(&package.manifest).unwrap();
+    manifest["version"] = json!("2");
+    let installed = registry::install(&s, &json!({"manifest": manifest, "source": source}))
+        .await
+        .unwrap();
+    registry::approve(&s, "router", "2", text(&installed, "digest"))
+        .await
+        .unwrap();
+    let agent = s
+        .agent(
+            json!({
+                "name": "Attachment reader",
+                "access": {"projects": [], "installation": false, "github": false}
+            }),
+            None,
+        )
+        .await
+        .unwrap();
+    create_route(
+        &app,
+        &instance,
+        &resource,
+        json!({
+            "name": "Channel",
+            "enabled": true,
+            "match": {"channel": "C1"},
+            "agentId": agent["id"],
+            "userIds": ["alice"]
+        }),
+    )
+    .await;
+
+    let owner_changed = Arc::new(AtomicBool::new(false));
+    let revoked = owner_changed.clone();
+    let authority = axum::Router::new().route(
+        "/api/relay/00000000-0000-4000-8000-000000000055/task-authors",
+        axum::routing::get(move || {
+            let access = if revoked.load(Ordering::SeqCst) {
+                "owner-rejoined"
+            } else {
+                "fixture-owner"
+            };
+            async move {
+                axum::Json(json!({
+                    "owner": {"account_id": "fixture-owner", "access_id": access},
+                    "members": []
+                }))
+            }
+        }),
+    );
+    let (origin, authority_server) = common::serve_locally(authority).await;
+    let identity_path = s.config.data_dir.join("installation-relay/identity.json");
+    let mut identity: Value =
+        serde_json::from_slice(&std::fs::read(&identity_path).unwrap()).unwrap();
+    identity["origin"] = json!(origin);
+    std::fs::write(identity_path, serde_json::to_vec(&identity).unwrap()).unwrap();
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let (entering, releasing) = (entered.clone(), release.clone());
+    let provider = axum::Router::new().route(
+        "/download",
+        axum::routing::get(move || {
+            let (entered, release) = (entering.clone(), releasing.clone());
+            async move {
+                entered.notify_one();
+                release.notified().await;
+                "Synthetic attachment content"
+            }
+        }),
+    );
+    let (origin, server) = common::serve_locally(provider).await;
+    s.plugins.route_http_to(Some(origin));
+    let (status, body) = deliver(
+        &app,
+        &instance,
+        json!({
+            "id": "attachment-request",
+            "resource": resource,
+            "author": {"id": "alice"},
+            "context": {"channel": "C1", "thread": "thread1"},
+            "body": {"text": "Read my attachment"}
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["status"], "accepted");
+    let package = registry::active(&s, "router").await.unwrap();
+    let connection = connections::get(&s, "router", &instance).await.unwrap();
+    let mut session = s
+        .plugins
+        .host
+        .start(
+            &PathBuf::from(env!("CARGO_BIN_EXE_cairn")),
+            &package.manifest,
+            &package.source,
+        )
+        .await
+        .unwrap();
+    let upload_guard = if queued_upload {
+        Some(s.attachment_upload.lock().await)
+    } else {
+        None
+    };
+    let calling = s.clone();
+    let mut pending = tokio::spawn(async move {
+        let result = runtime::pump(&calling, &connection, &mut session).await;
+        session.stop().await;
+        result
+    });
+    tokio::select! {
+        () = entered.notified() => {},
+        result = &mut pending => panic!("Ended before attachment I/O: {result:?}"),
+        () = tokio::time::sleep(std::time::Duration::from_secs(5)) => {
+            panic!("The attachment download was not reached")
+        },
+    }
+    assert!(s.chat_list().await.unwrap().is_empty());
+    if queued_upload {
+        // The first authorized transaction creates the chat; publication of its
+        // file must still wait behind the same quota lock as ordinary uploads.
+        release.notify_one();
+        common::eventually(
+            std::time::Duration::from_secs(5),
+            std::time::Duration::from_millis(10),
+            async || (!s.chat_list().await.unwrap().is_empty()).then_some(()),
+        )
+        .await;
+    }
+    if changed == "owner" {
+        owner_changed.store(true, Ordering::SeqCst);
+    } else if changed == "approval" {
+        let mut manifest = serde_json::to_value(&package.manifest).unwrap();
+        manifest["version"] = json!("3");
+        let replacement = registry::install(
+            &s,
+            &json!({
+                "manifest": manifest,
+                "source": format!("-- replacement package\n{}", package.source.main)
+            }),
+        )
+        .await
+        .unwrap();
+        registry::approve(&s, "router", "3", text(&replacement, "digest"))
+            .await
+            .unwrap();
+    }
+    if !queued_upload {
+        release.notify_one();
+    }
+    drop(upload_guard);
+    let _ = pending.await.unwrap();
+    let chats = s.chat_list().await.unwrap();
+    let mut messages = 0;
+    for chat in &chats {
+        let detail = s.chat_detail(text(chat, "id")).await.unwrap();
+        messages += detail["messages"].as_array().unwrap().len();
+    }
+    let attachments = s
+        .store
+        .read(|db| db.keys("chat-attachment:"))
+        .await
+        .unwrap()
+        .len();
+    server.abort();
+    authority_server.abort();
+    (chats.len(), messages, attachments)
+}
+
+#[tokio::test]
+async fn owner_revocation_during_attachment_download_prevents_conversation_submission() {
+    assert_eq!(
+        submit_after_held_attachment_authority_change("control", false).await,
+        (1, 1, 1),
+        "The positive control never submitted the downloaded attachment"
+    );
+    assert_eq!(
+        submit_after_held_attachment_authority_change("owner", false).await,
+        (0, 0, 0),
+        "A retired owner persisted a conversation after attachment I/O"
+    );
+}
+
+#[tokio::test]
+async fn approval_replacement_during_attachment_download_prevents_conversation_submission() {
+    assert_eq!(
+        submit_after_held_attachment_authority_change("control", false).await,
+        (1, 1, 1),
+        "The positive control never submitted the downloaded attachment"
+    );
+    assert_eq!(
+        submit_after_held_attachment_authority_change("approval", false).await,
+        (0, 0, 0),
+        "A retired package persisted a conversation after attachment I/O"
+    );
+}
+
+#[tokio::test]
+async fn owner_revocation_while_an_attachment_waits_for_quota_prevents_publication() {
+    assert_eq!(
+        submit_after_held_attachment_authority_change("control", true).await,
+        (1, 1, 1),
+        "The positive control never published its queued attachment"
+    );
+    assert_eq!(
+        submit_after_held_attachment_authority_change("owner", true).await,
+        (1, 0, 0),
+        "A retired owner published an attachment after waiting for quota"
+    );
+}
+
+#[tokio::test]
+async fn approval_replacement_while_an_attachment_waits_for_quota_prevents_publication() {
+    assert_eq!(
+        submit_after_held_attachment_authority_change("control", true).await,
+        (1, 1, 1),
+        "The positive control never published its queued attachment"
+    );
+    assert_eq!(
+        submit_after_held_attachment_authority_change("approval", true).await,
+        (1, 0, 0),
+        "A retired package published an attachment after waiting for quota"
+    );
+}
+
+#[tokio::test]
+async fn everyone_routes_refuse_resource_grants_without_losing_admission() {
+    let (_root, s, instance, resource, app) = fixture().await;
+    let mut agents = Vec::new();
+    for name in ["Public route agent", "Restricted agent"] {
+        agents.push(s.agent(json!({
+            "name": name,
+            "access": {"sandbox": "read-only", "projects": [], "installation": false, "github": false, "mcps": []},
+        }), None).await.unwrap());
+    }
+    let public = &agents[0];
+    let restricted = &agents[1];
+    let route = create_route(
+        &app,
+        &instance,
+        &resource,
+        json!({
+            "name": "Public channel", "enabled": true,
+            "match": {"channel": "C1"}, "agentId": public["id"], "accessMode": "everyone",
+        }),
+    )
+    .await;
+    let path =
+        format!("/api/plugins/router/connections/{instance}/resources/workspace/{resource}/grants");
+    let grant = |agent: &Value| {
+        owner_request(
+            "POST",
+            &path,
+            json!({"agentId": agent["id"], "operations": ["read"]}),
+        )
+    };
+
+    let response = common::send(&app, grant(restricted)).await;
+    assert_eq!(
+        response.status(),
+        StatusCode::OK,
+        "{}",
+        common::read_text(response).await
+    );
+    let response = common::send(&app, grant(public)).await;
+    assert_eq!(
+        response.status(),
+        StatusCode::BAD_REQUEST,
+        "An Everyone route must not be disabled by a new credential grant: {}",
+        common::read_text(response).await,
+    );
+
+    let (status, result) = deliver(
+        &app,
+        &instance,
+        json!({
+            "id": "public-after-refused-grant", "resource": resource,
+            "author": {"id": "alice"}, "context": {"channel": "C1", "thread": "public"},
+            "body": {"text": "Hello"},
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{result}");
+    assert_eq!(result["status"], "accepted", "{result}");
+
+    let route_path = format!(
+        "/api/plugins/router/connections/{instance}/resources/workspace/{resource}/routes/{}",
+        text(&route, "id"),
+    );
+    let response = common::send(
+        &app,
+        owner_request(
+            "DELETE",
+            &route_path,
+            json!({"revision": route["revision"]}),
+        ),
+    )
+    .await;
+    assert_eq!(
+        response.status(),
+        StatusCode::OK,
+        "{}",
+        common::read_text(response).await
+    );
+    let response = common::send(&app, grant(public)).await;
+    assert_eq!(
+        response.status(),
+        StatusCode::OK,
+        "{}",
+        common::read_text(response).await
+    );
+}
+
+struct QueuedRoutedRequest {
+    _root: TempDir,
+    s: Arc<Service>,
+    instance: String,
+    resource: String,
+    app: axum::Router,
+    route: Value,
+    run: String,
+}
+
+async fn queued_routed_request() -> QueuedRoutedRequest {
+    let (_root, s, instance, resource, app) = fixture().await;
+    s.accounts
+        .create(
+            &s,
+            cairn_installation::provider::Provider::Codex,
+            "Not connected fixture",
+        )
+        .await
+        .unwrap();
+    let agent = s
+        .agent(
+            json!({
+                "name": "Queued request fixture",
+                "access": { "projects": [], "installation": false, "github": false },
+            }),
+            None,
+        )
+        .await
+        .unwrap();
+    let route = create_route(
+        &app,
+        &instance,
+        &resource,
+        json!({
+            "name": "Engineering", "enabled": true, "match": { "channel": "C1" },
+            "agentId": agent["id"], "accessMode": "requests", "userIds": ["alice", "bob"],
+        }),
+    )
+    .await;
+    let admitted = deliver(
+        &app,
+        &instance,
+        json!({
+            "id": "queued-alice", "resource": resource,
+            "author": { "id": "alice" }, "context": { "channel": "C1", "thread": "queued-thread" },
+            "body": { "text": "Request queued before revocation" },
+        }),
+    )
+    .await;
+    assert_eq!(admitted.0, StatusCode::OK);
+    assert_eq!(admitted.1["status"], "accepted");
+    let package = registry::active(&s, "router").await.unwrap();
+    let connection = connections::get(&s, "router", &instance).await.unwrap();
+    let mut session = s
+        .plugins
+        .host
+        .start(
+            &PathBuf::from(env!("CARGO_BIN_EXE_cairn")),
+            &package.manifest,
+            &package.source,
+        )
+        .await
+        .unwrap();
+    runtime::begin(&s, &connection, &mut session).await.unwrap();
+    runtime::pump(&s, &connection, &mut session).await.unwrap();
+    session.stop().await;
+    s.chat_tick(&std::collections::HashSet::new())
+        .await
+        .unwrap();
+    let chats = s.chat_list().await.unwrap();
+    assert_eq!(chats.len(), 1);
+    let detail = s.chat_detail(text(&chats[0], "id")).await.unwrap();
+    let id = text(&detail["run"], "id").to_owned();
+    assert_eq!(detail["run"]["status"], "queued");
+    // A real scheduler pass leaves a valid request waiting for unavailable capacity.
+    // This fixture launches no agent process or VM.
+    s.worker.tick(&s).await.unwrap();
+    let waiting = s.store.run(&id).await.unwrap();
+    assert_eq!(waiting["status"], "queued");
+    assert!(s.worker.active.lock().await.is_empty());
+    QueuedRoutedRequest {
+        _root,
+        s,
+        instance,
+        resource,
+        app,
+        route,
+        run: id,
+    }
+}
+
+#[tokio::test]
+async fn staged_routed_requests_lose_native_worker_admission_when_their_source_is_revoked() {
+    let mut observed = Vec::new();
+    for change in ["person", "reapprove", "route", "resource"] {
+        let QueuedRoutedRequest {
+            _root,
+            s,
+            instance,
+            resource,
+            app,
+            route,
+            run: id,
+        } = queued_routed_request().await;
+        let route_path = format!(
+            "/api/plugins/router/connections/{instance}/resources/workspace/{resource}/routes/{}",
+            text(&route, "id"),
+        );
+        match change {
+            "person" | "reapprove" => {
+                let response = common::send(
+                    &app,
+                    owner_request(
+                        "POST",
+                        &format!("{route_path}/people/alice"),
+                        json!({ "action": "remove", "revision": route["revision"] }),
+                    ),
+                )
+                .await;
+                assert_eq!(response.status(), StatusCode::OK);
+                let removed = common::read_json(response).await;
+                if change == "reapprove" {
+                    let fresh = deliver(&app, &instance, json!({
+                        "id": "new-access-request", "resource": resource,
+                        "author": { "id": "alice" }, "context": { "channel": "C1", "thread": "fresh-thread" },
+                        "body": { "text": "New permission request" },
+                    })).await;
+                    assert_eq!(fresh.1["status"], "requested");
+                    let response = common::send(
+                        &app,
+                        owner_request(
+                            "POST",
+                            &format!("{route_path}/people/alice"),
+                            json!({ "action": "approve", "revision": removed["revision"] }),
+                        ),
+                    )
+                    .await;
+                    assert_eq!(
+                        response.status(),
+                        StatusCode::OK,
+                        "{}",
+                        common::read_text(response).await
+                    );
+                }
+            }
+            "route" => {
+                let response = common::send(&app, owner_request("PUT", &route_path, json!({
+                    "name": "Engineering", "enabled": false, "match": { "channel": "C1" },
+                    "agentId": route["agentId"], "userIds": ["alice", "bob"], "revision": route["revision"],
+                }))).await;
+                assert_eq!(
+                    response.status(),
+                    StatusCode::OK,
+                    "{}",
+                    common::read_text(response).await
+                );
+            }
+            "resource" => {
+                let value = resources::get(&s, "router", &instance, "workspace", &resource)
+                    .await
+                    .unwrap();
+                let response = common::send(&app, owner_request("DELETE", &format!(
+                    "/api/plugins/router/connections/{instance}/resources/workspace/{resource}",
+                ), json!({ "revision": value.revision }))).await;
+                assert_eq!(
+                    response.status(),
+                    StatusCode::OK,
+                    "{}",
+                    common::read_text(response).await
+                );
+            }
+            _ => unreachable!(),
+        }
+        let result = s.worker.tick(&s).await;
+        let current = s.store.run(&id).await.unwrap();
+        observed.push((
+            change,
+            current["status"].clone(),
+            result.err().map(|e| e.message),
+        ));
+        assert!(s.worker.active.lock().await.is_empty());
+    }
+    assert!(
+        observed
+            .iter()
+            .all(|(_, status, error)| status == "cancelled" && error.is_none()),
+        "Source withdrawal did not settle staged native work: {observed:?}"
+    );
+}
+
+#[tokio::test]
+async fn native_source_is_retained_across_owner_lookup_and_temporary_failures() {
+    for change in ["person", "reapprove", "unavailable"] {
+        let QueuedRoutedRequest {
+            _root,
+            s,
+            instance,
+            resource,
+            app,
+            route,
+            run: id,
+        } = queued_routed_request().await;
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let first = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let (entering, releasing) = (entered.clone(), release.clone());
+        let unavailable = change == "unavailable";
+        let authority = axum::Router::new().route(
+            "/api/relay/00000000-0000-4000-8000-000000000055/task-authors",
+            axum::routing::get(move || {
+                let first = first.swap(false, std::sync::atomic::Ordering::SeqCst);
+                let (entered, release) = (entering.clone(), releasing.clone());
+                async move {
+                    if first {
+                        entered.notify_one();
+                        release.notified().await;
+                        if unavailable {
+                            return (
+                                StatusCode::SERVICE_UNAVAILABLE,
+                                "Synthetic authority unavailable",
+                            )
+                                .into_response();
+                        }
+                    }
+                    axum::Json(json!({
+                        "owner": {"account_id": "fixture-owner", "access_id": "fixture-owner"},
+                        "members": [],
+                    }))
+                    .into_response()
+                }
+            }),
+        );
+        let (origin, authority_server) = common::serve_locally(authority).await;
+        let identity_path = s.config.data_dir.join("installation-relay/identity.json");
+        let mut identity: Value =
+            serde_json::from_slice(&std::fs::read(&identity_path).unwrap()).unwrap();
+        identity["origin"] = json!(origin);
+        std::fs::write(&identity_path, serde_json::to_vec(&identity).unwrap()).unwrap();
+        let service = s.clone();
+        let ticking = tokio::spawn(async move { service.worker.tick(&service).await });
+        tokio::time::timeout(std::time::Duration::from_secs(10), entered.notified())
+            .await
+            .unwrap();
+        if !unavailable {
+            let route_path = format!(
+                "/api/plugins/router/connections/{instance}/resources/workspace/{resource}/routes/{}",
+                text(&route, "id"),
+            );
+            let response = common::send(
+                &app,
+                owner_request(
+                    "POST",
+                    &format!("{route_path}/people/alice"),
+                    json!({"action": "remove", "revision": route["revision"]}),
+                ),
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::OK);
+            let removed = common::read_json(response).await;
+            if change == "reapprove" {
+                let fresh = deliver(&app, &instance, json!({
+                    "id": "new-source-access", "resource": resource,
+                    "author": {"id": "alice"}, "context": {"channel": "C1", "thread": "new-source-thread"},
+                    "body": {"text": "A new access request"},
+                })).await;
+                assert_eq!(fresh.1["status"], "requested");
+                let response = common::send(
+                    &app,
+                    owner_request(
+                        "POST",
+                        &format!("{route_path}/people/alice"),
+                        json!({"action": "approve", "revision": removed["revision"]}),
+                    ),
+                )
+                .await;
+                assert_eq!(
+                    response.status(),
+                    StatusCode::OK,
+                    "{}",
+                    common::read_text(response).await
+                );
+            }
+        }
+        release.notify_one();
+        ticking.await.unwrap().unwrap();
+        let current = s.store.run(&id).await.unwrap();
+        assert_eq!(
+            current["status"],
+            if unavailable { "queued" } else { "cancelled" },
+            "{change}: {current}"
+        );
+        assert!(s.worker.active.lock().await.is_empty());
+        if unavailable {
+            assert_eq!(
+                current["accountWaitReason"],
+                "Waiting to verify the requester's source access."
+            );
+            s.worker.tick(&s).await.unwrap();
+            let resumed = s.store.run(&id).await.unwrap();
+            assert_eq!(resumed["status"], "queued");
+            assert_ne!(resumed["accountWaitReason"], current["accountWaitReason"]);
+        }
+        authority_server.abort();
+    }
 }

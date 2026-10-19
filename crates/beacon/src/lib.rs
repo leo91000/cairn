@@ -113,16 +113,14 @@ pub async fn router(
     sender: Arc<dyn EmailSender>,
     origin: String,
 ) -> Result<Router, sqlx_core::migrate::MigrateError> {
-    router_with_oauth(pool, sender, origin, OAuthProviders::default()).await
-}
-
-pub async fn router_with_oauth(
-    pool: PgPool,
-    sender: Arc<dyn EmailSender>,
-    origin: String,
-    oauth: OAuthProviders,
-) -> Result<Router, sqlx_core::migrate::MigrateError> {
-    router_with_relay(pool, sender, origin, oauth, Relay::default()).await
+    router_with_relay(
+        pool,
+        sender,
+        origin,
+        OAuthProviders::default(),
+        Relay::default(),
+    )
+    .await
 }
 
 /// Supply the relay handle used by installation-access changes to revoke live readers.
@@ -133,60 +131,18 @@ pub async fn router_with_relay(
     oauth: OAuthProviders,
     relay: Relay,
 ) -> Result<Router, sqlx_core::migrate::MigrateError> {
-    router_with_network(
-        pool,
-        sender,
-        origin,
-        oauth,
-        relay,
-        TrustedProxies::default(),
-    )
-    .await
-}
-
-/// Configure proxy trust explicitly; library/test callers default to no trusted peers.
-pub async fn router_with_network(
-    pool: PgPool,
-    sender: Arc<dyn EmailSender>,
-    origin: String,
-    oauth: OAuthProviders,
-    relay: Relay,
-    trusted_proxies: TrustedProxies,
-) -> Result<Router, sqlx_core::migrate::MigrateError> {
-    router_with_network_and_push(pool, sender, origin, oauth, relay, trusted_proxies, None).await
-}
-
-pub async fn router_with_push(
-    pool: PgPool,
-    sender: Arc<dyn EmailSender>,
-    origin: String,
-    oauth: OAuthProviders,
-    relay: Relay,
-    push: Option<Arc<dyn PushSender>>,
-) -> Result<Router, sqlx_core::migrate::MigrateError> {
-    router_with_network_and_push(
-        pool,
-        sender,
-        origin,
-        oauth,
-        relay,
-        TrustedProxies::default(),
-        push,
-    )
-    .await
-}
-
-pub async fn router_with_network_and_push(
-    pool: PgPool,
-    sender: Arc<dyn EmailSender>,
-    origin: String,
-    oauth: OAuthProviders,
-    relay: Relay,
-    trusted_proxies: TrustedProxies,
-    push: Option<Arc<dyn PushSender>>,
-) -> Result<Router, sqlx_core::migrate::MigrateError> {
     let hosts = InstallationHosts::disabled(&origin);
-    router_with_installation_hosts(pool, sender, hosts, oauth, relay, trusted_proxies, push).await
+
+    router_with_installation_hosts(
+        pool,
+        sender,
+        hosts,
+        oauth,
+        relay,
+        TrustedProxies::default(),
+        None,
+    )
+    .await
 }
 
 pub async fn router_with_installation_hosts(

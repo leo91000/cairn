@@ -3046,3 +3046,410 @@ async fn personal_discovery_rechecks_membership_owner_and_package_after_loading_
         authority_server.abort();
     }
 }
+
+#[tokio::test]
+async fn disconnect_during_refresh_authority_lookup_never_sends_the_retired_token() {
+    for disconnect in [false, true] {
+        let (_root, s, instance, resource, path, app) = configured_fixture(false, true).await;
+        let refreshes = Arc::new(AtomicUsize::new(0));
+        let reads = Arc::new(AtomicUsize::new(0));
+        let renewing = refreshes.clone();
+        let reading = reads.clone();
+        let provider = axum::Router::new()
+            .route(
+                "/token",
+                axum::routing::post(
+                    move |axum::Form(form): axum::Form<HashMap<String, String>>| {
+                        let refreshes = renewing.clone();
+                        async move {
+                            if form["grant_type"] == "refresh_token" {
+                                assert_eq!(form["refresh_token"], "retired-refresh-fixture");
+                                refreshes.fetch_add(1, Ordering::SeqCst);
+                                axum::Json(json!({
+                                    "access_token": "renewed-access-fixture",
+                                    "refresh_token": "next-refresh-fixture",
+                                    "expires_in": 43200,
+                                    "scope": "messages:read",
+                                    "authed_user": {"id": "U111"}
+                                }))
+                            } else {
+                                axum::Json(json!({
+                                    "access_token": "expiring-access-fixture",
+                                    "refresh_token": "retired-refresh-fixture",
+                                    "expires_in": 1,
+                                    "scope": "messages:read",
+                                    "team": {"id": "T111"},
+                                    "authed_user": {"id": "U111"}
+                                }))
+                            }
+                        }
+                    },
+                ),
+            )
+            .route(
+                "/messages",
+                axum::routing::get(move |headers: axum::http::HeaderMap| {
+                    let reads = reading.clone();
+                    async move {
+                        assert_eq!(headers["authorization"], "Bearer renewed-access-fixture");
+                        reads.fetch_add(1, Ordering::SeqCst);
+                        axum::Json(json!({"actor": "U111"}))
+                    }
+                }),
+            );
+        let (origin, server) = common::serve_locally(provider).await;
+        s.plugins.route_http_to(Some(origin));
+        let started = begin(&app, &path).await;
+        let callback = format!(
+            "/api/plugin-oauth/{instance}/callback?state={}&code=fixture",
+            text(&started, "state")
+        );
+        assert_eq!(
+            common::send(&app, request("GET", &callback, Value::Null, None))
+                .await
+                .status(),
+            StatusCode::OK
+        );
+        assert_eq!(
+            common::send(
+                &app,
+                request(
+                    "POST",
+                    &format!("{path}/finish"),
+                    json!({"state": started["state"]}),
+                    Some("fixture-owner")
+                )
+            )
+            .await
+            .status(),
+            StatusCode::OK
+        );
+        let grants = format!(
+            "/api/plugins/example/connections/{instance}/resources/workspace/{resource}/grants"
+        );
+        assert_eq!(
+            common::send(
+                &app,
+                request(
+                    "POST",
+                    &grants,
+                    json!({"agentId": MAIN_AGENT_ID, "profile": "read"}),
+                    Some("fixture-owner")
+                )
+            )
+            .await
+            .status(),
+            StatusCode::OK
+        );
+        let chat = s
+            .chat_create(json!({"agentId": MAIN_AGENT_ID}))
+            .await
+            .unwrap();
+        assert_eq!(
+            common::send(
+                &app,
+                request(
+                    "POST",
+                    &format!("/api/chats/{}/messages", text(&chat, "id")),
+                    json!({"id": cairn_installation::config::id(), "text": "Read as me"}),
+                    Some("fixture-owner")
+                )
+            )
+            .await
+            .status(),
+            StatusCode::OK
+        );
+        s.chat_tick(&HashSet::new()).await.unwrap();
+        let detail = s.chat_detail(text(&chat, "id")).await.unwrap();
+        let run = s
+            .store
+            .patch_run(
+                text(&detail["run"], "id"),
+                json!({"status": "running", "isolated": true}),
+            )
+            .await
+            .unwrap();
+        let configuration = s.mcps.run_configuration(&s, &run).await.unwrap();
+        let bearer = text(&configuration["env"], "CAIRN_MCP_RUN_TOKEN").to_owned();
+
+        // Hold a real authority lookup only after the refresh claim is durable.
+        // Other requests, including the owner's disconnect, remain independent.
+        let slot = format!(
+            "plugin-oauth:{resource}:bot:personal:{}",
+            cairn_installation::auth::hex_digest("fixture-owner")
+        );
+        let held = Arc::new(AtomicBool::new(false));
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let (service, holding, entering, releasing) =
+            (s.clone(), held.clone(), entered.clone(), release.clone());
+        let authority = axum::Router::new().route(
+            "/api/relay/00000000-0000-4000-8000-000000000055/task-authors",
+            axum::routing::get(move || {
+                let (service, slot, holding, entered, release) = (
+                    service.clone(),
+                    slot.clone(),
+                    holding.clone(),
+                    entering.clone(),
+                    releasing.clone(),
+                );
+                async move {
+                    let refreshing = service
+                        .vault
+                        .get(&slot)
+                        .await
+                        .unwrap()
+                        .is_some_and(|value| value["refreshing"] == true);
+                    if refreshing && !holding.swap(true, Ordering::SeqCst) {
+                        entered.notify_one();
+                        release.notified().await;
+                    }
+                    axum::Json(json!({
+                        "owner": {"account_id": "fixture-owner", "access_id": "fixture-owner"},
+                        "members": []
+                    }))
+                }
+            }),
+        );
+        let (origin, authority_server) = common::serve_locally(authority).await;
+        let identity_path = s.config.data_dir.join("installation-relay/identity.json");
+        let mut identity: Value =
+            serde_json::from_slice(&std::fs::read(&identity_path).unwrap()).unwrap();
+        identity["origin"] = json!(origin);
+        std::fs::write(identity_path, serde_json::to_vec(&identity).unwrap()).unwrap();
+        let calling = s.clone();
+        let mut pending = tokio::spawn(async move {
+            agents::call_tool(
+                &calling,
+                &bearer,
+                "example_read",
+                &json!({"resource": resource}),
+            )
+            .await
+        });
+        tokio::select! {
+            () = entered.notified() => {},
+            result = &mut pending => panic!("Ended before the claimed refresh lookup: {result:?}"),
+            () = tokio::time::sleep(std::time::Duration::from_secs(5)) => {
+                panic!("The refresh authority lookup was not reached")
+            },
+        }
+        if disconnect {
+            assert_eq!(
+                common::send(
+                    &app,
+                    request("DELETE", &path, Value::Null, Some("fixture-owner"))
+                )
+                .await
+                .status(),
+                StatusCode::OK
+            );
+        }
+        release.notify_one();
+        let result = pending.await.unwrap();
+        if disconnect {
+            assert!(result.is_err(), "A disconnected personal request succeeded");
+            assert_eq!(
+                refreshes.load(Ordering::SeqCst),
+                0,
+                "A disconnected personal refresh token reached the provider"
+            );
+            assert_eq!(reads.load(Ordering::SeqCst), 0);
+        } else {
+            assert_eq!(result.unwrap().unwrap()["actor"], "U111");
+            assert_eq!(
+                refreshes.load(Ordering::SeqCst),
+                1,
+                "The positive control did not exercise renewal"
+            );
+            assert_eq!(reads.load(Ordering::SeqCst), 1);
+        }
+        server.abort();
+        authority_server.abort();
+    }
+}
+
+#[tokio::test]
+async fn mcp_editing_a_queued_message_does_not_inherit_its_authors_personal_oauth() {
+    for edited in [false, true] {
+        let (_root, s, instance, resource, path, app) = configured_fixture(false, true).await;
+        let calls = Arc::new(AtomicUsize::new(0));
+        let reading = calls.clone();
+        let provider = axum::Router::new()
+            .route(
+                "/token",
+                axum::routing::post(|| async {
+                    axum::Json(json!({
+                        "access_token": "personal-mcp-edit-fixture",
+                        "scope": "messages:read",
+                        "team": {"id": "T111"},
+                        "authed_user": {"id": "U111"}
+                    }))
+                }),
+            )
+            .route(
+                "/messages",
+                axum::routing::get(move |headers: axum::http::HeaderMap| {
+                    let calls = reading.clone();
+                    async move {
+                        assert_eq!(headers["authorization"], "Bearer personal-mcp-edit-fixture");
+                        calls.fetch_add(1, Ordering::SeqCst);
+                        axum::Json(json!({"actor": "U111"}))
+                    }
+                }),
+            );
+        let (origin, server) = common::serve_locally(provider).await;
+        s.plugins.route_http_to(Some(origin));
+        let started = begin(&app, &path).await;
+        let callback = format!(
+            "/api/plugin-oauth/{instance}/callback?state={}&code=fixture",
+            text(&started, "state")
+        );
+        assert_eq!(
+            common::send(&app, request("GET", &callback, Value::Null, None))
+                .await
+                .status(),
+            StatusCode::OK
+        );
+        assert_eq!(
+            common::send(
+                &app,
+                request(
+                    "POST",
+                    &format!("{path}/finish"),
+                    json!({"state": started["state"]}),
+                    Some("fixture-owner")
+                )
+            )
+            .await
+            .status(),
+            StatusCode::OK
+        );
+        let grants = format!(
+            "/api/plugins/example/connections/{instance}/resources/workspace/{resource}/grants"
+        );
+        assert_eq!(
+            common::send(
+                &app,
+                request(
+                    "POST",
+                    &grants,
+                    json!({"agentId": MAIN_AGENT_ID, "profile": "read"}),
+                    Some("fixture-owner")
+                )
+            )
+            .await
+            .status(),
+            StatusCode::OK
+        );
+        let chat = s
+            .chat_create(json!({"agentId": MAIN_AGENT_ID}))
+            .await
+            .unwrap();
+        let message = cairn_installation::config::id();
+        assert_eq!(
+            common::send(
+                &app,
+                request(
+                    "POST",
+                    &format!("/api/chats/{}/messages", text(&chat, "id")),
+                    json!({"id": message, "text": "The person's original request"}),
+                    Some("fixture-owner")
+                )
+            )
+            .await
+            .status(),
+            StatusCode::OK
+        );
+        if edited {
+            let response = mcp_management_call(
+                &s,
+                "edit_chat_message",
+                json!({
+                    "chatId": chat["id"],
+                    "messageId": message,
+                    "message": {"text": "Changed through owner-authorized MCP"}
+                }),
+            )
+            .await;
+            assert_ne!(response["result"]["isError"], true, "{response}");
+            assert_eq!(
+                response["result"]["structuredContent"]["result"]["text"],
+                "Changed through owner-authorized MCP"
+            );
+        }
+        s.chat_tick(&HashSet::new()).await.unwrap();
+        let detail = s.chat_detail(text(&chat, "id")).await.unwrap();
+        let run = s
+            .store
+            .patch_run(
+                text(&detail["run"], "id"),
+                json!({"status": "running", "isolated": true}),
+            )
+            .await
+            .unwrap();
+        let config = s.mcps.run_configuration(&s, &run).await.unwrap();
+        let result = agents::call_tool(
+            &s,
+            text(&config["env"], "CAIRN_MCP_RUN_TOKEN"),
+            "example_read",
+            &json!({"resource": resource}),
+        )
+        .await;
+        server.abort();
+        if edited {
+            assert!(
+                result.is_err(),
+                "The MCP-edited request retained its original author's OAuth"
+            );
+            assert_eq!(calls.load(Ordering::SeqCst), 0);
+        } else {
+            assert_eq!(result.unwrap().unwrap()["actor"], "U111");
+            assert_eq!(
+                calls.load(Ordering::SeqCst),
+                1,
+                "The positive control did not read as the author"
+            );
+            let steering = cairn_installation::config::id();
+            let denied = mcp_management_call(
+                &s,
+                "send_chat_message",
+                json!({
+                    "chatId": chat["id"],
+                    "message": {
+                        "id": steering,
+                        "text": "Unattributed MCP steering",
+                        "mode": "steer"
+                    }
+                }),
+            )
+            .await;
+            assert_eq!(denied["result"]["isError"], true, "{denied}");
+            assert!(
+                s.chat_detail(text(&chat, "id")).await.unwrap()["messages"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .all(|message| message["id"] != steering)
+            );
+        }
+    }
+}
+
+async fn mcp_management_call(s: &Arc<Service>, name: &str, args: Value) -> Value {
+    let token = common::relay_fixture::grant(s, &["read", "manage", "run"]).await;
+    let endpoint = common::relay_fixture::router(s.clone()).await.unwrap();
+    let rpc = json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "tools/call",
+        "params": common::mcp_arguments(name, &args)
+    });
+    let request = common::request("POST", "/mcp")
+        .header("authorization", format!("Bearer {token}"))
+        .body(axum::body::Body::from(rpc.to_string()))
+        .unwrap();
+    let response = common::send(&endpoint, request).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    common::read_json(response).await
+}

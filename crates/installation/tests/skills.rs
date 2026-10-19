@@ -1512,7 +1512,7 @@ async fn owner_mcp_clients_read_and_edit_multi_file_skills() {
                     "jsonrpc": "2.0",
                     "id": 1,
                     "method": "tools/call",
-                    "params": { "name": name, "arguments": arguments },
+                    "params": common::mcp_arguments(name, &arguments),
                 })
                 .to_string(),
             ))
@@ -1521,7 +1521,9 @@ async fn owner_mcp_clients_read_and_edit_multi_file_skills() {
         async move {
             let response = common::send(&router, request).await;
             assert_eq!(response.status(), StatusCode::OK);
-            common::read_json(response).await["result"].clone()
+            let response = common::read_json(response).await;
+            assert!(response["error"].is_null(), "{response}");
+            response["result"].clone()
         }
     };
 

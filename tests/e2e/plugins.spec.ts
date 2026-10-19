@@ -1,5 +1,6 @@
 import type { Route } from '@playwright/test'
 import { Buffer } from 'node:buffer'
+import { createHmac } from 'node:crypto'
 import {
   expect,
   signIn,
@@ -182,7 +183,7 @@ test('TOML packages wait for review and connect through a generated form', async
   await signIn(page)
   await page.getByRole('button', { name: 'Install package' }).click()
   const install = page.getByRole('dialog', { name: 'Install a plugin package' })
-  await install.getByLabel('Package files').setInputFiles([
+  const files = (maxLength: number) => [
     {
       name: 'manifest.toml',
       mimeType: 'text/plain',
@@ -198,11 +199,17 @@ key = "team"
 title = "Team"
 type = "string"
 required = true
+maxLength = ${maxLength}
 `),
     },
     { name: 'main.luau', mimeType: 'text/plain', buffer: Buffer.from(source) },
     { name: 'notes.luau', mimeType: 'text/plain', buffer: Buffer.from(module) },
-  ])
+  ]
+  // Admission names the limit rather than accepting a declaration it would cap on save.
+  await install.getByLabel('Package files').setInputFiles(files(10001))
+  await install.getByRole('button', { name: 'Install', exact: true }).click()
+  await expect(install.getByRole('alert')).toHaveText('Plugin setting maxLength must be an integer from 1 to 10000 (text limit).')
+  await install.getByLabel('Package files').setInputFiles(files(10000))
   await install.getByRole('button', { name: 'Install', exact: true }).click()
 
   const review = page.getByRole('dialog', { name: 'Review Team notes' })
@@ -1119,6 +1126,42 @@ test('resource access refreshes uncertain writes without automatically repeating
   expect(writes).toBe(2)
 })
 
+test('stored versions that fail admission explain why and remain removable', async ({ page }) => {
+  await useRelayForHttpMocks(page)
+  const error = 'Plugin setting maxLength must be an integer from 1 to 10000 (text limit).'
+  await page.route('**/api/plugins', route => route.fulfill({
+    json: {
+      packages: [{
+        id: 'legacy',
+        builtin: false,
+        status: 'invalid',
+        active: null,
+        manifest: null,
+        versions: [{ version: '1.0.0', error }],
+      }],
+      capabilities: [],
+      connections: [],
+    },
+  }))
+  await page.goto(workspacePath('/plugins'))
+  await signIn(page)
+  const card = page.getByRole('button', { name: 'legacy · Review' })
+  await expect(card).toContainText('Invalid')
+  await expect(card).toContainText('Check the package files')
+  await card.click()
+  const review = page.getByRole('dialog', { name: 'Review legacy' })
+  await expect(review.getByText(`Version 1.0.0 can’t be used: ${error}`)).toBeVisible()
+  await expect(review.getByRole('button', { name: 'Uninstall' })).toBeVisible()
+  await expect(review.getByRole('button', { name: 'Approve and activate' })).toHaveCount(0)
+  await review.getByRole('button', { name: 'Close', exact: true }).click()
+
+  await page.goto(workspacePath('/plugins/legacy'))
+  const notice = page.getByRole('status').filter({ hasText: 'No version of this plugin can be used.' })
+  await expect(notice).toBeVisible()
+  await notice.getByRole('button', { name: 'Review' }).click()
+  await expect(page.getByRole('dialog', { name: 'Review legacy' }).getByText(`Version 1.0.0 can’t be used: ${error}`)).toBeVisible()
+})
+
 test('program releases can be checked, installed and restored independently of plugin accounts', async ({ page }) => {
   await useRelayForHttpMocks(page)
   const release = (version: string) => ({
@@ -1184,4 +1227,710 @@ test('program releases can be checked, installed and restored independently of p
   program.installed = installed('2.42.0')
   await expect(programs.getByText('op · Version 2.42.0')).toBeVisible({ timeout: 12000 })
   expect(actions).toEqual(['check', 'install', 'rollback'])
+})
+
+async function conversationRoutesFixture(workspace: import('./fixtures').Workspace, id: string) {
+  const agent = await workspace.api('/api/agents', 'POST', {
+    name: 'Route helper',
+    access: {
+      projects: [],
+      installation: false,
+      github: false,
+      mcps: [],
+      sandbox: 'read-only',
+    },
+  })
+  const installed = await workspace.api('/api/plugins/packages', 'POST', {
+    manifest: {
+      id,
+      name: 'Conversation routes',
+      description: 'Native resource delegation.',
+      version: '1',
+      apiVersion: 2,
+      capabilities: ['resources', 'conversations.submit', 'webhooks', 'inbound'],
+      settings: [{
+        key: 'signature',
+        title: 'Signature',
+        type: 'secret',
+        required: true,
+      }],
+      resources: [{
+        name: 'workspace',
+        title: 'Workspaces',
+        singular: 'Workspace',
+        delegation: true,
+      }],
+      webhooks: [{
+        name: 'events',
+        signature: {
+          secret: 'signature',
+          header: 'x-signature',
+          prefix: 'v0=',
+          template: 'v0:{{timestamp}}:{{body}}',
+          timestamp: { header: 'x-timestamp', maxAgeSeconds: 300 },
+        },
+      }],
+    },
+    source: `return {webhook = function(event)
+      local result = cairn.inbound.deliver(cairn.json.decode(event.body))
+      return {status = 200, body = cairn.json.encode(result)}
+    end}`,
+  })
+  await workspace.api(`/api/plugins/packages/${id}/approve`, 'POST', { version: '1', digest: installed.digest })
+  const instance = await workspace.api(`/api/plugins/${id}/connections`, 'POST', {
+    name: 'Application',
+    enabled: true,
+    secrets: { signature: 'synthetic-browser-route-signature' },
+  })
+  const root = `/api/plugins/${id}/connections/${instance.id}/resources/workspace`
+  const resource = await workspace.api(root, 'POST', { name: 'Engineering' })
+  return {
+    id,
+    agent,
+    instance,
+    resource,
+    path: `${root}/${resource.id}/routes`,
+  }
+}
+
+for (const kind of ['routes', 'grants'] as const) {
+  test(`resource ${kind} load every page before editing and discard a closed read`, async ({ page, workspace }) => {
+    const fixture = kind === 'routes'
+      ? await conversationRoutesFixture(workspace, 'routes-pages')
+      : await resourceAccessFixture(workspace, 'grants-pages')
+    const records = []
+    for (const name of ['First', 'Last']) {
+      records.push(await workspace.api(fixture.path, 'POST', kind === 'routes'
+        ? {
+            name,
+            enabled: true,
+            match: { channel: name },
+            agentId: fixture.agent.id,
+            userIds: ['alice'],
+          }
+        : { agentId: fixture.agent.id, profile: 'read', scopes: { channel: [name] } }))
+    }
+
+    records.sort((a, b) => a.id.localeCompare(b.id))
+    const last = records[1]
+    await useRelayForHttpMocks(page)
+    let release!: () => void
+    let started!: () => void
+    const gate = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    const secondPage = new Promise<void>((resolve) => {
+      started = resolve
+    })
+    let hold = true
+    await page.route(`**${fixture.path.replace('/api', '')}**`, async (route) => {
+      const request = route.request()
+      if (request.method() !== 'GET' || !new URL(request.url()).pathname.endsWith(`/${kind}`))
+        return route.continue()
+      const cursor = new URL(request.url()).searchParams.get('cursor')
+      const response = await route.fetch()
+      const saved = (await response.json()).items.sort((a: { id: string }, b: { id: string }) => a.id.localeCompare(b.id)).filter((item: { id: string }) => !cursor || item.id > cursor)
+      if (cursor && hold) {
+        started()
+        await gate
+      }
+
+      if (request.failure())
+        return
+      await route.fulfill({ response, json: { items: saved.slice(0, 1), nextCursor: saved.length > 1 ? saved[0].id : null } })
+    })
+    try {
+      await page.goto(workspacePath(`/plugins/${fixture.id}`))
+      await signIn(page)
+      const resource = page.getByRole('article', { name: 'Engineering', exact: true })
+      const action = kind === 'routes' ? 'Conversation routes' : 'Agent access'
+      const dialog = page.getByRole('dialog', { name: `${action} · Engineering`, exact: true })
+      await resource.getByRole('button', { name: action, exact: true }).click()
+      await secondPage
+      await expect(dialog.getByRole('button', { name: /Loading (routes|rules)…/ })).toBeDisabled()
+      await dialog.getByRole('button', { name: 'Close dialog', exact: true }).click()
+      hold = false
+      release()
+      await expect(dialog).toHaveCount(0)
+      await resource.getByRole('button', { name: action, exact: true }).click()
+      const article = kind === 'routes'
+        ? dialog.getByRole('article', { name: last.name, exact: true })
+        : dialog.getByRole('article', { name: 'Access rule', exact: true }).filter({ hasText: `channel: ${last.scopes.channel[0]}` })
+      await expect(article).toBeVisible()
+      await article.getByRole('button', { name: kind === 'routes' ? 'Delete route' : 'Revoke rule', exact: true }).click()
+      await article.getByRole('button', { name: kind === 'routes' ? 'Confirm delete' : 'Confirm revoke', exact: true }).click()
+      await expect(article).toHaveCount(0)
+      await expect(dialog.getByRole('button', { name: kind === 'routes' ? 'Add route' : 'Add access rule', exact: true })).toBeEnabled()
+      expect((await workspace.api(fixture.path)).items.map((item: { id: string }) => item.id)).not.toContain(last.id)
+    }
+    finally {
+      hold = false
+      release()
+    }
+  })
+}
+
+test('resource routes preserve exact conditions, require explicit grants and edit paused overrides', async ({ page, workspace }) => {
+  test.setTimeout(90000)
+  const { id, agent, path } = await conversationRoutesFixture(workspace, 'routes-ui')
+  await page.goto(workspacePath(`/plugins/${id}`))
+  await signIn(page)
+  const resource = page.getByRole('article', { name: 'Engineering', exact: true })
+  await resource.getByRole('button', { name: 'Conversation routes', exact: true }).click()
+  const routes = page.getByRole('dialog', { name: 'Conversation routes · Engineering', exact: true })
+  await expect(routes.getByText('No routes yet. No one can start a conversation through this resource.', { exact: true })).toBeVisible()
+  await routes.getByRole('button', { name: 'Add route', exact: true }).click()
+  await routes.getByLabel('Route name', { exact: true }).fill('Support')
+  await expect(routes.getByRole('combobox', { name: 'Agent', exact: true })).toHaveValue('')
+  await expect(routes.getByRole('button', { name: 'Save route', exact: true })).toBeDisabled()
+  await expect(routes.getByRole('combobox', { name: 'Agent', exact: true })).toBeEnabled()
+  await routes.getByRole('combobox', { name: 'Agent', exact: true }).selectOption(agent.id)
+  await routes.getByRole('combobox', { name: 'Who may participate', exact: true }).selectOption('allowlist')
+  await routes.getByLabel('Allowed person IDs', { exact: true }).fill('U1\nU2')
+  await expect(routes.getByRole('button', { name: 'Save route', exact: true })).toBeDisabled()
+  await routes.getByRole('button', { name: 'Add condition', exact: true }).click()
+  await routes.getByLabel('Condition 1 key', { exact: true }).fill('constructor')
+  await routes.getByLabel('Condition 1 value', { exact: true }).fill('C1')
+  await expect(routes.getByRole('button', { name: 'Save route', exact: true })).toBeEnabled()
+  await routes.getByRole('button', { name: 'Save route', exact: true }).click()
+  const route = routes.getByRole('article', { name: 'Support', exact: true })
+  await expect(route).toBeVisible()
+  const saved = (await workspace.api(path)).items
+  expect(saved).toHaveLength(1)
+  expect(saved[0]).toMatchObject({
+    name: 'Support',
+    enabled: true,
+    agentId: agent.id,
+    userIds: ['U1', 'U2'],
+    accessMode: 'allowlist',
+    match: { constructor: 'C1' },
+    maxMessagesPerHour: 20,
+    maxPerPersonPerHour: 5,
+  })
+  await route.getByRole('button', { name: 'Edit route', exact: true }).click()
+  await expect(routes.getByLabel('Condition 1 key', { exact: true })).toHaveValue('constructor')
+  await expect(routes.getByLabel('Condition 1 value', { exact: true })).toHaveValue('C1')
+  await routes.getByRole('checkbox', { name: 'Enabled', exact: true }).uncheck()
+  await expect(routes.getByRole('button', { name: 'Save route', exact: true })).toBeEnabled()
+  await routes.getByRole('button', { name: 'Save route', exact: true }).click()
+  await expect(route.getByText('Support · Paused', { exact: true })).toBeVisible()
+  const changed = (await workspace.api(path)).items[0]
+  expect(changed.match).toEqual({ constructor: 'C1' })
+  expect(changed.enabled).toBe(false)
+  const viewport = page.viewportSize()
+  await page.setViewportSize({ width: 390, height: 844 })
+  await expect(route.getByText('Support · Paused', { exact: true })).toBeVisible()
+  await page.screenshot({ path: test.info().outputPath('resource-routes-phone.png'), animations: 'disabled' })
+  if (viewport)
+    await page.setViewportSize(viewport)
+  await route.getByRole('button', { name: 'Delete route', exact: true }).click()
+  await expect(route.getByRole('alert')).toContainText('A broader route may then match its sources.')
+  await route.getByRole('button', { name: 'Confirm delete', exact: true }).click()
+  await expect(routes.getByText('No routes yet. No one can start a conversation through this resource.', { exact: true })).toBeVisible()
+  expect((await workspace.api(path)).items).toHaveLength(0)
+})
+
+test('resource routes refresh an uncertain creation without repeating the write', async ({ page, workspace }) => {
+  test.setTimeout(90000)
+  const { id, agent, path } = await conversationRoutesFixture(workspace, 'routes-uncertain')
+  await useRelayForHttpMocks(page)
+  let writes = 0
+  await page.route(`**${path.replace('/api', '')}`, async (route) => {
+    if (route.request().method() !== 'POST')
+      return route.continue()
+    writes++
+    const response = await route.fetch()
+    expect(response.ok()).toBe(true)
+    return route.abort('failed')
+  })
+  await page.goto(workspacePath(`/plugins/${id}`))
+  await signIn(page)
+  await page.getByRole('article', { name: 'Engineering', exact: true }).getByRole('button', { name: 'Conversation routes', exact: true }).click()
+  const routes = page.getByRole('dialog', { name: 'Conversation routes · Engineering', exact: true })
+  await routes.getByRole('button', { name: 'Add route', exact: true }).click()
+  await routes.getByLabel('Route name', { exact: true }).fill('Default')
+  await expect(routes.getByRole('combobox', { name: 'Agent', exact: true })).toBeEnabled()
+  await routes.getByRole('combobox', { name: 'Agent', exact: true }).selectOption(agent.id)
+  await routes.getByRole('checkbox', { name: 'Match all sources in this resource', exact: true }).check()
+  await routes.getByRole('button', { name: 'Save route', exact: true }).click()
+  await expect(routes.getByRole('alert')).toContainText('Refresh routes before making another change.')
+  expect(writes).toBe(1)
+  expect((await workspace.api(path)).items).toHaveLength(1)
+  await expect(routes.getByRole('button', { name: 'Add route', exact: true })).toHaveCount(0)
+  await routes.getByRole('button', { name: 'Refresh routes', exact: true }).click()
+  await expect(routes.getByRole('article', { name: 'Default', exact: true })).toBeVisible()
+  expect(writes).toBe(1)
+})
+
+test('resource routes manage people and requests only on their selected route', async ({ page, workspace }) => {
+  test.setTimeout(90000)
+  const {
+    id,
+    instance,
+    resource,
+    agent,
+    path,
+  } = await conversationRoutesFixture(workspace, 'routes-people')
+  const support = await workspace.api(path, 'POST', {
+    name: 'Support',
+    enabled: true,
+    match: { channel: 'C1' },
+    agentId: agent.id,
+    accessMode: 'requests',
+  })
+  const operations = await workspace.api(path, 'POST', {
+    name: 'Operations',
+    enabled: true,
+    match: { channel: 'C2' },
+    agentId: agent.id,
+    accessMode: 'requests',
+  })
+  for (const [channel, person] of [['C1', 'U1'], ['C2', 'U2']]) {
+    const body = JSON.stringify({
+      id: `request-${person}`,
+      resource: resource.id,
+      author: { id: person, name: `Person ${person}` },
+      context: { channel, thread: person },
+      body: { text: 'Unapproved content must stay outside the request list' },
+    })
+    const timestamp = Math.floor(Date.now() / 1000).toString()
+    const signature = createHmac('sha256', 'synthetic-browser-route-signature').update(`v0:${timestamp}:${body}`).digest('hex')
+    const response = await fetch(`${workspace.installationUrl}/api/plugin-webhooks/${instance.id}/events`, {
+      method: 'POST',
+      body,
+      headers: { 'content-type': 'application/json', 'x-signature': `v0=${signature}`, 'x-timestamp': timestamp },
+    })
+    expect(response.ok).toBe(true)
+    expect((await response.json()).status).toBe('requested')
+  }
+
+  await page.goto(workspacePath(`/plugins/${id}`))
+  await signIn(page)
+  await page.getByRole('article', { name: 'Engineering', exact: true }).getByRole('button', { name: 'Conversation routes', exact: true }).click()
+  const routes = page.getByRole('dialog', { name: 'Conversation routes · Engineering', exact: true })
+  const supportRow = routes.getByRole('article', { name: 'Support', exact: true })
+  await supportRow.getByRole('button', { name: 'People and requests', exact: true }).click()
+  await expect(routes.getByText('Person U1', { exact: true })).toBeVisible()
+  await expect(routes.getByText('Person U2', { exact: true })).toHaveCount(0)
+  await expect(routes.getByText('Unapproved content must stay outside the request list', { exact: true })).toHaveCount(0)
+  await routes.getByRole('button', { name: 'Approve U1', exact: true }).click()
+  await expect(supportRow).toBeVisible()
+  expect((await workspace.api(path)).items.find((item: any) => item.id === support.id).userIds).toEqual(['U1'])
+  expect((await workspace.api(`${path}/${support.id}/requests`)).items).toHaveLength(0)
+  expect((await workspace.api(`${path}/${operations.id}/requests`)).items).toHaveLength(1)
+  await supportRow.getByRole('button', { name: 'People and requests', exact: true }).click()
+  await routes.getByRole('button', { name: 'Remove U1', exact: true }).click()
+  await expect(supportRow).toBeVisible()
+  expect((await workspace.api(path)).items.find((item: any) => item.id === support.id).userIds).toEqual([])
+  await routes.getByRole('article', { name: 'Operations', exact: true }).getByRole('button', { name: 'People and requests', exact: true }).click()
+  await expect(routes.getByText('Person U2', { exact: true })).toBeVisible()
+  await routes.getByRole('button', { name: 'Deny U2', exact: true }).click()
+  await expect(routes.getByRole('article', { name: 'Operations', exact: true })).toBeVisible()
+  expect((await workspace.api(`${path}/${operations.id}/requests`)).items[0].status).toBe('denied')
+})
+
+test('a stale route editor cannot restore a participant removed by another owner action', async ({ page, workspace }) => {
+  test.setTimeout(90000)
+  const { id, agent, path } = await conversationRoutesFixture(workspace, 'routes-stale')
+  const saved = await workspace.api(path, 'POST', {
+    name: 'Support',
+    enabled: true,
+    match: { channel: 'C1' },
+    agentId: agent.id,
+    accessMode: 'allowlist',
+    userIds: ['U1'],
+  })
+  await useRelayForHttpMocks(page)
+  let writes = 0
+  await page.route(`**${path.replace('/api', '')}/${saved.id}`, (route) => {
+    if (route.request().method() === 'PUT')
+      writes++
+    return route.continue()
+  })
+  await page.goto(workspacePath(`/plugins/${id}`))
+  await signIn(page)
+  await page.getByRole('article', { name: 'Engineering', exact: true }).getByRole('button', { name: 'Conversation routes', exact: true }).click()
+  const routes = page.getByRole('dialog', { name: 'Conversation routes · Engineering', exact: true })
+  const row = routes.getByRole('article', { name: 'Support', exact: true })
+  await row.getByRole('button', { name: 'Edit route', exact: true }).click()
+  await expect(routes.getByLabel('Allowed person IDs', { exact: true })).toHaveValue('U1')
+  await workspace.api(`${path}/${saved.id}/people/U1`, 'POST', { action: 'remove', revision: saved.revision })
+  await routes.getByLabel('Route name', { exact: true }).fill('Stale change')
+  await expect(routes.getByRole('button', { name: 'Save route', exact: true })).toBeEnabled()
+  await routes.getByRole('button', { name: 'Save route', exact: true }).click()
+  await expect(routes.getByRole('alert')).toContainText('Refresh routes before making another change.')
+  expect(writes).toBe(1)
+  let current = (await workspace.api(path)).items[0]
+  expect(current.name).toBe('Support')
+  expect(current.userIds).toEqual([])
+  await routes.getByRole('button', { name: 'Refresh routes', exact: true }).click()
+  await row.getByRole('button', { name: 'Edit route', exact: true }).click()
+  await expect(routes.getByLabel('Allowed person IDs', { exact: true })).toHaveValue('')
+  expect(writes).toBe(1)
+  current = (await workspace.api(path)).items[0]
+  expect(current.userIds).toEqual([])
+})
+
+test('instance and panel forms share defaults, clearing, hidden values and secret rules', async ({ page }) => {
+  await useRelayForHttpMocks(page)
+  const fields = [
+    {
+      key: 'title',
+      title: 'Title',
+      type: 'string',
+      default: 'Default title',
+    },
+    {
+      key: 'count',
+      title: 'Count',
+      type: 'number',
+      default: 0,
+    },
+    {
+      key: 'enabled',
+      title: 'Enabled',
+      type: 'boolean',
+      default: true,
+    },
+    {
+      key: 'scopes',
+      title: 'Scopes',
+      type: 'multiselect',
+      options: [{ value: 'read', label: 'Read' }],
+      default: ['read'],
+    },
+    {
+      key: 'derived',
+      title: 'Derived',
+      type: 'string',
+      hidden: true,
+      default: ' hidden ',
+    },
+    { key: 'password', title: 'Password', type: 'secret' },
+    { key: 'constructor', title: 'Constructor secret', type: 'secret' },
+    {
+      key: 'region',
+      title: 'Region',
+      type: 'select',
+      default: ' eu ',
+      options: [{ value: ' eu ', label: 'Europe' }],
+    },
+  ]
+  const manifest = {
+    id: 'forms',
+    name: 'Form examples',
+    version: '1.0.0',
+    apiVersion: 2,
+    description: 'Synthetic form fixture.',
+    capabilities: [],
+    settings: fields,
+    instanceView: true,
+    instanceForm: true,
+  }
+  const connection = {
+    id: 'example',
+    pluginId: 'forms',
+    name: 'Example',
+    settings: {},
+    secretKeys: ['password'],
+    agentIds: [],
+    agentId: '',
+    accessMode: 'requests',
+    userIds: [],
+    people: [],
+    requests: [],
+    enabled: true,
+    status: { state: 'connected' },
+  }
+  const panelNode = (values = {}) => ({
+    type: 'form',
+    fields,
+    values,
+    submit: { label: 'Apply values', action: 'apply' },
+  })
+  await page.route('**/api/plugins', route => route.fulfill({
+    json: {
+      packages: [{
+        id: 'forms',
+        builtin: false,
+        status: 'active',
+        active: '1.0.0',
+        manifest,
+        versions: [],
+      }],
+      capabilities: [],
+      connections: [connection],
+    },
+  }))
+  const initialPanelValues = { password: 'synthetic_never_prefill', unknown: 'drop' }
+  await page.route('**/api/plugins/forms/connections/example/view', route => route.fulfill({
+    json: { view: [panelNode(initialPanelValues)] },
+  }))
+  const actions: Record<string, any>[] = []
+  await page.route('**/api/plugins/forms/connections/example/actions', async (route) => {
+    actions.push(route.request().postDataJSON().values)
+    const result = actions.length === 2
+      ? { view: [panelNode(initialPanelValues)] }
+      : actions.length === 3
+        ? { view: [panelNode({ title: 'Replacement title', count: 7 })] }
+        : {}
+    await route.fulfill({ json: result })
+  })
+  const completions: Record<string, any>[] = []
+  await page.route('**/api/plugins/forms/form', async (route) => {
+    completions.push(route.request().postDataJSON())
+    await route.fulfill({
+      json: {
+        options: {},
+        values: { derived: ' completed ', unknown: 'drop' },
+        errors: {},
+        view: [{ type: 'text', text: 'Synthetic completion applied' }],
+      },
+    })
+  })
+  const saves: Record<string, any>[] = []
+  await page.route('**/api/plugins/forms/connections/example', async (route) => {
+    saves.push(route.request().postDataJSON())
+    await route.fulfill({ json: {} })
+  })
+  await page.goto(workspacePath('/plugins/forms'))
+  await signIn(page)
+  const panel = page.getByRole('region', { name: 'Example panel' })
+  await expect(panel.getByLabel('Title', { exact: true })).toHaveValue('Default title')
+  await expect(panel.getByLabel('Count', { exact: true })).toHaveValue('0')
+  await expect(panel.getByLabel('Password', { exact: true })).toHaveValue('')
+  await expect(panel.getByLabel('Constructor secret', { exact: true })).toHaveValue('')
+  await expect(panel.getByRole('combobox', { name: 'Region', exact: true })).toHaveValue(' eu ')
+  await expect(panel.getByLabel('Derived', { exact: true })).toHaveCount(0)
+  await panel.getByRole('button', { name: 'Apply values' }).click()
+  await expect.poll(() => actions.length).toBe(1)
+  expect(actions[0]).toEqual({
+    title: 'Default title',
+    count: 0,
+    enabled: true,
+    scopes: ['read'],
+    derived: 'hidden',
+    region: ' eu ',
+  })
+  await panel.getByLabel('Title', { exact: true }).fill('   ')
+  await panel.getByLabel('Count', { exact: true }).fill('3.5')
+  await panel.getByLabel('Enabled', { exact: true }).uncheck()
+  await panel.getByLabel('Read', { exact: true }).uncheck()
+  await panel.getByLabel('Password', { exact: true }).fill(' synthetic_panel_secret ')
+  await panel.getByLabel('Constructor secret', { exact: true }).fill(' synthetic_constructor_secret ')
+  await panel.getByRole('button', { name: 'Apply values' }).click()
+  await expect.poll(() => actions.length).toBe(2)
+  expect(actions[1]).toEqual({
+    count: 3.5,
+    enabled: false,
+    scopes: [],
+    derived: 'hidden',
+    region: ' eu ',
+    password: ' synthetic_panel_secret ',
+    constructor: ' synthetic_constructor_secret ',
+  })
+  await expect(panel.getByLabel('Password', { exact: true })).toHaveValue('')
+  await expect(panel.getByLabel('Constructor secret', { exact: true })).toHaveValue('')
+  await expect(panel.getByLabel('Title', { exact: true })).toHaveValue('   ')
+  await expect(panel.getByLabel('Count', { exact: true })).toHaveValue('3.5')
+  await panel.getByRole('button', { name: 'Apply values' }).click()
+  await expect.poll(() => actions.length).toBe(3)
+  expect(actions[2]).toEqual({
+    count: 3.5,
+    enabled: false,
+    scopes: [],
+    derived: 'hidden',
+    region: ' eu ',
+  })
+  await expect(panel.getByLabel('Title', { exact: true })).toHaveValue('Replacement title')
+  await expect(panel.getByLabel('Count', { exact: true })).toHaveValue('7')
+
+  await page.getByRole('button', { name: 'Edit Example', exact: true }).click()
+  const editor = page.getByRole('dialog', { name: 'Edit Example' })
+  await expect.poll(() => completions.length).toBe(1)
+  expect(completions[0].settings).toEqual(actions[0])
+  expect(completions[0].secrets).toEqual({})
+  await expect(editor.getByLabel('Title', { exact: true })).toHaveValue('Default title')
+  await expect(editor.getByLabel('Password', { exact: true })).toHaveValue('')
+  await expect(editor.getByLabel('Constructor secret', { exact: true })).toHaveValue('')
+  // The completion's `errors: {}` has no entry for a field named constructor.
+  await expect(editor.getByText('Synthetic completion applied')).toBeVisible()
+  await expect(editor.getByLabel('Constructor secret', { exact: true })).not.toHaveAttribute('aria-describedby')
+  await editor.getByLabel('Title', { exact: true }).fill('')
+  await editor.getByLabel('Count', { exact: true }).fill('')
+  await editor.getByLabel('Password', { exact: true }).fill('   ')
+  await editor.getByRole('button', { name: 'Save instance', exact: true }).click()
+  await expect.poll(() => saves.length).toBe(1)
+  expect(saves[0].settings).toEqual({
+    enabled: true,
+    scopes: ['read'],
+    derived: 'completed',
+    region: ' eu ',
+  })
+  expect(saves[0].secrets).toEqual({})
+})
+
+test('resource forms share native defaults, exact choices and secret normalization', async ({ page, workspace }) => {
+  test.setTimeout(90000)
+  // The payload assertion observes HTTP; direct calls use data-channel frames.
+  await useRelayForHttpMocks(page)
+
+  const manifest = {
+    id: 'resource-form-values',
+    name: 'Resource form values',
+    description: 'Synthetic resource form boundary fixture.',
+    version: '1',
+    apiVersion: 2,
+    capabilities: ['resources'],
+    resources: [{
+      name: 'workspace',
+      title: 'Workspaces',
+      singular: 'Workspace',
+      settings: [
+        {
+          key: 'constructor',
+          title: 'Constructor value',
+          type: 'string',
+          default: 'Declared default',
+        },
+        { key: 'title', title: 'Optional title', type: 'string' },
+        {
+          key: 'count',
+          title: 'Count',
+          type: 'number',
+          default: 0,
+        },
+        {
+          key: 'enabled',
+          title: 'Feature enabled',
+          type: 'boolean',
+          default: true,
+        },
+        {
+          key: 'scopes',
+          title: 'Scopes',
+          type: 'multiselect',
+          default: ['read'],
+          options: [{ value: 'read', label: 'Read' }],
+        },
+        {
+          key: 'region',
+          title: 'Region',
+          type: 'select',
+          default: ' eu ',
+          options: [{ value: ' eu ', label: 'Europe' }],
+        },
+        { key: 'password', title: 'Workspace secret', type: 'secret' },
+      ],
+    }],
+  }
+  const installed = await workspace.api('/api/plugins/packages', 'POST', { manifest, source: 'return {}' })
+  await workspace.api('/api/plugins/packages/resource-form-values/approve', 'POST', { version: '1', digest: installed.digest })
+  const connection = await workspace.api('/api/plugins/resource-form-values/connections', 'POST', {
+    name: 'Form service',
+    enabled: true,
+    settings: {},
+  })
+  await page.goto(workspacePath('/plugins/resource-form-values'))
+  await signIn(page)
+  const instance = page.getByRole('article', { name: 'Form service', exact: true })
+  await instance.getByRole('button', { name: 'Add workspace', exact: true }).click()
+  const form = instance.getByRole('form', { name: 'New workspace', exact: true })
+  await expect(form.getByLabel('Constructor value', { exact: true })).toHaveValue('Declared default')
+  await expect(form.getByLabel('Count', { exact: true })).toHaveValue('0')
+  await expect(form.getByRole('combobox', { name: 'Region', exact: true })).toHaveValue(' eu ')
+  await expect(form.getByLabel('Workspace secret', { exact: true })).toHaveValue('')
+  await form.getByLabel('Name', { exact: true }).fill('Engineering')
+  await form.getByLabel('Optional title', { exact: true }).fill('   ')
+  await form.getByLabel('Count', { exact: true }).fill('3.5')
+  await form.getByLabel('Feature enabled', { exact: true }).uncheck()
+  await form.getByLabel('Read', { exact: true }).uncheck()
+  await form.getByLabel('Workspace secret', { exact: true }).fill(' \uFEFFsynthetic-resource-secret\uFEFF ')
+  const requested = page.waitForRequest(request => request.method() === 'POST' && request.url().endsWith('/resources/workspace'))
+  await form.getByRole('button', { name: 'Save workspace', exact: true }).click()
+  const request = await requested
+  expect(request.postDataJSON().settings).toEqual({
+    constructor: 'Declared default',
+    count: 3.5,
+    enabled: false,
+    scopes: [],
+    region: ' eu ',
+  })
+  expect(request.postDataJSON().secrets).toEqual({ password: '\uFEFFsynthetic-resource-secret\uFEFF' })
+  await expect(instance.getByRole('article', { name: 'Engineering', exact: true })).toBeVisible()
+  const saved = await workspace.api(`/api/plugins/resource-form-values/connections/${connection.id}/resources/workspace`)
+  expect(saved.items[0].settings).toEqual({
+    constructor: 'Declared default',
+    count: 3.5,
+    enabled: false,
+    scopes: [],
+    region: ' eu ',
+  })
+  expect(saved.items[0].secretKeys).toEqual(['password'])
+})
+
+test('setup drafts load every page before resuming and discarding the last draft', async ({ page, workspace }) => {
+  const manifest = {
+    id: 'draft-pages',
+    name: 'Draft pages',
+    version: '1',
+    apiVersion: 2,
+    capabilities: [],
+    instanceForm: true,
+    settings: [{ key: 'label', title: 'Label', type: 'string' }],
+  }
+  const installed = await workspace.api('/api/plugins/packages', 'POST', {
+    manifest,
+    source: 'return {form = function() return {} end}',
+  })
+  await workspace.api('/api/plugins/packages/draft-pages/approve', 'POST', { version: '1', digest: installed.digest })
+  for (const label of ['First', 'Second'])
+    await workspace.api('/api/plugins/draft-pages/setup-drafts', 'POST', { name: `${label} setup`, settings: { label } })
+  const saved = (await workspace.api('/api/plugins/draft-pages/setup-drafts')).items
+  const last = saved.at(-1)
+  let entered!: () => void
+  let release!: () => void
+  const secondPage = new Promise<void>((resolve) => {
+    entered = resolve
+  })
+  const held = new Promise<void>((resolve) => {
+    release = resolve
+  })
+  await useRelayForHttpMocks(page)
+  await page.route('**/plugins/draft-pages/setup-drafts*', async (route) => {
+    const url = new URL(route.request().url())
+    if (route.request().method() !== 'GET' || !url.pathname.endsWith('/setup-drafts')) {
+      await route.continue()
+      return
+    }
+
+    const response = await route.fetch()
+    const value = await response.json()
+    if (url.searchParams.has('cursor')) {
+      entered()
+      await held
+    }
+
+    await route.fulfill({
+      response,
+      json: {
+        ...value,
+        items: value.items.slice(0, 1),
+        nextCursor: value.items.length > 1 ? value.items[0].id : null,
+      },
+    })
+  })
+  await page.goto(workspacePath('/plugins/draft-pages'))
+  await signIn(page)
+  await secondPage
+  await expect(page.getByRole('button', { name: `Continue ${last.name}`, exact: true })).not.toBeVisible()
+  release()
+  await page.getByRole('button', { name: `Continue ${last.name}`, exact: true }).click()
+  const setup = page.getByRole('dialog', { name: 'Set up Draft pages' })
+  await expect(setup.getByLabel('Label', { exact: true })).toHaveValue(last.settings.label)
+  await setup.getByRole('button', { name: 'Close dialog' }).click()
+  await page.getByRole('button', { name: `Discard ${last.name}`, exact: true }).click()
+  await page.getByRole('dialog', { name: `Discard ${last.name}?` }).getByRole('button', { name: 'Discard setup', exact: true }).click()
+  await expect(page.getByRole('button', { name: `Continue ${last.name}`, exact: true })).not.toBeVisible()
+  expect((await workspace.api('/api/plugins/draft-pages/setup-drafts')).items.map((item: any) => item.id)).not.toContain(last.id)
 })

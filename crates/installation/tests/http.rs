@@ -844,11 +844,19 @@ async fn mixed_peer_limits_report_the_first_refusal_once_per_window() {
         }
     }
 
+    // tracing-core 0.1.36's Rebuilder::JustOne uses the registering thread's dispatcher.
+    // Keep a second dispatcher alive so an uncaptured request cannot cache Interest::never
+    // for the warning while our scoped subscriber is registered on another context.
+    let _callsite_registration =
+        tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
+
     // Generic peer traffic and gateway traffic retain their existing shared bucket.
     // Its selected maximum depends on the path (300 or 600).
     for gateway_first in [true, false] {
         let (_root, _fixture, service) = app().await;
-        let app = cairn_installation::http::router(service).await.unwrap();
+        let app = cairn_installation::http::router(service.clone())
+            .await
+            .unwrap();
         let gateway = format!("/mcp-gateway/{}", id());
         let bytes = Arc::new(Mutex::new(Vec::new()));
         let captured = Logs(bytes.clone());
@@ -857,6 +865,31 @@ async fn mixed_peer_limits_report_the_first_refusal_once_per_window() {
             .without_time()
             .with_writer(move || captured.clone())
             .finish();
+        let subscriber = tracing::Dispatch::new(subscriber);
+
+        // Another request can first register the warning outside our capture scope.
+        // Use independent rate-limit state to force that ordering before this test's refusals.
+        let uncaptured = cairn_installation::http::router(service).await.unwrap();
+        for _ in 0..300 {
+            assert_eq!(
+                send(
+                    &uncaptured,
+                    json_request("GET", "/health").body(Body::empty()).unwrap(),
+                )
+                .await
+                .status(),
+                StatusCode::OK,
+            );
+        }
+        assert_eq!(
+            send(
+                &uncaptured,
+                json_request("GET", "/health").body(Body::empty()).unwrap(),
+            )
+            .await
+            .status(),
+            StatusCode::TOO_MANY_REQUESTS,
+        );
 
         async {
             let first = if gateway_first { &gateway } else { "/health" };

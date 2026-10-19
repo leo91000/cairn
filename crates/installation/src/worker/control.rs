@@ -53,6 +53,41 @@ impl Worker {
         Ok(())
     }
 
+    /// Pauses queued follow-ups and stops the chat's current turn together.
+    pub(crate) async fn stop_chat_authorized<F>(
+        &self,
+        s: &Service,
+        id: &str,
+        authorize: F,
+    ) -> Result<Value>
+    where
+        F: FnOnce(&Db<'_>) -> Result<()> + Send + 'static,
+    {
+        let active = self.active.lock().await;
+        let executing: std::collections::HashSet<_> = active.keys().cloned().collect();
+        let id = id.to_owned();
+        let chat = s
+            .store
+            .transaction(move |db| {
+                authorize(db)?;
+                let chat = crate::chats::pause_in(db, &id, true)?;
+                if let Some(run_id) = chat["runId"].as_str() {
+                    crate::chats::sleep::cancel_for_run(db, run_id)?;
+                    let run = required(db.run(run_id)?, "Run not found")?;
+                    if RunStatus::of(&run).is_some_and(RunStatus::is_active) {
+                        request_cancel(db, run_id, executing.contains(run_id))?;
+                    }
+                }
+                required(db.get("chats", &id)?, "Chat not found")
+            })
+            .await?;
+        if let Some(cancel) = chat["runId"].as_str().and_then(|id| active.get(id)) {
+            cancel.cancel();
+        }
+        self.notify();
+        Ok(chat)
+    }
+
     pub async fn resume(&self, s: &Service, id: &str) -> Result<Value> {
         self.resume_authorized(s, id, |_| Ok(())).await
     }

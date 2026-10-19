@@ -11,6 +11,7 @@ use crate::{
 use cairn_plugin_api::Manifest;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
+use std::collections::HashSet;
 
 pub const KIND: &str = "plugin-connections";
 
@@ -133,19 +134,25 @@ impl Connection {
 /// installation, GitHub, MCP or plugin grants (such as 1Password). Checked on save and
 /// on every effect.
 pub(crate) fn public_safe(db: &Db<'_>, agent_id: &str, access: &Value) -> Result<()> {
-    let projects = access["projects"].as_array().map_or(usize::MAX, Vec::len);
     let secrets = db.list(KIND)?.iter().any(|connection| {
         connection["agentIds"]
             .as_array()
             .is_some_and(|ids| ids.iter().any(|id| id == agent_id))
     });
+    public_access(
+        access,
+        secrets || super::grants::agent_has_grants(db, agent_id)?,
+    )
+}
+
+fn public_access(access: &Value, plugin_access: bool) -> Result<()> {
+    let projects = access["projects"].as_array().map_or(usize::MAX, Vec::len);
     if access["sandbox"] != "read-only"
         || access["installation"] == true
         || access["github"] == true
         || access["mcps"] != json!([])
         || projects > 1
-        || secrets
-        || super::grants::agent_has_grants(db, agent_id)?
+        || plugin_access
     {
         return Err(Error::bad(
             "For anyone in the channel, choose an agent with a read-only sandbox, at most one project, and no installation, GitHub, MCP or plugin access such as 1Password.",
@@ -165,12 +172,7 @@ pub(crate) fn delegation_access(
         .get("agents", agent_id)?
         .ok_or_else(|| Error::bad("Agent not found."))?;
     let access = policy(&agent);
-    let projects = project.map_or_else(|| json!([]), |id| json!([id]));
-    if access["projects"] != projects || access["installation"] == true {
-        return Err(Error::bad(
-            "Choose a dedicated agent restricted to the selected project (or no projects), with installation access disabled.",
-        ));
-    }
+    dedicated_access(&access, project)?;
     if let Some(project) = project
         && db.get("projects", project)?.is_none()
     {
@@ -180,6 +182,61 @@ pub(crate) fn delegation_access(
         public_safe(db, agent_id, &access)?;
     }
     Ok(access)
+}
+
+fn dedicated_access(access: &Value, project: Option<&str>) -> Result<()> {
+    let projects = project.map_or_else(|| json!([]), |id| json!([id]));
+    if access["projects"] != projects || access["installation"] == true {
+        return Err(Error::bad(
+            "Choose a dedicated agent restricted to the selected project (or no projects), with installation access disabled.",
+        ));
+    }
+    Ok(())
+}
+
+/// Advisory owner preview from the same policy predicates as save/effects. Read
+/// plugin grants once for the whole agent list, inside the caller's snapshot.
+pub(crate) fn delegation_eligibility(
+    db: &Db<'_>,
+    project: Option<&str>,
+    mode: AccessMode,
+) -> Result<Value> {
+    if let Some(project) = project
+        && db.get("projects", project)?.is_none()
+    {
+        return Err(Error::bad("Project not found."));
+    }
+    let mut plugin_agents = HashSet::new();
+    if mode == AccessMode::Everyone {
+        for connection in db.list(KIND)? {
+            if let Some(ids) = connection["agentIds"].as_array() {
+                plugin_agents.extend(ids.iter().filter_map(Value::as_str).map(str::to_owned));
+            }
+        }
+        for grant in db.list(super::grants::KIND)? {
+            plugin_agents.insert(text(&grant, "agentId").to_owned());
+        }
+    }
+    let items = db
+        .list("agents")?
+        .iter()
+        .map(|agent| {
+            let id = text(agent, "id");
+            let access = policy(agent);
+            let eligibility = dedicated_access(&access, project).and_then(|()| {
+                if mode == AccessMode::Everyone {
+                    public_access(&access, plugin_agents.contains(id))
+                } else {
+                    Ok(())
+                }
+            });
+            match eligibility {
+                Ok(()) => json!({ "agentId": id, "eligible": true }),
+                Err(error) => json!({ "agentId": id, "eligible": false, "reason": error.message }),
+            }
+        })
+        .collect::<Vec<_>>();
+    Ok(json!({ "items": items }))
 }
 
 pub fn label(value: &str) -> String {

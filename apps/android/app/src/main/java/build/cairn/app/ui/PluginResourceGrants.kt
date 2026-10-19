@@ -62,9 +62,9 @@ internal fun PluginResourceGrants(
     val canGrant = controls && state.agents.any { it.id == agentId } && allowed.isNotEmpty()
     suspend fun load(current: Int) {
         ready = false
-        val result = vm.api.get<PluginPage<PluginResourceGrant>>(path)
+        val result = vm.api.pluginManagementItems<PluginResourceGrant>(path)
         if (current == generation) {
-            rules = result.items
+            rules = result
             ready = true
         }
     }

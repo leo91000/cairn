@@ -23,7 +23,7 @@ le broker enregistrait le code de sortie 1 pour toute erreur, y compris
 Le contrôleur fixe `memory.high` un dixième sous `memory.max` à chaque
 application du budget. Au-dessus de ce seuil, le noyau récupère le cache et
 ralentit les allocations au lieu de tuer un processus. `memory.max` reste la
-limite physique de l’ADR-0012. Pendant l’incident, ce réglage posé à la main
+limite physique de la [décision sur les budgets partagés](0012-shared-node-budgets.md). Pendant l’incident, ce réglage posé à la main
 a ramené l’usage de 38,1 à 31,6 Go sans pression mesurable (PSI `some` à
 0,06 % sur 5 minutes).
 
@@ -65,7 +65,7 @@ erreurs (validation, conflit, image invitée incompatible) gardent le code 1.
 
 ## Complément du 2026-10-05 : ballon de pression à double seuil
 
-Le ballon de pression de l’ADR-0012 ne faisait que gonfler. Au-delà de 85 % du
+Le ballon de pression de la [décision sur les budgets partagés](0012-shared-node-budgets.md) ne faisait que gonfler. Au-delà de 85 % du
 budget, chaque guest en marche rendait jusqu’à ne garder que 256 Mio
 disponibles, et rien ne lui rendait cette mémoire une fois la pression passée.
 Une VM de 34 Gio est ainsi restée plusieurs heures avec environ 2 Gio

@@ -13,7 +13,7 @@ use crate::{
     service::Service,
     validation::text,
 };
-use cairn_plugin_host::Session;
+use cairn_plugin_host::{InvocationError, Session};
 use serde_json::{Value, json};
 use std::{collections::HashMap, sync::Arc, time::Duration};
 use tokio_util::sync::CancellationToken;
@@ -176,7 +176,12 @@ pub async fn begin(s: &Service, connection: &Connection, session: &mut Session) 
     )
     .await
     .map(|_| ())
-    .map_err(Error::bad_gateway)
+    // Package start refusals remain retryable (502), unlike socket start's
+    // explicit 403/needs_review policy. Preserve its existing diagnostic text.
+    .map_err(|error| match error {
+        InvocationError::Rejected(message) => Error::bad_gateway(format!("rejected: {message}")),
+        InvocationError::Failed(message) => Error::bad_gateway(message),
+    })
 }
 
 /// Delivers everything due for this connection once. Returns an error when the
@@ -378,14 +383,19 @@ async fn dispatch(
     event: &Value,
     name: &str,
     payload: Value,
-) -> std::result::Result<Value, String> {
-    let digest = registry::digest(session.manifest(), session.sources()).map_err(|e| e.message)?;
+) -> std::result::Result<Value, InvocationError> {
+    let digest = registry::digest(session.manifest(), session.sources())
+        .map_err(|e| InvocationError::Failed(e.message))?;
     registry::require_digest(s, &connection.plugin_id, &digest)
         .await
-        .map_err(|e| e.message)?;
+        .map_err(|e| InvocationError::Failed(e.message))?;
     let connection = super::routes::bound(s, connection, &event["routing"])
         .await
-        .map_err(|e| e.message)?;
+        .map_err(|e| InvocationError::Failed(e.message))?;
+    if let Some(author) = event["authorId"].as_str() {
+        super::routes::require_person(&connection, author)
+            .map_err(|e| InvocationError::Failed(e.message))?;
+    }
     let context = Context {
         connection,
         manifest: session.manifest().clone(),
@@ -405,7 +415,7 @@ async fn dispatch(
         .await?;
     registry::require_digest(s, &context.manifest.id, &digest)
         .await
-        .map_err(|e| e.message)?;
+        .map_err(|e| InvocationError::Failed(e.message))?;
     Ok(result)
 }
 

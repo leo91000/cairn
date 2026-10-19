@@ -2,7 +2,7 @@
 //! context before storing content; packages never supply its agent or authority.
 use super::{
     connections::{self, AccessMode, Connection, Label},
-    registry, resources,
+    resources::{self, Resource, target::Target},
 };
 use crate::{
     config::{id, now},
@@ -14,6 +14,7 @@ use crate::{
 use cairn_plugin_api::Manifest;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 
 pub const KIND: &str = "plugin-routes";
@@ -35,6 +36,10 @@ pub struct Route {
     pub access_mode: AccessMode,
     pub user_ids: Vec<String>,
     pub people: Vec<Label>,
+    /// Generations only for currently listed people, bounded by the allowlist.
+    /// People from the original route grant use its native revision.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    person_revisions: BTreeMap<String, String>,
     pub max_messages_per_hour: u32,
     pub max_per_person_per_hour: u32,
     pub revision: String,
@@ -51,6 +56,15 @@ pub struct Binding {
     pub resources: Vec<(String, String)>,
     pub digest: String,
     pub context: Value,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) person: Option<PersonGrant>,
+}
+
+#[derive(Clone, Deserialize, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct PersonGrant {
+    id: String,
+    revision: String,
 }
 
 #[derive(Deserialize)]
@@ -73,6 +87,116 @@ struct Input {
     #[serde(default = "personal_hourly")]
     max_per_person_per_hour: u32,
     revision: Option<String>,
+}
+
+impl Route {
+    /// Management concurrency covers every field, including participants. The
+    /// persisted revision remains the authority of already admitted work: removing
+    /// Bob must not invalidate an unrelated request from Alice.
+    fn edit_revision(&self) -> Result<String> {
+        Ok(hex::encode(Sha256::digest(serde_json::to_vec(self)?)))
+    }
+
+    fn owner_value(&self) -> Result<Value> {
+        let mut value = serde_json::to_value(self)?;
+        value.as_object_mut().unwrap().remove("personRevisions");
+        value["revision"] = json!(self.edit_revision()?);
+        Ok(value)
+    }
+
+    fn require_revision(&self, revision: Option<&str>) -> Result<()> {
+        if revision != Some(self.edit_revision()?.as_str()) {
+            return Err(Error::conflict("The route changed. Reload before editing."));
+        }
+        Ok(())
+    }
+
+    fn person_revision(&self, person: &str) -> &str {
+        self.person_revisions
+            .get(person)
+            .map_or(self.revision.as_str(), String::as_str)
+    }
+}
+
+/// Only the host stamps admitted work with a person's current grant. A fresh
+/// approval never restores work carrying their retired grant generation.
+pub(crate) fn admit_person(
+    db: &Db<'_>,
+    connection: &Connection,
+    person: &str,
+) -> Result<Option<Binding>> {
+    let connection = connections::authorize(db, connection)?;
+    let Some(mut binding) = connection.routing.clone() else {
+        return Ok(None);
+    };
+    let route = route_in(db, &connection.id, &binding.resource, &binding.id)?;
+    if route.revision != binding.revision || !connection.allows(person) {
+        return Err(Error::forbidden("This person is no longer allowed."));
+    }
+    binding.person = Some(PersonGrant {
+        id: person.to_owned(),
+        revision: route.person_revision(person).to_owned(),
+    });
+    Ok(Some(binding))
+}
+
+/// Unbound transport/owner notifications cannot act for a person. Old draft
+/// admissions without a generation fail closed instead of acquiring a new grant.
+pub(crate) fn require_person(connection: &Connection, person: &str) -> Result<()> {
+    if connection.routing.as_ref().is_some_and(|binding| {
+        binding
+            .person
+            .as_ref()
+            .is_none_or(|grant| grant.id != person)
+    }) {
+        return Err(Error::forbidden(
+            "This person's admitted authority is unavailable.",
+        ));
+    }
+    Ok(())
+}
+
+fn current_resource(db: &Db<'_>, target: &Target, resource: &Resource) -> Result<()> {
+    target.current(db)?;
+    if !target.get(db, &resource.id)?.is_some_and(|value| {
+        value["connectionId"] == resource.connection_id
+            && value["collection"] == resource.collection
+            && value["revision"] == resource.revision
+    }) {
+        return Err(Error::conflict(
+            "The resource changed. Reload its configuration.",
+        ));
+    }
+    Ok(())
+}
+
+pub async fn eligibility(
+    s: &Service,
+    plugin: &str,
+    instance: &str,
+    collection: &str,
+    resource: &str,
+    account: &str,
+    query: &std::collections::HashMap<String, String>,
+) -> Result<Value> {
+    let target = Target::active(s, plugin, instance).await?;
+    declared(target.manifest(), collection)?;
+    let resource = resources::get_for(s, target.clone(), collection, resource).await?;
+    let project = query.get("projectId").cloned();
+    if let Some(project) = &project {
+        uuid(project)?;
+    }
+    let mode: AccessMode = serde_json::from_value(json!(
+        query.get("accessMode").map_or("allowlist", String::as_str)
+    ))
+    .map_err(|_| Error::bad("Choose a valid access mode."))?;
+    super::operations::Owner::for_account(s, account).await?;
+    s.store
+        .transaction(move |db| {
+            current_resource(db, &target, &resource)?;
+            connections::delegation_eligibility(db, project.as_deref(), mode)
+        })
+        .await
 }
 
 fn hourly() -> u32 {
@@ -137,10 +261,9 @@ pub async fn save(
     value: &Value,
     existing: Option<&str>,
 ) -> Result<Value> {
-    let connection = connections::get(s, plugin, instance).await?;
-    let package = registry::active(s, plugin).await?;
-    declared(&package.manifest, collection)?;
-    let resource = resources::get(s, plugin, instance, collection, resource).await?;
+    let target = Target::active(s, plugin, instance).await?;
+    declared(target.manifest(), collection)?;
+    let resource = resources::get_for(s, target.clone(), collection, resource).await?;
     let owner = crate::relay::task_author_policy(s)
         .await?
         .ok_or_else(|| Error::forbidden("The installation has no verified owner."))?
@@ -207,37 +330,22 @@ pub async fn save(
         access_mode: input.access_mode,
         user_ids: input.user_ids,
         people,
+        person_revisions: BTreeMap::new(),
         max_messages_per_hour: input.max_messages_per_hour,
         max_per_person_per_hour: input.max_per_person_per_hour,
         revision: id(),
-        digest: package.digest,
+        digest: target.package().digest.clone(),
         updated_at: now(),
     };
     let previous_revision = input.revision;
     let updating = existing.is_some();
     s.store
         .transaction(move |db| {
-            let unchanged_instance = db
-                .get(connections::KIND, &connection.id)?
-                .is_some_and(|value| value["revision"] == connection.revision);
-            let unchanged_resource = db
-                .get(resources::KIND, &resource.id)?
-                .is_some_and(|value| value["revision"] == resource.revision);
-            if !unchanged_instance || !unchanged_resource {
-                return Err(Error::conflict(
-                    "The resource or instance changed. Reload its configuration.",
-                ));
-            }
+            current_resource(db, &target, &resource)?;
 
             if updating {
-                let unchanged_route = db.get(KIND, &route.id)?.is_some_and(|value| {
-                    value["connectionId"] == route.connection_id
-                        && value["resourceId"] == route.resource_id
-                        && value["revision"].as_str() == previous_revision.as_deref()
-                });
-                if !unchanged_route {
-                    return Err(Error::conflict("The route changed. Reload before saving."));
-                }
+                route_in(db, &route.connection_id, &route.resource_id, &route.id)?
+                    .require_revision(previous_revision.as_deref())?;
             } else {
                 let count = db
                     .list(KIND)?
@@ -265,7 +373,7 @@ pub async fn save(
                     "resourceId": route.resource_id,
                 }),
             )?;
-            Ok(value)
+            route.owner_value()
         })
         .await
 }
@@ -276,25 +384,30 @@ pub async fn list(
     instance: &str,
     collection: &str,
     resource: &str,
+    cursor: Option<&str>,
 ) -> Result<Value> {
-    resources::get(s, plugin, instance, collection, resource).await?;
-    let package = registry::active(s, plugin).await?;
-    declared(&package.manifest, collection)?;
-    let (instance, resource) = (instance.to_owned(), resource.to_owned());
+    let target = Target::active(s, plugin, instance).await?;
+    declared(target.manifest(), collection)?;
+    let resource = resources::get_for(s, target.clone(), collection, resource).await?;
+    let instance = instance.to_owned();
+    let cursor = cursor.map(str::to_owned);
     s.store
-        .read(move |db| {
+        .transaction(move |db| {
+            current_resource(db, &target, &resource)?;
             let items = db
                 .list(KIND)?
                 .into_iter()
                 .filter(|value| {
-                    value["connectionId"] == instance && value["resourceId"] == resource
+                    value["connectionId"] == instance && value["resourceId"] == resource.id
                 })
-                .collect::<Vec<_>>();
-            Ok(json!({"items": items}))
+                .map(|value| serde_json::from_value::<Route>(value)?.owner_value())
+                .collect::<Result<Vec<_>>>()?;
+            super::paging::page(items, cursor.as_deref())
         })
         .await
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn remove(
     s: &Service,
     plugin: &str,
@@ -303,8 +416,10 @@ pub async fn remove(
     resource: &str,
     route: &str,
     account: &str,
+    input: &Value,
 ) -> Result<Value> {
-    resources::get(s, plugin, instance, collection, resource).await?;
+    let target = Target::active(s, plugin, instance).await?;
+    let resource = resources::get_for(s, target.clone(), collection, resource).await?;
     let owner = crate::relay::task_author_policy(s)
         .await?
         .ok_or_else(|| Error::forbidden("The installation has no verified owner."))?
@@ -315,15 +430,15 @@ pub async fn remove(
         ));
     }
     uuid(route)?;
-    let (instance, resource, route) = (instance.to_owned(), resource.to_owned(), route.to_owned());
+    let (instance, route, revision) = (
+        instance.to_owned(),
+        route.to_owned(),
+        input["revision"].as_str().map(str::to_owned),
+    );
     s.store
         .transaction(move |db| {
-            let current = db
-                .get(KIND, &route)?
-                .ok_or_else(|| Error::not_found("Route not found."))?;
-            if current["connectionId"] != instance || current["resourceId"] != resource {
-                return Err(Error::not_found("Route not found."));
-            }
+            current_resource(db, &target, &resource)?;
+            route_in(db, &instance, &resource.id, &route)?.require_revision(revision.as_deref())?;
             remove_in(db, &route)?;
             Ok(json!({ "deleted": true }))
         })
@@ -358,7 +473,7 @@ pub(crate) async fn select(
     context: &Value,
 ) -> Result<Option<Connection>> {
     uuid(resource)?;
-    let package = registry::active(s, &root.plugin_id).await?;
+    let package = super::registry::active(s, &root.plugin_id).await?;
     let (root, resource, context) = (root.clone(), resource.to_owned(), context.clone());
     let routed = s
         .store
@@ -384,6 +499,7 @@ pub(crate) async fn select(
                 resources: reference.revisions,
                 digest: route.digest.clone(),
                 context,
+                person: None,
             };
             apply(db, root, route, binding).map(Some)
         })
@@ -450,6 +566,13 @@ pub(crate) fn authorize(
     {
         return Err(denied());
     }
+    if let Some(person) = &binding.person {
+        let allowed =
+            route.access_mode == AccessMode::Everyone || route.user_ids.contains(&person.id);
+        if !allowed || route.person_revision(&person.id) != person.revision {
+            return Err(denied());
+        }
+    }
     apply(db, root, route, binding.clone())
 }
 
@@ -513,9 +636,10 @@ pub async fn people(
     route: &str,
     account: &str,
     user: &str,
-    action: &str,
+    input: &Value,
 ) -> Result<Value> {
-    resources::get(s, plugin, instance, collection, resource).await?;
+    let target = Target::active(s, plugin, instance).await?;
+    let resource = resources::get_for(s, target.clone(), collection, resource).await?;
     let owner = crate::relay::task_author_policy(s)
         .await?
         .ok_or_else(|| Error::forbidden("The installation has no verified owner."))?
@@ -525,21 +649,27 @@ pub async fn people(
             "Only the current owner can manage this route.",
         ));
     }
+    let action = text(input, "action");
     if !connections::external_id(user) || !matches!(action, "approve" | "deny" | "remove") {
         return Err(Error::bad("Choose a person and an access action."));
     }
-    let (instance, resource, route, user, action) = (
+    let revision = input["revision"].as_str().map(str::to_owned);
+    let (instance, route, user, action) = (
         instance.to_owned(),
-        resource.to_owned(),
         route.to_owned(),
         user.to_owned(),
         action.to_owned(),
     );
     s.store
         .transaction(move |db| {
-            let mut route = route_in(db, &instance, &resource, &route)?;
+            current_resource(db, &target, &resource)?;
+            let mut route = route_in(db, &instance, &resource.id, &route)?;
+            route.require_revision(revision.as_deref())?;
             if route.owner_access_id != owner.access_id {
                 return Err(Error::forbidden("Review this route for the current owner."));
+            }
+            if route.access_mode == AccessMode::Everyone {
+                return Err(Error::bad("Anyone access does not use a people list. Choose another access mode to restrict participation."));
             }
             let request = db
                 .list("plugin-requests")?
@@ -554,6 +684,7 @@ pub async fn people(
                             return Err(Error::bad("At most 100 people can use one route."));
                         }
                         route.user_ids.push(user.clone());
+                        route.person_revisions.insert(user.clone(), id());
                         route.people.push(Label {
                             id: user.clone(),
                             name: connections::label(text(&request, "name")),
@@ -571,16 +702,19 @@ pub async fn people(
                 _ => {
                     route.user_ids.retain(|id| id != &user);
                     route.people.retain(|p| p.id != user);
+                    route.person_revisions.remove(&user);
                 }
             }
-            route.updated_at = now();
+            // A denied request changes outside the route itself. Advance its edit
+            // token even when two management actions share one clock tick.
+            route.updated_at = now().max(route.updated_at.saturating_add(1));
             let value = serde_json::to_value(&route)?;
             db.put(KIND, &value)?;
             db.audit(
                 "plugin.route.people",
                 &json!({ "id": route.id, "action": action }),
             )?;
-            Ok(value)
+            route.owner_value()
         })
         .await
 }

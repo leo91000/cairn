@@ -236,19 +236,6 @@ export function hasSetup(manifest: Manifest | null | undefined) {
   return Boolean(manifest?.resources?.length || manifest?.oauth?.length || manifest?.webhooks?.length)
 }
 
-export function fieldValues(fields: SettingField[], settings: Record<string, any>) {
-  return Object.fromEntries(fields.filter(field => field.type !== 'secret').map(field => [
-    field.key,
-    settings[field.key] ?? field.default ?? (field.type === 'boolean' ? false : field.type === 'multiselect' ? [] : ''),
-  ]))
-}
-
-export function fieldSettings(fields: SettingField[], values: Record<string, any>) {
-  return Object.fromEntries(fields.filter(field => field.type !== 'secret')
-    .filter(field => values[field.key] !== '' && values[field.key] !== undefined && values[field.key] !== null)
-    .map(field => [field.key, field.type === 'number' ? Number(values[field.key]) : values[field.key]]))
-}
-
 export interface ProgramRelease {
   version: string
   url: string
@@ -442,4 +429,26 @@ export function publicProblem(agent: Agent, connections: Pick<PluginConnection, 
   if (connections.some(connection => connection.agentIds?.includes(agent.id)))
     return 'Has plugin access'
   return ''
+}
+
+export interface RouteEligibility {
+  agentId: string
+  eligible: boolean
+  reason?: string
+}
+
+export interface PluginRoute {
+  id: string
+  resourceId: string
+  name: string
+  enabled: boolean
+  match: Record<string, string>
+  agentId: string
+  projectId: string | null
+  accessMode: 'allowlist' | 'requests' | 'everyone'
+  userIds: string[]
+  people: { id: string, name: string }[]
+  maxMessagesPerHour: number
+  maxPerPersonPerHour: number
+  revision: string
 }

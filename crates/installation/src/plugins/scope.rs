@@ -9,8 +9,9 @@ use super::{
 use crate::{
     error::{Error, Result},
     service::Service,
+    validation::text,
 };
-use cairn_plugin_host::Denied;
+use cairn_plugin_host::{Denied, InvocationError};
 use serde_json::{Value, json};
 use std::sync::{Arc, Mutex};
 
@@ -26,15 +27,51 @@ pub enum Scope {
     /// `exec`, with the draft's credential and secrets.
     Draft(Box<Connection>, Arc<super::forms::Draft>),
     /// A run's agent, through the enabled instances it is granted: commands and tools.
-    Agent {
-        agent_id: String,
-        instances: Vec<Connection>,
-        /// Host-only proof of the issuing run, never included in plugin payloads.
-        bearer: String,
-    },
+    Agent(Box<Agent>),
+}
+
+/// Host-only proof of both the issuing run and its original requester. The target
+/// instance's agent grant cannot replace a revoked source participant grant.
+pub struct Agent {
+    agent_id: String,
+    instances: Vec<Connection>,
+    bearer: String,
+    requester: Option<super::requesters::RunRequester>,
 }
 
 impl Scope {
+    pub(crate) async fn for_agent(
+        s: &Service,
+        run: &Value,
+        instances: Vec<Connection>,
+        bearer: &str,
+    ) -> Result<Self> {
+        let requester = super::requesters::for_run(s, run).await?;
+        if let Some(super::requesters::Principal::External(actor)) =
+            requester.as_ref().map(|requester| &requester.principal)
+        {
+            let actor = actor.clone();
+            let origin = s
+                .store
+                .read(move |db| super::requesters::external_in(db, &actor))
+                .await?;
+            if instances
+                .iter()
+                .any(|instance| instance.plugin_id == origin.plugin_id)
+            {
+                return Err(Error::forbidden(
+                    "Use a resource operation within the requester's admitted source scope.",
+                ));
+            }
+        }
+        Ok(Self::Agent(Box::new(Agent {
+            agent_id: text(&run["snapshot"]["agent"], "id").to_owned(),
+            instances,
+            bearer: bearer.to_owned(),
+            requester,
+        })))
+    }
+
     /// What the script receives about the instances it may use. Never secret values.
     pub fn instances(&self) -> Vec<Value> {
         match self {
@@ -44,7 +81,7 @@ impl Scope {
                 vec![summary(connection)]
             }
             Scope::Setup(draft) => vec![summary(&draft.connection())],
-            Scope::Agent { instances, .. } => instances.iter().map(summary).collect(),
+            Scope::Agent(agent) => agent.instances.iter().map(summary).collect(),
             Scope::ResourceAgent(authorization) => vec![summary(&authorization.connection)],
         }
     }
@@ -68,6 +105,11 @@ async fn current(s: &Service, scope: &Scope, args: &Value) -> Result<Connection>
         Scope::Draft(_, values) => {
             if let Some(owner) = &values.owner {
                 owner.recheck(s).await?;
+            }
+        }
+        Scope::Agent(agent) => {
+            if let Some(requester) = &agent.requester {
+                super::requesters::recheck(s, requester).await?;
             }
         }
         _ => {}
@@ -112,25 +154,29 @@ async fn current(s: &Service, scope: &Scope, args: &Value) -> Result<Connection>
             }
             connection
         }
-        Scope::Agent { instances, .. } => match requested {
-            Some(id) => instances
+        Scope::Agent(agent) => match requested {
+            Some(id) => agent
+                .instances
                 .iter()
                 .find(|connection| connection.id == id)
                 .ok_or_else(|| Error::forbidden("This agent is not granted that instance."))?,
-            None if instances.len() == 1 => &instances[0],
+            None if agent.instances.len() == 1 => &agent.instances[0],
             None => return Err(Error::bad("Name the instance to use.")),
         },
     };
     let id = expected.id.clone();
-    let bearer = match scope {
-        Scope::Agent { bearer, .. } => Some(bearer.clone()),
+    let authority = match scope {
+        Scope::Agent(agent) => Some((agent.bearer.clone(), agent.requester.clone())),
         _ => None,
     };
     let value = s
         .store
         .read(move |db| {
-            if let Some(bearer) = bearer {
+            if let Some((bearer, requester)) = authority {
                 crate::project_workspaces::authorize_in(db, &bearer)?;
+                if let Some(requester) = requester {
+                    super::requesters::recheck_in(db, &requester)?;
+                }
             }
             db.get(connections::KIND, &id)
         })
@@ -142,7 +188,7 @@ async fn current(s: &Service, scope: &Scope, args: &Value) -> Result<Connection>
         Scope::Instance(..) | Scope::Draft(..) => true,
         Scope::Ingress(_) => connection.enabled,
         Scope::ResourceAgent(_) | Scope::Setup(_) => unreachable!(),
-        Scope::Agent { agent_id, .. } => connection.grants(agent_id),
+        Scope::Agent(agent) => connection.grants(&agent.agent_id),
     };
     if !unchanged || !granted {
         return Err(Error::forbidden(
@@ -181,7 +227,7 @@ pub async fn call(
             "An instance being edited can only use http and exec.",
         ));
     }
-    if matches!(scope, Scope::Agent { .. })
+    if matches!(scope, Scope::Agent(_))
         && (method.starts_with("resources.") || args["auth"].get("resource").is_some())
     {
         return Err(Error::forbidden(
@@ -221,7 +267,7 @@ pub async fn call(
     .await?;
     // Revocation or a changed secret during slow I/O must not deliver its result.
     let bound_form = matches!(scope, Scope::Draft(_, values) if values.setup.is_some());
-    if (matches!(scope, Scope::Agent { .. }) || bound_form)
+    if (matches!(scope, Scope::Agent(_)) || bound_form)
         && matches!(method, "exec.run" | "http.request")
     {
         current(s, scope, args).await?;
@@ -266,8 +312,8 @@ pub async fn invoke(
         .await;
     if result.is_ok() {
         match scope {
-            Scope::Agent { instances, .. } => {
-                for instance in instances {
+            Scope::Agent(agent) => {
+                for instance in &agent.instances {
                     current(s, scope, &json!({"instance": instance.id})).await?;
                 }
             }
@@ -281,13 +327,7 @@ pub async fn invoke(
     }
     match (result, refused.into_inner().unwrap()) {
         (Ok(value), _) => Ok(value),
-        (Err(error), _) if error.starts_with(cairn_plugin_api::REJECTED) => {
-            Err(Error::bad_gateway(
-                error
-                    .trim_start_matches(cairn_plugin_api::REJECTED)
-                    .to_owned(),
-            ))
-        }
+        (Err(InvocationError::Rejected(message)), _) => Err(Error::bad_gateway(message)),
         (Err(_), Some(error)) => Err(error),
         (Err(_), None) => Err(Error::bad_gateway(format!(
             "The {} plugin failed while handling {event}.",

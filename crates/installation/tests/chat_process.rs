@@ -401,6 +401,53 @@ async fn deliver(root: &TempDir, messages: &Value) {
 }
 
 #[tokio::test]
+async fn oversized_inbox_fails_before_submitting_messages() {
+    let root = TempDir::new().unwrap();
+    let home = prepare(&root);
+    let config = config(&root);
+    std::fs::write(
+        root.path().join("inbox/messages.json"),
+        vec![b' '; 2_000_001],
+    )
+    .unwrap();
+    let (tx, mut rx) = mpsc::channel::<Value>(64);
+    let events = tokio::spawn(async move {
+        while let Some(event) = rx.recv().await {
+            assert_ne!(event["type"], "turn.completed");
+        }
+    });
+    let error = tokio::time::timeout(
+        Duration::from_secs(10),
+        chat_process::run(
+            &config,
+            &home,
+            plan(&root, "fixture:question"),
+            tx,
+            CancellationToken::new(),
+        ),
+    )
+    .await
+    .unwrap()
+    .unwrap_err();
+    events.await.unwrap();
+    assert_eq!(error.status, 400);
+    assert_eq!(error.message, "Chat inbox is too large.");
+}
+
+#[tokio::test]
+async fn invalid_and_exact_limit_empty_inboxes_do_not_interrupt_a_turn() {
+    for bytes in [
+        b"invalid json".to_vec(),
+        format!("[]{}", " ".repeat(1_999_998)).into_bytes(),
+    ] {
+        let root = TempDir::new().unwrap();
+        let home = prepare(&root);
+        std::fs::write(root.path().join("inbox/messages.json"), bytes).unwrap();
+        run_quietly(&config(&root), &home, plan(&root, "Continue the request")).await;
+    }
+}
+
+#[tokio::test]
 async fn model_and_reasoning_reach_codex_and_model_changes_resolve_the_new_default() {
     let root = TempDir::new().unwrap();
     let home = prepare(&root);
@@ -466,6 +513,50 @@ async fn native_in_flight_question_accepts_answer_and_preserves_receipt() {
     assert!(completed);
     assert_eq!(question_id.len(), 64);
     assert!(root.path().join("result.md").exists());
+}
+
+#[tokio::test]
+async fn withdrawn_native_questions_resume_without_an_answer_or_user_receipt() {
+    for blocking in [false, true] {
+        let root = TempDir::new().unwrap();
+        let home = prepare(&root);
+        let observed = home.clone();
+        let config = config(&root);
+        let plan = plan(
+            &root,
+            if blocking {
+                "fixture:question blocking"
+            } else {
+                "fixture:question"
+            },
+        );
+        let (tx, mut rx) = mpsc::channel(64);
+        let task = tokio::spawn(async move {
+            chat_process::run(&config, &home, plan, tx, CancellationToken::new()).await
+        });
+        let mut completed = false;
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while let Some(event) = rx.recv().await {
+                if event["type"] == "chat.question" {
+                    deliver(&root, &json!([{
+                        "id": "withdrawal", "questionId": event["question"]["id"], "questionCancelled": true,
+                    }])).await;
+                }
+                assert!(!(event["type"] == "chat.delivered" && event["messageId"] == "withdrawal"));
+                completed |= event["type"] == "turn.completed";
+            }
+        }).await.unwrap();
+        task.await.unwrap().unwrap();
+        assert!(completed);
+        let thread = conversation(&observed);
+        let answer = thread["turns"][0]["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|i| i["type"] == "fixtureAnswer")
+            .unwrap();
+        assert_eq!(answer["answers"], json!({}));
+    }
 }
 
 #[tokio::test]

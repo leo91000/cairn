@@ -330,6 +330,16 @@ impl Turn<'_> {
                 continue;
             }
             let question_id = text(&message, "questionId");
+            if message["questionCancelled"] == true {
+                if let Some((native_id, _)) = self.questions.get(question_id) {
+                    self.server
+                        .post(&format!("/question/{native_id}/reject"), &json!({}))
+                        .await?;
+                    self.questions.remove(question_id);
+                }
+                self.submitted.insert(id.into());
+                continue;
+            }
             if let Some((native_id, count)) = self.questions.get(question_id).cloned() {
                 let answers = (0..count)
                     .map(|index| {

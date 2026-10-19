@@ -672,14 +672,19 @@ pub async fn callback(s: &Service, instance: &str, request: Request) -> Result<R
         .into_response())
 }
 
-async fn exchange(
+async fn exchange<F, Fut>(
     s: &Service,
     manifest: &Manifest,
     provider: &OAuth,
     client_id: &str,
     instance: &str,
     fields: BTreeMap<&str, String>,
-) -> Result<Value> {
+    check: F,
+) -> Result<Value>
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = Result<()>>,
+{
     let target = capabilities::target(s, manifest, &provider.token_url, "https")?;
     let mut request = s.plugins.http.post(target).timeout(Duration::from_secs(15));
     let mut fields = fields;
@@ -694,6 +699,9 @@ async fn exchange(
     } else {
         fields.insert("client_id", client_id.into());
     }
+    // Client-secret loading is preparation too. Recheck the exact consent or
+    // renewal claim after every such await, immediately before provider I/O.
+    check().await?;
     let response = request.form(&fields).send().await.map_err(|_| {
         Error::bad_gateway("OAuth token service is unavailable. Start authorization again.")
     })?;
@@ -919,6 +927,14 @@ async fn finish_pending(
         &pending.client_id,
         instance,
         fields,
+        || async {
+            registry::require_digest(s, plugin, &pending.digest).await?;
+            check_initiator(s, provider, &pending).await?;
+            let expected = pending.clone();
+            s.store
+                .transaction(move |db| current(db, &expected).map(|_| ()))
+                .await
+        },
     )
     .await?;
     let tokens = capture(&response, &provider.token, &pending.scopes)?;
@@ -1304,6 +1320,11 @@ pub(crate) async fn credential(
             "The OAuth authorization changed. Reconnect this resource.",
         ));
     }
+    let package = registry::approved(s, &context.connection.plugin_id).await?;
+    if package.package.digest != authorization.digest {
+        return Err(Error::forbidden("The OAuth package approval changed."));
+    }
+    let approval = package.snapshot();
     if authorization.refreshing {
         return Err(Error::forbidden(
             "The last OAuth renewal was interrupted. Reconnect this resource.",
@@ -1339,10 +1360,15 @@ pub(crate) async fn credential(
                 db.set(&stored_key(&stored), &encrypted, None)
             })
             .await?;
-        resources::recheck(s, context, &resource).await?;
-        if let Some(grant) = &context.resource_grant {
-            super::grants::recheck(s, grant).await?;
-        }
+        let check = Reference {
+            key: key.clone(),
+            revision: fence.clone(),
+            owner_access: authorization.owner_access.clone(),
+            plugin: context.connection.plugin_id.clone(),
+            digest: authorization.digest.clone(),
+            actor: actor.clone(),
+            subject_link: subject_link.clone(),
+        };
         let fields = BTreeMap::from([
             ("grant_type", "refresh_token".into()),
             ("refresh_token", refresh),
@@ -1354,6 +1380,28 @@ pub(crate) async fn credential(
             text(&context.connection.settings, &provider.client_id),
             &context.connection.id,
             fields,
+            || async {
+                recheck(s, &check).await?;
+                if let Some(grant) = &context.resource_grant {
+                    super::grants::recheck(s, grant).await?;
+                }
+                let connection = context.connection.clone();
+                let resource = resource.clone();
+                let grant = context.resource_grant.clone();
+                let reference = check.clone();
+                let approval = approval.clone();
+                let vault = s.vault.clone();
+                s.store
+                    .transaction(move |db| {
+                        approval.recheck_in(db)?;
+                        resources::recheck_in(db, &connection, &resource)?;
+                        if let Some(grant) = &grant {
+                            super::grants::recheck_in(db, grant)?;
+                        }
+                        recheck_in(&vault, db, &reference)
+                    })
+                    .await
+            },
         )
         .await?;
         let mapping = provider
@@ -1384,15 +1432,6 @@ pub(crate) async fn credential(
             ));
         }
         resources::recheck(s, context, &resource).await?;
-        let check = Reference {
-            key: key.clone(),
-            revision: fence.clone(),
-            owner_access: authorization.owner_access.clone(),
-            plugin: context.connection.plugin_id.clone(),
-            digest: authorization.digest.clone(),
-            actor: actor.clone(),
-            subject_link: subject_link.clone(),
-        };
         recheck(s, &check).await?;
         authorization.tokens = tokens;
         authorization.refreshing = false;

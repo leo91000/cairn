@@ -77,6 +77,9 @@ async fn checked_approval(
     args: Value,
 ) -> Result<Value> {
     ensure_owner(s, &context.connection).await?;
+    if let Some(author) = context.event["authorId"].as_str() {
+        super::routes::require_person(&context.connection, author)?;
+    }
     let expected = context.connection.clone();
     s.store.read(move |db| authorize(db, &expected)).await?;
     let execution_digest = match digest {
@@ -89,7 +92,7 @@ async fn checked_approval(
         None => None,
     };
     let result = match method {
-        "conversations.submit" => super::work::submit(s, context, &args).await,
+        "conversations.submit" => super::work::submit_approved(s, context, &args, digest).await,
         "conversations.check" => super::work::check(s, context, &args).await,
         "conversations.answer" => super::work::answer(s, context, &args).await,
         "conversations.cancel" => super::work::cancel(s, context, &args).await,

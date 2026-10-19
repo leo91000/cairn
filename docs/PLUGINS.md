@@ -311,6 +311,10 @@ and responses expose only their names. An optional declared credential is stored
 with the same encrypted TTL; responses expose only `credential: boolean`. Blank or
 omitted tokens keep the saved credential. PATCH keeps the draft ID and original expiry.
 
+Draft lists use `?cursor=…` and return `{ items, nextCursor }`, with a bounded
+encoded response size. Both clients load all pages before displaying the saved
+list, and cancel unfinished reads when leaving the screen.
+
 Drafts expire after 24 hours, with at most 32 live drafts per installation. They
 belong to the current owner's account and installation-access revision and never
 start workers or grant agents access. Changing the approved package makes the
@@ -449,6 +453,11 @@ operations that omit those scopes. Nothing is granted by default, including to
 Main agent or through instance-level grants. Tools list only operations the
 agent can use. CLI and MCP share the same checks.
 
+GET uses `{items, nextCursor}` and accepts `?cursor=<last-id>`, like resource
+collections. Route and grant pages contain at most 32 records and are also bounded
+by their encoded byte size below the relay limit. Web and Android load every page
+before enabling edits; closing the editor cancels the entire read.
+
 On web and Android, open the active instance, then **Agent access** on its resource.
 Choose an agent explicitly, select a profile or individual operations, optionally
 limit scope values, and inspect the per-rule preview before granting access.
@@ -471,30 +480,64 @@ A resource collection can declare `delegation: true` when the package also decla
 `conversations.submit`. These instances do not delegate to one app-wide agent.
 The owner configures routes under each resource at
 `/api/plugins/<plugin>/connections/<instance>/resources/<collection>/<resource>/routes`.
-POST creates, GET lists `{items}`, and `/<route>` supports PUT with its last
-`revision` or DELETE. A route contains `name`, `enabled`, exact string `match`
+POST creates, GET lists `{items, nextCursor}`, and `/<route>` supports PUT or DELETE with its
+last opaque `revision`. A route contains `name`, `enabled`, exact string `match`
 conditions on source context, `agentId`, optional `projectId`, `accessMode`,
 `userIds`, optional `people`, and hourly limits. Defaults are 20 messages per hour
 and five per person; the latter applies to everyone access. No route or person is
 granted by default. The selected agent must have only the selected project's access
 and no installation access; everyone access retains the stricter public-agent rules.
+An owner can preview eligible agents at the sibling endpoint
+`/route-eligibility?accessMode=allowlist|requests|everyone&projectId=<optional-id>`.
+It returns `{items: [{agentId, eligible, reason?}]}` without access policies or
+credentials. The result is advisory: save and effects recheck current authority.
+Configuration remains available while the instance or resource is paused.
 
 `cairn.inbound.deliver` supplies the configured `resource` and authentic source
 `context` alongside its message. The host selects the most specific matching route.
 A disabled override denies admission; equally specific matching rules conflict.
 Packages cannot select an agent or route using message bodies. Access requests and
 approvals are local to the selected route: append `/<route>/requests` for GET or
-`/<route>/people/<person>` for POST `{action = "approve" | "deny" | "remove"}`.
+`/<route>/people/<person>` for POST
+`{action = "approve" | "deny" | "remove", revision = <last-revision>}`.
+Each successful mutation returns the current route and its editing revision;
+DELETE returns `{deleted: true}`. A stale edit, people action or deletion returns
+409 and must be refreshed explicitly, never retried with overwritten fields.
+Removing one person revokes their pending work while preserving other admitted
+participants' authority. Reapproving them grants a new native generation: old
+queued messages, controls, OAuth requests and in-flight results remain revoked.
+Anyone access does not use a people list; choose a restricted access mode before
+managing individual participants. The editing revision is separate from native
+authority; clients must treat it as opaque.
 Unapproved requests retain the person's identity, never message content.
+
+Native execution retains the original routed requester while waiting for capacity
+and across account, workspace and runner preparation. The scheduler rechecks it
+before admission and the worker checks it again before starting the agent. A
+withdrawn source cancels queued work; temporary authority lookup failures defer
+admission. Reapproval cannot replace the proof already captured by a preparing run.
+
+The per-person generations are host-only. They are never accepted from a plugin
+or an owner form, and only currently listed grants need entries (at most 100).
+Personal bindings produced by earlier development snapshots without this proof
+fail closed and require a new request from the source. This does not erase Cairn
+history or credentials. Ordinary instance delegation keeps its existing format.
 
 Accepted events and deliveries retain native route authority outside the Luau
 payload. Instance, ancestor-resource, route, owner-access and package revisions
 are checked again before effects and after slow results. Adding a more specific
 route can revoke older queued authority. Each worker is checked against the exact
 manifest and source files it loaded, including across package approval changes.
+Commands and MCP tools retain their run's original requester, including when the
+target integration uses an instance-wide agent grant. That separate target grant
+does not bypass revocation of the source participant, route or owner access.
 Operation scopes with the same name as a route condition must match that condition;
 operations on the source integration cannot select a different instance or an
 unrelated resource even if the agent has a broader grant.
+Commands and tools on that source integration must declare a resource operation;
+an instance-wide handler cannot enforce the admitted resource and channel scope.
+Explicit grants to other integrations remain independent, with the original
+requester's authority still checked around their effects.
 
 Shared threads still share a conversation, while each admitted message records its
 own external subject. Answer and cancel calls must include `delivery`, the issuing
@@ -616,7 +659,9 @@ refresh state is persisted before sending a single-use token. An interrupted or
 uncertain renewal requires reconnection, rather than replaying the old token.
 Owner access, approval, resource identity and authorization revision are checked
 again around I/O. Resource-granted calls also recheck the agent before issuing a
-new provider request after a slow renewal.
+new provider request after a slow renewal. Preparing a client secret or checking
+remote authority does not preserve an earlier consent: the host checks the exact
+authorization again immediately before sending a code or refresh token.
 
 #### Personal providers
 
@@ -1085,3 +1130,89 @@ through its package form, people management, and installing, approving, connecti
 and uninstalling a package, on desktop and mobile.
 These are local fixture tests, not evidence of a real Discord connection or a
 production deployment.
+
+## Setting constraints and compatibility (F6)
+
+`maxLength`, when present, must be a JSON/TOML integer from 1 through 10,000
+for non-secret fields, or through 16,384 for secrets. Cairn rejects a larger
+text declaration with the explicit 10,000 limit instead of accepting a manifest
+whose declared limit would be silently capped on save. Text lengths count Unicode
+characters; secret lengths count UTF-8 bytes, as before. Without `maxLength`, the
+save limits remain 200 for `string` and dynamic choices, 2,000 for `text`/`url`,
+and 16,384 bytes for secrets. `minimum` and `maximum` must be finite numbers;
+when both are present, `minimum` must not exceed `maximum`.
+
+A non-null `default` must have the field's type and satisfy its length, numeric
+range, choices and whole-value pattern. Text defaults follow save behavior:
+length/control characters are checked before trimming, patterns after trimming;
+required text cannot trim to empty, and nonempty URLs must use HTTP(S). Optional
+empty text retains the existing pattern exemption. Secret defaults and dynamic
+choice defaults remain forbidden. A null default on a non-secret field means
+no default. No values are truncated.
+
+This tightens the set of persisted manifests that the registry can read. The
+installation compatibility epoch advances from 3 to 4; automatic production
+rollout must stop at that boundary under [the production compatibility
+contract](PRODUCTION-CAIRN.md#installation-data-compatibility). This PR does not
+perform a rollout. Both bundled manifests and ordinary valid installed packages
+retain their settings, serialized form and approval digests; no database, secret
+or instance record is rewritten.
+
+Before a separately reviewed epoch transition, inspect installed manifest settings
+for negative, zero, fractional or oversized `maxLength`, reversed numeric bounds,
+and defaults that fail the rules above. The registry revalidates every version on
+read: an incompatible installed version fails with a validation error, remains on
+disk, and cannot run; catalog version errors identify it. Do not silently clamp,
+normalize or reapprove its contents.
+
+Forward repair: publish a corrected package with a new version under the same
+plugin ID, upload it, review and approve that version. Choose bounds that cover
+existing instance values, or deliberately correct those values when editing the
+instance. The registry then activates the approved version; existing instance IDs,
+settings, encrypted secrets and grants stay in place. If repair or approval fails,
+keep the original files and records and fix the package before retrying. Preserve
+the previous binary and an explicitly prepared pre-transition data backup for a
+reviewed rollback; do not run the previous binary on epoch-4 installation data or
+lower the compatibility epoch to bypass the rollout gate. No automatic data
+backup/restoration or production manifest inventory is claimed here.
+
+The Android `Int?` decoder's behavior for a fractional `maxLength` has not been
+executed on a JVM or device in this change. Backend admission now rejects that
+manifest before it can reach either client's field decoder.
+
+## Client form values (F5)
+
+Web instance editors and view forms use pure value transformations, compared with
+Android's native form helpers using `tests/fixtures/plugin-form-values.json`.
+Opening a form applies defaults to missing values; an explicit null or a later
+clear does not reapply a default. Nonprimitive answers do not coerce scalar
+controls: a boolean answer such as `[true]` or `["true"]` becomes false, matching
+Android. Only declared non-secret fields are settings,
+including hidden fields populated by the package. Nonblank text is trimmed,
+numbers are sent as JSON numbers, and blank text/numbers are omitted. Choice
+identifiers are preserved exactly, including whitespace accepted by the manifest;
+an empty single choice is omitted. False and
+empty multiple choices remain explicit. Secrets are never prefilled from a view's
+`values` or instance settings. Blank secrets are omitted, preserving saved instance
+secrets. Instance secrets follow the existing trimmed save contract; nonblank view
+form secrets reach the action exactly as typed, matching Android.
+
+Both clients use Kotlin's existing `Char.isWhitespace` predicate for text trimming
+and secret blankness: Java `Character.isWhitespace || Character.isSpaceChar`.
+The exact set is U+0009–U+000D, U+001C–U+0020, U+00A0, U+1680,
+U+2000–U+200A, U+2028–U+2029, U+202F, U+205F and U+3000.
+U+0085 NEXT LINE and format characters (including U+FEFF, U+200B and U+2060)
+are meaningful. This differs from Rust's Unicode `White_Space` trimming and
+JavaScript's built-in `trim`; neither defines the client contract. The shared
+`plugin-form-whitespace.json` corpus covers all ASCII/C1 controls, separators,
+and format/nonspace boundaries, as singletons and around nonblank text. Its
+blank set is also checked exhaustively against the pinned Kotlin/JDK Char domain.
+Choice IDs use exact bytes and required selects still use null/empty missingness.
+
+These helpers do not make control characters valid instance settings: the server
+independently rejects them on instance saves. Admitted panel `values` can contain
+controls; action secrets keep their raw bytes after the shared blank filter.
+
+These are client value transformations, not validation of an action. A plugin
+still validates its action input. The server's F6 manifest constraints, package
+admission/review, instance validation and completion handler remain unchanged.

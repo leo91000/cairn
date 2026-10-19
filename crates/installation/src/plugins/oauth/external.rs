@@ -228,7 +228,7 @@ pub(crate) async fn call(
                         .clone()
                         .ok_or_else(expired)?,
                     actor: None,
-                    external: Some(person),
+                    external: Some(*person),
                     source_event: source_event.into(),
                     setup_target: None,
                 },
@@ -258,7 +258,7 @@ pub(crate) async fn call(
             let expected = pending
                 .external
                 .clone()
-                .map(Principal::External)
+                .map(|external| Principal::External(Box::new(external)))
                 .ok_or_else(expired)?;
             if !expected.same_authority(&Principal::External(person))
                 || pending.resource != input.resource

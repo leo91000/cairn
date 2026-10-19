@@ -1,7 +1,14 @@
 <script setup lang="ts">
-import type { GithubRepository } from '../../../../packages/contracts/contracts'
+import type { z } from 'zod'
+import type {
+  Agent,
+  agentInput,
+  GithubRepository,
+  Project,
+  projectInput,
+} from '../../../../packages/contracts/contracts'
 import type { ExecutionNode } from '../../../../packages/contracts/nodes'
-import { computed, ref } from 'vue'
+import { computed, nextTick, ref } from 'vue'
 import { providers as codingAgents } from '../../../../packages/contracts/accounts'
 import { MAIN_AGENT_ID } from '../../../../packages/contracts/constants'
 import { LOCAL_NODE_ID } from '../../../../packages/contracts/nodes'
@@ -30,7 +37,10 @@ import {
   ShieldCheck,
   Trash2,
 } from '../icons'
+import { useResourceSave } from '../resourceSave'
 import { iconButton } from '../ui'
+
+type ResourceForm = z.infer<typeof agentInput> | z.infer<typeof projectInput>
 
 const props = defineProps<{
   kind: 'agents' | 'projects'
@@ -60,22 +70,39 @@ function repositoryLabel(origin?: string) {
   }
 }
 
-const editing = ref<string | null>(null)
+const resourceSave = useResourceSave()
+const editing = resourceSave.savedId
+const pendingCreation = resourceSave.pendingCreation
+let openedId: string | null = null
+const saveAlert = ref<InstanceType<typeof UiAlert>>()
 const open = ref(false)
-const deleting = ref<any>(null)
+const deleting = ref<Agent | Project | null>(null)
 const busy = ref(false)
 const error = ref('')
-const form = ref<any>({})
+const form = ref<ResourceForm>({
+  name: '',
+  description: '',
+  path: '',
+  baseBranch: 'main',
+  sourceMode: 'remote',
+})
+const access = computed(() => 'access' in form.value ? form.value.access : undefined)
 const allNodes = computed({
-  get: () => form.value.access?.nodes === null,
+  get: () => access.value?.nodes === null,
   set: (value: boolean) => {
-    form.value.access.nodes = value ? null : []
+    if (!access.value)
+      return
+
+    access.value.nodes = value ? null : []
   },
 })
 const projectMode = ref('local')
 const repository = ref('')
 
 function selectRepository(repo: GithubRepository) {
+  if (!('path' in form.value))
+    return
+
   repository.value = repo.fullName
   form.value.name = repo.name.slice(0, 100)
   form.value.description = repo.description.slice(0, 500)
@@ -92,40 +119,52 @@ const sandboxOptions = [
   { value: 'read-only', label: 'Read only', description: 'Project mounts are read-only; no approval escalation' },
 ]
 const allProjects = computed({
-  get: () => form.value.access?.projects === null,
+  get: () => access.value?.projects === null,
   set: (value: boolean) => {
-    form.value.access.projects = value ? null : []
+    if (!access.value)
+      return
+
+    access.value.projects = value ? null : []
     if (!value)
-      form.value.access.github = false
+      access.value.github = false
   },
 })
 const allMcps = computed({
-  get: () => form.value.access?.mcps === null,
+  get: () => access.value?.mcps === null,
   set: (value: boolean) => {
-    form.value.access.mcps = value ? null : []
-    form.value.access.mcpTools = {}
+    if (!access.value)
+      return
+
+    access.value.mcps = value ? null : []
+    access.value.mcpTools = {}
   },
 })
 
 function toggleMcp(id: string, enabled: boolean) {
+  if (!access.value?.mcps)
+    return
+
   if (enabled) {
-    form.value.access.mcps.push(id)
+    access.value.mcps.push(id)
   }
   else {
-    form.value.access.mcps = form.value.access.mcps.filter((value: string) => value !== id)
-    delete form.value.access.mcpTools[id]
+    access.value.mcps = access.value.mcps.filter(value => value !== id)
+    delete access.value.mcpTools[id]
   }
 }
 
 const allSkills = computed({
-  get: () => form.value.access?.skills === null,
+  get: () => access.value?.skills === null,
   set: (value: boolean) => {
-    form.value.access.skills = value ? null : []
+    if (!access.value)
+      return
+
+    access.value.skills = value ? null : []
   },
 })
-const permittedSkills = computed(() => state.skills.filter(skill => skill.valid && (skill.scope === 'global' || form.value.access?.projects === null || form.value.access?.projects?.includes(skill.scope))))
+const permittedSkills = computed(() => state.skills.filter(skill => skill.valid && (skill.scope === 'global' || access.value?.projects === null || access.value?.projects?.includes(skill.scope))))
 
-async function edit(item?: any) {
+async function edit(item?: Agent | Project) {
   if (state.installationRole === 'member')
     return
 
@@ -134,7 +173,8 @@ async function edit(item?: any) {
   githubToken.value = ''
   githubConfigured.value = false
   removeGithub.value = false
-  editing.value = item?.id ?? null
+  openedId = item?.id ?? null
+  resourceSave.reset(openedId)
   form.value = item
     ? structuredClone(JSON.parse(JSON.stringify(item)))
     : isAgent.value
@@ -164,7 +204,7 @@ async function edit(item?: any) {
           baseBranch: 'main',
           sourceMode: 'remote',
         }
-  if (isAgent.value) {
+  if ('access' in form.value) {
     form.value.provider ??= 'codex'
     form.value.access.installation ??= false
     form.value.access.nodes ??= form.value.access.nodes === null ? null : [LOCAL_NODE_ID]
@@ -177,14 +217,14 @@ async function edit(item?: any) {
     }
   }
 
-  if (!isAgent.value)
+  if ('path' in form.value)
     form.value.sourceMode ??= 'remote'
   error.value = ''
   open.value = true
   if (isAgent.value && editing.value) {
     const id = editing.value
     try {
-      const connection = await api(`/agents/${id}/github-token`)
+      const connection = await api<{ configured: boolean }>(`/agents/${id}/github-token`)
       if (editing.value === id)
         githubConfigured.value = connection.configured
     }
@@ -199,27 +239,59 @@ async function save() {
     return
   busy.value = true
   error.value = ''
+  let phase: 'save' | 'token' | 'refresh' = 'save'
   try {
-    const saved = await api(githubImport.value ? '/projects/github' : `/${props.kind}${editing.value ? `/${editing.value}` : ''}`, {
-      method: editing.value ? 'PUT' : 'POST',
-      body: JSON.stringify(githubImport.value
-        ? {
+    const importing = githubImport.value
+    const projectForm = 'path' in form.value ? form.value : undefined
+    const saved = await resourceSave.save<Agent | Project>(`/${props.kind}`, {
+      body: () => form.value,
+      createPath: importing ? '/projects/github' : undefined,
+      createBody: importing && projectForm
+        ? () => ({
             repository: repository.value,
-            name: form.value.name,
-            description: form.value.description,
-            baseBranch: form.value.baseBranch,
-          }
-        : form.value),
+            name: projectForm.name,
+            description: projectForm.description,
+            baseBranch: projectForm.baseBranch,
+          })
+        : undefined,
+      onCreated: (created) => {
+        if (importing && 'path' in form.value && 'path' in created) {
+          form.value.path = created.path
+          form.value.sourceMode = created.sourceMode
+        }
+      },
     })
-    if (isAgent.value && (githubToken.value || removeGithub.value))
+    if (isAgent.value && (githubToken.value || removeGithub.value)) {
+      phase = 'token'
       await api(`/agents/${saved.id}/github-token`, { method: 'PUT', body: JSON.stringify({ token: removeGithub.value ? '' : githubToken.value }) })
+    }
+
     githubToken.value = ''
+    removeGithub.value = false
+    phase = 'refresh'
     await refresh()
     open.value = false
     notify(`${isAgent.value ? 'Agent' : 'Project'} saved`)
   }
   catch (e) {
-    error.value = (e as Error).message
+    const label = isAgent.value ? 'Agent' : 'Project'
+    const detail = (e as Error).message
+    let summary: string
+    if (phase === 'refresh')
+      summary = `${label} saved, but the workspace could not be reloaded.`
+    else if (phase === 'token')
+      summary = 'Agent saved, but the GitHub connection could not be saved.'
+    else if (editing.value && editing.value !== openedId)
+      summary = `${label} saved, but the latest changes could not be saved.`
+    else if (pendingCreation.value)
+      summary = `Could not confirm whether the ${label.toLowerCase()} was saved. Retry to recover it safely.`
+    else
+      summary = `Could not save the ${label.toLowerCase()}.`
+    error.value = detail ? `${summary} ${detail}` : summary
+
+    // The alert follows the whole form; bring it above the sticky actions on small screens.
+    await nextTick()
+    saveAlert.value?.$el.scrollIntoView?.({ block: 'nearest' })
   }
   finally {
     busy.value = false
@@ -227,6 +299,9 @@ async function save() {
 }
 
 async function remove() {
+  if (!deleting.value)
+    return
+
   try {
     await api(`/${props.kind}/${deleting.value.id}`, { method: 'DELETE' })
     await refresh()
@@ -345,12 +420,12 @@ async function remove() {
           <VirtualSelect
             v-model="projectMode"
             label="Add from"
-            :disabled="busy"
+            :disabled="busy || pendingCreation"
             :options="[{ value: 'local', label: 'Server directory' }, { value: 'github', label: 'GitHub' }]"
           />
           <GithubRepositoryPicker
             v-if="githubImport"
-            :disabled="busy"
+            :disabled="busy || pendingCreation"
             :selected="repository"
             @select="selectRepository"
           />
@@ -368,7 +443,7 @@ async function remove() {
           rows="2"
           maxlength="500"
           placeholder="A short reminder of what this is for."
-        /></label><template v-if="isAgent">
+        /></label><template v-if="'access' in form">
           <AssistantPicker
             v-model:provider="form.provider"
             v-model:model="form.model"
@@ -394,11 +469,11 @@ async function remove() {
                 <div v-for="connection in state.mcps" :key="connection.id">
                   <label class="checkbox flex-row items-center gap-2 text-xs font-normal phone:text-xs phone:leading-[1.6] mx-0 my-[9px]"><input
                     type="checkbox"
-                    :checked="allMcps || form.access.mcps.includes(connection.id)"
+                    :checked="allMcps || form.access.mcps?.includes(connection.id)"
                     :disabled="allMcps"
                     @change="toggleMcp(connection.id, ($event.target as HTMLInputElement).checked)"
                   >{{ connection.name }}</label>
-                  <details v-if="allMcps || form.access.mcps.includes(connection.id)" class="mcp-agent-tools mt-[7px] mr-0 mb-4 ml-6 text-xs">
+                  <details v-if="allMcps || form.access.mcps?.includes(connection.id)" class="mcp-agent-tools mt-[7px] mr-0 mb-4 ml-6 text-xs">
                     <summary>Tool access</summary>
                     <label class="checkbox flex-row items-center gap-2 text-xs font-normal phone:text-xs phone:leading-[1.6] mx-0 my-[9px]"><input type="checkbox" :checked="!(connection.id in form.access.mcpTools)" @change="($event.target as HTMLInputElement).checked ? delete form.access.mcpTools[connection.id] : form.access.mcpTools[connection.id] = []">All enabled tools</label>
                     <template v-if="connection.id in form.access.mcpTools">
@@ -421,13 +496,13 @@ async function remove() {
             <p v-else>
               The main agent has access to all registered projects, skills, and shared connections.
             </p>
-            <label class="checkbox"><input v-model="form.access.installation" type="checkbox">Allow access to the current Cairn installation</label>
+            <label class="checkbox flex-row items-center gap-2 text-xs font-normal phone:text-xs phone:leading-[1.6] mx-0 my-[9px]"><input v-model="form.access.installation" type="checkbox">Allow access to the current Cairn installation</label>
             <small>Manage agents, projects, skills, MCP connections, tasks and runs on behalf of the installation owner, across the entire installation.</small>
-            <label class="checkbox"><input v-model="allNodes" type="checkbox">All nodes, including future nodes</label>
+            <label class="checkbox flex-row items-center gap-2 text-xs font-normal phone:text-xs phone:leading-[1.6] mx-0 my-[9px]"><input v-model="allNodes" type="checkbox">All nodes, including future nodes</label>
             <fieldset v-if="!allNodes" class="access-choices">
               <legend>Allowed nodes</legend>
-              <label class="checkbox"><input v-model="form.access.nodes" type="checkbox" :value="LOCAL_NODE_ID">Current runner</label>
-              <label v-for="node in nodes.filter(n => !n.local && !n.revoked)" :key="node.id" class="checkbox"><input v-model="form.access.nodes" type="checkbox" :value="node.id">{{ node.name }}</label>
+              <label class="checkbox flex-row items-center gap-2 text-xs font-normal phone:text-xs phone:leading-[1.6] mx-0 my-[9px]"><input v-model="form.access.nodes" type="checkbox" :value="LOCAL_NODE_ID">Current runner</label>
+              <label v-for="node in nodes.filter(n => !n.local && !n.revoked)" :key="node.id" class="checkbox flex-row items-center gap-2 text-xs font-normal phone:text-xs phone:leading-[1.6] mx-0 my-[9px]"><input v-model="form.access.nodes" type="checkbox" :value="node.id">{{ node.name }}</label>
             </fieldset>
             <VirtualSelect
               v-model="form.access.sandbox"
@@ -473,7 +548,7 @@ async function remove() {
             placeholder="main"
           ><small>Used for new private workspaces.</small></label>
         </template>
-        <UiAlert v-if="error" class="col-span-2 phone:col-span-1">
+        <UiAlert v-if="error" ref="saveAlert" class="col-span-2 scroll-mb-24 phone:col-span-1">
           {{ error }}
         </UiAlert>
       </div>

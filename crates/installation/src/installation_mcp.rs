@@ -2,7 +2,7 @@
 //! The owner delegates the complete public MCP management catalogue.
 use crate::{
     error::{Error, Result, required},
-    mcp_server::{ToolResult, empty_listing},
+    mcp_server::empty_listing,
     mcps::{grant_key, record::RunGrant},
     run_status::RunStatus,
     service::{Service, allowed, covers, policy},
@@ -91,8 +91,7 @@ pub(crate) async fn rpc(
     method: &str,
     params: &Value,
 ) -> Result<Value> {
-    let run = authorize(s, bearer).await?;
-    let agent_id = &run["snapshot"]["agent"]["id"];
+    authorize(s, bearer).await?;
     if let Some(listing) = empty_listing(method) {
         return Ok(listing);
     }
@@ -101,59 +100,74 @@ pub(crate) async fn rpc(
             let tools: Vec<_> = crate::mcp_server::catalog()
                 .into_iter()
                 .map(|mut tool| {
-                    // This endpoint uses the run grant, never external OAuth consent.
                     tool.as_object_mut().unwrap().remove("_meta");
-                    let properties = match text(&tool, "name") {
-                        "create_task" => Some(&mut tool["inputSchema"]["properties"]),
-                        "update_task" => {
-                            Some(&mut tool["inputSchema"]["properties"]["task"]["properties"])
-                        }
-                        _ => None,
-                    };
-                    if let Some(properties) = properties {
-                        properties["agentId"]["default"] = agent_id.clone();
-                    }
                     tool
                 })
                 .collect();
             Ok(json!({ "tools": tools }))
         }
         "tools/call" => {
-            let name = text(params, "name");
-            let operation = async {
-                let known = crate::mcp_server::catalog()
-                    .iter()
-                    .any(|tool| text(tool, "name") == name);
-                if !known {
-                    return Err(Error::not_found("Unknown tool"));
-                }
-
-                let mut args = params
+            crate::mcp_server::code_mode::call(
+                s,
+                crate::mcp_server::code_mode::Authorization::Installation(bearer.to_owned()),
+                text(params, "name"),
+                params
                     .get("arguments")
                     .cloned()
-                    .unwrap_or_else(|| json!({}));
-                // The shared public contract defaults to Main. This endpoint
-                // schedules the calling agent when no agent was selected.
-                let task = match name {
-                    "create_task" => Some(&mut args),
-                    "update_task" => args.get_mut("task"),
-                    _ => None,
-                };
-                if let Some(task) = task.and_then(Value::as_object_mut) {
-                    task.entry("agentId").or_insert_with(|| agent_id.clone());
-                }
-                let args = parse(&format!("mcp:{name}"), args)?;
-                invoke(s, bearer, name, args).await
-            }
-            .await;
-            let result = match operation {
-                Ok(value) => ToolResult::success(value.to_string(), json!({ "result": value })),
-                Err(error) => ToolResult::failure(&error.message),
-            };
-            Ok(serde_json::to_value(result)?)
+                    .unwrap_or_else(|| json!({})),
+            )
+            .await
         }
         _ => Err(Error::not_found("Method not found")),
     }
+}
+
+pub(crate) async fn operations(s: &Service, bearer: &str) -> Result<Vec<Value>> {
+    let run = authorize(s, bearer).await?;
+    let agent_id = &run["snapshot"]["agent"]["id"];
+    let tools = crate::mcp_server::operations()
+        .into_iter()
+        .map(|mut tool| {
+            tool.as_object_mut().unwrap().remove("_meta");
+            let properties = match text(&tool, "name") {
+                "create_task" | "create_chat" => Some(&mut tool["inputSchema"]["properties"]),
+                "update_task" => Some(&mut tool["inputSchema"]["properties"]["task"]["properties"]),
+                _ => None,
+            };
+            if let Some(properties) = properties {
+                properties["agentId"]["default"] = agent_id.clone();
+            }
+            tool
+        })
+        .collect();
+    Ok(tools)
+}
+
+pub(crate) async fn operation(
+    s: &Arc<Service>,
+    bearer: &str,
+    name: &str,
+    mut args: Value,
+) -> Result<Value> {
+    let run = authorize(s, bearer).await?;
+    let known = crate::mcp_server::operations()
+        .iter()
+        .any(|tool| text(tool, "name") == name);
+    if !known {
+        return Err(Error::not_found("Unknown operation"));
+    }
+    let input = match name {
+        "create_task" | "create_chat" => Some(&mut args),
+        "update_task" => args.get_mut("task"),
+        _ => None,
+    };
+    if let Some(input) = input.and_then(Value::as_object_mut) {
+        input
+            .entry("agentId")
+            .or_insert_with(|| run["snapshot"]["agent"]["id"].clone());
+    }
+    let args = parse(&format!("mcp:{name}"), args)?;
+    invoke(s, bearer, name, args).await
 }
 
 async fn invoke(s: &Arc<Service>, bearer: &str, name: &str, args: Value) -> Result<Value> {

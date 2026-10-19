@@ -9,10 +9,15 @@ import {
 } from 'vue'
 import { api, state } from '../api'
 import {
+  pluginFormSecrets,
+  pluginFormValue,
+  pluginFormValues,
+  pluginSecrets,
+  pluginSettings,
+} from '../plugin-form-values'
+import {
   delegates,
   eligibleAgent,
-  fieldSettings,
-  fieldValues,
   formResult,
   unshownFormErrors,
 } from '../plugins'
@@ -27,8 +32,8 @@ const props = defineProps<{ plugin: string, manifest: Manifest, initial: PluginS
 const emit = defineEmits<{ close: [], changed: [], activated: [] }>()
 const draft = ref(props.initial)
 const name = ref(props.initial.name)
-const values = ref(fieldValues(props.manifest.settings ?? [], props.initial.settings))
-const secrets = ref<Record<string, string>>({})
+const values = ref(pluginFormValues(props.manifest.settings ?? [], props.initial.settings))
+const secrets = ref<Record<string, string>>(pluginFormSecrets())
 const token = ref('')
 const credentialErrorId = useId()
 const enabled = ref(true)
@@ -49,7 +54,7 @@ let timer: ReturnType<typeof setTimeout> | undefined
 let expiryTimer: ReturnType<typeof setTimeout> | undefined
 
 function settings() {
-  return fieldSettings(props.manifest.settings ?? [], values.value)
+  return pluginSettings(props.manifest.settings ?? [], values.value)
 }
 
 function canonical(value: Record<string, any>) {
@@ -58,7 +63,7 @@ function canonical(value: Record<string, any>) {
 
 const dirty = computed(() => name.value.trim() !== draft.value.name
   || canonical(settings()) !== canonical(draft.value.settings)
-  || Boolean(token.value.trim()) || Object.values(secrets.value).some(value => value.trim()))
+  || Boolean(token.value.trim()) || Object.keys(pluginSecrets(secrets.value)).length > 0)
 const available = computed(() => draft.value.status === 'setup' && !expired.value)
 const eligible = computed(() => state.agents.filter(eligibleAgent))
 
@@ -82,8 +87,11 @@ async function complete(changed?: string) {
     }))
     if (request !== asked)
       return
-    for (const [key, value] of Object.entries(result.values ?? {}))
-      values.value[key] = value ?? ''
+    for (const field of props.manifest.settings ?? []) {
+      if (Object.hasOwn(result.values, field.key))
+        values.value[field.key] = pluginFormValue(field, result.values[field.key])
+    }
+
     completion.value = result
     formReady.value = true
   }
@@ -131,13 +139,13 @@ async function save() {
         revision: draft.value.revision,
         name: name.value,
         settings: settings(),
-        secrets: secrets.value,
+        secrets: pluginSecrets(secrets.value),
         ...(token.value ? { token: token.value } : {}),
       }),
     })
     name.value = draft.value.name
-    values.value = fieldValues(props.manifest.settings ?? [], draft.value.settings)
-    secrets.value = {}
+    values.value = pluginFormValues(props.manifest.settings ?? [], draft.value.settings)
+    secrets.value = pluginFormSecrets()
     token.value = ''
     emit('changed')
     await complete()
@@ -173,7 +181,7 @@ onBeforeUnmount(() => {
   clearTimeout(expiryTimer)
   asked++
   token.value = ''
-  secrets.value = {}
+  secrets.value = pluginFormSecrets()
 })
 </script>
 

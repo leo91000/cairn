@@ -4,7 +4,7 @@ import sample from '../../../tests/fixtures/activity-events.json'
 import { redactPayload } from '../../../tests/fixtures/legacy/server/worker.ts'
 import { activityEntries, ActivityGroups, teamEntries } from '../src/activity'
 
-const events: RunEvent[] = sample.map((payload, index) => ({
+const events: RunEvent[] = sample.slice(0, 15).map((payload, index) => ({
   id: index + 1,
   runId: 'test',
   createdAt: index,

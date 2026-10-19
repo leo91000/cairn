@@ -2,6 +2,37 @@ use crate::{service::policy, validation::text};
 use serde_json::{Value, json};
 use std::{path::Path, sync::LazyLock};
 
+pub const ACTIVITY_DETAIL_LIMIT: usize = 16 * 1024;
+const NOTICE: &str = "Details shortened: arguments and output were omitted.";
+
+/// Serialize UI activity before it crosses the guest transport. The native
+/// session retains full tool results; the manager already stores these previews.
+pub fn event_line(event: &Value) -> Vec<u8> {
+    let mut bytes = event.to_string().into_bytes();
+    let activity = text(event, "type").starts_with("item.")
+        && event["item"].is_object()
+        && event["item"]["type"] != "agent_message";
+    if activity && bytes.len() > ACTIVITY_DETAIL_LIMIT {
+        bytes = compact_activity_preview(event, None)
+            .to_string()
+            .into_bytes();
+    }
+    bytes.push(b'\n');
+    bytes
+}
+
+/// A controller can fail after writing only part of a guest stdout line.
+/// Establish a fresh line so the failure remains independently parseable.
+pub fn controller_failure_line(message: &str) -> Vec<u8> {
+    let failure = json!({
+        "type": "runner.failed",
+        "error": { "message": message },
+    });
+    let mut bytes = vec![b'\n'];
+    bytes.extend(event_line(&failure));
+    bytes
+}
+
 static TOKEN: LazyLock<regex::Regex> = LazyLock::new(|| {
     regex::Regex::new(r"\b(?:gh[pousr]_\w{15,}|github_pat_\w{15,}|ops_[\w.-]{15,}|sk-[\w-]{12,})\b")
         .unwrap()
@@ -69,7 +100,12 @@ pub fn payload(value: &Value, secrets: &[String]) -> Value {
 /// Keep an inspectable activity and its outcome without retaining large tool data.
 /// Redact complete fields before shortening them, so a cut cannot expose part of a secret.
 pub fn compact_activity(event: &Value, secrets: &[String]) -> Value {
-    const NOTICE: &str = "Details shortened: arguments and output were omitted.";
+    compact_activity_preview(event, Some(secrets))
+}
+
+/// Unknown configured secrets prohibit cutting fields: omit oversized values
+/// whole, and let the manager redact every complete value that remains.
+fn compact_activity_preview(event: &Value, secrets: Option<&[String]>) -> Value {
     let source = &event["item"];
     let mut item = serde_json::Map::new();
     for key in [
@@ -99,7 +135,7 @@ pub fn compact_activity(event: &Value, secrets: &[String]) -> Value {
     }
     for key in ["id", "type"] {
         if let Some(value) = source.get(key) {
-            item.insert(key.to_owned(), payload(value, secrets));
+            item.insert(key.to_owned(), payload(value, secrets.unwrap_or_default()));
         }
     }
     if let Some(command) = source.get("command") {
@@ -194,16 +230,19 @@ pub fn compact_activity(event: &Value, secrets: &[String]) -> Value {
     json!({ "type": event["type"], "item": item })
 }
 
-fn activity_preview(value: &Value, limit: usize, secrets: &[String]) -> Value {
+fn activity_preview(value: &Value, limit: usize, secrets: Option<&[String]>) -> Value {
     if value.is_object() || value.is_array() {
         return Value::Null;
     }
-    let redacted = payload(value, secrets);
+    let redacted = payload(value, secrets.unwrap_or_default());
     let Some(text) = redacted.as_str() else {
         return redacted;
     };
     if text.len() <= limit {
         return redacted;
+    }
+    if secrets.is_none() {
+        return NOTICE.into();
     }
 
     format!("{}…", &text[..text.floor_char_boundary(limit)]).into()
@@ -259,7 +298,11 @@ pub fn prompt(run: &Value, chat: bool) -> String {
             clarification is useful. Nonblocking questions let you continue independent \
             work while the user considers the options; a suggested answer is never user \
             approval. Follow the latest user instructions and do not treat a question \
-            as authorization to publish changes."
+            as authorization to publish changes. Use cairn_workspace.pending_questions and \
+            cairn_workspace.withdraw_question to retire a question that became unnecessary \
+            or was answered in ordinary chat. Withdrawal never supplies approval. A completed \
+            outcome retires unanswered questions at the end of the turn; report needs_input \
+            when an answer is still required."
     } else {
         "This unattended task cannot answer clarification questions; report a \
             concrete blocker if required information is missing."
@@ -417,6 +460,21 @@ fn skill_index(skills: &Value) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn transport_preserves_large_messages_control_events_and_small_activity() {
+        let text = "Long message é\n".repeat(3000);
+        for event in [
+            json!({ "type": "item.completed", "item": { "id": "message", "type": "agent_message", "text": text } }),
+            json!({ "type": "chat.question", "question": { "title": text } }),
+            json!({ "type": "turn.failed", "error": { "message": text } }),
+            json!({ "type": "item.completed", "item": { "id": "tool", "type": "mcp_tool_call", "result": { "isError": true } } }),
+        ] {
+            let line = event_line(&event);
+            assert_eq!(line.last(), Some(&b'\n'));
+            assert_eq!(serde_json::from_slice::<Value>(&line).unwrap(), event);
+        }
+    }
 
     #[test]
     fn selected_skills_list_paths_instead_of_contents() {

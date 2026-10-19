@@ -133,11 +133,7 @@ pub async fn command(s: &Service, bearer: &str, input: &Value) -> Result<Value> 
         Some(operation) => {
             super::grants::authorize(s, &run, &package, operation, &json!(values), bearer).await?
         }
-        None => Scope::Agent {
-            agent_id,
-            instances,
-            bearer: bearer.to_owned(),
-        },
+        None => Scope::for_agent(s, &run, instances, bearer).await?,
     };
     let payload = json!({
         "command": name,
@@ -221,11 +217,7 @@ pub async fn call_tool(
             if instances.is_empty() {
                 return Ok(None);
             }
-            Scope::Agent {
-                agent_id,
-                instances,
-                bearer: bearer.to_owned(),
-            }
+            Scope::for_agent(s, &run, instances, bearer).await?
         }
     };
     let payload = json!({

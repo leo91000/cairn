@@ -173,12 +173,14 @@ pub async fn create(
             if db.get("agents", &grant.agent_id)?.is_none() {
                 return Err(Error::bad("Agent not found."));
             }
-            if db.list(connections::KIND)?.iter().any(|value| {
-                value["agentId"] == grant.agent_id && value["accessMode"] == "everyone"
-            }) {
-                return Err(Error::bad(
-                    "An agent reachable by anyone cannot receive resource credentials.",
-                ));
+            for kind in [connections::KIND, super::routes::KIND] {
+                if db.list(kind)?.iter().any(|value| {
+                    value["agentId"] == grant.agent_id && value["accessMode"] == "everyone"
+                }) {
+                    return Err(Error::bad(
+                        "An agent reachable by anyone cannot receive resource credentials.",
+                    ));
+                }
             }
             if db
                 .list(KIND)?
@@ -207,6 +209,7 @@ pub async fn list(
     instance: &str,
     collection: &str,
     resource: &str,
+    cursor: Option<&str>,
 ) -> Result<Value> {
     resources::get(s, plugin, instance, collection, resource).await?;
     let values = s
@@ -217,7 +220,7 @@ pub async fn list(
         .filter(|value| value["resourceId"] == resource && value["connectionId"] == instance)
         .map(serde_json::from_value::<Grant>)
         .collect::<std::result::Result<Vec<_>, _>>()?;
-    Ok(json!({ "items": values.iter().map(summary).collect::<Vec<_>>() }))
+    super::paging::page(values.iter().map(summary).collect(), cursor)
 }
 
 pub async fn remove(

@@ -41,6 +41,18 @@ describe('real worker subprocess lifecycle', () => {
     return ctx.service.store.run(id)!
   }
 
+  it('replays provider activity without emitting stored wait cases from the shared corpus', async () => {
+    ctx.service.task({ ...ctx.task, prompt: 'fixture:activity' }, ctx.task.id)
+    const run = await ctx.service.enqueue(ctx.task.id)
+    await ctx.worker.tick()
+    expect((await finished(run.id)).status).toBe('succeeded')
+    const events = ctx.service.store.events(run.id)
+    expect(events.filter(event => event.type === 'chat.wait_ready')).toEqual([])
+    const items = events.map(event => event.payload?.item as Record<string, unknown> | undefined)
+    expect(items.filter(item => item?.id === 'command-1')).toHaveLength(2)
+    expect(items.some(item => item?.id === 'read-typescript')).toBe(true)
+  })
+
   it('passes run-scoped MCP access to the subprocess and redacts and revokes its credential', async () => {
     const provider = await mcpProvider()
     try {

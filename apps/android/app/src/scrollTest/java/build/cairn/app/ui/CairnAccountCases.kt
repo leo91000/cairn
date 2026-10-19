@@ -22,6 +22,100 @@ abstract class CairnAccountCases {
 
     protected open fun sessionVault(application: Application): SessionVault = AccountFixtureVault()
 
+    protected open fun captureRevokedAccess() {}
+
+    fun revokedLastInstallationShowsTheAccountPageAndExplainsTheChange() {
+        MockWebServer().use { server ->
+            val revoked = java.util.concurrent.atomic.AtomicBoolean(false)
+            val refreshesAfterRevocation = java.util.concurrent.atomic.AtomicInteger(0)
+            val releasePoll = java.util.concurrent.CountDownLatch(1)
+            val installations =
+                """[{"id":"revoked-home","name":"Maison","role":"member","online":false}]"""
+            server.dispatcher =
+                object : Dispatcher() {
+                    override fun dispatch(request: RecordedRequest): MockResponse {
+                        val response =
+                            when (request.requestUrl!!.encodedPath) {
+                                "/api/account/session" ->
+                                    """{"authenticated":true,"csrf":"fixture-csrf","account":{"id":"revoked-person","email":"member@example.test"},"installations":$installations}"""
+                                "/api/installations/revoked-home/api/overview" -> {
+                                    revoked.set(true)
+                                    return MockResponse()
+                                        .setResponseCode(403)
+                                        .setBody("""{"error":"Access revoked"}""")
+                                }
+                                "/api/installations" -> {
+                                    if (revoked.get()) {
+                                        // Let the 403 recovery discover the removal. Later periodic
+                                        // polls must not replace its notice before we inspect it.
+                                        if (refreshesAfterRevocation.incrementAndGet() > 1)
+                                            check(
+                                                releasePoll.await(
+                                                    30,
+                                                    java.util.concurrent.TimeUnit.SECONDS,
+                                                )
+                                            )
+                                        "[]"
+                                    } else installations
+                                }
+                                else -> "{}"
+                            }
+                        return MockResponse().setBody(response)
+                    }
+                }
+            server.start()
+            val application = ApplicationProvider.getApplicationContext<Application>()
+            val vm = CairnViewModel(application, sessionVault(application), beaconOrigin = "")
+            val models = androidx.lifecycle.ViewModelStore().apply { put("fixture", vm) }
+            val mounted = mutableStateOf(true)
+            try {
+                compose.setContent {
+                    if (mounted.value) {
+                        LaunchedEffect(Unit) {
+                            vm.state.first { it.ready }
+                            vm.perform { connect(server.url("/").toString()) }
+                        }
+                        CairnTheme { CairnApp(vm = vm) }
+                    }
+                }
+                compose.waitUntil(30000) {
+                    compose
+                        .onAllNodes(installationHeader("Maison", "Hors ligne"))
+                        .fetchSemanticsNodes()
+                        .isNotEmpty() &&
+                        vm.state.value.installation?.id == "revoked-home" &&
+                        !vm.state.value.busy
+                }
+                compose.runOnIdle { vm.perform { api.request("GET", "/overview") } }
+                compose.waitUntil(20000) {
+                    compose
+                        .onAllNodesWithText("Aucune installation")
+                        .fetchSemanticsNodes()
+                        .isNotEmpty() &&
+                        compose
+                            .onAllNodesWithText("Votre accès à cette installation a changé.")
+                            .fetchSemanticsNodes()
+                            .isNotEmpty()
+                }
+                compose.onNodeWithText("Aucune installation").assertIsDisplayed()
+                compose
+                    .onNodeWithText("Votre accès à cette installation a changé.")
+                    .assertIsDisplayed()
+                assertTrue(vm.state.value.session.authenticated)
+                assertNull(vm.state.value.installation)
+                assertTrue(refreshesAfterRevocation.get() >= 1)
+                captureRevokedAccess()
+            } finally {
+                releasePoll.countDown()
+                compose.runOnIdle {
+                    mounted.value = false
+                    models.clear()
+                }
+                compose.waitForIdle()
+            }
+        }
+    }
+
     fun switchingToASharedInstallationHidesManagementAndRestoresTheSelection() {
         MockWebServer().use { server ->
             val installations =

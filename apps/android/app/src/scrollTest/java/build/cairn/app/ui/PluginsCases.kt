@@ -431,6 +431,94 @@ abstract class PluginsCases {
     }
 
     @Test
+    fun requiredWhitespaceChoiceCanBeSavedWithNonblankUnicodeText() {
+        val entry =
+            notes.copy(
+                manifest =
+                    notes.manifest!!.copy(
+                        capabilities = emptyList(),
+                        settings =
+                            listOf(
+                                PluginSetting(
+                                    key = "region",
+                                    title = "Region",
+                                    type = "select",
+                                    required = true,
+                                    default = JsonPrimitive(" "),
+                                    options =
+                                        listOf(
+                                            PluginOption(" ", "Space option"),
+                                            PluginOption("eu", "Europe"),
+                                        ),
+                                ),
+                                PluginSetting(key = "team", title = "Team", required = true),
+                                PluginSetting(
+                                    key = "password",
+                                    title = "Password",
+                                    type = "secret",
+                                    required = true,
+                                ),
+                            ),
+                    )
+            )
+        MockWebServer().use { server ->
+            val saved = CopyOnWriteArrayList<String>()
+            server.dispatcher =
+                dispatcher(includeGet = true) { path, body ->
+                    when (path) {
+                        "/api/installations/fixture/api/plugins" ->
+                            wireJson.encodeToString(PluginCatalog(packages = listOf(entry)))
+                        "/api/installations/fixture/api/plugins/notes/connections" -> {
+                            saved += body
+                            "{}"
+                        }
+                        else -> null
+                    }
+                }
+            server.start()
+            show(server) { vm, state -> PluginScreen(vm, state, "notes") {} }
+            compose.waitUntil(30000) {
+                compose
+                    .onAllNodesWithText("Ajouter une instance")
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
+            }
+            compose.onNodeWithText("Ajouter une instance").performClick()
+            compose.onNodeWithText("Space option").assertExists()
+            compose.onNodeWithText("Enregistrer").assertIsNotEnabled()
+            compose.onNodeWithText("Team").performTextInput("   ")
+            compose.onNodeWithText("Password").performTextInput(" \uFEFFcredential\uFEFF ")
+            compose.onNodeWithText("Enregistrer").assertIsNotEnabled()
+            compose.onNodeWithText("Team").performTextReplacement(" \uFEFFteam\uFEFF ")
+            // Opening default is a nonempty identifier, even though it is blank as text.
+            compose.onNodeWithText("Enregistrer").assertIsEnabled()
+            // The same identifier chosen manually must reach the save guard and wire payload.
+            compose.onNodeWithText("Space option").performClick()
+            compose.onNodeWithText("Europe").performClick()
+            compose.onNodeWithText("Europe").performClick()
+            compose.onNodeWithText("Space option").performClick()
+            compose.onNodeWithText("Enregistrer").assertIsEnabled()
+            capture("plugin-whitespace-choice-editor")
+            compose.onNodeWithText("Enregistrer").performClick()
+            compose.waitUntil(10000) { saved.isNotEmpty() }
+            val payload = wireJson.parseToJsonElement(saved.single()).jsonObject
+            assertEquals(
+                buildJsonObject {
+                    put("region", " ")
+                    put("team", "\uFEFFteam\uFEFF")
+                },
+                payload["settings"],
+            )
+            assertEquals(
+                buildJsonObject {
+                    put("password", "\uFEFFcredential\uFEFF")
+                },
+                payload["secrets"],
+            )
+        }
+    }
+
+    @Test
     fun discordBotIsSetUpThroughItsPackageForm() {
         MockWebServer().use { server ->
             val forms = CopyOnWriteArrayList<JsonObject>()
@@ -1022,6 +1110,106 @@ abstract class PluginsCases {
                     }
                     .second
             assertEquals("resource2", resourceDelete["revision"]?.jsonPrimitive?.content)
+        }
+    }
+
+    @Test
+    fun setupDraftsLoadEveryPageBeforeResumingAndDiscardingTheLastDraft() {
+        val entry =
+            PluginEntry(
+                id = "draft-pages",
+                active = "1",
+                manifest =
+                    PluginManifest(
+                        id = "draft-pages",
+                        name = "Draft pages",
+                        version = "1",
+                        settings =
+                            listOf(PluginSetting(key = "label", title = "Label", type = "string")),
+                    ),
+            )
+        val drafts = CopyOnWriteArrayList<PluginSetupDraft>()
+        for ((index, name) in listOf("First", "Last").withIndex()) {
+            drafts +=
+                PluginSetupDraft(
+                    id = "00000000-0000-4000-8000-00000000000${index + 1}",
+                    pluginId = "draft-pages",
+                    name = "$name setup",
+                    revision = "revision-$index",
+                    settings = buildJsonObject { put("label", "$name saved value") },
+                    expiresAt = System.currentTimeMillis() + 86400000,
+                )
+        }
+        val last = drafts.last()
+        val started = CountDownLatch(1)
+        val release = CountDownLatch(1)
+        val deleted = CopyOnWriteArrayList<String>()
+        MockWebServer().use { server ->
+            server.dispatcher =
+                dispatcher(
+                    read = { path ->
+                        when {
+                            path.endsWith("/plugins") ->
+                                wireJson.encodeToString(PluginCatalog(packages = listOf(entry)))
+                            path.substringBefore('?').endsWith("/setup-drafts") -> {
+                                val cursor = android.net.Uri.parse(path).getQueryParameter("cursor")
+                                if (cursor != null) {
+                                    started.countDown()
+                                    check(release.await(20, TimeUnit.SECONDS))
+                                }
+                                val remaining = drafts.filter { cursor == null || it.id > cursor }
+                                wireJson.encodeToString(
+                                    PluginPage(
+                                        remaining.take(1),
+                                        remaining.firstOrNull()?.id?.takeIf { remaining.size > 1 },
+                                    )
+                                )
+                            }
+                            else -> null
+                        }
+                    }
+                ) { path, body ->
+                    if (path.endsWith("/setup-drafts/${last.id}")) {
+                        assertEquals(
+                            last.revision,
+                            wireJson
+                                .parseToJsonElement(body)
+                                .jsonObject["revision"]!!
+                                .jsonPrimitive
+                                .content,
+                        )
+                        deleted += last.id
+                        drafts.remove(last)
+                        "{}"
+                    } else null
+                }
+            server.start()
+            show(server) { vm, state -> PluginScreen(vm, state, "draft-pages") {} }
+            try {
+                compose.waitUntil(10000) { started.count == 0L }
+                compose.onNodeWithText("Continuer Last setup").assertDoesNotExist()
+            } finally {
+                release.countDown()
+            }
+            compose.waitUntil(10000) {
+                compose
+                    .onAllNodesWithText("Continuer Last setup")
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
+            }
+            compose.onNodeWithText("Continuer Last setup").performScrollTo().performClick()
+            compose.onNodeWithText("Last saved value").assertExists()
+            compose.onNodeWithContentDescription("Fermer").performClick()
+            compose.onNodeWithText("Abandonner Last setup").performScrollTo().performClick()
+            compose.onNodeWithText("Confirmer").performClick()
+            compose.waitUntil(10000) {
+                deleted.size == 1 &&
+                    compose
+                        .onAllNodesWithText("Abandonner Last setup")
+                        .fetchSemanticsNodes()
+                        .isEmpty()
+            }
+            assertEquals(listOf(last.id), deleted.toList())
         }
     }
 
@@ -2233,7 +2421,14 @@ abstract class PluginsCases {
                 id = "draft-grants",
                 agentAccess = PluginAgentAccess(),
                 resources =
-                    listOf(PluginResourceCollection("workspace", "Workspaces", "Workspace")),
+                    listOf(
+                        PluginResourceCollection(
+                            "workspace",
+                            "Workspaces",
+                            "Workspace",
+                            delegation = true,
+                        )
+                    ),
                 operations = listOf(PluginOperation("read", "workspace", PluginAccessProfile.Read)),
             )
         val resource =
@@ -2277,7 +2472,547 @@ abstract class PluginsCases {
                 compose.onAllNodesWithText("Prepared workspace").fetchSemanticsNodes().isNotEmpty()
             }
             compose.onNodeWithText("Accès des agents").assertDoesNotExist()
+            compose.onNodeWithText("Routes de conversation").assertDoesNotExist()
             assertEquals(0, grantReads.get())
+        }
+    }
+
+    @Test
+    fun resourceRoutesLoadAllPagesAndCancelAClosedRead() {
+        resourceManagementPagesScenario(routes = true)
+    }
+
+    @Test
+    fun resourceGrantsLoadAllPagesAndCancelAClosedRead() {
+        resourceManagementPagesScenario(routes = false)
+    }
+
+    private fun resourceManagementPagesScenario(routes: Boolean) {
+        val root = "/plugins/pages/connections/app/resources/workspace/engineering"
+        val path = "$root/${if (routes) "routes" else "grants"}"
+        val items = CopyOnWriteArrayList<JsonElement>()
+        for (id in listOf("first", "last")) {
+            items +=
+                if (routes)
+                    wireJson.encodeToJsonElement(
+                        PluginRoute(
+                            id = id,
+                            resourceId = "engineering",
+                            name = id,
+                            agentId = "helper",
+                            userIds = listOf("alice"),
+                            revision = "revision-$id",
+                        )
+                    )
+                else
+                    wireJson.encodeToJsonElement(
+                        PluginResourceGrant(
+                            id = id,
+                            resourceId = "engineering",
+                            agentId = "helper",
+                            profile = PluginAccessProfile.Read,
+                            scopes = mapOf("channel" to listOf(id)),
+                        )
+                    )
+        }
+        val started = CountDownLatch(1)
+        val release = CountDownLatch(1)
+        val hold = java.util.concurrent.atomic.AtomicBoolean(true)
+        val deleted = CopyOnWriteArrayList<String>()
+        val operations =
+            listOf(
+                PluginOperation(
+                    "read-messages",
+                    "workspace",
+                    PluginAccessProfile.Read,
+                    listOf("channel"),
+                )
+            )
+        MockWebServer().use { server ->
+            val normal = dispatcher { _, _ -> null }
+            server.dispatcher =
+                object : Dispatcher() {
+                    override fun dispatch(request: RecordedRequest): MockResponse {
+                        val requested = request.requestUrl!!
+                        if (request.method == "GET" && requested.encodedPath.endsWith(path)) {
+                            val cursor = requested.queryParameter("cursor")
+                            val remaining = items.filter {
+                                cursor == null ||
+                                    it.jsonObject["id"]!!.jsonPrimitive.content > cursor
+                            }
+                            if (cursor != null && hold.get()) {
+                                started.countDown()
+                                check(release.await(20, TimeUnit.SECONDS))
+                            }
+                            val page = buildJsonObject {
+                                put("items", JsonArray(remaining.take(1)))
+                                put(
+                                    "nextCursor",
+                                    if (remaining.size > 1) remaining.first().jsonObject["id"]!!
+                                    else JsonNull,
+                                )
+                            }
+                            return MockResponse().setBody(page.toString())
+                        }
+                        if (
+                            request.method == "DELETE" && requested.encodedPath.contains("$path/")
+                        ) {
+                            assertEquals("fixture-csrf", request.getHeader("X-CSRF-Token"))
+                            val id = requested.pathSegments.last()
+                            if (routes)
+                                assertEquals(
+                                    "revision-$id",
+                                    wireJson
+                                        .parseToJsonElement(request.body.readUtf8())
+                                        .jsonObject["revision"]!!
+                                        .jsonPrimitive
+                                        .content,
+                                )
+                            deleted += id
+                            items.removeAll { it.jsonObject["id"]!!.jsonPrimitive.content == id }
+                            return MockResponse().setBody("{}")
+                        }
+                        return normal.dispatch(request)
+                    }
+                }
+            server.start()
+            show(server) { vm, state ->
+                if (routes) PluginResourceRoutes(vm, state, root, "Engineering", true) {}
+                else PluginResourceGrants(vm, state, path, "Engineering", operations, true) {}
+            }
+            val action = if (routes) "Routes de conversation" else "Accès des agents"
+            val loading = if (routes) "Chargement des routes…" else "Chargement des règles…"
+            val add = if (routes) "Ajouter une route" else "Ajouter une règle"
+            compose.waitUntil(10000) {
+                compose.onAllNodesWithText(action).fetchSemanticsNodes().isNotEmpty()
+            }
+            compose.onNodeWithText(action).performClick()
+            try {
+                compose.waitUntil(10000) { started.count == 0L }
+                compose.onNodeWithText(loading).assertExists()
+                compose.onNodeWithText(add).assertDoesNotExist()
+                compose.onNodeWithContentDescription("Fermer").performClick()
+                compose.onNodeWithText("$action · Engineering").assertDoesNotExist()
+            } finally {
+                hold.set(false)
+                release.countDown()
+            }
+            compose.onNodeWithText(action).performClick()
+            val last = if (routes) "Supprimer la route last" else "channel : last"
+            compose.waitUntil(10000) {
+                compose.onAllNodesWithText(last).fetchSemanticsNodes().isNotEmpty()
+            }
+            compose.onNodeWithText(last).performScrollTo().assertExists()
+            if (routes) {
+                compose.onNodeWithText(last).performClick()
+                compose.onNodeWithText("Confirmer la suppression").performScrollTo().performClick()
+            } else {
+                compose.onAllNodesWithText("Révoquer la règle")[1].performScrollTo().performClick()
+                compose.onNodeWithText("Confirmer").performClick()
+            }
+            compose.waitUntil(10000) {
+                deleted.size == 1 &&
+                    compose.onAllNodesWithText(last).fetchSemanticsNodes().isEmpty() &&
+                    compose.onAllNodesWithText(add).fetchSemanticsNodes().isNotEmpty()
+            }
+            assertEquals(listOf("last"), deleted.toList())
+            compose.onNodeWithText(add).performScrollTo().assertExists()
+        }
+    }
+
+    @Test
+    fun resourceRoutesRequireExplicitSourceAndAgentAndPreservePausedConditions() {
+        resourceRouteEditorScenario(uncertain = false)
+    }
+
+    @Test
+    fun resourceRoutesRefreshAnUncertainCreationWithoutRepeatingIt() {
+        resourceRouteEditorScenario(uncertain = true)
+    }
+
+    private fun resourceRouteEditorScenario(uncertain: Boolean) {
+        val routes = CopyOnWriteArrayList<PluginRoute>()
+        val writes = CopyOnWriteArrayList<JsonObject>()
+        val methods = CopyOnWriteArrayList<String>()
+        val routePath = "/plugins/routes-ui/connections/app/resources/workspace/engineering"
+        val path = "$routePath/routes"
+        MockWebServer().use { server ->
+            val normal =
+                dispatcher(
+                    read = { requested ->
+                        when {
+                            requested.endsWith(path) ->
+                                wireJson.encodeToString(PluginPage(routes.toList()))
+                            requested.contains("$routePath/route-eligibility?") ->
+                                wireJson.encodeToString(
+                                    PluginPage(listOf(RouteEligibility("helper", true)))
+                                )
+                            else -> null
+                        }
+                    }
+                ) { _, _ ->
+                    null
+                }
+            server.dispatcher =
+                object : Dispatcher() {
+                    override fun dispatch(request: RecordedRequest): MockResponse {
+                        val requested = request.path.orEmpty()
+                        if (request.method == "GET" || !requested.contains(path))
+                            return normal.dispatch(request)
+                        if (request.getHeader("X-CSRF-Token") != "fixture-csrf")
+                            return MockResponse().setResponseCode(403)
+                        val input = wireJson.parseToJsonElement(request.body.readUtf8()).jsonObject
+                        methods += request.method.orEmpty()
+                        writes += input
+                        if (request.method == "DELETE") {
+                            assertEquals(
+                                routes.single().revision,
+                                input["revision"]?.jsonPrimitive?.content,
+                            )
+                            routes.clear()
+                            return MockResponse().setBody("{}")
+                        }
+                        if (request.method == "PUT")
+                            assertEquals(
+                                routes.single().revision,
+                                input["revision"]?.jsonPrimitive?.content,
+                            )
+                        val saved =
+                            wireJson
+                                .decodeFromString<PluginRoute>(input.toString())
+                                .copy(
+                                    id = "route",
+                                    resourceId = "engineering",
+                                    revision = "edit${writes.size}",
+                                )
+                        routes.clear()
+                        routes += saved
+                        return if (uncertain)
+                            MockResponse().setSocketPolicy(SocketPolicy.DISCONNECT_AFTER_REQUEST)
+                        else MockResponse().setBody(wireJson.encodeToString(saved))
+                    }
+                }
+            server.start()
+            show(server) { vm, state ->
+                PluginResourceRoutes(vm, state, routePath, "Engineering", true) {}
+            }
+            compose.waitUntil(10000) {
+                compose
+                    .onAllNodesWithText("Routes de conversation")
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
+            }
+            compose.onNodeWithText("Routes de conversation").performClick()
+            compose.waitUntil(10000) {
+                compose.onAllNodesWithText("Ajouter une route").fetchSemanticsNodes().isNotEmpty()
+            }
+            compose.onNodeWithText("Ajouter une route").performScrollTo().performClick()
+            compose.onNodeWithText("Nom de la route").performScrollTo().performTextInput("Support")
+            compose.onNodeWithText("Enregistrer").assertIsNotEnabled()
+            compose.waitUntil(10000) {
+                compose.onAllNodesWithContentDescription("Helper").fetchSemanticsNodes().any {
+                    !it.config.contains(SemanticsProperties.Disabled)
+                }
+            }
+            compose.onNodeWithContentDescription("Helper").performScrollTo().performClick()
+            compose.onNodeWithText("Enregistrer").assertIsNotEnabled()
+            compose.onNodeWithText("Ajouter une condition").performScrollTo().performClick()
+            compose
+                .onNodeWithText("Clé de la condition 1")
+                .performScrollTo()
+                .performTextInput("constructor")
+            compose
+                .onNodeWithText("Valeur de la condition 1")
+                .performScrollTo()
+                .performTextInput("C1")
+            compose.onNodeWithText("Enregistrer").assertIsEnabled().performClick()
+            compose.waitUntil(10000) {
+                routes.size == 1 &&
+                    compose
+                        .onAllNodesWithText(
+                            if (uncertain) "Actualisez les routes avant une autre modification."
+                            else "Modifier la route Support",
+                            substring = true,
+                        )
+                        .fetchSemanticsNodes()
+                        .isNotEmpty()
+            }
+            assertEquals(1, writes.size)
+            assertEquals("helper", writes.single()["agentId"]?.jsonPrimitive?.content)
+            assertEquals("C1", routes.single().match["constructor"])
+            assertEquals("requests", routes.single().accessMode)
+            assertTrue(routes.single().userIds.isEmpty())
+            if (uncertain) {
+                compose.onNodeWithText("Ajouter une route").assertDoesNotExist()
+                compose.onNodeWithText("Actualiser les routes").performScrollTo().performClick()
+                compose.waitUntil(10000) {
+                    compose
+                        .onAllNodesWithText("Modifier la route Support")
+                        .fetchSemanticsNodes()
+                        .isNotEmpty()
+                }
+                assertEquals(1, writes.size)
+                capture("resource-route-uncertain-refreshed")
+            } else {
+                capture("resource-conversation-route")
+                compose.onNodeWithText("Modifier la route Support").performScrollTo().performClick()
+                compose.onNodeWithText("Valeur de la condition 1").assertTextContains("C1")
+                compose.onNodeWithText("Route activée").performScrollTo().performClick()
+                compose.onNodeWithText("Enregistrer").assertIsEnabled().performClick()
+                compose.waitUntil(10000) {
+                    methods.size == 2 &&
+                        compose
+                            .onAllNodesWithText("Support · En pause")
+                            .fetchSemanticsNodes()
+                            .isNotEmpty()
+                }
+                assertFalse(routes.single().enabled)
+                assertEquals(mapOf("constructor" to "C1"), routes.single().match)
+                compose
+                    .onNodeWithText("Supprimer la route Support")
+                    .performScrollTo()
+                    .performClick()
+                compose
+                    .onNodeWithText(
+                        "Supprimer Support ? Une route plus générale pourra alors correspondre à ses sources."
+                    )
+                    .performScrollTo()
+                    .assertExists()
+                compose.onNodeWithText("Confirmer la suppression").performScrollTo().performClick()
+                compose.waitUntil(10000) {
+                    routes.isEmpty() &&
+                        compose
+                            .onAllNodesWithText("Ajouter une route")
+                            .fetchSemanticsNodes()
+                            .isNotEmpty()
+                }
+                assertEquals(listOf("POST", "PUT", "DELETE"), methods.toList())
+            }
+        }
+    }
+
+    @Test
+    fun resourceRoutePeopleUseTheirOwnRevisionAndNeverRetryAStaleAction() {
+        val root = "/plugins/routes-people/connections/app/resources/workspace/engineering"
+        val routes =
+            CopyOnWriteArrayList(
+                listOf(
+                    PluginRoute(
+                        id = "support",
+                        resourceId = "engineering",
+                        name = "Support",
+                        agentId = "helper",
+                        accessMode = "requests",
+                        match = mapOf("channel" to "C1"),
+                        revision = "s1",
+                    ),
+                    PluginRoute(
+                        id = "operations",
+                        resourceId = "engineering",
+                        name = "Operations",
+                        agentId = "helper",
+                        accessMode = "requests",
+                        match = mapOf("channel" to "C2"),
+                        revision = "o1",
+                    ),
+                )
+            )
+        val requests =
+            mapOf(
+                "support" to
+                    CopyOnWriteArrayList(
+                        listOf(PluginRouteRequest("q1", "U1", "Person U1", "pending"))
+                    ),
+                "operations" to
+                    CopyOnWriteArrayList(
+                        listOf(PluginRouteRequest("q2", "U2", "Person U2", "pending"))
+                    ),
+            )
+        val writes = CopyOnWriteArrayList<Pair<String, JsonObject>>()
+        MockWebServer().use { server ->
+            val normal =
+                dispatcher(
+                    read = { path ->
+                        when {
+                            path.endsWith("$root/routes") ->
+                                wireJson.encodeToString(PluginPage(routes.toList()))
+                            path.contains("$root/routes/") && path.endsWith("/requests") -> {
+                                val id = path.substringAfter("$root/routes/").substringBefore('/')
+                                wireJson.encodeToString(PluginPage(requests.getValue(id).toList()))
+                            }
+                            else -> null
+                        }
+                    }
+                ) { _, _ ->
+                    null
+                }
+            server.dispatcher =
+                object : Dispatcher() {
+                    override fun dispatch(request: RecordedRequest): MockResponse {
+                        val path = request.path.orEmpty()
+                        if (
+                            request.method != "POST" ||
+                                !path.contains("$root/routes/") ||
+                                !path.contains("/people/")
+                        )
+                            return normal.dispatch(request)
+                        if (request.getHeader("X-CSRF-Token") != "fixture-csrf")
+                            return MockResponse().setResponseCode(403)
+                        val input = wireJson.parseToJsonElement(request.body.readUtf8()).jsonObject
+                        writes += path to input
+                        val id = path.substringAfter("$root/routes/").substringBefore('/')
+                        val person = path.substringAfterLast('/')
+                        val index = routes.indexOfFirst { it.id == id }
+                        val current = routes[index]
+                        if (input["revision"]?.jsonPrimitive?.content != current.revision)
+                            return MockResponse()
+                                .setResponseCode(409)
+                                .setBody("""{"error":"The route changed."}""")
+                        val action = input["action"]?.jsonPrimitive?.content
+                        val users =
+                            when (action) {
+                                "approve" -> (current.userIds + person).distinct()
+                                "remove" -> current.userIds - person
+                                else -> current.userIds
+                            }
+                        if (action == "deny") {
+                            val pending = requests.getValue(id)
+                            val requestIndex = pending.indexOfFirst { it.userId == person }
+                            pending[requestIndex] = pending[requestIndex].copy(status = "denied")
+                        } else requests.getValue(id).removeAll { it.userId == person }
+                        val saved =
+                            current.copy(
+                                userIds = users,
+                                people = users.map { PluginLabel(it, "Person $it") },
+                                revision = "r${writes.size}",
+                            )
+                        routes[index] = saved
+                        return MockResponse().setBody(wireJson.encodeToString(saved))
+                    }
+                }
+            server.start()
+            show(server) { vm, state ->
+                PluginResourceRoutes(vm, state, root, "Engineering", true) {}
+            }
+            compose.waitUntil(10000) {
+                compose
+                    .onAllNodesWithText("Routes de conversation")
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
+            }
+            compose.onNodeWithText("Routes de conversation").performClick()
+            compose.waitUntil(10000) {
+                compose
+                    .onAllNodesWithText("Personnes et demandes · Support")
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
+            }
+            compose
+                .onNodeWithText("Personnes et demandes · Support")
+                .performScrollTo()
+                .performClick()
+            compose.waitUntil(10000) {
+                compose.onAllNodesWithText("Approuver U1").fetchSemanticsNodes().isNotEmpty()
+            }
+            compose.onNodeWithText("Person U2").assertDoesNotExist()
+            capture("resource-route-people")
+            compose.onNodeWithText("Approuver U1").performScrollTo().performClick()
+            compose.waitUntil(10000) {
+                writes.size == 1 &&
+                    compose
+                        .onAllNodesWithText("Personnes et demandes · Support")
+                        .fetchSemanticsNodes()
+                        .isNotEmpty()
+            }
+            assertEquals(listOf("U1"), routes.first().userIds)
+            assertTrue(requests.getValue("support").isEmpty())
+            assertEquals("pending", requests.getValue("operations").single().status)
+            assertTrue(writes.single().first.endsWith("/routes/support/people/U1"))
+            assertEquals("s1", writes.single().second["revision"]?.jsonPrimitive?.content)
+            compose
+                .onNodeWithText("Personnes et demandes · Support")
+                .performScrollTo()
+                .performClick()
+            compose.waitUntil(10000) {
+                compose.onAllNodesWithText("Retirer U1").fetchSemanticsNodes().isNotEmpty()
+            }
+            compose.onNodeWithText("Retirer U1").performScrollTo().performClick()
+            compose.waitUntil(10000) {
+                writes.size == 2 &&
+                    compose
+                        .onAllNodesWithText("Personnes et demandes · Operations")
+                        .fetchSemanticsNodes()
+                        .isNotEmpty()
+            }
+            assertTrue(routes.first().userIds.isEmpty())
+            compose
+                .onNodeWithText("Personnes et demandes · Operations")
+                .performScrollTo()
+                .performClick()
+            compose.waitUntil(10000) {
+                compose.onAllNodesWithText("Refuser U2").fetchSemanticsNodes().isNotEmpty()
+            }
+            compose.onNodeWithText("Refuser U2").performScrollTo().performClick()
+            compose.waitUntil(10000) {
+                writes.size == 3 &&
+                    compose
+                        .onAllNodesWithText("Personnes et demandes · Support")
+                        .fetchSemanticsNodes()
+                        .isNotEmpty()
+            }
+            assertEquals("denied", requests.getValue("operations").single().status)
+            assertTrue(writes.last().first.endsWith("/routes/operations/people/U2"))
+            requests.getValue("support") += PluginRouteRequest("q3", "U3", "Person U3", "pending")
+            compose
+                .onNodeWithText("Personnes et demandes · Support")
+                .performScrollTo()
+                .performClick()
+            compose.waitUntil(10000) {
+                compose.onAllNodesWithText("Approuver U3").fetchSemanticsNodes().isNotEmpty()
+            }
+            routes[0] = routes[0].copy(revision = "external-change")
+            compose.onNodeWithText("Approuver U3").performScrollTo().performClick()
+            compose.waitUntil(10000) {
+                compose
+                    .onAllNodesWithText(
+                        "Actualisez les routes avant une autre modification.",
+                        substring = true,
+                    )
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
+            }
+            assertEquals(4, writes.size)
+            assertTrue(routes.first().userIds.isEmpty())
+            assertEquals("pending", requests.getValue("support").single().status)
+            compose.onNodeWithText("Approuver U3").assertDoesNotExist()
+            compose.onNodeWithText("Actualiser les routes").performScrollTo().performClick()
+            compose.waitUntil(10000) {
+                compose
+                    .onAllNodesWithText("Personnes et demandes · Support")
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
+            }
+            compose
+                .onNodeWithText("Personnes et demandes · Support")
+                .performScrollTo()
+                .performClick()
+            compose.waitUntil(10000) {
+                compose.onAllNodesWithText("Approuver U3").fetchSemanticsNodes().isNotEmpty()
+            }
+            assertEquals(4, writes.size)
+            compose.onNodeWithText("Approuver U3").performScrollTo().performClick()
+            compose.waitUntil(10000) {
+                writes.size == 5 &&
+                    compose
+                        .onAllNodesWithText("Personnes et demandes · Support")
+                        .fetchSemanticsNodes()
+                        .isNotEmpty()
+            }
+            assertEquals(listOf("U3"), routes.first().userIds)
+            assertEquals(
+                "external-change",
+                writes.last().second["revision"]?.jsonPrimitive?.content,
+            )
         }
     }
 

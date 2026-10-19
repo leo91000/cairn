@@ -31,6 +31,76 @@ class LiveTest {
         "event: batch\nid: $cursor\ndata: ${wireJson.encodeToString(batch)}\n\n"
 
     @Test
+    fun `older pages survive an IOException reconnect while the session lock remains occupied`() =
+        runBlocking {
+            MockWebServer().use { server ->
+                val history = "v1:r1:1"
+                val state = LiveState(run = Run("r1", status = "running"))
+                for (id in listOf(12L, 13L)) {
+                    server.enqueue(
+                        MockResponse()
+                            .setHeader("Content-Type", "text/event-stream")
+                            .setBody(
+                                frame(
+                                    id,
+                                    LiveBatch(
+                                        listOf(message(id, "Message $id", itemId = "m$id")),
+                                        state,
+                                        false,
+                                        false,
+                                        history,
+                                        oldest = 12,
+                                        hasOlder = true,
+                                    ),
+                                )
+                            )
+                    )
+                }
+                server.start()
+                val api = CairnApi(server.url("/"), MemoryVault())
+                val session = LiveSession().also { it.followsLatest = false }
+                val pages = OlderPages()
+                var applied: LiveSnapshot? = null
+                var reconnect: LiveSnapshot? = null
+                val final =
+                    withTimeout(10000) {
+                        api.live("/runs/r1/stream", session)
+                            .map { snapshot ->
+                                // A prepend taking this mutex cannot run until collection stops.
+                                assertFalse(session.mutex.tryLock())
+                                if (applied == null && snapshot.history == history) {
+                                    applied =
+                                        pages.apply(
+                                            HistoryPage(
+                                                listOf(message(11, "Older", itemId = "m11")),
+                                                history,
+                                                11,
+                                                false,
+                                            ),
+                                            snapshot,
+                                            snapshot,
+                                        )
+                                }
+                                pages.display(snapshot).also {
+                                    if (it.status == "Reconnexion…" && it.cursor == 12L)
+                                        reconnect = it
+                                }
+                            }
+                            .first { it.cursor == 13L }
+                    }
+                assertEquals(listOf(11L, 12L), checkNotNull(applied).events.map { it.id })
+                assertEquals(listOf(11L, 12L), checkNotNull(reconnect).events.map { it.id })
+                assertEquals(listOf(11L, 12L, 13L), final.events.map { it.id })
+                assertEquals(11L, final.oldest)
+                assertFalse(final.hasOlder)
+                assertFalse(session.mutex.isLocked)
+                assertEquals("0", server.takeRequest().requestUrl!!.queryParameter("after"))
+                assertEquals("12", server.takeRequest().requestUrl!!.queryParameter("after"))
+                assertTrue(api.streamCalls.isEmpty())
+            }
+        }
+
+    @Test
     fun `legacy cached subagents refetch while scoped caches resume without duplicate workers`() =
         runBlocking {
             for (legacy in listOf(true, false)) {

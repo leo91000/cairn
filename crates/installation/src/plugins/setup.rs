@@ -163,7 +163,7 @@ pub(crate) async fn configuration(
     Ok((draft, approved))
 }
 
-pub async fn list(s: &Service, plugin: &str, account: &str) -> Result<Value> {
+pub async fn list(s: &Service, plugin: &str, account: &str, cursor: Option<&str>) -> Result<Value> {
     let current = owner(s).await?;
     if current.account_id != account {
         return Err(Error::forbidden(
@@ -174,7 +174,7 @@ pub async fn list(s: &Service, plugin: &str, account: &str) -> Result<Value> {
         .await
         .ok()
         .map(|package| package.digest);
-    let mut drafts = s
+    let drafts = s
         .store
         .keys_as::<SetupDraft>(PREFIX)
         .await?
@@ -187,12 +187,11 @@ pub async fn list(s: &Service, plugin: &str, account: &str) -> Result<Value> {
                 && draft.owner_access_id == current.access_id
         })
         .collect::<Vec<_>>();
-    drafts.sort_by(|a, b| a.id.cmp(&b.id));
     let items = drafts
         .iter()
         .map(|draft| draft.public(digest.as_deref() == Some(&draft.digest)))
         .collect::<Vec<_>>();
-    Ok(json!({"items": items, "nextCursor": null}))
+    super::paging::page(items, cursor)
 }
 
 pub async fn get(s: &Service, plugin: &str, draft: &str, account: &str) -> Result<Value> {

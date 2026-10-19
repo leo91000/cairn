@@ -12,13 +12,13 @@ use cairn_installation::{
     plugins::{
         capabilities,
         connections::{self, Connection},
-        registry, runtime, socket, work,
+        panels, registry, runtime, socket, work,
     },
     service::Service,
     validation::text,
 };
 use cairn_plugin_api::Manifest;
-use cairn_plugin_host::{Denied, Host, Session};
+use cairn_plugin_host::{Denied, Host, InvocationError, Session};
 use serde_json::{Value, json};
 use std::{
     path::PathBuf,
@@ -338,10 +338,7 @@ async fn worker_sessions_enforce_capabilities_deadlines_and_keep_state() {
         .unwrap_err();
     assert_eq!(
         error,
-        format!(
-            "{}This 1Password account is not authorized.",
-            cairn_plugin_api::REJECTED
-        )
+        InvocationError::Rejected("This 1Password account is not authorized.".into())
     );
 
     let calls = AtomicUsize::new(0);
@@ -360,7 +357,9 @@ async fn worker_sessions_enforce_capabilities_deadlines_and_keep_state() {
         .await
         .unwrap_err();
     assert_eq!(calls.load(Ordering::SeqCst), 0);
-    assert!(error.contains("capability"));
+    assert!(
+        matches!(error, InvocationError::Failed(ref message) if message.contains("capability"))
+    );
     let error = host
         .invoke(
             &worker(),
@@ -372,7 +371,10 @@ async fn worker_sessions_enforce_capabilities_deadlines_and_keep_state() {
         )
         .await
         .unwrap_err();
-    assert!(!error.contains("synthetic_secret"));
+    assert_eq!(
+        error,
+        InvocationError::Failed("Plugin execution failed.".into())
+    );
     let mut incompatible = onepassword.manifest.clone();
     incompatible.api_version += 1;
     assert!(
@@ -427,7 +429,7 @@ async fn worker_sessions_enforce_capabilities_deadlines_and_keep_state() {
         .await
         .unwrap_err();
     assert!(
-        error.contains("deadline") || error.contains("failed"),
+        matches!(error, InvocationError::Failed(ref message) if message.contains("deadline") || message.contains("failed")),
         "{error}"
     );
     assert!(started.elapsed() < Duration::from_secs(2));
@@ -447,6 +449,161 @@ async fn worker_sessions_enforce_capabilities_deadlines_and_keep_state() {
         true
     );
     next.stop().await;
+}
+
+#[tokio::test]
+async fn rejected_handlers_keep_filtered_messages_and_leave_the_worker_usable() {
+    let host = Host::default();
+    let package = registry::builtin("discord").unwrap();
+    let mut session = host
+        .start(
+            &worker(),
+            &package.manifest,
+            r#"return {
+                reject = function(input) cairn.fail(input.message) end,
+                fail = function() error("rejected: synthetic_private_detail") end,
+                ok = function() return true end,
+            }"#,
+        )
+        .await
+        .unwrap();
+    let message = format!("rejected: rejected: \n\t{}", "é".repeat(400));
+    let expected: String = message
+        .chars()
+        .filter(|c| !c.is_control())
+        .take(300)
+        .collect();
+    assert_eq!(
+        session
+            .dispatch("reject", json!({ "message": message }), |_, _| async {
+                unreachable!()
+            })
+            .await,
+        Err(InvocationError::Rejected(expected))
+    );
+    assert!(session.alive());
+    assert_eq!(
+        session
+            .dispatch("fail", Value::Null, |_, _| async { unreachable!() })
+            .await,
+        Err(InvocationError::Failed("Plugin execution failed.".into()))
+    );
+    assert!(session.alive());
+    assert_eq!(
+        session
+            .dispatch("ok", Value::Null, |_, _| async { unreachable!() })
+            .await
+            .unwrap(),
+        true
+    );
+    session.stop().await;
+}
+
+#[tokio::test]
+async fn handler_presentations_preserve_rejection_and_host_refusal_policies() {
+    let (_root, s, agent) = service().await;
+    let mut manifest = registry::builtin("discord").unwrap().manifest;
+    manifest.id = "presentations".into();
+    manifest.instance_form = false;
+    let (link, _commands) = socket::Link::channel();
+    let rejected = "Review this instance.";
+    let refused = "This host is not declared by the plugin.";
+    let handler_failed = "The Discord plugin failed while handling test.";
+    let socket_failed = "The plugin failed while handling its connection.";
+    for (index, (body, handler_error, socket_error, start_message)) in [
+        (
+            "cairn.fail('Review this instance.')",
+            (502, rejected),
+            (403, rejected),
+            "rejected: Review this instance.",
+        ),
+        (
+            "error('rejected: synthetic_private_detail')",
+            (502, handler_failed),
+            (502, socket_failed),
+            "Plugin execution failed.",
+        ),
+        (
+            "local ok = pcall(cairn.http.request, { url = 'https://evil.example.org/' }) error('private')",
+            (403, refused),
+            (403, refused),
+            "Plugin execution failed.",
+        ),
+        (
+            "local ok = pcall(cairn.http.request, { url = 'https://evil.example.org/' }) cairn.fail('Review this instance.')",
+            (502, rejected),
+            (403, rejected),
+            "rejected: Review this instance.",
+        ),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let mut manifest = manifest.clone();
+        manifest.version = format!("99.0.0-presentation-{index}");
+        let source = format!("return {{ test = function() {body} end, socket = function() {body} end, start = function() {body} end }}");
+        let installed = registry::install(
+            &s,
+            &json!({
+                "manifest": manifest,
+                "source": source,
+            }),
+        )
+        .await
+        .unwrap();
+        registry::approve(&s, &manifest.id, &manifest.version, text(&installed, "digest"))
+            .await
+            .unwrap();
+        let package = registry::active(&s, &manifest.id).await.unwrap();
+        let connection = connections::save(
+            &s,
+            &manifest.id,
+            &json!({
+                "name": "Presentation instance",
+                "settings": {"guildId": "100", "channelId": "200", "botName": "Cairn"},
+                "userIds": ["300"],
+                "agentId": agent["id"],
+                "enabled": true,
+                "token": "synthetic_discord_token",
+            }),
+            None,
+        )
+        .await
+        .unwrap();
+        let connection: Connection = serde_json::from_value(connection).unwrap();
+        let error = panels::test(&s, &manifest.id, &connection.id)
+            .await
+            .unwrap_err();
+        assert_eq!((error.status, error.message.as_str()), handler_error);
+
+        let mut session = s
+            .plugins
+            .host
+            .start(&worker(), &package.manifest, &package.source)
+            .await
+            .unwrap();
+        let error = socket::deliver(
+            &s,
+            &connection,
+            &mut session,
+            &link,
+            json!({ "type": "start" }),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!((error.status, error.message.as_str()), socket_error);
+        assert!(session.alive());
+
+        let error = runtime::begin(&s, &connection, &mut session)
+            .await
+            .unwrap_err();
+        assert_eq!(
+            error.status, 502,
+            "Package start failures remain retryable."
+        );
+        assert_eq!(error.message, start_message);
+        session.stop().await;
+    }
 }
 
 /// Moves the delivery's next attempt and progress throttle to now.

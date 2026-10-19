@@ -188,15 +188,18 @@ private fun PluginInstances(
     var discarding by remember(id) { mutableStateOf<PluginSetupDraft?>(null) }
     val context = LocalContext.current
     suspend fun load() {
-        catalog = vm.api.get<PluginCatalog>("/plugins")
-        drafts =
-            vm.api.get<PluginPage<PluginSetupDraft>>("/plugins/${segment(id)}/setup-drafts").items
+        val nextCatalog = vm.api.get<PluginCatalog>("/plugins")
+        val nextDrafts =
+            vm.api.pluginManagementItems<PluginSetupDraft>("/plugins/${segment(id)}/setup-drafts")
+        catalog = nextCatalog
+        drafts = nextDrafts
     }
     Poll("plugin-$id" to state.busy, 5000) {
         if (editing == null && setupDraft == null && !reviewing && !state.busy)
             try {
                 load()
             } catch (e: Exception) {
+                if (e is kotlinx.coroutines.CancellationException) throw e
                 vm.report(e)
             }
     }
@@ -805,11 +808,7 @@ private fun InstanceEditor(
                             put("settings", pluginSettings(stored, values))
                             put(
                                 "secrets",
-                                JsonObject(
-                                    secrets
-                                        .filterValues { it.isNotBlank() }
-                                        .mapValues { JsonPrimitive(it.value.trim()) }
-                                ),
+                                pluginSecrets(secrets),
                             )
                             if (token.isNotBlank()) put("token", token.trim())
                             asking.second?.let { put("changed", it) }
@@ -859,7 +858,9 @@ private fun InstanceEditor(
                 fields.none {
                     it.required &&
                         it.type !in setOf("boolean", "secret", "multiselect") &&
-                        values[it.key].isNullOrBlank()
+                        // A choice is an exact identifier; only text uses blankness.
+                        (if (it.type == "select") values[it.key].isNullOrEmpty()
+                        else values[it.key].isNullOrBlank())
                 } &&
                 (!manifest.delegates || (agent != null && problem(agent) == null)) &&
                 !completing,
@@ -875,11 +876,7 @@ private fun InstanceEditor(
                         // Blank secret fields keep what is saved.
                         put(
                             "secrets",
-                            JsonObject(
-                                secrets
-                                    .filterValues { it.isNotBlank() }
-                                    .mapValues { JsonPrimitive(it.value.trim()) }
-                            ),
+                            pluginSecrets(secrets),
                         )
                         if (manifest.agentAccess != null)
                             put("agentIds", JsonArray(granted.map(::JsonPrimitive)))

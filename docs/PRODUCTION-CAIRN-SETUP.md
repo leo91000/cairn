@@ -156,7 +156,8 @@ Use `deploy/beacon/compose.production.yaml`, distinct from the development
 `compose.yaml`. It runs beacon + Postgres, a persistent Postgres volume,
 healthchecks, rotated logs, explicit budgets and **one beacon process**.
 Keep stop-first replacement; never run old and new beacon processes together
-or add a second application replica (ADR-0032).
+or add a second application replica
+([single-relay-process decision](adr/0032-single-official-relay-process.md)).
 
 Connect only beacon to the dedicated external proxy Docker network configured
 below, using `COOLIFY_PROXY_NETWORK`. Check the actual Traefik

@@ -45,24 +45,28 @@ internal fun PluginResources(
         }
     var removing by
         remember(location.plugin, location.instance) { mutableStateOf<PluginResource?>(null) }
-    var grantEditors by
+    var accessEditors by
         remember(location.plugin, location.instance) { mutableStateOf(mapOf<String, Boolean>()) }
-    val grantLocked = grantEditors.values.any { it }
+    val accessLocked = accessEditors.values.any { it }
     var authorizations by
         remember(location.plugin, location.instance) {
             mutableStateOf(mapOf<String, PluginAuthorizationActivity>())
         }
     var loading by remember(location.plugin, location.instance) { mutableStateOf(false) }
     val loads = remember(location.plugin, location.instance) { AtomicInteger() }
+    fun accessBlocked(own: String) = accessEditors.any { (key, active) -> key != own && active }
+    fun accessActivity(key: String, active: Boolean) {
+        accessEditors = if (active) accessEditors + (key to true) else accessEditors - key
+    }
     val oauthBusy = authorizations.values.any { it.busy }
     val oauthPending = authorizations.values.any { it.pending }
     val controlsEnabled =
-        enabled && !state.busy && !loading && !oauthBusy && !oauthPending && !grantLocked
-    LaunchedEffect(loading, oauthBusy, oauthPending, editing, removing, grantLocked) {
+        enabled && !state.busy && !loading && !oauthBusy && !oauthPending && !accessLocked
+    LaunchedEffect(loading, oauthBusy, oauthPending, editing, removing, accessLocked) {
         stateChanged(
             PluginResourceActivity(
                 loading || oauthBusy,
-                editing != null || removing != null || grantLocked,
+                editing != null || removing != null || accessLocked,
                 oauthPending,
             )
         )
@@ -125,7 +129,7 @@ internal fun PluginResources(
     Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
         TextButton(
             onClick = { vm.perform { load() } },
-            enabled = !state.busy && !loading && !grantLocked,
+            enabled = !state.busy && !loading && !accessLocked,
         ) {
             Text("Actualiser les ressources")
         }
@@ -186,12 +190,33 @@ internal fun PluginResources(
                                         !state.busy &&
                                         !loading &&
                                         editing == null &&
+                                        removing == null &&
                                         !oauthBusy &&
-                                        !oauthPending,
+                                        !oauthPending &&
+                                        !accessBlocked("grants/${resource.id}"),
                                     activity = { active ->
-                                        grantEditors =
-                                            if (active) grantEditors + (resource.id to true)
-                                            else grantEditors - resource.id
+                                        accessActivity("grants/${resource.id}", active)
+                                    },
+                                )
+                            }
+                        }
+                        if (location.setupRevision == null && collection.delegation) {
+                            key("${location.path}/${resource.id}/routes@${resource.revision}") {
+                                PluginResourceRoutes(
+                                    vm,
+                                    state,
+                                    "${location.path}/${segment(collection.name)}/${segment(resource.id)}",
+                                    resource.name,
+                                    enabled &&
+                                        !state.busy &&
+                                        !loading &&
+                                        editing == null &&
+                                        removing == null &&
+                                        !oauthBusy &&
+                                        !oauthPending &&
+                                        !accessBlocked("routes/${resource.id}"),
+                                    activity = { active ->
+                                        accessActivity("routes/${resource.id}", active)
                                     },
                                 )
                             }
@@ -214,7 +239,7 @@ internal fun PluginResources(
                                             !state.busy &&
                                             !loading &&
                                             editing == null &&
-                                            !grantLocked,
+                                            !accessLocked,
                                         blocked =
                                             authorizations.any { (other, activity) ->
                                                 other != identity &&
@@ -239,7 +264,7 @@ internal fun PluginResources(
             if (pages[collection.name]?.nextCursor != null)
                 TextButton(
                     onClick = { vm.perform { more(collection.name) } },
-                    enabled = !state.busy && !loading && !grantLocked,
+                    enabled = !state.busy && !loading && !accessLocked,
                 ) {
                     Text("Voir plus · ${collection.title}")
                 }

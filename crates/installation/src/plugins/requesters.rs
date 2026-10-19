@@ -21,7 +21,7 @@ pub(crate) struct Actor {
 #[serde(untagged)]
 pub(crate) enum Principal {
     Account(Actor),
-    External(External),
+    External(Box<External>),
 }
 
 #[derive(Clone, Deserialize, Serialize, PartialEq)]
@@ -39,12 +39,12 @@ impl Principal {
         subject: &str,
     ) -> Option<Self> {
         connection.routing.as_ref().map(|binding| {
-            Self::External(External {
+            Self::External(Box::new(External {
                 connection_id: connection.id.clone(),
                 connection_revision: connection.revision.clone(),
                 binding: binding.clone(),
                 subject: subject.to_owned(),
-            })
+            }))
         })
     }
 
@@ -62,6 +62,7 @@ impl Principal {
                     && a.binding.resource == b.binding.resource
                     && a.binding.resources == b.binding.resources
                     && a.binding.digest == b.binding.digest
+                    && a.binding.person == b.binding.person
             }
             _ => false,
         }
@@ -220,6 +221,7 @@ pub(crate) fn external_in(db: &Db<'_>, actor: &External) -> Result<super::connec
     }
     expected.routing = Some(actor.binding.clone());
     let connection = super::connections::authorize(db, &expected)?;
+    super::routes::require_person(&connection, &actor.subject)?;
     if !connection.allows(&actor.subject) {
         return Err(Error::forbidden("The requester is no longer allowed."));
     }
@@ -245,33 +247,60 @@ pub(crate) struct RunRequester {
     suspended: bool,
 }
 
-pub(crate) async fn for_run(s: &Service, run: &Value) -> Result<Option<RunRequester>> {
-    let run_id = text(run, "id").to_owned();
-    let message = text(&run["chatExecution"], "messageId").to_owned();
+/// Native execution retains its admitted source across capacity waits and slow
+/// preparation. Owner intervention suspends OAuth, not this source boundary.
+#[derive(Clone)]
+pub(crate) struct ExecutionSource(RunRequester);
+
+impl ExecutionSource {
+    pub(crate) fn is_revoked(error: &Error) -> bool {
+        matches!(error.status, 401 | 403 | 404 | 409)
+    }
+
+    pub(crate) fn capture_in(db: &Db<'_>, run: &Value) -> Result<Option<Self>> {
+        Ok(captured_run(db, run)?
+            .filter(|requester| matches!(&requester.principal, Principal::External(_)))
+            .map(Self))
+    }
+
+    pub(crate) async fn recheck(&self, s: &Service) -> Result<()> {
+        if let Principal::External(actor) = &self.0.principal {
+            external(s, actor).await?;
+        }
+        let source = self.clone();
+        s.store.read(move |db| source.recheck_in(db)).await
+    }
+
+    pub(crate) fn recheck_in(&self, db: &Db<'_>) -> Result<()> {
+        recheck_turn_in(db, &self.0).map(|_| ())
+    }
+}
+
+fn captured_run(db: &Db<'_>, run: &Value) -> Result<Option<RunRequester>> {
+    let run_id = text(run, "id");
+    let message = text(&run["chatExecution"], "messageId");
     if message.is_empty() {
-        // Scheduled work and external principals need their own explicit authority.
         return Ok(None);
     }
+    let Some(chat) = crate::chats::chat_for_run(db, run_id)? else {
+        return Ok(None);
+    };
+    let chat_id = text(&chat, "id");
+    let suspended = suspended(db, chat_id, run)?;
+    Ok(
+        recorded(db, chat_id, message)?.map(|principal| RunRequester {
+            principal,
+            run: run_id.into(),
+            chat: chat_id.into(),
+            message: message.into(),
+            suspended,
+        }),
+    )
+}
+
+pub(crate) async fn for_run(s: &Service, run: &Value) -> Result<Option<RunRequester>> {
     let run = run.clone();
-    let requester = s
-        .store
-        .read(move |db| {
-            let Some(chat) = crate::chats::chat_for_run(db, &run_id)? else {
-                return Ok(None);
-            };
-            let chat_id = text(&chat, "id");
-            let suspended = suspended(db, chat_id, &run)?;
-            Ok(
-                recorded(db, chat_id, &message)?.map(|principal| RunRequester {
-                    principal,
-                    run: run_id,
-                    chat: chat_id.into(),
-                    message,
-                    suspended,
-                }),
-            )
-        })
-        .await?;
+    let requester = s.store.read(move |db| captured_run(db, &run)).await?;
     if let Some(requester) = &requester {
         recheck(s, requester).await?;
     }
@@ -297,16 +326,27 @@ pub(crate) async fn recheck(s: &Service, requester: &RunRequester) -> Result<()>
 
 /// Local authority fences can share a snapshot with resource and credential checks.
 pub(crate) fn recheck_in(db: &Db<'_>, requester: &RunRequester) -> Result<()> {
+    let run = recheck_turn_in(db, requester)?;
+    if run["status"] != RunStatus::Running
+        || suspended(db, &requester.chat, &run)? != requester.suspended
+    {
+        return Err(Error::forbidden(
+            "The requester's execution changed or stopped.",
+        ));
+    }
+    Ok(())
+}
+
+fn recheck_turn_in(db: &Db<'_>, requester: &RunRequester) -> Result<Value> {
     if let Principal::External(actor) = &requester.principal {
         external_in(db, actor)?;
     }
     let run = db
         .run(&requester.run)?
         .ok_or_else(|| Error::forbidden("The requester's run was removed."))?;
-    if run["status"] != RunStatus::Running
+    if !RunStatus::of(&run).is_some_and(RunStatus::is_active)
         || !run["cancelRequestedAt"].is_null()
         || run["chatExecution"]["messageId"] != requester.message
-        || suspended(db, &requester.chat, &run)? != requester.suspended
         || !db
             .get("chats", &requester.chat)?
             .is_some_and(|chat| chat["runId"] == requester.run)
@@ -316,7 +356,7 @@ pub(crate) fn recheck_in(db: &Db<'_>, requester: &RunRequester) -> Result<()> {
             "The requester's execution changed or stopped.",
         ));
     }
-    Ok(())
+    Ok(run)
 }
 
 /// Owner intervention suspends personal credentials, while retaining the original

@@ -3,6 +3,7 @@
 use super::{
     capabilities::Context,
     connections::{AccessMode, Connection, Label, authorize, ensure_owner, external_id, label},
+    registry,
 };
 use crate::{
     config::{id, now},
@@ -14,6 +15,7 @@ use crate::{
 use cairn_plugin_api::Manifest;
 use rusqlite::OptionalExtension;
 use serde_json::{Value, json};
+use std::sync::Arc;
 
 pub const EVENTS: &str = "plugin-events";
 pub const DELIVERIES: &str = "plugin-deliveries";
@@ -66,13 +68,17 @@ pub(crate) fn enqueue(
     payload: &Value,
     author: Option<&str>,
 ) -> Result<()> {
+    let routing = match author {
+        Some(author) => super::routes::admit_person(db, connection, author)?,
+        None => connection.routing.clone(),
+    };
     db.put(
         EVENTS,
         &json!({
             "id": id(),
             "connectionId": connection.id,
             "revision": connection.revision,
-            "routing": connection.routing,
+            "routing": routing,
             "name": name,
             "payload": payload,
             "authorId": author,
@@ -322,6 +328,7 @@ fn binding(connection: &Connection, author: &str, thread: &str, shared: bool) ->
 fn admit(db: &Db<'_>, expected: &Connection, event: &Value) -> Result<(Connection, String)> {
     let connection = authorize(db, expected)?;
     let author = text(event, "authorId").to_owned();
+    super::routes::require_person(&connection, &author)?;
     if !connection.allows(&author) || event["revision"] != connection.revision {
         return Err(Error::forbidden("This person is no longer allowed."));
     }
@@ -381,11 +388,16 @@ fn limits(db: &Db<'_>, connection: &Connection, author: &str) -> Result<Counters
 
 /// Files a person attached, fetched from hosts the plugin declares (at most four,
 /// 10 MB each). Fetching happens before any conversation changes.
-async fn download(
+async fn download<F, Fut>(
     s: &Service,
     manifest: &Manifest,
     files: &Value,
-) -> Result<Vec<(String, Vec<u8>)>> {
+    check: F,
+) -> Result<Vec<(String, Vec<u8>)>>
+where
+    F: Fn() -> Fut,
+    Fut: std::future::Future<Output = Result<()>>,
+{
     let files = files.as_array().cloned().unwrap_or_default();
     if files.len() > 4 {
         return Err(Error::bad("Attach up to four files."));
@@ -393,6 +405,7 @@ async fn download(
     let mut downloaded = Vec::new();
     for file in files {
         let target = super::capabilities::target(s, manifest, text(&file, "url"), "https")?;
+        check().await?;
         let response = s
             .plugins
             .http
@@ -433,10 +446,43 @@ async fn download(
 /// `conversations.submit`: only while handling a `message` event, on behalf of that
 /// event's author. Identity and routing come from ingress, never from script arguments.
 pub async fn submit(s: &Service, context: &Context, args: &Value) -> Result<Value> {
+    submit_approved(s, context, args, None).await
+}
+
+async fn submission_authority(
+    s: &Service,
+    context: &Context,
+    package: &registry::ApprovedPackage,
+) -> Result<()> {
+    ensure_owner(s, &context.connection).await?;
+    registry::require_digest(s, &context.manifest.id, &package.package.digest).await?;
+    let approval = package.snapshot();
+    let expected = context.connection.clone();
+    let event = context.event.clone();
+    s.store
+        .transaction(move |db| {
+            approval.recheck_in(db)?;
+            admit(db, &expected, &event).map(|_| ())
+        })
+        .await
+}
+
+pub(crate) async fn submit_approved(
+    s: &Service,
+    context: &Context,
+    args: &Value,
+    digest: Option<&str>,
+) -> Result<Value> {
     let (expected, event) = (&context.connection, &context.event);
     if event["name"] != "message" {
         return Err(Error::forbidden(
             "Conversations start only from a received message.",
+        ));
+    }
+    let package = Arc::new(registry::approved(s, &context.manifest.id).await?);
+    if digest.is_some_and(|digest| digest != package.package.digest) {
+        return Err(Error::forbidden(
+            "The plugin worker's package approval changed.",
         ));
     }
     ensure_owner(s, expected).await?;
@@ -459,7 +505,10 @@ pub async fn submit(s: &Service, context: &Context, args: &Value) -> Result<Valu
     {
         return Err(Error::bad("Invalid conversation message."));
     }
-    let files = download(s, &context.manifest, &args["files"]).await?;
+    let files = download(s, &context.manifest, &args["files"], || {
+        submission_authority(s, context, &package)
+    })
+    .await?;
     if content.is_empty() && files.is_empty() {
         return Err(Error::bad("Write a message or attach a file."));
     }
@@ -470,6 +519,8 @@ pub async fn submit(s: &Service, context: &Context, args: &Value) -> Result<Valu
     );
     let dedupe = format!("plugin-submitted:{namespace}:{external_id}");
 
+    submission_authority(s, context, &package).await?;
+
     // Resolve (or start) the conversation first, so attachments can be stored in it.
     let resolved = {
         let (expected, event, dedupe, thread) = (
@@ -478,8 +529,10 @@ pub async fn submit(s: &Service, context: &Context, args: &Value) -> Result<Valu
             dedupe.clone(),
             thread.clone(),
         );
+        let approval = package.clone();
         s.store
             .transaction(move |db| {
+                approval.recheck_in(db)?;
                 let (connection, author) = admit(db, &expected, &event)?;
                 if let Some(receipt) = db.kv(&dedupe)? {
                     return Ok(Err(receipt));
@@ -557,8 +610,11 @@ pub async fn submit(s: &Service, context: &Context, args: &Value) -> Result<Valu
             let resumed_chat = chat_id.clone();
             let resumed_run = run_id.to_owned();
             let resumed_thread = thread.clone();
+            let approval = package.clone();
+            submission_authority(s, context, &package).await?;
             s.worker
                 .resume_authorized(s, run_id, move |db| {
+                    approval.recheck_in(db)?;
                     let (connection, author) = admit(db, &expected, &event)?;
                     require_binding(db, &binding(&connection, &author, &resumed_thread, shared), &resumed_chat)?;
                     if let Some(principal) = super::requesters::Principal::admitted(&connection, &author) {
@@ -582,15 +638,42 @@ pub async fn submit(s: &Service, context: &Context, args: &Value) -> Result<Valu
     let mut attachment_ids = Vec::new();
     for (name, bytes) in files {
         let attachment = id();
-        s.store_attachment(&chat_id, &attachment, &name, &bytes)
-            .await?;
+        let approval = package.clone();
+        let expected = expected.clone();
+        let event = event.clone();
+        let thread = thread.clone();
+        let attached_chat = chat_id.clone();
+        s.store_attachment_checked(
+            &chat_id,
+            &attachment,
+            &name,
+            &bytes,
+            || submission_authority(s, context, &package),
+            move |db| {
+                approval.recheck_in(db)?;
+                let (connection, author) = admit(db, &expected, &event)?;
+                require_binding(
+                    db,
+                    &binding(&connection, &author, &thread, shared),
+                    &attached_chat,
+                )?;
+                let chat = db
+                    .get("chats", &attached_chat)?
+                    .ok_or_else(|| Error::not_found("Conversation no longer exists."))?;
+                crate::conversation_lifecycle::require_active(&chat)
+            },
+        )
+        .await?;
         attachment_ids.push(attachment);
     }
+    submission_authority(s, context, &package).await?;
     let expected = expected.clone();
     let event = event.clone();
+    let approval = package.clone();
     let result = s
         .store
         .transaction(move |db| {
+            approval.recheck_in(db)?;
             let (connection, author) = admit(db, &expected, &event)?;
             if let Some(receipt) = db.kv(&dedupe)? {
                 return Ok(receipt);
@@ -605,11 +688,11 @@ pub async fn submit(s: &Service, context: &Context, args: &Value) -> Result<Valu
             let message_id = id();
             let message = json!({ "id": message_id, "text": content, "attachmentIds": attachment_ids });
             let principal = super::requesters::Principal::admitted(&connection, &author);
-            super::requesters::capture_principal(db, &chat_id, &message, principal.as_ref(), super::requesters::Capture::New)?;
             let queued = crate::chats::send_in(
                 db,
                 &chat_id,
                 message,
+                principal.as_ref(),
             )?;
             if new_turn {
                 let key = super::turns::key(&chat_id, &message_id);
@@ -1036,6 +1119,7 @@ enum Turn {
 }
 
 fn turn(db: &Db<'_>, connection: &Connection, delivery: &Value) -> Result<Turn> {
+    super::routes::require_person(connection, text(delivery, "userId"))?;
     if delivery["revision"] != connection.revision || !connection.allows(text(delivery, "userId")) {
         return Err(Error::forbidden("Reply authorization was revoked."));
     }

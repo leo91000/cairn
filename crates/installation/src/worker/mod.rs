@@ -42,6 +42,7 @@ pub struct Worker {
 struct Admission {
     account: Option<crate::accounts::Lease>,
     preparation: Option<OwnedMutexGuard<()>>,
+    source: Option<crate::plugins::requesters::ExecutionSource>,
 }
 
 impl Worker {

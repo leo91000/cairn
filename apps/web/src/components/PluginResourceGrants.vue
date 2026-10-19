@@ -2,6 +2,7 @@
 import type { PluginAccessProfile, PluginOperation, PluginResourceGrant } from '../plugins'
 import { computed, onBeforeUnmount, ref } from 'vue'
 import { api, state } from '../api'
+import { pluginManagementItems } from '../plugin-management'
 import { resourceRuleOperations } from '../plugins'
 import Modal from './Modal.vue'
 import UiAlert from './UiAlert.vue'
@@ -49,9 +50,9 @@ async function load(current: number) {
   const controller = new AbortController()
   reader = controller
   try {
-    const result = await api<{ items: PluginResourceGrant[] }>(props.path, { signal: controller.signal })
+    const result = await pluginManagementItems<PluginResourceGrant>(props.path, controller.signal)
     if (current === generation) {
-      rules.value = result.items
+      rules.value = result
       ready.value = true
     }
   }

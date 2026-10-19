@@ -279,17 +279,31 @@ fun Choice(
     selected: String,
     choices: List<Pair<String, String>>,
     onChange: (String) -> Unit,
+) = Choice(label, selected, choices, enabled = true, onChange = onChange)
+
+@Composable
+fun Choice(
+    label: String,
+    selected: String,
+    choices: List<Pair<String, String>>,
+    enabled: Boolean,
+    onChange: (String) -> Unit,
 ) {
     var expanded by remember { mutableStateOf(false) }
     Column {
         Text(label, style = MaterialTheme.typography.labelLarge)
-        OutlinedButton(onClick = { expanded = true }, modifier = Modifier.fillMaxWidth()) {
+        OutlinedButton(
+            onClick = { expanded = true },
+            enabled = enabled,
+            modifier = Modifier.fillMaxWidth(),
+        ) {
             Text(choices.find { it.first == selected }?.second ?: "Choisir…")
         }
         DropdownMenu(expanded, { expanded = false }) {
             choices.forEach { (key, name) ->
                 DropdownMenuItem(
                     text = { Text(name) },
+                    enabled = enabled,
                     onClick = {
                         expanded = false
                         onChange(key)
@@ -325,6 +339,14 @@ fun Editor(
     dismissible: Boolean = !busy,
     content: @Composable ColumnScope.() -> Unit,
 ) {
+    val scroll = rememberScrollState()
+    var revealFeedback by remember { mutableStateOf(false) }
+    // Save feedback sits above the form: bring it back into view after a failed save.
+    LaunchedEffect(busy, error) {
+        if (!revealFeedback || busy) return@LaunchedEffect
+        revealFeedback = false
+        if (error != null) scroll.animateScrollTo(0)
+    }
     Dialog(
         onDismissRequest = { if (dismissible) close() },
         properties =
@@ -342,7 +364,13 @@ fun Editor(
                             }
                         },
                         actions = {
-                            TextButton(onClick = save, enabled = valid && !busy) {
+                            TextButton(
+                                onClick = {
+                                    revealFeedback = true
+                                    save()
+                                },
+                                enabled = valid && !busy,
+                            ) {
                                 Text("Enregistrer")
                             }
                         },
@@ -352,10 +380,7 @@ fun Editor(
             },
         ) { padding ->
             Column(
-                Modifier.padding(padding)
-                    .fillMaxSize()
-                    .verticalScroll(rememberScrollState())
-                    .padding(20.dp),
+                Modifier.padding(padding).fillMaxSize().verticalScroll(scroll).padding(20.dp),
                 verticalArrangement = Arrangement.spacedBy(16.dp),
             ) {
                 if (busy) LinearProgressIndicator(Modifier.fillMaxWidth())

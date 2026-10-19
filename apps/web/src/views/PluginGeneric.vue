@@ -5,7 +5,6 @@ import type {
   FormResult,
   PluginConnection,
   PluginEntry,
-  PluginPage,
   PluginSetupDraft,
 } from '../plugins'
 import {
@@ -47,6 +46,14 @@ import {
   X,
   Zap,
 } from '../icons'
+import {
+  pluginFormSecrets,
+  pluginFormValue,
+  pluginFormValues,
+  pluginSecrets,
+  pluginSettings,
+} from '../plugin-form-values'
+import { pluginManagementItems } from '../plugin-management'
 import { pluginOperation } from '../plugin-operations'
 import {
   capabilityLabels,
@@ -77,7 +84,7 @@ const drafts = ref<PluginSetupDraft[]>([])
 const discarding = ref<PluginSetupDraft>()
 const form = ref<Record<string, any>>({})
 const values = ref<Record<string, any>>({})
-const secrets = ref<Record<string, string>>({})
+const secrets = ref<Record<string, string>>(pluginFormSecrets())
 const people = ref<{ id: string, name: string }[]>([])
 const person = ref('')
 const completion = ref<FormResult | null>(null)
@@ -85,6 +92,7 @@ const completing = ref(false)
 let timer: ReturnType<typeof setInterval> | undefined
 let typing: ReturnType<typeof setTimeout> | undefined
 let asked = 0
+let reader: AbortController | undefined
 
 const entry = computed<PluginEntry | undefined>(() => catalog.value.packages.find(item => item.id === id.value))
 const manifest = computed(() => entry.value?.manifest)
@@ -121,9 +129,26 @@ const tones = {
 }
 
 async function load() {
-  catalog.value = await api<Catalog>('/plugins')
-  drafts.value = (await api<PluginPage<PluginSetupDraft>>(`/plugins/${id.value}/setup-drafts`)).items
-  loaded.value = true
+  reader?.abort()
+  const controller = new AbortController()
+  reader = controller
+  try {
+    const nextCatalog = await api<Catalog>('/plugins', { signal: controller.signal })
+    const nextDrafts = await pluginManagementItems<PluginSetupDraft>(`/plugins/${id.value}/setup-drafts`, controller.signal)
+    if (reader === controller && !controller.signal.aborted) {
+      catalog.value = nextCatalog
+      drafts.value = nextDrafts
+      loaded.value = true
+    }
+  }
+  catch (e) {
+    if (!controller.signal.aborted)
+      throw e
+  }
+  finally {
+    if (reader === controller)
+      reader = undefined
+  }
 }
 
 async function action(operation: () => Promise<void>) {
@@ -166,11 +191,8 @@ async function edit(connection: PluginConnection | null) {
 
   error.value = ''
   editing.value = connection
-  values.value = Object.fromEntries(storedFields.value.map(field => [
-    field.key,
-    connection?.settings[field.key] ?? field.default ?? (field.type === 'boolean' ? false : field.type === 'multiselect' ? [] : ''),
-  ]))
-  secrets.value = {}
+  values.value = pluginFormValues(storedFields.value, connection?.settings)
+  secrets.value = pluginFormSecrets()
   people.value = (connection?.userIds ?? []).map(user => ({ id: user, name: connection?.people.find(item => item.id === user)?.name ?? '' }))
   person.value = ''
   completion.value = null
@@ -195,12 +217,6 @@ async function discard(draft: PluginSetupDraft) {
   })
 }
 
-function settings() {
-  return Object.fromEntries(Object.entries(values.value)
-    .filter(([, value]) => value !== '' && value !== undefined && value !== null)
-    .map(([key, value]) => [key, storedFields.value.find(field => field.key === key)?.type === 'number' ? Number(value) : value]))
-}
-
 /**
  * Asks the package's form handler for choices, derived values, errors and guidance.
  * Only the latest answer counts.
@@ -213,15 +229,18 @@ async function complete(changed?: string) {
   try {
     const result = formResult(await pluginOperation<FormResult | null>(`/plugins/${id.value}/form`, {
       instance: editing.value?.id,
-      settings: settings(),
-      secrets: Object.fromEntries(Object.entries(secrets.value).filter(([, value]) => value.trim())),
+      settings: pluginSettings(storedFields.value, values.value),
+      secrets: pluginSecrets(secrets.value),
       ...(form.value.token ? { token: form.value.token } : {}),
       ...(changed ? { changed } : {}),
     }))
     if (ask !== asked)
       return
-    for (const [key, value] of Object.entries(result.values))
-      values.value[key] = value ?? ''
+    for (const field of storedFields.value) {
+      if (Object.hasOwn(result.values, field.key))
+        values.value[field.key] = pluginFormValue(field, result.values[field.key])
+    }
+
     completion.value = result
   }
   catch (e) {
@@ -264,9 +283,9 @@ async function save() {
     const body = {
       name: form.value.name,
       ...(form.value.token ? { token: form.value.token } : {}),
-      settings: settings(),
+      settings: pluginSettings(storedFields.value, values.value),
       // Blank secret fields keep what is saved.
-      secrets: Object.fromEntries(Object.entries(secrets.value).filter(([, value]) => value.trim())),
+      secrets: pluginSecrets(secrets.value),
       ...(manifest.value?.agentAccess && { agentIds: form.value.agentIds }),
       ...(delegates.value && {
         agentId: form.value.agentId,
@@ -282,7 +301,7 @@ async function save() {
     const path = `/plugins/${id.value}/connections${editing.value ? `/${editing.value.id}` : ''}`
     await pluginOperation(path, body, editing.value ? 'PUT' : 'POST')
     form.value.token = ''
-    secrets.value = {}
+    secrets.value = pluginFormSecrets()
     editing.value = undefined
     await load()
     notify(`${singular.value} saved`)
@@ -314,7 +333,7 @@ async function remove() {
 function closeEditor() {
   clearTimeout(typing)
   asked++
-  secrets.value = {}
+  secrets.value = pluginFormSecrets()
   form.value.token = ''
   completion.value = null
   editing.value = undefined
@@ -328,10 +347,12 @@ onMounted(async () => {
   }, 5000)
 })
 onBeforeUnmount(() => {
+  reader?.abort()
+  reader = undefined
   clearInterval(timer)
   clearTimeout(typing)
   form.value.token = ''
-  secrets.value = {}
+  secrets.value = pluginFormSecrets()
 })
 </script>
 
@@ -351,6 +372,13 @@ onBeforeUnmount(() => {
     <p v-if="loaded && !entry" class="mt-6 text-sm text-muted">
       This plugin isn’t installed.
     </p>
+    <div v-else-if="entry && !manifest" class="mt-6 flex items-center gap-3 rounded-2xl bg-danger-surface px-4 py-3 text-xs text-danger" role="status">
+      <Icon :name="TriangleAlert" :size="17" />
+      <span class="min-w-0 flex-1">No version of this plugin can be used. Review it to see why.</span>
+      <UiButton size="small" class="bg-surface" @click="reviewing = true">
+        Review
+      </UiButton>
+    </div>
     <template v-if="entry && manifest">
       <div class="mt-4.5 flex items-center justify-between gap-4 phone:flex-wrap">
         <div class="flex items-center gap-4">

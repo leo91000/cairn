@@ -72,6 +72,63 @@ the web/Android journeys. Tests assert observable behavior at those interfaces.
 No live Slack app, workspace or credential has been accessed or created.
 The previous plugin stack (#215, #223) is already merged; do not repeat those merges.
 
+## Resource routes and authority checks
+
+Both clients now manage resource routes, participants and pending access requests.
+Route edits carry the saved revision. Late reads cannot reopen a closed editor;
+uncertain writes require an explicit reload before another mutation. The owner
+chooses the agent and optional project from native eligibility results computed
+with the same policy used at admission. These results expose eligibility and a
+reason, without disclosing an agent's granted access to installation members.
+
+Removing and approving a participant again creates a new admission generation.
+Previously queued work and in-flight results cannot acquire that new permission.
+Legacy admissions without a participant generation fail closed. Commands and MCP
+tools retain the originating requester's resource/channel restrictions, including
+when they use another explicitly granted instance of the same integration.
+
+Native chat submission captures its requester together with the message. Routed
+submissions pass their verified external principal; management MCP submissions
+remain anonymous. Editing another author's queued message does not retain that
+author's personal OAuth. Adding a resource grant to an agent already configured
+for an Everyone route is refused, as it is for instance-level public delegation.
+The existing whole-instance grant contract still rechecks public policy and stops
+an incompatible public delegation.
+
+Native scheduling and preparation retain the routed requester's original proof,
+including across capacity waits and immediately before agent start. The native
+regression first left all four revoked sources queued and now cancels them. The
+extra delayed-owner-lookup and temporary-outage cases also pass in the 38-test
+native routing/grants/pages checkpoint. Route/grant management uses bounded
+cursor pages on both clients. The public HTTP regression reproduced
+9,291,339-byte grant and 14,300,719-byte route responses against the 8,000,000-byte
+relay limit; the corrected responses remain below that limit across all pages.
+
+A separate public HTTP regression reproduced an 8,336,211-byte setup-draft list
+using a documented owner-copied TOML package and ordinary bounded draft requests.
+The upload variant was not valid evidence because its canonical manifest could
+not be approved. Setup lists now use the same encoded-byte budget and both clients
+follow every cursor before exposing the saved drafts. Full corrected-page,
+browser and device qualification remains in progress.
+
+Deferred credential exchange and renewal recheck the exact authorization after
+remote authority lookup and immediately before provider I/O. Attachment submission
+also rechecks owner/package/admission authority after download, after waiting for
+the shared quota lock and before publishing file metadata or the message. These
+paths share the ordinary attachment quota and clean up unpublished file bytes.
+
+Setup and resource editors reuse the shared field normalization contract on web
+and Android, including exact choice IDs, numeric values, empty values and secret
+whitespace. Web dictionaries for plugin-defined collection and field names have
+no inherited entries.
+
+The current integration includes main through `d01b5198`, whose compatibility
+baseline is epoch 4. The route-authority measurements document bounded record
+shape and their limits; full native/storage and release qualification remains
+open. Catalogue totals, route usage summaries, guided selectors and scoped
+resource forms are still pending, along with the remaining Slack delivery list.
+Validation and independent review of this checkpoint are still in progress.
+
 ## Foundation checkpoint
 
 This is an implementation checkpoint for a draft PR, not the completed Slack

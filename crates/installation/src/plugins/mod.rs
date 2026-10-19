@@ -11,6 +11,7 @@ pub mod grants;
 pub mod legacy;
 pub mod oauth;
 pub mod operations;
+mod paging;
 pub mod panels;
 pub mod program_installation;
 pub mod programs;
@@ -308,7 +309,13 @@ pub async fn routes(s: &Arc<Service>, input: &Input) -> Result<Value> {
                 .identity
                 .as_ref()
                 .map_or("", |identity| identity.account_id.as_str());
-            setup::list(s, id, account).await
+            setup::list(
+                s,
+                id,
+                account,
+                input.query.get("cursor").map(String::as_str),
+            )
+            .await
         }
         ("POST", ["plugins", id, "setup-drafts"]) => {
             let account = input
@@ -392,6 +399,34 @@ pub async fn routes(s: &Arc<Service>, input: &Input) -> Result<Value> {
             }
         }
 
+        (
+            "GET",
+            [
+                "plugins",
+                id,
+                "connections",
+                connection,
+                "resources",
+                collection,
+                resource,
+                "route-eligibility",
+            ],
+        ) => {
+            let account = input
+                .identity
+                .as_ref()
+                .map_or("", |i| i.account_id.as_str());
+            routes::eligibility(
+                s,
+                id,
+                connection,
+                collection,
+                resource,
+                account,
+                &input.query,
+            )
+            .await
+        }
         (
             method,
             [
@@ -532,7 +567,17 @@ pub async fn routes(s: &Arc<Service>, input: &Input) -> Result<Value> {
                 "POST" => {
                     routes::save(s, id, connection, collection, resource, account, body, None).await
                 }
-                "GET" => routes::list(s, id, connection, collection, resource).await,
+                "GET" => {
+                    routes::list(
+                        s,
+                        id,
+                        connection,
+                        collection,
+                        resource,
+                        input.query.get("cursor").map(String::as_str),
+                    )
+                    .await
+                }
                 _ => Err(Error::method_not_allowed("Method not allowed.")),
             }
         }
@@ -569,7 +614,10 @@ pub async fn routes(s: &Arc<Service>, input: &Input) -> Result<Value> {
                     .await
                 }
                 "DELETE" => {
-                    routes::remove(s, id, connection, collection, resource, route, account).await
+                    routes::remove(
+                        s, id, connection, collection, resource, route, account, body,
+                    )
+                    .await
                 }
                 _ => Err(Error::method_not_allowed("Method not allowed.")),
             }
@@ -610,15 +658,7 @@ pub async fn routes(s: &Arc<Service>, input: &Input) -> Result<Value> {
                 .as_ref()
                 .map_or("", |i| i.account_id.as_str());
             routes::people(
-                s,
-                id,
-                connection,
-                collection,
-                resource,
-                route,
-                account,
-                user,
-                crate::validation::text(body, "action"),
+                s, id, connection, collection, resource, route, account, user, body,
             )
             .await
         }
@@ -653,7 +693,17 @@ pub async fn routes(s: &Arc<Service>, input: &Input) -> Result<Value> {
                 resource,
                 "grants",
             ],
-        ) => grants::list(s, id, connection, collection, resource).await,
+        ) => {
+            grants::list(
+                s,
+                id,
+                connection,
+                collection,
+                resource,
+                input.query.get("cursor").map(String::as_str),
+            )
+            .await
+        }
         (
             "DELETE",
             [

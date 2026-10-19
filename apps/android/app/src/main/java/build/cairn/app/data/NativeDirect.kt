@@ -3,11 +3,9 @@ package build.cairn.app.data
 import android.content.Context
 import android.net.ConnectivityManager
 import android.net.Network
-import android.util.Log
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.ProcessLifecycleOwner
 import androidx.lifecycle.repeatOnLifecycle
-import build.cairn.app.BuildConfig
 import java.io.IOException
 import java.net.InetAddress
 import java.net.UnknownHostException
@@ -28,7 +26,6 @@ internal class NativeDirect(private val api: CairnApi, context: Context) {
     companion object {
         private val initialization = Any()
         private var initialized = false
-        private val traceSequence = AtomicLong()
 
         // Match the web client's numeric destination policy. The Rust verifier remains
         // authoritative; validate the literal before InetAddress so no DNS lookup can occur.
@@ -66,13 +63,6 @@ internal class NativeDirect(private val api: CairnApi, context: Context) {
     }
 
     private class Unavailable : IOException("Direct indisponible")
-
-    private val traceId = if (BuildConfig.DEBUG) traceSequence.incrementAndGet() else 0
-
-    // Temporary CI probe; never include SDP, exception messages or authority identifiers.
-    private fun trace(event: String) {
-        if (BuildConfig.DEBUG) Log.d("CairnDirect", "[DEBUG-slack-capacity] client=$traceId $event")
-    }
 
     private val denied = AtomicBoolean()
     private val generation = AtomicLong()
@@ -126,7 +116,6 @@ internal class NativeDirect(private val api: CairnApi, context: Context) {
                 return@launch
             }
             ProcessLifecycleOwner.get().lifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) {
-                trace("foreground retryMs=${retry.remaining()}")
                 if (manager.activeNetwork != network) networkChanged(manager.activeNetwork)
                 manager.registerDefaultNetworkCallback(callback)
                 try {
@@ -142,7 +131,6 @@ internal class NativeDirect(private val api: CairnApi, context: Context) {
                             continue
                         }
                         val attempt = Attempt(attemptGeneration)
-                        trace("attempt begin")
                         active.set(attempt)
                         var attemptFailed = false
                         try {
@@ -150,15 +138,10 @@ internal class NativeDirect(private val api: CairnApi, context: Context) {
                             attempt.failed.await()
                             attemptFailed = true
                         } catch (error: CancellationException) {
-                            trace("cancel phase=${attempt.phase}")
                             throw error
                         } catch (error: Unavailable) {
-                            trace("unavailable phase=${attempt.phase}")
                             unavailableAt.set(attemptGeneration)
                         } catch (error: Exception) {
-                            trace(
-                                "failure phase=${attempt.phase} type=${error.javaClass.simpleName} http=${(error as? ApiException)?.status}"
-                            )
                             attemptFailed = true
                             rememberDenial(error)
                             // Direct is optional; the relay reports installation/session failures.
@@ -173,7 +156,6 @@ internal class NativeDirect(private val api: CairnApi, context: Context) {
                                         unavailableAt.get() != attemptGeneration
                                 ) {
                                     retry.failed()
-                                    trace("backoffMs=${retry.remaining()}")
                                 }
                             }
                             active.compareAndSet(attempt, null)
@@ -181,7 +163,6 @@ internal class NativeDirect(private val api: CairnApi, context: Context) {
                         }
                     }
                 } finally {
-                    trace("foreground ended")
                     manager.unregisterNetworkCallback(callback)
                 }
             }
@@ -199,7 +180,6 @@ internal class NativeDirect(private val api: CairnApi, context: Context) {
     }
 
     private inner class Attempt(private val attemptGeneration: Long) {
-        @Volatile var phase = "peer"
         val failed = CompletableDeferred<Unit>()
         private val opened = CompletableDeferred<Unit>()
         private val expires = AtomicLong()
@@ -218,10 +198,6 @@ internal class NativeDirect(private val api: CairnApi, context: Context) {
         private var fingerprint = ""
 
         fun fail(error: Exception? = null) {
-            if (!failed.isCompleted)
-                trace(
-                    "peer ended phase=$phase type=${error?.javaClass?.simpleName} http=${(error as? ApiException)?.status}"
-                )
             // Renewal unavailability belongs to this network generation, even if a newer
             // default network was observed while the HTTP request was in flight.
             if (error is Unavailable) unavailableAt.set(attemptGeneration)
@@ -319,7 +295,6 @@ internal class NativeDirect(private val api: CairnApi, context: Context) {
                                             !failed.isCompleted &&
                                                 System.currentTimeMillis() < expires.get()
                                         ) {
-                                            phase = "connected"
                                             retry.connected()
                                             api.transport.attach(traffic!!)
                                             opened.complete(Unit)
@@ -355,7 +330,6 @@ internal class NativeDirect(private val api: CairnApi, context: Context) {
                     if (iceRestart)
                         mandatory.add(MediaConstraints.KeyValuePair("IceRestart", "true"))
                 }
-            phase = "offer"
             val offer = requireNotNull(description { peer!!.createOffer(it, constraints) })
             val sdp =
                 usableSdp(offer.description)
@@ -376,7 +350,6 @@ internal class NativeDirect(private val api: CairnApi, context: Context) {
                 sdp.lineSequence()
                     .first { it.startsWith("a=fingerprint:") }
                     .removePrefix("a=fingerprint:")
-            phase = "authorize"
             val grant = authorize("authorize")
             if (grant["available"]?.jsonPrimitive?.booleanOrNull != true) throw Unavailable()
             connection =
@@ -386,7 +359,6 @@ internal class NativeDirect(private val api: CairnApi, context: Context) {
                     .jsonPrimitive
                     .content
             updateGrant(grant)
-            phase = "ice"
             configuration.iceServers =
                 grant["iceServers"]!!.jsonArray.flatMap { server ->
                     server.jsonObject["urls"]!!.jsonArray.map { url ->
@@ -578,9 +550,6 @@ internal class NativeDirect(private val api: CairnApi, context: Context) {
             } catch (error: CancellationException) {
                 throw error
             } catch (error: Exception) {
-                trace(
-                    "signal failure phase=$phase type=${error.javaClass.simpleName} http=${(error as? ApiException)?.status}"
-                )
                 rememberDenial(error)
             } finally {
                 fail()

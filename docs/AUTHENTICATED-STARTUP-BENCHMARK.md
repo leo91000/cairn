@@ -3,6 +3,10 @@
 Mesures du 12 septembre 2026. Elles complètent et précisent les
 [benchmarks d'infrastructure](STARTUP-STRATEGIES-BENCHMARK.md).
 
+Ce rapport conserve les observations et conclusions du 12 septembre 2026. Les
+liens relatifs vers le code sont des repères dans l’arborescence actuelle, qui a
+évolué depuis ces mesures ; ils ne désignent pas une version mesurée figée.
+
 ## Résultat principal
 
 **Préparer les VM ne suffit pas encore pour atteindre 500 ms au premier appel
@@ -56,7 +60,7 @@ Le code vérifie les nouvelles demandes sur un intervalle d'**une seconde**,
 sans réveil immédiat depuis les routes de création examinées. Il faudra notifier
 le worker à l'envoi d'un message, tout en gardant le timer pour les tâches
 planifiées et la récupération. Diminuer le coût de boot ne retire pas cette attente.
-Source : [worker](../crates/installation/src/worker.rs).
+Repère actuel : [worker](../crates/installation/src/worker/mod.rs).
 
 ### 2. La découverte des modèles se répète au premier compte
 
@@ -71,7 +75,7 @@ devrait exploiter les métadonnées déjà découvertes par le manager, liées a
 et au modèle, avec invalidation appropriée. Il faut ensuite mesurer si l'on retire
 réellement cette requête du chemin critique, sans perdre les contrôles de capacités.
 Sources : [démarrage du chat](../crates/installation/src/chat_process.rs),
-[gestion des comptes](../crates/installation/src/accounts.rs).
+[gestion des comptes](../crates/installation/src/accounts/mod.rs).
 
 ### 3. Les applications connectées ajoutent un second MCP
 
@@ -112,8 +116,9 @@ La correction à étudier est une lecture rapide des jetons encore valides qui
 n'attende pas tout le monitoring, **en conservant une rotation sérialisée et la
 validation de la réservation du compte**. Supprimer simplement le verrou serait
 une régression du contrat d'authentification.
-Sources : `access_tokens` et `refresh` dans
-[accounts.rs](../crates/installation/src/accounts.rs).
+Le module de comptes a depuis été réorganisé. Repères actuels :
+[gestion des comptes](../crates/installation/src/accounts/mod.rs) et
+[broker d’accès](../crates/installation/src/accounts/broker.rs).
 
 ## Ce qui reste hors de ces conclusions
 

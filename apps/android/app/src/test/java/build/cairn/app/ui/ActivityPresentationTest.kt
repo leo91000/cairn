@@ -6,6 +6,71 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class ActivityPresentationTest {
+    @Test
+    fun `shared corpus preserves activity and distinguishes immediate results`() {
+        val raw =
+            java.io.File(requireNotNull(System.getProperty("cairn.activityCorpus"))).readText()
+        val corpus = wireJson.parseToJsonElement(raw).jsonArray
+        assertEquals(21, corpus.size)
+        val original =
+            corpus.take(15).mapIndexed { index, value ->
+                val data = value.jsonObject
+                RunEvent(index.toLong() + 1, index.toLong(), data.string("type"), "", data)
+            }
+        val replay = timelineEntries(original)
+        assertEquals(3, replay.count { it.message })
+        assertEquals(1, replay.count { it.plan != null })
+        val kinds =
+            replay
+                .filter { !it.message && it.plan == null }
+                .flatMap { it.events }
+                .map { presentActivity(it).kind }
+        assertEquals(
+            listOf(
+                ActivityKind.SEARCH,
+                ActivityKind.SEARCH,
+                ActivityKind.READ,
+                ActivityKind.READ,
+                ActivityKind.BROWSE,
+                ActivityKind.COMMAND,
+                ActivityKind.FILES,
+                ActivityKind.COMMAND,
+                ActivityKind.TOOL,
+            ),
+            kinds,
+        )
+
+        val immediate = listOf(true, true, false, false, true, false)
+        val condition = buildJsonObject {
+            put("type", "run_finished")
+            put("runId", "dependency")
+        }
+        val wakeup = ChatWakeup("wake", "message", "Pending", 60, 0, 60_000, condition = condition)
+        val scheduled =
+            RunEvent(1, 1, "chat.wait", "", wireJson.encodeToJsonElement(wakeup).jsonObject)
+        corpus.drop(15).forEachIndexed { index, value ->
+            val data = value.jsonObject
+            val ready =
+                RunEvent(
+                    2,
+                    2,
+                    data.string("type"),
+                    data.string("text"),
+                    data["payload"] as? JsonObject,
+                )
+            val waits =
+                timelineEntries(listOf(scheduled, ready), chat = true).mapNotNull { it.wait }
+            assertEquals("case $index", if (immediate[index]) 2 else 1, waits.size)
+            assertEquals(if (immediate[index]) "replaced" else null, waits.first().ended)
+            val result = waits.last()
+            assertEquals(if (immediate[index]) null else "wake", result.wakeup?.id)
+            assertEquals("completed", result.observation.string("state"))
+            assertEquals("run_finished", result.observation.string("type"))
+            assertEquals("succeeded", result.observation.string("status"))
+            if (immediate[index]) assertEquals("Review finished", result.reason)
+        }
+    }
+
     private fun event(type: String, text: String) = RunEvent(1, 1000, type, text)
 
     private fun tool(command: String, code: Int = 0) =

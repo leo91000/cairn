@@ -148,7 +148,7 @@ impl Attachment {
 }
 
 impl Service {
-    fn attachment_path(&self, chat: &str, id: &str) -> PathBuf {
+    pub(crate) fn attachment_path(&self, chat: &str, id: &str) -> PathBuf {
         self.config
             .data_dir
             .join("chat-attachments")
@@ -212,16 +212,68 @@ impl Service {
         name: &str,
         bytes: &[u8],
     ) -> Result<Value> {
+        self.store_attachment_checked(chat, id, name, bytes, || async { Ok(()) }, |_| Ok(()))
+            .await
+    }
+
+    pub(crate) async fn store_attachment_authorized<F>(
+        &self,
+        chat: &str,
+        id: &str,
+        name: &str,
+        bytes: &[u8],
+        authorize: F,
+    ) -> Result<Value>
+    where
+        F: Fn(&Db<'_>) -> Result<()> + Send + Sync + Clone + 'static,
+    {
+        self.store_attachment_checked(chat, id, name, bytes, || async { Ok(()) }, authorize)
+            .await
+    }
+
+    /// Stage bytes privately, then fence the caller in the same transaction which
+    /// publishes their metadata. The shared quota lock covers both entry points.
+    pub(crate) async fn store_attachment_checked<F, Fut, G>(
+        &self,
+        chat: &str,
+        id: &str,
+        name: &str,
+        bytes: &[u8],
+        check: F,
+        check_in: G,
+    ) -> Result<Value>
+    where
+        F: Fn() -> Fut,
+        Fut: std::future::Future<Output = Result<()>>,
+        G: Fn(&Db<'_>) -> Result<()> + Clone + Send + 'static,
+    {
         uuid(chat)?;
         uuid(id)?;
         let _guard = self.attachment_upload.lock().await;
+        check().await?;
         if bytes.len() > MAX_FILE {
             return Err(Error::too_large("Files must be 10 MB or smaller."));
         }
         let name = filename(name);
         let digest = hex::encode(Sha256::digest(bytes));
         let k = key(chat, id);
-        if let Some(existing) = self.store.kv(&k).await? {
+        let lookup = k.clone();
+        let lookup_check = check_in.clone();
+        let existing = self
+            .store
+            .read(move |db| {
+                let transaction = rusqlite::Transaction::new_unchecked(
+                    db.0,
+                    rusqlite::TransactionBehavior::Deferred,
+                )?;
+                let db = &Db(&transaction);
+                lookup_check(db)?;
+                let existing = db.kv(&lookup)?;
+                transaction.commit()?;
+                Ok(existing)
+            })
+            .await?;
+        if let Some(existing) = existing {
             if existing["digest"] != digest || existing["name"] != name {
                 return Err(Error::conflict(
                     "This attachment identifier has already been used.",
@@ -266,14 +318,18 @@ impl Service {
         atomic_write(&path, bytes).await?;
         let chat_id = chat.to_owned();
         let saved = attachment.clone();
-        let commit = self
-            .store
-            .transaction(move |db| {
-                let chat = required(db.get("chats", &chat_id)?, "Chat not found")?;
-                crate::conversation_lifecycle::require_active(&chat)?;
-                db.set(&k, &saved, None)
-            })
-            .await;
+        let commit = async {
+            check().await?;
+            self.store
+                .transaction(move |db| {
+                    check_in(db)?;
+                    let chat = required(db.get("chats", &chat_id)?, "Chat not found")?;
+                    crate::conversation_lifecycle::require_active(&chat)?;
+                    db.set(&k, &saved, None)
+                })
+                .await
+        }
+        .await;
         if let Err(error) = commit {
             if let Err(cleanup) = tokio::fs::remove_file(&path).await {
                 tracing::warn!(error = %cleanup, "could not remove an uncommitted attachment");

@@ -105,6 +105,21 @@ mod tests {
     use super::*;
 
     #[tokio::test]
+    async fn bounded_reads_stop_after_the_first_excess_byte() {
+        let mut reader = std::io::Cursor::new(vec![b'x'; 100]);
+        let error = read_bounded(&mut reader, 8).await.unwrap_err();
+        assert_eq!(reader.position(), 9);
+        assert_eq!(error.status, 502);
+        assert_eq!(
+            error.message,
+            "Executable output exceeded the supported limit."
+        );
+
+        let mut reader = std::io::Cursor::new(vec![b'x'; 8]);
+        assert_eq!(read_bounded(&mut reader, 8).await.unwrap(), vec![b'x'; 8]);
+    }
+
+    #[tokio::test]
     async fn spawned_processes_never_receive_storage_credentials() {
         let env = Environment::from([
             ("AWS_SECRET_ACCESS_KEY".into(), "secret".into()),
