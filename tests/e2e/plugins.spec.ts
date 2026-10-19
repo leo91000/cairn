@@ -342,3 +342,202 @@ test('program releases can be checked, installed and restored independently of p
   await expect(programs.getByText('op · Version 2.42.0')).toBeVisible({ timeout: 12000 })
   expect(actions).toEqual(['check', 'install', 'rollback'])
 })
+
+test('instance and panel forms share defaults, clearing, hidden values and secret rules', async ({ page }) => {
+  await useRelayForHttpMocks(page)
+  const fields = [
+    {
+      key: 'title',
+      title: 'Title',
+      type: 'string',
+      default: 'Default title',
+    },
+    {
+      key: 'count',
+      title: 'Count',
+      type: 'number',
+      default: 0,
+    },
+    {
+      key: 'enabled',
+      title: 'Enabled',
+      type: 'boolean',
+      default: true,
+    },
+    {
+      key: 'scopes',
+      title: 'Scopes',
+      type: 'multiselect',
+      options: [{ value: 'read', label: 'Read' }],
+      default: ['read'],
+    },
+    {
+      key: 'derived',
+      title: 'Derived',
+      type: 'string',
+      hidden: true,
+      default: ' hidden ',
+    },
+    { key: 'password', title: 'Password', type: 'secret' },
+    { key: 'constructor', title: 'Constructor secret', type: 'secret' },
+    {
+      key: 'region',
+      title: 'Region',
+      type: 'select',
+      default: ' eu ',
+      options: [{ value: ' eu ', label: 'Europe' }],
+    },
+  ]
+  const manifest = {
+    id: 'forms',
+    name: 'Form examples',
+    version: '1.0.0',
+    apiVersion: 2,
+    description: 'Synthetic form fixture.',
+    capabilities: [],
+    settings: fields,
+    instanceView: true,
+    instanceForm: true,
+  }
+  const connection = {
+    id: 'example',
+    pluginId: 'forms',
+    name: 'Example',
+    settings: {},
+    secretKeys: ['password'],
+    agentIds: [],
+    agentId: '',
+    accessMode: 'requests',
+    userIds: [],
+    people: [],
+    requests: [],
+    enabled: true,
+    status: { state: 'connected' },
+  }
+  const panelNode = (values = {}) => ({
+    type: 'form',
+    fields,
+    values,
+    submit: { label: 'Apply values', action: 'apply' },
+  })
+  await page.route('**/api/plugins', route => route.fulfill({
+    json: {
+      packages: [{
+        id: 'forms',
+        builtin: false,
+        status: 'active',
+        active: '1.0.0',
+        manifest,
+        versions: [],
+      }],
+      capabilities: [],
+      connections: [connection],
+    },
+  }))
+  const initialPanelValues = { password: 'synthetic_never_prefill', unknown: 'drop' }
+  await page.route('**/api/plugins/forms/connections/example/view', route => route.fulfill({
+    json: { view: [panelNode(initialPanelValues)] },
+  }))
+  const actions: Record<string, any>[] = []
+  await page.route('**/api/plugins/forms/connections/example/actions', async (route) => {
+    actions.push(route.request().postDataJSON().values)
+    const result = actions.length === 2
+      ? { view: [panelNode(initialPanelValues)] }
+      : actions.length === 3
+        ? { view: [panelNode({ title: 'Replacement title', count: 7 })] }
+        : {}
+    await route.fulfill({ json: result })
+  })
+  const completions: Record<string, any>[] = []
+  await page.route('**/api/plugins/forms/form', async (route) => {
+    completions.push(route.request().postDataJSON())
+    await route.fulfill({
+      json: {
+        options: {},
+        values: { derived: ' completed ', unknown: 'drop' },
+        errors: {},
+        view: [{ type: 'text', text: 'Synthetic completion applied' }],
+      },
+    })
+  })
+  const saves: Record<string, any>[] = []
+  await page.route('**/api/plugins/forms/connections/example', async (route) => {
+    saves.push(route.request().postDataJSON())
+    await route.fulfill({ json: {} })
+  })
+  await page.goto(workspacePath('/plugins/forms'))
+  await signIn(page)
+  const panel = page.getByRole('region', { name: 'Example panel' })
+  await expect(panel.getByLabel('Title', { exact: true })).toHaveValue('Default title')
+  await expect(panel.getByLabel('Count', { exact: true })).toHaveValue('0')
+  await expect(panel.getByLabel('Password', { exact: true })).toHaveValue('')
+  await expect(panel.getByLabel('Constructor secret', { exact: true })).toHaveValue('')
+  await expect(panel.getByRole('combobox', { name: 'Region', exact: true })).toHaveValue(' eu ')
+  await expect(panel.getByLabel('Derived', { exact: true })).toHaveCount(0)
+  await panel.getByRole('button', { name: 'Apply values' }).click()
+  await expect.poll(() => actions.length).toBe(1)
+  expect(actions[0]).toEqual({
+    title: 'Default title',
+    count: 0,
+    enabled: true,
+    scopes: ['read'],
+    derived: 'hidden',
+    region: ' eu ',
+  })
+  await panel.getByLabel('Title', { exact: true }).fill('   ')
+  await panel.getByLabel('Count', { exact: true }).fill('3.5')
+  await panel.getByLabel('Enabled', { exact: true }).uncheck()
+  await panel.getByLabel('Read', { exact: true }).uncheck()
+  await panel.getByLabel('Password', { exact: true }).fill(' synthetic_panel_secret ')
+  await panel.getByLabel('Constructor secret', { exact: true }).fill(' synthetic_constructor_secret ')
+  await panel.getByRole('button', { name: 'Apply values' }).click()
+  await expect.poll(() => actions.length).toBe(2)
+  expect(actions[1]).toEqual({
+    count: 3.5,
+    enabled: false,
+    scopes: [],
+    derived: 'hidden',
+    region: ' eu ',
+    password: ' synthetic_panel_secret ',
+    constructor: ' synthetic_constructor_secret ',
+  })
+  await expect(panel.getByLabel('Password', { exact: true })).toHaveValue('')
+  await expect(panel.getByLabel('Constructor secret', { exact: true })).toHaveValue('')
+  await expect(panel.getByLabel('Title', { exact: true })).toHaveValue('   ')
+  await expect(panel.getByLabel('Count', { exact: true })).toHaveValue('3.5')
+  await panel.getByRole('button', { name: 'Apply values' }).click()
+  await expect.poll(() => actions.length).toBe(3)
+  expect(actions[2]).toEqual({
+    count: 3.5,
+    enabled: false,
+    scopes: [],
+    derived: 'hidden',
+    region: ' eu ',
+  })
+  await expect(panel.getByLabel('Title', { exact: true })).toHaveValue('Replacement title')
+  await expect(panel.getByLabel('Count', { exact: true })).toHaveValue('7')
+
+  await page.getByRole('button', { name: 'Edit Example', exact: true }).click()
+  const editor = page.getByRole('dialog', { name: 'Edit Example' })
+  await expect.poll(() => completions.length).toBe(1)
+  expect(completions[0].settings).toEqual(actions[0])
+  expect(completions[0].secrets).toEqual({})
+  await expect(editor.getByLabel('Title', { exact: true })).toHaveValue('Default title')
+  await expect(editor.getByLabel('Password', { exact: true })).toHaveValue('')
+  await expect(editor.getByLabel('Constructor secret', { exact: true })).toHaveValue('')
+  // The completion's `errors: {}` has no entry for a field named constructor.
+  await expect(editor.getByText('Synthetic completion applied')).toBeVisible()
+  await expect(editor.getByLabel('Constructor secret', { exact: true })).not.toHaveAttribute('aria-describedby')
+  await editor.getByLabel('Title', { exact: true }).fill('')
+  await editor.getByLabel('Count', { exact: true }).fill('')
+  await editor.getByLabel('Password', { exact: true }).fill('   ')
+  await editor.getByRole('button', { name: 'Save instance', exact: true }).click()
+  await expect.poll(() => saves.length).toBe(1)
+  expect(saves[0].settings).toEqual({
+    enabled: true,
+    scopes: ['read'],
+    derived: 'completed',
+    region: ' eu ',
+  })
+  expect(saves[0].secrets).toEqual({})
+})

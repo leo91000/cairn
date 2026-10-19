@@ -716,11 +716,7 @@ private fun InstanceEditor(
                             put("settings", pluginSettings(stored, values))
                             put(
                                 "secrets",
-                                JsonObject(
-                                    secrets
-                                        .filterValues { it.isNotBlank() }
-                                        .mapValues { JsonPrimitive(it.value.trim()) }
-                                ),
+                                pluginSecrets(secrets),
                             )
                             if (token.isNotBlank()) put("token", token.trim())
                             asking.second?.let { put("changed", it) }
@@ -770,7 +766,9 @@ private fun InstanceEditor(
                 fields.none {
                     it.required &&
                         it.type !in setOf("boolean", "secret", "multiselect") &&
-                        values[it.key].isNullOrBlank()
+                        // A choice is an exact identifier; only text uses blankness.
+                        (if (it.type == "select") values[it.key].isNullOrEmpty()
+                        else values[it.key].isNullOrBlank())
                 } &&
                 (!manifest.delegates || (agent != null && problem(agent) == null)) &&
                 !completing,
@@ -786,11 +784,7 @@ private fun InstanceEditor(
                         // Blank secret fields keep what is saved.
                         put(
                             "secrets",
-                            JsonObject(
-                                secrets
-                                    .filterValues { it.isNotBlank() }
-                                    .mapValues { JsonPrimitive(it.value.trim()) }
-                            ),
+                            pluginSecrets(secrets),
                         )
                         if (manifest.agentAccess != null)
                             put("agentIds", JsonArray(granted.map(::JsonPrimitive)))
