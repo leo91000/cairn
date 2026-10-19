@@ -664,7 +664,23 @@ internal fun timelineEntries(
         fun updateWait(index: Int, change: (ActivityWait) -> ActivityWait) {
             result[index] = result[index].copy(wait = change(result[index].wait!!))
         }
+        // A scheduled wait only starts once its turn ends: its card follows what the agent did
+        // after the call, and moves to where the turn ends, another wait or a message comes, or
+        // the history does.
+        var scheduled: Int? = null
+        val moves = mutableMapOf<Int, Int>()
+        fun placeScheduled() {
+            val index = scheduled ?: return
+            flushActivity()
+            moves[index] = result.size
+            scheduled = null
+        }
         for ((eventIndex, event) in folded.withIndex()) {
+            if (
+                event.type in WAIT_BOUNDARIES ||
+                    (event.type == "status" && event.text in TERMINAL_STATUSES)
+            )
+                placeScheduled()
             if (event.type == "turn.started") waitReason = ""
             when (event.type) {
                 "chat.sleep",
@@ -672,8 +688,8 @@ internal fun timelineEntries(
                     val wakeup = event.wakeupPayload() ?: continue
                     if (wakeup.id in waits) continue
                     openWait?.let { index -> updateWait(index) { it.copy(ended = "replaced") } }
-                    flushActivity()
                     openWait = result.size
+                    scheduled = result.size
                     waits[wakeup.id] = result.size
                     waitReason = ""
                     result.add(
@@ -953,6 +969,7 @@ internal fun timelineEntries(
             }
         }
         flushActivity()
+        placeScheduled()
         val knownWait = pendingWakeup?.id?.let(waits::get)
         if (knownWait != null && pendingWakeup.observation != null) {
             updateWait(knownWait) {
@@ -975,8 +992,32 @@ internal fun timelineEntries(
                 )
             )
         }
-        result
+        if (moves.isEmpty()) result
+        else {
+            // Each moved card goes before the entry at its target, in one pass.
+            val arriving = moves.entries.groupBy({ it.value }, { it.key })
+            buildList(result.size) {
+                for (index in 0..result.size) {
+                    arriving[index]?.sorted()?.forEach { add(result[it]) }
+                    if (index < result.size && index !in moves) add(result[index])
+                }
+            }
+        }
     }
+
+// Where a scheduled wait's card is placed: its turn ended, or a message or another wait event came.
+private val WAIT_BOUNDARIES =
+    setOf(
+        "turn.started",
+        "turn.completed",
+        "turn.failed",
+        "chat.user",
+        "chat.sleep",
+        "chat.wait",
+        "chat.wait_ready",
+        "chat.wakeup",
+    )
+private val TERMINAL_STATUSES = setOf("succeeded", "failed", "cancelled", "interrupted")
 
 /**
  * Match the web feed: attach each publication beside its response, keeping versions per message.
