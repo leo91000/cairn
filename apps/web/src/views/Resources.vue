@@ -503,10 +503,15 @@ async function remove() {
             </p>
             <label class="checkbox flex-row items-center gap-2 text-xs font-normal phone:text-xs phone:leading-[1.6] mx-0 my-[9px]"><input v-model="form.access.installation" type="checkbox">Allow access to the current Cairn installation</label>
             <small>Manage agents, projects, skills, MCP connections, tasks and runs on behalf of the installation owner, across the entire installation.</small>
-            <label>Execution backend<select v-model="form.access.backend" aria-label="Agent execution backend" @change="form.access.nodes = []">
-              <option value="firecracker">Firecracker VM</option>
-              <option value="native">Native process · trusted people only</option>
-            </select></label>
+            <VirtualSelect
+              v-model="form.access.backend"
+              label="Agent execution backend"
+              :options="[
+                { value: 'firecracker', label: 'Firecracker VM' },
+                { value: 'native', label: 'Native process · trusted people only' },
+              ]"
+              @update:model-value="form.access.nodes = []"
+            />
             <small v-if="form.access.backend === 'native'">Uses the host GPU and OS tools with weaker isolation. Choose native nodes explicitly; each node must also authorize the people directing this agent.</small>
             <label v-if="form.access.backend !== 'native'" class="checkbox flex-row items-center gap-2 text-xs font-normal phone:text-xs phone:leading-[1.6] mx-0 my-[9px]"><input v-model="allNodes" type="checkbox">All VM nodes, including future VM nodes</label>
             <fieldset v-if="!allNodes" class="access-choices">

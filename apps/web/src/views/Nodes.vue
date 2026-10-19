@@ -18,6 +18,7 @@ import Modal from '../components/Modal.vue'
 import NodeStorage from '../components/NodeStorage.vue'
 import UiAlert from '../components/UiAlert.vue'
 import UiButton from '../components/UiButton.vue'
+import VirtualSelect from '../components/VirtualSelect.vue'
 import {
   Plus,
   Server,
@@ -254,10 +255,14 @@ function statusLabel(node: ExecutionNode) {
           {{ error }}
         </UiAlert>
         <form class="mt-3 grid gap-3" @submit.prevent="enroll">
-          <label>Execution backend<select v-model="enrollmentBackend" aria-label="Execution backend">
-            <option value="firecracker">Firecracker VM</option>
-            <option value="native">Native process · trusted people only</option>
-          </select></label>
+          <VirtualSelect
+            v-model="enrollmentBackend"
+            label="Execution backend"
+            :options="[
+              { value: 'firecracker', label: 'Firecracker VM' },
+              { value: 'native', label: 'Native process · trusted people only' },
+            ]"
+          />
           <p v-if="enrollmentBackend === 'native'" class="text-sm text-muted">
             Shares the host GPU through its installed drivers. Uses weaker isolation than a VM; heavy work can slow your desktop. Linux x86-64 and systemd are required.
           </p>

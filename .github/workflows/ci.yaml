@@ -170,7 +170,7 @@ jobs:
           .node-s3-test/bin/pip install 'moto[server]==5.2.3' awscli
           PATH="$PWD/.node-s3-test/bin:$PATH" .node-s3-test/bin/python scripts/tests/node_s3_test.py
   native-runtime:
-    name: Native Linux process ownership (no GPU)
+    name: Native Linux process ownership (CPU workload)
     needs: [resolve, build]
     if: needs.resolve.outputs.reuse != 'true'
     runs-on: ubuntu-latest
