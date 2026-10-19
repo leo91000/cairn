@@ -232,6 +232,8 @@ test('a slow conversation opens on a loader, then returns to the previous readin
     await expect(loader).toBeVisible()
     await expect(loader).toHaveCSS('opacity', '1')
     await expect(page.locator('.chat-page h1:not(.sr-only)')).toHaveText(workspace.service.chats.detail(second.id).title)
+    // The composer keeps the opening conversation's shape: no agent or project to choose.
+    await expect(page.getByRole('combobox', { name: 'Chat agent' })).toHaveCount(0)
     await page.screenshot({ path: test.info().outputPath('slow-navigation-pending.png'), animations: 'disabled' })
     release()
     await expect(page.locator('.activity-message').getByText('Slow target conversation', { exact: true }).first()).toBeVisible()

@@ -1114,7 +1114,8 @@ function key(event: KeyboardEvent) {
                 <div v-if="dragging" class="pointer-events-none absolute inset-0 z-10 flex items-center justify-center gap-2 rounded-xl border-2 border-dashed border-accent bg-surface/95 text-sm font-semibold text-accent">
                   <Icon :name="Paperclip" :size="20" />Drop files here
                 </div>
-                <div v-if="!detail" class="mb-3 flex max-w-100 items-center gap-1 phone:mb-2">
+                <!-- A new conversation chooses its agent and project; one still opening does not. -->
+                <div v-if="!route.params.id" class="mb-3 flex max-w-100 items-center gap-1 phone:mb-2">
                   <VirtualSelect
                     v-model="agentId"
                     :options="agents"
