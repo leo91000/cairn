@@ -18,7 +18,7 @@ import uuid
 from pathlib import Path
 
 SCENARIOS = ["same-lan", "mdns-only-client", "nat-client", "nat-installation", "nat-both",
-             "udp-blocked", "symmetric-nat", "symmetric-client", "same-server", "network-change", "packet-loss"]
+             "udp-blocked", "symmetric-nat", "symmetric-client", "same-server", "network-change", "packet-loss", "qualification"]
 
 
 def participant_uses_nat(scenario, role):
@@ -55,6 +55,7 @@ class Network:
         self.links = []
         self.children = []
         self.groups = []
+        self.loss_reports = {}
 
     def namespace(self, role):
         name = self.prefix + "-" + role
@@ -154,6 +155,20 @@ class Network:
         if errors:
             raise RuntimeError("Network cleanup incomplete: " + ", ".join(errors))
 
+    def loss_counts(self):
+        counts = {}
+        for role, path in self.loss_reports.items():
+            if not path.exists():
+                raise RuntimeError(f"{role}: loss router did not record its completed decisions")
+            observed = json.loads(path.read_text())
+            packets, dropped = observed["packets"], observed["droppedPackets"]
+            if (packets != dropped + observed["forwardedPackets"]
+                    or not packets // 5 <= dropped <= (packets + 4) // 5
+                    or not 0 <= observed["droppedBytes"] <= observed["bytes"]):
+                raise RuntimeError(f"{role}: inconsistent loss router count snapshot")
+            counts[role] = observed
+        return counts
+
     def setup(self, scenario):
         internet = self.namespace("internet")
         self.internet = internet
@@ -220,11 +235,12 @@ class Network:
                 child = self.spawn(router, os.sys.executable, str(Path(__file__).resolve()),
                                    "loss-router", external, str(ready), role, privileged=True)
                 wait_ready(ready, child, "Deterministic loss router")
+                self.loss_reports[role] = ready.with_name(ready.name + ".counts.json")
                 self.exec(router, "ip", "route", "add", "table", "102", "default", "dev", "loss")
                 self.exec(router, "ip", "rule", "add", "iif", "lan", "lookup", "102")
             self.participants[role] = {"namespace": participant, "router": router,
                                        "link": endpoint, "address": address}
-        if scenario == "same-lan":
+        if scenario in {"same-lan", "qualification"}:
             # Move the installation's LAN end onto the client's LAN bridge.
             installation = self.participants["installation"]
             client = self.participants["client"]
@@ -353,7 +369,7 @@ def main():
                         str(Path(__file__).resolve()), "stun-probe", network.stun_address))
                     for role in ["client", "installation"]
                 }
-            if args.scenario in {"same-lan", "udp-blocked"}:
+            if args.scenario in {"same-lan", "udp-blocked", "qualification"}:
                 installation = network.participants["installation"]
                 for port in [49011, 49012]:
                     network.listen(binary, installation["namespace"], installation["address"], port)
@@ -371,6 +387,13 @@ def main():
         finally:
             # Processes can still write here until they and their namespaces have stopped.
             network.close()
+            if args.scenario == "packet-loss":
+                counts = network.loss_counts()
+                if set(counts) != {"client", "installation"}:
+                    raise RuntimeError("Both packet-loss routers must provide count snapshots")
+                saved = json.loads(args.output.read_text()) if args.output.exists() else {"scenario": args.scenario}
+                args.output.parent.mkdir(parents=True, exist_ok=True)
+                args.output.write_text(json.dumps({**saved, "lossCounters": counts}) + "\n")
 
 
 def android(network, directory, args, report):
@@ -468,9 +491,9 @@ def browser(network, binary, directory, args, report):
                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     network.children.append(proxy)
 
-    def wrapper(name, role, executable, preserve=""):
+    def wrapper(name, role, executable, preserve="", arguments=()):
         path = directory / name
-        command = namespace_command(network.participants[role]["namespace"], executable)
+        command = namespace_command(network.participants[role]["namespace"], executable, *arguments)
         if preserve:
             command.insert(2, "--preserve-env=" + preserve)
         path.write_text("#!/bin/sh\nexec " + shlex.join(command) + ' "$@"\n')
@@ -486,8 +509,9 @@ def browser(network, binary, directory, args, report):
     env["CAIRN_NETWORK_DIRECT_CLIENT"] = wrapper(
         "direct-client", "client", str(Path("target/debug/examples/network_direct_client").resolve()), "")
     env["CAIRN_NETWORK_INSTALLATION_BINARY"] = wrapper(
-        "installation", "installation", str(Path("target/debug/cairn").resolve()),
-        "DATA_DIR,AGENT_HOME,WORKSPACE_ROOTS,NODE_ENV,WORKER_ENABLED,HOST,PORT,CAIRN_BEACON_ORIGIN,CAIRN_INSTALLATION_CLAIM_CODE,CAIRN_INSTALLATION_NAME,CAIRN_DIRECT_ENABLED,CAIRN_DIRECT_STUN_URLS,CAIRN_DIRECT_PUBLIC_IP")
+        "installation", "installation", str(Path("target/debug/examples/network_qualification" if args.scenario == "qualification" else "target/debug/cairn").resolve()),
+        "DATA_DIR,AGENT_HOME,WORKSPACE_ROOTS,NODE_ENV,WORKER_ENABLED,HOST,PORT,CAIRN_BEACON_ORIGIN,CAIRN_INSTALLATION_CLAIM_CODE,CAIRN_INSTALLATION_NAME,CAIRN_DIRECT_ENABLED,CAIRN_DIRECT_STUN_URLS,CAIRN_DIRECT_PUBLIC_IP",
+        arguments=(str(directory / "qualification-control"),) if args.scenario == "qualification" else ())
     # sudo closes inherited descriptors, including Playwright's CDP pipes (3/4).
     # Transfer those descriptors over a private Unix socket after entering the
     # namespace; browser traffic still traverses the real network topology.
@@ -609,30 +633,63 @@ def stun_probe(address):
 
 
 def loss_router(external, ready, role):
-    # Read the TUN's routed IPv4 packets; inject surviving packets onto the WAN.
-    # No parsing, logging, rewriting or persistence of application content.
-    with open("/dev/net/tun", "r+b", buffering=0) as interface:
-        fcntl.ioctl(interface, 0x400454ca, struct.pack("16sH", b"loss", 0x0001 | 0x1000))
-        with socket.socket(socket.AF_INET, socket.SOCK_RAW, socket.IPPROTO_RAW) as outgoing:
-            outgoing.setsockopt(socket.IPPROTO_IP, socket.IP_HDRINCL, 1)
-            outgoing.setsockopt(socket.SOL_SOCKET, socket.SO_BINDTODEVICE, external.encode() + b"\0")
-            Path(ready).touch()
-            count = 0
-            while packet := interface.read(65536):
-                # TUN link-up also emits IPv6 neighbor discovery; the bench's
-                # controlled topology is IPv4, and these are not test packets.
-                if packet[0] >> 4 != 4:
-                    continue
-                if count % 5 == 0:
-                    # One loss in each five-packet block, with a reproducible
-                    # position independent of periodic STUN/SCTP traffic. Fixed
-                    # every-fifth loss can suppress *all* INIT retransmissions.
-                    seed = f"cairn-network-loss-v1:{role}:{count // 5}".encode()
-                    digest = hashlib.blake2s(seed, digest_size=8).digest()
-                    lost_position = int.from_bytes(digest, "big") % 5
-                if count % 5 != lost_position:
-                    outgoing.sendto(packet, (socket.inet_ntoa(packet[16:20]), 0))
-                count += 1
+    started = time.monotonic()
+    count, dropped, total_bytes, dropped_bytes = 0, 0, 0, 0
+    completed = (0, 0, 0, 0)
+
+    def terminate(_signal, _frame):
+        raise SystemExit(0)
+
+    # The existing owned-process teardown supplies SIGTERM. No extra packet,
+    # production endpoint or periodic file write perturbs the loss sequence.
+    signal.signal(signal.SIGTERM, terminate)
+    try:
+        # Read the TUN's routed IPv4 packets; inject surviving packets onto the WAN.
+        # No parsing, logging, rewriting or persistence of application content.
+        with open("/dev/net/tun", "r+b", buffering=0) as interface:
+            fcntl.ioctl(interface, 0x400454ca, struct.pack("16sH", b"loss", 0x0001 | 0x1000))
+            with socket.socket(socket.AF_INET, socket.SOCK_RAW, socket.IPPROTO_RAW) as outgoing:
+                outgoing.setsockopt(socket.IPPROTO_IP, socket.IP_HDRINCL, 1)
+                outgoing.setsockopt(socket.SOL_SOCKET, socket.SO_BINDTODEVICE, external.encode() + b"\0")
+                Path(ready).touch()
+                while packet := interface.read(65536):
+                    # TUN link-up also emits IPv6 neighbor discovery; the bench's
+                    # controlled topology is IPv4, and these are not test packets.
+                    if packet[0] >> 4 != 4:
+                        continue
+                    if count % 5 == 0:
+                        # One loss in each five-packet block, with a reproducible
+                        # position independent of periodic STUN/SCTP traffic. Fixed
+                        # every-fifth loss can suppress *all* INIT retransmissions.
+                        seed = f"cairn-network-loss-v1:{role}:{count // 5}".encode()
+                        digest = hashlib.blake2s(seed, digest_size=8).digest()
+                        lost_position = int.from_bytes(digest, "big") % 5
+                    if count % 5 != lost_position:
+                        outgoing.sendto(packet, (socket.inet_ntoa(packet[16:20]), 0))
+                    else:
+                        dropped += 1
+                        dropped_bytes += len(packet)
+                    count += 1
+                    total_bytes += len(packet)
+                    # One atomic snapshot after a completed decision. A signal may
+                    # interrupt the next send; it must never publish mixed counters.
+                    completed = (count, dropped, total_bytes, dropped_bytes)
+    finally:
+        packets, dropped_packets, size, dropped_size = completed
+        snapshot = Path(ready).with_name(Path(ready).name + ".counts.json")
+        snapshot.write_text(json.dumps({
+            "profile": "cairn-network-loss-v1",
+            "snapshot": "completed-decisions-at-router-shutdown",
+            "packets": packets,
+            "droppedPackets": dropped_packets,
+            "forwardedPackets": packets - dropped_packets,
+            "bytes": size,
+            "droppedBytes": dropped_size,
+            "elapsedMs": round((time.monotonic() - started) * 1000),
+        }) + "\n")
+        # The parent directory is private; these aggregate counts contain no
+        # credentials and must be readable after the privileged router exits.
+        snapshot.chmod(0o644)
 
 
 def browser_pipe(namespace, executable, directory, arguments):
