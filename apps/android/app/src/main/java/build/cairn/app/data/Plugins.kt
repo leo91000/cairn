@@ -395,11 +395,20 @@ fun pluginSettings(fields: List<PluginSetting>, values: Map<String, String>): Js
                         "boolean" -> JsonPrimitive(value == "true")
                         "number" -> value.trim().toDoubleOrNull()?.let(::number)
                         "multiselect" -> multiselect(value)
+                        "select" -> value.takeIf { it.isNotEmpty() }?.let(::JsonPrimitive)
                         else -> value.trim().takeIf { it.isNotEmpty() }?.let(::JsonPrimitive)
                     }
                 element?.let { field.key to it }
             }
             .toMap()
+    )
+
+/** Blank secrets keep saved credentials; view actions preserve the typed value. */
+fun pluginSecrets(values: Map<String, String>, trim: Boolean = true): JsonObject =
+    JsonObject(
+        values
+            .filterValues { it.isNotBlank() }
+            .mapValues { JsonPrimitive(if (trim) it.value.trim() else it.value) }
     )
 
 /** The form text of a saved value or a field default. */

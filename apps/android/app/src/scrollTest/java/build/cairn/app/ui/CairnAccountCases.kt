@@ -38,7 +38,7 @@ abstract class CairnAccountCases {
                             when (request.requestUrl!!.encodedPath) {
                                 "/api/account/session" ->
                                     """{"authenticated":true,"csrf":"fixture-csrf","account":{"id":"revoked-person","email":"member@example.test"},"installations":$installations}"""
-                                "/api/installations/revoked-home/api/revoked" -> {
+                                "/api/installations/revoked-home/api/overview" -> {
                                     revoked.set(true)
                                     return MockResponse()
                                         .setResponseCode(403)
@@ -79,9 +79,14 @@ abstract class CairnAccountCases {
                     }
                 }
                 compose.waitUntil(30000) {
-                    vm.state.value.installation?.id == "revoked-home" && !vm.state.value.busy
+                    compose
+                        .onAllNodes(installationHeader("Maison", "Hors ligne"))
+                        .fetchSemanticsNodes()
+                        .isNotEmpty() &&
+                        vm.state.value.installation?.id == "revoked-home" &&
+                        !vm.state.value.busy
                 }
-                compose.runOnIdle { vm.perform { api.request("GET", "/revoked") } }
+                compose.runOnIdle { vm.perform { api.request("GET", "/overview") } }
                 compose.waitUntil(20000) {
                     compose
                         .onAllNodesWithText("Aucune installation")
