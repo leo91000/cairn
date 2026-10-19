@@ -14,7 +14,7 @@ export function pluginFieldAnswer<T>(answers: Record<string, T> | undefined, key
 export function pluginFormValue(field: SettingField, saved: unknown): unknown {
   const value = saved === undefined ? field.default : saved
   if (field.type === 'boolean')
-    return String(value) === 'true'
+    return value === true || value === 'true'
   if (field.type === 'multiselect')
     return Array.isArray(value) ? [...value] : []
   return value !== null && value !== undefined && typeof value !== 'object' ? String(value) : ''
@@ -36,7 +36,7 @@ export function pluginSettings(fields: SettingField[], values: Record<string, un
       continue
     const value = Object.hasOwn(values, field.key) ? values[field.key] : undefined
     if (field.type === 'boolean') {
-      settings[field.key] = String(value) === 'true'
+      settings[field.key] = value === true || value === 'true'
     }
     else if (field.type === 'multiselect') {
       settings[field.key] = Array.isArray(value) ? [...value] : []
@@ -73,7 +73,49 @@ export function pluginSecrets(secrets: Record<string, string>, trim = true): Rec
     .map(([key, value]) => [key, trim ? pluginText(value) : value]))
 }
 
-/** Rust str::trim uses Unicode White_Space; JS trim also strips the meaningful U+FEFF. */
+// Kotlin Char.isWhitespace = Character.isWhitespace || Character.isSpaceChar.
+// Pin that client set: U+001C..001F are blank, U+0085 and U+FEFF are meaningful.
+// Rust str::trim and JS trim have different sets; neither defines this contract.
+// Both client runners check tests/fixtures/plugin-form-whitespace.json.
+const clientWhitespace = new Set([
+  0x0009,
+  0x000A,
+  0x000B,
+  0x000C,
+  0x000D,
+  0x001C,
+  0x001D,
+  0x001E,
+  0x001F,
+  0x0020,
+  0x00A0,
+  0x1680,
+  0x2000,
+  0x2001,
+  0x2002,
+  0x2003,
+  0x2004,
+  0x2005,
+  0x2006,
+  0x2007,
+  0x2008,
+  0x2009,
+  0x200A,
+  0x2028,
+  0x2029,
+  0x202F,
+  0x205F,
+  0x3000,
+])
+
+/** The same predicate controls text trimming and instance/action secret blankness. */
 function pluginText(value: string): string {
-  return value.replace(/^\p{White_Space}+|\p{White_Space}+$/gu, '')
+  let start = 0
+  let end = value.length
+  while (start < end && clientWhitespace.has(value.charCodeAt(start)))
+    start++
+  while (end > start && clientWhitespace.has(value.charCodeAt(end - 1)))
+    end--
+
+  return value.slice(start, end)
 }

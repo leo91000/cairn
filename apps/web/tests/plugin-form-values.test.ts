@@ -1,6 +1,7 @@
 import type { SettingField } from '../src/plugins'
 import { describe, expect, it } from 'vitest'
 import corpus from '../../../tests/fixtures/plugin-form-values.json'
+import whitespace from '../../../tests/fixtures/plugin-form-whitespace.json'
 import {
   pluginFieldAnswer,
   pluginFormSecrets,
@@ -10,6 +11,43 @@ import {
 } from '../src/plugin-form-values'
 
 describe('declarative plugin forms (shared Android corpus)', () => {
+  it('matches Kotlin blankness and trimming at whitespace, control and format boundaries', () => {
+    const fields: SettingField[] = [{ key: 'note', title: 'Note', type: 'text' }]
+    const blankCodes = []
+    for (let code = 0; code <= 0xFFFF; code++) {
+      if (!Object.hasOwn(pluginSettings(fields, { note: String.fromCharCode(code) }), 'note'))
+        blankCodes.push(code)
+    }
+
+    expect(blankCodes).toEqual(whitespace.blank.map(code => Number.parseInt(code, 16)))
+
+    for (const [group, codes] of Object.entries(whitespace)) {
+      for (const code of codes) {
+        const character = String.fromCodePoint(Number.parseInt(code, 16))
+        for (const value of [character, `${character}x`, `x${character}`, `${character}x${character}`]) {
+          const normalized = group === 'blank' ? value.replaceAll(character, '') : value
+          const expected = normalized ? { note: normalized } : {}
+          const message = `U+${code}: ${JSON.stringify(value)}`
+          const opened = pluginFormValues(fields, { note: value })
+          expect(pluginSettings(fields, opened), message).toEqual(expected)
+          expect(pluginSettings(fields, { ...pluginFormValues(fields), note: value }), message).toEqual(expected)
+          expect(pluginSecrets({ note: value }), message).toEqual(expected)
+          expect(pluginSecrets({ note: value }, false), message).toEqual(normalized ? { note: value } : {})
+        }
+
+        const choices: SettingField[] = [{
+          key: 'choice',
+          title: 'Choice',
+          type: 'select',
+          required: true,
+          options: [{ value: character, label: code }],
+        }]
+        expect(pluginSettings(choices, pluginFormValues(choices, { choice: character }))).toEqual({ choice: character })
+        expect(pluginSettings(choices, { choice: '' })).toEqual({})
+      }
+    }
+  })
+
   it('keeps secret fields empty for accepted prototype property names', () => {
     const secrets = pluginFormSecrets()
     const keys = ['constructor', 'toString', 'valueOf']

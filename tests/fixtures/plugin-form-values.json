@@ -663,5 +663,207 @@
     },
     "instanceSecrets": {},
     "actionSecrets": {}
+  },
+  {
+    "name": "NEXT LINE is meaningful",
+    "fields": [
+      {
+        "key": "note",
+        "title": "Note",
+        "type": "text"
+      },
+      {
+        "key": "single",
+        "title": "Single",
+        "type": "string"
+      },
+      {
+        "key": "password",
+        "title": "Password",
+        "type": "secret"
+      }
+    ],
+    "initial": {
+      "note": "\u0085x\u0085",
+      "single": "\u0085"
+    },
+    "edits": {
+      "note": "\u0085",
+      "single": "\u0085x\u0085"
+    },
+    "secrets": {
+      "password": "\u0085",
+      "padded": "\u0085x\u0085"
+    },
+    "opened": {
+      "note": "\u0085x\u0085",
+      "single": "\u0085"
+    },
+    "settings": {
+      "single": "\u0085x\u0085",
+      "note": "\u0085"
+    },
+    "instanceSecrets": {
+      "padded": "\u0085x\u0085",
+      "password": "\u0085"
+    },
+    "actionSecrets": {
+      "padded": "\u0085x\u0085",
+      "password": "\u0085"
+    }
+  },
+  {
+    "name": "file group record unit separators are blank",
+    "fields": [
+      {
+        "key": "note",
+        "title": "Note",
+        "type": "text"
+      },
+      {
+        "key": "single",
+        "title": "Single",
+        "type": "string"
+      },
+      {
+        "key": "password",
+        "title": "Password",
+        "type": "secret"
+      }
+    ],
+    "initial": {
+      "note": "\u001c\u001d\u001e\u001fx\u001c\u001d\u001e\u001f",
+      "single": "\u001c\u001d\u001e\u001f"
+    },
+    "edits": {
+      "note": "\u001c\u001d\u001e\u001f",
+      "single": "\u001c\u001d\u001e\u001fx\u001c\u001d\u001e\u001f"
+    },
+    "secrets": {
+      "password": "\u001c\u001d\u001e\u001f",
+      "padded": "\u001c\u001d\u001e\u001fx\u001c\u001d\u001e\u001f"
+    },
+    "opened": {
+      "note": "x"
+    },
+    "settings": {
+      "single": "x"
+    },
+    "instanceSecrets": {
+      "padded": "x"
+    },
+    "actionSecrets": {
+      "padded": "\u001c\u001d\u001e\u001fx\u001c\u001d\u001e\u001f"
+    }
+  },
+  {
+    "name": "BOM is meaningful",
+    "fields": [
+      {
+        "key": "note",
+        "title": "Note",
+        "type": "text"
+      },
+      {
+        "key": "single",
+        "title": "Single",
+        "type": "string"
+      },
+      {
+        "key": "password",
+        "title": "Password",
+        "type": "secret"
+      }
+    ],
+    "initial": {
+      "note": "\ufeffx\ufeff",
+      "single": "\ufeff"
+    },
+    "edits": {
+      "note": "\ufeff",
+      "single": "\ufeffx\ufeff"
+    },
+    "secrets": {
+      "password": "\ufeff",
+      "padded": "\ufeffx\ufeff"
+    },
+    "opened": {
+      "note": "\ufeffx\ufeff",
+      "single": "\ufeff"
+    },
+    "settings": {
+      "single": "\ufeffx\ufeff",
+      "note": "\ufeff"
+    },
+    "instanceSecrets": {
+      "padded": "\ufeffx\ufeff",
+      "password": "\ufeff"
+    },
+    "actionSecrets": {
+      "padded": "\ufeffx\ufeff",
+      "password": "\ufeff"
+    }
+  },
+  {
+    "name": "nonprimitive boolean answers do not coerce to true",
+    "fields": [
+      {
+        "key": "arrayFlag",
+        "title": "arrayFlag",
+        "type": "boolean"
+      },
+      {
+        "key": "stringArrayFlag",
+        "title": "stringArrayFlag",
+        "type": "boolean"
+      },
+      {
+        "key": "objectFlag",
+        "title": "objectFlag",
+        "type": "boolean"
+      },
+      {
+        "key": "primitive",
+        "title": "primitive",
+        "type": "boolean"
+      }
+    ],
+    "initial": {
+      "arrayFlag": [
+        true
+      ],
+      "stringArrayFlag": [
+        "true"
+      ],
+      "objectFlag": {
+        "value": true
+      },
+      "primitive": true
+    },
+    "edits": {
+      "arrayFlag": [
+        "true"
+      ],
+      "stringArrayFlag": [
+        true
+      ],
+      "objectFlag": [],
+      "primitive": "true"
+    },
+    "secrets": {},
+    "opened": {
+      "arrayFlag": false,
+      "stringArrayFlag": false,
+      "objectFlag": false,
+      "primitive": true
+    },
+    "settings": {
+      "arrayFlag": false,
+      "stringArrayFlag": false,
+      "objectFlag": false,
+      "primitive": true
+    },
+    "instanceSecrets": {},
+    "actionSecrets": {}
   }
 ]

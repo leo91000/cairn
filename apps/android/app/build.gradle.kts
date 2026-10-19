@@ -157,6 +157,7 @@ tasks.withType<Test>().configureEach {
     systemProperty("cairn.activityCorpus", activityCorpus.absolutePath)
     val pluginFormCorpus = rootProject.file("../../tests/fixtures/plugin-form-values.json")
     inputs.file(pluginFormCorpus)
+    inputs.file(rootProject.file("../../tests/fixtures/plugin-form-whitespace.json"))
     systemProperty("cairn.pluginFormCorpus", pluginFormCorpus.absolutePath)
     // Robolectric's Android 16 shared-memory emulation uses JDK file descriptors.
     jvmArgs(

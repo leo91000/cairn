@@ -659,7 +659,9 @@ manifest before it can reach either client's field decoder.
 Web instance editors and view forms use pure value transformations, compared with
 Android's native form helpers using `tests/fixtures/plugin-form-values.json`.
 Opening a form applies defaults to missing values; an explicit null or a later
-clear does not reapply a default. Only declared non-secret fields are settings,
+clear does not reapply a default. Nonprimitive answers do not coerce scalar
+controls: a boolean answer such as `[true]` or `["true"]` becomes false, matching
+Android. Only declared non-secret fields are settings,
 including hidden fields populated by the package. Nonblank text is trimmed,
 numbers are sent as JSON numbers, and blank text/numbers are omitted. Choice
 identifiers are preserved exactly, including whitespace accepted by the manifest;
@@ -668,6 +670,22 @@ empty multiple choices remain explicit. Secrets are never prefilled from a view'
 `values` or instance settings. Blank secrets are omitted, preserving saved instance
 secrets. Instance secrets follow the existing trimmed save contract; nonblank view
 form secrets reach the action exactly as typed, matching Android.
+
+Both clients use Kotlin's existing `Char.isWhitespace` predicate for text trimming
+and secret blankness: Java `Character.isWhitespace || Character.isSpaceChar`.
+The exact set is U+0009–U+000D, U+001C–U+0020, U+00A0, U+1680,
+U+2000–U+200A, U+2028–U+2029, U+202F, U+205F and U+3000.
+U+0085 NEXT LINE and format characters (including U+FEFF, U+200B and U+2060)
+are meaningful. This differs from Rust's Unicode `White_Space` trimming and
+JavaScript's built-in `trim`; neither defines the client contract. The shared
+`plugin-form-whitespace.json` corpus covers all ASCII/C1 controls, separators,
+and format/nonspace boundaries, as singletons and around nonblank text. Its
+blank set is also checked exhaustively against the pinned Kotlin/JDK Char domain.
+Choice IDs use exact bytes and required selects still use null/empty missingness.
+
+These helpers do not make control characters valid instance settings: the server
+independently rejects them on instance saves. Admitted panel `values` can contain
+controls; action secrets keep their raw bytes after the shared blank filter.
 
 These are client value transformations, not validation of an action. A plugin
 still validates its action input. The server's F6 manifest constraints, package
