@@ -1,7 +1,7 @@
 # C3: conversation candidate selection experiment
 
 Issue: [#264](https://github.com/leo91000/cairn/issues/264), part of #240.
-Reference: main `293117d04e9d958aeed6a99d4cd8ff2650dc4f5b` (F22), including
+Historical measurement reference: main `293117d04e9d958aeed6a99d4cd8ff2650dc4f5b` (F22), including
 F3 #317 and F8 #315. The issue and its comments were read on 2026-10-19.
 
 **Decision: keep F22 and the current production selection.** No accepted user
@@ -11,9 +11,9 @@ that a product budget is met or missed. They do not justify an index, dirty set,
 new persistent state, or a production scheduler refactor. Reopen selection when
 a budget and a representative native workload can discriminate those choices.
 
-## Current source and contracts
+## Measured source and contracts
 
-`Service::chat_tick` still lists all chats in `records.updated_at DESC` order.
+On that reference, `Service::chat_tick` lists all chats in `records.updated_at DESC` order.
 For active chats it reads the last run, publishes steering for queued/running
 runs, excludes busy/recoveryPending runs, handles attention before pause, then
 checks the wait, calls transactional `next_queued`, and considers a wakeup.
@@ -34,11 +34,18 @@ fencing/reserving the destination. This experiment does not duplicate those
 paths. A candidate policy must preserve their interaction with the active-run
 and recovery checks, including steering before the busy check.
 
-There are no production Rust, web, Android, schema, index, wire-format, persisted
-record, or epoch changes. Epoch 5 and reviewed legacy tree
-`a6aae371f1d76cceb2f510180531f0ef17ec3e60` remain unchanged under the production
-compatibility contract. No UI behavior changes; a Claude UI pass, Android
-formatting and browser/device visual qualification are inapplicable.
+This C3 change alters no production Rust, web, Android, schema, index, wire-format,
+persisted record, or compatibility epoch. The measured reference uses epoch 5.
+During validation, main advanced to `176969f50b77f7cac702dccce66b63e4723df63f`,
+including external #292 and its reviewed epoch 6 transition (ADR-0050). Preserve
+that current-main contract and the unchanged legacy tree
+`a6aae371f1d76cceb2f510180531f0ef17ec3e60`; epoch-5 binaries cannot interpret
+the native records. The measurements and local checks here are not reattributed
+to the newer main. A conflict-free merge simulation is not actual integration
+qualification: the parent must check the evolved callers and actual integration,
+with fresh full review and whole-head CI if its source identity changes, before
+merge. No UI behavior changes; a Claude UI pass, Android formatting and
+browser/device visual qualification are inapplicable.
 
 ## Discriminating prototype
 
