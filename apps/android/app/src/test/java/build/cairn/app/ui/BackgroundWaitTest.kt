@@ -8,9 +8,12 @@ import org.junit.*
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
+import org.robolectric.annotation.GraphicsMode
 
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [36], qualifiers = "w412dp-h915dp-mdpi")
+// Real text layout, so that a long wait reason overflows.
+@GraphicsMode(GraphicsMode.Mode.NATIVE)
 class BackgroundWaitTest : BackgroundWaitCases() {
     @Before
     fun setup() {
