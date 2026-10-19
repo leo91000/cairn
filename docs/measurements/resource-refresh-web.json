@@ -1,0 +1,5460 @@
+{
+  "measuredAt": "2026-10-19T07:28:08.202Z",
+  "source": "d01b519896c62ab3e51295eb702195975a2414ec",
+  "workload": {
+    "agents": 2,
+    "projects": 1,
+    "tasks": 1,
+    "skills": 0,
+    "mcps": 0
+  },
+  "node": "v24.21.0",
+  "chromium": "153.0.8010.12",
+  "host": {
+    "cpu": "Intel(R) Xeon(R) Processor @ 2.80GHz",
+    "logicalCpus": 7,
+    "memoryBytes": 19929366528,
+    "freeBytes": 4703936512
+  },
+  "interSampleDelayMs": 2000,
+  "conditions": "Local VM: HTTP loopback and UDP on its non-loopback interface; debug Rust; fresh installation store/account, reused disposable Beacon DB; fixture providers; established route; first plus 20 warm samples; delay only between trials; state publication/nextTick, excluding editor paint",
+  "status": "complete",
+  "measurements": [
+    {
+      "route": "relay",
+      "resource": "agents",
+      "strategy": "global",
+      "first": {
+        "published": true,
+        "writeMs": 174.80000000074506,
+        "totalMs": 1544.800000000745,
+        "requests": [
+          {
+            "route": "relay",
+            "method": "PUT",
+            "resource": "agents"
+          },
+          {
+            "route": "relay",
+            "method": "GET",
+            "resource": "mcps"
+          },
+          {
+            "route": "relay",
+            "method": "GET",
+            "resource": "agents"
+          },
+          {
+            "route": "relay",
+            "method": "GET",
+            "resource": "tasks"
+          },
+          {
+            "route": "relay",
+            "method": "GET",
+            "resource": "skills"
+          },
+          {
+            "route": "relay",
+            "method": "GET",
+            "resource": "projects"
+          }
+        ]
+      },
+      "warm": [
+        {
+          "published": true,
+          "writeMs": 158.70000000018626,
+          "totalMs": 1501.3999999994412,
+          "requests": [
+            {
+              "route": "relay",
+              "method": "PUT",
+              "resource": "agents"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "skills"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "tasks"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "mcps"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "projects"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "agents"
+            }
+          ]
+        },
+        {
+          "published": true,
+          "writeMs": 239.79999999981374,
+          "totalMs": 546.5,
+          "requests": [
+            {
+              "route": "relay",
+              "method": "PUT",
+              "resource": "agents"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "tasks"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "projects"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "agents"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "mcps"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "skills"
+            }
+          ]
+        },
+        {
+          "published": true,
+          "writeMs": 202.90000000037253,
+          "totalMs": 681.4000000003725,
+          "requests": [
+            {
+              "route": "relay",
+              "method": "PUT",
+              "resource": "agents"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "agents"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "projects"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "mcps"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "skills"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "tasks"
+            }
+          ]
+        },
+        {
+          "published": true,
+          "writeMs": 167.6000000005588,
+          "totalMs": 655.4000000003725,
+          "requests": [
+            {
+              "route": "relay",
+              "method": "PUT",
+              "resource": "agents"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "projects"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "agents"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "tasks"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "mcps"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "skills"
+            }
+          ]
+        },
+        {
+          "published": true,
+          "writeMs": 40.10000000055879,
+          "totalMs": 182.6000000005588,
+          "requests": [
+            {
+              "route": "relay",
+              "method": "PUT",
+              "resource": "agents"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "agents"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "tasks"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "projects"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "mcps"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "skills"
+            }
+          ]
+        },
+        {
+          "published": true,
+          "writeMs": 112.1000000005588,
+          "totalMs": 365.1000000005588,
+          "requests": [
+            {
+              "route": "relay",
+              "method": "PUT",
+              "resource": "agents"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "tasks"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "mcps"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "projects"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "agents"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "skills"
+            }
+          ]
+        },
+        {
+          "published": true,
+          "writeMs": 80.3999999994412,
+          "totalMs": 546.7999999998137,
+          "requests": [
+            {
+              "route": "relay",
+              "method": "PUT",
+              "resource": "agents"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "agents"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "mcps"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "projects"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "skills"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "tasks"
+            }
+          ]
+        },
+        {
+          "published": true,
+          "writeMs": 41.59999999962747,
+          "totalMs": 285.8999999994412,
+          "requests": [
+            {
+              "route": "relay",
+              "method": "PUT",
+              "resource": "agents"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "agents"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "mcps"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "projects"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "tasks"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "skills"
+            }
+          ]
+        },
+        {
+          "published": true,
+          "writeMs": 62.90000000037253,
+          "totalMs": 219.80000000074506,
+          "requests": [
+            {
+              "route": "relay",
+              "method": "PUT",
+              "resource": "agents"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "tasks"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "agents"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "projects"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "skills"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "mcps"
+            }
+          ]
+        },
+        {
+          "published": true,
+          "writeMs": 59.700000000186265,
+          "totalMs": 210.79999999981374,
+          "requests": [
+            {
+              "route": "relay",
+              "method": "PUT",
+              "resource": "agents"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "skills"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "projects"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "tasks"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "agents"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "mcps"
+            }
+          ]
+        },
+        {
+          "published": true,
+          "writeMs": 109.20000000018626,
+          "totalMs": 541.7999999998137,
+          "requests": [
+            {
+              "route": "relay",
+              "method": "PUT",
+              "resource": "agents"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "agents"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "tasks"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "mcps"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "projects"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "skills"
+            }
+          ]
+        },
+        {
+          "published": true,
+          "writeMs": 65.90000000037253,
+          "totalMs": 299.6000000005588,
+          "requests": [
+            {
+              "route": "relay",
+              "method": "PUT",
+              "resource": "agents"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "projects"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "tasks"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "agents"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "mcps"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "skills"
+            }
+          ]
+        },
+        {
+          "published": true,
+          "writeMs": 102.6000000005588,
+          "totalMs": 323.6000000005588,
+          "requests": [
+            {
+              "route": "relay",
+              "method": "PUT",
+              "resource": "agents"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "agents"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "projects"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "skills"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "mcps"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "tasks"
+            }
+          ]
+        },
+        {
+          "published": true,
+          "writeMs": 135.19999999925494,
+          "totalMs": 379.09999999962747,
+          "requests": [
+            {
+              "route": "relay",
+              "method": "PUT",
+              "resource": "agents"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "tasks"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "agents"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "projects"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "skills"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "mcps"
+            }
+          ]
+        },
+        {
+          "published": true,
+          "writeMs": 294,
+          "totalMs": 647.8999999994412,
+          "requests": [
+            {
+              "route": "relay",
+              "method": "PUT",
+              "resource": "agents"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "agents"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "projects"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "tasks"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "mcps"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "skills"
+            }
+          ]
+        },
+        {
+          "published": true,
+          "writeMs": 68.5,
+          "totalMs": 314.30000000074506,
+          "requests": [
+            {
+              "route": "relay",
+              "method": "PUT",
+              "resource": "agents"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "mcps"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "projects"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "tasks"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "agents"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "skills"
+            }
+          ]
+        },
+        {
+          "published": true,
+          "writeMs": 88.30000000074506,
+          "totalMs": 248.30000000074506,
+          "requests": [
+            {
+              "route": "relay",
+              "method": "PUT",
+              "resource": "agents"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "agents"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "projects"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "mcps"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "skills"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "tasks"
+            }
+          ]
+        },
+        {
+          "published": true,
+          "writeMs": 104,
+          "totalMs": 385.1000000005588,
+          "requests": [
+            {
+              "route": "relay",
+              "method": "PUT",
+              "resource": "agents"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "agents"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "projects"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "tasks"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "mcps"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "skills"
+            }
+          ]
+        },
+        {
+          "published": true,
+          "writeMs": 112.79999999981374,
+          "totalMs": 412.59999999962747,
+          "requests": [
+            {
+              "route": "relay",
+              "method": "PUT",
+              "resource": "agents"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "mcps"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "agents"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "tasks"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "skills"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "projects"
+            }
+          ]
+        },
+        {
+          "published": true,
+          "writeMs": 71.5,
+          "totalMs": 265.29999999981374,
+          "requests": [
+            {
+              "route": "relay",
+              "method": "PUT",
+              "resource": "agents"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "agents"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "skills"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "tasks"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "projects"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "mcps"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "route": "relay",
+      "resource": "projects",
+      "strategy": "global",
+      "first": {
+        "published": true,
+        "writeMs": 144.90000000037253,
+        "totalMs": 357.59999999962747,
+        "requests": [
+          {
+            "route": "relay",
+            "method": "PUT",
+            "resource": "projects"
+          },
+          {
+            "route": "relay",
+            "method": "GET",
+            "resource": "projects"
+          },
+          {
+            "route": "relay",
+            "method": "GET",
+            "resource": "mcps"
+          },
+          {
+            "route": "relay",
+            "method": "GET",
+            "resource": "agents"
+          },
+          {
+            "route": "relay",
+            "method": "GET",
+            "resource": "tasks"
+          },
+          {
+            "route": "relay",
+            "method": "GET",
+            "resource": "skills"
+          }
+        ]
+      },
+      "warm": [
+        {
+          "published": true,
+          "writeMs": 84.80000000074506,
+          "totalMs": 325.40000000037253,
+          "requests": [
+            {
+              "route": "relay",
+              "method": "PUT",
+              "resource": "projects"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "projects"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "agents"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "skills"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "mcps"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "tasks"
+            }
+          ]
+        },
+        {
+          "published": true,
+          "writeMs": 185,
+          "totalMs": 493.70000000018626,
+          "requests": [
+            {
+              "route": "relay",
+              "method": "PUT",
+              "resource": "projects"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "projects"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "tasks"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "mcps"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "agents"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "skills"
+            }
+          ]
+        },
+        {
+          "published": true,
+          "writeMs": 112.70000000018626,
+          "totalMs": 331,
+          "requests": [
+            {
+              "route": "relay",
+              "method": "PUT",
+              "resource": "projects"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "projects"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "mcps"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "skills"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "tasks"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "agents"
+            }
+          ]
+        },
+        {
+          "published": true,
+          "writeMs": 96.09999999962747,
+          "totalMs": 303.29999999981374,
+          "requests": [
+            {
+              "route": "relay",
+              "method": "PUT",
+              "resource": "projects"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "tasks"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "agents"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "skills"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "mcps"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "projects"
+            }
+          ]
+        },
+        {
+          "published": true,
+          "writeMs": 98.40000000037253,
+          "totalMs": 286,
+          "requests": [
+            {
+              "route": "relay",
+              "method": "PUT",
+              "resource": "projects"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "tasks"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "projects"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "skills"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "mcps"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "agents"
+            }
+          ]
+        },
+        {
+          "published": true,
+          "writeMs": 194.79999999981374,
+          "totalMs": 516.3999999994412,
+          "requests": [
+            {
+              "route": "relay",
+              "method": "PUT",
+              "resource": "projects"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "agents"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "projects"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "tasks"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "mcps"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "skills"
+            }
+          ]
+        },
+        {
+          "published": true,
+          "writeMs": 79.29999999981374,
+          "totalMs": 222.40000000037253,
+          "requests": [
+            {
+              "route": "relay",
+              "method": "PUT",
+              "resource": "projects"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "agents"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "tasks"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "projects"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "mcps"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "skills"
+            }
+          ]
+        },
+        {
+          "published": true,
+          "writeMs": 151.70000000018626,
+          "totalMs": 434.1000000005588,
+          "requests": [
+            {
+              "route": "relay",
+              "method": "PUT",
+              "resource": "projects"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "projects"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "agents"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "tasks"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "skills"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "mcps"
+            }
+          ]
+        },
+        {
+          "published": true,
+          "writeMs": 110.70000000018626,
+          "totalMs": 328.59999999962747,
+          "requests": [
+            {
+              "route": "relay",
+              "method": "PUT",
+              "resource": "projects"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "agents"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "tasks"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "skills"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "mcps"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "projects"
+            }
+          ]
+        },
+        {
+          "published": true,
+          "writeMs": 61.90000000037253,
+          "totalMs": 183.29999999981374,
+          "requests": [
+            {
+              "route": "relay",
+              "method": "PUT",
+              "resource": "projects"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "skills"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "mcps"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "tasks"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "projects"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "agents"
+            }
+          ]
+        },
+        {
+          "published": true,
+          "writeMs": 129.3999999994412,
+          "totalMs": 268.59999999962747,
+          "requests": [
+            {
+              "route": "relay",
+              "method": "PUT",
+              "resource": "projects"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "projects"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "tasks"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "mcps"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "skills"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "agents"
+            }
+          ]
+        },
+        {
+          "published": true,
+          "writeMs": 95.59999999962747,
+          "totalMs": 257.40000000037253,
+          "requests": [
+            {
+              "route": "relay",
+              "method": "PUT",
+              "resource": "projects"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "projects"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "skills"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "mcps"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "agents"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "tasks"
+            }
+          ]
+        },
+        {
+          "published": true,
+          "writeMs": 59.5,
+          "totalMs": 189.3999999994412,
+          "requests": [
+            {
+              "route": "relay",
+              "method": "PUT",
+              "resource": "projects"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "agents"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "tasks"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "projects"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "mcps"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "skills"
+            }
+          ]
+        },
+        {
+          "published": true,
+          "writeMs": 59.90000000037253,
+          "totalMs": 267.20000000018626,
+          "requests": [
+            {
+              "route": "relay",
+              "method": "PUT",
+              "resource": "projects"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "tasks"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "projects"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "agents"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "mcps"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "skills"
+            }
+          ]
+        },
+        {
+          "published": true,
+          "writeMs": 103.29999999981374,
+          "totalMs": 289,
+          "requests": [
+            {
+              "route": "relay",
+              "method": "PUT",
+              "resource": "projects"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "agents"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "tasks"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "mcps"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "projects"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "skills"
+            }
+          ]
+        },
+        {
+          "published": true,
+          "writeMs": 71.79999999981374,
+          "totalMs": 348.6000000005588,
+          "requests": [
+            {
+              "route": "relay",
+              "method": "PUT",
+              "resource": "projects"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "mcps"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "agents"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "projects"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "tasks"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "skills"
+            }
+          ]
+        },
+        {
+          "published": true,
+          "writeMs": 151.70000000018626,
+          "totalMs": 307.70000000018626,
+          "requests": [
+            {
+              "route": "relay",
+              "method": "PUT",
+              "resource": "projects"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "projects"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "mcps"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "tasks"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "agents"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "skills"
+            }
+          ]
+        },
+        {
+          "published": true,
+          "writeMs": 161.5,
+          "totalMs": 476.6000000005588,
+          "requests": [
+            {
+              "route": "relay",
+              "method": "PUT",
+              "resource": "projects"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "agents"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "skills"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "mcps"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "projects"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "tasks"
+            }
+          ]
+        },
+        {
+          "published": true,
+          "writeMs": 84.30000000074506,
+          "totalMs": 356.80000000074506,
+          "requests": [
+            {
+              "route": "relay",
+              "method": "PUT",
+              "resource": "projects"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "agents"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "mcps"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "projects"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "skills"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "tasks"
+            }
+          ]
+        },
+        {
+          "published": true,
+          "writeMs": 60.69999999925494,
+          "totalMs": 220,
+          "requests": [
+            {
+              "route": "relay",
+              "method": "PUT",
+              "resource": "projects"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "agents"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "tasks"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "projects"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "mcps"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "skills"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "route": "relay",
+      "resource": "tasks",
+      "strategy": "global",
+      "first": {
+        "published": true,
+        "writeMs": 451.6000000005588,
+        "totalMs": 712.6000000005588,
+        "requests": [
+          {
+            "route": "relay",
+            "method": "PUT",
+            "resource": "tasks"
+          },
+          {
+            "route": "relay",
+            "method": "GET",
+            "resource": "agents"
+          },
+          {
+            "route": "relay",
+            "method": "GET",
+            "resource": "projects"
+          },
+          {
+            "route": "relay",
+            "method": "GET",
+            "resource": "tasks"
+          },
+          {
+            "route": "relay",
+            "method": "GET",
+            "resource": "mcps"
+          },
+          {
+            "route": "relay",
+            "method": "GET",
+            "resource": "skills"
+          }
+        ]
+      },
+      "warm": [
+        {
+          "published": true,
+          "writeMs": 125.5,
+          "totalMs": 313.20000000018626,
+          "requests": [
+            {
+              "route": "relay",
+              "method": "PUT",
+              "resource": "tasks"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "projects"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "tasks"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "agents"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "skills"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "mcps"
+            }
+          ]
+        },
+        {
+          "published": true,
+          "writeMs": 83.70000000018626,
+          "totalMs": 229,
+          "requests": [
+            {
+              "route": "relay",
+              "method": "PUT",
+              "resource": "tasks"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "tasks"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "agents"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "projects"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "mcps"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "skills"
+            }
+          ]
+        },
+        {
+          "published": true,
+          "writeMs": 373.20000000018626,
+          "totalMs": 564.5,
+          "requests": [
+            {
+              "route": "relay",
+              "method": "PUT",
+              "resource": "tasks"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "agents"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "projects"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "mcps"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "tasks"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "skills"
+            }
+          ]
+        },
+        {
+          "published": true,
+          "writeMs": 148.79999999981374,
+          "totalMs": 312.09999999962747,
+          "requests": [
+            {
+              "route": "relay",
+              "method": "PUT",
+              "resource": "tasks"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "agents"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "projects"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "mcps"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "tasks"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "skills"
+            }
+          ]
+        },
+        {
+          "published": true,
+          "writeMs": 285.20000000018626,
+          "totalMs": 485.1000000005588,
+          "requests": [
+            {
+              "route": "relay",
+              "method": "PUT",
+              "resource": "tasks"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "projects"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "tasks"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "agents"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "skills"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "mcps"
+            }
+          ]
+        },
+        {
+          "published": true,
+          "writeMs": 209.20000000018626,
+          "totalMs": 354.59999999962747,
+          "requests": [
+            {
+              "route": "relay",
+              "method": "PUT",
+              "resource": "tasks"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "projects"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "tasks"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "mcps"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "agents"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "skills"
+            }
+          ]
+        },
+        {
+          "published": true,
+          "writeMs": 117,
+          "totalMs": 436.90000000037253,
+          "requests": [
+            {
+              "route": "relay",
+              "method": "PUT",
+              "resource": "tasks"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "agents"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "tasks"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "mcps"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "projects"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "skills"
+            }
+          ]
+        },
+        {
+          "published": true,
+          "writeMs": 344.29999999981374,
+          "totalMs": 599.5999999996275,
+          "requests": [
+            {
+              "route": "relay",
+              "method": "PUT",
+              "resource": "tasks"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "tasks"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "projects"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "agents"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "mcps"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "skills"
+            }
+          ]
+        },
+        {
+          "published": true,
+          "writeMs": 355.29999999981374,
+          "totalMs": 654.2999999998137,
+          "requests": [
+            {
+              "route": "relay",
+              "method": "PUT",
+              "resource": "tasks"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "tasks"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "projects"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "agents"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "skills"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "mcps"
+            }
+          ]
+        },
+        {
+          "published": true,
+          "writeMs": 385.6000000005588,
+          "totalMs": 684.1000000005588,
+          "requests": [
+            {
+              "route": "relay",
+              "method": "PUT",
+              "resource": "tasks"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "projects"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "tasks"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "agents"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "mcps"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "skills"
+            }
+          ]
+        },
+        {
+          "published": true,
+          "writeMs": 274.20000000018626,
+          "totalMs": 469.80000000074506,
+          "requests": [
+            {
+              "route": "relay",
+              "method": "PUT",
+              "resource": "tasks"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "projects"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "mcps"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "agents"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "skills"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "tasks"
+            }
+          ]
+        },
+        {
+          "published": true,
+          "writeMs": 635.5,
+          "totalMs": 998.2000000001863,
+          "requests": [
+            {
+              "route": "relay",
+              "method": "PUT",
+              "resource": "tasks"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "agents"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "tasks"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "mcps"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "skills"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "projects"
+            }
+          ]
+        },
+        {
+          "published": true,
+          "writeMs": 330.79999999981374,
+          "totalMs": 685.5999999996275,
+          "requests": [
+            {
+              "route": "relay",
+              "method": "PUT",
+              "resource": "tasks"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "agents"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "tasks"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "projects"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "mcps"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "skills"
+            }
+          ]
+        },
+        {
+          "published": true,
+          "writeMs": 734.7999999998137,
+          "totalMs": 1039.199999999255,
+          "requests": [
+            {
+              "route": "relay",
+              "method": "PUT",
+              "resource": "tasks"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "agents"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "tasks"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "projects"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "skills"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "mcps"
+            }
+          ]
+        },
+        {
+          "published": true,
+          "writeMs": 372.79999999981374,
+          "totalMs": 607.2999999998137,
+          "requests": [
+            {
+              "route": "relay",
+              "method": "PUT",
+              "resource": "tasks"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "agents"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "projects"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "mcps"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "skills"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "tasks"
+            }
+          ]
+        },
+        {
+          "published": true,
+          "writeMs": 509.5,
+          "totalMs": 642.7000000001863,
+          "requests": [
+            {
+              "route": "relay",
+              "method": "PUT",
+              "resource": "tasks"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "projects"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "agents"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "skills"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "mcps"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "tasks"
+            }
+          ]
+        },
+        {
+          "published": true,
+          "writeMs": 603.6999999992549,
+          "totalMs": 976.5999999996275,
+          "requests": [
+            {
+              "route": "relay",
+              "method": "PUT",
+              "resource": "tasks"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "tasks"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "agents"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "projects"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "mcps"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "skills"
+            }
+          ]
+        },
+        {
+          "published": true,
+          "writeMs": 148.59999999962747,
+          "totalMs": 338.59999999962747,
+          "requests": [
+            {
+              "route": "relay",
+              "method": "PUT",
+              "resource": "tasks"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "projects"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "tasks"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "agents"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "mcps"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "skills"
+            }
+          ]
+        },
+        {
+          "published": true,
+          "writeMs": 108.90000000037253,
+          "totalMs": 272,
+          "requests": [
+            {
+              "route": "relay",
+              "method": "PUT",
+              "resource": "tasks"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "mcps"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "skills"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "projects"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "tasks"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "agents"
+            }
+          ]
+        },
+        {
+          "published": true,
+          "writeMs": 580.8999999994412,
+          "totalMs": 825.3999999994412,
+          "requests": [
+            {
+              "route": "relay",
+              "method": "PUT",
+              "resource": "tasks"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "projects"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "tasks"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "agents"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "skills"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "mcps"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "route": "relay",
+      "resource": "tasks",
+      "strategy": "task-only-prototype",
+      "first": {
+        "published": true,
+        "writeMs": 118.19999999925494,
+        "totalMs": 167.59999999962747,
+        "requests": [
+          {
+            "route": "relay",
+            "method": "PUT",
+            "resource": "tasks"
+          },
+          {
+            "route": "relay",
+            "method": "GET",
+            "resource": "tasks"
+          }
+        ]
+      },
+      "warm": [
+        {
+          "published": true,
+          "writeMs": 245.5,
+          "totalMs": 429.90000000037253,
+          "requests": [
+            {
+              "route": "relay",
+              "method": "PUT",
+              "resource": "tasks"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "tasks"
+            }
+          ]
+        },
+        {
+          "published": true,
+          "writeMs": 289.5,
+          "totalMs": 363.20000000018626,
+          "requests": [
+            {
+              "route": "relay",
+              "method": "PUT",
+              "resource": "tasks"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "tasks"
+            }
+          ]
+        },
+        {
+          "published": true,
+          "writeMs": 93.40000000037253,
+          "totalMs": 131.90000000037253,
+          "requests": [
+            {
+              "route": "relay",
+              "method": "PUT",
+              "resource": "tasks"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "tasks"
+            }
+          ]
+        },
+        {
+          "published": true,
+          "writeMs": 88.20000000018626,
+          "totalMs": 141.40000000037253,
+          "requests": [
+            {
+              "route": "relay",
+              "method": "PUT",
+              "resource": "tasks"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "tasks"
+            }
+          ]
+        },
+        {
+          "published": true,
+          "writeMs": 328.40000000037253,
+          "totalMs": 392.70000000018626,
+          "requests": [
+            {
+              "route": "relay",
+              "method": "PUT",
+              "resource": "tasks"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "tasks"
+            }
+          ]
+        },
+        {
+          "published": true,
+          "writeMs": 96.90000000037253,
+          "totalMs": 164.90000000037253,
+          "requests": [
+            {
+              "route": "relay",
+              "method": "PUT",
+              "resource": "tasks"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "tasks"
+            }
+          ]
+        },
+        {
+          "published": true,
+          "writeMs": 62.60000000055879,
+          "totalMs": 111.30000000074506,
+          "requests": [
+            {
+              "route": "relay",
+              "method": "PUT",
+              "resource": "tasks"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "tasks"
+            }
+          ]
+        },
+        {
+          "published": true,
+          "writeMs": 77.6000000005588,
+          "totalMs": 120.90000000037253,
+          "requests": [
+            {
+              "route": "relay",
+              "method": "PUT",
+              "resource": "tasks"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "tasks"
+            }
+          ]
+        },
+        {
+          "published": true,
+          "writeMs": 88.09999999962747,
+          "totalMs": 136.20000000018626,
+          "requests": [
+            {
+              "route": "relay",
+              "method": "PUT",
+              "resource": "tasks"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "tasks"
+            }
+          ]
+        },
+        {
+          "published": true,
+          "writeMs": 296.30000000074506,
+          "totalMs": 348.70000000018626,
+          "requests": [
+            {
+              "route": "relay",
+              "method": "PUT",
+              "resource": "tasks"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "tasks"
+            }
+          ]
+        },
+        {
+          "published": true,
+          "writeMs": 150.69999999925494,
+          "totalMs": 295.29999999981374,
+          "requests": [
+            {
+              "route": "relay",
+              "method": "PUT",
+              "resource": "tasks"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "tasks"
+            }
+          ]
+        },
+        {
+          "published": true,
+          "writeMs": 608.0999999996275,
+          "totalMs": 704.7999999998137,
+          "requests": [
+            {
+              "route": "relay",
+              "method": "PUT",
+              "resource": "tasks"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "tasks"
+            }
+          ]
+        },
+        {
+          "published": true,
+          "writeMs": 227.29999999981374,
+          "totalMs": 385.09999999962747,
+          "requests": [
+            {
+              "route": "relay",
+              "method": "PUT",
+              "resource": "tasks"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "tasks"
+            }
+          ]
+        },
+        {
+          "published": true,
+          "writeMs": 604.6999999992549,
+          "totalMs": 674.2999999998137,
+          "requests": [
+            {
+              "route": "relay",
+              "method": "PUT",
+              "resource": "tasks"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "tasks"
+            }
+          ]
+        },
+        {
+          "published": true,
+          "writeMs": 251.40000000037253,
+          "totalMs": 326.40000000037253,
+          "requests": [
+            {
+              "route": "relay",
+              "method": "PUT",
+              "resource": "tasks"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "tasks"
+            }
+          ]
+        },
+        {
+          "published": true,
+          "writeMs": 238.29999999981374,
+          "totalMs": 335.29999999981374,
+          "requests": [
+            {
+              "route": "relay",
+              "method": "PUT",
+              "resource": "tasks"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "tasks"
+            }
+          ]
+        },
+        {
+          "published": true,
+          "writeMs": 495.29999999981374,
+          "totalMs": 612.4000000003725,
+          "requests": [
+            {
+              "route": "relay",
+              "method": "PUT",
+              "resource": "tasks"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "tasks"
+            }
+          ]
+        },
+        {
+          "published": true,
+          "writeMs": 103.90000000037253,
+          "totalMs": 165.29999999981374,
+          "requests": [
+            {
+              "route": "relay",
+              "method": "PUT",
+              "resource": "tasks"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "tasks"
+            }
+          ]
+        },
+        {
+          "published": true,
+          "writeMs": 134.09999999962747,
+          "totalMs": 220.09999999962747,
+          "requests": [
+            {
+              "route": "relay",
+              "method": "PUT",
+              "resource": "tasks"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "tasks"
+            }
+          ]
+        },
+        {
+          "published": true,
+          "writeMs": 84.20000000018626,
+          "totalMs": 141.30000000074506,
+          "requests": [
+            {
+              "route": "relay",
+              "method": "PUT",
+              "resource": "tasks"
+            },
+            {
+              "route": "relay",
+              "method": "GET",
+              "resource": "tasks"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "route": "direct",
+      "resource": "agents",
+      "strategy": "global",
+      "first": {
+        "published": true,
+        "writeMs": 99.09999999962747,
+        "totalMs": 195.3999999994412,
+        "requests": [
+          {
+            "route": "direct",
+            "method": "PUT",
+            "resource": "agents"
+          },
+          {
+            "route": "direct",
+            "method": "GET",
+            "resource": "mcps"
+          },
+          {
+            "route": "direct",
+            "method": "GET",
+            "resource": "projects"
+          },
+          {
+            "route": "direct",
+            "method": "GET",
+            "resource": "tasks"
+          },
+          {
+            "route": "direct",
+            "method": "GET",
+            "resource": "agents"
+          },
+          {
+            "route": "direct",
+            "method": "GET",
+            "resource": "skills"
+          }
+        ]
+      },
+      "warm": [
+        {
+          "published": true,
+          "writeMs": 50.799999999813735,
+          "totalMs": 145.79999999981374,
+          "requests": [
+            {
+              "route": "direct",
+              "method": "PUT",
+              "resource": "agents"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "mcps"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "agents"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "tasks"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "projects"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "skills"
+            }
+          ]
+        },
+        {
+          "published": true,
+          "writeMs": 23,
+          "totalMs": 83.19999999925494,
+          "requests": [
+            {
+              "route": "direct",
+              "method": "PUT",
+              "resource": "agents"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "projects"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "mcps"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "tasks"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "agents"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "skills"
+            }
+          ]
+        },
+        {
+          "published": true,
+          "writeMs": 28.299999999813735,
+          "totalMs": 61.69999999925494,
+          "requests": [
+            {
+              "route": "direct",
+              "method": "PUT",
+              "resource": "agents"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "projects"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "mcps"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "tasks"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "agents"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "skills"
+            }
+          ]
+        },
+        {
+          "published": true,
+          "writeMs": 12.200000000186265,
+          "totalMs": 68.90000000037253,
+          "requests": [
+            {
+              "route": "direct",
+              "method": "PUT",
+              "resource": "agents"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "agents"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "tasks"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "projects"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "mcps"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "skills"
+            }
+          ]
+        },
+        {
+          "published": true,
+          "writeMs": 21.100000000558794,
+          "totalMs": 105.1000000005588,
+          "requests": [
+            {
+              "route": "direct",
+              "method": "PUT",
+              "resource": "agents"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "agents"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "mcps"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "projects"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "tasks"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "skills"
+            }
+          ]
+        },
+        {
+          "published": true,
+          "writeMs": 57.60000000055879,
+          "totalMs": 209.6000000005588,
+          "requests": [
+            {
+              "route": "direct",
+              "method": "PUT",
+              "resource": "agents"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "mcps"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "agents"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "tasks"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "projects"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "skills"
+            }
+          ]
+        },
+        {
+          "published": true,
+          "writeMs": 8.400000000372529,
+          "totalMs": 56.299999999813735,
+          "requests": [
+            {
+              "route": "direct",
+              "method": "PUT",
+              "resource": "agents"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "mcps"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "agents"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "projects"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "tasks"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "skills"
+            }
+          ]
+        },
+        {
+          "published": true,
+          "writeMs": 40.40000000037253,
+          "totalMs": 132.40000000037253,
+          "requests": [
+            {
+              "route": "direct",
+              "method": "PUT",
+              "resource": "agents"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "projects"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "mcps"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "tasks"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "agents"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "skills"
+            }
+          ]
+        },
+        {
+          "published": true,
+          "writeMs": 22.600000000558794,
+          "totalMs": 149.6000000005588,
+          "requests": [
+            {
+              "route": "direct",
+              "method": "PUT",
+              "resource": "agents"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "agents"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "projects"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "tasks"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "mcps"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "skills"
+            }
+          ]
+        },
+        {
+          "published": true,
+          "writeMs": 21.40000000037253,
+          "totalMs": 56.90000000037253,
+          "requests": [
+            {
+              "route": "direct",
+              "method": "PUT",
+              "resource": "agents"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "projects"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "agents"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "mcps"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "tasks"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "skills"
+            }
+          ]
+        },
+        {
+          "published": true,
+          "writeMs": 14.799999999813735,
+          "totalMs": 50.90000000037253,
+          "requests": [
+            {
+              "route": "direct",
+              "method": "PUT",
+              "resource": "agents"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "agents"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "projects"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "mcps"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "tasks"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "skills"
+            }
+          ]
+        },
+        {
+          "published": true,
+          "writeMs": 11.300000000745058,
+          "totalMs": 32.700000000186265,
+          "requests": [
+            {
+              "route": "direct",
+              "method": "PUT",
+              "resource": "agents"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "tasks"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "agents"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "projects"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "mcps"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "skills"
+            }
+          ]
+        },
+        {
+          "published": true,
+          "writeMs": 15.399999999441206,
+          "totalMs": 65.29999999981374,
+          "requests": [
+            {
+              "route": "direct",
+              "method": "PUT",
+              "resource": "agents"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "agents"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "mcps"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "tasks"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "projects"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "skills"
+            }
+          ]
+        },
+        {
+          "published": true,
+          "writeMs": 18.5,
+          "totalMs": 59.09999999962747,
+          "requests": [
+            {
+              "route": "direct",
+              "method": "PUT",
+              "resource": "agents"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "mcps"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "agents"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "projects"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "tasks"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "skills"
+            }
+          ]
+        },
+        {
+          "published": true,
+          "writeMs": 23,
+          "totalMs": 67.29999999981374,
+          "requests": [
+            {
+              "route": "direct",
+              "method": "PUT",
+              "resource": "agents"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "projects"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "mcps"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "tasks"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "agents"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "skills"
+            }
+          ]
+        },
+        {
+          "published": true,
+          "writeMs": 14.899999999441206,
+          "totalMs": 111.20000000018626,
+          "requests": [
+            {
+              "route": "direct",
+              "method": "PUT",
+              "resource": "agents"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "agents"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "tasks"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "projects"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "mcps"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "skills"
+            }
+          ]
+        },
+        {
+          "published": true,
+          "writeMs": 30.5,
+          "totalMs": 76.3999999994412,
+          "requests": [
+            {
+              "route": "direct",
+              "method": "PUT",
+              "resource": "agents"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "agents"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "projects"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "tasks"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "mcps"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "skills"
+            }
+          ]
+        },
+        {
+          "published": true,
+          "writeMs": 25.5,
+          "totalMs": 134.5,
+          "requests": [
+            {
+              "route": "direct",
+              "method": "PUT",
+              "resource": "agents"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "projects"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "mcps"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "agents"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "tasks"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "skills"
+            }
+          ]
+        },
+        {
+          "published": true,
+          "writeMs": 28.299999999813735,
+          "totalMs": 82.5,
+          "requests": [
+            {
+              "route": "direct",
+              "method": "PUT",
+              "resource": "agents"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "mcps"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "projects"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "agents"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "tasks"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "skills"
+            }
+          ]
+        },
+        {
+          "published": true,
+          "writeMs": 14.799999999813735,
+          "totalMs": 80.5,
+          "requests": [
+            {
+              "route": "direct",
+              "method": "PUT",
+              "resource": "agents"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "projects"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "mcps"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "tasks"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "agents"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "skills"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "route": "direct",
+      "resource": "projects",
+      "strategy": "global",
+      "first": {
+        "published": true,
+        "writeMs": 38.10000000055879,
+        "totalMs": 72.5,
+        "requests": [
+          {
+            "route": "direct",
+            "method": "PUT",
+            "resource": "projects"
+          },
+          {
+            "route": "direct",
+            "method": "GET",
+            "resource": "agents"
+          },
+          {
+            "route": "direct",
+            "method": "GET",
+            "resource": "projects"
+          },
+          {
+            "route": "direct",
+            "method": "GET",
+            "resource": "tasks"
+          },
+          {
+            "route": "direct",
+            "method": "GET",
+            "resource": "mcps"
+          },
+          {
+            "route": "direct",
+            "method": "GET",
+            "resource": "skills"
+          }
+        ]
+      },
+      "warm": [
+        {
+          "published": true,
+          "writeMs": 26.299999999813735,
+          "totalMs": 102.90000000037253,
+          "requests": [
+            {
+              "route": "direct",
+              "method": "PUT",
+              "resource": "projects"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "agents"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "tasks"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "mcps"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "projects"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "skills"
+            }
+          ]
+        },
+        {
+          "published": true,
+          "writeMs": 59.5,
+          "totalMs": 168.1000000005588,
+          "requests": [
+            {
+              "route": "direct",
+              "method": "PUT",
+              "resource": "projects"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "projects"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "agents"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "tasks"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "mcps"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "skills"
+            }
+          ]
+        },
+        {
+          "published": true,
+          "writeMs": 51.60000000055879,
+          "totalMs": 176.6000000005588,
+          "requests": [
+            {
+              "route": "direct",
+              "method": "PUT",
+              "resource": "projects"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "mcps"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "tasks"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "projects"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "agents"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "skills"
+            }
+          ]
+        },
+        {
+          "published": true,
+          "writeMs": 35.09999999962747,
+          "totalMs": 88.59999999962747,
+          "requests": [
+            {
+              "route": "direct",
+              "method": "PUT",
+              "resource": "projects"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "tasks"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "mcps"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "agents"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "projects"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "skills"
+            }
+          ]
+        },
+        {
+          "published": true,
+          "writeMs": 88.59999999962747,
+          "totalMs": 171.70000000018626,
+          "requests": [
+            {
+              "route": "direct",
+              "method": "PUT",
+              "resource": "projects"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "agents"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "mcps"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "projects"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "tasks"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "skills"
+            }
+          ]
+        },
+        {
+          "published": true,
+          "writeMs": 79.5,
+          "totalMs": 190.5,
+          "requests": [
+            {
+              "route": "direct",
+              "method": "PUT",
+              "resource": "projects"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "mcps"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "agents"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "tasks"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "projects"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "skills"
+            }
+          ]
+        },
+        {
+          "published": true,
+          "writeMs": 59.799999999813735,
+          "totalMs": 148.59999999962747,
+          "requests": [
+            {
+              "route": "direct",
+              "method": "PUT",
+              "resource": "projects"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "mcps"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "projects"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "tasks"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "agents"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "skills"
+            }
+          ]
+        },
+        {
+          "published": true,
+          "writeMs": 26.600000000558794,
+          "totalMs": 155,
+          "requests": [
+            {
+              "route": "direct",
+              "method": "PUT",
+              "resource": "projects"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "mcps"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "projects"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "tasks"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "agents"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "skills"
+            }
+          ]
+        },
+        {
+          "published": true,
+          "writeMs": 34.299999999813735,
+          "totalMs": 65.79999999981374,
+          "requests": [
+            {
+              "route": "direct",
+              "method": "PUT",
+              "resource": "projects"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "projects"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "mcps"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "tasks"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "agents"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "skills"
+            }
+          ]
+        },
+        {
+          "published": true,
+          "writeMs": 27.100000000558794,
+          "totalMs": 76.70000000018626,
+          "requests": [
+            {
+              "route": "direct",
+              "method": "PUT",
+              "resource": "projects"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "mcps"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "agents"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "projects"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "tasks"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "skills"
+            }
+          ]
+        },
+        {
+          "published": true,
+          "writeMs": 23.299999999813735,
+          "totalMs": 62.19999999925494,
+          "requests": [
+            {
+              "route": "direct",
+              "method": "PUT",
+              "resource": "projects"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "agents"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "mcps"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "projects"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "tasks"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "skills"
+            }
+          ]
+        },
+        {
+          "published": true,
+          "writeMs": 49.59999999962747,
+          "totalMs": 133.59999999962747,
+          "requests": [
+            {
+              "route": "direct",
+              "method": "PUT",
+              "resource": "projects"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "projects"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "tasks"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "mcps"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "skills"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "agents"
+            }
+          ]
+        },
+        {
+          "published": true,
+          "writeMs": 65.09999999962747,
+          "totalMs": 188.29999999981374,
+          "requests": [
+            {
+              "route": "direct",
+              "method": "PUT",
+              "resource": "projects"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "agents"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "projects"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "tasks"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "mcps"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "skills"
+            }
+          ]
+        },
+        {
+          "published": true,
+          "writeMs": 33,
+          "totalMs": 100.09999999962747,
+          "requests": [
+            {
+              "route": "direct",
+              "method": "PUT",
+              "resource": "projects"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "projects"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "mcps"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "agents"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "tasks"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "skills"
+            }
+          ]
+        },
+        {
+          "published": true,
+          "writeMs": 72.40000000037253,
+          "totalMs": 141.20000000018626,
+          "requests": [
+            {
+              "route": "direct",
+              "method": "PUT",
+              "resource": "projects"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "mcps"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "tasks"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "agents"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "skills"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "projects"
+            }
+          ]
+        },
+        {
+          "published": true,
+          "writeMs": 67,
+          "totalMs": 195.6000000005588,
+          "requests": [
+            {
+              "route": "direct",
+              "method": "PUT",
+              "resource": "projects"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "agents"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "projects"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "mcps"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "tasks"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "skills"
+            }
+          ]
+        },
+        {
+          "published": true,
+          "writeMs": 42.799999999813735,
+          "totalMs": 107.29999999981374,
+          "requests": [
+            {
+              "route": "direct",
+              "method": "PUT",
+              "resource": "projects"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "mcps"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "projects"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "agents"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "tasks"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "skills"
+            }
+          ]
+        },
+        {
+          "published": true,
+          "writeMs": 36.700000000186265,
+          "totalMs": 97.5,
+          "requests": [
+            {
+              "route": "direct",
+              "method": "PUT",
+              "resource": "projects"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "mcps"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "tasks"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "agents"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "projects"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "skills"
+            }
+          ]
+        },
+        {
+          "published": true,
+          "writeMs": 54.89999999944121,
+          "totalMs": 100.8999999994412,
+          "requests": [
+            {
+              "route": "direct",
+              "method": "PUT",
+              "resource": "projects"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "mcps"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "tasks"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "agents"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "projects"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "skills"
+            }
+          ]
+        },
+        {
+          "published": true,
+          "writeMs": 46.90000000037253,
+          "totalMs": 91.79999999981374,
+          "requests": [
+            {
+              "route": "direct",
+              "method": "PUT",
+              "resource": "projects"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "mcps"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "tasks"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "agents"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "projects"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "skills"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "route": "direct",
+      "resource": "tasks",
+      "strategy": "global",
+      "first": {
+        "published": true,
+        "writeMs": 339.20000000018626,
+        "totalMs": 419.40000000037253,
+        "requests": [
+          {
+            "route": "direct",
+            "method": "PUT",
+            "resource": "tasks"
+          },
+          {
+            "route": "direct",
+            "method": "GET",
+            "resource": "agents"
+          },
+          {
+            "route": "direct",
+            "method": "GET",
+            "resource": "tasks"
+          },
+          {
+            "route": "direct",
+            "method": "GET",
+            "resource": "projects"
+          },
+          {
+            "route": "direct",
+            "method": "GET",
+            "resource": "mcps"
+          },
+          {
+            "route": "direct",
+            "method": "GET",
+            "resource": "skills"
+          }
+        ]
+      },
+      "warm": [
+        {
+          "published": true,
+          "writeMs": 104.70000000018626,
+          "totalMs": 181.90000000037253,
+          "requests": [
+            {
+              "route": "direct",
+              "method": "PUT",
+              "resource": "tasks"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "mcps"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "projects"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "agents"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "tasks"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "skills"
+            }
+          ]
+        },
+        {
+          "published": true,
+          "writeMs": 224.79999999981374,
+          "totalMs": 318,
+          "requests": [
+            {
+              "route": "direct",
+              "method": "PUT",
+              "resource": "tasks"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "agents"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "mcps"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "projects"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "tasks"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "skills"
+            }
+          ]
+        },
+        {
+          "published": true,
+          "writeMs": 151.79999999981374,
+          "totalMs": 269.09999999962747,
+          "requests": [
+            {
+              "route": "direct",
+              "method": "PUT",
+              "resource": "tasks"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "mcps"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "tasks"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "agents"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "projects"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "skills"
+            }
+          ]
+        },
+        {
+          "published": true,
+          "writeMs": 394.70000000018626,
+          "totalMs": 464.40000000037253,
+          "requests": [
+            {
+              "route": "direct",
+              "method": "PUT",
+              "resource": "tasks"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "mcps"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "agents"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "projects"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "tasks"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "skills"
+            }
+          ]
+        },
+        {
+          "published": true,
+          "writeMs": 109.29999999981374,
+          "totalMs": 161,
+          "requests": [
+            {
+              "route": "direct",
+              "method": "PUT",
+              "resource": "tasks"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "mcps"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "agents"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "projects"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "tasks"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "skills"
+            }
+          ]
+        },
+        {
+          "published": true,
+          "writeMs": 68.6000000005588,
+          "totalMs": 117.80000000074506,
+          "requests": [
+            {
+              "route": "direct",
+              "method": "PUT",
+              "resource": "tasks"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "mcps"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "projects"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "agents"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "tasks"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "skills"
+            }
+          ]
+        },
+        {
+          "published": true,
+          "writeMs": 182.1000000005588,
+          "totalMs": 212.70000000018626,
+          "requests": [
+            {
+              "route": "direct",
+              "method": "PUT",
+              "resource": "tasks"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "agents"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "tasks"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "mcps"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "projects"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "skills"
+            }
+          ]
+        },
+        {
+          "published": true,
+          "writeMs": 105.30000000074506,
+          "totalMs": 164.40000000037253,
+          "requests": [
+            {
+              "route": "direct",
+              "method": "PUT",
+              "resource": "tasks"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "agents"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "projects"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "mcps"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "tasks"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "skills"
+            }
+          ]
+        },
+        {
+          "published": true,
+          "writeMs": 125.29999999981374,
+          "totalMs": 204.5,
+          "requests": [
+            {
+              "route": "direct",
+              "method": "PUT",
+              "resource": "tasks"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "mcps"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "projects"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "agents"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "tasks"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "skills"
+            }
+          ]
+        },
+        {
+          "published": true,
+          "writeMs": 280.40000000037253,
+          "totalMs": 342.90000000037253,
+          "requests": [
+            {
+              "route": "direct",
+              "method": "PUT",
+              "resource": "tasks"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "agents"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "tasks"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "mcps"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "projects"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "skills"
+            }
+          ]
+        },
+        {
+          "published": true,
+          "writeMs": 44.700000000186265,
+          "totalMs": 75.40000000037253,
+          "requests": [
+            {
+              "route": "direct",
+              "method": "PUT",
+              "resource": "tasks"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "projects"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "mcps"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "agents"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "tasks"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "skills"
+            }
+          ]
+        },
+        {
+          "published": true,
+          "writeMs": 66,
+          "totalMs": 118.8999999994412,
+          "requests": [
+            {
+              "route": "direct",
+              "method": "PUT",
+              "resource": "tasks"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "mcps"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "agents"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "tasks"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "projects"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "skills"
+            }
+          ]
+        },
+        {
+          "published": true,
+          "writeMs": 47,
+          "totalMs": 92.40000000037253,
+          "requests": [
+            {
+              "route": "direct",
+              "method": "PUT",
+              "resource": "tasks"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "agents"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "mcps"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "tasks"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "projects"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "skills"
+            }
+          ]
+        },
+        {
+          "published": true,
+          "writeMs": 188.29999999981374,
+          "totalMs": 232.79999999981374,
+          "requests": [
+            {
+              "route": "direct",
+              "method": "PUT",
+              "resource": "tasks"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "mcps"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "projects"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "tasks"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "agents"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "skills"
+            }
+          ]
+        },
+        {
+          "published": true,
+          "writeMs": 62.700000000186265,
+          "totalMs": 111.6000000005588,
+          "requests": [
+            {
+              "route": "direct",
+              "method": "PUT",
+              "resource": "tasks"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "agents"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "mcps"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "tasks"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "projects"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "skills"
+            }
+          ]
+        },
+        {
+          "published": true,
+          "writeMs": 53.700000000186265,
+          "totalMs": 111.59999999962747,
+          "requests": [
+            {
+              "route": "direct",
+              "method": "PUT",
+              "resource": "tasks"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "tasks"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "agents"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "mcps"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "projects"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "skills"
+            }
+          ]
+        },
+        {
+          "published": true,
+          "writeMs": 63.299999999813735,
+          "totalMs": 123.19999999925494,
+          "requests": [
+            {
+              "route": "direct",
+              "method": "PUT",
+              "resource": "tasks"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "mcps"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "projects"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "tasks"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "agents"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "skills"
+            }
+          ]
+        },
+        {
+          "published": true,
+          "writeMs": 320.30000000074506,
+          "totalMs": 383.5,
+          "requests": [
+            {
+              "route": "direct",
+              "method": "PUT",
+              "resource": "tasks"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "mcps"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "projects"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "agents"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "tasks"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "skills"
+            }
+          ]
+        },
+        {
+          "published": true,
+          "writeMs": 203.09999999962747,
+          "totalMs": 268.8999999994412,
+          "requests": [
+            {
+              "route": "direct",
+              "method": "PUT",
+              "resource": "tasks"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "mcps"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "projects"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "agents"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "tasks"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "skills"
+            }
+          ]
+        },
+        {
+          "published": true,
+          "writeMs": 82.20000000018626,
+          "totalMs": 167.40000000037253,
+          "requests": [
+            {
+              "route": "direct",
+              "method": "PUT",
+              "resource": "tasks"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "tasks"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "mcps"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "agents"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "projects"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "skills"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "route": "direct",
+      "resource": "tasks",
+      "strategy": "task-only-prototype",
+      "first": {
+        "published": true,
+        "writeMs": 348.80000000074506,
+        "totalMs": 363.80000000074506,
+        "requests": [
+          {
+            "route": "direct",
+            "method": "PUT",
+            "resource": "tasks"
+          },
+          {
+            "route": "direct",
+            "method": "GET",
+            "resource": "tasks"
+          }
+        ]
+      },
+      "warm": [
+        {
+          "published": true,
+          "writeMs": 73.20000000018626,
+          "totalMs": 87.09999999962747,
+          "requests": [
+            {
+              "route": "direct",
+              "method": "PUT",
+              "resource": "tasks"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "tasks"
+            }
+          ]
+        },
+        {
+          "published": true,
+          "writeMs": 82.09999999962747,
+          "totalMs": 113.29999999981374,
+          "requests": [
+            {
+              "route": "direct",
+              "method": "PUT",
+              "resource": "tasks"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "tasks"
+            }
+          ]
+        },
+        {
+          "published": true,
+          "writeMs": 75,
+          "totalMs": 84.1000000005588,
+          "requests": [
+            {
+              "route": "direct",
+              "method": "PUT",
+              "resource": "tasks"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "tasks"
+            }
+          ]
+        },
+        {
+          "published": true,
+          "writeMs": 80.29999999981374,
+          "totalMs": 93.40000000037253,
+          "requests": [
+            {
+              "route": "direct",
+              "method": "PUT",
+              "resource": "tasks"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "tasks"
+            }
+          ]
+        },
+        {
+          "published": true,
+          "writeMs": 352.29999999981374,
+          "totalMs": 364.59999999962747,
+          "requests": [
+            {
+              "route": "direct",
+              "method": "PUT",
+              "resource": "tasks"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "tasks"
+            }
+          ]
+        },
+        {
+          "published": true,
+          "writeMs": 67.09999999962747,
+          "totalMs": 75.40000000037253,
+          "requests": [
+            {
+              "route": "direct",
+              "method": "PUT",
+              "resource": "tasks"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "tasks"
+            }
+          ]
+        },
+        {
+          "published": true,
+          "writeMs": 460,
+          "totalMs": 492.8999999994412,
+          "requests": [
+            {
+              "route": "direct",
+              "method": "PUT",
+              "resource": "tasks"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "tasks"
+            }
+          ]
+        },
+        {
+          "published": true,
+          "writeMs": 148.3999999994412,
+          "totalMs": 187.79999999981374,
+          "requests": [
+            {
+              "route": "direct",
+              "method": "PUT",
+              "resource": "tasks"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "tasks"
+            }
+          ]
+        },
+        {
+          "published": true,
+          "writeMs": 400,
+          "totalMs": 457.29999999981374,
+          "requests": [
+            {
+              "route": "direct",
+              "method": "PUT",
+              "resource": "tasks"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "tasks"
+            }
+          ]
+        },
+        {
+          "published": true,
+          "writeMs": 181.5,
+          "totalMs": 198.5,
+          "requests": [
+            {
+              "route": "direct",
+              "method": "PUT",
+              "resource": "tasks"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "tasks"
+            }
+          ]
+        },
+        {
+          "published": true,
+          "writeMs": 46,
+          "totalMs": 57.200000000186265,
+          "requests": [
+            {
+              "route": "direct",
+              "method": "PUT",
+              "resource": "tasks"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "tasks"
+            }
+          ]
+        },
+        {
+          "published": true,
+          "writeMs": 194.20000000018626,
+          "totalMs": 247.3999999994412,
+          "requests": [
+            {
+              "route": "direct",
+              "method": "PUT",
+              "resource": "tasks"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "tasks"
+            }
+          ]
+        },
+        {
+          "published": true,
+          "writeMs": 169.20000000018626,
+          "totalMs": 199.29999999981374,
+          "requests": [
+            {
+              "route": "direct",
+              "method": "PUT",
+              "resource": "tasks"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "tasks"
+            }
+          ]
+        },
+        {
+          "published": true,
+          "writeMs": 163.70000000018626,
+          "totalMs": 183.70000000018626,
+          "requests": [
+            {
+              "route": "direct",
+              "method": "PUT",
+              "resource": "tasks"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "tasks"
+            }
+          ]
+        },
+        {
+          "published": true,
+          "writeMs": 327.6000000005588,
+          "totalMs": 341.6000000005588,
+          "requests": [
+            {
+              "route": "direct",
+              "method": "PUT",
+              "resource": "tasks"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "tasks"
+            }
+          ]
+        },
+        {
+          "published": true,
+          "writeMs": 57,
+          "totalMs": 100,
+          "requests": [
+            {
+              "route": "direct",
+              "method": "PUT",
+              "resource": "tasks"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "tasks"
+            }
+          ]
+        },
+        {
+          "published": true,
+          "writeMs": 309.8999999994412,
+          "totalMs": 321.8999999994412,
+          "requests": [
+            {
+              "route": "direct",
+              "method": "PUT",
+              "resource": "tasks"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "tasks"
+            }
+          ]
+        },
+        {
+          "published": true,
+          "writeMs": 42.10000000055879,
+          "totalMs": 50,
+          "requests": [
+            {
+              "route": "direct",
+              "method": "PUT",
+              "resource": "tasks"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "tasks"
+            }
+          ]
+        },
+        {
+          "published": true,
+          "writeMs": 52.40000000037253,
+          "totalMs": 66.40000000037253,
+          "requests": [
+            {
+              "route": "direct",
+              "method": "PUT",
+              "resource": "tasks"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "tasks"
+            }
+          ]
+        },
+        {
+          "published": true,
+          "writeMs": 103.59999999962747,
+          "totalMs": 147,
+          "requests": [
+            {
+              "route": "direct",
+              "method": "PUT",
+              "resource": "tasks"
+            },
+            {
+              "route": "direct",
+              "method": "GET",
+              "resource": "tasks"
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "metadataNotes": [
+    "host.freeBytes is the measured os.freemem value; the original label availableBytes was corrected without changing its value. Linux MemAvailable is recorded separately in host logs.",
+    "Clarified fresh installation store/account versus reused disposable Beacon PostgreSQL database; timings and request observations unchanged."
+  ]
+}
