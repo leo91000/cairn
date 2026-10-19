@@ -10,6 +10,12 @@
 //! These grants are live, not part of a run's snapshot: [`crate::service::policy`]
 //! leaves them out, so changing them neither blocks queued work nor suspends a
 //! plugin delegation.
+//!
+//! Compatibility with the previous release, whose `policy()` merges every `access`
+//! key: an empty grant list is stored as an absent key, and the access approved for a
+//! plugin delegation (`grantedAccess`) includes the non-empty lists. That release then
+//! computes the same approved access for an unchanged agent, while this one compares
+//! approvals without the live grants ([`same_approval`]).
 
 use crate::{
     error::{Error, Result},
@@ -50,9 +56,68 @@ pub fn plugins(agent: &Value) -> Vec<String> {
     ids(&agent["access"][PLUGINS])
 }
 
+/// The access a plugin delegation approves for an agent: its policy and, when present,
+/// its live grants, as the previous release computes it.
+pub fn approved_access(agent: &Value) -> Value {
+    let mut access = crate::service::policy(agent);
+    for (key, grants) in [
+        (EXCLUSIVE_NODES, exclusive_nodes(agent)),
+        (PLUGINS, plugins(agent)),
+    ] {
+        if !grants.is_empty() {
+            access[key] = json!(grants);
+        }
+    }
+    access
+}
+
+/// Whether a delegation's approved access still matches the agent. Live grants are
+/// checked on their own and never require reapproval.
+pub fn same_approval(agent: &Value, granted: &Value) -> bool {
+    let mut granted = granted.clone();
+    if let Some(fields) = granted.as_object_mut() {
+        fields.remove(EXCLUSIVE_NODES);
+        fields.remove(PLUGINS);
+    }
+    crate::service::policy(agent) == granted
+}
+
+/// Stores empty grant lists as absent keys (see the module documentation).
+pub(crate) fn tidy(agent: &mut Value) {
+    let Some(access) = agent["access"].as_object_mut() else {
+        return;
+    };
+    for key in [EXCLUSIVE_NODES, PLUGINS] {
+        if access.get(key).is_some_and(|grants| ids(grants).is_empty()) {
+            access.remove(key);
+        }
+    }
+}
+
+/// Keeps the approved access of the agent's unchanged delegations equal to what the
+/// previous release would compute, after its live grants changed.
+pub(crate) fn refresh_delegations(db: &Db<'_>, agent: &Value) -> Result<()> {
+    let approved = approved_access(agent);
+    for mut instance in db.list(PLUGIN_INSTANCES)? {
+        let current = instance["agentId"] == agent["id"]
+            && same_approval(agent, &instance["grantedAccess"])
+            && instance["grantedAccess"] != approved;
+        if current {
+            instance["grantedAccess"] = approved.clone();
+            db.put(PLUGIN_INSTANCES, &instance)?;
+        }
+    }
+    Ok(())
+}
+
 /// Checks the grants an owner selected: unique, existing, not revoked, and only on
-/// plugin instances that give agents access.
+/// plugin instances that give agents access. Instances the agent already holds stay
+/// accepted while their package awaits review, so unrelated edits still save.
 pub(crate) fn validate(db: &Db<'_>, agent: &Value, accepts_agents: &[String]) -> Result<()> {
+    let held = db
+        .get("agents", text(agent, "id"))?
+        .map(|saved| plugins(&saved))
+        .unwrap_or_default();
     let nodes = exclusive_nodes(agent);
     let instances = plugins(agent);
     if nodes.len() > MAX_GRANTS || instances.len() > MAX_GRANTS {
@@ -71,7 +136,9 @@ pub(crate) fn validate(db: &Db<'_>, agent: &Value, accepts_agents: &[String]) ->
     for instance in &instances {
         db.get(PLUGIN_INSTANCES, instance)?
             .ok_or_else(|| Error::bad("A selected plugin instance no longer exists."))?;
-        if !accepts_agents.iter().any(|id| id == instance) {
+        let accepted =
+            accepts_agents.iter().any(|id| id == instance) || held.iter().any(|id| id == instance);
+        if !accepted {
             return Err(Error::bad(
                 "A selected plugin instance does not give agents access.",
             ));
@@ -137,8 +204,10 @@ fn grant_resource(db: &Db<'_>, key: &str, resource: &str, agents: &[String]) -> 
             agent["access"] = json!({});
         }
         if set_member(&mut agent["access"][key], resource, granted) {
+            tidy(&mut agent);
             crate::service::touch(&mut agent);
             db.put("agents", &agent)?;
+            refresh_delegations(db, &agent)?;
         }
     }
     Ok(())
@@ -167,8 +236,9 @@ pub(crate) fn forget_resource(db: &Db<'_>, key: &str, resource: &str) -> Result<
     grant_resource(db, key, resource, &[])
 }
 
-/// Rebuilds the agent side from the resource copies, and drops copies that name
-/// agents which no longer exist. Idempotent; runs at every startup.
+/// Rebuilds the agent side from the resource copies, drops copies that name agents
+/// which no longer exist, and gives every agent a revision. Idempotent; runs at
+/// every startup after the other agent migrations.
 pub(crate) fn reconcile(db: &Db<'_>) -> Result<()> {
     let agents = db.list("agents")?;
     let known = |id: &Value| agents.iter().any(|agent| agent["id"] == *id);
@@ -223,16 +293,21 @@ pub(crate) fn reconcile(db: &Db<'_>) -> Result<()> {
                     .iter()
                     .all(|id| saved.iter().any(|known| id == known))
         };
-        let unchanged = agent["access"][EXCLUSIVE_NODES].is_array()
-            && agent["access"][PLUGINS].is_array()
-            && same(EXCLUSIVE_NODES, &exclusive)
-            && same(PLUGINS, &instance_grants);
-        if unchanged {
-            continue;
+        let changed = !(same(EXCLUSIVE_NODES, &exclusive) && same(PLUGINS, &instance_grants));
+        if changed {
+            agent["access"][EXCLUSIVE_NODES] = exclusive.into();
+            agent["access"][PLUGINS] = instance_grants.into();
+            tidy(&mut agent);
         }
-        agent["access"][EXCLUSIVE_NODES] = exclusive.into();
-        agent["access"][PLUGINS] = instance_grants.into();
-        db.put("agents", &agent)?;
+        // Agents saved before revisions existed get one, so editors detect later changes.
+        let unversioned = !agent["revision"]
+            .as_str()
+            .is_some_and(|revision| !revision.is_empty());
+        if changed || unversioned {
+            crate::service::touch(&mut agent);
+            db.put("agents", &agent)?;
+        }
+        refresh_delegations(db, &agent)?;
     }
     Ok(())
 }

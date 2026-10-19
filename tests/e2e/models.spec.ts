@@ -3,6 +3,7 @@ import {
   createAgent,
   expect,
   expectSingleScroll,
+  grantFullAccess,
   initializeRepository,
   openAgentSection,
   test,
@@ -18,6 +19,7 @@ test('selects live models and supported reasoning for agents and queued chat tur
   await page.goto(workspacePath('/agents'))
   await page.getByRole('link', { name: 'New agent', exact: true }).click()
   await page.getByLabel('Name', { exact: true }).fill('Model explorer')
+  await grantFullAccess(page)
   await openAgentSection(page, 'Coding agent & model')
   const picker = page.getByRole('button', { name: /^Agent, model and reasoning/ })
   const menu = page.getByRole('dialog', { name: 'Agent & model' })

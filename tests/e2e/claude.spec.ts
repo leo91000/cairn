@@ -4,6 +4,7 @@ import {
   createAgent,
   expect,
   expectSingleScroll,
+  grantFullAccess,
   openAgentSection,
   test,
   useRelayForHttpMocks,
@@ -17,6 +18,7 @@ test('Claude agents, chats, questions and scheduled work run on a connected Clau
   await authenticateWorkspace(page)
   await page.getByRole('link', { name: 'New agent', exact: true }).click()
   await page.getByLabel('Name', { exact: true }).fill('Claude engineer')
+  await grantFullAccess(page)
   await openAgentSection(page, 'Coding agent & model')
   await page.getByRole('button', { name: /^Agent, model and reasoning/ }).click()
   const agentMenu = page.getByRole('dialog', { name: 'Agent & model' })

@@ -262,6 +262,12 @@ test('a failed dedicated GitHub token keeps the created agent and retries only t
       creates++
   })
   await page.route('**/api/agents/*/github-token', async (route) => {
+    // The created agent's page reads the token state too; only saves are attempts.
+    if (route.request().method() !== 'PUT') {
+      await route.continue()
+      return
+    }
+
     tokenAttempts++
     await route.fulfill(tokenAttempts === 1
       ? { status: 400, json: { error: 'GitHub connection rejected' } }
@@ -400,7 +406,7 @@ test('exclusive reservation is granted per node from the agent page once the age
   await expect(card.getByRole('link', { name: 'Manage access from the agents ›' })).toBeVisible()
 })
 
-test('leaving with unsaved changes asks first, and a concurrent change is reported without losing the draft', async ({ page, workspace }) => {
+test('leaving with unsaved changes asks first, and a concurrent change is merged into the kept draft', async ({ page, workspace }) => {
   const agent = await workspace.api('/api/agents', 'POST', { name: 'Docs writer' })
   await signIn(page)
   await page.goto(workspacePath(`/agents/${agent.id}?section=identity`))
@@ -417,13 +423,189 @@ test('leaving with unsaved changes asks first, and a concurrent change is report
   const bar = page.getByRole('region', { name: 'Unsaved changes' })
   await expect(bar.getByRole('alert')).toHaveText('This agent was changed elsewhere. Reload it before saving.')
   await expect(page.getByLabel('Description', { exact: true })).toHaveValue('Keeps the documentation current')
+  // As on Android, reloading keeps the owner's edit on top of the newer agent.
   await bar.getByRole('button', { name: 'Reload', exact: true }).click()
   await expect(page.getByLabel('Name', { exact: true })).toHaveValue('Documentation writer')
-  await expect(bar).toHaveCount(0)
+  await expect(page.getByLabel('Description', { exact: true })).toHaveValue('Keeps the documentation current')
+  await expect(bar).toContainText('1 unsaved change')
+  await saveAgent(page)
+  expect((await workspace.api('/api/agents')).find((item: { id: string }) => item.id === agent.id)).toMatchObject({
+    name: 'Documentation writer',
+    description: 'Keeps the documentation current',
+  })
 
-  await page.getByLabel('Description', { exact: true }).fill('Keeps the documentation current')
+  await page.getByLabel('Description', { exact: true }).fill('Something else')
   await page.getByRole('link', { name: 'Back to agents' }).click()
   await guard.getByRole('button', { name: 'Discard changes' }).click()
   await expect(page).toHaveURL(/\/agents$/)
-  expect((await workspace.api('/api/agents')).find((item: { id: string }) => item.id === agent.id).description).toBe('')
+  expect((await workspace.api('/api/agents')).find((item: { id: string }) => item.id === agent.id).description).toBe('Keeps the documentation current')
+})
+
+test('a failed GitHub token keeps the pending token or removal, and the retry only saves the token', async ({ page, workspace }) => {
+  // Earlier journeys share this worker's request budget. Start these
+  // save-and-retry flows with a fresh limiter while preserving the seeded data.
+  await workspace.restart()
+  const agent = await workspace.api('/api/agents', 'POST', { name: 'Token keeper', access: { projects: [], github: false } })
+  await useRelayForHttpMocks(page)
+  await page.goto(workspacePath(`/agents/${agent.id}?section=identity`))
+  await authenticateWorkspace(page)
+  let rejectToken = true
+  let tokenAttempts = 0
+  let configured = false
+  const profiles: { description: string }[] = []
+  page.on('response', async (response) => {
+    if (response.request().method() === 'PUT' && response.url().endsWith(`/api/agents/${agent.id}`) && response.ok())
+      profiles.push(await response.json())
+  })
+  await page.route('**/api/agents/*/github-token', async (route) => {
+    if (route.request().method() !== 'PUT') {
+      await route.continue()
+      return
+    }
+
+    tokenAttempts++
+    if (rejectToken) {
+      await route.fulfill({ status: 400, json: { error: 'GitHub connection rejected' } })
+      return
+    }
+
+    const response = await route.fetch()
+    configured = (await response.json()).configured
+    await route.fulfill({ response })
+  })
+  const bar = page.getByRole('region', { name: 'Unsaved changes' })
+  const save = bar.getByRole('button', { name: 'Save', exact: true })
+
+  await page.getByLabel('Description', { exact: true }).fill('Releases with its own token')
+  await openAgentSection(page, 'GitHub')
+  await page.getByRole('radio', { name: /^Dedicated token/ }).check()
+  await page.getByLabel('GitHub token').fill('fixture-token-not-a-secret')
+  await save.click()
+  await expect(bar.getByRole('alert')).toContainText('Agent saved, but the GitHub connection could not be saved')
+  // The profile is saved; the token and its mode stay pending for the retry.
+  expect(profiles.map(profile => profile.description)).toEqual(['Releases with its own token'])
+  await expect(page.getByRole('radio', { name: /^Dedicated token/ })).toBeChecked()
+  await expect(page.getByLabel('GitHub token')).toHaveValue('fixture-token-not-a-secret')
+  await expect(save).toBeEnabled()
+  rejectToken = false
+  await save.click()
+  await expect(bar).toHaveCount(0)
+  expect(configured).toBe(true)
+  expect(profiles).toHaveLength(1)
+  expect(tokenAttempts).toBe(2)
+
+  rejectToken = true
+  await page.getByRole('radio', { name: /^No GitHub/ }).check()
+  await save.click()
+  await expect(bar.getByRole('alert')).toContainText('Agent saved, but the GitHub connection could not be saved')
+  await expect(page.getByRole('radio', { name: /^No GitHub/ })).toBeChecked()
+  await expect(save).toBeEnabled()
+  expect(configured).toBe(true)
+  rejectToken = false
+  await save.click()
+  await expect(bar).toHaveCount(0)
+  expect(configured).toBe(false)
+  await expect(page.getByRole('radio', { name: /^No GitHub/ })).toBeChecked()
+  expect(profiles).toHaveLength(1)
+  expect(tokenAttempts).toBe(4)
+})
+
+test('recovering a created agent keeps its revision, so a concurrent change is a conflict to reload', async ({ page, workspace }) => {
+  await useRelayForHttpMocks(page)
+  await page.goto(workspacePath('/agents/new'))
+  await authenticateWorkspace(page)
+  await page.getByLabel('Name', { exact: true }).fill('Recovered agent')
+  let createdId = ''
+  let creations = 0
+  let rejectRefresh = false
+  await page.route('**/api/agents', async (route) => {
+    const request = route.request()
+    if (request.method() === 'POST') {
+      creations++
+      const response = await route.fetch()
+      createdId = (await response.json()).id
+      rejectRefresh = true
+      await route.fulfill({ response })
+    }
+    else if (request.method() === 'GET' && rejectRefresh) {
+      await route.fulfill({ status: 400, json: { error: 'Resource list temporarily rejected' } })
+    }
+    else {
+      await route.continue()
+    }
+  })
+  const bar = page.getByRole('region', { name: 'Unsaved changes' })
+  await bar.getByRole('button', { name: 'Create agent', exact: true }).click()
+  await expect(bar.getByRole('alert')).toContainText('Agent saved, but the workspace could not be reloaded')
+  rejectRefresh = false
+
+  // Someone else changes the created agent before the retry.
+  await workspace.api(`/api/agents/${createdId}`, 'PUT', { name: 'Recovered agent', description: 'Changed elsewhere' })
+  await page.getByLabel('Name', { exact: true }).fill('Recovered agent edited')
+  await bar.getByRole('button', { name: 'Create agent', exact: true }).click()
+  await expect(bar.getByRole('alert')).toHaveText('This agent was changed elsewhere. Reload it before saving.')
+  expect((await workspace.api('/api/agents')).find((item: { id: string }) => item.id === createdId)).toMatchObject({
+    name: 'Recovered agent',
+    description: 'Changed elsewhere',
+  })
+
+  await bar.getByRole('button', { name: 'Reload', exact: true }).click()
+  await expect(page.getByLabel('Name', { exact: true })).toHaveValue('Recovered agent edited')
+  await expect(page.getByLabel('Description', { exact: true })).toHaveValue('Changed elsewhere')
+  await bar.getByRole('button', { name: 'Create agent', exact: true }).click()
+  await expect(page).toHaveURL(new RegExp(`/agents/${createdId}$`))
+  expect(creations).toBe(1)
+  expect((await workspace.api('/api/agents')).filter((item: { name: string }) => item.name.startsWith('Recovered agent'))).toEqual([
+    expect.objectContaining({ id: createdId, name: 'Recovered agent edited', description: 'Changed elsewhere' }),
+  ])
+})
+
+test('tool choices stay visible and editable when every MCP connection is granted', async ({ page, workspace }) => {
+  const mcp = await workspace.api('/api/mcps', 'POST', {
+    name: 'Design tools',
+    transport: 'http',
+    url: 'http://127.0.0.1:9/mcp',
+    allowPrivateNetwork: true,
+  })
+  const agent = await workspace.api('/api/agents', 'POST', { name: 'Limited MCP user', access: { mcps: null, mcpTools: { [mcp.id]: ['echo'] } } })
+  await useRelayForHttpMocks(page)
+  // The connection reports two discovered tools.
+  await page.route('**/api/mcps', async (route) => {
+    if (route.request().method() !== 'GET') {
+      await route.continue()
+      return
+    }
+
+    const response = await route.fetch()
+    const list = (await response.json()).map((item: { id: string }) => item.id === mcp.id
+      ? { ...item, tools: [{ name: 'echo', inputSchema: { type: 'object' } }, { name: 'search', inputSchema: { type: 'object' } }] }
+      : item)
+    await route.fulfill({ response, json: list })
+  })
+  await page.goto(workspacePath(`/agents/${agent.id}?section=mcps`))
+  await authenticateWorkspace(page)
+  const group = page.getByRole('group', { name: 'MCP connections access' })
+  await expect(group.getByRole('button', { name: 'All, including future', exact: true })).toHaveAttribute('aria-pressed', 'true')
+  const connection = page.getByRole('listitem', { name: 'Design tools' })
+  await expect(connection).toContainText('Tools · 2 enabled on the connection · 1 chosen')
+  const bar = page.getByRole('region', { name: 'Unsaved changes' })
+  await expect(bar).toHaveCount(0)
+
+  await connection.locator('summary').click()
+  await expect(connection.getByLabel('echo', { exact: true })).toBeChecked()
+  await connection.getByLabel('search', { exact: true }).check()
+  await expect(bar).toContainText('1 unsaved change')
+  await saveAgent(page)
+  const saved = (await workspace.api('/api/agents')).find((item: { id: string }) => item.id === agent.id)
+  expect(saved.access.mcps).toBeNull()
+  expect(saved.access.mcpTools).toEqual({ [mcp.id]: ['echo', 'search'] })
+
+  // Switching to a chosen list and back keeps the tool choices.
+  await group.getByRole('button', { name: 'Choose', exact: true }).click()
+  await expect(page.getByLabel('Design tools', { exact: true })).toBeChecked()
+  await group.getByRole('button', { name: 'All, including future', exact: true }).click()
+  await expect(connection).toContainText('2 chosen')
+  await expect(bar).toHaveCount(0)
+  await page.getByRole('link', { name: 'Overview', exact: true }).click()
+  await expect(page.getByRole('button', { name: /^MCP & tools/ })).toContainText('Tools limited on Design tools')
 })

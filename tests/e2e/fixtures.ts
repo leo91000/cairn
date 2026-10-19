@@ -377,6 +377,18 @@ export async function openAgentSection(page: Page, name: string) {
   await expect(heading).toBeFocused()
 }
 
+// New agents start restricted, and restricted agents need an isolated runner. Journeys that
+// run a drafted agent on the shared runner grant it everything, as the owner would.
+export async function grantFullAccess(page: Page) {
+  for (const [section, group] of [['Projects', 'Projects access'], ['Skills', 'Skills access'], ['MCP & tools', 'MCP connections access']]) {
+    await openAgentSection(page, section!)
+    await page.getByRole('group', { name: group }).getByRole('button', { name: 'All, including future', exact: true }).click()
+  }
+
+  await openAgentSection(page, 'GitHub')
+  await page.getByRole('radio', { name: /^Shared connection/ }).check()
+}
+
 // Creates the agent drafted on /agents/new and waits for its own page.
 export async function createAgent(page: Page) {
   await page.getByRole('button', { name: 'Create agent', exact: true }).click()

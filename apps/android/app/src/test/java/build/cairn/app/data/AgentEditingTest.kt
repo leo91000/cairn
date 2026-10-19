@@ -293,4 +293,80 @@ class AgentEditingTest {
         assertEquals(listOf("prod"), rebased.access.plugins)
         assertEquals("r2", rebased.revision)
     }
+
+    @Test
+    fun aSavedProfileKeepsOnlyTheFailedTokenPendingFromTheNewRevision() {
+        val draft =
+            AgentDraft(agent)
+                .copy(
+                    agent = agent.copy(name = "Releases"),
+                    github = GithubMode.Dedicated.value,
+                )
+        val saved = draft.resolved(tokenSaved = false).copy(revision = "r2")
+
+        // The profile was saved, the token was not: only the token remains to save.
+        val retry = draft.afterProfileSaved(saved)
+        assertFalse(profileChanged(saved, retry.resolved(tokenSaved = false)))
+        assertEquals(
+            listOf(AgentSection.Github),
+            agentChanges(saved, retry, tokenSaved = false, newToken = "ghp_x"),
+        )
+        assertEquals("ghp_x", retry.tokenChange(false, "ghp_x"))
+        assertEquals(
+            "r2",
+            agentSaveBody(retry.resolved(false))["revision"]!!.jsonPrimitive.content,
+        )
+
+        // A pending removal of the saved token stays pending the same way.
+        val removal =
+            AgentDraft(agent)
+                .copy(github = GithubMode.None.value)
+                .afterProfileSaved(agent.copy(revision = "r2"))
+        assertEquals("", removal.tokenChange(tokenSaved = true, newToken = ""))
+        assertEquals(
+            listOf(AgentSection.Github),
+            agentChanges(agent.copy(revision = "r2"), removal, tokenSaved = true, newToken = ""),
+        )
+
+        // Any edit made afterwards is a profile change again.
+        val edited = retry.agent.copy(description = "Later")
+        assertTrue(profileChanged(saved, edited))
+    }
+
+    @Test
+    fun aNewAgentStartsWithoutAccessWhileExistingAgentsKeepServerDefaults() {
+        val created = newAgent()
+        val access = agentSaveBody(created)["access"]!!.jsonObject
+        assertEquals(0, access["projects"]!!.jsonArray.size)
+        assertEquals(0, access["skills"]!!.jsonArray.size)
+        assertEquals(0, access["mcps"]!!.jsonArray.size)
+        assertEquals(0, access["mcpTools"]!!.jsonObject.size)
+        assertEquals(0, access["exclusiveNodes"]!!.jsonArray.size)
+        assertEquals(0, access["plugins"]!!.jsonArray.size)
+        assertEquals(LOCAL_NODE_ID, access["nodes"]!!.jsonArray.single().jsonPrimitive.content)
+        assertFalse(access["github"]!!.jsonPrimitive.content.toBoolean())
+        assertFalse(access["installation"]!!.jsonPrimitive.content.toBoolean())
+        assertEquals("yolo", access["sandbox"]!!.jsonPrimitive.content)
+        assertEquals(GithubMode.None, AgentDraft(created).githubMode(tokenSaved = false))
+
+        // A saved agent without access fields still decodes to the server defaults.
+        val existing = wireJson.decodeFromString<Agent>("""{"id":"a","name":"Old"}""")
+        assertNull(existing.access.projects)
+        assertTrue(existing.access.github)
+    }
+
+    @Test
+    fun emptyGrantsOmittedByTheServerAreNotUnsavedChanges() {
+        val omitted =
+            wireJson.decodeFromString<Agent>(
+                """{"id":"agent","name":"Release","revision":"r1","access":{"nodes":["$LOCAL_NODE_ID"]}}"""
+            )
+        val explicit =
+            wireJson.decodeFromString<Agent>(
+                """{"id":"agent","name":"Release","revision":"r1","access":{"nodes":["$LOCAL_NODE_ID"],"exclusiveNodes":[],"plugins":[]}}"""
+            )
+        assertEquals(explicit, omitted)
+        assertTrue(agentChanges(omitted, AgentDraft(explicit), false, "").isEmpty())
+        assertFalse(profileChanged(omitted, explicit))
+    }
 }

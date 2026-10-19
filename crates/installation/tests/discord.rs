@@ -1289,3 +1289,51 @@ async fn agent_edits_preview_and_reapprove_the_bot_answering_as_the_agent() {
         cairn_installation::service::policy(&widened)
     );
 }
+
+#[tokio::test]
+async fn preview_reports_a_plugin_grant_that_would_stop_a_bot_anyone_can_reach() {
+    let (_root, s, agent) = service().await;
+    let mut public = agent.clone();
+    public["access"]["sandbox"] = "read-only".into();
+    let public = s.agent(public, Some(text(&agent, "id"))).await.unwrap();
+    let saved = connections::save(
+        &s,
+        "discord",
+        &json!({
+            "name": "#support on Acme",
+            "settings": { "guildId": "100", "channelId": "200" },
+            "accessMode": "everyone",
+            "agentId": public["id"],
+            "projectId": null,
+            "enabled": true,
+            "token": "synthetic_discord_token",
+        }),
+        None,
+    )
+    .await
+    .unwrap();
+    let account = connections::save(
+        &s,
+        "onepassword",
+        &json!({ "name": "Production", "enabled": true, "secrets": { "token": "ops_fixture" } }),
+        None,
+    )
+    .await
+    .unwrap();
+    let id = text(&public, "id").to_owned();
+
+    // The approved policy is unchanged, but anyone could then reach a secret.
+    let mut secret = public.clone();
+    secret["access"]["plugins"] = json!([account["id"]]);
+    let preview = s.agent_preview(secret.clone(), &id).await.unwrap();
+    let effect = &preview["delegations"][0];
+    assert_eq!(effect["id"], saved["id"]);
+    assert_eq!(effect["suspended"], true);
+    assert!(effect["blocked"].is_string());
+    secret["reapproveDelegations"] = json!([saved["id"]]);
+    assert!(s.agent(secret, Some(&id)).await.is_err());
+
+    // Without plugin grants the same preview is clean.
+    let preview = s.agent_preview(public.clone(), &id).await.unwrap();
+    assert_eq!(preview["delegations"][0]["suspended"], false);
+}

@@ -2,6 +2,7 @@ import {
   createAgent,
   expect,
   expectSingleScroll,
+  grantFullAccess,
   initializeRepository,
   openAgentSection,
   signIn,
@@ -45,6 +46,7 @@ test('OpenCode connects a Zen key, selects native models and runs a conversation
   await page.goto(workspacePath('/agents'))
   await page.getByRole('link', { name: 'New agent', exact: true }).click()
   await page.getByLabel('Name', { exact: true }).fill('OpenCode workspace helper')
+  await grantFullAccess(page)
   await openAgentSection(page, 'Coding agent & model')
   const picker = page.getByRole('button', { name: /^Agent, model and reasoning/ })
   await picker.click()

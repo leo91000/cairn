@@ -409,6 +409,8 @@ abstract class NodePlacementCases {
             var granted = false
             var enrolled = false
             var cleaned = false
+            // Granted from its agent page in another window while the last step is open.
+            var grantedElsewhere = false
             server.dispatcher =
                 object : Dispatcher() {
                     override fun dispatch(request: RecordedRequest): MockResponse {
@@ -445,9 +447,9 @@ abstract class NodePlacementCases {
                                     """{"freedMiB":2048,"failed":0}"""
                                 }
                                 path == "/api/installations/fixture/api/nodes" ->
-                                    """[{"id":"node","name":"Serveur test","status":"${if (revoked) "revoked" else "online"}","revoked":$revoked,"accepting":true,"limits":{"cpu":4,"memoryMiB":8192,"diskMiB":65536},"agents":[],"exclusiveAgents":[],"staleDisks":{"count":${if (cleaned) 0 else 1},"diskMiB":2048}}${if (enrolled) """,{"id":"fresh","name":"Nouvelle node","status":"online","accepting":true,"agents":${if (granted) """[{"id":"agent","name":"Agent test"}]""" else "[]"}}""" else ""}]"""
+                                    """[{"id":"node","name":"Serveur test","status":"${if (revoked) "revoked" else "online"}","revoked":$revoked,"accepting":true,"limits":{"cpu":4,"memoryMiB":8192,"diskMiB":65536},"agents":[],"exclusiveAgents":[],"staleDisks":{"count":${if (cleaned) 0 else 1},"diskMiB":2048}}${if (enrolled) """,{"id":"fresh","name":"Nouvelle node","status":"online","accepting":true,"agents":[{"id":"other","name":"Agent autorisé"},{"id":"main","name":"Agent global","allNodes":true}${if (grantedElsewhere) """,{"id":"late","name":"Agent tardif"}""" else ""}${if (granted) """,{"id":"agent","name":"Agent test"}""" else ""}]}""" else ""}]"""
                                 path == "/api/installations/fixture/api/agents" ->
-                                    """[{"id":"agent","name":"Agent test"},{"id":"main","name":"Agent global","access":{"nodes":null}}]"""
+                                    """[{"id":"agent","name":"Agent test"},{"id":"other","name":"Agent autorisé","access":{"nodes":["fresh"]}},{"id":"late","name":"Agent tardif"},{"id":"main","name":"Agent global","access":{"nodes":null}}]"""
                                 path == "/api/installations" -> beaconInstallationsFixture()
                                 path == "/api/account/session" -> beaconAccountFixture("fixture")
                                 path == "/api/installations/fixture/api/overview" -> "{}"
@@ -656,8 +658,26 @@ abstract class NodePlacementCases {
             }
             capture("first-agents")
             compose.onNodeWithText("Autorisé sur toutes les nodes").assertExists()
+            // An agent already allowed here stays allowed: finishing never revokes it.
+            compose.onNodeWithText("Déjà autorisé sur cette machine").assertExists()
+            compose.onNode(isOn() and hasText("Agent autorisé")).assertIsNotEnabled()
             compose.onNodeWithText("Plus tard").assertExists()
             compose.onNodeWithText("Agent test").performScrollTo().performClick()
+            // Another window grants an agent meanwhile; the next refresh brings it in.
+            grantedElsewhere = true
+            compose.onNode(isOff() and hasText("Agent tardif")).assertIsEnabled()
+            repeat(6) {
+                compose.mainClock.advanceTimeBy(2_000)
+                elapse(2_000)
+                compose.waitForIdle()
+            }
+            compose.waitUntil(10000) {
+                compose
+                    .onAllNodesWithText("Déjà autorisé sur cette machine")
+                    .fetchSemanticsNodes()
+                    .size == 2
+            }
+            compose.onNode(isOn() and hasText("Agent tardif")).assertIsNotEnabled()
             compose.onNodeWithText("Terminer").performScrollTo().performClick()
             compose.waitUntil(10000) {
                 writes.any { it.first == "/api/installations/fixture/api/nodes/fresh/agents" } &&
@@ -667,14 +687,13 @@ abstract class NodePlacementCases {
                         .isEmpty()
             }
             assertEquals(
-                "agent",
+                setOf("agent", "other", "late"),
                 writes
                     .first { it.first == "/api/installations/fixture/api/nodes/fresh/agents" }
                     .second["agentIds"]!!
                     .jsonArray
-                    .single()
-                    .jsonPrimitive
-                    .content,
+                    .map { it.jsonPrimitive.content }
+                    .toSet(),
             )
         }
     }

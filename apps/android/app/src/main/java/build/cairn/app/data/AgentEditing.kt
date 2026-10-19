@@ -74,6 +74,27 @@ data class AgentDraft(
     val github: String? = null,
 )
 
+/**
+ * The draft of a new agent: it starts with no access and gains only what the owner grants. The
+ * server's defaults for existing agents are unchanged.
+ */
+fun newAgent() =
+    Agent(
+        access =
+            AccessPolicy(
+                nodes = listOf(LOCAL_NODE_ID),
+                projects = emptyList(),
+                skills = emptyList(),
+                mcps = emptyList(),
+                mcpTools = emptyMap(),
+                installation = false,
+                github = false,
+                sandbox = "yolo",
+                exclusiveNodes = emptyList(),
+                plugins = emptyList(),
+            )
+    )
+
 /** Everything the page shows the agent's access against. */
 data class AgentResources(
     val projects: List<Project> = emptyList(),
@@ -112,6 +133,19 @@ fun AgentDraft.tokenChange(tokenSaved: Boolean, newToken: String): String? =
         GithubMode.None -> "".takeIf { tokenSaved }
         GithubMode.Shared -> null
     }
+
+/**
+ * Whether [edited] differs from the saved [base] in anything the agent save sends. Identity,
+ * revision and portrait come from the server.
+ */
+fun profileChanged(base: Agent, edited: Agent): Boolean =
+    edited.copy(id = base.id, revision = base.revision, avatar = base.avatar) != base
+
+/**
+ * The draft once its profile is saved: the saved agent, keeping the GitHub choice so a token that
+ * failed to save stays pending and the next save only retries it, from the new revision.
+ */
+fun AgentDraft.afterProfileSaved(saved: Agent) = AgentDraft(saved, github = github)
 
 /** The section of every unsaved change, once per changed setting. */
 fun agentChanges(

@@ -11,6 +11,7 @@ import {
   errorSection,
   issues,
   newAgentDraft,
+  rebaseDraft,
   reviewLines,
   selectionSummary,
   skillLabel,
@@ -111,4 +112,69 @@ it('summarizes an agent for the list and places server errors in their section',
   expect(accessSummary(agent, context)).toBe('3 projects · 2 nodes · 1Password')
   expect(errorSection('A selected plugin instance no longer exists.')).toBe('plugins')
   expect(errorSection('A revoked node cannot be reserved.')).toBe('nodes')
+})
+
+it('starts new agents restricted until the owner widens their access', () => {
+  expect(newAgentDraft().access).toEqual({
+    nodes: [LOCAL_NODE_ID],
+    exclusiveNodes: [],
+    plugins: [],
+    projects: [],
+    skills: [],
+    mcps: [],
+    mcpTools: {},
+    installation: false,
+    github: false,
+    sandbox: 'yolo',
+  })
+  expect(issues(newAgentDraft(), context, false)).toEqual([])
+  expect(reviewLines(newAgentDraft(), newAgentDraft(), context)).toEqual([])
+})
+
+it('treats live grants the server omits as none, so a loaded agent is not changed', () => {
+  const agent = {
+    id: 'a',
+    name: 'Agent',
+    access: {
+      nodes: [LOCAL_NODE_ID],
+      projects: null,
+      skills: null,
+      mcps: null,
+      github: true,
+      installation: false,
+      sandbox: 'yolo',
+    },
+  } as unknown as Agent
+  const loaded = draftOf(agent)
+  expect(loaded.access).toMatchObject({ exclusiveNodes: [], plugins: [], mcpTools: {} })
+  expect(changes(loaded, draftOf(agent))).toEqual([])
+  // A draft compared against the raw response, keys absent, is unchanged too.
+  const raw = { ...loaded, access: agent.access } as typeof loaded
+  expect(changes(raw, loaded)).toEqual([])
+  expect(reviewLines(raw, loaded, context)).toEqual([])
+  expect(issues(raw, context, false)).toEqual([])
+  expect(accessSummary(agent, context)).toBe('All projects · 1 node')
+})
+
+it('rebases the owner\'s edits onto a newer agent, like Android', () => {
+  const base = draftOf({ id: 'a', name: 'Docs writer', access: { projects: ['p1'], mcps: null, mcpTools: {} } } as unknown as Agent)
+  const mine = structuredClone(base)
+  mine.description = 'Keeps the documentation current'
+  mine.access.mcpTools = { m1: ['echo'] }
+  const theirs = structuredClone(base)
+  theirs.name = 'Documentation writer'
+  theirs.description = 'Changed elsewhere'
+  theirs.access.projects = ['p1', 'p2']
+  theirs.access.plugins = ['prod']
+  const rebased = rebaseDraft(base, mine, theirs)
+  // Edited values keep the draft; the others take the newer agent.
+  expect(rebased.description).toBe('Keeps the documentation current')
+  expect(rebased.access.mcpTools).toEqual({ m1: ['echo'] })
+  expect(rebased.name).toBe('Documentation writer')
+  expect(rebased.access.projects).toEqual(['p1', 'p2'])
+  expect(rebased.access.plugins).toEqual(['prod'])
+  expect(changes(theirs, rebased)).toEqual(['identity', 'mcps'])
+  // The result is independent of its inputs.
+  rebased.access.projects!.push('p3')
+  expect(theirs.access.projects).toEqual(['p1', 'p2'])
 })

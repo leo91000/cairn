@@ -53,6 +53,14 @@ data class ExecutionNode(
     val storage: NodeStoragePolicy? = null,
 )
 
+/**
+ * Agents already allowed to run on this machine without being allowed everywhere, from the node
+ * itself or from each agent's page. Replacing the node's list must keep them.
+ */
+fun ExecutionNode.grantedAgents(agents: List<Agent> = emptyList()): Set<String> =
+    this.agents.filter { !it.allNodes }.map { it.id }.toSet() +
+        agents.filter { it.access.nodes?.contains(id) == true }.map { it.id }
+
 @Serializable
 data class ExclusiveReservation(
     val id: String,

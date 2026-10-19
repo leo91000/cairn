@@ -55,6 +55,21 @@ supprimés sont retirés des copies. Les anciens clients qui envoient encore
 `exclusiveAgents` à une node ou `agentIds` à une instance mettent à jour les agents,
 et leur omission conserve les droits existants.
 
+La version précédente fusionne toutes les clés de `access` dans sa politique, et
+compare cette politique à l’accès approuvé d’une délégation externe. Une liste vide
+est donc enregistrée comme une clé absente, et l’accès approuvé (`grantedAccess`)
+inclut les listes non vides. Cette version compare les approbations sans les droits
+en direct ; elle met à jour l’accès approuvé d’une délégation inchangée quand ces
+droits changent. Après un retour arrière, la version précédente calcule ainsi le même
+accès approuvé et ne suspend pas les délégations. Le démarrage donne aussi une
+révision aux agents enregistrés avant son introduction.
+
+Les autres modifications d’un agent conservent ses droits en direct, par exemple
+la suppression d’une connexion MCP, qui change aussi sa révision. Un droit déjà
+détenu sur une instance dont le package attend une revue reste accepté, pour que
+les autres modifications de l’agent s’enregistrent ; l’accorder à un autre agent
+exige un package actif.
+
 La suppression d’un agent le retire désormais aussi de `exclusiveAgents`. Avant,
 cet identifiant orphelin faisait échouer l’enregistrement suivant de la node.
 

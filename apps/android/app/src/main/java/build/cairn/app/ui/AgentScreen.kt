@@ -88,7 +88,7 @@ fun AgentScreen(
         }
         return
     }
-    AgentPage(vm, state, server ?: Agent(), creating, back, chat, navigate)
+    AgentPage(vm, state, server ?: newAgent(), creating, back, chat, navigate)
 }
 
 @Composable
@@ -184,13 +184,41 @@ private fun AgentPage(
     BackHandler(enabled = !saving) { leave() }
 
     suspend fun commit(edited: Agent, approved: List<String>) {
+        val tokenChange = draft.tokenChange(tokenSaved, newToken)
+
+        // A profile already saved (its token failed) is not sent again: only the token is retried.
+        val profilePending = baseline.id.isBlank() || profileChanged(baseline, edited)
         val saved: Agent =
-            if (creating)
-                wireJson.decodeFromJsonElement<Agent>(
-                    creation.save(vm.api, "/agents", { agentSaveBody(edited, approved) })
-                )
-            else vm.api.send("PUT", "/agents/${segment(agentId)}", agentSaveBody(edited, approved))
-        draft.tokenChange(tokenSaved, newToken)?.let { token ->
+            when {
+                !profilePending -> baseline
+                creating -> {
+                    // Once created, the agent's revision guards the recovery update, so a change
+                    // made elsewhere meanwhile is reported as a conflict instead of overwritten.
+                    val response =
+                        creation.save(
+                            vm.api,
+                            "/agents",
+                            value = {
+                                agentSaveBody(edited.copy(revision = baseline.revision), approved)
+                            },
+                            createValue = { agentSaveBody(edited.copy(revision = ""), approved) },
+                            onCreated = { baseline = wireJson.decodeFromJsonElement<Agent>(it) },
+                        )
+                    wireJson.decodeFromJsonElement<Agent>(response)
+                }
+                else ->
+                    vm.api.send(
+                        "PUT",
+                        "/agents/${segment(agentId)}",
+                        agentSaveBody(edited, approved),
+                    )
+            }
+
+        // The profile is saved: a retry after a failed token starts from this revision.
+        baseline = saved
+        draft = draft.afterProfileSaved(saved)
+
+        tokenChange?.let { token ->
             try {
                 vm.api.request(
                     "PUT",

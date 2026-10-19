@@ -124,7 +124,7 @@ impl Service {
     async fn migrate_agents(&self) -> Result<()> {
         for mut agent in self.store.list("agents").await? {
             if agent["access"].get("mcps").is_none() || agent["access"].get("nodes").is_none() {
-                agent["access"] = policy(&agent);
+                agent["access"] = crate::agent_grants::approved_access(&agent);
                 self.store.put("agents", agent).await?;
             }
         }
@@ -995,9 +995,11 @@ fn save_agent(db: &Db<'_>, mut agent: Value, access: &Value) -> Result<Value> {
     {
         agent["avatar"] = avatar.clone();
     }
+    crate::agent_grants::tidy(&mut agent);
     touch(&mut agent);
     db.put("agents", &agent)?;
     crate::agent_grants::mirror(db, &agent)?;
+    crate::agent_grants::refresh_delegations(db, &agent)?;
     db.audit("agent.saved", &json!({ "id": agent["id"] }))?;
     Ok(agent)
 }

@@ -2005,10 +2005,11 @@ async fn installation_access_cannot_grant_secrets_or_exclusive_reservations() {
     )
     .await;
     let agents = s.store.list("agents").await.unwrap();
-    let escalation = agents.iter().find(|agent| agent["name"] == "Escalation");
-    if let Some(escalation) = escalation {
-        assert_eq!(escalation["access"]["plugins"], json!([]), "{created}");
-    }
+    let escalation = agents
+        .iter()
+        .find(|agent| agent["name"] == "Escalation")
+        .expect("the agent is created without the requested grant");
+    assert!(escalation["access"].get("plugins").is_none(), "{created}");
     let instance = s
         .store
         .get(

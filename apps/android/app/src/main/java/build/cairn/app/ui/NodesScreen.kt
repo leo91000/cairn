@@ -348,9 +348,14 @@ fun NodesScreen(
             }
         }
     }
-    granting?.let { node ->
-        FirstAgents(node, state, { granting = null }) { agentIds ->
+    granting?.let { opened ->
+        // The page keeps polling: grants made meanwhile, as from an agent page in another window,
+        // show up here and are kept.
+        val node = nodes.find { it.id == opened.id } ?: opened
+        FirstAgents(node, state, { granting = null }) { chosen ->
             vm.perform {
+                // The request replaces the node's list: finishing must never revoke an agent.
+                val agentIds = (chosen + node.grantedAgents(state.agents)).distinct()
                 api.request(
                     "PUT",
                     "/nodes/${node.id}/agents",
@@ -451,7 +456,7 @@ private fun NodeAgents(node: ExecutionNode, state: Workspace, openAgents: () -> 
 
 /**
  * The last step of adding a machine: nothing is chosen for the owner, except agents already allowed
- * on every node.
+ * on it or on every node. Those stay allowed.
  */
 @Composable
 private fun FirstAgents(
@@ -466,25 +471,29 @@ private fun FirstAgents(
             "Les agents choisis pourront exécuter leurs conversations sur cette machine. Un tag ou une capacité ne donne jamais d’accès à lui seul.",
             style = MaterialTheme.typography.bodyMedium,
         )
+        val granted = node.grantedAgents(state.agents)
         state.agents.forEach { agent ->
             val everywhere = agent.access.nodes == null
+            val already = !everywhere && agent.id in granted
+            val locked = everywhere || already
             Row(
                 Modifier.fillMaxWidth().heightIn(min = 48.dp).toggleable(
-                    value = everywhere || agent.id in selected,
-                    enabled = !everywhere && !state.busy,
+                    value = locked || agent.id in selected,
+                    enabled = !locked && !state.busy,
                     role = androidx.compose.ui.semantics.Role.Checkbox,
                 ) {
                     selected = if (it) selected + agent.id else selected - agent.id
                 },
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                Checkbox(everywhere || agent.id in selected, null, enabled = !everywhere)
+                Checkbox(locked || agent.id in selected, null, enabled = !locked)
                 Spacer(Modifier.width(8.dp))
                 Column(Modifier.weight(1f)) {
                     Text(agent.name)
-                    if (everywhere)
+                    if (locked)
                         Text(
-                            "Autorisé sur toutes les nodes",
+                            if (everywhere) "Autorisé sur toutes les nodes"
+                            else "Déjà autorisé sur cette machine",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )

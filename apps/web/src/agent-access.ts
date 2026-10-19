@@ -56,6 +56,10 @@ export const sandboxOptions = [
 
 export const alwaysAvailable = 'Publish deliverables (including public links), wait for a delay or a condition, see its nodes and move the conversation between them, report its outcome.'
 
+/**
+ * A new agent starts restricted: no project, skill, MCP connection or GitHub, on the
+ * current runner only. The owner widens each section, e.g. with "All, including future".
+ */
 export function newAgentDraft(): AgentDraft {
   return {
     name: '',
@@ -69,12 +73,12 @@ export function newAgentDraft(): AgentDraft {
       nodes: [LOCAL_NODE_ID],
       exclusiveNodes: [],
       plugins: [],
-      projects: null,
-      skills: null,
-      mcps: null,
+      projects: [],
+      skills: [],
+      mcps: [],
       mcpTools: {},
       installation: false,
-      github: true,
+      github: false,
       sandbox: 'yolo',
     },
   }
@@ -104,6 +108,28 @@ export function draftOf(agent: Agent): AgentDraft {
       sandbox: access.sandbox ?? 'yolo',
     },
   }
+}
+
+/**
+ * Applies the owner's edits onto a newer saved agent, as Android does: a value the owner
+ * changed from `base` keeps the draft value, every other value takes the newer one.
+ */
+export function rebaseDraft(base: AgentDraft, mine: AgentDraft, theirs: AgentDraft): AgentDraft {
+  const same = (left: unknown, right: unknown) => JSON.stringify(left) === JSON.stringify(right)
+  const pick = <T>(old: T, edited: T, newer: T): T => same(old, edited) ? newer : edited
+  const access = Object.fromEntries((Object.keys(theirs.access) as (keyof AgentAccess)[])
+    .map(key => [key, pick(base.access[key], mine.access[key], theirs.access[key])]))
+  const rebased: AgentDraft = {
+    name: pick(base.name, mine.name, theirs.name),
+    description: pick(base.description, mine.description, theirs.description),
+    instructions: pick(base.instructions, mine.instructions, theirs.instructions),
+    provider: pick(base.provider, mine.provider, theirs.provider),
+    model: pick(base.model, mine.model, theirs.model),
+    reasoning: pick(base.reasoning, mine.reasoning, theirs.reasoning),
+    timeoutMinutes: pick(base.timeoutMinutes, mine.timeoutMinutes, theirs.timeoutMinutes),
+    access: access as AgentAccess,
+  }
+  return JSON.parse(JSON.stringify(rebased))
 }
 
 /** "All, including future" | "3 of 12" | "None". */
@@ -214,15 +240,18 @@ export function changes(saved: AgentDraft, draft: AgentDraft) {
   add('projects', listCount(saved.access.projects, draft.access.projects))
   add('skills', listCount(saved.access.skills, draft.access.skills))
   add('mcps', listCount(saved.access.mcps, draft.access.mcps))
-  const tools = new Set([...Object.keys(saved.access.mcpTools), ...Object.keys(draft.access.mcpTools)])
+  const savedTools = saved.access.mcpTools ?? {}
+  const draftTools = draft.access.mcpTools ?? {}
+  const tools = new Set([...Object.keys(savedTools), ...Object.keys(draftTools)])
   for (const connection of tools)
-    add('mcps', Number(JSON.stringify(saved.access.mcpTools[connection] ?? null) !== JSON.stringify(draft.access.mcpTools[connection] ?? null)))
+    add('mcps', Number(JSON.stringify(savedTools[connection] ?? null) !== JSON.stringify(draftTools[connection] ?? null)))
   add('github', Number(saved.access.github !== draft.access.github))
   add('sandbox', Number(saved.access.sandbox !== draft.access.sandbox))
   add('powers', Number(saved.access.installation !== draft.access.installation))
   add('nodes', listCount(saved.access.nodes, draft.access.nodes))
-  add('nodes', listCount(saved.access.exclusiveNodes, draft.access.exclusiveNodes))
-  add('plugins', listCount(saved.access.plugins, draft.access.plugins))
+  // Responses omit empty live grants: absent means none.
+  add('nodes', listCount(saved.access.exclusiveNodes ?? [], draft.access.exclusiveNodes ?? []))
+  add('plugins', listCount(saved.access.plugins ?? [], draft.access.plugins ?? []))
   return changed
 }
 
@@ -246,11 +275,11 @@ export function reviewLines(saved: AgentDraft, draft: AgentDraft, context: Conte
   const lines: ReviewLine[] = []
   const node = (id: string) => nodeName(context.nodes.find(item => item.id === id), id)
 
-  for (const id of listChanges(saved.access.exclusiveNodes, draft.access.exclusiveNodes).added)
+  for (const id of listChanges(saved.access.exclusiveNodes ?? [], draft.access.exclusiveNodes ?? []).added)
     lines.push({ kind: 'power', section: 'nodes', text: `Added: exclusive reservation on ${node(id)}. This agent will be able to suspend other agents’ conversations on this machine.` })
   if (draft.access.installation && !saved.access.installation)
     lines.push({ kind: 'power', section: 'powers', text: 'Added: installation management. This agent will be able to create and change agents, projects, skills, MCP connections, missions and runs on your behalf.' })
-  for (const id of listChanges(saved.access.plugins, draft.access.plugins).added)
+  for (const id of listChanges(saved.access.plugins ?? [], draft.access.plugins ?? []).added)
     lines.push({ kind: 'secret', section: 'plugins', text: `Added: ${connectionLabel(id, context)} — effective immediately, including in running conversations.` })
 
   if (saved.access.github && !draft.access.github && draft.access.projects !== null)
@@ -271,9 +300,9 @@ export function reviewLines(saved: AgentDraft, draft: AgentDraft, context: Conte
   described('skill', saved.access.skills, draft.access.skills, key => skillLabel(key, context.projects).name)
   described('MCP connection', saved.access.mcps, draft.access.mcps, mcp)
   described('node', saved.access.nodes, draft.access.nodes, node)
-  for (const id of listChanges(saved.access.exclusiveNodes, draft.access.exclusiveNodes).removed)
+  for (const id of listChanges(saved.access.exclusiveNodes ?? [], draft.access.exclusiveNodes ?? []).removed)
     removed.push(`exclusive reservation on ${node(id)}`)
-  for (const id of listChanges(saved.access.plugins, draft.access.plugins).removed)
+  for (const id of listChanges(saved.access.plugins ?? [], draft.access.plugins ?? []).removed)
     removed.push(connectionLabel(id, context))
   if (saved.access.installation && !draft.access.installation)
     removed.push('installation management')
@@ -333,7 +362,7 @@ export function issues(draft: AgentDraft, context: Context, isMain: boolean) {
     }
   }
 
-  for (const id of access.exclusiveNodes) {
+  for (const id of access.exclusiveNodes ?? []) {
     const node = context.nodes.find(item => item.id === id)
     if (!node || node.revoked)
       found.push({ section: 'nodes', text: 'An exclusive reservation targets a node that no longer exists.' })
@@ -341,7 +370,7 @@ export function issues(draft: AgentDraft, context: Context, isMain: boolean) {
       found.push({ section: 'nodes', text: `The exclusive reservation on ${nodeName(node, id)} is inactive: this agent cannot run there.` })
   }
 
-  for (const id of access.plugins) {
+  for (const id of access.plugins ?? []) {
     const connection = context.connections.find(item => item.id === id)
     if (!connection)
       found.push({ section: 'plugins', text: 'A granted plugin instance no longer exists.' })

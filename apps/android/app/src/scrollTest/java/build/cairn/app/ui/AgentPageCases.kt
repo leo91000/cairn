@@ -150,7 +150,13 @@ abstract class AgentPageCases {
                     ) {
                         val body = wireJson.parseToJsonElement(text).jsonObject
                         saved += path to body
-                        if (conflict.getAndSet(false))
+                        // Like the server: a stale revision is refused, an absent one is not
+                        // checked.
+                        val sent = body["revision"]?.jsonPrimitive?.content.orEmpty()
+                        val stored =
+                            agents.get().find { it.id == path.removePrefix("/agents/") }?.revision
+                        val stale = sent.isNotEmpty() && stored != null && sent != stored
+                        if (conflict.getAndSet(false) || stale)
                             return response
                                 .setResponseCode(409)
                                 .setBody(
@@ -505,10 +511,51 @@ abstract class AgentPageCases {
     }
 
     @Test
-    fun creationRetriesKeepOneAgentAfterALostResponseAndARejectedToken() {
+    fun aRejectedTokenKeepsTheSavedRevisionAndARetrySavesOnlyTheToken() {
+        journey("agent") { fixture ->
+            fixture.rejectToken.set(true)
+            open(AgentSection.Identity)
+            compose.onNodeWithText("Nom").performTextReplacement("Release bot")
+            back()
+            open(AgentSection.Github)
+            compose.onNodeWithText(GithubMode.Dedicated.label).performClick()
+            compose.onNodeWithText("Jeton GitHub dédié").performTextInput("fixture-token")
+            back()
+
+            // The agent is saved, its token is rejected.
+            compose.onNodeWithText("Enregistrer").performClick()
+            confirmReview()
+            waitForText("Agent enregistré, mais le jeton GitHub n’a pas été enregistré. Réessayez.")
+            compose.onNodeWithText("● 1 modification non enregistrée").assertExists()
+
+            // The retry neither resends the old revision nor loses the entered token.
+            waitForEnabled("Enregistrer")
+            compose.onNodeWithText("Enregistrer").performClick()
+            confirmReview()
+            compose.waitUntil(15000) {
+                fixture.tokens.size == 2 &&
+                    compose.onAllNodesWithTag("agent-save-bar").fetchSemanticsNodes().isEmpty()
+            }
+            compose
+                .onNodeWithText("Cet agent a été modifié ailleurs", substring = true)
+                .assertDoesNotExist()
+            assertEquals(listOf("/agents/agent"), fixture.saved.map { it.first })
+            assertEquals("r1", fixture.saved.single().second["revision"]!!.jsonPrimitive.content)
+            assertEquals(
+                "Release bot",
+                fixture.agents.get().single { it.id == "agent" }.name,
+            )
+        }
+    }
+
+    @Test
+    fun creationRetriesKeepOneAgentAfterALostResponseAConflictAndARejectedToken() {
         journey("") { fixture ->
             fixture.loseCreation.set(true)
             fixture.rejectToken.set(true)
+            // A new agent starts without access: the owner grants what it needs.
+            compose.onNodeWithContentDescription("Projets, Aucun").assertExists()
+            compose.onNodeWithContentDescription("GitHub, ${GithubMode.None.label}").assertExists()
             open(AgentSection.Identity)
             compose.onNodeWithText("Nom").performTextReplacement("Nouvel agent")
             back()
@@ -522,13 +569,29 @@ abstract class AgentPageCases {
             waitForText("Sauvegarde de l’agent non confirmée", substring = true)
             capture("agent-creation-uncertain")
 
-            // The retry replays the same creation identity; the token is then rejected.
+            // The retry replays the same creation identity, then updates that agent from the
+            // revision it was created with: a change made elsewhere meanwhile is a conflict.
+            fixture.conflict.set(true)
+            waitForEnabled("Créer l’agent")
+            compose.onNodeWithText("Créer l’agent").performClick()
+            waitForText("Cet agent a été modifié ailleurs", substring = true)
+            assertEquals("c1", fixture.saved[2].second["revision"]!!.jsonPrimitive.content)
+
+            // Reloading keeps the draft; a further edit is saved from the created revision and
+            // the token is then rejected.
+            compose.onNodeWithText("Recharger").performClick()
+            compose.waitUntil(15000) {
+                compose.onAllNodesWithText("Recharger").fetchSemanticsNodes().isEmpty()
+            }
+            open(AgentSection.Identity)
+            compose.onNodeWithText("Nom").performTextReplacement("Agent de release")
+            back()
             waitForEnabled("Créer l’agent")
             compose.onNodeWithText("Créer l’agent").performClick()
             waitForText("Agent enregistré, mais le jeton GitHub n’a pas été enregistré. Réessayez.")
             assertFalse(left.get())
 
-            // The last retry updates that agent and saves only its token.
+            // The last retry saves only the token of that agent.
             waitForEnabled("Créer l’agent")
             compose.onNodeWithText("Créer l’agent").performClick()
             compose.waitUntil(15000) { left.get() }
@@ -537,12 +600,25 @@ abstract class AgentPageCases {
                 listOf("/agents", "/agents", "/agents/created", "/agents/created"),
                 requests,
             )
+            assertEquals("c1", fixture.saved[3].second["revision"]!!.jsonPrimitive.content)
+            val creation = fixture.saved[0].second
+            assertEquals(creation["creationId"], fixture.saved[1].second["creationId"])
+            assertNotNull(creation["creationId"])
+            assertFalse("revision" in creation)
+            val access = creation["access"]!!.jsonObject
+            assertEquals(JsonArray(emptyList()), access["projects"])
+            assertEquals(JsonArray(emptyList()), access["skills"])
+            assertEquals(JsonArray(emptyList()), access["mcps"])
+            assertEquals(JsonPrimitive(false), access["github"])
+            assertEquals(JsonArray(listOf(JsonPrimitive(LOCAL_NODE_ID))), access["nodes"])
             assertEquals(
-                fixture.saved[0].second["creationId"],
-                fixture.saved[1].second["creationId"],
+                "Agent de release",
+                fixture.saved[3].second["name"]!!.jsonPrimitive.content,
             )
-            assertNotNull(fixture.saved[0].second["creationId"])
-            assertEquals(1, fixture.agents.get().count { it.name == "Nouvel agent" })
+            assertEquals(
+                listOf("Agent de release"),
+                fixture.agents.get().filter { it.id == "created" }.map { it.name },
+            )
             assertEquals(2, fixture.tokens.size)
         }
     }

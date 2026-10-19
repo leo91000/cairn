@@ -33,6 +33,7 @@ import {
   mainLockedSections,
   newAgentDraft,
   nodeName,
+  rebaseDraft,
   reviewLines,
   runsOn,
   sandboxOptions,
@@ -223,6 +224,8 @@ const pluginSummary = computed(() => {
 const githubSummary = computed(() => isMain.value || githubMode.value === 'shared' ? 'Shared connection' : githubMode.value === 'dedicated' ? 'Dedicated token' : 'No GitHub')
 const powers = computed(() => exclusiveNodes.value.length + Number(access.value.installation))
 const mcpCount = computed(() => access.value.mcps === null ? state.mcps.length : access.value.mcps.length)
+// Connections whose tools are limited to a chosen few, also under "All, including future".
+const limitedMcps = computed(() => state.mcps.filter(connection => connection.id in access.value.mcpTools && (access.value.mcps === null || access.value.mcps.includes(connection.id))))
 const disabledMcps = computed(() => state.mcps.filter(connection => !connection.enabled && (access.value.mcps === null || access.value.mcps.includes(connection.id))))
 
 // One line per section: short values beside the desktop navigation, longer ones on phones and cards.
@@ -231,7 +234,7 @@ const summaries = computed<Record<SectionId, { short: string, long: string }>>((
   model: { short: provider.value.label, long: [provider.value.label, draft.value.model || 'Default model'].join(' · ') },
   projects: { short: isMain.value ? 'Fixed' : short(access.value.projects, state.projects.length), long: isMain.value ? 'All, including future' : selectionSummary(access.value.projects, state.projects.length) },
   skills: { short: isMain.value ? 'Fixed' : short(access.value.skills, permittedSkills.value.length), long: isMain.value ? 'All, including future' : selectionSummary(access.value.skills, permittedSkills.value.length) },
-  mcps: { short: isMain.value ? 'Fixed' : short(access.value.mcps, state.mcps.length), long: isMain.value ? 'All, including future' : `${selectionSummary(access.value.mcps, state.mcps.length)}${disabledMcps.value.length ? ` · ${disabledMcps.value.length} disabled` : ''}` },
+  mcps: { short: isMain.value ? 'Fixed' : short(access.value.mcps, state.mcps.length), long: isMain.value ? 'All, including future' : `${selectionSummary(access.value.mcps, state.mcps.length)}${limitedMcps.value.length ? ` · tools limited on ${limitedMcps.value.length}` : ''}${disabledMcps.value.length ? ` · ${disabledMcps.value.length} disabled` : ''}` },
   github: { short: isMain.value ? 'Fixed' : githubMode.value === 'shared' ? 'Shared' : githubMode.value === 'dedicated' ? 'Token' : 'None', long: githubSummary.value },
   plugins: { short: access.value.plugins.length ? String(access.value.plugins.length) : 'None', long: pluginSummary.value || 'None' },
   nodes: { short: short(access.value.nodes, availableNodes.value.length), long: `${selectionSummary(access.value.nodes, availableNodes.value.length)}${exclusiveNodes.value.length ? ` · exclusive on ${exclusiveNodes.value.length}` : ''}` },
@@ -265,7 +268,7 @@ const overview = computed(() => [
         section: 'mcps' as const,
         title: 'MCP & tools',
         summary: isMain.value ? 'All, including future' : `${mcpCount.value} ${mcpCount.value === 1 ? 'connection' : 'connections'}${access.value.mcps === null ? ', including future' : ''}`,
-        detail: access.value.mcps === null || isMain.value ? 'All enabled tools' : names(access.value.mcps, connection => state.mcps.find(item => item.id === connection)?.name ?? 'Removed connection'),
+        detail: isMain.value ? 'All enabled tools' : access.value.mcps === null ? (limitedMcps.value.length ? `Tools limited on ${names(limitedMcps.value.map(connection => connection.name), name => name)}` : 'All enabled tools') : names(access.value.mcps, connection => state.mcps.find(item => item.id === connection)?.name ?? 'Removed connection'),
         chip: isMain.value ? { tone: 'fixed' as const, label: 'Fixed' } : disabledMcps.value.length ? { tone: 'unavailable' as const, label: `${disabledMcps.value[0]!.name} disabled` } : chip(access.value.mcps),
       },
       {
@@ -425,10 +428,11 @@ watch([draft, githubToken, dedicated], () => {
 }, { deep: true })
 
 function body(reapprove: string[] = []) {
+  // Also set once a new agent exists: a recovery update must not overwrite another client's change.
   const revision = agent.value?.revision
   return {
     ...draft.value,
-    ...(revision && !isNew.value ? { revision } : {}),
+    ...(revision ? { revision } : {}),
     ...(reapprove.length ? { reapproveDelegations: reapprove } : {}),
   }
 }
@@ -449,7 +453,8 @@ async function requestSave() {
   let lines = reviewLines(saved.value, draft.value, context.value)
   let effects: DelegationEffect[] = []
   let affected = 0
-  if (!isNew.value) {
+  // A pending GitHub token alone changes no access: it is saved without a preview.
+  if (!isNew.value && changes(saved.value, draft.value).length) {
     busy.value = true
     try {
       // The server says which queued or running work and which delegations the change affects.
@@ -499,14 +504,26 @@ async function commit(reapprove: string[]) {
   reviewError.value = ''
   const change = tokenChange.value
   const token = githubToken.value.trim()
+  // After a saved profile and a failed token, a retry only saves what is still pending.
+  const profileChanged = isNew.value || changes(saved.value, draft.value).length > 0
   let result: Agent
   try {
-    result = isNew.value
-      ? await creation.save<Agent>('/agents', { body: () => body(reapprove) })
-      : await api<Agent>(`/agents/${id.value}`, {
-          method: 'PUT',
-          body: JSON.stringify(body(reapprove)),
-        })
+    if (isNew.value) {
+      result = await creation.save<Agent>('/agents', {
+        body: () => body(reapprove),
+        // A replayed creation updates the agent it created, at that agent's revision.
+        onCreated: (created) => { agent.value = created },
+      })
+    }
+    else if (profileChanged) {
+      result = await api<Agent>(`/agents/${id.value}`, {
+        method: 'PUT',
+        body: JSON.stringify(body(reapprove)),
+      })
+    }
+    else {
+      result = agent.value!
+    }
   }
   catch (e) {
     failed(e)
@@ -521,20 +538,28 @@ async function commit(reapprove: string[]) {
   }
 
   review.value = null
-  if (!isNew.value)
-    apply(result)
+  // The saved profile and its revision advance now; the GitHub token stays pending until it is saved.
   // A created agent stays on this draft until its token and the workspace are saved too:
   // retrying then updates the same agent instead of creating another one.
+  agent.value = result
+  if (profileChanged) {
+    saved.value = draftOf(result)
+    draft.value = draftOf(result)
+    fieldErrors.value = {}
+    attempted.value = false
+  }
+
   let phase: 'token' | 'refresh' = 'token'
   let completed = false
   try {
     if (change) {
       await api(`/agents/${result.id}/github-token`, { method: 'PUT', body: JSON.stringify({ token: change === 'set' ? token : '' }) })
       githubConfigured.value = change === 'set'
-      savedDedicated.value = !result.access.github && githubConfigured.value
-      dedicated.value = savedDedicated.value
     }
 
+    githubToken.value = ''
+    savedDedicated.value = !result.access.github && githubConfigured.value
+    dedicated.value = savedDedicated.value
     phase = 'refresh'
     await refresh()
     completed = true
@@ -563,17 +588,28 @@ async function commit(reapprove: string[]) {
   void loadSuspension()
 }
 
+// Like Android, the owner's edits are kept on top of the newer agent: values they changed keep
+// the draft, every other value takes the newer one, and the newer revision becomes the base.
 async function reloadAgent() {
+  const target = isNew.value ? creation.savedId.value : id.value
   busy.value = true
   try {
-    const found = (await api<Agent[]>('/agents')).find(item => item.id === id.value)
+    const found = (await api<Agent[]>('/agents')).find(item => item.id === target)
     if (!found) {
       notFound.value = true
       return
     }
 
-    apply(found)
+    const base = saved.value
+    const mine = draft.value
+    const githubEdited = dedicated.value !== savedDedicated.value
+    const pendingDedicated = dedicated.value
+    agent.value = found
+    saved.value = draftOf(found)
+    draft.value = rebaseDraft(base, mine, saved.value)
     await loadGithub()
+    if (githubEdited)
+      dedicated.value = pendingDedicated
     conflict.value = false
     serverError.value = ''
   }

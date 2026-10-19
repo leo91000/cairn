@@ -134,9 +134,9 @@ async fn the_agent_page_grants_exclusive_nodes_and_service_accounts() {
     let account = owner.add_service_account(json!([])).await;
     let mut agent = owner.create_agent("Release engineer").await;
 
-    // Nothing new is granted by default.
-    assert_eq!(agent["access"]["exclusiveNodes"], json!([]));
-    assert_eq!(agent["access"]["plugins"], json!([]));
+    // Nothing new is granted by default; empty grants are stored as absent keys.
+    assert!(agent["access"].get("exclusiveNodes").is_none());
+    assert!(agent["access"].get("plugins").is_none());
 
     agent["access"]["nodes"] = json!([LOCAL_NODE_ID, NODE]);
     agent["access"]["exclusiveNodes"] = json!([NODE]);
@@ -317,9 +317,10 @@ async fn older_clients_editing_resources_update_the_agent() {
     connections::remove(&owner.service, "onepassword", &account)
         .await
         .unwrap();
-    assert_eq!(
-        owner.stored("agents", &id).await["access"]["plugins"],
-        json!([])
+    assert!(
+        owner.stored("agents", &id).await["access"]
+            .get("plugins")
+            .is_none()
     );
 }
 
@@ -357,9 +358,10 @@ async fn deleting_an_agent_or_revoking_a_node_removes_its_live_grants() {
     owner
         .send("POST", &format!("/api/nodes/{NODE}/revoke"), json!({}))
         .await;
-    assert_eq!(
-        owner.stored("agents", text(&kept, "id")).await["access"]["exclusiveNodes"],
-        json!([])
+    assert!(
+        owner.stored("agents", text(&kept, "id")).await["access"]
+            .get("exclusiveNodes")
+            .is_none()
     );
 }
 
@@ -451,4 +453,192 @@ async fn preview_counts_work_that_reduced_access_would_stop() {
         owner.stored("agents", text(&agent, "id")).await["access"]["sandbox"],
         "yolo"
     );
+}
+
+#[tokio::test]
+async fn deleting_an_mcp_connection_keeps_live_grants_and_marks_changed_agents() {
+    let owner = Owner::new().await;
+    owner.add_node().await;
+    let account = owner.add_service_account(json!([])).await;
+    let mcp = owner
+        .service
+        .mcps
+        .save(
+            &owner.service,
+            json!({ "name": "Docs", "transport": "stdio", "command": "node", "args": ["mcp.mjs"] }),
+            None,
+        )
+        .await
+        .unwrap();
+    let mcp = text(&mcp, "id").to_owned();
+
+    let mut agent = owner.create_agent("Connected").await;
+    agent["access"]["nodes"] = json!([LOCAL_NODE_ID, NODE]);
+    agent["access"]["exclusiveNodes"] = json!([NODE]);
+    agent["access"]["plugins"] = json!([account]);
+    agent["access"]["mcps"] = json!([mcp]);
+    let (status, saved) = owner.send("PUT", &path(&agent), agent).await;
+    assert_eq!(status, StatusCode::OK, "{saved}");
+    let unrelated = owner.create_agent("Unrelated").await;
+
+    owner
+        .service
+        .mcps
+        .disconnect(&owner.service, &mcp, true)
+        .await
+        .unwrap();
+
+    let after = owner.stored("agents", text(&saved, "id")).await;
+    assert_eq!(after["access"]["mcps"], json!([]));
+    assert_eq!(after["access"]["exclusiveNodes"], json!([NODE]));
+    assert_eq!(after["access"]["plugins"], json!([account]));
+    assert_ne!(after["revision"], saved["revision"]);
+    // Agents without that connection are left untouched.
+    let untouched = owner.stored("agents", text(&unrelated, "id")).await;
+    assert_eq!(untouched["revision"], unrelated["revision"]);
+
+    // A later unrelated save keeps the grants.
+    let mut renamed = after.clone();
+    renamed["description"] = "Renamed".into();
+    let (status, _) = owner.send("PUT", &path(&after), renamed).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        owner.stored(connections::KIND, &account).await["agentIds"],
+        json!([text(&saved, "id")])
+    );
+}
+
+#[tokio::test]
+async fn startup_gives_existing_agents_a_revision_and_keeps_empty_grants_absent() {
+    let root = TempDir::new().unwrap();
+    std::fs::create_dir(root.path().join("home")).unwrap();
+    let service = start(root.path()).await;
+    let mut legacy = service
+        .store
+        .get("agents", MAIN_AGENT_ID)
+        .await
+        .unwrap()
+        .unwrap();
+    legacy.as_object_mut().unwrap().remove("revision");
+    for key in ["exclusiveNodes", "plugins"] {
+        legacy["access"].as_object_mut().unwrap().remove(key);
+    }
+    service.store.put("agents", legacy).await.unwrap();
+    service.shutdown.cancel();
+    drop(service);
+
+    let restarted = start(root.path()).await;
+    let main = restarted
+        .store
+        .get("agents", MAIN_AGENT_ID)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(main["revision"].as_str().is_some_and(|r| !r.is_empty()));
+    // The previous release merges every access key into its policy: empty grants stay absent.
+    assert!(main["access"].get("exclusiveNodes").is_none());
+    assert!(main["access"].get("plugins").is_none());
+}
+
+#[tokio::test]
+async fn approved_delegation_access_matches_what_the_previous_release_computes() {
+    let owner = Owner::new().await;
+    owner.add_node().await;
+    let mut agent = owner.create_agent("Bot").await;
+    agent["access"]["projects"] = json!([]);
+    agent["access"]["nodes"] = json!([LOCAL_NODE_ID, NODE]);
+    agent["access"]["exclusiveNodes"] = json!([NODE]);
+    agent["access"]["github"] = false.into();
+    let (status, agent) = owner.send("PUT", &path(&agent), agent).await;
+    assert_eq!(status, StatusCode::OK, "{agent}");
+
+    // A delegation approved for this agent, as the instance editor saves it.
+    let instance = json!({
+        "id": GHOST,
+        "pluginId": "discord",
+        "name": "#support",
+        "enabled": true,
+        "revision": "r1",
+        "settings": {},
+        "agentId": agent["id"],
+        "projectId": null,
+        "grantedAccess": cairn_installation::agent_grants::approved_access(&agent),
+        "ownerAccessId": null,
+        "accessMode": "allowlist",
+        "userIds": ["1"],
+        "people": [],
+        "maxMessagesPerHour": 20,
+        "updatedAt": 0,
+    });
+    owner
+        .service
+        .store
+        .put(connections::KIND, instance)
+        .await
+        .unwrap();
+
+    // The previous release's policy() merges every saved access key.
+    let mut previous = json!({
+        "projects": null, "skills": null, "mcps": null, "mcpTools": {},
+        "installation": false, "github": true, "sandbox": "yolo",
+        "nodes": [LOCAL_NODE_ID],
+    });
+    cairn_installation::store::merge(&mut previous, &agent["access"]);
+    let stored = owner.stored(connections::KIND, GHOST).await;
+    assert_eq!(stored["grantedAccess"], previous);
+
+    // Removing the live grant keeps the delegation approved, on both releases.
+    let mut fewer = agent.clone();
+    fewer["access"]["exclusiveNodes"] = json!([]);
+    let (status, fewer) = owner.send("PUT", &path(&agent), fewer).await;
+    assert_eq!(status, StatusCode::OK, "{fewer}");
+    let stored = owner.stored(connections::KIND, GHOST).await;
+    let mut previous = json!({
+        "projects": null, "skills": null, "mcps": null, "mcpTools": {},
+        "installation": false, "github": true, "sandbox": "yolo",
+        "nodes": [LOCAL_NODE_ID],
+    });
+    cairn_installation::store::merge(&mut previous, &fewer["access"]);
+    assert_eq!(stored["grantedAccess"], previous);
+    assert!(cairn_installation::agent_grants::same_approval(
+        &fewer,
+        &stored["grantedAccess"]
+    ));
+}
+
+#[tokio::test]
+async fn a_held_grant_on_an_instance_awaiting_review_does_not_block_other_edits() {
+    let owner = Owner::new().await;
+    let agent = owner.create_agent("Reviewer").await;
+    let id = text(&agent, "id").to_owned();
+    // An instance of a package that is not active (for example awaiting review).
+    owner
+        .service
+        .store
+        .put(
+            connections::KIND,
+            json!({ "id": GHOST, "pluginId": "third-party", "name": "Pending", "agentIds": [id] }),
+        )
+        .await
+        .unwrap();
+    let mut held = owner.stored("agents", &id).await;
+    held["access"]["plugins"] = json!([GHOST]);
+    owner
+        .service
+        .store
+        .put("agents", held.clone())
+        .await
+        .unwrap();
+
+    let mut renamed = held.clone();
+    renamed["description"] = "Still editable".into();
+    let (status, saved) = owner.send("PUT", &path(&held), renamed).await;
+    assert_eq!(status, StatusCode::OK, "{saved}");
+    assert_eq!(saved["access"]["plugins"], json!([GHOST]));
+
+    // Granting it to another agent still requires an active package.
+    let mut other = owner.create_agent("Other").await;
+    other["access"]["plugins"] = json!([GHOST]);
+    let (status, _) = owner.send("PUT", &path(&other), other).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
 }
