@@ -151,6 +151,35 @@ pub async fn run(
     config: PeerConfig,
     stop: CancellationToken,
 ) {
+    run_inner(router, direct, config, stop, None).await;
+}
+
+/// Explicit construction seam for qualification launchers; the ordinary launcher
+/// never supplies overrides. Fault plans and control protocols belong to fixtures.
+pub struct PeerDependencies {
+    pub runtime: Arc<dyn webrtc::runtime::Runtime>,
+    pub crypto: Arc<dyn rtc::crypto::RTCCryptoProvider>,
+}
+
+pub type PeerFactory = Arc<dyn Fn() -> PeerDependencies + Send + Sync>;
+
+pub async fn run_with_factory(
+    router: Router,
+    direct: DirectConnections,
+    config: PeerConfig,
+    stop: CancellationToken,
+    factory: PeerFactory,
+) {
+    run_inner(router, direct, config, stop, Some(factory)).await;
+}
+
+async fn run_inner(
+    router: Router,
+    direct: DirectConnections,
+    config: PeerConfig,
+    stop: CancellationToken,
+    factory: Option<PeerFactory>,
+) {
     let mut events = direct.subscribe();
     let mut peers = HashMap::<String, mpsc::Sender<DirectSignal>>::new();
     let mut jobs = JoinSet::new();
@@ -188,6 +217,7 @@ pub async fn run(
                         let router = router.clone();
                         let traffic = traffic.clone();
                         let reassembly = reassembly.clone();
+                        let dependencies = factory.as_ref().map(|factory| factory());
                         let task = jobs.spawn(async move {
                             let span = tracing::debug_span!(PEER_TASK_SPAN);
                             let failed = CancellationToken::new();
@@ -195,6 +225,7 @@ pub async fn run(
                                 authorization,
                                 sdp,
                                 signals: receiver,
+                                dependencies,
                             };
                             let operation = serve_peer(
                                 router,
@@ -237,6 +268,7 @@ struct Negotiation {
     authorization: DirectAuthorization,
     sdp: String,
     signals: mpsc::Receiver<DirectSignal>,
+    dependencies: Option<PeerDependencies>,
 }
 
 async fn serve_peer(
@@ -252,6 +284,7 @@ async fn serve_peer(
         authorization,
         sdp,
         mut signals,
+        dependencies,
     } = negotiation;
     let (channels, mut incoming) = mpsc::channel(1);
     let aliases = Arc::new(PublicAliases::new(
@@ -276,10 +309,26 @@ async fn serve_peer(
         aliases: aliases.clone(),
     });
     let builder = PeerConnectionBuilder::new();
+    let (runtime, crypto) = dependencies.map_or_else(
+        || (None, None),
+        |dependencies| (Some(dependencies.runtime), Some(dependencies.crypto)),
+    );
     let builder = if config.public_ip.is_some() {
-        builder.with_runtime(Arc::new(AliasRuntime::new(aliases.clone())))
+        builder.with_runtime(Arc::new(AliasRuntime::new(aliases.clone(), runtime)))
+    } else if let Some(runtime) = runtime {
+        builder.with_runtime(runtime)
     } else {
         builder
+    };
+    let settings = SettingEngineBuilder::new()
+        .with_network_types(vec![NetworkType::Udp4, NetworkType::Udp6])
+        .with_multicast_dns_mode(MulticastDnsMode::Disabled)
+        .with_sctp_max_message_size(SctpMaxMessageSize::Bounded(16_384))
+        .with_sctp_max_receive_buffer_size(65_536);
+    let settings = if let Some(crypto) = crypto {
+        settings.with_crypto_provider(crypto)
+    } else {
+        settings
     };
     let peer: Arc<dyn PeerConnection> = Arc::new(
         builder
@@ -295,14 +344,7 @@ async fn serve_peer(
                     }])
                     .build(),
             )
-            .with_setting_engine(
-                SettingEngineBuilder::new()
-                    .with_network_types(vec![NetworkType::Udp4, NetworkType::Udp6])
-                    .with_multicast_dns_mode(MulticastDnsMode::Disabled)
-                    .with_sctp_max_message_size(SctpMaxMessageSize::Bounded(16_384))
-                    .with_sctp_max_receive_buffer_size(65_536)
-                    .build(),
-            )
+            .with_setting_engine(settings.build())
             .with_handler(handler)
             .with_udp_addrs(vec!["0.0.0.0:0", "[::]:0"])
             .with_data_channel_send_buffer_limit(65_536)

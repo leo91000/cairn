@@ -11,7 +11,7 @@ use cairn_installation::{
     vault::Vault,
 };
 use serde_json::{Value, json};
-use std::path::Path;
+use std::{collections::HashSet, path::Path};
 use tempfile::TempDir;
 
 const COMPLETE: &str = "The requested work is complete.";
@@ -417,6 +417,12 @@ async fn concurrent_messages_and_answers_are_idempotent_and_survive_restart() {
         .await
         .unwrap();
     assert_eq!(service.store.keys("push-outbox:").await.unwrap().len(), 1);
+    let pending =
+        cairn_installation::notifications::pending(&service, HashSet::new(), String::new(), 10)
+            .await
+            .unwrap();
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].id, question["id"].as_str().unwrap());
     let question_id = question["id"].as_str().unwrap();
     let answer = json!({ "id": id(), "answers": { "choice": ["A private answer"] } });
     let (a, b) = tokio::join!(
@@ -428,6 +434,22 @@ async fn concurrent_messages_and_answers_are_idempotent_and_survive_restart() {
     let detail = reopened.chat_detail(chat_id).await.unwrap();
     assert_eq!(detail["messages"].as_array().unwrap().len(), 2);
     assert_eq!(detail["questions"][0]["status"], "answering");
+    let pending =
+        cairn_installation::notifications::pending(&reopened, HashSet::new(), String::new(), 10)
+            .await
+            .unwrap();
+    assert!(
+        pending.is_empty(),
+        "An answered question must not be relayed after restart"
+    );
+    assert!(
+        reopened
+            .store
+            .keys("push-outbox:")
+            .await
+            .unwrap()
+            .is_empty()
+    );
     reopened
         .chat_acknowledge(&run_id, answer["id"].as_str().unwrap())
         .await

@@ -170,6 +170,15 @@ where
             cairn_installation::nodes::connector::connect(Path::new(directory), stop).await?;
         }
         "guest" => cairn_installation::microvm::guest::serve(stop).await?,
+        "native-controller" => cairn_installation::native::serve(stop).await?,
+        "native-watchdog" => {
+            cairn_installation::native::watchdog(
+                Path::new(arg(&args, 1, "Missing native lease file.")?),
+                arg(&args, 2, "Missing native attempt.")?,
+                stop,
+            )
+            .await?;
+        }
         "toolkit-env" => {
             let config = Config::load()?;
             let environment =

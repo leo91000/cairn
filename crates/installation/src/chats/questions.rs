@@ -250,7 +250,13 @@ fn answer_text(fields: &[QuestionField], answers: &BTreeMap<String, Vec<String>>
     format!("My answers to your questions:\n\n{}", parts.join("\n\n"))
 }
 
-fn answer(db: &Db<'_>, chat_id: &str, id: &str, input: &AnswerInput) -> Result<Question> {
+fn answer(
+    db: &Db<'_>,
+    chat_id: &str,
+    id: &str,
+    input: &AnswerInput,
+    origin: &crate::native::policy::Origin,
+) -> Result<Question> {
     chat(db, chat_id)?;
     let question = required(find_question(db, chat_id, id)?, "Question not found")?;
     let answers = serde_json::to_value(&input.answers)?;
@@ -281,7 +287,7 @@ fn answer(db: &Db<'_>, chat_id: &str, id: &str, input: &AnswerInput) -> Result<Q
             "text": answer_text(&question.fields, &input.answers),
         }),
     )?;
-    send(db, chat_id, message, Some((question, answers)))?;
+    send(db, chat_id, message, Some((question, answers)), origin)?;
     required(find_question(db, chat_id, id)?, "Question not found")
 }
 
@@ -346,13 +352,17 @@ impl Service {
     where
         F: FnOnce(&Db<'_>) -> Result<()> + Send + 'static,
     {
+        let origin = crate::native::policy::origin();
+        if origin.known() {
+            crate::native::policy::refresh_chat(self, chat_id).await?;
+        }
         let input = parse_as::<AnswerInput>("answer", input)?;
         let (chat_id, id) = (chat_id.to_owned(), id.to_owned());
         let question = self
             .store
             .transaction(move |db| {
                 authorize(db)?;
-                answer(db, &chat_id, &id, &input)
+                answer(db, &chat_id, &id, &input, &origin)
             })
             .await?;
         self.worker.notify();

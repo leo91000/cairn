@@ -146,7 +146,19 @@ impl Executor {
                 .join(run)
                 .join("workspace")
                 .join(project);
-            if value["source"] != target.to_string_lossy().as_ref() {
+            let expected = if crate::native::enabled() {
+                let plan: Value = serde_json::from_slice(
+                    &tokio::fs::read(plan_path(&super::node_data_dir(), attempt)).await?,
+                )?;
+                PathBuf::from(text(&plan, "guestDataRoot"))
+                    .join("runs")
+                    .join(run)
+                    .join("workspace")
+                    .join(project)
+            } else {
+                target.clone()
+            };
+            if value["source"] != expected.to_string_lossy().as_ref() {
                 return Err(Error::bad("Invalid project destination."));
             }
             let selection = json!({ "kind": "project", "projectId": project });
@@ -185,7 +197,7 @@ impl Executor {
 async fn stage_plan(session: &Session, data: &Path) -> Result<Value> {
     let descriptor = session.json("plan", &json!({})).await?;
     let mut plan = descriptor["plan"].clone();
-    if descriptor["dataRoot"] != data.to_string_lossy().as_ref() {
+    if !crate::native::enabled() && descriptor["dataRoot"] != data.to_string_lossy().as_ref() {
         return Err(Error::conflict(
             "Master and node DATA_DIR must match for portable VM paths.",
         ));
@@ -195,6 +207,23 @@ async fn stage_plan(session: &Session, data: &Path) -> Result<Value> {
         return Err(Error::conflict(
             "Remote execution requires managed provider authentication.",
         ));
+    }
+    if crate::native::enabled() {
+        let manager = PathBuf::from(text(&descriptor, "dataRoot"));
+        if !manager.is_absolute() {
+            return Err(Error::bad("Invalid manager data root."));
+        }
+        plan["guestDataRoot"] = descriptor["dataRoot"].clone();
+        for import in plan["imports"]
+            .as_array_mut()
+            .ok_or_else(|| Error::bad("Missing native imports."))?
+        {
+            let source = PathBuf::from(text(import, "source"));
+            let relative = source
+                .strip_prefix(&manager)
+                .map_err(|_| Error::bad("Native import outside manager storage."))?;
+            import["source"] = data.join(relative).to_string_lossy().into_owned().into();
+        }
     }
     let root = data.join("runs").join(text(&plan, "runId"));
     session.seed(json!({ "kind": "initial" }), &root).await?;
@@ -227,8 +256,7 @@ async fn grant_lease(session: &Session, data: &Path) -> Result<()> {
     let controller =
         std::env::var("RUNNER_URL").map_err(|_| Error::bad("Missing local runner."))?;
     let credential = crate::execution::secret(data, "runner-secret").await?;
-    let lease = session
-        .client
+    let lease = super::local_client()?
         .post(format!(
             "{}/runs/{}/lease",
             controller.trim_end_matches('/'),

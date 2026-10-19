@@ -153,7 +153,41 @@ pub(super) async fn invoke(
     args: Value,
     bearer: Option<&str>,
 ) -> Result<Value> {
-    let authorize = management_authorization(bearer);
+    let origin = crate::native::policy::origin();
+    let control = matches!(
+        name,
+        "restore_chat" | "resume_chat" | "restart_chat_session"
+    ) || (name == "set_chat_paused" && args["paused"] != true);
+    if control && origin.known() {
+        crate::native::policy::refresh_chat(s, text(&args, "chatId")).await?;
+    }
+    let management = management_authorization(bearer);
+    if control {
+        let (check, id, source) = (
+            management.clone(),
+            text(&args, "chatId").to_owned(),
+            origin.clone(),
+        );
+        s.store
+            .transaction(move |db| {
+                check(db)?;
+                let mut chat = required(db.get("chats", &id)?, "Chat not found")?;
+                crate::native::policy::authorize_chat(db, &mut chat, &source)?;
+                db.put("chats", &chat)?;
+                Ok(())
+            })
+            .await?;
+    }
+    let control_id = control.then(|| text(&args, "chatId").to_owned());
+    let control_origin = origin.clone();
+    let authorize = move |db: &Db<'_>| {
+        management(db)?;
+        if let Some(id) = &control_id {
+            let chat = required(db.get("chats", id)?, "Chat not found")?;
+            crate::native::policy::chat_grant(db, &chat, &control_origin)?;
+        }
+        Ok(())
+    };
     if matches!(
         name,
         "list_chats" | "get_chat" | "list_chat_questions" | "read_chat_content"
@@ -223,6 +257,13 @@ pub(super) async fn invoke(
             .await;
     }
 
+    if origin.known() {
+        if name == "create_chat" {
+            crate::native::policy::refresh_agent(s, text(&args, "agentId")).await?;
+        } else if matches!(name, "send_chat_message" | "edit_chat_message") {
+            crate::native::policy::refresh_chat(s, text(&args, "chatId")).await?;
+        }
+    }
     let name = name.to_owned();
     let result = s
         .store
@@ -236,13 +277,13 @@ pub(super) async fn invoke(
                     }
                     crate::conversation_lifecycle::request_new_session(db, id)
                 }
-                "create_chat" => chats::create_in(db, args),
-                "send_chat_message" => chats::send_in(db, id, args["message"].clone()),
+                "create_chat" => chats::create_as(db, args, &origin),
+                "send_chat_message" => chats::send(db, id, crate::validation::parse("message", args["message"].clone())?, None, &origin),
                 "edit_chat_message" => {
                     let mut message = args["message"].clone();
                     message["id"] = args["messageId"].clone();
                     let message = crate::validation::parse("message", message)?;
-                    chats::edit(db, id, text(&args, "messageId"), Some(message))
+                    chats::edit_as(db, id, text(&args, "messageId"), Some(message), &origin)
                 }
                 "delete_chat_message" => chats::edit(db, id, text(&args, "messageId"), None),
                 "set_chat_paused" => chats::pause_in(db, id, args["paused"] == true),

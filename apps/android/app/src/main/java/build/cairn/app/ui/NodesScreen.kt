@@ -22,6 +22,8 @@ fun NodesScreen(vm: CairnViewModel, state: Workspace, openRun: (String) -> Unit 
     var adding by remember { mutableStateOf(false) }
     var storage by remember { mutableStateOf<ExecutionNode?>(null) }
     var name by remember { mutableStateOf("") }
+    var backend by remember { mutableStateOf("firecracker") }
+    var nativeCallers by remember { mutableStateOf<List<NativeCaller>>(emptyList()) }
     // Never persist enrollment secrets in saved instance state.
     var enrollment by remember { mutableStateOf<NodeEnrollment?>(null) }
     // Machines known when the code was created, to recognise the newly connected one.
@@ -35,6 +37,8 @@ fun NodesScreen(vm: CairnViewModel, state: Workspace, openRun: (String) -> Unit 
     var showRevoked by remember { mutableStateOf(false) }
     suspend fun load() {
         nodes = vm.api.get("/nodes")
+        if (nodes.any { it.capabilities.backend == "native" })
+            nativeCallers = vm.api.get("/nodes/native-callers")
         if (enrollment == null) return
         nodes
             .firstOrNull { !it.local && !it.revoked && it.id !in knownBeforeEnrollment }
@@ -42,7 +46,7 @@ fun NodesScreen(vm: CairnViewModel, state: Workspace, openRun: (String) -> Unit 
                 enrollment = null
                 adding = false
                 vm.notify("${it.name} est connectée")
-                granting = it
+                if (it.capabilities.backend == "native") editing = it else granting = it
             }
     }
     Poll("nodes", 10_000) {
@@ -71,6 +75,12 @@ fun NodesScreen(vm: CairnViewModel, state: Workspace, openRun: (String) -> Unit 
             .forEach { node ->
                 Panel {
                     Text(node.name, style = MaterialTheme.typography.titleMedium)
+                    Text(
+                        if (node.capabilities.backend == "native")
+                            "Processus natif · GPU partagé · personnes de confiance"
+                        else "VM Firecracker",
+                        style = MaterialTheme.typography.bodySmall,
+                    )
                     Text(
                         when (node.status) {
                             "online" -> "Connectée"
@@ -225,7 +235,8 @@ fun NodesScreen(vm: CairnViewModel, state: Workspace, openRun: (String) -> Unit 
                             Button(onClick = { granting = node }) { Text("Choisir les agents") }
                         else TextButton(onClick = { granting = node }) { Text("Agents") }
                         TextButton(onClick = { editing = node }) { Text("Configurer") }
-                        TextButton(onClick = { storage = node }) { Text("Stockage") }
+                        if (node.capabilities.backend != "native")
+                            TextButton(onClick = { storage = node }) { Text("Stockage") }
                         if (!node.local)
                             TextButton(onClick = { revoking = node }) { Text("Révoquer") }
                     }
@@ -262,6 +273,13 @@ fun NodesScreen(vm: CairnViewModel, state: Workspace, openRun: (String) -> Unit 
                 style = MaterialTheme.typography.bodyMedium,
             )
             Field("Nom de la machine", name, { name = it })
+            Toggle("Exécution native sur l’hôte", backend == "native") {
+                backend = if (it) "native" else "firecracker"
+            }
+            if (backend == "native")
+                Text(
+                    "Linux x86-64 avec systemd. Le GPU reste utilisable par le bureau, mais les travaux intensifs peuvent le ralentir. L’isolation est plus faible qu’une VM."
+                )
             Button(
                 enabled = !state.busy && name.isNotBlank(),
                 onClick = {
@@ -271,7 +289,10 @@ fun NodesScreen(vm: CairnViewModel, state: Workspace, openRun: (String) -> Unit 
                             api.send(
                                 "POST",
                                 "/nodes/enrollments",
-                                buildJsonObject { put("name", name) },
+                                buildJsonObject {
+                                    put("name", name)
+                                    put("backend", backend)
+                                },
                             )
                     }
                 },
@@ -282,7 +303,10 @@ fun NodesScreen(vm: CairnViewModel, state: Workspace, openRun: (String) -> Unit 
                 val command = it.installCommand
                 if (command != null) {
                     Text(
-                        "1. Sur la machine Linux (x86-64 avec KVM, Docker, curl et systemd), lancez :"
+                        if (it.backend == "native")
+                            "1. Sur la machine Linux x86-64 avec Python 3, curl et systemd, lancez :"
+                        else
+                            "1. Sur la machine Linux (x86-64 avec KVM, Docker, curl et systemd), lancez :"
                     )
                     Code(command)
                     CopyButton("Copier la commande", command)
@@ -339,7 +363,7 @@ fun NodesScreen(vm: CairnViewModel, state: Workspace, openRun: (String) -> Unit 
         }
     }
     editing?.let { node ->
-        NodeEditor(node, state, { editing = null }) { config ->
+        NodeEditor(node, state, nativeCallers, { editing = null }) { config ->
             vm.perform {
                 api.request("PUT", "/nodes/${node.id}", wireJson.encodeToJsonElement(config))
                 editing = null
@@ -405,7 +429,7 @@ fun NodesScreen(vm: CairnViewModel, state: Workspace, openRun: (String) -> Unit 
                         " Les conversations en cours se mettent en pause après le délai de déconnexion, puis reprennent depuis leur dernier point de reprise sur une autre machine autorisée qui a de la capacité. Celles fixées à cette machine, ou sans point de reprise, attendent."
                     )
                 append(
-                    "\n\nLes fichiers restent sur la machine. Pour la désinstaller, lancez dessus :\n$UNINSTALL_COMMAND\n(la dernière commande supprime aussi les disques de conversation conservés sur la machine)."
+                    "\n\nLes fichiers restent sur la machine. Pour la désinstaller, lancez dessus :\n${if (node.capabilities.backend == "native") "sudo systemctl disable --now cairn-native-node; sudo rm -rf /etc/systemd/system/cairn-native-node.service /opt/cairn-native /var/lib/cairn-native" else UNINSTALL_COMMAND}\n(la dernière commande supprime aussi les disques de conversation conservés sur la machine)."
                 )
             },
             state.busy,
@@ -444,28 +468,36 @@ private fun AgentGrants(
             "Les agents choisis peuvent exécuter des conversations sur cette machine. Un tag ou une capacité ne donne jamais d’accès à lui seul."
         )
         Panel {
-            state.agents.forEach { agent ->
-                if (agent.id in everywhere) Text("${agent.name} (autorisé sur toutes les nodes)")
-                else
-                    Toggle(agent.name, agent.id in selected) {
-                        if (!state.busy)
-                            selected = if (it) selected + agent.id else selected - agent.id
-                    }
-            }
+            state.agents
+                .filter {
+                    (it.access.backend == "native") == (node.capabilities.backend == "native")
+                }
+                .forEach { agent ->
+                    if (agent.id in everywhere)
+                        Text("${agent.name} (autorisé sur toutes les nodes)")
+                    else
+                        Toggle(agent.name, agent.id in selected) {
+                            if (!state.busy)
+                                selected = if (it) selected + agent.id else selected - agent.id
+                        }
+                }
         }
     }
 }
 
 @Composable
-private fun NodeEditor(
+internal fun NodeEditor(
     node: ExecutionNode,
     state: Workspace,
+    nativeCallers: List<NativeCaller>,
     dismiss: () -> Unit,
     save: (NodeConfiguration) -> Unit,
 ) {
     var name by remember(node.id) { mutableStateOf(node.name) }
     var tags by remember(node.id) { mutableStateOf(node.tags.joinToString(", ")) }
     var accepting by remember(node.id) { mutableStateOf(node.accepting) }
+    var nativeEnabled by remember(node.id) { mutableStateOf(node.nativeEnabled) }
+    var nativeAccounts by remember(node.id) { mutableStateOf(node.nativeAccounts.toSet()) }
     var slots by remember(node.id) { mutableStateOf(node.slots.toString()) }
     var exclusiveAgents by remember(node.id) { mutableStateOf(node.exclusiveAgents.toSet()) }
     var cpu by remember(node.id) { mutableStateOf(node.limits.cpu.toString()) }
@@ -494,6 +526,8 @@ private fun NodeEditor(
                     NodeResources(cpu.toInt(), memoryMiB!!, diskMiB!!),
                     slots.toInt(),
                     exclusiveAgents.toList(),
+                    if (node.capabilities.backend == "native") nativeEnabled else null,
+                    if (node.capabilities.backend == "native") nativeAccounts.toList() else null,
                 )
             )
         },
@@ -506,7 +540,12 @@ private fun NodeEditor(
         }
         Panel {
             Text("Slots et budgets partagés", style = MaterialTheme.typography.titleSmall)
-            Field("Slots d’exécution", slots, { slots = it }, enabled = !state.busy)
+            Field(
+                "Slots d’exécution",
+                slots,
+                { slots = it },
+                enabled = !state.busy && node.capabilities.backend != "native",
+            )
             Field("Budget CPU partagé", cpu, { cpu = it }, enabled = !state.busy)
             Field("Budget RAM partagé (Gio)", memory, { memory = it }, enabled = !state.busy)
             Field("Budget disque partagé (Gio)", disk, { disk = it }, enabled = !state.busy)
@@ -515,21 +554,36 @@ private fun NodeEditor(
                 style = MaterialTheme.typography.bodySmall,
             )
         }
-        Panel {
-            Text("Réservation exclusive", style = MaterialTheme.typography.titleSmall)
-            Text(
-                "Les agents autorisés peuvent suspendre les autres tâches de cette machine pendant leurs travaux intensifs. Cet accès est distinct du droit d’y exécuter une conversation."
-            )
-            if (!node.exclusiveReservations)
-                Text("Mettez à jour le runtime de cette machine pour activer les réservations.")
-            state.agents.forEach { agent ->
-                Toggle("Autoriser ${agent.name}", agent.id in exclusiveAgents) {
-                    if (!state.busy)
-                        exclusiveAgents =
-                            if (it) exclusiveAgents + agent.id else exclusiveAgents - agent.id
+        if (node.capabilities.backend == "native")
+            Panel {
+                Text("Exécution native", style = MaterialTheme.typography.titleSmall)
+                Text(
+                    "Seuls les agents natifs et les personnes sélectionnées peuvent travailler ici. Retirer une autorisation arrête les travaux concernés à l’expiration de leur bail."
+                )
+                Toggle("Activer l’exécution native", nativeEnabled) { nativeEnabled = it }
+                nativeCallers.forEach { person ->
+                    Toggle(person.email, person.id in nativeAccounts) { selected ->
+                        nativeAccounts =
+                            if (selected) nativeAccounts + person.id else nativeAccounts - person.id
+                    }
                 }
             }
-        }
+        if (node.capabilities.backend != "native")
+            Panel {
+                Text("Réservation exclusive", style = MaterialTheme.typography.titleSmall)
+                Text(
+                    "Les agents autorisés peuvent suspendre les autres tâches de cette machine pendant leurs travaux intensifs. Cet accès est distinct du droit d’y exécuter une conversation."
+                )
+                if (!node.exclusiveReservations)
+                    Text("Mettez à jour le runtime de cette machine pour activer les réservations.")
+                state.agents.forEach { agent ->
+                    Toggle("Autoriser ${agent.name}", agent.id in exclusiveAgents) {
+                        if (!state.busy)
+                            exclusiveAgents =
+                                if (it) exclusiveAgents + agent.id else exclusiveAgents - agent.id
+                    }
+                }
+            }
         Toggle("Accepter de nouveaux travaux", accepting, { if (!state.busy) accepting = it })
     }
 }

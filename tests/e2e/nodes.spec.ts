@@ -250,3 +250,64 @@ test('conversation placement distinguishes a preference from a strict pin and sh
   await page.setViewportSize({ width: 390, height: 700 })
   await expect(composer).toBeFocused()
 })
+
+test('native enrollment requires explicit people and native agent grants', async ({ page, workspace }) => {
+  test.setTimeout(60000)
+  await page.goto(workspacePath('/nodes'))
+  await authenticateWorkspace(page)
+  await page.getByRole('button', { name: 'Add a machine', exact: true }).click()
+  const enrollment = page.getByRole('dialog', { name: 'Add a machine', exact: true })
+  await enrollment.getByLabel('Execution backend').selectOption('native')
+  await expect(enrollment).toContainText('weaker isolation')
+  await enrollment.getByLabel('Machine name').fill('Native desktop')
+  await enrollment.getByLabel('Direct manager address').fill(workspace.url)
+  await enrollment.getByRole('button', { name: 'Create enrollment code' }).click()
+  const code = await enrollment.getByLabel('Single-use enrollment code').textContent()
+  const response = await page.request.post(`${workspace.installationUrl}/internal/nodes/enroll`, {
+    data: {
+      code,
+      name: 'Native desktop',
+      protocol: 1,
+      runtimeId: 'fixture',
+      capabilities: {
+        backend: 'native',
+        os: 'linux',
+        arch: 'x86_64',
+        cpu: 8,
+        memoryMiB: 16384,
+        diskMiB: 65536,
+        kvm: false,
+        fuse: false,
+      },
+    },
+  })
+  expect(response.ok()).toBe(true)
+  await page.reload()
+  const node = page.getByRole('article').filter({ has: page.getByRole('heading', { name: 'Native desktop' }) })
+  await expect(node).toContainText('Native process')
+  await expect(node.getByRole('button', { name: 'Storage', exact: true })).toHaveCount(0)
+  await node.getByRole('button', { name: 'Configure', exact: true }).click()
+  const dialog = page.getByRole('dialog', { name: 'Configure node' })
+  await expect(dialog.getByLabel('Execution slots')).toBeDisabled()
+  await expect(dialog.getByRole('group', { name: 'Exclusive reservations' })).toHaveCount(0)
+  await expect(dialog.getByLabel('Enable native execution')).not.toBeChecked()
+  const callers = await workspace.api('/api/nodes/native-callers')
+  expect(callers.length).toBeGreaterThan(0)
+  await dialog.getByLabel(callers[0].email, { exact: true }).check()
+  await dialog.getByLabel('Enable native execution').check()
+  await dialog.getByRole('button', { name: 'Save', exact: true }).click()
+  await expect(dialog).toHaveCount(0)
+  const configured = (await workspace.api('/api/nodes')).find((value: { name: string }) => value.name === 'Native desktop')
+  expect(configured).toMatchObject({ nativeEnabled: true, nativeAccounts: [callers[0].id], slots: 1 })
+  const agent = await workspace.api('/api/agents', 'POST', { name: 'Native worker', access: { backend: 'native', nodes: [configured.id] } })
+  await node.getByRole('button', { name: 'Agents', exact: true }).click()
+  const grants = page.getByRole('dialog')
+  await expect(grants.getByLabel(agent.name)).toBeChecked()
+  await expect(grants).not.toContainText('Main agent')
+  await page.keyboard.press('Escape')
+  await node.getByRole('button', { name: 'Configure', exact: true }).click()
+  await expect(dialog.getByLabel(callers[0].email, { exact: true })).toBeChecked()
+  await dialog.getByLabel('Enable native execution').uncheck()
+  await dialog.getByRole('button', { name: 'Save', exact: true }).click()
+  expect((await workspace.api('/api/nodes')).find((value: { id: string }) => value.id === configured.id).nativeEnabled).toBe(false)
+})

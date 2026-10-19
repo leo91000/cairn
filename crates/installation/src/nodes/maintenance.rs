@@ -66,6 +66,14 @@ pub async fn downloads(State(app): State<App>, request: Request) -> Result<Respo
         return Err(Error::method_not_allowed("Method not allowed."));
     }
     let (kind, body) = match request.uri().path() {
+        "/internal/nodes/native-host.py" => (
+            "text/x-python",
+            include_str!("../../../../deploy/nodes/native-host.py").into(),
+        ),
+        "/internal/nodes/native-install.sh" => (
+            "text/x-shellscript",
+            include_str!("../../../../deploy/nodes/native-install.sh").into(),
+        ),
         "/internal/nodes/release" => ("application/json", advertise(&app.service).await?),
         "/internal/nodes/host.py" => (
             "text/x-python",

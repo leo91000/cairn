@@ -22,6 +22,18 @@ fn under(path: &str, prefix: &str) -> bool {
 }
 
 pub async fn dispatch(s: &Arc<Service>, input: &Input) -> Result<Value> {
+    crate::native::policy::authorize_request(s, input).await?;
+    let caller = input
+        .identity
+        .as_ref()
+        .filter(|identity| identity.mcp_scopes.is_none())
+        .map(|identity| identity.account_id.clone());
+    crate::native::policy::CALLER
+        .scope(caller, dispatch_inner(s, input))
+        .await
+}
+
+async fn dispatch_inner(s: &Arc<Service>, input: &Input) -> Result<Value> {
     if under(&input.path, "/api/nodes") {
         return crate::nodes::admin(s, input).await;
     }

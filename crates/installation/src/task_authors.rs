@@ -2,7 +2,7 @@
 use crate::{
     auth::{InstallationIdentity, InstallationRole},
     error::{Error, Result},
-    service::Service,
+    service::{Service, creation_id, replayed_creation},
     validation::parse,
 };
 use cairn_protocol::{TaskAuthorGrant, TaskAuthorPolicy};
@@ -36,7 +36,42 @@ impl Service {
         bearer: Option<String>,
     ) -> Result<Value> {
         let _guard = self.task_author_lock.lock().await;
-        let input = parse("task", input)?;
+        let creation_id = creation_id(&input, existing)?;
+        let mut input = parse("task", input)?;
+        // Replays are reads of the committed task, never a second schedule save.
+        // Retain the same author and execution grant checks as an explicit edit.
+        let previous = if let Some(id) = creation_id.clone() {
+            self.store
+                .read(move |db| replayed_creation(db, "tasks", Some(&id)))
+                .await?
+        } else {
+            None
+        };
+        if let Some(previous) = previous {
+            if let Some(identity) = identity
+                && identity.role == InstallationRole::Member
+                && previous["authorId"] != identity.account_id
+            {
+                return Err(Error::forbidden(
+                    "Only the task author or installation owner can recover this creation.",
+                ));
+            }
+            self.synchronize_task_authors_locked().await?;
+            let id = previous["id"].as_str().unwrap().to_owned();
+            return self
+                .store
+                .read(move |db| {
+                    let task = crate::error::required(db.get("tasks", &id)?, "Task not found")?;
+                    if let Some(bearer) = bearer {
+                        crate::installation_mcp::authorize_task_in(db, &bearer, &task, Some(&id))?;
+                    }
+                    Ok(task)
+                })
+                .await;
+        }
+        if let Some(id) = creation_id {
+            input["creationId"] = id.into();
+        }
 
         if let Some(id) = existing {
             let previous = self.get("tasks", id).await?;
@@ -49,7 +84,7 @@ impl Service {
                 && (input["archived"] == previous_input["archived"] || input["archived"] == true)
                 && unchanged_content == previous_input;
             if only_reduces_execution {
-                return self.save_task(input, existing, None, bearer).await;
+                return self.save_task(input, existing, None, bearer, true).await;
             }
 
             if let Some(identity) = identity
@@ -74,7 +109,7 @@ impl Service {
             None
         };
 
-        self.save_task(input, existing, author, bearer).await
+        self.save_task(input, existing, author, bearer, false).await
     }
 
     pub async fn synchronize_task_authors(&self) -> Result<()> {

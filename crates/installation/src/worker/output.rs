@@ -142,7 +142,7 @@ pub(super) async fn record(
         let run = s.store.run(id).await?;
         let first_rejected = !previously_launched
             && run["sessionId"].is_null()
-            && checkpoint.read(RunCheckpoint::firecracker).await;
+            && checkpoint.read(RunCheckpoint::managed).await;
         if first_rejected && run["chatExecution"].is_object() {
             let mut execution = run["chatExecution"].clone();
             execution["recovery"] = false.into();

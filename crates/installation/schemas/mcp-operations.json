@@ -25,6 +25,15 @@
           "minLength": 1,
           "maxLength": 100
         },
+        "provider": {
+          "default": "codex",
+          "type": "string",
+          "enum": [
+            "codex",
+            "claude",
+            "opencode"
+          ]
+        },
         "description": {
           "default": "",
           "type": "string",
@@ -38,12 +47,8 @@
         "reasoning": {
           "default": "high",
           "type": "string",
-          "enum": [
-            "low",
-            "medium",
-            "high",
-            "xhigh"
-          ]
+          "maxLength": 40,
+          "pattern": "^(?:[a-z][a-z0-9_-]*)?$"
         },
         "instructions": {
           "default": "",
@@ -58,6 +63,7 @@
         },
         "access": {
           "default": {
+            "backend": "firecracker",
             "nodes": [
               "00000000-0000-4000-8000-000000000002"
             ],
@@ -71,6 +77,14 @@
           },
           "type": "object",
           "properties": {
+            "backend": {
+              "default": "firecracker",
+              "type": "string",
+              "enum": [
+                "firecracker",
+                "native"
+              ]
+            },
             "nodes": {
               "default": [
                 "00000000-0000-4000-8000-000000000002"
@@ -177,6 +191,7 @@
             }
           },
           "required": [
+            "backend",
             "nodes",
             "projects",
             "skills",
@@ -191,6 +206,7 @@
       },
       "required": [
         "name",
+        "provider",
         "description",
         "model",
         "reasoning",
@@ -218,6 +234,14 @@
         "agent": {
           "type": "object",
           "properties": {
+            "provider": {
+              "type": "string",
+              "enum": [
+                "codex",
+                "claude",
+                "opencode"
+              ]
+            },
             "name": {
               "type": "string",
               "minLength": 1,
@@ -233,12 +257,8 @@
             },
             "reasoning": {
               "type": "string",
-              "enum": [
-                "low",
-                "medium",
-                "high",
-                "xhigh"
-              ]
+              "maxLength": 40,
+              "pattern": "^(?:[a-z][a-z0-9_-]*)?$"
             },
             "instructions": {
               "type": "string",
@@ -252,6 +272,13 @@
             "access": {
               "type": "object",
               "properties": {
+                "backend": {
+                  "type": "string",
+                  "enum": [
+                    "firecracker",
+                    "native"
+                  ]
+                },
                 "nodes": {
                   "anyOf": [
                     {

@@ -152,7 +152,7 @@ async fn recovers_controller(
     cancel: &CancellationToken,
     error: &Error,
 ) -> Result<bool> {
-    if !error.is_unavailable() || !saved.firecracker() {
+    if !error.is_unavailable() || !saved.managed() {
         return Ok(false);
     }
     let run = s.store.run(&checkpoint.id).await?;
@@ -253,10 +253,18 @@ async fn release(
     }
     s.mcps.revoke_run(s, run_id).await?;
     requeue_pending_move(s, checkpoint).await?;
-    if fenced && saved.firecracker() {
+    if fenced && saved.managed() {
         let run = s.store.run(run_id).await?;
         if run["status"] == RunStatus::Succeeded && crate::nodes::publication::protected(&run) {
             crate::nodes::publication::request(s, run_id).await?;
+            if saved
+                .prepared()
+                .is_some_and(|prepared| prepared["backend"] == "native")
+            {
+                // Native checkpoints are stopped file streams. Finish this turn's
+                // publication before admitting another writer to the conversation.
+                crate::nodes::publication::attempt(s, &s.store.run(run_id).await?).await;
+            }
         }
     }
     if fenced {

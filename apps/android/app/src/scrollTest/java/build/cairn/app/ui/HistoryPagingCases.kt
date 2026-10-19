@@ -10,10 +10,15 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.asAndroidBitmap
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.semantics.LiveRegionMode
+import androidx.compose.ui.semantics.SemanticsActions
+import androidx.compose.ui.semantics.SemanticsProperties
 import androidx.compose.ui.test.*
 import androidx.compose.ui.test.junit4.ComposeContentTestRule
 import androidx.compose.ui.test.junit4.v2.createComposeRule
+import androidx.compose.ui.unit.Density
 import androidx.compose.ui.unit.dp
 import build.cairn.app.data.LiveSnapshot
 import java.io.File
@@ -369,5 +374,72 @@ abstract class HistoryPagingCases(
         val before = compose.runOnIdle { offset(40)!! }
         applyPage(16, more = false)
         compose.runOnIdle { assertEquals(before, offset(40)) }
+    }
+
+    @Test
+    fun pagingErrorFitsANarrowScreenWithLargeText() {
+        val message = "Historique temporairement indisponible."
+        compose.setContent {
+            val density = LocalDensity.current
+            CompositionLocalProvider(LocalDensity provides Density(density.density, 1.5f)) {
+                CairnTheme("dark") {
+                    Surface(Modifier.width(320.dp).height(480.dp)) {
+                        Box(Modifier.fillMaxSize().testTag("narrow-history")) {
+                            HistoryStatus(
+                                LiveSnapshot(hasOlder = true, olderError = message),
+                                rememberLazyListState(),
+                                retry = {},
+                            )
+                        }
+                    }
+                }
+            }
+        }
+        compose.waitForIdle()
+
+        fun layout(text: String): androidx.compose.ui.text.TextLayoutResult {
+            val results = mutableListOf<androidx.compose.ui.text.TextLayoutResult>()
+            compose
+                .onNodeWithText(text)
+                .fetchSemanticsNode()
+                .config[SemanticsActions.GetTextLayoutResult]
+                .action!!
+                .invoke(results)
+            return results.single()
+        }
+        assertEquals("The retry label must not break mid-word", 1, layout("Réessayer").lineCount)
+        assertFalse("The whole error must stay readable", layout(message).hasVisualOverflow)
+
+        // Like the web's 90% width, the pill keeps a margin from the screen edges.
+        val margin = with(compose.density) { 12.dp.toPx() } - 0.5f
+        val screen = compose.onNodeWithTag("narrow-history").getBoundsInRoot()
+        val pill =
+            compose
+                .onNode(
+                    SemanticsMatcher.expectValue(
+                        SemanticsProperties.LiveRegion,
+                        LiveRegionMode.Polite,
+                    )
+                )
+                .fetchSemanticsNode()
+                .boundsInRoot
+        with(compose.density) {
+            assertTrue(pill.left - screen.left.toPx() >= margin)
+            assertTrue(screen.right.toPx() - pill.right >= margin)
+        }
+
+        // Like the web's role="status", accessibility services hear the paging status.
+        compose
+            .onNode(
+                hasText(message) and
+                    hasAnyAncestor(
+                        SemanticsMatcher.expectValue(
+                            SemanticsProperties.LiveRegion,
+                            LiveRegionMode.Polite,
+                        )
+                    )
+            )
+            .assertIsDisplayed()
+        capture("history-paging-narrow-error")
     }
 }

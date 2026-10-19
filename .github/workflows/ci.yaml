@@ -82,7 +82,7 @@ jobs:
           restore-keys: rust-${{ runner.os }}-1.97.1-debug0-
       - name: Build the browser-test backend and frontend
         run: |
-          cargo build --locked --bin cairn --example worker_fixture --example network_direct_client --features ublk
+          cargo build --locked --bin cairn --example worker_fixture --example network_direct_client --example network_qualification --features ublk
           cargo build --locked -p cairn-beacon --bin cairn-beacon --example network_stun_server
           pnpm exec vite build --config apps/web/vite.config.ts
       - uses: actions/upload-artifact@v7.0.1
@@ -93,6 +93,7 @@ jobs:
             target/debug/cairn-beacon
             target/debug/examples/worker_fixture
             target/debug/examples/network_direct_client
+            target/debug/examples/network_qualification
             target/debug/examples/network_stun_server
           retention-days: 1
       - uses: actions/upload-artifact@v7.0.1
@@ -146,17 +147,19 @@ jobs:
         run: pnpm check
       - run: |
           node --import tsx scripts/backend-schemas.mjs
-          git diff --exit-code -- crates/installation/schemas/inputs.json
+          git diff --exit-code -- crates/installation/schemas/
           cargo clippy --locked --workspace --all-targets --features ublk-prototype -- -D warnings
           node scripts/test-backend.mjs --features ublk-prototype
           # Also compile the browser-test binaries into the cache that later build jobs restore.
-          cargo build --locked --bin cairn --example worker_fixture --example network_direct_client --features ublk
+          cargo build --locked --bin cairn --example worker_fixture --example network_direct_client --example network_qualification --features ublk
           cargo build --locked -p cairn-beacon --bin cairn-beacon --example network_stun_server
       - name: Validate node supervisor and S3 recovery
         run: |
           python3 scripts/tests/guest_trim_test.py
           python3 scripts/tests/guest_projects_test.py
           python3 scripts/tests/node_supervisor_test.py
+          python3 deploy/nodes/test_native_host.py
+          bash -n deploy/nodes/native-install.sh
           python3 scripts/tests/installation_installer_test.py
           python3 scripts/tests/compressed_swap_test.py
           python3 scripts/tests/installation_updates_test.py
@@ -166,6 +169,22 @@ jobs:
           python3 -m venv .node-s3-test
           .node-s3-test/bin/pip install 'moto[server]==5.2.3' awscli
           PATH="$PWD/.node-s3-test/bin:$PATH" .node-s3-test/bin/python scripts/tests/node_s3_test.py
+  native-runtime:
+    name: Native Linux process ownership (no GPU)
+    needs: [resolve, build]
+    if: needs.resolve.outputs.reuse != 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: actions/download-artifact@v8.0.1
+        with:
+          name: browser-backend
+          path: target/debug/
+      - name: Qualify real systemd workload ownership and crash recovery
+        run: |
+          chmod +x target/debug/cairn
+          sudo env CAIRN_NATIVE_DISPOSABLE_HOST=1 python3 scripts/tests/native_runtime_test.py target/debug/cairn
   browser:
     services:
       postgres:
@@ -296,12 +315,14 @@ jobs:
           name: browser-backend
           path: target/debug/
       - run: chmod +x target/debug/cairn target/debug/cairn-beacon target/debug/examples/network_direct_client target/debug/examples/network_stun_server
+      - run: chmod +x target/debug/examples/network_qualification
+      - run: pnpm exec vite build --config tests/network-qualification.vite.ts
       - name: Validate real network topology and authenticated sessions
         run: |
           python3 tests/network_probe_test.py
           python3 tests/network_bench_test.py
           python3 tests/stun_docker_test.py
-          for scenario in same-lan mdns-only-client nat-client nat-installation nat-both udp-blocked symmetric-nat symmetric-client same-server network-change packet-loss; do
+          for scenario in same-lan mdns-only-client nat-client nat-installation nat-both udp-blocked symmetric-nat symmetric-client same-server network-change packet-loss qualification; do
             python3 tests/network-bench.py "$scenario" --output "test-results/network/$scenario.json"
           done
       - uses: actions/upload-artifact@v7.0.1
@@ -688,8 +709,8 @@ jobs:
   publish:
     # The Intel nested Android test needs hardware GitHub does not provide; it runs locally
     # before releases when Android or runner changes need it (docs/DEPLOYMENT.md) and does not gate CI.
-    needs: [resolve, quality, browser, network-bench, image, beacon-image]
-    if: always() && !cancelled() && needs.resolve.outputs.reuse != 'true' && needs.quality.result == 'success' && needs.browser.result == 'success' && needs.network-bench.result == 'success' && needs.image.result == 'success' && needs.image.outputs.published == 'true' && needs.beacon-image.result == 'success' && needs.beacon-image.outputs.published == 'true'
+    needs: [resolve, quality, browser, network-bench, native-runtime, image, beacon-image]
+    if: always() && !cancelled() && needs.resolve.outputs.reuse != 'true' && needs.quality.result == 'success' && needs.browser.result == 'success' && needs.network-bench.result == 'success' && needs.native-runtime.result == 'success' && needs.image.result == 'success' && needs.image.outputs.published == 'true' && needs.beacon-image.result == 'success' && needs.beacon-image.outputs.published == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:

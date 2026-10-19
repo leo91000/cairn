@@ -146,13 +146,20 @@ impl<'a> Request<'a> {
         // An existing environment stays where it is unless it is moving.
         let existing = self.moving || self.checkpoint["nodeId"].as_str().is_none_or(|p| p == id);
         let local_unconfigured = node["local"] == true && !configured;
-        let ready = local_unconfigured
+        let native = crate::native::policy::native(&self.run["snapshot"]["agent"]);
+        if native != crate::native::policy::node_native(node) {
+            return false;
+        }
+        let ready = (native
+            && node["executionReady"] == true
+            && super::seen_within(node, FRESH_HEARTBEAT_MS))
+            || local_unconfigured
             || (node["capabilities"]["kvm"] == true
                 && node["executionReady"] == true
                 && super::seen_within(node, FRESH_HEARTBEAT_MS));
         // A moved disk is mounted from its published S3 state. A node that
         // has not passed the storage probe cannot receive that disk.
-        node["capabilities"]["fuse"] == true
+        (native || node["capabilities"]["fuse"] == true)
             && !node["maintenance"].is_string()
             && !node["exclusiveReservation"].is_object()
             && !(local_unconfigured && run["isolated"] == true)
@@ -327,6 +334,10 @@ impl Snapshot {
         if !configured && nodes.iter().all(|n| n["id"] != LOCAL_NODE_ID) {
             nodes.push(development_node(configured));
         }
+        nodes.retain(|node| {
+            !crate::native::policy::node_native(node)
+                || crate::native::policy::allows(db, run, node).unwrap_or(false)
+        });
         // Ties keep the preferred node, then the current runner.
         nodes.sort_by_key(|node| {
             (

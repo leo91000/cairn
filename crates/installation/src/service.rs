@@ -172,6 +172,7 @@ impl Service {
     where
         F: FnOnce(&Db<'_>) -> Result<()> + Send + 'static,
     {
+        let creation_id = creation_id(&input, existing_id)?;
         let existing = match existing_id {
             Some(id) => Some(self.get("agents", id).await?),
             None => None,
@@ -183,21 +184,28 @@ impl Service {
         crate::provider::Provider::of_agent(&agent)?
             .adapter()
             .validate_agent(&agent)?;
-        agent["id"] = existing_id.map_or_else(id, str::to_owned).into();
+        agent["id"] = existing_id
+            .map(str::to_owned)
+            .or(creation_id.clone())
+            .unwrap_or_else(id)
+            .into();
         agent["createdAt"] = existing
             .as_ref()
             .map_or_else(|| now().into(), |v| v["createdAt"].clone());
         let access = policy(&agent);
         validate_access(&agent, &access)?;
         self.require_access_targets(&access).await?;
-        let agent = self
+        let (agent, created) = self
             .store
             .transaction(move |db| {
                 authorize(db)?;
-                save_agent(db, agent, &access)
+                if let Some(previous) = replayed_creation(db, "agents", creation_id.as_deref())? {
+                    return Ok((previous, false));
+                }
+                Ok((save_agent(db, agent, &access)?, existing.is_none()))
             })
             .await?;
-        if existing_id.is_none() && self.avatars.configured(self).await? {
+        if created && self.avatars.configured(self).await? {
             // Creation remains successful even when portrait scheduling fails.
             return Ok(self
                 .avatars
@@ -242,6 +250,7 @@ impl Service {
     where
         F: FnOnce(&Db<'_>) -> Result<()> + Send + 'static,
     {
+        let creation_id = creation_id(&input, existing)?;
         let mut project = parse("project", input)?;
         let actual = crate::skills::workspace(
             Path::new(text(&project, "path")),
@@ -254,11 +263,18 @@ impl Service {
         };
         project["origin"] = normalize_origin(&git_origin(&actual).await).into();
         project["path"] = actual.to_string_lossy().into_owned().into();
-        project["id"] = existing.map_or_else(id, str::to_owned).into();
+        project["id"] = existing
+            .map(str::to_owned)
+            .or(creation_id.clone())
+            .unwrap_or_else(id)
+            .into();
         project["createdAt"] = previous.map_or_else(|| now().into(), |v| v["createdAt"].clone());
         self.store
             .transaction(move |db| {
                 authorize(db)?;
+                if let Some(previous) = replayed_creation(db, "projects", creation_id.as_deref())? {
+                    return Ok(previous);
+                }
                 let project = db.put("projects", &project)?;
                 db.audit("project.saved", &json!({ "id": project["id"] }))?;
                 Ok(project)
@@ -276,14 +292,24 @@ impl Service {
         existing: Option<&str>,
         author: Option<cairn_protocol::TaskAuthorGrant>,
         bearer: Option<String>,
+        reduces_execution: bool,
     ) -> Result<Value> {
+        let creation_id = creation_id(&input, existing)?;
         let mut task = parse("task", input)?;
         let agent = self.get("agents", text(&task, "agentId")).await?;
+        let origin = crate::native::policy::origin();
+        if crate::native::policy::native(&agent) && !reduces_execution {
+            crate::native::policy::refresh(self).await?;
+        }
         task_projects(&agent, &task, &self.store.list("projects").await?)?;
         if let Some(cron) = task["cron"].as_str() {
             next_occurrences(cron, text(&task, "timezone"), now(), 1)?;
         }
-        task["id"] = existing.map_or_else(id, str::to_owned).into();
+        task["id"] = existing
+            .map(str::to_owned)
+            .or(creation_id.clone())
+            .unwrap_or_else(id)
+            .into();
         task["createdAt"] = if let Some(id) = existing {
             let previous = self.get("tasks", id).await?;
             task["authorId"] = previous["authorId"].clone();
@@ -312,6 +338,17 @@ impl Service {
         let existing = existing.map(str::to_owned);
         self.store
             .transaction(move |db| {
+                let previous = existing
+                    .as_deref()
+                    .map(|id| db.get("tasks", id))
+                    .transpose()?
+                    .flatten();
+                let grant = if reduces_execution {
+                    required(previous.clone(), "Task not found")?
+                } else {
+                    crate::native::policy::task_grant(db, &task, previous.as_ref(), &origin)?
+                };
+                crate::native::policy::apply(&mut task, &grant);
                 if let Some(bearer) = bearer {
                     crate::installation_mcp::authorize_task_in(
                         db,
@@ -319,6 +356,9 @@ impl Service {
                         &task,
                         existing.as_deref(),
                     )?;
+                }
+                if let Some(previous) = replayed_creation(db, "tasks", creation_id.as_deref())? {
+                    return Ok(previous);
                 }
                 db.put("tasks", &task)?;
                 db.audit("task.saved", &json!({ "id": task["id"] }))?;
@@ -501,9 +541,24 @@ impl Service {
         dedupe: Option<String>,
         bearer: Option<String>,
     ) -> Result<Value> {
+        let mut run = run;
+        let origin = if run["trigger"] == "schedule" {
+            crate::native::policy::Origin::Stored(run["snapshot"]["task"].clone())
+        } else {
+            crate::native::policy::origin()
+        };
+        if crate::native::policy::native(&run["snapshot"]["agent"]) {
+            crate::native::policy::refresh(self).await?;
+        }
         let result = self
             .store
             .transaction(move |db| {
+                let grant = crate::native::policy::authorize_origin(
+                    db,
+                    &run["snapshot"]["agent"],
+                    &origin,
+                )?;
+                crate::native::policy::apply(&mut run, &grant);
                 if let Some(bearer) = bearer {
                     crate::installation_mcp::authorize_task_in(
                         db,
@@ -749,7 +804,7 @@ fn inherit_agent_settings(input: &mut Value, existing: &Value) {
     if !input["access"].is_object() {
         return;
     }
-    for key in ["nodes", "installation"] {
+    for key in ["nodes", "installation", "backend"] {
         if input["access"].get(key).is_none() {
             input["access"][key] = policy(existing)[key].clone();
         }
@@ -767,6 +822,11 @@ fn restricted(access: &Value) -> bool {
 }
 
 fn validate_access(agent: &Value, access: &Value) -> Result<()> {
+    if access["backend"] == "native" && access["nodes"].as_array().is_none_or(Vec::is_empty) {
+        return Err(Error::bad(
+            "Native execution requires selected nodes; wildcard access is not sufficient.",
+        ));
+    }
     if !access["projects"].is_null() && access["github"] == true {
         return Err(Error::bad(
             "Shared GitHub credentials require access to all projects. Disable the GitHub connection for an agent with selected projects.",
@@ -817,6 +877,7 @@ pub fn policy(agent: &Value) -> Value {
         "github": true,
         "sandbox": "yolo",
         "nodes": [crate::nodes::LOCAL_NODE_ID],
+        "backend": "firecracker",
     });
     merge(&mut value, &agent["access"]);
     // Agents restricted before MCP permissions existed get no MCP connection.
@@ -841,6 +902,9 @@ pub fn covers(current: &Value, granted: &Value) -> bool {
     let current = policy(current);
     let granted = policy(granted);
 
+    if current["backend"] != granted["backend"] {
+        return false;
+    }
     let scopes = ["projects", "skills", "mcps"]
         .iter()
         .all(|key| within(&granted[*key], &current[*key]));
@@ -978,4 +1042,52 @@ fn normalize_origin(remote: &str) -> String {
         }
     }
     String::new()
+}
+
+/// A form keeps this identity across an uncertain POST response. It is the normal
+/// record UUID, so replay needs no new persistent format or auxiliary key. Updates
+/// continue to use the URL identity and cannot change it through the request body.
+pub(crate) fn creation_id(input: &Value, existing: Option<&str>) -> Result<Option<String>> {
+    if existing.is_some() {
+        return Ok(None);
+    }
+    input
+        .get("creationId")
+        .map(|value| {
+            let value = value
+                .as_str()
+                .ok_or_else(|| Error::bad("creationId must be a UUID"))?;
+            let uuid = uuid::Uuid::parse_str(value)
+                .map_err(|_| Error::bad("creationId must be a UUID"))?;
+            if uuid.get_version() != Some(uuid::Version::Random) {
+                return Err(Error::bad("creationId must be a random UUID"));
+            }
+            Ok(uuid.to_string())
+        })
+        .transpose()
+}
+
+/// Record IDs share a namespace across kinds. A caller-selected identity must
+/// never turn a collision into an upsert of a different resource's JSON.
+pub(crate) fn replayed_creation(
+    db: &Db<'_>,
+    kind: &str,
+    creation_id: Option<&str>,
+) -> Result<Option<Value>> {
+    let Some(id) = creation_id else {
+        return Ok(None);
+    };
+    let rows = db.json_rows(
+        "SELECT json_object('kind',kind,'record',json(data)) FROM records WHERE id=?",
+        [id],
+    )?;
+    let Some(row) = rows.first() else {
+        return Ok(None);
+    };
+    if row["kind"] != kind {
+        return Err(Error::conflict(
+            "This creation identity belongs to a different resource.",
+        ));
+    }
+    Ok(Some(row["record"].clone()))
 }

@@ -19,6 +19,8 @@ export interface ExecutionNode {
   name: string
   local: boolean
   accepting: boolean
+  nativeEnabled?: boolean
+  nativeAccounts?: string[]
   exclusiveAgents?: string[]
   exclusiveReservations?: boolean
   exclusiveReservation?: ExclusiveReservation | null
@@ -28,6 +30,7 @@ export interface ExecutionNode {
   systemTags?: string[]
   capabilities: NodeResources & {
     diskTotalMiB?: number
+    backend?: 'firecracker' | 'native'
     os: string
     arch: string
     kvm: boolean
@@ -74,7 +77,10 @@ export interface NodeAgent {
   allNodes: boolean
 }
 
+export interface NativeCaller { id: string, email: string }
+
 export interface NodeEnrollment {
+  backend?: 'firecracker' | 'native'
   installCommand?: string | null
   managerUrl?: string | null
   code: string
@@ -126,9 +132,9 @@ export function nodeDiagnostics(node: ExecutionNode, now = Date.now()) {
   const reasons: string[] = []
   if (!node.local && node.status === 'offline')
     reasons.push(node.lastSeen != null ? `No contact since ${relativeAge(node.lastSeen, now)}: check that the machine is on, online and that the cairn-node service is running.` : 'The machine has never connected: run the installation command on it.')
-  if (!node.capabilities.kvm)
+  if (node.capabilities.backend !== 'native' && !node.capabilities.kvm)
     reasons.push('KVM is unavailable: enable virtualization in the BIOS and load the kvm module.')
-  if (!node.capabilities.fuse)
+  if (node.capabilities.backend !== 'native' && !node.capabilities.fuse)
     reasons.push('FUSE is unavailable: this node cannot mount S3-backed conversation disks.')
   if (node.status !== 'offline' && node.executionReady === false)
     reasons.push(node.budgetError ? `The shared budget could not be applied: ${node.budgetError}` : node.updateError ? `The runtime is not ready: ${node.updateError}` : 'The runtime is not ready yet or does not match the version approved by the master.')
@@ -140,6 +146,8 @@ export function nodeDiagnostics(node: ExecutionNode, now = Date.now()) {
     reasons.push(node.pressure === 'memory' ? 'Shared RAM is under pressure: new work waits for headroom.' : 'Shared disk space is low: new work waits for headroom.')
   if (!node.accepting)
     reasons.push('New work is paused on this machine (Configure → Accept new work).')
+  if (node.capabilities.backend === 'native' && (!node.nativeEnabled || !node.nativeAccounts?.length))
+    reasons.push('Native execution needs explicit activation and trusted people in Configure.')
   if (!node.agents?.length)
     reasons.push('No agent can use this machine yet.')
   return reasons

@@ -197,7 +197,10 @@ async fn requested(s: &Service, run: &Value, args: &Value, by_agent: bool) -> Re
     // A finished conversation with a VM session moves without being resumed.
     let idle = run["status"] == RunStatus::Succeeded
         && run["sessionId"].is_string()
-        && checkpoint["prepared"]["backend"] == "firecracker";
+        && matches!(
+            checkpoint["prepared"]["backend"].as_str(),
+            Some("firecracker" | "native")
+        );
     let reservation = id();
     let mut selecting = run.clone();
     selecting["placementTransition"] = true.into();
@@ -651,7 +654,7 @@ async fn resume_at_destination(s: &Service, current: &Value, backup: &Value) -> 
         RunStatus::Queued
     };
     let patch = json!({
-        "storage": { "mode": super::ON_DEMAND },
+        "storage": { "mode": if crate::native::policy::native(&current["snapshot"]["agent"]) { "native" } else { super::ON_DEMAND } },
         "movementError": null,
         "accountWaitReason": null,
         "nodeId": node,

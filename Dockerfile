@@ -238,4 +238,5 @@ COPY --from=guest-control /control.squashfs /opt/cairn-vm/control.squashfs
 COPY --from=guest-disk /root.ext4.zst /opt/cairn-vm/root.ext4.zst
 COPY --chmod=755 deploy/microvm/init deploy/microvm/docker deploy/microvm/install-docker /opt/cairn-vm/
 COPY --chmod=755 deploy/nodes /opt/cairn-node
+RUN node /opt/cairn-node/bundle-native-tools.mjs && rm -rf /opt/cairn-native-tools
 USER node

@@ -20,13 +20,16 @@ It does not assert pixel equality between a browser and Material components.
 | Agent plan | The plan Codex, Claude Code and OpenCode keep while they work (one `todo_list` item whatever its source) shows as a card where the agent first wrote it, kept current and folded once finished; each later change leaves a line naming the steps finished, started, added or dropped; while the agent follows the current request's plan, a bar above the composer shows its progress and the step in progress, and opens the whole plan with its explanation | `AgentPlanTest` mirrors `agent-plan.test.ts`; `PlanViewsTest`; browser plan journeys in `chats.spec.ts` |
 | Completion | Quiet task outcome below final reply, expandable reason/evidence, explicit blocked/input state, attribution; routine session rows hidden in chat; failures remain visible | Presentation/activity cases; device evidence expansion |
 | Task workspace | Missions list merging tasks and activity: readable schedules, recent run history, direct run, filters and search; mission sheet (detail pane on wide windows) with next dates, success rate and history opening each run; the full run log stays under Atelier › Journal | Native UI, workspace and Signal journeys; device mission screens |
+| Creation retries | Agents, local projects and missions retain the acquired ID before any refresh or GitHub-token step. Creation forms keep one UUID and the original POST payload across an uncertain response; retries recover the created record before applying edited fields with PUT. Save, uncertain-creation, latest-changes, token and reload failures have distinct feedback (English on web, French on Android); an edit rejected on a resource opened for editing reads as a plain save failure. A failed save brings its message into view: web scrolls the alert above the sticky actions, Android scrolls the editor back to its top message. GitHub import retains its existing repository identity and stores the returned project before refresh. | Shared `ResourceSaveCases` on JVM/device; browser creation retry journeys; backend creation replay tests |
 | Task management | Create/edit/duplicate/delete/archive/restore, schedules/timezones/tags, agent/project/model/limits, pause/resume/run, original brief | Workspace journey; device editor; existing task form |
 | Runs | Conversation/result/files, history, fullscreen, stop/retry/resume, errors/account waiting, usage, snapshots, project source revision, workspace cleanup guard | Workspace journey; history/scroll regressions |
-| Agents | Existing configuration and access controls, project-scoped GitHub behavior, dedicated token on creation, permitted skills and MCP tools | Form/API comparison; existing account/MCP suite |
+| Native Linux nodes | Both clients choose the enrollment backend, enable native execution, select real trusted installation members, grant selected native agents explicit nodes, and show native placement/stopped checkpoint status. Android uses French Material toggles; web uses a backend selector and checkboxes. Firecracker remains the default; VM journal-cache controls are hidden for native nodes. | Native policy/lease tests; native browser and Compose cases; device validation recorded in PR |
+| Agents | Existing configuration and access controls, project-scoped GitHub behavior, dedicated token on creation, permitted skills and MCP tools. Web installation/node access checkboxes use horizontal, centered label rows; Android already presents these controls in centered native `Toggle` rows (`ResourcesScreen.kt`, `Components.kt`), with French labels and switches. | Form/API comparison; existing account/MCP suite; Claude browser review of web access rows across desktop, phone and enlarged text |
 | Projects | Remote branch or committed local snapshot, path and base branch, starting revision in run details | Contract decoding; form/API comparison |
 | Skills and MCPs | Skill content/files, scopes and validation, MCP configuration/authentication/discovery/tool restrictions | Existing API and MCP/Compose cases; form/API comparison |
+| Account/installation scope cleanup | Android centralizes streams, read markers, drafts, notification scope and session cleanup in a private ViewModel transition. Same account/installation/role/CSRF preserves cached history and files; changing any clears them. Beacon outages retain a restorable session. When the last access is removed, the « Aucune installation » page now hosts the snackbar, so the access-change and account notices appear there (web reports an inaccessible installation inline); web behavior is unchanged. | `ScopeTransitionTest`; shared `CairnAccountCases` HTTP 403 journey in JVM/device wrappers; `OlderPagesScopeTest` API/page cancellation; web `api-connection.test.ts` |
 | Connections and access | OAuth, GitHub, Codex and Claude Code accounts/usage, token grants, authorization, logout and encrypted sessions | Existing network/authorization/cache suite |
-| Plugins | Catalogue, instances, manifest-driven settings and secrets, agent grants, version/file review and approval, declarative panels/actions/tests, native Discord setup and delegation/access/activity, 1Password instances; JSON/TOML manifest review and package-owned program check/install/restore (file uploads remain on web) | `PluginsJourneyTest`, shared `PluginsCases` / `PluginsDeviceTest`; browser plugin journeys |
+| Plugins | Instance and panel forms share defaults on opening, typed numbers, omitted blank text/numbers, explicit false/empty choices, exact choice identifiers (including admitted whitespace), hidden declared values and no secret prefilling. Text trimming and secret blankness on both clients follow existing Kotlin `Char.isWhitespace` (Java WhiteSpace/SpaceChar union): U+001C–U+001F are blank; U+0085 and U+FEFF remain meaningful. Instance secrets are trimmed; nonblank action secrets retain raw bytes. Shared boundary corpus checks the actual Kotlin/JDK runtime and both production helpers; server instance control rejection remains independent. Required selects use null/empty missingness, including whitespace-only option IDs, while required text still uses blankness. Unchanged returned forms retain drafts; changed form definitions reset their controls on both clients. Web centralizes these rules in `plugin-form-values.ts`; Android retains native controls and the existing `formValue`/`pluginSettings` contract, with a shared JSON scenario corpus (`PluginFormValuesTest`). Shared server admission rejects inconsistent manifest constraints/defaults (text cap 10,000; secret cap 16,384); package upload stays on web and Android reviews the same validated manifest. A package with no usable version shows its stored version errors in review, and its page offers that review on both clients. Catalogue, instances, manifest-driven settings and secrets, agent grants, version/file review and approval, declarative panels/actions/tests, native Discord setup and delegation/access/activity, 1Password instances; JSON/TOML manifest review and package-owned program check/install/restore (file uploads remain on web) | `PluginsJourneyTest`, shared `PluginsCases` / `PluginsDeviceTest`; browser plugin journeys |
 | Artifacts | Authenticated previews, versions, groups, images/PDF/Markdown, save/share and deep links from replies | Chat journey; artifact and link gesture regressions |
 | Reading | Wrapped long text/URLs, selectable native Markdown, history pagination, stable reading anchors during drag/streaming, jump to latest | Markdown/history suite; real device gesture tests |
 | Live catch-up | Following the latest output, a resume past a backlog longer than one page reopens on the recent window; older messages load on scroll. Reading older messages keeps the complete replay and the reading position. Stored backlog pages bypass the live coalescing delay | Backend recent-window, cached-resume, reconnect and history/reset tests; web connection test; Android `LiveTest`, `ScrollResumeTest` and `RecentWindowResumeTest` |
@@ -73,3 +76,36 @@ coverage used, not a claim that every production account/provider was exercised.
 
 Device UI captures use a local MockWebServer fixture, synthetic messages and
 example.test links. They do not contain production conversations or credentials.
+
+
+### Immediate wait results (#255)
+
+Web and Android read the explicit `chat.wait_ready.payload.immediate` boolean
+before the historical “Wait condition already completed” marker. An explicit
+`false` keeps the result attached to the scheduled wait, even with the historical
+text. Both clients also decode observations saved as JSON in `text` and replay
+`tests/fixtures/activity-events.json` (the original 15 activity events plus six
+wait-result cases). The event marker and reason are additive; the `wait_for`
+response, stored schema and compatibility epoch stay unchanged. Older clients
+can still read the event and its historical text. Cards retain their existing
+native presentation and language on each platform; no layout changes.
+
+### Older history pages (#263)
+
+Both clients reject pages from a replaced history or stream epoch, keep accepted
+pages through subsequent emissions/reconnects, and persist the combined displayed
+snapshot. Android extracts these rules into the pure `OlderPages` class while the
+web keeps them in `useLiveRun`.
+Android also cancels a page request when its path/API Compose scope is disposed;
+the web guards application with its connection generation. The lifecycle stream
+resume adapters remain in place. `OlderPagesTest`, the `LiveTest` reconnect probe
+and `OlderPagesScopeTest` cover the Android rules and scope/cache interactions.
+See `docs/research/263-android-older-pages.md` for the discriminating experiment,
+locking decision and limits; no performance gain is asserted.
+
+The paging status matches the web's `role="status"` banner on small screens: like
+its 90% width, the Android pill keeps a 12 dp margin from the screen edges, wraps
+the error beside a whole « Réessayer » label, and becomes a rounded rectangle when
+large text wraps. It is a polite live region for accessibility services. At
+normal text size the pills keep their single-line capsule look and heights.
+`pagingErrorFitsANarrowScreenWithLargeText` checks a 320 dp width at 150% text.

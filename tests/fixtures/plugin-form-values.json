@@ -1,0 +1,869 @@
+[
+  {
+    "name": "defaults include zero false choices and hidden fields",
+    "fields": [
+      {
+        "key": "name",
+        "title": "name",
+        "type": "string",
+        "default": " core "
+      },
+      {
+        "key": "limit",
+        "title": "limit",
+        "type": "number",
+        "default": 0
+      },
+      {
+        "key": "enabled",
+        "title": "enabled",
+        "type": "boolean",
+        "default": false
+      },
+      {
+        "key": "scopes",
+        "title": "scopes",
+        "type": "multiselect",
+        "default": [
+          "read"
+        ],
+        "options": [
+          {
+            "value": "read",
+            "label": "Read"
+          }
+        ]
+      },
+      {
+        "key": "region",
+        "title": "region",
+        "type": "select",
+        "default": "eu",
+        "options": [
+          {
+            "value": "eu",
+            "label": "Europe"
+          }
+        ]
+      },
+      {
+        "key": "derived",
+        "title": "derived",
+        "type": "string",
+        "hidden": true,
+        "default": " derived "
+      },
+      {
+        "key": "password",
+        "title": "password",
+        "type": "secret"
+      }
+    ],
+    "initial": {},
+    "edits": {},
+    "secrets": {},
+    "opened": {
+      "name": "core",
+      "limit": 0,
+      "enabled": false,
+      "scopes": [
+        "read"
+      ],
+      "region": "eu",
+      "derived": "derived"
+    },
+    "settings": {
+      "name": "core",
+      "limit": 0,
+      "enabled": false,
+      "scopes": [
+        "read"
+      ],
+      "region": "eu",
+      "derived": "derived"
+    },
+    "instanceSecrets": {},
+    "actionSecrets": {}
+  },
+  {
+    "name": "saved values override defaults and secrets are never prefilled",
+    "fields": [
+      {
+        "key": "name",
+        "title": "name",
+        "type": "string",
+        "default": "fallback"
+      },
+      {
+        "key": "limit",
+        "title": "limit",
+        "type": "number",
+        "default": 5
+      },
+      {
+        "key": "enabled",
+        "title": "enabled",
+        "type": "boolean",
+        "default": true
+      },
+      {
+        "key": "scopes",
+        "title": "scopes",
+        "type": "multiselect",
+        "default": [
+          "read"
+        ],
+        "options": [
+          {
+            "value": "read",
+            "label": "Read"
+          }
+        ]
+      },
+      {
+        "key": "password",
+        "title": "password",
+        "type": "secret"
+      }
+    ],
+    "initial": {
+      "name": "",
+      "limit": 0,
+      "enabled": false,
+      "scopes": [],
+      "password": "synthetic_prefill_must_not_escape",
+      "unknown": "ignored"
+    },
+    "edits": {},
+    "secrets": {},
+    "opened": {
+      "limit": 0,
+      "enabled": false,
+      "scopes": []
+    },
+    "settings": {
+      "limit": 0,
+      "enabled": false,
+      "scopes": []
+    },
+    "instanceSecrets": {},
+    "actionSecrets": {}
+  },
+  {
+    "name": "clearing a default does not restore it and blanks are omitted",
+    "fields": [
+      {
+        "key": "name",
+        "title": "name",
+        "type": "string",
+        "default": "fallback"
+      },
+      {
+        "key": "limit",
+        "title": "limit",
+        "type": "number",
+        "default": 5
+      },
+      {
+        "key": "enabled",
+        "title": "enabled",
+        "type": "boolean",
+        "default": true
+      },
+      {
+        "key": "scopes",
+        "title": "scopes",
+        "type": "multiselect",
+        "default": [
+          "read"
+        ],
+        "options": [
+          {
+            "value": "read",
+            "label": "Read"
+          }
+        ]
+      },
+      {
+        "key": "region",
+        "title": "region",
+        "type": "select",
+        "default": "eu",
+        "options": [
+          {
+            "value": "eu",
+            "label": "Europe"
+          }
+        ]
+      }
+    ],
+    "initial": {},
+    "edits": {
+      "name": " \n ",
+      "limit": "",
+      "enabled": false,
+      "scopes": [],
+      "region": ""
+    },
+    "secrets": {},
+    "opened": {
+      "name": "fallback",
+      "limit": 5,
+      "enabled": true,
+      "scopes": [
+        "read"
+      ],
+      "region": "eu"
+    },
+    "settings": {
+      "enabled": false,
+      "scopes": []
+    },
+    "instanceSecrets": {},
+    "actionSecrets": {}
+  },
+  {
+    "name": "trim text preserve hidden values and serialize edited numbers",
+    "fields": [
+      {
+        "key": "name",
+        "title": "name",
+        "type": "string"
+      },
+      {
+        "key": "note",
+        "title": "note",
+        "type": "text"
+      },
+      {
+        "key": "url",
+        "title": "url",
+        "type": "url"
+      },
+      {
+        "key": "limit",
+        "title": "limit",
+        "type": "number"
+      },
+      {
+        "key": "rate",
+        "title": "rate",
+        "type": "number"
+      },
+      {
+        "key": "derived",
+        "title": "derived",
+        "type": "string",
+        "hidden": true
+      },
+      {
+        "key": "password",
+        "title": "password",
+        "type": "secret"
+      },
+      {
+        "key": "blankSecret",
+        "title": "blankSecret",
+        "type": "secret"
+      }
+    ],
+    "initial": {
+      "derived": " hidden ",
+      "password": "synthetic_prefill",
+      "unknown": "drop"
+    },
+    "edits": {
+      "name": " core ",
+      "note": " hello\nworld ",
+      "url": " https://example.test/path ",
+      "limit": " 3 ",
+      "rate": "-1.25e2",
+      "password": "must_not_be_a_setting",
+      "unknown": "drop"
+    },
+    "secrets": {
+      "password": " synthetic_action_secret ",
+      "blankSecret": " \n "
+    },
+    "opened": {
+      "derived": "hidden"
+    },
+    "settings": {
+      "name": "core",
+      "note": "hello\nworld",
+      "url": "https://example.test/path",
+      "limit": 3,
+      "rate": -125,
+      "derived": "hidden"
+    },
+    "instanceSecrets": {
+      "password": "synthetic_action_secret"
+    },
+    "actionSecrets": {
+      "password": " synthetic_action_secret "
+    }
+  },
+  {
+    "name": "null clears a value while absent values use defaults",
+    "fields": [
+      {
+        "key": "name",
+        "title": "name",
+        "type": "string",
+        "default": "fallback"
+      },
+      {
+        "key": "limit",
+        "title": "limit",
+        "type": "number",
+        "default": 5
+      },
+      {
+        "key": "enabled",
+        "title": "enabled",
+        "type": "boolean",
+        "default": true
+      },
+      {
+        "key": "scopes",
+        "title": "scopes",
+        "type": "multiselect",
+        "default": [
+          "read"
+        ],
+        "options": [
+          {
+            "value": "read",
+            "label": "Read"
+          }
+        ]
+      },
+      {
+        "key": "absent",
+        "title": "absent",
+        "type": "string",
+        "default": "fallback"
+      }
+    ],
+    "initial": {
+      "name": null,
+      "limit": null,
+      "enabled": null,
+      "scopes": null
+    },
+    "edits": {},
+    "secrets": {},
+    "opened": {
+      "enabled": false,
+      "scopes": [],
+      "absent": "fallback"
+    },
+    "settings": {
+      "enabled": false,
+      "scopes": [],
+      "absent": "fallback"
+    },
+    "instanceSecrets": {},
+    "actionSecrets": {}
+  },
+  {
+    "name": "empty form emits boolean and multiple choice empty values",
+    "fields": [
+      {
+        "key": "enabled",
+        "title": "enabled",
+        "type": "boolean"
+      },
+      {
+        "key": "scopes",
+        "title": "scopes",
+        "type": "multiselect"
+      },
+      {
+        "key": "name",
+        "title": "name",
+        "type": "string"
+      },
+      {
+        "key": "limit",
+        "title": "limit",
+        "type": "number"
+      },
+      {
+        "key": "password",
+        "title": "password",
+        "type": "secret"
+      }
+    ],
+    "initial": {},
+    "edits": {
+      "limit": "not-a-number"
+    },
+    "secrets": {
+      "password": ""
+    },
+    "opened": {
+      "enabled": false,
+      "scopes": []
+    },
+    "settings": {
+      "enabled": false,
+      "scopes": []
+    },
+    "instanceSecrets": {},
+    "actionSecrets": {}
+  },
+  {
+    "name": "invalid hexadecimal numbers do not become decimal values",
+    "fields": [
+      {
+        "key": "count",
+        "title": "Count",
+        "type": "number"
+      }
+    ],
+    "initial": {
+      "count": "0x10"
+    },
+    "edits": {},
+    "secrets": {},
+    "opened": {},
+    "settings": {},
+    "instanceSecrets": {},
+    "actionSecrets": {}
+  },
+  {
+    "name": "choice identifiers retain whitespace accepted by the manifest",
+    "fields": [
+      {
+        "key": "region",
+        "title": "Region",
+        "type": "select",
+        "default": " eu ",
+        "options": [
+          {
+            "value": " eu ",
+            "label": "Europe"
+          }
+        ]
+      },
+      {
+        "key": "channel",
+        "title": "Channel",
+        "type": "select",
+        "dynamic": true
+      },
+      {
+        "key": "scopes",
+        "title": "Scopes",
+        "type": "multiselect",
+        "default": [
+          " read "
+        ],
+        "options": [
+          {
+            "value": " read ",
+            "label": "Read"
+          }
+        ]
+      }
+    ],
+    "initial": {
+      "channel": " channel "
+    },
+    "edits": {},
+    "secrets": {},
+    "opened": {
+      "region": " eu ",
+      "channel": " channel ",
+      "scopes": [
+        " read "
+      ]
+    },
+    "settings": {
+      "region": " eu ",
+      "channel": " channel ",
+      "scopes": [
+        " read "
+      ]
+    },
+    "instanceSecrets": {},
+    "actionSecrets": {}
+  },
+  {
+    "name": "prototype field names use their own defaults and can be cleared",
+    "fields": [
+      {
+        "key": "constructor",
+        "title": "Constructor",
+        "type": "string",
+        "default": "safe"
+      },
+      {
+        "key": "toString",
+        "title": "To string",
+        "type": "string",
+        "default": "text"
+      },
+      {
+        "key": "valueOf",
+        "title": "Value of",
+        "type": "number",
+        "default": 0
+      }
+    ],
+    "initial": {},
+    "edits": {
+      "constructor": ""
+    },
+    "secrets": {},
+    "opened": {
+      "constructor": "safe",
+      "toString": "text",
+      "valueOf": 0
+    },
+    "settings": {
+      "toString": "text",
+      "valueOf": 0
+    },
+    "instanceSecrets": {},
+    "actionSecrets": {}
+  },
+  {
+    "name": "format characters retain meaningful boundary bytes",
+    "fields": [
+      {
+        "key": "text",
+        "title": "Text",
+        "type": "string",
+        "default": "\ufeff\u200b\u2060credential\u2060\u200b\ufeff"
+      },
+      {
+        "key": "note",
+        "title": "Note",
+        "type": "text",
+        "required": true,
+        "default": "\ufeff\u200b\u2060credential\u2060\u200b\ufeff"
+      }
+    ],
+    "initial": {},
+    "edits": {
+      "text": "\ufeff\u200b\u2060credential\u2060\u200b\ufeff"
+    },
+    "secrets": {
+      "password": "\ufeff\u200b\u2060credential\u2060\u200b\ufeff",
+      "formatOnly": "\ufeff",
+      "paddedFormatOnly": " \ufeff "
+    },
+    "opened": {
+      "text": "\ufeff\u200b\u2060credential\u2060\u200b\ufeff",
+      "note": "\ufeff\u200b\u2060credential\u2060\u200b\ufeff"
+    },
+    "settings": {
+      "text": "\ufeff\u200b\u2060credential\u2060\u200b\ufeff",
+      "note": "\ufeff\u200b\u2060credential\u2060\u200b\ufeff"
+    },
+    "instanceSecrets": {
+      "password": "\ufeff\u200b\u2060credential\u2060\u200b\ufeff",
+      "formatOnly": "\ufeff",
+      "paddedFormatOnly": "\ufeff"
+    },
+    "actionSecrets": {
+      "password": "\ufeff\u200b\u2060credential\u2060\u200b\ufeff",
+      "formatOnly": "\ufeff",
+      "paddedFormatOnly": " \ufeff "
+    }
+  },
+  {
+    "name": "Unicode whitespace normalizes around retained format characters",
+    "fields": [
+      {
+        "key": "text",
+        "title": "Text",
+        "type": "string",
+        "default": "\u00a0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a\u2028\u2029\u202f\u205f\u3000\ufeff\u200b\u2060credential\u2060\u200b\ufeff\u00a0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a\u2028\u2029\u202f\u205f\u3000"
+      },
+      {
+        "key": "note",
+        "title": "Note",
+        "type": "text",
+        "required": true,
+        "default": "\u00a0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a\u2028\u2029\u202f\u205f\u3000\ufeff\u200b\u2060credential\u2060\u200b\ufeff\u00a0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a\u2028\u2029\u202f\u205f\u3000"
+      }
+    ],
+    "initial": {},
+    "edits": {
+      "text": "\u00a0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a\u2028\u2029\u202f\u205f\u3000\ufeff\u200b\u2060credential\u2060\u200b\ufeff\u00a0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a\u2028\u2029\u202f\u205f\u3000"
+    },
+    "secrets": {
+      "password": "\u00a0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a\u2028\u2029\u202f\u205f\u3000\ufeff\u200b\u2060credential\u2060\u200b\ufeff\u00a0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a\u2028\u2029\u202f\u205f\u3000"
+    },
+    "opened": {
+      "text": "\ufeff\u200b\u2060credential\u2060\u200b\ufeff",
+      "note": "\ufeff\u200b\u2060credential\u2060\u200b\ufeff"
+    },
+    "settings": {
+      "text": "\ufeff\u200b\u2060credential\u2060\u200b\ufeff",
+      "note": "\ufeff\u200b\u2060credential\u2060\u200b\ufeff"
+    },
+    "instanceSecrets": {
+      "password": "\ufeff\u200b\u2060credential\u2060\u200b\ufeff"
+    },
+    "actionSecrets": {
+      "password": "\u00a0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a\u2028\u2029\u202f\u205f\u3000\ufeff\u200b\u2060credential\u2060\u200b\ufeff\u00a0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a\u2028\u2029\u202f\u205f\u3000"
+    }
+  },
+  {
+    "name": "Unicode whitespace alone is blank",
+    "fields": [
+      {
+        "key": "text",
+        "title": "Text",
+        "type": "string",
+        "default": "\u00a0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a\u2028\u2029\u202f\u205f\u3000"
+      }
+    ],
+    "initial": {},
+    "edits": {
+      "text": "\u00a0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a\u2028\u2029\u202f\u205f\u3000"
+    },
+    "secrets": {
+      "password": "\u00a0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a\u2028\u2029\u202f\u205f\u3000"
+    },
+    "opened": {},
+    "settings": {},
+    "instanceSecrets": {},
+    "actionSecrets": {}
+  },
+  {
+    "name": "required whitespace-only choice identifiers remain exact",
+    "fields": [
+      {
+        "key": "region",
+        "title": "Region",
+        "type": "select",
+        "required": true,
+        "default": " ",
+        "options": [
+          {
+            "value": " ",
+            "label": "Space option"
+          }
+        ]
+      }
+    ],
+    "initial": {},
+    "edits": {},
+    "secrets": {},
+    "opened": {
+      "region": " "
+    },
+    "settings": {
+      "region": " "
+    },
+    "instanceSecrets": {},
+    "actionSecrets": {}
+  },
+  {
+    "name": "NEXT LINE is meaningful",
+    "fields": [
+      {
+        "key": "note",
+        "title": "Note",
+        "type": "text"
+      },
+      {
+        "key": "single",
+        "title": "Single",
+        "type": "string"
+      },
+      {
+        "key": "password",
+        "title": "Password",
+        "type": "secret"
+      }
+    ],
+    "initial": {
+      "note": "\u0085x\u0085",
+      "single": "\u0085"
+    },
+    "edits": {
+      "note": "\u0085",
+      "single": "\u0085x\u0085"
+    },
+    "secrets": {
+      "password": "\u0085",
+      "padded": "\u0085x\u0085"
+    },
+    "opened": {
+      "note": "\u0085x\u0085",
+      "single": "\u0085"
+    },
+    "settings": {
+      "single": "\u0085x\u0085",
+      "note": "\u0085"
+    },
+    "instanceSecrets": {
+      "padded": "\u0085x\u0085",
+      "password": "\u0085"
+    },
+    "actionSecrets": {
+      "padded": "\u0085x\u0085",
+      "password": "\u0085"
+    }
+  },
+  {
+    "name": "file group record unit separators are blank",
+    "fields": [
+      {
+        "key": "note",
+        "title": "Note",
+        "type": "text"
+      },
+      {
+        "key": "single",
+        "title": "Single",
+        "type": "string"
+      },
+      {
+        "key": "password",
+        "title": "Password",
+        "type": "secret"
+      }
+    ],
+    "initial": {
+      "note": "\u001c\u001d\u001e\u001fx\u001c\u001d\u001e\u001f",
+      "single": "\u001c\u001d\u001e\u001f"
+    },
+    "edits": {
+      "note": "\u001c\u001d\u001e\u001f",
+      "single": "\u001c\u001d\u001e\u001fx\u001c\u001d\u001e\u001f"
+    },
+    "secrets": {
+      "password": "\u001c\u001d\u001e\u001f",
+      "padded": "\u001c\u001d\u001e\u001fx\u001c\u001d\u001e\u001f"
+    },
+    "opened": {
+      "note": "x"
+    },
+    "settings": {
+      "single": "x"
+    },
+    "instanceSecrets": {
+      "padded": "x"
+    },
+    "actionSecrets": {
+      "padded": "\u001c\u001d\u001e\u001fx\u001c\u001d\u001e\u001f"
+    }
+  },
+  {
+    "name": "BOM is meaningful",
+    "fields": [
+      {
+        "key": "note",
+        "title": "Note",
+        "type": "text"
+      },
+      {
+        "key": "single",
+        "title": "Single",
+        "type": "string"
+      },
+      {
+        "key": "password",
+        "title": "Password",
+        "type": "secret"
+      }
+    ],
+    "initial": {
+      "note": "\ufeffx\ufeff",
+      "single": "\ufeff"
+    },
+    "edits": {
+      "note": "\ufeff",
+      "single": "\ufeffx\ufeff"
+    },
+    "secrets": {
+      "password": "\ufeff",
+      "padded": "\ufeffx\ufeff"
+    },
+    "opened": {
+      "note": "\ufeffx\ufeff",
+      "single": "\ufeff"
+    },
+    "settings": {
+      "single": "\ufeffx\ufeff",
+      "note": "\ufeff"
+    },
+    "instanceSecrets": {
+      "padded": "\ufeffx\ufeff",
+      "password": "\ufeff"
+    },
+    "actionSecrets": {
+      "padded": "\ufeffx\ufeff",
+      "password": "\ufeff"
+    }
+  },
+  {
+    "name": "nonprimitive boolean answers do not coerce to true",
+    "fields": [
+      {
+        "key": "arrayFlag",
+        "title": "arrayFlag",
+        "type": "boolean"
+      },
+      {
+        "key": "stringArrayFlag",
+        "title": "stringArrayFlag",
+        "type": "boolean"
+      },
+      {
+        "key": "objectFlag",
+        "title": "objectFlag",
+        "type": "boolean"
+      },
+      {
+        "key": "primitive",
+        "title": "primitive",
+        "type": "boolean"
+      }
+    ],
+    "initial": {
+      "arrayFlag": [
+        true
+      ],
+      "stringArrayFlag": [
+        "true"
+      ],
+      "objectFlag": {
+        "value": true
+      },
+      "primitive": true
+    },
+    "edits": {
+      "arrayFlag": [
+        "true"
+      ],
+      "stringArrayFlag": [
+        true
+      ],
+      "objectFlag": [],
+      "primitive": "true"
+    },
+    "secrets": {},
+    "opened": {
+      "arrayFlag": false,
+      "stringArrayFlag": false,
+      "objectFlag": false,
+      "primitive": true
+    },
+    "settings": {
+      "arrayFlag": false,
+      "stringArrayFlag": false,
+      "objectFlag": false,
+      "primitive": true
+    },
+    "instanceSecrets": {},
+    "actionSecrets": {}
+  }
+]

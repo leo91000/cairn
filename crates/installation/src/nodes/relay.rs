@@ -60,6 +60,7 @@ impl<'a> End<'a> {
 /// The master connection a relayed command answers through.
 struct Master<'a> {
     client: &'a reqwest::Client,
+    controller: &'a reqwest::Client,
     url: &'a url::Url,
     token: &'a str,
 }
@@ -120,6 +121,7 @@ pub async fn run(
         .redirect(reqwest::redirect::Policy::none())
         .build()
         .map_err(Error::internal)?;
+    let controller = super::local_client()?;
     let permits = Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_COMMANDS));
     let mut tasks = tokio::task::JoinSet::new();
     let executor = Arc::new(Executor::default());
@@ -165,11 +167,13 @@ pub async fn run(
             runner.clone(),
             runner_token.clone(),
         );
+        let controller = controller.clone();
         let executor = executor.clone();
         tasks.spawn(async move {
             let _permit = permit;
             let master = Master {
                 client: &http,
+                controller: &controller,
                 url: &master,
                 token: &token,
             };
@@ -181,7 +185,7 @@ pub async fn run(
     while tasks.join_next().await.is_some() {}
     for attempt in executor.close().await {
         // Best effort: the controller also stops VMs whose lease expires.
-        let _ = client
+        let _ = controller
             .delete(
                 runner
                     .join(&format!("runs/{attempt}"))
@@ -383,7 +387,7 @@ async fn call_controller(
         )
         .await?;
     master
-        .client
+        .controller
         .request(
             method.parse().map_err(Error::internal)?,
             runner.join(path).map_err(Error::internal)?,

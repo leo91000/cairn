@@ -41,7 +41,13 @@ pub(super) async fn restore(
     github: Option<&str>,
 ) -> Result<Value> {
     let microvm = uses_vm(run, config);
-    if microvm && !is_firecracker(&prepared) {
+    let native = crate::native::policy::native(&run["snapshot"]["agent"]);
+    if prepared["backend"] == "native" && !native || native && prepared["backend"] != "native" {
+        return Err(Error::conflict(
+            "Execution backend changed; start a new conversation.",
+        ));
+    }
+    if microvm && !native && !is_firecracker(&prepared) {
         let migrated = migrate_to_vm(run, &prepared, config, github).await?;
         return Ok(serde_json::to_value(migrated)?);
     }

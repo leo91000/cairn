@@ -55,6 +55,9 @@ La permission signée par Beacon, limitée à une installation, un compte, une s
 Machine rattachée à une installation pour y effectuer le travail d’un agent, selon ses capacités et les autorisations accordées. Une node peut être disponible de manière intermittente.
 _Avoid_ : agent (qui désigne l’agent chargé du travail, et non la machine)
 
+**Exécution native** :
+Travail d’un agent effectué par le système de la node, avec ses pilotes et les ressources partagées avec son propriétaire. Il exige des agents sélectionnés et des personnes explicitement autorisées, avec une frontière d’isolation plus faible qu’une VM.
+
 **Capacité d’une node** :
 Possibilité de travail vérifiée sur une node, distincte de la seule présence du matériel et de sa disponibilité au moment de la demande. Une capacité ne donne aucun droit supplémentaire à l’agent.
 

@@ -24,7 +24,7 @@ private data class Placement(
 
 private val nodeStates =
     mapOf(
-        "pausing" to "Suspension de la VM",
+        "pausing" to "Suspension de l’exécution",
         "saving" to "Synchronisation de l’environnement",
         "restoring" to "Restauration de l’environnement",
         "resuming" to "Reprise de la conversation",
@@ -118,6 +118,8 @@ fun NodePlacement(vm: CairnViewModel, run: Run) {
             run.capacityWaitUntil != null -> "En attente de capacité"
             run.backup?.status == "saving" -> "Synchronisation…"
             dirty > 0 -> "${formatBytes(dirty)} non synchronisés"
+            run.executionBackend == "native" && run.status == "running" ->
+                "Travail local · sauvegardé après l’arrêt"
             run.backup?.capturedAt != null ->
                 "Synchronisé ${relativeAge(run.backup.capturedAt, now)}"
             else -> "Pas encore synchronisé"
@@ -146,6 +148,8 @@ fun NodePlacement(vm: CairnViewModel, run: Run) {
         DetailSheet("Node d’exécution", { expanded = false }) {
             Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
                 Text(current, style = MaterialTheme.typography.titleMedium)
+                if (run.executionBackend == "native")
+                    Text("Processus natif · GPU partagé · sauvegarde entre les tours")
                 if (run.storage?.mode == "on-demand")
                     Text(
                         "Fichiers chargés à la demande",
