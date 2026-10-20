@@ -29,8 +29,8 @@ import {
 const nodes = ref<ExecutionNode[]>([])
 const nativeCallers = ref<Array<{ id: string, email: string }>>([])
 const enrollmentBackend = ref<'firecracker' | 'native'>('firecracker')
-// Stops before deleting while a conversation disk is mounted, and removes the unit last so it can be rerun.
-const nativeUninstallCommand = `sudo sh -c 'systemctl disable --now cairn-native-node || exit; if findmnt -rno TARGET | grep ^/var/lib/cairn-native/; then echo "Unmount these conversation disks, then run this command again." >&2; exit 1; fi; rm -rf /opt/cairn-native /var/lib/cairn-native && rm -f /etc/systemd/system/cairn-native-node.service && systemctl daemon-reload && userdel cairn-workload'`
+// Stops before deleting while a conversation disk is mounted and keeps the unit until the rest is gone, so it can be rerun.
+const nativeUninstallCommand = `sudo sh -c 'if [ -e /etc/systemd/system/cairn-native-node.service ]; then systemctl disable --now cairn-native-node || exit; fi; command -v findmnt >/dev/null || exit; if findmnt -rno TARGET | grep ^/var/lib/cairn-native/; then echo "Unmount these conversation disks, then run this command again." >&2; exit 1; fi; rm -rf /opt/cairn-native /var/lib/cairn-native && { userdel cairn-workload || ! id cairn-workload >/dev/null 2>&1; } && rm -f /etc/systemd/system/cairn-native-node.service && systemctl daemon-reload'`
 const editing = ref<ExecutionNode | null>(null)
 const tags = ref('')
 const name = ref('')

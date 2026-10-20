@@ -34,7 +34,7 @@ const model = defineModel<T>({ required: true })
       @click="model = option.value"
     >
       <Icon v-if="option.icon" :name="option.icon" :size="15" />
-      <span v-if="stretch" class="min-w-0 truncate">{{ option.label }}</span>
+      <span v-if="stretch" class="min-w-0 truncate" :title="option.label">{{ option.label }}</span>
       <template v-else>
         {{ option.label }}
       </template>
