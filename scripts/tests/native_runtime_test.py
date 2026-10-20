@@ -25,7 +25,12 @@ SPEC.loader.exec_module(host)
 
 
 def command(*args, **options):
-    return subprocess.run(args, check=True, capture_output=True, text=True, timeout=40, **options)
+    try:
+        return subprocess.run(args, check=True, capture_output=True, text=True, timeout=40, **options)
+    except subprocess.CalledProcessError as error:
+        if error.stderr:
+            print(error.stderr, file=sys.stderr, end='')
+        raise
 
 
 def eventually(check, timeout=30):
@@ -87,7 +92,14 @@ def main():
             finally:
                 connection.close()
 
+        def controller_collected():
+            status = command('systemctl', 'show', supervisor, '--property=LoadState', '--value')
+            return status.stdout.strip() == 'not-found'
+
         def start_controller():
+            # A stopped workload can still reference the transient supervisor.
+            # Its name is reusable only after systemd has unloaded that unit.
+            eventually(controller_collected)
             environment = dict(DATA_DIR=str(data), RUNNER_STATE_DIR=str(state), RUNNER_BIND='127.0.0.1:4311',
                 CAIRN_NATIVE_TOOLS=str(tools), CAIRN_NATIVE_USER=user, CAIRN_NODE_BACKEND='native',
                 APP_RUNTIME_ID='synthetic', CAIRN_NATIVE_SUPERVISOR_UNIT=supervisor)

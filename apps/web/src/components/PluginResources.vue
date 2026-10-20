@@ -24,6 +24,7 @@ import PluginResourceGrants from './PluginResourceGrants.vue'
 import PluginResourceRoutes from './PluginResourceRoutes.vue'
 import UiAlert from './UiAlert.vue'
 import UiButton from './UiButton.vue'
+import VirtualSelect from './VirtualSelect.vue'
 
 const props = defineProps<{
   plugin: string
@@ -38,6 +39,10 @@ const pages = ref<Record<string, PluginPage<PluginResource>>>(Object.create(null
 const editing = ref<{ collection: PluginResourceCollection, resource?: PluginResource }>()
 const name = ref('')
 const parent = ref('')
+const parentOptions = computed(() => {
+  const collection = editing.value?.collection.parent
+  return (collection ? pages.value[collection]?.items ?? [] : []).map(item => ({ value: item.id, label: item.name }))
+})
 const enabled = ref(true)
 const values = ref<Record<string, any>>({})
 const secrets = ref<Record<string, string>>(pluginFormSecrets())
@@ -389,10 +394,15 @@ onBeforeUnmount(() => {
           required
           maxlength="100"
         ></label>
-        <label v-if="collection.parent">Parent<select v-model="parent" :disabled="blocked" required>
-          <option value="">Choose a parent</option>
-          <option v-for="item in pages[collection.parent]?.items" :key="item.id" :value="item.id">{{ item.name }}</option>
-        </select></label>
+        <VirtualSelect
+          v-if="collection.parent"
+          v-model="parent"
+          label="Parent"
+          placeholder="Choose a parent"
+          :options="parentOptions"
+          :disabled="blocked"
+          required
+        />
         <PluginFields
           v-model:values="values"
           v-model:secrets="secrets"

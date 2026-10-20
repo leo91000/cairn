@@ -1,4 +1,4 @@
-import type { Route } from '@playwright/test'
+import type { Locator, Route } from '@playwright/test'
 import { Buffer } from 'node:buffer'
 import { createHmac } from 'node:crypto'
 import {
@@ -10,6 +10,11 @@ import {
 } from './fixtures'
 
 const token = `synthetic_browser_discord_token_${'x'.repeat(48)}`
+
+async function selectField(scope: Locator, label: string, option: string) {
+  await scope.getByRole('combobox', { name: label, exact: true }).fill(option)
+  await scope.getByRole('option', { name: option, exact: true }).click()
+}
 
 // Discord itself is never contacted: the package's setup form is answered by the browser
 // fixture, the way the Discord package's `form` handler answers it.
@@ -400,6 +405,69 @@ test('owner resumes an inert setup, prepares resources and activates the same in
   await expect(discard).not.toBeVisible()
   expect((await workspace.api('/api/plugins/workspace-service/setup-drafts')).items).toEqual([])
   expect((await workspace.api('/api/plugins')).connections.find((item: any) => item.id === active.id)).toBeDefined()
+})
+
+test('setup agent and resource parent selection preserve explicit authority', async ({ page, workspace }) => {
+  const agent = await workspace.api('/api/agents', 'POST', {
+    name: 'Dedicated selector helper',
+    access: {
+      projects: [],
+      skills: [],
+      mcps: [],
+      github: false,
+      installation: false,
+    },
+  })
+  const installed = await workspace.api('/api/plugins/packages', 'POST', {
+    manifest: {
+      id: 'selector-ui',
+      name: 'Selector service',
+      version: '1',
+      apiVersion: 2,
+      description: 'Explicit owner selections.',
+      capabilities: ['resources', 'conversations.submit'],
+      agentAccess: {},
+      resources: [
+        { name: 'workspace', title: 'Workspaces', singular: 'Workspace' },
+        {
+          name: 'channel',
+          title: 'Channels',
+          singular: 'Channel',
+          parent: 'workspace',
+        },
+      ],
+    },
+    source: 'return {}',
+  })
+  await workspace.api('/api/plugins/packages/selector-ui/approve', 'POST', { version: '1', digest: installed.digest })
+  const draft = await workspace.api('/api/plugins/selector-ui/setup-drafts', 'POST', { name: 'Prepared configuration' })
+  const root = `/api/plugins/selector-ui/setup-drafts/${draft.id}/resources`
+  const engineering = await workspace.api(`${root}/workspace`, 'POST', { name: 'Engineering', setupRevision: draft.revision })
+  await workspace.api(`${root}/workspace`, 'POST', { name: 'Sales', setupRevision: draft.revision })
+  await page.goto(workspacePath('/plugins/selector-ui'))
+  await signIn(page)
+  await page.getByRole('button', { name: 'Continue Prepared configuration', exact: true }).click()
+  const setup = page.getByRole('dialog', { name: 'Set up Selector service', exact: true })
+  await expect(setup.getByRole('button', { name: 'Activate instance', exact: true })).toBeDisabled()
+  await expect(setup.getByRole('combobox', { name: 'Agent for incoming conversations', exact: true })).toHaveValue('')
+  await setup.getByRole('button', { name: 'Add channel', exact: true }).click()
+  const channel = setup.getByRole('form', { name: 'New channel', exact: true })
+  await channel.getByLabel('Name', { exact: true }).fill('Support')
+  await channel.getByRole('button', { name: 'Save channel', exact: true }).click()
+  await expect(channel.getByText('Choose parent to continue.', { exact: true })).toBeVisible()
+  expect((await workspace.api(`${root}/channel`)).items).toEqual([])
+  await selectField(channel, 'Parent', 'Engineering')
+  await channel.getByRole('button', { name: 'Save channel', exact: true }).click()
+  await expect(setup.getByRole('article', { name: 'Support', exact: true })).toBeVisible()
+  expect((await workspace.api(`${root}/channel`)).items[0].parentId).toBe(engineering.id)
+  await selectField(setup, 'Agent for incoming conversations', agent.name)
+  await setup.getByRole('checkbox', { name: 'Start immediately', exact: true }).uncheck()
+  await setup.getByRole('button', { name: 'Activate instance', exact: true }).click()
+  await expect(setup).not.toBeVisible()
+  const active = (await workspace.api('/api/plugins')).connections.find((item: any) => item.id === draft.id)
+  expect(active.agentId).toBe(agent.id)
+  expect(active.agentIds).toEqual([])
+  expect(active.enabled).toBe(false)
 })
 
 test('setup explains credential errors and accepts an empty form answer', async ({ page, workspace }) => {
@@ -951,7 +1019,7 @@ test('a late resource page cannot duplicate a newer authorization refresh', asyn
 })
 
 async function resourceAccessFixture(workspace: import('./fixtures').Workspace, id: string, scope = 'channel', readOperation = 'read-messages') {
-  const agent = await workspace.api('/api/agents', 'POST', { name: 'Resource helper' })
+  const agent = await workspace.api('/api/agents', 'POST', { name: `Resource helper ${id}` })
   const manifest = {
     id,
     name: 'Resource access',
@@ -1003,9 +1071,9 @@ for (const scope of ['constructor', 'toString']) {
     const access = page.getByRole('dialog', { name: 'Agent access · Engineering', exact: true })
     await access.getByRole('button', { name: 'Add access rule', exact: true }).click()
     await expect(access.getByLabel(`Limit ${scope}`, { exact: true })).toHaveValue('')
-    await expect(access.getByRole('combobox', { name: operation, exact: true })).toHaveJSProperty('selectedIndex', 0)
-    await access.getByRole('combobox', { name: 'Agent', exact: true }).selectOption(agent.id)
-    await access.getByRole('combobox', { name: 'Profile', exact: true }).selectOption('read')
+    await expect(access.getByRole('combobox', { name: operation, exact: true })).toHaveValue('Use profile')
+    await selectField(access, 'Agent', agent.name)
+    await selectField(access, 'Profile', 'Read')
     await access.getByLabel(`Limit ${scope}`, { exact: true }).fill('C111')
     await access.getByRole('button', { name: 'Grant access', exact: true }).click()
     await expect(access.getByRole('button', { name: 'Add access rule', exact: true })).toBeVisible()
@@ -1021,7 +1089,7 @@ for (const scope of ['constructor', 'toString']) {
     await expect(access.getByText(`${scope}: C111`, { exact: true })).toBeVisible()
     await access.getByRole('button', { name: 'Add access rule', exact: true }).click()
     await expect(access.getByLabel(`Limit ${scope}`, { exact: true })).toHaveValue('')
-    await expect(access.getByRole('combobox', { name: operation, exact: true })).toHaveJSProperty('selectedIndex', 0)
+    await expect(access.getByRole('combobox', { name: operation, exact: true })).toHaveValue('Use profile')
   })
 }
 
@@ -1046,10 +1114,13 @@ test('resource access combines explicit profiles, operation exceptions and scope
   await access.getByRole('button', { name: 'Add access rule', exact: true }).click()
   await expect(access.getByRole('button', { name: 'Grant access', exact: true })).toBeDisabled()
   await expect(access.getByRole('combobox', { name: 'Agent', exact: true })).toHaveValue('')
-  await access.getByRole('combobox', { name: 'Agent', exact: true }).selectOption(agent.id)
-  await access.getByRole('combobox', { name: 'Profile', exact: true }).selectOption('contribute')
-  await access.getByRole('combobox', { name: 'read-messages', exact: true }).selectOption('deny')
-  await access.getByRole('combobox', { name: 'delete-message', exact: true }).selectOption('allow')
+  await expect(access.getByRole('combobox', { name: 'Profile', exact: true })).toHaveValue('Only selected operations')
+  await selectField(access, 'Agent', agent.name)
+  await selectField(access, 'Profile', 'Only selected operations')
+  await expect(access.getByRole('button', { name: 'Grant access', exact: true })).toBeDisabled()
+  await selectField(access, 'Profile', 'Contribution')
+  await selectField(access, 'read-messages', 'Deny in this rule')
+  await selectField(access, 'delete-message', 'Allow explicitly')
   await access.getByLabel('Limit channel', { exact: true }).fill('C111\nC222')
   const preview = access.getByRole('list', { name: 'Operations allowed by this rule' })
   await expect(preview).toContainText('send-message')
@@ -1076,8 +1147,8 @@ test('resource access combines explicit profiles, operation exceptions and scope
   await expect(access.getByText('channel: C111, C222', { exact: true })).toBeVisible()
 
   await access.getByRole('button', { name: 'Add access rule', exact: true }).click()
-  await access.getByRole('combobox', { name: 'Agent', exact: true }).selectOption(agent.id)
-  await access.getByRole('combobox', { name: 'read-messages', exact: true }).selectOption('allow')
+  await selectField(access, 'Agent', agent.name)
+  await selectField(access, 'read-messages', 'Allow explicitly')
   await access.getByRole('button', { name: 'Grant access', exact: true }).click()
   await expect(access.getByRole('button', { name: 'Revoke rule' })).toHaveCount(2)
   rules = (await workspace.api(path)).items
@@ -1153,8 +1224,8 @@ test('resource access cancels offline reads but keeps an outstanding write locke
     expect(reads).toBe(2)
 
     await access.getByRole('button', { name: 'Add access rule', exact: true }).click()
-    await access.getByRole('combobox', { name: 'Agent', exact: true }).selectOption(agent.id)
-    await access.getByRole('combobox', { name: 'Profile', exact: true }).selectOption('read')
+    await selectField(access, 'Agent', agent.name)
+    await selectField(access, 'Profile', 'Read')
     await access.getByRole('button', { name: 'Grant access', exact: true }).click()
     await writing
     await access.getByRole('button', { name: 'Close dialog', exact: true }).click()
@@ -1197,8 +1268,8 @@ test('resource access refreshes uncertain writes without automatically repeating
   await page.getByRole('article', { name: 'Engineering', exact: true }).getByRole('button', { name: 'Agent access', exact: true }).click()
   const access = page.getByRole('dialog', { name: 'Agent access · Engineering', exact: true })
   await access.getByRole('button', { name: 'Add access rule', exact: true }).click()
-  await access.getByRole('combobox', { name: 'Agent', exact: true }).selectOption(agent.id)
-  await access.getByRole('combobox', { name: 'Profile', exact: true }).selectOption('read')
+  await selectField(access, 'Agent', agent.name)
+  await selectField(access, 'Profile', 'Read')
   await access.getByRole('button', { name: 'Grant access', exact: true }).click()
   await expect(access.getByRole('alert')).toContainText('Refresh the rules before making another change.')
   expect((await workspace.api(path)).items).toHaveLength(1)
@@ -1322,7 +1393,7 @@ test('program releases can be checked, installed and restored independently of p
 
 async function conversationRoutesFixture(workspace: import('./fixtures').Workspace, id: string) {
   const agent = await workspace.api('/api/agents', 'POST', {
-    name: 'Route helper',
+    name: `Route helper ${id}`,
     access: {
       projects: [],
       installation: false,
@@ -1464,6 +1535,7 @@ for (const kind of ['routes', 'grants'] as const) {
 test('resource routes preserve exact conditions, require explicit grants and edit paused overrides', async ({ page, workspace }) => {
   test.setTimeout(90000)
   const { id, agent, path } = await conversationRoutesFixture(workspace, 'routes-ui')
+  const broad = await workspace.api('/api/agents', 'POST', { name: 'Broad route helper' })
   await page.goto(workspacePath(`/plugins/${id}`))
   await signIn(page)
   const resource = page.getByRole('article', { name: 'Engineering', exact: true })
@@ -1475,8 +1547,15 @@ test('resource routes preserve exact conditions, require explicit grants and edi
   await expect(routes.getByRole('combobox', { name: 'Agent', exact: true })).toHaveValue('')
   await expect(routes.getByRole('button', { name: 'Save route', exact: true })).toBeDisabled()
   await expect(routes.getByRole('combobox', { name: 'Agent', exact: true })).toBeEnabled()
-  await routes.getByRole('combobox', { name: 'Agent', exact: true }).selectOption(agent.id)
-  await routes.getByRole('combobox', { name: 'Who may participate', exact: true }).selectOption('allowlist')
+  await expect(routes.getByRole('combobox', { name: 'Project', exact: true })).toHaveValue('No project')
+  await selectField(routes, 'Project', 'No project')
+  const agentSelect = routes.getByRole('combobox', { name: 'Agent', exact: true })
+  await agentSelect.fill(broad.name)
+  await expect(routes.getByRole('option', { name: broad.name, exact: true })).toHaveAttribute('aria-disabled', 'true')
+  await agentSelect.press('Escape')
+  await expect(agentSelect).toHaveValue('')
+  await selectField(routes, 'Agent', agent.name)
+  await selectField(routes, 'Who may participate', 'Listed people only')
   await routes.getByLabel('Allowed person IDs', { exact: true }).fill('U1\nU2')
   await expect(routes.getByRole('button', { name: 'Save route', exact: true })).toBeDisabled()
   await routes.getByRole('button', { name: 'Add condition', exact: true }).click()
@@ -1541,7 +1620,7 @@ test('resource routes refresh an uncertain creation without repeating the write'
   await routes.getByRole('button', { name: 'Add route', exact: true }).click()
   await routes.getByLabel('Route name', { exact: true }).fill('Default')
   await expect(routes.getByRole('combobox', { name: 'Agent', exact: true })).toBeEnabled()
-  await routes.getByRole('combobox', { name: 'Agent', exact: true }).selectOption(agent.id)
+  await selectField(routes, 'Agent', agent.name)
   await routes.getByRole('checkbox', { name: 'Match all sources in this resource', exact: true }).check()
   await routes.getByRole('button', { name: 'Save route', exact: true }).click()
   await expect(routes.getByRole('alert')).toContainText('Refresh routes before making another change.')

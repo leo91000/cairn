@@ -1085,3 +1085,44 @@ The regression holds the real post-response lookup: its unchanged control succee
 while pausing or editing the resource is refused with 403. All three scenarios pass
 through the installed package and actual Luau worker. Whole-checkpoint qualification
 and fresh independent review remain required.
+
+## Native controller qualification after a crash
+
+The hosted run at `7bb84816` passes the full Rust and web suites, all browser jobs,
+Android including the complete device journeys, and the storage reference. Its
+native CPU qualification fails while recreating the crashed controller's transient
+systemd unit. The unchanged fixture and a reduced controller-crash scenario both
+reproduce that failure in an isolated systemd container with private cgroups.
+
+Captured stderr identifies a still-loaded unit name. A workload leaving its active
+state does not establish that its supervisor has been unloaded; the
+[systemd transient-unit contract](https://www.freedesktop.org/software/systemd/man/257/org.freedesktop.systemd1.html)
+requires the name to be available before defining it again. The fixture now waits
+for `LoadState=not-found` under its existing deadline and prints captured command
+errors. Production execution and its containment checks are unchanged.
+
+The original negative control still fails after the correction. Ten full corrected
+trials pass with the actual Cairn binary, including lease expiry, descendant
+fencing, guardian and controller crashes, restored workspace, and retry tombstones.
+Hosted qualification of this correction and fresh full review remain required.
+This checkpoint does not complete the Slack package or the remaining Q1–Q20 work.
+
+
+## OAuth credential encoding and owner selectors
+
+Confidential OAuth now form-encodes the client ID and secret independently before
+constructing Basic authentication. The installed-package regression uses reserved
+characters and checks the exact header for both code exchange and refresh, while
+concurrent calls consume only one refresh token. It fails against the previous
+implementation and passes after correction. The complete 28-case OAuth suite and
+the targeted regression on the final formatted source pass.
+
+New owner-management selectors reuse the shared web `VirtualSelect`: setup agents,
+resource parents, grant agents/profiles/operation exceptions, and route projects,
+participation and eligible agents. Empty profiles and projects remain valid;
+required agents and parents have no implicit selection. Native Android retains its
+shared `Choice`/`ChoiceList` presentation and the same exact IDs and eligibility
+rules. Browser journeys exercise searching and choosing these values, required
+parent validation, explicit incoming-agent authority and the saved native payloads.
+The web lint, 602 unit tests and production build pass. These corrections do not
+complete scoped resource forms, guided route selectors or the full Slack contract.

@@ -293,14 +293,34 @@ async fn owner_oauth_captures_tokens_without_exposing_them_and_binds_the_resourc
 }
 
 #[tokio::test]
-async fn concurrent_calls_share_one_refresh_and_reuse_only_the_rotated_token() {
+async fn confidential_exchange_and_shared_refresh_form_encode_client_credentials() {
     let (_root, s, instance, resource, path, app) = fixture(false).await;
+    connections::save(
+        &s,
+        "example",
+        &json!({
+            "name": "Example app", "enabled": true,
+            "settings": {"clientId": "app:desktop"},
+            "secrets": {"clientSecret": "s+%word: /?="}
+        }),
+        Some(&instance),
+    )
+    .await
+    .unwrap();
     let started = begin(&app, &path).await;
     let exchanges = Arc::new(AtomicUsize::new(0));
     let exchange_count = exchanges.clone();
-    let provider = axum::Router::new().route("/token", axum::routing::post(move |axum::Form(form): axum::Form<HashMap<String, String>>| {
+    let provider = axum::Router::new().route("/token", axum::routing::post(move |headers: axum::http::HeaderMap, axum::Form(form): axum::Form<HashMap<String, String>>| {
         let count = exchange_count.clone();
         async move {
+            // RFC 6749 section 2.3.1: encode each credential before Basic.
+            let credentials = base64::Engine::encode(
+                &base64::engine::general_purpose::STANDARD,
+                "app%3Adesktop:s%2B%25word%3A+%2F%3F%3D",
+            );
+            assert_eq!(headers["authorization"], format!("Basic {credentials}"));
+            assert!(!form.contains_key("client_id"));
+            assert!(!form.contains_key("client_secret"));
             let call = count.fetch_add(1, Ordering::SeqCst);
             if call == 0 {
                 assert_eq!(form["grant_type"], "authorization_code");

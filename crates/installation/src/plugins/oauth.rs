@@ -737,7 +737,12 @@ where
             .and_then(Value::as_str)
             .filter(|v| !v.is_empty())
             .ok_or_else(|| Error::forbidden("OAuth client secret is unavailable."))?;
-        request = request.basic_auth(client_id, Some(secret));
+        // OAuth Basic uses form-encoded credentials (RFC 6749 section 2.3.1).
+        let encoded_client_id: String =
+            url::form_urlencoded::byte_serialize(client_id.as_bytes()).collect();
+        let encoded_client_secret: String =
+            url::form_urlencoded::byte_serialize(secret.as_bytes()).collect();
+        request = request.basic_auth(encoded_client_id, Some(encoded_client_secret));
     } else {
         fields.insert("client_id", client_id.into());
     }

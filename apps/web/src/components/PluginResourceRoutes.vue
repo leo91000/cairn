@@ -12,6 +12,7 @@ import { pluginManagementItems } from '../plugin-management'
 import Modal from './Modal.vue'
 import UiAlert from './UiAlert.vue'
 import UiButton from './UiButton.vue'
+import VirtualSelect from './VirtualSelect.vue'
 
 const props = defineProps<{ path: string, name: string, enabled: boolean }>()
 const emit = defineEmits<{ activity: [active: boolean] }>()
@@ -38,6 +39,27 @@ const personalHourly = ref(5)
 const eligibility = ref<RouteEligibility[]>([])
 const eligibilityReady = ref(false)
 const eligibilityError = ref('')
+const projectOptions = computed(() => [
+  { value: '', label: 'No project' },
+  ...state.projects.map(item => ({ value: item.id, label: item.name })),
+])
+const participationOptions = [
+  { value: 'allowlist', label: 'Listed people only' },
+  { value: 'requests', label: 'Approve people as they ask' },
+  { value: 'everyone', label: 'Anyone' },
+]
+const agentOptions = computed(() => {
+  const results = new Map(eligibility.value.map(item => [item.agentId, item]))
+  return state.agents.map((item) => {
+    const result = results.get(item.id)
+    return {
+      value: item.id,
+      label: item.name,
+      description: result?.reason,
+      disabled: !result?.eligible,
+    }
+  })
+})
 let generation = 0
 let previewGeneration = 0
 let reader: AbortController | undefined
@@ -375,20 +397,33 @@ onBeforeUnmount(() => {
           class="w-auto!"
           :disabled="busy || !props.enabled"
         >Enabled</label>
-        <label>Project<select v-model="project" :disabled="busy || !props.enabled"><option value="">No project</option><option v-for="item in state.projects" :key="item.id" :value="item.id">{{ item.name }}</option></select></label>
-        <label>Who may participate<select v-model="mode" :disabled="busy || !props.enabled"><option value="allowlist">Listed people only</option><option value="requests">Approve people as they ask</option><option value="everyone">Anyone</option></select></label>
+        <VirtualSelect
+          v-model="project"
+          label="Project"
+          :options="projectOptions"
+          :disabled="busy || !props.enabled"
+        />
+        <VirtualSelect
+          v-model="mode"
+          label="Who may participate"
+          :options="participationOptions"
+          :disabled="busy || !props.enabled"
+        />
         <UiAlert v-if="eligibilityError">
           {{ eligibilityError }}
         </UiAlert>
         <p v-if="!eligibilityReady && !eligibilityError" class="text-xs text-muted">
           Checking eligible agents…
         </p>
-        <label>Agent<select v-model="agent" required :disabled="busy || !eligibilityReady || !props.enabled"><option value="">Choose an agent</option><option
-          v-for="item in state.agents"
-          :key="item.id"
-          :value="item.id"
-          :disabled="!eligibility.find(result => result.agentId === item.id)?.eligible"
-        >{{ item.name }}{{ eligibility.find(result => result.agentId === item.id)?.reason ? ` · ${eligibility.find(result => result.agentId === item.id)!.reason}` : '' }}</option></select></label>
+        <VirtualSelect
+          v-model="agent"
+          label="Agent"
+          :options="agentOptions"
+          placeholder="Choose an agent"
+          required
+          :loading="!eligibilityReady && !eligibilityError"
+          :disabled="busy || !eligibilityReady || !props.enabled"
+        />
         <p class="text-xs text-muted">
           The agent must be dedicated to the selected project. Anyone access requires a read-only agent without installation, GitHub, MCP or plugin access.
         </p>

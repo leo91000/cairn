@@ -636,8 +636,10 @@ checklist.
 Both endpoints use HTTPS on declared hosts, without redirects. `clientId` names
 an instance text setting; `clientSecret` names a secret setting. `pkce: true` adds
 S256 PKCE and permits a public client without `clientSecret`. Confidential clients
-use HTTP Basic authentication at the token endpoint. A provider supporting both
-may declare both. Slack's PKCE switch changes the app to a public client; do not
+use HTTP Basic authentication at the token endpoint, after independently
+form-encoding the client ID and secret as required by
+[RFC 6749 §2.3.1](https://www.rfc-editor.org/rfc/rfc6749#section-2.3.1).
+A provider supporting both may declare both. Slack's PKCE switch changes the app to a public client; do not
 enable it silently in a server app.
 
 `scopeParameter` defaults to `scope` and may name another nonreserved parameter,

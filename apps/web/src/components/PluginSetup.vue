@@ -27,6 +27,7 @@ import PluginResources from './PluginResources.vue'
 import PluginView from './PluginView.vue'
 import UiAlert from './UiAlert.vue'
 import UiButton from './UiButton.vue'
+import VirtualSelect from './VirtualSelect.vue'
 
 const props = defineProps<{ plugin: string, manifest: Manifest, initial: PluginSetupDraft }>()
 const emit = defineEmits<{ close: [], changed: [], activated: [] }>()
@@ -278,10 +279,17 @@ onBeforeUnmount(() => {
           >{{ agent.name }}
         </label>
       </section>
-      <label v-if="delegates(manifest)">Agent for incoming conversations<select v-model="agentId" :disabled="busy || resourceWork || !available">
-        <option value="">Choose a dedicated agent</option>
-        <option v-for="agent in eligible" :key="agent.id" :value="agent.id">{{ agent.name }}</option>
-      </select><small>People must be approved before their messages are accepted. You can configure people and limits after activation.</small></label>
+      <div v-if="delegates(manifest)" class="grid gap-1">
+        <VirtualSelect
+          v-model="agentId"
+          label="Agent for incoming conversations"
+          placeholder="Choose a dedicated agent"
+          :options="eligible.map(agent => ({ value: agent.id, label: agent.name }))"
+          :disabled="busy || resourceWork || !available"
+          required
+        />
+        <small>People must be approved before their messages are accepted. You can configure people and limits after activation.</small>
+      </div>
       <label class="flex flex-row! items-center gap-2!"><input
         v-model="enabled"
         type="checkbox"

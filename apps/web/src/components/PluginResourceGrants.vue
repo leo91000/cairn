@@ -7,6 +7,7 @@ import { resourceRuleOperations } from '../plugins'
 import Modal from './Modal.vue'
 import UiAlert from './UiAlert.vue'
 import UiButton from './UiButton.vue'
+import VirtualSelect from './VirtualSelect.vue'
 
 const props = defineProps<{
   path: string
@@ -30,6 +31,16 @@ const profile = ref<PluginAccessProfile | ''>('')
 const overrides = ref<Record<string, string>>(Object.create(null))
 const limits = ref<Record<string, string>>(Object.create(null))
 const profiles = { read: 'Read', contribute: 'Contribution', manage: 'Management' }
+const agentOptions = computed(() => state.agents.map(item => ({ value: item.id, label: item.name })))
+const profileOptions = [
+  { value: '', label: 'Only selected operations' },
+  ...Object.entries(profiles).map(([value, label]) => ({ value, label })),
+]
+const operationOptions = [
+  { value: '', label: 'Use profile' },
+  { value: 'allow', label: 'Allow explicitly' },
+  { value: 'deny', label: 'Deny in this rule' },
+]
 const scopeNames = computed(() => [...new Set(props.operations.flatMap(operation => operation.scopes ?? []))])
 const draft = computed(() => ({
   agentId: agent.value,
@@ -219,24 +230,32 @@ onBeforeUnmount(() => {
           aria-label="New access rule"
           @submit.prevent="mutate('POST')"
         >
-          <label>Agent<select v-model="agent" :disabled="busy || !enabled">
-            <option value="">Choose an agent</option>
-            <option v-for="item in state.agents" :key="item.id" :value="item.id">{{ item.name }}</option>
-          </select></label>
-          <label>Profile<select v-model="profile" :disabled="busy || !enabled">
-            <option value="">Only selected operations</option>
-            <option v-for="(label, value) in profiles" :key="value" :value="value">{{ label }}</option>
-          </select></label>
+          <VirtualSelect
+            v-model="agent"
+            label="Agent"
+            :options="agentOptions"
+            placeholder="Choose an agent"
+            required
+            :disabled="busy || !enabled"
+          />
+          <VirtualSelect
+            v-model="profile"
+            label="Profile"
+            :options="profileOptions"
+            :disabled="busy || !enabled"
+          />
           <p class="text-xs text-muted">
             Contribution includes Read. Management includes both. Choose exceptions below.
           </p>
-          <label v-for="operation in operations" :key="operation.name" class="min-w-0 break-words">
-            {{ operation.name }}<select v-model="overrides[operation.name]" :disabled="busy || !enabled">
-              <option :value="undefined">Use profile</option>
-              <option value="allow">Allow explicitly</option>
-              <option value="deny">Deny in this rule</option>
-            </select>
-          </label>
+          <VirtualSelect
+            v-for="operation in operations"
+            :key="operation.name"
+            :model-value="overrides[operation.name] ?? ''"
+            :label="operation.name"
+            :options="operationOptions"
+            :disabled="busy || !enabled"
+            @update:model-value="overrides[operation.name] = $event"
+          />
           <p class="text-xs text-muted">
             Optional limits: one allowed value per line. Empty means no additional limit. Operations without every configured scope are excluded.
           </p>
