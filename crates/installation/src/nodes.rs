@@ -592,7 +592,7 @@ async fn configure_storage(s: &Service, node: &str, body: &Value) -> Result<Valu
         .await
         .map_err(|_| Error::unavailable("Node storage probe unavailable."))?;
     if !response.status().is_success() {
-        return Err(Error::conflict("Node did not pass its FUSE storage probe."));
+        return Err(Error::conflict("Node did not pass its storage probe."));
     }
     let node = node.to_owned();
     let value = s

@@ -24,6 +24,7 @@ data class NodeCapabilities(
     val arch: String = "",
     val kvm: Boolean = false,
     val backend: String = "firecracker",
+    val ublk: Boolean = false,
 )
 
 @Serializable
@@ -248,11 +249,14 @@ fun nodeDiagnostics(node: ExecutionNode, now: Long = System.currentTimeMillis())
     if (!node.local && node.status == "offline")
         reasons +=
             node.lastSeen?.let {
-                "Aucun contact depuis ${relativeAge(it, now).removePrefix("il y a ")} : vérifiez que la machine est allumée, connectée et que le service cairn-node tourne."
+                "Aucun contact depuis ${relativeAge(it, now).removePrefix("il y a ")} : vérifiez que la machine est allumée, connectée et que le service ${if (node.capabilities.backend == NATIVE_BACKEND) "cairn-native-node" else "cairn-node"} tourne."
             } ?: "La machine ne s’est jamais connectée : lancez la commande d’installation dessus."
     if (node.capabilities.backend != "native" && !node.capabilities.kvm)
         reasons +=
             "KVM indisponible : activez la virtualisation dans le BIOS et chargez le module kvm."
+    if (node.capabilities.backend == NATIVE_BACKEND && !node.capabilities.ublk)
+        reasons +=
+            "ublk indisponible : chargez le module noyau ublk_drv (/dev/ublk-control) pour monter les disques de conversation stockés sur S3."
     if (node.status != "offline" && !node.executionReady)
         reasons +=
             node.budgetError?.let { "Le budget partagé n’a pas pu être appliqué : $it" }

@@ -57,4 +57,23 @@ it('formats node sizes, recovery ages and blocking reasons for people', () => {
   expect(nodeDiagnostics({ ...node, executionReady: false, budgetError: 'RAM below current usage' })[0]).toContain('RAM below current usage')
   expect(nodeDiagnostics({ ...node, agents: [] })).toEqual(['No agent can use this machine yet.'])
   expect(nodeDiagnostics({ ...node, status: 'offline', lastSeen: 0 }, 10 * 60_000)[0]).toContain('No contact since 10 min ago')
+
+  // Native nodes need ublk rather than KVM/FUSE, and run under their own service.
+  const native = {
+    ...node,
+    nativeEnabled: true,
+    nativeAccounts: ['p'],
+    capabilities: {
+      ...node.capabilities,
+      backend: 'native' as const,
+      kvm: false,
+      fuse: false,
+      ublk: true,
+    },
+  }
+  expect(nodeDiagnostics(native)).toEqual([])
+  expect(nodeDiagnostics({ ...native, capabilities: { ...native.capabilities, ublk: false } })).toEqual([
+    'ublk is unavailable: load the ublk_drv kernel module (/dev/ublk-control) so this node can mount S3-backed conversation disks.',
+  ])
+  expect(nodeDiagnostics({ ...native, status: 'offline', lastSeen: 0 }, 10 * 60_000)[0]).toContain('the cairn-native-node service is running')
 })

@@ -118,8 +118,11 @@ fun NodePlacement(vm: CairnViewModel, run: Run) {
             run.capacityWaitUntil != null -> "En attente de capacité"
             run.backup?.status == "saving" -> "Synchronisation…"
             dirty > 0 -> "${formatBytes(dirty)} non synchronisés"
-            run.executionBackend == "native" && run.status == "running" ->
-                "Travail local · sauvegardé après l’arrêt"
+            // Native ublk disks synchronize while running like VM disks; only legacy file
+            // workspaces wait for the stop.
+            run.executionBackend == "native" &&
+                run.status == "running" &&
+                run.storage?.mode != "on-demand" -> "Travail local · sauvegardé après l’arrêt"
             run.backup?.capturedAt != null ->
                 "Synchronisé ${relativeAge(run.backup.capturedAt, now)}"
             else -> "Pas encore synchronisé"
@@ -148,8 +151,12 @@ fun NodePlacement(vm: CairnViewModel, run: Run) {
         DetailSheet("Node d’exécution", { expanded = false }) {
             Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
                 Text(current, style = MaterialTheme.typography.titleMedium)
-                if (run.executionBackend == "native")
-                    Text("Processus natif · GPU partagé · sauvegarde entre les tours")
+                if (run.executionBackend == "native") Text("Processus natif · GPU partagé")
+                if (run.executionBackend == "native" && run.storage?.mode != "on-demand")
+                    Text(
+                        "Sauvegarde entre les tours",
+                        style = MaterialTheme.typography.bodySmall,
+                    )
                 if (run.storage?.mode == "on-demand")
                     Text(
                         "Fichiers chargés à la demande",

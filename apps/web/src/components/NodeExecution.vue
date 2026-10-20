@@ -113,7 +113,8 @@ const status = computed((): { tone: 'bad' | 'warn' | 'busy' | 'ok' | 'idle', lab
     return { tone: 'warn', label: 'Saving…' }
   if (dirtyBytes.value)
     return { tone: 'warn', label: `${formatBytes(dirtyBytes.value)} unsaved` }
-  if (run.executionBackend === 'native' && run.status === 'running')
+  // Native ublk disks synchronize while running like VM disks; only legacy file workspaces wait for the stop.
+  if (run.executionBackend === 'native' && run.status === 'running' && run.storage?.mode !== 'on-demand')
     return { tone: 'warn', label: 'Local work · saved when execution stops' }
   if (run.backup?.capturedAt)
     return { tone: 'ok', label: `Synced ${relativeAge(run.backup.capturedAt, now.value)}` }
@@ -313,7 +314,7 @@ onUnmounted(() => {
             </h2>
             <p class="m-0! mt-0.5!">
               <template v-if="run.executionBackend === 'native'">
-                Native process · shared host GPU · checkpoints between turns
+                Native process · shared host GPU · {{ run.storage?.mode === 'on-demand' ? 'files load on demand' : 'checkpoints between turns' }}
               </template>
               <template v-else-if="run.storage?.mode === 'on-demand'">
                 Files load on demand
@@ -402,6 +403,7 @@ onUnmounted(() => {
             v-model="mode"
             label="Placement"
             :options="modes"
+            stretch
             class="rounded-lg border border-line bg-inset p-0.5"
           />
           <VirtualSelect

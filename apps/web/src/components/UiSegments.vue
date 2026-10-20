@@ -11,6 +11,8 @@ defineProps<{
     count?: number
   }[]
   compact?: boolean
+  // Share the full width equally, like a native segmented control.
+  stretch?: boolean
 }>()
 const model = defineModel<T>({ required: true })
 </script>
@@ -27,7 +29,7 @@ const model = defineModel<T>({ required: true })
       :key="`${option.value}`"
       type="button"
       class="flex min-h-[38px] items-center justify-center gap-[7px] rounded-md px-3 py-[9px] text-2xs font-medium whitespace-nowrap transition-colors focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
-      :class="[model === option.value ? 'selected bg-hover/60 text-ink' : 'text-muted hover:bg-soft hover:text-ink', compact ? 'phone:min-h-[34px] phone:px-2 phone:text-3xs' : 'phone:flex-1 phone:gap-[5px] phone:px-2.5']"
+      :class="[model === option.value ? 'selected bg-hover/60 text-ink' : 'text-muted hover:bg-soft hover:text-ink', compact ? 'phone:min-h-[34px] phone:px-2 phone:text-3xs' : 'phone:flex-1 phone:gap-[5px] phone:px-2.5', { 'min-w-0 flex-1': stretch }]"
       :aria-pressed="model === option.value"
       @click="model = option.value"
     >
