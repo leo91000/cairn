@@ -47,7 +47,10 @@ abstract class NodePlacementCases {
             }
         }
         compose.onNodeWithText("Slots d’exécution").assertIsNotEnabled()
+        compose.onNodeWithText("Une node native exécute une conversation à la fois.").assertExists()
         compose.onNodeWithText("Réservation exclusive").assertDoesNotExist()
+        compose.onNodeWithText("Mettez à jour le runtime", substring = true).assertDoesNotExist()
+        compose.onNodeWithText("Personnes de confiance").performScrollTo().assertExists()
         compose.onNodeWithText("Activer l’exécution native").performScrollTo().performClick()
         compose.onNodeWithText("trusted@example.test").performScrollTo().performClick()
         capture("native-node-trust")
@@ -440,6 +443,71 @@ abstract class NodePlacementCases {
             compose.onNodeWithText("Échec").assertExists()
             compose.onNodeWithText("Suspendue (exclusivité)").assertDoesNotExist()
             compose.onNodeWithText("Suspendue pour une réservation exclusive").assertDoesNotExist()
+        }
+    }
+
+    @Test
+    fun aRunningNativeConversationShowsItsStorageSynchronization() {
+        MockWebServer().use { server ->
+            server.dispatcher =
+                object : Dispatcher() {
+                    override fun dispatch(request: RecordedRequest): MockResponse {
+                        val body =
+                            when (request.path!!.substringBefore('?')) {
+                                "/api/installations/fixture/api/nodes/placement/native" ->
+                                    """{"nodes":[{"id":"desk","name":"Bureau GPU","status":"online","capabilities":{"backend":"native","ublk":true}}]}"""
+                                "/api/installations" -> beaconInstallationsFixture()
+                                "/api/account/session" -> beaconAccountFixture("fixture")
+                                "/api/installations/fixture/api/overview" -> "{}"
+                                else -> "[]"
+                            }
+                        return MockResponse().setBody(body)
+                    }
+                }
+            server.start()
+            val vm = connectedViewModel()
+            // A legacy native file workspace is only saved once execution stops.
+            val run =
+                mutableStateOf(
+                    Run(
+                        id = "native",
+                        status = "running",
+                        nodeId = "desk",
+                        executionBackend = "native",
+                        storage = RunStorage(mode = "native", dirtyBytes = 0),
+                        backup = NodeBackup(capturedAt = System.currentTimeMillis() - 120_000),
+                    )
+                )
+            compose.setContent {
+                val state by vm.state.collectAsStateWithLifecycle()
+                LaunchedEffect(Unit) {
+                    vm.state.first { it.ready }
+                    vm.connect(server.url("/").toString())
+                }
+                CairnTheme {
+                    if (state.session.authenticated) Page { NodePlacement(vm, run.value) }
+                }
+            }
+            compose.waitUntil(20000) {
+                compose
+                    .onAllNodesWithText("Travail local · sauvegardé après l’arrêt")
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
+            }
+            // Native ublk disks synchronize while running, like VM disks.
+            compose.runOnIdle {
+                run.value = run.value.copy(storage = RunStorage(mode = "on-demand", dirtyBytes = 0))
+            }
+            compose.onNodeWithText("Travail local · sauvegardé après l’arrêt").assertDoesNotExist()
+            compose.onNodeWithText("Synchronisé il y a 2 min").assertExists()
+            compose.waitUntil(20000) {
+                compose.onAllNodesWithText("Node : Bureau GPU").fetchSemanticsNodes().isNotEmpty()
+            }
+            compose.onNodeWithText("Node : Bureau GPU").performClick()
+            compose.onNodeWithText("Processus natif · GPU partagé").assertExists()
+            compose.onNodeWithText("Fichiers chargés à la demande").assertExists()
+            compose.onNodeWithText("Sauvegarde entre les tours").assertDoesNotExist()
+            capture("native-run-synchronized")
         }
     }
 

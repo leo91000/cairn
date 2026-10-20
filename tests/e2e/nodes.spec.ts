@@ -192,15 +192,19 @@ test('conversation placement distinguishes a preference from a strict pin and sh
   await page.keyboard.press('Escape')
   await expect(panel).toHaveCount(0)
   await expect(header).toBeFocused()
-  // A running native ublk conversation synchronizes like a VM: its last sync stays visible.
+  // A legacy native file workspace is only saved once execution stops.
   workspace.service.store.updateRun(detail.run.id, {
     status: 'running',
     executionBackend: 'native',
-    storage: { mode: 'on-demand', localBytes: 191392768, dirtyBytes: 0 },
+    storage: { mode: 'native', localBytes: 191392768, dirtyBytes: 0 },
   } as any)
   await heartbeat()
-  await expect(header).toContainText('Synced 2 min ago', { timeout: 15000 })
-  await expect(header).not.toContainText('saved when execution stops')
+  await expect(header).toContainText('Local work · saved when execution stops', { timeout: 15000 })
+  // A running native ublk conversation synchronizes like a VM: its last sync stays visible.
+  workspace.service.store.updateRun(detail.run.id, { storage: { mode: 'on-demand', localBytes: 191392768, dirtyBytes: 0 } } as any)
+  await heartbeat()
+  await expect(header).not.toContainText('saved when execution stops', { timeout: 15000 })
+  await expect(header).toContainText('Synced 2 min ago')
   await header.click()
   await expect(panel).toContainText('Native process · shared host GPU · files load on demand')
   await page.keyboard.press('Escape')

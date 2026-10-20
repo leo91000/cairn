@@ -135,7 +135,10 @@ status for update failures. Enrollment and update credentials stay root-private.
 Revoke the node in Cairn first, then stop/disable `cairn-native-node.service` on its
 host. Removing `/opt/cairn-native` and `/var/lib/cairn-native` deletes binaries and
 all retained local work; do this only after synchronization and recovery review.
-Remove its systemd unit and run `systemctl daemon-reload` when uninstalling. The
+Remove them with `rm --one-file-system`: a conversation disk still mounted after a
+failed stop is skipped instead of traversed; unmount it and rerun the command. Then
+remove its systemd unit, run `systemctl daemon-reload` and delete the
+`cairn-workload` account. The Revoke dialog shows this command in that order. The
 installer leaves GPU drivers and the personal desktop session untouched.
 
 Claude's broker and CLI use a separate writable transient secure store for

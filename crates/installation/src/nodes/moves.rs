@@ -680,7 +680,8 @@ async fn resume_at_destination(s: &Service, current: &Value, backup: &Value) -> 
         RunStatus::Queued
     };
     let patch = json!({
-        "storage": { "mode": if crate::native::policy::native(&current["snapshot"]["agent"]) { "native" } else { super::ON_DEMAND } },
+        // Native and VM conversations both resume from on-demand journal disks.
+        "storage": { "mode": super::ON_DEMAND },
         "movementError": null,
         "accountWaitReason": null,
         "nodeId": node,

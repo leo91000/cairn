@@ -649,10 +649,10 @@ function statusLabel(node: ExecutionNode) {
           <legend>Native execution</legend>
           <p>Only selected native agents and trusted people may run here. Disabling native execution or removing a person stops affected work after its lease expires.</p>
           <label class="access-row"><input v-model="editing.nativeEnabled" type="checkbox">Enable native execution</label>
-          <p class="mt-4 mb-2!">
+          <p id="native-trusted-people" class="mt-4 mb-2!">
             Trusted people
           </p>
-          <div class="grid gap-2">
+          <div class="grid gap-2" role="group" aria-labelledby="native-trusted-people">
             <label v-for="person in nativeCallers" :key="person.id" class="access-row"><input v-model="editing.nativeAccounts" type="checkbox" :value="person.id"><span class="min-w-0 break-all">{{ person.email }}</span></label>
           </div>
           <p v-if="!nativeCallers.length" class="text-sm text-muted">
@@ -735,7 +735,7 @@ function statusLabel(node: ExecutionNode) {
           Conversations running there pause within the disconnection delay, then resume from their latest recovery point on another authorized machine when one has capacity. Conversations fixed to this machine, or without a recovery point, wait.
         </p>
         <p>Files stored on the machine are not deleted. To uninstall it, run on the machine:</p>
-        <code v-if="revoking?.capabilities.backend === 'native'" class="block break-all select-all">sudo systemctl disable --now cairn-native-node && sudo rm -rf --one-file-system /etc/systemd/system/cairn-native-node.service /opt/cairn-native /var/lib/cairn-native && sudo systemctl daemon-reload && sudo userdel cairn-workload</code>
+        <code v-if="revoking?.capabilities.backend === 'native'" class="block break-all select-all">sudo systemctl disable --now cairn-native-node && sudo rm -rf --one-file-system /opt/cairn-native /var/lib/cairn-native && sudo rm -f /etc/systemd/system/cairn-native-node.service && sudo systemctl daemon-reload && sudo userdel cairn-workload</code>
         <code v-else class="block break-all select-all">sudo systemctl disable --now cairn-node; sudo docker rm -f cairn-execution-node; sudo rm -rf /etc/systemd/system/cairn-node.service /opt/cairn-node /var/lib/cairn-node</code>
         <p class="text-sm text-muted">
           Removing these directories also deletes the local conversation disks kept on that machine.
