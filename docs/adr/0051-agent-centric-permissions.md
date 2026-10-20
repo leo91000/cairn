@@ -41,7 +41,8 @@ et l’aperçu l’indique. Une réservation exclusive ne la suspend pas, comme 
 gestion ne les expose pas :
 un agent qui gère l’installation ne peut pas s’accorder un compte 1Password ni une
 réservation exclusive, et ses modifications conservent ceux que le propriétaire a
-réglés, sauf la réservation d’une node sur laquelle il retire le droit d’exécuter.
+réglés, sauf les réservations qu’il rend impossibles : celle d’une node sur laquelle
+il retire le droit d’exécuter, ou toutes s’il passe l’agent en exécution native.
 
 Chaque enregistrement change la `revision` de l’agent. Un éditeur qui renvoie une
 révision périmée reçoit un conflit au lieu d’écraser des droits plus récents.

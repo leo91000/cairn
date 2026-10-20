@@ -7,7 +7,7 @@ its resource access cannot be reduced and it cannot be deleted.
 1Password service accounts, other plugin instances and exclusive node
 reservations are explicit exceptions: even Main needs a grant in its **Secrets &
 plugins** and **Nodes** sections. Those grants apply live; see
-[1Password access](ONEPASSWORD.md) and [agent-centric permissions](adr/0049-agent-centric-permissions.md).
+[1Password access](ONEPASSWORD.md) and [agent-centric permissions](adr/0051-agent-centric-permissions.md).
 
 Every permission is edited on the agent's page, on web and Android. It summarises
 effective access, opens one section per area, keeps a single draft and reviews
