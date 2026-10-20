@@ -251,7 +251,13 @@ impl Execution<'_> {
     async fn prepare(&mut self, existing: bool) -> Result<Workspace> {
         let s = self.s;
         let mut timing = Operation::new("workspace_prepare", &self.id, "execution");
-        let prepared = self.prepare_execution(existing).await?;
+        let (prepared, credentials) = self.prepare_execution(existing).await?;
+        // Plugin credentials written into the run are masked wherever they appear.
+        for git in &credentials.git {
+            if !self.sensitive.contains(&git.password) {
+                self.sensitive.push(git.password.clone());
+            }
+        }
         timing.next("account_home");
         let state_home = self.prepare_state_home(&prepared).await?;
         let patch = json!({
@@ -293,7 +299,10 @@ impl Execution<'_> {
     }
 
     /// Prepares the workspace, or restores the one saved before a restart.
-    async fn prepare_execution(&self, existing: bool) -> Result<Value> {
+    async fn prepare_execution(
+        &self,
+        existing: bool,
+    ) -> Result<(Value, crate::plugins::run_credentials::RunCredentials)> {
         let s = self.s;
         if existing && self.checkpoint.read(|c| c.prepared().is_none()).await {
             // A fresh generation keeps a half-prepared workspace from being reused.
@@ -326,7 +335,7 @@ impl Execution<'_> {
         self.checkpoint
             .update(|c| c.prepared = Some(Some(saved_prepared)))
             .await?;
-        Ok(prepared)
+        Ok((prepared, credentials))
     }
 
     async fn prepare_state_home(&mut self, prepared: &Value) -> Result<PathBuf> {

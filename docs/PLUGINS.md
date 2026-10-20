@@ -8,8 +8,9 @@ declares and the owner approved. Plugin code never receives `Service`, SQLite, t
 vault key or a connection's credential, and identities always come from the host.
 
 Cairn has no code specific to a plugin. Discord's Gateway session, its setup form,
-its panel and its test are Luau, like 1Password's commands and tools: a package
-written outside this repository can do everything the bundled ones do.
+its panel and its test are Luau, like 1Password's commands and tools and GitHub's
+sign-in, run credentials, project and skill sources and CI waits: a package written
+outside this repository can do everything the bundled ones do.
 
 ## Code layout
 
@@ -23,6 +24,10 @@ crates/installation/src/plugins/
   runtime.rs            One supervisor per instance that needs a worker: socket, pump
   socket.rs             `socket`: a package's own WebSocket, driven by its transport worker
   forms.rs              `instanceForm`: the package completes the owner's instance form
+  device_flow.rs        `credential.deviceFlow`: the host signs the owner in (RFC 8628)
+  run_credentials.rs    `runCredentials`: files and Git credentials in granted agents' runs
+  projects.rs           `projectSources`: projects the owner imports through an instance
+  conditions.rs         `conditions`: what granted agents wait for with `wait_for`
   capabilities.rs       storage, http, timers, exec, inbound and conversations for scripts
   scope.rs              One-shot handlers: who acts, which instances, rechecks
   agents.rs             Commands, Cairn MCP tools and prompt instructions for agents
@@ -31,7 +36,10 @@ crates/installation/src/plugins/
   work.rs               Admission, access requests, event queue, replies
   cli.rs                `cairn plugin <plugin> <command> …` inside conversations
   legacy.rs             Moves earlier 1Password accounts into instances
-plugins/                Bundled packages (1Password, Discord), embedded by installation's build.rs
+  legacy_github.rs      Moves the earlier GitHub connection and tokens into instances
+crates/installation/src/skills/sources.rs
+                        `skillSources`: skills imported from a package's source
+plugins/                Bundled packages (1Password, Discord, GitHub), embedded by build.rs
 packages/plugin-types/  Luau declarations for package authors
 apps/web/src/           Catalogue, review, generic plugin page, form and view renderers
 ```
@@ -86,7 +94,8 @@ A manifest declares `"apiVersion": 2` (the only version Cairn loads) and:
 - `hosts`: the hostnames `http` (HTTPS) and `socket` (WSS) may reach. `*.example.com`
   covers every subdomain of `example.com`, not the domain itself;
 - `credential`: how Cairn adds an instance's token to authorized requests
-  (header and prefix); the script only sets `auth = true`;
+  (header and prefix); the script only sets `auth = true`. With `deviceFlow`, the
+  owner can also sign in instead of pasting it: see [Device sign-in](#device-sign-in);
 - `settings`: the instance form, in order (`key`, `title`, `type`, `required`,
   `hidden`, `description`, `placeholder`, `section`, `default`, `maxLength`,
   `minimum`, `maximum`, `pattern`, `options`, `dynamic` and `refresh`).
@@ -103,7 +112,10 @@ A manifest declares `"apiVersion": 2` (the only version Cairn loads) and:
   page (`plugins`) and only granted agents get the package's commands,
   tools and instructions;
 - `commands`, `tools`, `instructions` (need `agentAccess`), `instanceView`,
-  `instanceTest` and `instanceForm`: see [Contributions](#contributions).
+  `instanceTest` and `instanceForm`: see [Contributions](#contributions);
+- `runCredentials` (needs `agentAccess`), `secretPatterns`, `projectSources`,
+  `conditions` (needs `agentAccess`) and `skillSources`: see
+  [Integrations](#integrations).
 
 ## Connections and delegation
 
@@ -114,7 +126,7 @@ Every plugin uses the same connection model: name, settings, optional credential
 delegation: one dedicated agent (one project at most, no installation access), the
 people allowed (listed, approved as they ask, or anyone), and an hourly message limit.
 “Anyone” is meant for public channels such as customer support: it requires an agent
-with a read-only sandbox and no installation, GitHub, MCP or 1Password access
+with a read-only sandbox and no installation, MCP or plugin access (GitHub, 1Password…)
 (rechecked before every effect, so a later grant suspends the connection), adds a
 per-person hourly limit, and lets only listed people or a conversation's starter
 answer for it or stop it. The
@@ -175,7 +187,10 @@ later, for example after a platform rate limit. Capabilities exposed to scripts:
 - `cairn.http.request{ method, url, headers?, json?|body?|multipart?, auth? }`:
   `multipart` sends a JSON part and deliverables of the reply being handled (by
   artifact ID, 25 MB each); nothing else can be uploaded. HTTPS to declared
-  hosts only, no redirects followed, 15-second timeout, 1 MB responses.
+  hosts only, no redirects followed, 15-second timeout, 1 MB responses. Requests
+  carry `user-agent: Cairn` unless the script sets one. Responses include the
+  `content-type`, `retry-after`, `link` and `x-*` headers (rate limits, granted
+  scopes, pagination), never cookies.
 - `cairn.timers.after(seconds, name, payload)` / `cancel(id)`: 1 s to 7 days, 100 per
   connection.
 
@@ -333,6 +348,158 @@ that omits `agentIds` keeps it. Instances of
 packages that need no worker (no socket, inbound messages, conversations or timers)
 start nothing and show as ready while enabled.
 
+## Integrations
+
+Packages can also take part in Cairn's own features. The host keeps every credential
+and does the work; handlers only describe and answer, in one-shot workers with the
+usual limits.
+
+### Device sign-in
+
+```toml
+[credential.deviceFlow]
+authorizationUrl = "https://example.com/login/device/code"   # HTTPS, declared host
+tokenUrl = "https://example.com/login/oauth/access_token"   # HTTPS, declared host
+clientId = "the publisher's public client ID"
+scopes = ["read", "write"]
+```
+
+The host runs the OAuth 2.0 device authorization grant (RFC 8628) for the owner:
+
+- `POST /api/plugins/{id}/device-flow` → `{ id, state: "pending", userCode,
+  verificationUri, verificationUriComplete?, expiresAt }`. The owner enters the code
+  on the service's page.
+- `GET /api/plugins/{id}/device-flow/{flow}` → the same with `state` `pending`,
+  `completed`, `failed` (with `message`) or `expired`; `DELETE` cancels.
+- The host polls the token endpoint at the advertised interval (`slow_down` adds five
+  seconds) and keeps the token in memory, at most eight sign-ins at once, ten minutes
+  after completion. A restart loses pending sign-ins.
+- The editor sends `credentialFlow: <flow id>` instead of `token` to the form handler
+  and to the save, which consumes the sign-in. The browser and the script never see
+  the token. Tokens are not refreshed: use an OAuth application whose tokens do not
+  expire.
+
+### Run credentials
+
+```toml
+[runCredentials]
+files = [{ path = ".config/tool/hosts.yml", content = "token: {{credential}}\n" }]
+git = [{ url = "https://example.com", username = "x-access-token", password = "{{credential}}" }]
+gitIdentity = { name = "{{settings.name}}", email = "{{settings.email}}" }
+```
+
+For each agent holding an enabled instance (one per package: Cairn refuses a second
+grant), the host renders these templates when a run is prepared and each time it
+resumes. Placeholders are `{{credential}}`, `{{secrets.KEY}}` and `{{settings.KEY}}`;
+a value with control characters, or a missing one, leaves its item out.
+
+- Files land in the run's home, private (0600 in 0700 directories). Paths are
+  relative, visible-segment names, outside provider state, skills, `.gitconfig`,
+  `.ssh` and `.config/cairn`. At most eight files of 8 KB.
+- Git credentials go to `~/.config/cairn/git-credentials`, a credential-store file
+  Cairn owns, with one `credential.<url>.helper` line per prefix in the run's
+  `.gitconfig`. URLs are HTTPS prefixes on declared hosts.
+- `gitIdentity` is the commit author when the installation has no global Git
+  identity; empty values leave it out.
+- A withdrawn grant empties the files it wrote on the next resumption, including in a
+  resumed VM; the end of the run removes them. Native nodes bind them read-only from
+  staging, so they never reach the journal.
+- The host's own fetches (seeding a run, opening a project, imports) use the same Git
+  credentials: the instance that imported the project first, then the agent's, then
+  any enabled instance serving the remote. An SSH remote switches to HTTPS only when
+  an instance serves it.
+- Shared executions without a VM (local development without `RUNNER_URL`) receive no
+  run credentials.
+
+### Secret patterns
+
+`secretPatterns` lists up to eight regular expressions of the service's token
+formats. Cairn masks matches in run output and tool payloads, like its own formats.
+A pattern matching empty or ordinary text is refused.
+
+### Project sources
+
+```toml
+[[projectSources]]
+name = "repositories"
+title = "Repository"
+```
+
+The `projects` handler receives `{ op = "list", source, page, query, instance }` and
+returns `{ items = { { id, name, description?, defaultBranch?, badges?, updatedAt?,
+url?, origin? } }, nextPage? }` (200 items at most; `origin` marks imported ones), or
+`{ op = "resolve", source, id, instance }` and returns `{ id, name, description?,
+origin, defaultBranch? }`. `origin` must be HTTPS on a declared host.
+
+- `GET /api/plugins/{id}/projects?source=&instance=&page=&query=` lists, with
+  `imported` computed by Cairn.
+- `POST /api/projects/import` with `{ pluginId, source, instance, id, name?,
+  description?, baseBranch? }` clones the resolved remote with the instance's run Git
+  credentials into a new managed directory and registers the project with
+  `source: { pluginId, source, instance, id }`. Repeats return the same project.
+
+### Conditions
+
+```toml
+[[conditions]]
+name = "checks"
+project = true
+description = "What completes, what the results mean."
+[conditions.inputSchema]
+type = "object"
+required = ["sha"]
+properties.sha = { type = "string", pattern = "^[0-9a-f]{40}$" }
+```
+
+Granted agents see each condition in `wait_for` as type `<plugin>_<name>` (with `-`
+as `_`), with `projectId` when `project = true`; Cairn records the plugin
+(`pluginId`) and checks, before every observation, that the agent still holds an
+enabled instance and that the project still has the origin the run was granted.
+
+The `condition` handler receives `{ condition, input, project?, agent, instances }`
+(`project`: `{ id, name, origin, baseBranch, source }`) and returns:
+
+- `{ state = "waiting", display = { title, short, details } }` while pending; the
+  display is shown in conversations;
+- a result such as `{ state = "completed", …, display = { tone, title, detail } }`
+  (tones `ok`, `error`, `warning`, `neutral`): the conversation resumes with it;
+- `{ state = "unavailable", message }` for a permanent failure: refused when
+  registering, a result afterwards.
+
+An error is transient: Cairn retries until the deadline. `checkAfter` (seconds, 10 to
+3600) delays the next check; otherwise conditions are checked every 30 seconds, in
+batches of 16 shared by identical requests. Withdrawing the grant ends the wait as
+`unavailable`.
+
+### Skill sources
+
+```toml
+[[skillSources]]
+name = "repository"
+title = "Repository"
+[[skillSources.fields]]
+key = "repository"
+title = "Repository"
+type = "string"
+required = true
+```
+
+Fields use the settings schema (`string`, `url` or `text`). The `skills` handler
+receives `{ op = "resolve", source, location, instance }` and returns `{ version,
+location?, folder?, label?, url?, message?, date? }`, or `{ op = "files", source,
+location, version, folder, instance }` and returns `{ files = { { path, size, digest,
+executable?, link?, download = { url, headers? } } }, truncated? }` with paths relative
+to the folder (2,000 at most). Cairn downloads each file from a declared host with the
+instance's credential (`accept`, `user-agent` and `x-*` headers allowed), refuses
+links and oversized skills, picks the folder holding `SKILL.md` and compares digests
+between versions.
+
+`POST /api/skills/{scope}/import` takes `{ source: "plugin", pluginId, skillSource,
+instance?, location, folder? }`; the source status compares `version`s and
+`…/source/update` takes `{ version, base }`. A skill's source is `{ pluginId, source,
+instance, label, location, url, folder, version, importedAt, modified }`; a removed
+instance falls back to another enabled one.
+
 ## Program installers
 
 Keep exactly one `manifest.json` or `manifest.toml` at the package root. Both
@@ -461,6 +628,36 @@ commands do not acquire a new manager network route.
 Existing 1Password accounts migrate to plugin instances at startup. This is a data
 compatibility break (epoch 2); follow the [migration and rollback plan](PLUGIN-V2-MIGRATION.md)
 before deploying the first plugin API v2 release.
+
+## GitHub
+
+The bundled GitHub package (`plugins/github/`) is an ordinary package built on the
+[integrations](#integrations) above. An instance is a GitHub account:
+
+- **Sign-in.** Atelier → Plugins → GitHub → add an account, then “Sign in with GitHub”
+  (the OAuth App “Cairn installations”, scopes `repo`, `workflow`, `read:org`), or
+  paste a token: a fine-grained token limits agents to the repositories and
+  permissions chosen on GitHub. The form checks the account, warns when an OAuth
+  token lacks `workflow`, and keeps the login and commit identity (name and noreply
+  address) as hidden settings. The panel and test show the account.
+- **Runs.** Agents granted an account on their page get `~/.config/gh/hosts.yml` for
+  the `gh` CLI, Git credentials for `https://github.com`, the commit identity (unless
+  the installation has its own) and the package's instructions. One account per
+  agent. Token formats are masked in run output.
+- **Projects.** Projects → import from “GitHub repository” lists the account's
+  repositories (owned, collaborations, organizations; 50 per page).
+- **Waits.** `github_workflow` (project, run ID, full commit SHA) and
+  `github_pr_checks` (project, PR number, full head SHA), with the same results as
+  before: required checks from classic branch protection and rulesets, `superseded`,
+  `closed`, `no_required_checks`, limits of 500 checks. SSH remotes in every spelling
+  Cairn stores are recognized.
+- **Skills.** “GitHub repository” imports a folder at a branch, tag or commit;
+  `repository` also accepts a `https://github.com/owner/name/tree/<ref>/<folder>`
+  address. Large repositories need the folder: a recursive listing over 1 MB is
+  reported as partial.
+
+Installations that had the earlier built-in GitHub move into this package at startup:
+see the [migration](GITHUB-PLUGIN-MIGRATION.md).
 
 ## Discord
 

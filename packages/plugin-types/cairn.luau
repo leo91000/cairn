@@ -29,6 +29,23 @@
 --   form              the owner edits an instance (instanceForm)
 --                     { values, credential, secrets, instance?, changed?, submit }
 --                     -> FormResult; http and exec use the draft's credential and secrets
+--   projects          a `projectSources` request, for the owner through one instance
+--                     { op = "list", source, page, query, instance }
+--                       -> { items = { { id, name, description?, defaultBranch?, badges?,
+--                            updatedAt?, url?, origin? } }, nextPage? }
+--                     { op = "resolve", source, id, instance }
+--                       -> { id, name, description?, origin, defaultBranch? }
+--   condition         a granted agent's `conditions` wait     { condition, input, project?,
+--                     agent, instances } -> { state = "waiting", display = { title, short,
+--                     details } } | { state = "completed" | …, …, display = { tone, title,
+--                     detail } } | { state = "unavailable", message }; errors are retried,
+--                     `checkAfter` (seconds) delays the next check
+--   skills            a `skillSources` request, for the owner through one instance
+--                     { op = "resolve", source, location, instance }
+--                       -> { version, location?, folder?, label?, url?, message?, date? }
+--                     { op = "files", source, location, version, folder, instance }
+--                       -> { files = { { path, size, digest, executable?, link?,
+--                            download = { url, headers? } } }, truncated? }
 -- `instances` are those the agent is granted: { id, name, enabled, settings, secrets }
 -- (secret field names only). Pass `instance = id` to capability calls when several.
 -- Each handler runs to completion under a deadline and a 16 MB memory limit.
@@ -113,6 +130,7 @@ export type Inbound = {
 
 export type HttpResponse = {
     status: number,
+    -- content-type, retry-after, link and x-* headers.
     headers: { [string]: string },
     json: Json?,
     text: string?,
