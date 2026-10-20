@@ -210,14 +210,14 @@ abstract class NodePlacementCases {
             compose.onNodeWithText("disque · ublk indisponible", substring = true).assertExists()
             compose
                 .onNodeWithText(
-                    "ublk indisponible : chargez le module noyau ublk_drv",
+                    "ublk indisponible : cette node a besoin d’un runtime natif à jour",
                     substring = true,
                 )
                 .assertExists()
             compose.onNodeWithText("Révoquer").performScrollTo().performClick()
-            compose.onNodeWithText("findmnt -rno TARGET", substring = true).assertExists()
+            compose.onNodeWithText("grep ^/var/lib/cairn-native/", substring = true).assertExists()
             compose
-                .onNodeWithText("la commande s’arrête avant de supprimer", substring = true)
+                .onNodeWithText("l’affiche et s’arrête avant de supprimer", substring = true)
                 .assertExists()
         }
     }

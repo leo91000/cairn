@@ -441,11 +441,11 @@ fun NodesScreen(
                         " Les conversations en cours se mettent en pause après le délai de déconnexion, puis reprennent depuis leur dernier point de reprise sur une autre machine autorisée qui a de la capacité. Celles fixées à cette machine, ou sans point de reprise, attendent."
                     )
                 append(
-                    "\n\nLes fichiers restent sur la machine. Pour la désinstaller, lancez dessus :\n${if (node.capabilities.backend == "native") "sudo systemctl disable --now cairn-native-node && ! findmnt -rno TARGET | grep -q '^/var/lib/cairn-native/' && { sudo rm -rf /opt/cairn-native /var/lib/cairn-native; sudo rm -f /etc/systemd/system/cairn-native-node.service; sudo systemctl daemon-reload; sudo userdel cairn-workload; }" else UNINSTALL_COMMAND}\n(supprimer ces répertoires efface aussi les disques de conversation conservés sur la machine)."
+                    "\n\nLes fichiers restent sur la machine. Pour la désinstaller, lancez dessus :\n${if (node.capabilities.backend == "native") "sudo sh -c 'systemctl disable --now cairn-native-node || exit; if findmnt -rno TARGET | grep ^/var/lib/cairn-native/; then echo \"Unmount these conversation disks, then run this command again.\" >&2; exit 1; fi; rm -rf /opt/cairn-native /var/lib/cairn-native && rm -f /etc/systemd/system/cairn-native-node.service && systemctl daemon-reload && userdel cairn-workload'" else UNINSTALL_COMMAND}\n(supprimer ces répertoires efface aussi les disques de conversation conservés sur la machine)."
                 )
                 if (node.capabilities.backend == NATIVE_BACKEND)
                     append(
-                        "\nSi un disque de conversation est encore monté, la commande s’arrête avant de supprimer quoi que ce soit : démontez-le puis relancez-la."
+                        "\nSi un disque de conversation est encore monté, la commande l’affiche et s’arrête avant de supprimer quoi que ce soit : démontez-le puis relancez-la."
                     )
             },
             state.busy,
@@ -654,7 +654,8 @@ internal fun NodeEditor(
                     "Seuls les agents natifs et les personnes sélectionnées peuvent travailler ici. Retirer une autorisation arrête les travaux concernés à l’expiration de leur bail."
                 )
                 Toggle("Activer l’exécution native", nativeEnabled) { nativeEnabled = it }
-                Text("Personnes de confiance", style = MaterialTheme.typography.labelLarge)
+                if (nativeCallers.isNotEmpty())
+                    Text("Personnes de confiance", style = MaterialTheme.typography.labelLarge)
                 if (nativeCallers.isEmpty())
                     Text(
                         "Aucune personne disponible. Actualisez la connexion de l’installation avant d’accorder l’accès.",
@@ -814,6 +815,8 @@ private fun NodeStorageEditor(
                     percent.toInt(),
                     interval.toLong(),
                     dirty.toLong(),
+                    // Edited on the web only; keep it rather than resetting it to the default.
+                    memoryCacheMiB = policy.memoryCacheMiB,
                 )
             )
         },

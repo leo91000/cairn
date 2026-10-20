@@ -72,7 +72,7 @@ class NodesTest {
         assertEquals(emptyList<String>(), nodeDiagnostics(native))
         assertEquals(
             listOf(
-                "ublk indisponible : chargez le module noyau ublk_drv (/dev/ublk-control) pour monter les disques de conversation stockés sur S3."
+                "ublk indisponible : cette node a besoin d’un runtime natif à jour et du module noyau ublk_drv (/dev/ublk-control) pour monter les disques de conversation stockés sur S3."
             ),
             nodeDiagnostics(native.copy(capabilities = native.capabilities.copy(ublk = false))),
         )

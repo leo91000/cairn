@@ -34,7 +34,10 @@ const model = defineModel<T>({ required: true })
       @click="model = option.value"
     >
       <Icon v-if="option.icon" :name="option.icon" :size="15" />
-      {{ option.label }}
+      <span v-if="stretch" class="min-w-0 truncate">{{ option.label }}</span>
+      <template v-else>
+        {{ option.label }}
+      </template>
       <span v-if="option.count !== undefined" class="min-w-6 rounded bg-transparent px-[5px] py-0.5 text-center text-micro tabular-nums phone:min-w-5 phone:px-[3px]">{{ option.count }}</span>
     </button>
   </div>

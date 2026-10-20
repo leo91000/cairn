@@ -424,6 +424,7 @@ test('native enrollment requires explicit people and native agent grants', async
   await expect(dialog.getByLabel('Execution slots')).toBeDisabled()
   await expect(dialog.getByRole('group', { name: 'Exclusive reservations' })).toHaveCount(0)
   await expect(dialog.getByLabel('Enable native execution')).not.toBeChecked()
+  await expect(dialog.getByRole('group', { name: 'Trusted people', exact: true })).toBeVisible()
   await expect(dialog).toContainText('A native node runs one conversation at a time.')
   // Native nodes never take exclusive reservations, so no runtime update is suggested.
   await expect(dialog).not.toContainText('needs an update before exclusive reservations')
@@ -455,8 +456,8 @@ test('native enrollment requires explicit people and native agent grants', async
   await expect(node).toContainText('ublk unavailable')
   await node.getByRole('button', { name: 'Revoke', exact: true }).click()
   const revoke = page.getByRole('dialog', { name: 'Revoke node', exact: true })
-  await expect(revoke).toContainText('findmnt -rno TARGET')
-  await expect(revoke).toContainText('the command stops before deleting anything')
+  await expect(revoke).toContainText('findmnt -rno TARGET | grep ^/var/lib/cairn-native/')
+  await expect(revoke).toContainText('the command lists it and stops before deleting anything')
   await page.keyboard.press('Escape')
   await expect(revoke).toHaveCount(0)
   // Agents are granted on their own page; the card lists them read-only.

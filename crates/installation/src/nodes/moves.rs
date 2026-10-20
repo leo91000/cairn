@@ -679,7 +679,7 @@ async fn resume_at_destination(s: &Service, current: &Value, backup: &Value) -> 
     } else {
         RunStatus::Queued
     };
-    // The transfer already validated this manifest; an unreadable one keeps the default.
+    // Publication validated this manifest before the move; an unreadable one keeps the default.
     let manifest = super::publication::manifest(s, backup)
         .await
         .unwrap_or_default();

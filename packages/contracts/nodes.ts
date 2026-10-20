@@ -138,7 +138,7 @@ export function nodeDiagnostics(node: ExecutionNode, now = Date.now()) {
   if (node.capabilities.backend !== 'native' && !node.capabilities.fuse)
     reasons.push('FUSE is unavailable: this node cannot mount S3-backed conversation disks.')
   if (node.capabilities.backend === 'native' && !node.capabilities.ublk)
-    reasons.push('ublk is unavailable: load the ublk_drv kernel module (/dev/ublk-control) so this node can mount S3-backed conversation disks.')
+    reasons.push('ublk is unavailable: this node needs a current native runtime and the ublk_drv kernel module (/dev/ublk-control) to mount S3-backed conversation disks.')
   if (node.status !== 'offline' && node.executionReady === false)
     reasons.push(node.budgetError ? `The shared budget could not be applied: ${node.budgetError}` : node.updateError ? `The runtime is not ready: ${node.updateError}` : 'The runtime is not ready yet or does not match the version approved by the master.')
   if (node.maintenance)

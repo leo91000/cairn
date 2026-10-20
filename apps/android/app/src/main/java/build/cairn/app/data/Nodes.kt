@@ -256,7 +256,7 @@ fun nodeDiagnostics(node: ExecutionNode, now: Long = System.currentTimeMillis())
             "KVM indisponible : activez la virtualisation dans le BIOS et chargez le module kvm."
     if (node.capabilities.backend == NATIVE_BACKEND && !node.capabilities.ublk)
         reasons +=
-            "ublk indisponible : chargez le module noyau ublk_drv (/dev/ublk-control) pour monter les disques de conversation stockés sur S3."
+            "ublk indisponible : cette node a besoin d’un runtime natif à jour et du module noyau ublk_drv (/dev/ublk-control) pour monter les disques de conversation stockés sur S3."
     if (node.status != "offline" && !node.executionReady)
         reasons +=
             node.budgetError?.let { "Le budget partagé n’a pas pu être appliqué : $it" }
@@ -298,6 +298,7 @@ data class NodeStoragePolicy(
     val reservePercent: Int = 5,
     val backupSeconds: Long = 60,
     val maxDirtySeconds: Long = 300,
+    val memoryCacheMiB: Long? = null,
 )
 
 fun formatBytes(bytes: Long): String {

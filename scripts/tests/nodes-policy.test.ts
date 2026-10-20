@@ -73,7 +73,7 @@ it('formats node sizes, recovery ages and blocking reasons for people', () => {
   }
   expect(nodeDiagnostics(native)).toEqual([])
   expect(nodeDiagnostics({ ...native, capabilities: { ...native.capabilities, ublk: false } })).toEqual([
-    'ublk is unavailable: load the ublk_drv kernel module (/dev/ublk-control) so this node can mount S3-backed conversation disks.',
+    'ublk is unavailable: this node needs a current native runtime and the ublk_drv kernel module (/dev/ublk-control) to mount S3-backed conversation disks.',
   ])
   expect(nodeDiagnostics({ ...native, status: 'offline', lastSeen: 0 }, 10 * 60_000)[0]).toContain('the cairn-native-node service is running')
 })
