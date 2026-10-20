@@ -1,6 +1,9 @@
 //! Host execution. Permissions and lifecycle are separate from coding-engine adapters.
+pub(crate) mod block;
 pub(crate) mod disk;
+mod home;
 pub mod policy;
+mod protection;
 pub mod releases;
 mod service;
 mod systemd;
@@ -36,4 +39,18 @@ pub(crate) fn controller_client(path: &std::path::Path) -> crate::error::Result<
         .unix_socket(path.to_owned())
         .build()
         .map_err(crate::error::Error::internal)
+}
+
+/// Run before creating runtime threads so host mounts stay private to this
+/// controller and every journal/control worker can make writeback progress.
+pub fn prepare_storage_process() -> std::io::Result<()> {
+    #[cfg(feature = "ublk")]
+    {
+        crate::storage::ublk::private_mount_namespace()?;
+        crate::storage::ublk::prepare_io_threads()
+    }
+    #[cfg(not(feature = "ublk"))]
+    Err(std::io::Error::other(
+        "Native execution requires a Cairn binary built with ublk support.",
+    ))
 }

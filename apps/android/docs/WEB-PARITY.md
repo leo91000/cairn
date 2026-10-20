@@ -136,3 +136,9 @@ the error beside a whole « Réessayer » label, and becomes a rounded rectangle
 large text wraps. It is a polite live region for accessibility services. At
 normal text size the pills keep their single-line capsule look and heights.
 `pagingErrorFitsANarrowScreenWithLargeText` checks a 320 dp width at 150% text.
+
+Native ublk storage and retention: native Linux conversations use the same
+on-demand S3 block journal and synchronization status as VM conversations. The
+installation reclaims acknowledged clean native cache after one idle hour and
+reloads missing blocks on demand. Web and Android consume the same backend status;
+neither client adds a retention control. Chat and published artifact links remain.

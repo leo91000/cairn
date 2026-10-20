@@ -483,6 +483,24 @@ impl Volume {
         Ok((!expired).then_some("backup-lag"))
     }
 
+    /// VM and native attempts share the bounded active synchronization window.
+    /// This never changes the original dirty timestamp or an existing attempt's
+    /// deadline, even when a monitor retries a transition.
+    pub(crate) fn activate_attempt(&self, attempt: &str) -> Result<()> {
+        let mut active = self.active_attempt.lock().map_err(Error::internal)?;
+        if active.as_str() != attempt {
+            self.active_since
+                .store(crate::config::now(), Ordering::Release);
+            *active = attempt.to_owned();
+        }
+        Ok(())
+    }
+
+    /// CPU protection must not wait for filesystem accounting or remote reads.
+    pub(crate) fn cpu_pause_reason(&self) -> Result<Option<&'static str>> {
+        self.control_reason(crate::config::now())
+    }
+
     /// Called under the attempt's control lock, shared with checkpoint capture.
     pub async fn enforce_limits(
         self: &Arc<Self>,
@@ -503,19 +521,12 @@ impl Volume {
         if stop.is_cancelled() {
             return Err(Error::conflict("Execution stopped."));
         }
-        let now = crate::config::now();
         // A resumed VM gets one bounded active synchronization window. Its
         // original dirty timestamp is retained for backup urgency and telemetry.
-        {
-            let mut active = self.active_attempt.lock().map_err(Error::internal)?;
-            if active.as_str() != attempt {
-                self.active_since.store(now, Ordering::Release);
-                *active = attempt.to_owned();
-            }
-        }
+        self.activate_attempt(attempt)?;
         // No filesystem scan, policy read, journal lock, or blocking task belongs
         // in this CPU safety decision. Writers fence space admission themselves.
-        let reason = match self.control_reason(now) {
+        let reason = match self.cpu_pause_reason() {
             Ok(reason) => reason,
             Err(error) => {
                 stop.cancel();
@@ -1138,6 +1149,31 @@ mod tests {
                 .unwrap(),
         );
         assert!(load(&legacy).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn native_activation_and_control_preserve_cpu_protection_without_a_vm_record() {
+        let root = tempfile::tempdir().unwrap();
+        let (volume, _, _) = controller_fixture(root.path()).await;
+        volume.disk.write_at(0, b"durable native backlog").unwrap();
+        let dirty = volume.disk.dirty_since().unwrap();
+        volume.activate_attempt("native-first").unwrap();
+        let first = volume.active_since.load(Ordering::Acquire);
+        assert!(first >= dirty);
+        volume.activate_attempt("native-first").unwrap();
+        assert_eq!(volume.active_since.load(Ordering::Acquire), first);
+        // Retrying the same attempt cannot reset an expired active window.
+        volume.active_since.store(1, Ordering::Release);
+        volume.activate_attempt("native-first").unwrap();
+        assert_eq!(volume.active_since.load(Ordering::Acquire), 1);
+        volume.activate_attempt("native-resumed").unwrap();
+        assert!(volume.active_since.load(Ordering::Acquire) >= first);
+        assert_eq!(volume.disk.dirty_since().unwrap(), dirty);
+        volume.fault.store(true, Ordering::Release);
+        assert_eq!(volume.cpu_pause_reason().unwrap(), Some("integrity"));
+        volume.fault.store(false, Ordering::Release);
+        volume.space_pressure.store(true, Ordering::Release);
+        assert_eq!(volume.cpu_pause_reason().unwrap(), Some("disk-space"));
     }
 
     #[tokio::test]

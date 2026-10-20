@@ -240,6 +240,7 @@ pub struct Launch<'a> {
     pub workspace: &'a Path,
     pub output: &'a Path,
     pub identity: &'a Identity,
+    pub temporary: &'a Path,
     pub auth: Option<&'a Path>,
 }
 
@@ -359,7 +360,7 @@ pub fn arguments(launch: &Launch<'_>) -> Result<Vec<String>> {
         };
         property(format!(
             "{key}={}:{}",
-            path_property(source)?,
+            path_property(&super::block::host_source(source)?)?,
             path_property(destination)?
         ));
         if !read_only {
@@ -383,9 +384,34 @@ pub fn arguments(launch: &Launch<'_>) -> Result<Vec<String>> {
     }
     property(format!(
         "BindPaths={}:/tmp",
-        path_property(&launch.home.parent().unwrap().join("tmp"))?
+        path_property(&super::block::host_source(launch.temporary)?)?
     ));
     property("ReadWritePaths=/tmp".into());
+    let bindings: Vec<super::home::Binding> = serde_json::from_value(
+        launch
+            .plan
+            .get("nativeHomeBindings")
+            .cloned()
+            .unwrap_or_else(|| serde_json::json!([])),
+    )?;
+    for binding in bindings {
+        let key = if binding.read_only {
+            "BindReadOnlyPaths"
+        } else {
+            "BindPaths"
+        };
+        property(format!(
+            "{key}={}:{}",
+            path_property(&super::block::host_source(&binding.source)?)?,
+            path_property(&binding.target)?
+        ));
+        if !binding.read_only {
+            property(format!(
+                "ReadWritePaths={}",
+                path_property(&binding.target)?
+            ));
+        }
+    }
     let tools = tools(text(launch.plan, "runtimeId"))?;
     property(format!(
         "BindReadOnlyPaths={}:/opt/cairn-native-tools",
@@ -512,6 +538,31 @@ fn installed_tools() -> Result<Vec<(String, PathBuf)>> {
         }
     }
     Ok(runtimes)
+}
+
+/// Freeze the entire workload, including descendants. An acknowledged command
+/// alone is insufficient: report paused only once systemd confirms the state.
+pub async fn set_paused(attempt: &str, paused: bool) -> Result<()> {
+    let unit = unit(attempt)?;
+    let action = if paused { "freeze" } else { "thaw" };
+    let result = output("/usr/bin/systemctl", &[action, &unit]).await?;
+    if !result.status.success() {
+        return Err(Error::unavailable(
+            "Native storage CPU transition was refused.",
+        ));
+    }
+    let state = output(
+        "/usr/bin/systemctl",
+        &["show", &unit, "--property=FreezerState", "--value"],
+    )
+    .await?;
+    let expected = if paused { "frozen" } else { "running" };
+    if !state.status.success() || String::from_utf8_lossy(&state.stdout).trim() != expected {
+        return Err(Error::unavailable(
+            "Native storage CPU transition was not confirmed.",
+        ));
+    }
+    Ok(())
 }
 
 #[cfg(test)]

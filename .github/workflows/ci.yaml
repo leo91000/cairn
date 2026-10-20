@@ -82,7 +82,7 @@ jobs:
           restore-keys: rust-${{ runner.os }}-1.97.1-debug0-
       - name: Build the browser-test backend and frontend
         run: |
-          cargo build --locked --bin cairn --example worker_fixture --example network_direct_client --example network_qualification --features ublk
+          cargo build --locked --bin cairn --example worker_fixture --example network_direct_client --example network_qualification --example native_storage_qualifier --features ublk
           cargo build --locked -p cairn-beacon --bin cairn-beacon --example network_stun_server
           pnpm exec vite build --config apps/web/vite.config.ts
       - uses: actions/upload-artifact@v7.0.1
@@ -91,6 +91,7 @@ jobs:
           path: |
             target/debug/cairn
             target/debug/cairn-beacon
+            target/debug/examples/native_storage_qualifier
             target/debug/examples/worker_fixture
             target/debug/examples/network_direct_client
             target/debug/examples/network_qualification
@@ -153,7 +154,7 @@ jobs:
           cargo clippy --locked --workspace --all-targets --features ublk-prototype -- -D warnings
           node scripts/test-backend.mjs --features ublk-prototype
           # Also compile the browser-test binaries into the cache that later build jobs restore.
-          cargo build --locked --bin cairn --example worker_fixture --example network_direct_client --example network_qualification --features ublk
+          cargo build --locked --bin cairn --example worker_fixture --example network_direct_client --example network_qualification --example native_storage_qualifier --features ublk
           cargo build --locked -p cairn-beacon --bin cairn-beacon --example network_stun_server
       - name: Validate node supervisor and S3 recovery
         run: |
@@ -172,21 +173,39 @@ jobs:
           .node-s3-test/bin/pip install 'moto[server]==5.2.3' awscli
           PATH="$PWD/.node-s3-test/bin:$PATH" .node-s3-test/bin/python scripts/tests/node_s3_test.py
   native-runtime:
-    name: Native Linux process ownership (CPU workload)
+    name: Native Linux ublk storage and process ownership (CPU workload)
     needs: [resolve, build]
     if: needs.resolve.outputs.reuse != 'true'
     runs-on: ubuntu-latest
-    timeout-minutes: 8
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7.0.1
       - uses: actions/download-artifact@v8.0.1
         with:
           name: browser-backend
           path: target/debug/
-      - name: Qualify real systemd workload ownership and crash recovery
+      - name: Prepare disposable host block storage and synthetic S3
         run: |
-          chmod +x target/debug/cairn
-          sudo env CAIRN_NATIVE_DISPOSABLE_HOST=1 python3 scripts/tests/native_runtime_test.py target/debug/cairn
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends e2fsprogs python3-venv
+          if ! sudo modprobe ublk_drv; then
+            sudo apt-get install -y --no-install-recommends "linux-modules-extra-$(uname -r)"
+            sudo modprobe ublk_drv
+          fi
+          test -c /dev/ublk-control
+          python3 -m venv .native-s3-test
+          .native-s3-test/bin/pip install 'moto[server]==5.2.3' awscli
+      - name: Qualify real ublk, S3, eviction, systemd ownership and crash recovery
+        run: |
+          chmod +x target/debug/cairn target/debug/examples/native_storage_qualifier
+          mkdir -p native-storage-evidence
+          sudo env PATH="$PWD/.native-s3-test/bin:$PATH" CAIRN_NATIVE_DISPOSABLE_HOST=1 NATIVE_STORAGE_EVIDENCE_DIR="$PWD/native-storage-evidence" .native-s3-test/bin/python scripts/tests/node_s3_test.py --native-runtime target/debug/cairn --qualifier target/debug/examples/native_storage_qualifier
+      - uses: actions/upload-artifact@v7.0.1
+        if: always()
+        with:
+          name: native-storage-evidence
+          path: native-storage-evidence/
+          retention-days: 14
   browser:
     services:
       postgres:

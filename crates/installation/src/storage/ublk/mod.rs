@@ -393,11 +393,25 @@ impl MountedDisk {
         Ok(())
     }
 
+    /// Abort only this nonce-verified device to release blocked I/O after a
+    /// failed consumer fence. Registration stays owned until normal retirement.
+    pub(crate) fn abort_io(&self) -> stdio::Result<()> {
+        self.stop()
+    }
+
     /// Caller has already awaited its VMM exit and cancelled blocked source reads.
     pub fn close(mut self) -> stdio::Result<()> {
-        self.stop()?;
-        if let Some(thread) = self.thread.take() {
-            thread
+        self.close_in_place()
+    }
+
+    /// The caller has fenced all consumers and unmounted any host filesystem.
+    /// Retaining the handle on error permits safe retry of kernel retirement.
+    pub(crate) fn close_in_place(&mut self) -> stdio::Result<()> {
+        if self.thread.is_some() {
+            self.stop()?;
+            self.thread
+                .take()
+                .unwrap()
                 .join()
                 .map_err(|_| stdio::Error::other("ublk backend panicked"))??;
         }
@@ -435,6 +449,47 @@ pub(crate) fn mount_named_disk(
     uid: u32,
     name: &str,
 ) -> stdio::Result<MountedDisk> {
+    mount_named(disk, state, jail, uid, name, false)
+}
+
+/// Host consumers must not share the backend's mount namespace: namespace exit
+/// could otherwise flush a filesystem through the very backend that is exiting.
+/// The backend unshares before the caller mounts its new block device.
+pub(crate) fn mount_host_disk(
+    disk: Arc<dyn Disk>,
+    state: &Path,
+    jail: &Path,
+) -> stdio::Result<MountedDisk> {
+    mount_named(disk, state, jail, 0, "disk.blk", true)
+}
+
+pub(crate) fn private_mount_namespace() -> stdio::Result<()> {
+    if unsafe { libc::unshare(libc::CLONE_NEWNS) } != 0 {
+        return Err(stdio::Error::last_os_error());
+    }
+    if unsafe {
+        libc::mount(
+            std::ptr::null(),
+            c"/".as_ptr(),
+            std::ptr::null(),
+            libc::MS_REC | libc::MS_PRIVATE,
+            std::ptr::null(),
+        )
+    } != 0
+    {
+        return Err(stdio::Error::last_os_error());
+    }
+    Ok(())
+}
+
+fn mount_named(
+    disk: Arc<dyn Disk>,
+    state: &Path,
+    jail: &Path,
+    uid: u32,
+    name: &str,
+    private_namespace: bool,
+) -> stdio::Result<MountedDisk> {
     if !matches!(name, "disk.blk" | "workspace.blk") {
         return Err(stdio::Error::other("Invalid VM block node name"));
     }
@@ -462,6 +517,9 @@ pub(crate) fn mount_named_disk(
             // Fail before ADD without the required capability. All newly
             // created I/O threads inherit the validated flusher state.
             io::enable_io_flusher()?;
+            if private_namespace {
+                private_mount_namespace()?;
+            }
             let token = (uuid::Uuid::new_v4().as_u128() as u64).max(1);
             let mut record = Record {
                 version: 1,
