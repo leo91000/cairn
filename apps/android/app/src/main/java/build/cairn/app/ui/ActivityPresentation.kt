@@ -27,9 +27,16 @@ internal data class ActivityPresentation(
     val output: String = "",
     val item: JsonObject? = null,
     val data: JsonObject? = null,
-    val raw: String = "",
+    /** The event's own text, the source shown when it carries no structured data. */
+    val text: String = "",
     val exitCode: Int? = null,
-)
+) {
+    /**
+     * The recorded source, formatted only when the reader opens it. Timelines present every event
+     * on each history page; formatting its whole output each time made paging stutter.
+     */
+    val raw: String by lazy { data?.let { activityJson.encodeToString(it) } ?: text }
+}
 
 internal val activityJson = Json(wireJson) { prettyPrint = true }
 
@@ -254,7 +261,6 @@ internal fun presentActivity(event: RunEvent): ActivityPresentation {
                 (event.type == "status" && event.text in listOf("failed", "error")))
     val running =
         !failed && (item.string("status") == "in_progress" || event.type == "item.started")
-    val raw = data?.let { activityJson.encodeToString(it) } ?: event.text
     val base =
         ActivityPresentation(
             ActivityKind.NOTICE,
@@ -263,7 +269,7 @@ internal fun presentActivity(event: RunEvent): ActivityPresentation {
             failed = failed,
             item = item,
             data = data,
-            raw = raw,
+            text = event.text,
             exitCode = exit,
         )
     return when (type) {

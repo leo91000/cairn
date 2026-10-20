@@ -77,10 +77,20 @@ including when a swipe does not change the original navigation route.
    The regression opens a paginated conversation, verifies that its neighbor is
    rendered without a history request, then swipes to it and verifies pagination
    starts. The same case runs under Robolectric and on an Android device.
+3. Each older page rebuilds the conversation timeline on the UI thread, and that
+   presented every tool event by pretty-printing its whole recorded JSON, outputs
+   included, for a "Détails techniques" panel that is only shown when opened.
+   Tool rows did the same each time they were composed while scrolling. The source
+   is now formatted when it is read. `HistoryPagingCostTest` prepends 40 pages of
+   100 events (turns of eight 1.5 KB command outputs and a reply) to a recent
+   window. On the JVM, run on its own, with 4,100 loaded events, rebuilding the
+   timeline went from 10.4 ms to 3.1 ms per page (0.47 to 0.16 ms with 200
+   events); merging the page stays under 0.4 ms. The removed cost grows with
+   output size, so real conversations save more than this fixture.
 
-Both regression tests failed before their respective fixes. These prove removal
-of UI-thread decoding and hidden-page history requests; they do not establish a
-frame-rate improvement on a user's production phone.
+The first two regression tests failed before their respective fixes. These prove
+removal of UI-thread decoding and hidden-page history requests; none of these
+establish a frame-rate improvement on a user's production phone.
 
 From `apps/android/`, with `ANDROID_HOME` configured:
 
