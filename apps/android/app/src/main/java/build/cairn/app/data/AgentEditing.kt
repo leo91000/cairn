@@ -559,7 +559,7 @@ fun timeoutSummary(minutes: Int) =
 fun agentAccessSummary(
     agent: Agent,
     catalog: PluginCatalog? = null,
-    /** Known machines, to show exclusivity only where it takes effect; null when unknown. */
+    /** Known machines, to show exclusivity only where it takes effect; null (unknown) omits it. */
     nodes: List<ExecutionNode>? = null,
 ): String {
     val access = agent.access
@@ -580,8 +580,8 @@ fun agentAccessSummary(
                             .distinct()
                     )
             if (
-                agent.exclusiveNodes.isNotEmpty() &&
-                    (nodes == null || agent.effectiveExclusive(nodes).isNotEmpty())
+                // Only where it takes effect, so never while the machines are unknown.
+                nodes != null && agent.effectiveExclusive(nodes).isNotEmpty()
             )
                 add("Exclusivité")
             if (access.installation) add("Gestion de l’installation")
@@ -636,6 +636,8 @@ fun agentIssues(agent: Agent, resources: AgentResources): List<AgentIssue> = bui
         agent.exclusiveNodes.forEach { id ->
             val node = choices.find { it.id == id }
             when {
+                // The current runner is always shown, even when the list omits it.
+                node == null && id == LOCAL_NODE_ID -> Unit
                 node == null ->
                     add(
                         AgentIssue(

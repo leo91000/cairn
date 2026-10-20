@@ -284,7 +284,7 @@ const summaries = computed<Record<SectionId, { short: string, long: string }>>((
   model: { short: provider.value.label, long: [provider.value.label, draft.value.model || 'Default model'].join(' · ') },
   projects: !isMain.value && !state.workspaceLoaded ? { short: 'Unavailable', long: 'Not loaded' } : { short: isMain.value ? 'Fixed' : short(access.value.projects, state.projects.length), long: isMain.value ? 'All, including future' : selectionSummary(access.value.projects, state.projects.length) },
   skills: !isMain.value && !state.workspaceLoaded ? { short: 'Unavailable', long: 'Not loaded' } : { short: isMain.value ? 'Fixed' : short(access.value.skills, permittedSkills.value.length), long: isMain.value ? 'All, including future' : selectionSummary(access.value.skills, permittedSkills.value.length) },
-  mcps: { short: isMain.value ? 'Fixed' : short(access.value.mcps, state.mcps.length), long: isMain.value ? 'All, including future' : `${selectionSummary(access.value.mcps, state.mcps.length)}${limitedMcps.value.length ? ` · tools limited on ${limitedMcps.value.length}` : ''}${disabledMcps.value.length ? ` · ${disabledMcps.value.length} disabled` : ''}` },
+  mcps: !isMain.value && !state.workspaceLoaded ? { short: 'Unavailable', long: 'Not loaded' } : { short: isMain.value ? 'Fixed' : short(access.value.mcps, state.mcps.length), long: isMain.value ? 'All, including future' : `${selectionSummary(access.value.mcps, state.mcps.length)}${limitedMcps.value.length ? ` · tools limited on ${limitedMcps.value.length}` : ''}${disabledMcps.value.length ? ` · ${disabledMcps.value.length} disabled` : ''}` },
   github: isMain.value || !githubError.value
     ? { short: isMain.value ? 'Fixed' : githubMode.value === 'shared' ? 'Shared' : githubMode.value === 'dedicated' ? 'Token' : 'None', long: githubSummary.value }
     : { short: 'Unavailable', long: 'Not loaded' },
@@ -403,6 +403,21 @@ const overview = computed(() => [
     ],
   },
 ])
+
+// Until projects, skills and MCP connections load, their cards say so instead of guessing.
+const overviewShown = computed(() => isMain.value || state.workspaceLoaded
+  ? overview.value
+  : overview.value.map(group => ({
+      ...group,
+      cards: group.cards.map(card => ['projects', 'skills', 'mcps'].includes(card.id)
+        ? {
+            ...card,
+            summary: 'Not loaded',
+            detail: 'Could not be loaded',
+            chip: { tone: 'unavailable' as const, label: 'Unavailable' },
+          }
+        : card),
+    })))
 
 /** The agent as the page edits it; on an older installation, with grants from its resources. */
 function loadedDraft(found: Agent) {
@@ -1040,7 +1055,7 @@ const errorCount = computed(() => Object.keys(fieldErrors.value).length)
               </li>
             </ul>
           </div>
-          <AgentOverview :groups="overview" @open="open" />
+          <AgentOverview :groups="overviewShown" @open="open" />
         </template>
 
         <section v-else :aria-labelledby="`agent-section-${section}`" class="grid min-w-0 gap-5">
@@ -1183,7 +1198,20 @@ const errorCount = computed(() => Object.keys(fieldErrors.value).length)
           </template>
 
           <template v-else-if="section === 'mcps'">
-            <AgentMcpSection v-model:access="draft.access" :mcps="state.mcps" />
+            <div v-if="!state.workspaceLoaded" class="grid gap-3 rounded-xl border border-line bg-surface p-5" role="alert">
+              <p class="text-sm">
+                MCP connections could not be loaded, so this agent’s MCP connections cannot be shown or changed.
+              </p>
+              <p class="text-sm text-muted">
+                {{ access.mcps === null ? 'All, including future' : access.mcps.length ? `${access.mcps.length} selected` : 'None' }}{{ Object.keys(access.mcpTools ?? {}).length ? ` · tools limited on ${Object.keys(access.mcpTools).length}` : '' }}
+              </p>
+              <div>
+                <UiButton size="small" :disabled="workspaceLoading" @click="retryWorkspace">
+                  {{ workspaceLoading ? 'Loading…' : 'Try again' }}
+                </UiButton>
+              </div>
+            </div>
+            <AgentMcpSection v-else v-model:access="draft.access" :mcps="state.mcps" />
           </template>
 
           <template v-else-if="section === 'github'">

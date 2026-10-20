@@ -369,18 +369,21 @@ fun NodesScreen(
         }
     }
     editing?.let { node ->
-        fun close() {
+        // Dismissing the configuration of a new native machine cancels the last step; only a
+        // saved configuration continues to who may use it.
+        fun dismiss() {
             editing = null
-            if (grantAfterConfigure == node.id) {
-                grantAfterConfigure = null
-                granting = nodes.find { it.id == node.id } ?: node
-            }
+            if (grantAfterConfigure == node.id) grantAfterConfigure = null
         }
-        NodeEditor(node, state, nativeCallers, ::close) { config ->
+        NodeEditor(node, state, nativeCallers, ::dismiss) { config ->
             vm.perform {
                 api.request("PUT", "/nodes/${node.id}", wireJson.encodeToJsonElement(config))
                 load()
-                close()
+                editing = null
+                if (grantAfterConfigure == node.id) {
+                    grantAfterConfigure = null
+                    granting = nodes.find { it.id == node.id } ?: node
+                }
             }
         }
     }

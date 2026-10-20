@@ -691,3 +691,15 @@ it('reviews only what an older installation receives', () => {
   expect(kinds(false)).toEqual(['Added: exclusive reservation on gpu-box', 'Added: installation management', 'Added: 1Password “Production” — effective immediately, including in running conversations'])
   expect(kinds(true)).toEqual(['Added: installation management'])
 })
+
+it('sends an instance\'s agents back while the agent list is unknown', () => {
+  expect(keptAgentIds([], onePassword, { agentIds: ['a'] })).toEqual(['a'])
+  expect(keptAgentIds([], onePassword, { agentIds: [] })).toBeUndefined()
+  expect(keptAgentIds([], { manifest: null }, { agentIds: ['a'] })).toBeUndefined()
+})
+
+it('never reports the current runner missing when the node list omits it', () => {
+  const draft = newAgentDraft()
+  draft.exclusiveNodes = [LOCAL_NODE_ID]
+  expect(issues(draft, { ...context, nodes: [gpu] }, false)).toEqual([])
+})

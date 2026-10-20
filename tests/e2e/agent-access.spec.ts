@@ -1162,3 +1162,34 @@ test('reloading after a conflict never removes a token saved meanwhile', async (
   expect(await workspace.api(`/api/agents/${agent.id}/github-token`)).toEqual({ configured: true })
   expect((await workspace.api('/api/agents')).find((item: { id: string }) => item.id === agent.id)).toMatchObject({ description: 'Works without GitHub', instructions: 'Changed elsewhere' })
 })
+
+test('while the workspace lists cannot load, MCP access is read-only and not reported gone', async ({ page, workspace }) => {
+  await workspace.restart()
+  await useRelayForHttpMocks(page)
+  const mcp = await workspace.api('/api/mcps', 'POST', {
+    name: 'Offline tools',
+    transport: 'http',
+    url: 'http://127.0.0.1:9/mcp',
+    allowPrivateNetwork: true,
+  })
+  const agent = await workspace.api('/api/agents', 'POST', { name: 'MCP reader offline', access: { mcps: [mcp.id], projects: [], github: false } })
+  let mcpsFail = true
+  await page.route('**/api/mcps', route => mcpsFail && route.request().method() === 'GET'
+    ? route.fulfill({ status: 500, json: { error: 'MCP registry unavailable' } })
+    : route.continue())
+  await page.goto(workspacePath(`/agents/${agent.id}?section=mcps`))
+  await authenticateWorkspace(page)
+  const failure = page.getByRole('alert').filter({ hasText: 'MCP connections could not be loaded, so this agent’s MCP connections cannot be shown or changed.' })
+  await expect(failure).toContainText('1 selected')
+  await expect(page.getByRole('group', { name: 'MCP connections access' })).toHaveCount(0)
+  await expect(page.getByRole('button', { name: /Remove missing/ })).toHaveCount(0)
+  await page.getByRole('link', { name: 'Overview', exact: true }).click()
+  await expect(page.getByRole('button', { name: /^MCP & tools Not loaded/ })).toBeVisible()
+  await expect(page.getByText('to check')).toHaveCount(0)
+
+  mcpsFail = false
+  await openAgentSection(page, 'MCP & tools')
+  await failure.getByRole('button', { name: 'Try again', exact: true }).click()
+  await expect(failure).toHaveCount(0)
+  await expect(page.getByRole('group', { name: 'MCP connections access' })).toBeVisible()
+})

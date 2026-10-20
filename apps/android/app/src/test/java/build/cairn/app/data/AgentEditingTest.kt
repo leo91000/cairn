@@ -457,6 +457,20 @@ class AgentEditingTest {
     }
 
     @Test
+    fun anEditedInstanceKeepsItsGrantsUnlessTheInstallationIsKnownCurrent() {
+        val account = catalog.connections.first { it.id == "prod" }.copy(agentIds = listOf("agent"))
+        val access = catalog.packages.first { it.id == "onepassword" }.manifest!!
+        val current = listOf(agent.copy(grantsOnAgent = true))
+        assertNull(account.agentIdsToKeep(current, access))
+        assertEquals(listOf("agent"), account.agentIdsToKeep(listOf(agent), access))
+        // Agents not loaded yet: unknown, so the grants are kept.
+        assertEquals(listOf("agent"), account.agentIdsToKeep(emptyList(), access))
+        // Nothing to keep without grants or without agent access.
+        assertNull(account.copy(agentIds = emptyList()).agentIdsToKeep(emptyList(), access))
+        assertNull(account.agentIdsToKeep(emptyList(), PluginManifest(id = "discord")))
+    }
+
+    @Test
     fun aBackendSwitchOnEitherSideKeepsThatSidesNodesWhole() {
         val base = agent.withExclusive("gpu", true)
         // I switched to native and chose desk; they added mac meanwhile.
@@ -491,10 +505,11 @@ class AgentEditingTest {
         assertEquals("2 projets · 1 node · Exécution native", agentAccessSummary(native))
 
         val granted = agent.copy(plugins = listOf("prod", "staging")).withExclusive("mac", true)
-        // Without the catalog or machines, counts and the grant as saved.
+        // Without the catalog or machines: counts, and no exclusivity that may not apply.
+        assertEquals("2 projets · 2 nodes · 2 plugins", agentAccessSummary(granted))
         assertEquals(
-            "2 projets · 2 nodes · 2 plugins · Exclusivité",
-            agentAccessSummary(granted),
+            "2 projets · 2 nodes · Exclusivité",
+            agentAccessSummary(agent.withExclusive("gpu", true), nodes = nodes),
         )
         // With them: package names, and exclusivity only where it applies (mac cannot run it).
         assertEquals("2 projets · 2 nodes · 1Password", agentAccessSummary(granted, catalog, nodes))

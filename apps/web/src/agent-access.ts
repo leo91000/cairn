@@ -276,11 +276,13 @@ export function withResourceGrants(draft: AgentDraft, agentId: string, connectio
 }
 
 /**
- * The agents an instance save must send back unchanged on an older installation, which replaces
- * the list when it is omitted; undefined when it should be omitted.
+ * The agents an instance save must send back unchanged on an older installation (or one not known
+ * yet), which replaces the list when it is omitted; undefined when it should be omitted.
  */
 export function keptAgentIds(agents: object[], entry: Pick<PluginEntry, 'manifest'> | undefined, connection: Pick<PluginConnection, 'agentIds'> | null | undefined) {
-  if (!olderInstallation(agents) || !entry?.manifest?.agentAccess || !connection?.agentIds?.length)
+  // Main always exists: no agent at all means the list did not load, and the installation is unknown.
+  const unknown = agents.length === 0
+  if (!(unknown || olderInstallation(agents)) || !entry?.manifest?.agentAccess || !connection?.agentIds?.length)
     return undefined
   return [...connection.agentIds]
 }
@@ -689,6 +691,9 @@ export function issues(draft: AgentDraft, context: Context, isMain: boolean, age
 
   for (const id of context.nodesUnavailable ? [] : draft.exclusiveNodes ?? []) {
     const node = context.nodes.find(item => item.id === id)
+    // The current runner exists even when the node list omits it; its support is then unknown.
+    if (!node && id === LOCAL_NODE_ID)
+      continue
     if (!node || node.revoked)
       found.push({ section: 'nodes', text: 'An exclusive reservation targets a node that no longer exists.' })
     else if (!runsOn(access, id))

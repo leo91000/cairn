@@ -1993,7 +1993,7 @@ private fun NodesSection(
         }
     if (nodes.isNotEmpty())
         agent.exclusiveNodes
-            .filter { id -> choices.none { it.id == id } }
+            .filter { id -> id != LOCAL_NODE_ID && choices.none { it.id == id } }
             .forEach { id ->
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Text("Node supprimée ou révoquée", Modifier.weight(1f))

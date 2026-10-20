@@ -59,8 +59,12 @@ abstract class NodePlacementCases {
         }
     }
 
+    @Test fun aNewNativeNodeIsConfiguredThenAsksWhichNativeAgentsMayUseIt() = nativeEnrollment(true)
+
     @Test
-    fun aNewNativeNodeIsConfiguredThenAsksWhichNativeAgentsMayUseIt() {
+    fun dismissingTheConfigurationOfANewNativeNodeCancelsTheLastStep() = nativeEnrollment(false)
+
+    private fun nativeEnrollment(save: Boolean) {
         MockWebServer().use { server ->
             val writes = CopyOnWriteArrayList<Pair<String, JsonObject>>()
             val enrolled = AtomicBoolean(false)
@@ -150,6 +154,21 @@ abstract class NodePlacementCases {
                     .onAllNodesWithText("Activer l’exécution native")
                     .fetchSemanticsNodes()
                     .isNotEmpty()
+            }
+            if (!save) {
+                // Dismissed without saving: like the web, the last step is cancelled.
+                compose.onNodeWithContentDescription("Fermer").performClick()
+                repeat(6) {
+                    compose.mainClock.advanceTimeBy(2_000)
+                    elapse(2_000)
+                    compose.waitForIdle()
+                }
+                compose.onNodeWithText("Qui peut utiliser « Desk » ?").assertDoesNotExist()
+                compose.onNodeWithText("Activer l’exécution native").assertDoesNotExist()
+                assertTrue(
+                    writes.none { it.first.startsWith("/api/installations/fixture/api/nodes/desk") }
+                )
+                return
             }
             compose.onNodeWithText("Activer l’exécution native").performScrollTo().performClick()
             compose.onNodeWithText("trusted@example.test").performScrollTo().performClick()
