@@ -78,7 +78,12 @@ async fn dispatch(s: &Arc<Service>, requests: &AtomicU64, command: &Value) -> Re
                     .await?;
                 publication::request(s, run_id).await?;
             }
-            let point = publication::capture(s, &s.store.run(run_id).await?).await?;
+            let published = publication::capture(s, &s.store.run(run_id).await?).await?;
+            // Capture returns public metadata; decoded-block inspection needs
+            // the encrypted manifest retained in the manager's private record.
+            let point = s
+                .get("node-backups", published["id"].as_str().unwrap_or(""))
+                .await?;
             let manifest = publication::manifest(s, &point).await?;
             if manifest["kind"] != "native-ext4-v1" || manifest["onDemand"] != true {
                 return Err(Error::bad("Expected a native journal recovery point."));
