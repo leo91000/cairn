@@ -42,9 +42,12 @@ can then run asynchronously across a following turn under the stable disk grant.
 Generated runtime configuration, credentials and frozen skills stay in per-attempt
 staging and are bound into the workload. Their underlying disk mount targets contain
 no generated secret bytes. Claude's broker atomically refreshes its credential
-file at runtime: its writable configuration parent is transient, with child binds
-for durable projects, sessions, tasks and installed plugins. A readonly credential
-file bind would both break refresh and miss files created after staging. Provider sessions, user tools, workspaces and output use
+file at runtime: its secure-store directory is bound separately in transient
+storage, using the CLI's existing `CLAUDE_SECURESTORAGE_CONFIG_DIR` override. The
+full Claude configuration directory remains on the journal, including arbitrary
+user files, settings, instructions, sessions and installed tools. A readonly
+credential file bind would break atomic refresh. Provider sessions, user tools,
+workspaces and output use
 the journal. This does not detect secrets an authorized agent copies into arbitrary
 files. `/tmp` remains an ephemeral directory outside the journal. Same-node resume
 avoids recursively reading or changing every workspace inode; a different workload

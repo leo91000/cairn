@@ -7,6 +7,8 @@ use crate::{
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
+pub(super) const CLAUDE_AUTH_DIRECTORY: &str = "/run/cairn-claude-auth";
+
 #[derive(Serialize, Deserialize)]
 pub struct Binding {
     pub source: PathBuf,
@@ -40,6 +42,14 @@ pub async fn prepare(source: &Path, home: &Path, uid: u32, gid: u32) -> Result<V
         if metadata.file_type().is_symlink() {
             return Err(Error::bad("Native runtime seed contains a symlink."));
         }
+        if relative == Path::new(".claude/.credentials.json") {
+            // The secure-store override reads this through transient storage.
+            // Never bind a generated credential onto the journal.
+            if !metadata.is_file() {
+                return Err(Error::bad("Native Claude credential seed was redirected."));
+            }
+            continue;
+        }
         if metadata.is_dir() {
             match tokio::fs::symlink_metadata(&destination).await {
                 Ok(metadata) if !metadata.is_dir() || metadata.file_type().is_symlink() => {
@@ -53,8 +63,14 @@ pub async fn prepare(source: &Path, home: &Path, uid: u32, gid: u32) -> Result<V
             }
             std::os::unix::fs::lchown(&destination, Some(uid), Some(gid))?;
             if relative == Path::new(".claude") {
-                claude(&path, &destination, uid, gid, &mut bindings).await?;
-                continue;
+                // Keep all user/provider state durable, including loose files.
+                // The credential store needs its own transient writable parent
+                // for atomic replacements by the broker and CLI.
+                bindings.push(Binding {
+                    source: path.clone(),
+                    target: CLAUDE_AUTH_DIRECTORY.into(),
+                    read_only: false,
+                });
             }
             if relative == Path::new(".agents/skills") {
                 bindings.push(Binding {
@@ -88,77 +104,64 @@ pub async fn prepare(source: &Path, home: &Path, uid: u32, gid: u32) -> Result<V
     Ok(bindings)
 }
 
-/// Claude's broker atomically replaces credentials at runtime. Its parent must
-/// be writable ephemeral storage; a readonly file mount cannot intercept rename.
-/// Persist session/tool directories through child binds, keeping the runtime
-/// credential and generated account metadata outside the journal throughout.
-async fn claude(
-    source: &Path,
-    home: &Path,
-    uid: u32,
-    gid: u32,
-    bindings: &mut Vec<Binding>,
-) -> Result<()> {
-    bindings.push(Binding {
-        source: source.into(),
-        target: "/home/node/.claude".into(),
-        read_only: false,
-    });
-    let mut directories = std::collections::BTreeSet::new();
-    // Existing private user/plugin directories survive conversion even when
-    // their names are not part of the coding engine's standard session layout.
-    let mut existing = tokio::fs::read_dir(home).await?;
-    while let Some(entry) = existing.next_entry().await? {
-        if entry.file_type().await?.is_dir() {
-            directories.insert(entry.file_name());
-        }
-    }
-    for name in [
-        "sessions",
-        "archived_sessions",
-        "projects",
-        "todos",
-        "session-env",
-        "shell-snapshots",
-        "plans",
-        "tasks",
-        "plugins",
-        "skills",
-        "agents",
-        "commands",
-        "output-styles",
-        "hooks",
-    ] {
-        directories.insert(std::ffi::OsString::from(name));
-    }
-    for name in directories {
-        for path in [home.join(&name), source.join(&name)] {
-            match tokio::fs::symlink_metadata(&path).await {
-                Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {}
-                Ok(_) => {
-                    return Err(Error::bad(
-                        "Native Claude session directory was redirected.",
-                    ));
-                }
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                    private_dir(&path).await?;
-                }
-                Err(error) => return Err(error.into()),
-            }
-            std::os::unix::fs::lchown(path, Some(uid), Some(gid))?;
-        }
-        bindings.push(Binding {
-            source: home.join(&name),
-            target: Path::new("/home/node/.claude").join(name),
-            read_only: false,
-        });
-    }
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn claude_loose_user_files_survive_fresh_attempt_staging() {
+        use std::os::unix::fs::MetadataExt;
+
+        let root = tempfile::tempdir().unwrap();
+        let home = root.path().join("persistent");
+        private_dir(&home.join(".claude")).await.unwrap();
+        tokio::fs::write(
+            home.join(".claude/CLAUDE.md"),
+            b"migrated user instructions",
+        )
+        .await
+        .unwrap();
+        let owner = std::fs::metadata(root.path()).unwrap();
+
+        for attempt in ["first", "resumed"] {
+            let source = root.path().join(attempt);
+            private_dir(&source.join(".claude")).await.unwrap();
+            tokio::fs::write(source.join(".claude/.credentials.json"), b"managed secret")
+                .await
+                .unwrap();
+            let bindings = prepare(&source, &home, owner.uid(), owner.gid())
+                .await
+                .unwrap();
+
+            for file in ["CLAUDE.md", "user-state.sqlite"] {
+                let target = Path::new("/home/node/.claude").join(file);
+                assert!(
+                    bindings
+                        .iter()
+                        .all(|binding| !target.starts_with(&binding.target))
+                );
+            }
+            assert_eq!(
+                tokio::fs::read(home.join(".claude/CLAUDE.md"))
+                    .await
+                    .unwrap(),
+                b"migrated user instructions"
+            );
+            if attempt == "first" {
+                tokio::fs::write(home.join(".claude/user-state.sqlite"), b"new durable state")
+                    .await
+                    .unwrap();
+            } else {
+                assert_eq!(
+                    tokio::fs::read(home.join(".claude/user-state.sqlite"))
+                        .await
+                        .unwrap(),
+                    b"new durable state"
+                );
+            }
+            assert!(!home.join(".claude/.credentials.json").exists());
+        }
+    }
 
     #[tokio::test]
     async fn managed_claude_runtime_refresh_stays_ephemeral_while_sessions_are_durable() {
@@ -176,15 +179,13 @@ mod tests {
         let bindings = prepare(&source, &home, identity.uid(), identity.gid())
             .await
             .unwrap();
+        assert!(bindings.iter().any(|b| b.source == source.join(".claude")
+            && b.target == Path::new(CLAUDE_AUTH_DIRECTORY)
+            && !b.read_only));
         assert!(
             bindings
                 .iter()
-                .any(|b| b.source == source.join(".claude") && !b.read_only)
-        );
-        assert!(
-            bindings
-                .iter()
-                .any(|b| b.source == home.join(".claude/projects") && !b.read_only)
+                .all(|b| b.target != Path::new("/home/node/.claude"))
         );
         let listener =
             tokio::net::UnixListener::bind(source.join(".claude/cairn-auth.sock")).unwrap();

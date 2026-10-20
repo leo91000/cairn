@@ -415,6 +415,9 @@ impl Controller {
         }
         let mut plan = plan.clone();
         plan["nativeHomeBindings"] = serde_json::to_value(bindings)?;
+        if plan["chat"]["provider"] == "claude" {
+            plan["chat"]["claudeCredentialsDirectory"] = super::home::CLAUDE_AUTH_DIRECTORY.into();
+        }
         let mcp_stop = stop.child_token();
         let _mcp_guard = mcp_stop.clone().drop_guard();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;

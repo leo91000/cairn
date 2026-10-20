@@ -167,6 +167,7 @@ def main():
             return response['value']
 
         contexts = {}
+        started_runs = set()
 
         def seed(run, legacy=False):
             stage = data / 'runs' / run
@@ -185,6 +186,7 @@ def main():
                 (old / 'data/home/.cache/models/keep').write_text('model cache')
                 (old / 'data/home/.codex/sessions/keep').write_text('session state')
                 (old / 'data/home/.claude/plugins/user/tool').write_text('legacy installed plugin')
+                (old / 'data/home/.claude/CLAUDE.md').write_text('legacy user instructions')
                 (old / 'initialized').write_text('1')
             return stage
 
@@ -215,19 +217,23 @@ def main():
             attempt = str(uuid.uuid4())
             attempts.append(attempt)
             workspace = data / 'runs' / run / 'workspace'
-            script = '#!/bin/sh\nset -eu\n'
+            script = '#!/bin/sh\nset -eux\n'
             script += 'test "$(id -u)" -ne 0\ntest ! -e ' + str(private) + '\n'
             script += 'test ! -e /run/docker.sock\nif touch /usr/cairn-should-be-readonly 2>/dev/null; then exit 81; fi\n'
             script += "test \"$(cat /home/node/.codex/auth.json)\" = '" + SECRET + "'\n"
             script += 'if echo bad > /home/node/.codex/auth.json 2>/dev/null; then exit 82; fi\n'
             # Exercise the same atomic credential replacement as the real Claude
             # broker client (unit coverage invokes that Client directly).
-            script += "/usr/bin/python3 - <<'CLAUDE'\nimport os,tempfile\nfrom pathlib import Path\np=Path('/home/node/.claude')\nfor i in range(2):\n    with tempfile.NamedTemporaryFile(dir=p,delete=False) as f:\n        f.write(b'" + SECRET + "'); f.flush(); os.fsync(f.fileno())\n    os.replace(f.name,p/'.credentials.json')\ns=p/'projects/session'\nif s.exists(): assert s.read_text()=='durable Claude session'\ns.write_text('durable Claude session')\nCLAUDE\n"
+            script += "/usr/bin/python3 - <<'CLAUDE'\nimport os,tempfile\nfrom pathlib import Path\np=Path('/home/node/.claude'); auth=Path('/run/cairn-claude-auth')\nfor i in range(2):\n    with tempfile.NamedTemporaryFile(dir=auth,delete=False) as f:\n        f.write(b'" + SECRET + "'); f.flush(); os.fsync(f.fileno())\n    os.replace(f.name,auth/'.credentials.json')\nassert not (p/'.credentials.json').exists()\n(p/'projects').mkdir(exist_ok=True)\ns=p/'projects/session'\nif s.exists(): assert s.read_text()=='durable Claude session'\ns.write_text('durable Claude session')\nCLAUDE\n"
+            if run in started_runs:
+                script += 'test "$(cat /home/node/.claude/user-state.json)" = "new user state"\n'
+            script += 'printf "new user state" > /home/node/.claude/user-state.json\n'
             script += 'test -f /home/node/.agents/skills/frozen/SKILL.md\n'
             script += 'if touch /home/node/.agents/skills/bad 2>/dev/null; then exit 83; fi\n'
             if legacy:
                 script += 'test "$(cat /home/node/.cache/models/keep)" = "model cache"\n'
                 script += 'test "$(cat /home/node/.claude/plugins/user/tool)" = "legacy installed plugin"\n'
+                script += 'test "$(cat /home/node/.claude/CLAUDE.md)" = "legacy user instructions"\n'
                 script += 'test "$(cat /home/node/.codex/sessions/keep)" = "session state"\n'
             script += 'if test -e persisted; then test "$(cat persisted)" = "' + expected + '"; fi\n'
             script += 'printf changed > persisted\nprintf temporary-artifact > /tmp/native-artifact\nprintf ready > ready\n'
@@ -253,7 +259,22 @@ def main():
                     if event.get('data'):
                         # Only the synthetic workload's errors; plans/grants never logged.
                         print(base64.b64decode(event['data']).decode(errors='replace').replace(SECRET, '[fixture-secret]'), file=sys.stderr)
+                diagnostics = ['Synthetic workload exit code: ' + (state / (attempt + '.exit')).read_text().strip()]
+                for unit in (supervisor, 'cairn-native-' + attempt + '.service'):
+                    for args in [('systemctl', 'show', unit, '--property=Result,ExecMainStatus,ExecMainCode,ActiveState'),
+                                 ('journalctl', '--no-pager', '--output=cat', '--lines=60', '--unit=' + unit)]:
+                        result = subprocess.run(args, capture_output=True, text=True, timeout=30)
+                        text = result.stdout + result.stderr
+                        for secret in (SECRET, token, contexts[run]['grant']):
+                            text = text.replace(secret, '[fixture-secret]')
+                        diagnostics.append(unit + ':\n' + text)
+                diagnostic_text = '\n'.join(diagnostics)
+                print(diagnostic_text, file=sys.stderr)
+                evidence = Path(os.environ.get('NATIVE_STORAGE_EVIDENCE_DIR', str(root / 'evidence')))
+                evidence.mkdir(parents=True, exist_ok=True)
+                (evidence / 'failure-diagnostics.txt').write_text(diagnostic_text)
                 raise AssertionError('Synthetic workload failed before readiness.')
+            started_runs.add(run)
             if long:
                 assert api('/runs/' + attempt + '/artifact', dict(runId=run, path='/tmp/native-artifact'), raw=True) == b'temporary-artifact'
             if measure:

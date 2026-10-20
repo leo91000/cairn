@@ -130,8 +130,9 @@ all retained local work; do this only after synchronization and recovery review.
 Remove its systemd unit and run `systemctl daemon-reload` when uninstalling. The
 installer leaves GPU drivers and the personal desktop session untouched.
 
-Claude broker credentials and runtime account metadata use writable transient
-configuration. Claude project/session, task, skill and plugin directories remain
-journal-backed through child bindings; arbitrary tools and model caches elsewhere
-in the private home remain durable. Generated Codex configuration and frozen Cairn
-skills retain read-only bindings.
+Claude's broker and CLI use a separate writable transient secure store for
+credentials. The full Claude user directory remains journal-backed, including
+root-level instructions/settings, arbitrary tool state, projects, sessions and
+installed plugins. Cairn-generated account metadata and configuration are bound
+from staging; generated Codex configuration and frozen Cairn skills retain read-only
+bindings. Other user tools and model caches in the private home remain durable.
