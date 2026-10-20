@@ -363,7 +363,7 @@ def main():
                 assert live['manifest']['kind'] == 'native-ext4-v1'
             # The current writer and an unacknowledged generation cannot be evicted.
             try:
-                api('/disks/' + run + '/evict', receipt)
+                api('/disks/' + run + '/evict', dict(receipt, attempt=resumed))
             except urllib.error.HTTPError as error:
                 assert error.code == 409
             else:
@@ -377,15 +377,20 @@ def main():
             size = descendant.stat().st_size
             time.sleep(0.5)
             assert descendant.stat().st_size == size, 'Storage pause left a descendant running.'
-            manager('live-publish', run=run)
+            # Acknowledgement retires the earlier point; restore the current
+            # retained publication rather than requesting a collected history.
+            point = manager('live-publish', run=run)
             eventually(lambda: api('/disks/' + run + '/storage-status')['paused'] is False)
             eventually(lambda: descendant.stat().st_size > size)
+            status = api('/disks/' + run + '/storage-status')
+            receipt = dict(attempt=resumed, backupId=point['backupId'], generation=point['generation'], grantId=status['grantId'])
             api('/storage-policy', contexts[run]['policy'])
             (managed(run) / 'persisted').write_text('unpublished mutation')
             api('/runs/' + resumed, method='DELETE')
             fenced(run, resumed)
+            assert api('/disks/' + run + '/storage-status')['dirtyBytes'] > 0
             try:
-                api('/disks/' + run + '/evict', dict(receipt, attempt=resumed))
+                api('/disks/' + run + '/evict', receipt)
             except urllib.error.HTTPError as error:
                 assert error.code == 409
             else:
