@@ -590,3 +590,41 @@ async fn data_saved_before_the_package_moves_into_instances() {
     let s = Service::new(config).await.unwrap();
     assert_eq!(s.store.list(connections::KIND).await.unwrap().len(), 3);
 }
+
+/// The bundled package against the real GitHub: run with `CAIRN_LIVE_GITHUB=<file>`;
+/// the user code is written to that file for someone to approve on github.com.
+#[tokio::test]
+#[ignore = "needs github.com and a person approving the sign-in"]
+async fn live_device_sign_in_against_github() {
+    let file = std::env::var("CAIRN_LIVE_GITHUB").unwrap();
+    let root = TempDir::new().unwrap();
+    common::managed_codex_home(&root.path().join("home"));
+    let s = Service::new(common::config(root.path())).await.unwrap();
+    s.plugins
+        .use_worker(std::path::PathBuf::from(env!("CARGO_BIN_EXE_cairn")));
+    let started = device_flow::start(&s, "github").await.unwrap();
+    std::fs::write(&file, text(&started, "userCode")).unwrap();
+    let flow = text(&started, "id").to_owned();
+    let status = common::eventually(Duration::from_secs(300), Duration::from_secs(2), || async {
+        let status = device_flow::status(&s, "github", &flow).unwrap();
+        (status["state"] != "pending").then_some(status)
+    })
+    .await;
+    assert_eq!(status["state"], "completed", "{status}");
+    let saved = connections::save(
+        &s,
+        "github",
+        &json!({ "name": "GitHub", "enabled": true, "credentialFlow": flow }),
+        None,
+    )
+    .await
+    .unwrap();
+    println!(
+        "LIVE_GITHUB {}",
+        json!({ "login": saved["settings"]["login"], "gitEmail": saved["settings"]["gitEmail"] })
+    );
+    let test = cairn_installation::plugins::panels::test(&s, "github", text(&saved, "id"))
+        .await
+        .unwrap();
+    println!("LIVE_GITHUB_TEST {test}");
+}

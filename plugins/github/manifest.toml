@@ -33,7 +33,7 @@ prefix = "Bearer "
 [credential.deviceFlow]
 authorizationUrl = "https://github.com/login/device/code"
 tokenUrl = "https://github.com/login/oauth/access_token"
-clientId = "Ov23liCairnPlaceholder"
+clientId = "Ov23lihPh3R8eqWccn6n"
 scopes = [
   "repo",
   "workflow",
