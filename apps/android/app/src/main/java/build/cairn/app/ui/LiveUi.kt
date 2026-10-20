@@ -53,6 +53,19 @@ fun rememberLive(
     val api = if (enabled) vm.api else null
     var value by remember(path, api) { mutableStateOf(LiveSnapshot()) }
     val session = remember(path, api) { LiveSession() }
+    // Retained pager pages become previews and then selected again without being restored.
+    // Recheck their latest snapshot at selection, before a frame of old content can show.
+    var waiting by
+        remember(path, api, streaming) {
+            val previous = session.snapshot
+            val detail = previous.state
+            val history = previous.history
+            val saved =
+                if (detail != null && history != null)
+                    CachedHistory(previous.cursor, history, detail, previous.events)
+                else null
+            mutableStateOf(streaming && saved != null && !current(saved))
+        }
     val parentScope = rememberCoroutineScope()
     val scope =
         remember(path, api) {
@@ -67,14 +80,14 @@ fun rememberLive(
         if (enabled && api != null) {
             var cacheGeneration = vm.historyCache.generation
             val key = vm.historyCache.key(api.cacheScope, api.csrf, path)
-            var outdated = false
             // A resumed session is already at least as recent as its cache.
             if (session.path != path)
                 vm.historyCache.read(key)?.let {
                     session.restore(it, path, api.streamGeneration.get())
-                    outdated = streaming && !isCurrent(it)
-                    if (!outdated) value = session.snapshot
+                    waiting = streaming && !isCurrent(it)
+                    if (!waiting) value = session.snapshot
                 }
+            val replay = session.snapshot
             try {
                 owner.lifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) {
                     try {
@@ -90,14 +103,14 @@ fun rememberLive(
                             .collect {
                                 // The stream's own state replaces an outdated copy; without a
                                 // connection, the copy is still better than nothing.
-                                if (outdated && it.status == UPDATING_STATUS) return@collect
-                                outdated = false
+                                if (waiting && it === replay) return@collect
                                 vm.acceptCacheRevision(it.state?.cacheRevision)
                                 cacheGeneration = vm.historyCache.generation
                                 if (!it.catchingUp || it.httpStatus != null) {
                                     if (it.history != value.history || it.epoch != value.epoch)
                                         olderError = null
                                     value = pages.display(it)
+                                    waiting = false
                                 }
                                 if (it.httpStatus in listOf(401, 403, 404, 409)) {
                                     vm.historyCache.remove(key)
@@ -140,7 +153,8 @@ fun rememberLive(
             }
         }
     }
-    return value.copy(
+    val visible = if (waiting) LiveSnapshot() else value
+    return visible.copy(
         loadingOlder = loadingOlder,
         olderError = olderError,
         loadOlder = {

@@ -150,7 +150,11 @@ struct Stream {
 
 impl Stream {
     async fn batch(&mut self) -> (i64, Value) {
-        tokio::time::timeout(Duration::from_secs(4), async {
+        self.batch_with_timeout(Duration::from_secs(4)).await
+    }
+
+    async fn batch_with_timeout(&mut self, timeout: Duration) -> (i64, Value) {
+        tokio::time::timeout(timeout, async {
             loop {
                 if let Some(end) = self.pending.find("\n\n") {
                     let frame: String = self.pending.drain(..end + 2).collect();
@@ -455,6 +459,58 @@ async fn resuming_past_replaced_text_snapshots_keeps_the_cached_history() {
         assert_eq!(update["reset"], false);
         assert_eq!(event_ids(&update["events"]), vec![next]);
     }
+}
+
+#[tokio::test]
+async fn idle_streams_refresh_lists_after_external_database_writes() {
+    async fn refreshed(stream: &mut Stream, chat_id: &str) {
+        loop {
+            let (_, batch) = stream.batch_with_timeout(Duration::from_secs(20)).await;
+            let chats = batch["state"]["chats"].as_array().unwrap();
+            if chats
+                .iter()
+                .any(|chat| chat["id"] == chat_id && chat["title"] == "After maintenance")
+            {
+                break;
+            }
+        }
+    }
+
+    let f = Fixture::new().await;
+    let chat = f
+        .service
+        .chat_create(json!({ "title": "Before maintenance" }))
+        .await
+        .unwrap();
+    let chat_id = text(&chat, "id");
+    let mut conversation = f
+        .open_path(
+            &format!("/api/chats/{chat_id}/stream?window=1&list=1"),
+            None,
+        )
+        .await;
+    conversation.batch().await;
+    let mut list = f.open_path("/api/chats/stream", None).await;
+    list.batch().await;
+
+    // This bypasses the actor and its revision counter, as an external maintenance tool does.
+    let revision = f.service.store.revision();
+    let external =
+        rusqlite::Connection::open(f.service.config.data_dir.join("manager.db")).unwrap();
+    external
+        .execute(
+            "UPDATE records SET data=json_set(data,'$.title',?) WHERE kind='chats' AND id=?",
+            ["After maintenance", chat_id],
+        )
+        .unwrap();
+    drop(external);
+    assert_eq!(f.service.store.revision(), revision);
+
+    tokio::join!(
+        refreshed(&mut conversation, chat_id),
+        refreshed(&mut list, chat_id)
+    );
+    assert_eq!(f.service.store.revision(), revision);
 }
 
 #[tokio::test]

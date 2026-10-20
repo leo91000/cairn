@@ -141,7 +141,7 @@ export function useLiveRun(path: () => string | undefined, options: LiveRunOptio
         state: detail,
         events: rows.slice(),
         oldest,
-        hasOlder: hasOlder.value,
+        hasOlder: older,
         savedAt: Date.now(),
         position: storedPosition,
       }

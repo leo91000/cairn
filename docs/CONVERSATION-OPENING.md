@@ -18,7 +18,8 @@ follow; raw data is in [measurements/conversation-opening](measurements/conversa
   (`/chats/stream`) keeps its payload and rebuilds the list at most every 250 ms after
   commits. Streams that carry the list share one rebuild per commit and account (cached by
   store revision: a read at a revision sees at least that commit). Deleted conversations are
-  skipped before their view is built.
+  skipped before their view is built. The 15-second idle recovery check invalidates the
+  account's list cache so external maintenance writes that bypass the store still appear.
 - The opening page is sent without the 25 ms coalescing delay meant for live updates.
 - A resume past more than one page of events first reads the newest window. When it
   reaches back to the saved cursor, which a backlog of replaced text snapshots usually does,
@@ -65,7 +66,8 @@ follow; raw data is in [measurements/conversation-opening](measurements/conversa
 ### Android
 
 The selected conversation waits for its stream when its saved copy is outdated, with the
-same rule as the web; pager previews keep showing their saved copies. « Actualisation… »
+same rule as the web; pager previews keep showing their saved copies and recheck their
+freshness whenever selected, including pages retained after a previous visit. « Actualisation… »
 appears only after a second. See [web parity](../apps/android/docs/WEB-PARITY.md).
 
 ## Compatibility

@@ -67,6 +67,10 @@ impl Scope {
 pub struct ConversationLists(std::sync::Mutex<HashMap<String, (u64, Vec<Value>)>>);
 
 impl ConversationLists {
+    fn invalidate(&self, account: &str) {
+        self.0.lock().unwrap().remove(account);
+    }
+
     /// A read at `revision` sees at least that commit, so a list built for the same
     /// revision is never older than the reader's own snapshot.
     fn get(&self, db: &Db<'_>, scope: &Scope, revision: u64) -> Result<Vec<Value>> {
@@ -414,7 +418,11 @@ impl Subscription {
                 result = self.changes.changed() => if result.is_err() { return Ok(None); },
                 // Recover writes by an external maintenance process; normal
                 // delivery is notification driven. Transport owns revocation.
-                () = tokio::time::sleep(Duration::from_secs(15)) => {},
+                () = tokio::time::sleep(Duration::from_secs(15)) => {
+                    if self.scope.carries_list() {
+                        self.s.conversation_lists.invalidate(&self.scope.account);
+                    }
+                },
             }
         }
     }
