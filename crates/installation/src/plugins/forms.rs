@@ -84,7 +84,8 @@ async fn run(
     Ok(result)
 }
 
-/// `POST /api/plugins/{id}/form`: `{ instance?, settings, secrets?, token?, changed? }`
+/// `POST /api/plugins/{id}/form`:
+/// `{ instance?, settings, secrets?, token? | credentialFlow?, changed? }`
 /// → `{ options, values, errors, view }`.
 pub async fn form(s: &Service, plugin_id: &str, input: &Value) -> Result<Value> {
     let package = registry::active(s, plugin_id).await?;
@@ -96,7 +97,14 @@ pub async fn form(s: &Service, plugin_id: &str, input: &Value) -> Result<Value> 
         Some(id) => Some(connections::get(s, plugin_id, id).await?.id),
         None => None,
     };
-    let token = text(input, "token").trim();
+    let signed_in = match input["credentialFlow"].as_str().filter(|flow| !flow.is_empty()) {
+        Some(flow) => Some(s.plugins.device_flows.token(plugin_id, flow, false)?),
+        None => None,
+    };
+    let token = signed_in
+        .as_deref()
+        .unwrap_or_else(|| text(input, "token"))
+        .trim();
     if token.len() > 4096 || token.chars().any(|c| c.is_whitespace() || c.is_control()) {
         let label = manifest
             .credential

@@ -12,6 +12,7 @@ use crate::{
     auth::token,
     config::Config,
     error::{Error, Result},
+    plugins::run_credentials::RunCredentials,
     service::{isolated, policy, run_projects},
     skills::{atomic_write, private_dir},
     validation::text,
@@ -71,26 +72,27 @@ pub async fn project_seed(
     project: &Value,
     config: &Config,
     root: &Path,
+    credentials: &RunCredentials,
 ) -> Result<Value> {
-    let entry = workspace::seed(run, project, config, root).await?;
+    let entry = workspace::seed(run, project, config, root, credentials).await?;
     Ok(serde_json::to_value(entry)?)
 }
 
 pub async fn prepare(
     run: &Value,
     config: &Config,
-    github: Option<&str>,
+    credentials: &RunCredentials,
     account_home: Option<&Path>,
     generation: Option<&str>,
 ) -> Result<Value> {
-    let prepared = prepare_execution(run, config, github, account_home, generation).await?;
+    let prepared = prepare_execution(run, config, credentials, account_home, generation).await?;
     Ok(serde_json::to_value(prepared)?)
 }
 
 pub async fn prepare_execution(
     run: &Value,
     config: &Config,
-    github: Option<&str>,
+    credentials: &RunCredentials,
     account_home: Option<&Path>,
     generation: Option<&str>,
 ) -> Result<Prepared> {
@@ -116,7 +118,8 @@ pub async fn prepare_execution(
     let mut mounts = Vec::new();
     for project in &projects {
         let entry =
-            workspace::prepare_project(run, project, config, &root, single, generation).await?;
+            workspace::prepare_project(run, project, config, &root, single, generation, credentials)
+                .await?;
         if is_isolated {
             mounts.push(Mount::same(&entry.path, read_only));
         }
@@ -143,8 +146,7 @@ pub async fn prepare_execution(
     }
     let home = directory.join("home");
     let options = HomeOptions {
-        github,
-        github_access: policy(&run["snapshot"]["agent"])["github"] == true,
+        credentials,
         account_home,
     };
     let skills = home::prepare_home(run, &home, config, &options).await?;
@@ -207,7 +209,9 @@ pub async fn restore(
     run: &Value,
     prepared: Value,
     config: &Config,
-    github: Option<&str>,
+    credentials: &RunCredentials,
 ) -> Result<Value> {
-    restore::restore(run, prepared, config, github).await
+    restore::restore(run, prepared, config, credentials).await
 }
+
+pub use home::{clear_run_credentials, credential_files};

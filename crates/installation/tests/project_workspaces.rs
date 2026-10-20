@@ -22,7 +22,6 @@ async fn fixture() -> (TempDir, Arc<Service>, Vec<Value>) {
     let root = TempDir::new().unwrap();
     common::managed_codex_home(&root.path().join("home"));
     let s = Service::new(Config {
-        gh_bin: "false".into(),
         concurrency: 2,
         runner_url: "http://runner:4311".into(),
         ..common::config(root.path())

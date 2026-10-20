@@ -112,7 +112,14 @@ impl Projects {
         uuid(attempt)?;
         let status = format!("Opening {}", text(&project, "name"));
         s.store.event(run_id, "status", &status, None).await?;
-        let entry = crate::execution::project_seed(&run, &project, &s.config, root).await?;
+        let agent_id = text(&run["snapshot"]["agent"], "id");
+        let access = crate::plugins::run_credentials::fetch(s, Some(agent_id), &current).await?;
+        let credentials = crate::plugins::run_credentials::RunCredentials {
+            fetch: [(project_id.to_owned(), access)].into(),
+            ..Default::default()
+        };
+        let entry =
+            crate::execution::project_seed(&run, &project, &s.config, root, &credentials).await?;
         // Recheck the grant after a potentially slow clone and before transferring anything.
         authorize(s, bearer).await?;
         let imported = import(s, &run, attempt, project_id, &entry).await?;
@@ -305,6 +312,16 @@ pub async fn rpc(s: &Service, bearer: &str, method: &str, params: &Value) -> Res
     if method != "tools/list" {
         return Err(Error::not_found("Unknown workspace operation."));
     }
+    // Conditions of granted plugins; listing without a live run offers Cairn's own.
+    let conditions = match authorize(s, bearer).await {
+        Ok(run) => {
+            let agent_id = text(&run["snapshot"]["agent"], "id");
+            crate::plugins::conditions::schemas(s, agent_id)
+                .await
+                .unwrap_or_default()
+        }
+        Err(_) => Vec::new(),
+    };
     let mut tools = vec![
         open_project_tool(),
         crate::artifacts::tool(),
@@ -315,7 +332,7 @@ pub async fn rpc(s: &Service, bearer: &str, method: &str, params: &Value) -> Res
         crate::chats::questions::list_tool(),
         crate::chats::questions::cancel_tool(),
         crate::chats::sleep::tool(),
-        crate::chats::wait_for::tool(),
+        crate::chats::wait_for::tool(&conditions),
         crate::nodes::exclusive::acquire_tool(),
         crate::nodes::exclusive::release_tool(),
         crate::nodes::exclusive::status_tool(),

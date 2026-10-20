@@ -74,7 +74,6 @@ impl Owner {
         std::fs::create_dir(root.path().join("home")).unwrap();
         let service = Service::new(Config {
             public_url: format!("http://{host}"),
-            gh_bin: "false".into(),
             concurrency: 4,
             runner_url,
             ..common::config(root.path())

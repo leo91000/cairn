@@ -25,11 +25,23 @@ pub async fn maintain(s: Arc<Service>) {
         HashMap::new();
     let mut timer = tokio::time::interval(Duration::from_secs(2));
     timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut patterns_loaded = false;
     loop {
-        tokio::select! {
+        let changed = tokio::select! {
             () = s.shutdown.cancelled() => break,
-            () = s.plugins.changed.notified() => {},
-            _ = timer.tick() => {},
+            () = s.plugins.changed.notified() => true,
+            _ = timer.tick() => false,
+        };
+        // Packages change with approvals and uninstalls, which notify.
+        if (changed || !patterns_loaded)
+            && let Ok(packages) = registry::all_active(&s).await
+        {
+            let patterns = packages
+                .iter()
+                .flat_map(|package| package.manifest.secret_regexes())
+                .collect();
+            crate::run_output::set_plugin_secret_patterns(patterns);
+            patterns_loaded = true;
         }
         let Ok(values) = s.store.list(connections::KIND).await else {
             continue;

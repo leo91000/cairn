@@ -314,14 +314,8 @@ async fn clear_credentials(s: &Service, run_id: &str) {
             tracing::warn!(run_id, error = %error, "Could not clear run credentials");
         }
     }
-    let github = s
-        .config
-        .data_dir
-        .join("runs")
-        .join(run_id)
-        .join("home/.config/gh");
-    // Most runs never configured GitHub CLI credentials.
-    let _ = tokio::fs::remove_dir_all(github).await;
+    let directory = s.config.data_dir.join("runs").join(run_id);
+    crate::execution::clear_run_credentials(&directory).await;
 }
 
 #[cfg(test)]
@@ -341,7 +335,6 @@ mod tests {
             codex_bin: "codex".into(),
             claude_bin: "claude".into(),
             opencode_bin: "opencode".into(),
-            gh_bin: "gh".into(),
             concurrency: 1,
             logger: false,
             worker_enabled: false,
@@ -428,7 +421,6 @@ mod tests {
             codex_bin: "codex".into(),
             claude_bin: "claude".into(),
             opencode_bin: "opencode".into(),
-            gh_bin: "gh".into(),
             concurrency: 1,
             logger: false,
             worker_enabled: false,

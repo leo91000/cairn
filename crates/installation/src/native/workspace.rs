@@ -108,7 +108,7 @@ fn included(path: &Path) -> bool {
     !matches!(
         relative,
         ".gitconfig" | ".netrc" | ".npmrc" | ".git-credentials" | ".claude.json"
-    ) && ![".ssh", ".aws", ".config/gh", ".config/gcloud"]
+    ) && ![".ssh", ".aws", ".config/gh", ".config/gcloud", ".config/cairn"]
         .iter()
         .any(|private| relative == *private || relative.starts_with(&format!("{private}/")))
 }
@@ -138,6 +138,7 @@ fn migration_included(path: &Path) -> bool {
         ".aws",
         ".config/gh",
         ".config/gcloud",
+        ".config/cairn",
     ] {
         if relative == Path::new(private) || relative.starts_with(private) {
             return false;

@@ -304,18 +304,19 @@ impl Execution<'_> {
         }
         let saved = self.checkpoint.snapshot().await;
         let agent_id = text(&self.run["snapshot"]["agent"], "id");
-        let github = s.store.kv(&format!("agent-github:{agent_id}")).await?;
-        let github = github.as_ref().and_then(Value::as_str);
+        let projects = crate::project_workspaces::catalog(self.run);
+        let credentials =
+            crate::plugins::run_credentials::for_run(s, agent_id, &projects).await?;
         let prepared = match saved.prepared() {
             Some(prepared) => {
-                execution::restore(self.run, prepared.clone(), &s.config, github).await?
+                execution::restore(self.run, prepared.clone(), &s.config, &credentials).await?
             }
             None => {
                 let account_home = self.account.as_ref().map(|a| a.home.as_path());
                 execution::prepare(
                     self.run,
                     &s.config,
-                    github,
+                    &credentials,
                     account_home,
                     saved.generation.as_deref(),
                 )

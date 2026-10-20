@@ -243,6 +243,24 @@ pub async fn active(s: &Service, id: &str) -> Result<Package> {
     Ok(package)
 }
 
+/// Every package that can run now: bundled ones and approved active installed versions.
+/// A package that fails to load is left out, as it cannot run either.
+pub async fn all_active(s: &Service) -> Result<Vec<Package>> {
+    let mut packages = BUILTIN
+        .iter()
+        .map(|(id, _, _, _)| builtin(id).expect("bundled plugin"))
+        .collect::<Vec<_>>();
+    for id in entries(&root(s)) {
+        if BUILTIN.iter().any(|(name, _, _, _)| *name == id) {
+            continue;
+        }
+        if let Ok(package) = active(s, &id).await {
+            packages.push(package);
+        }
+    }
+    Ok(packages)
+}
+
 fn summary(package: &Package) -> Value {
     json!({
         "version": package.manifest.version,

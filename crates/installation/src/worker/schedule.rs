@@ -465,7 +465,6 @@ mod tests {
             codex_bin: "unused".into(),
             claude_bin: "unused".into(),
             opencode_bin: "unused".into(),
-            gh_bin: "unused".into(),
             concurrency: 1,
             logger: false,
             worker_enabled: false,

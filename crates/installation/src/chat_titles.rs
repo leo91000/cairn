@@ -484,7 +484,6 @@ mod tests {
                 .into_owned(),
             claude_bin: "claude".into(),
             opencode_bin: "opencode".into(),
-            gh_bin: "gh".into(),
             concurrency: 1,
             logger: false,
             worker_enabled: false,

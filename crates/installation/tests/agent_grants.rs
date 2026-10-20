@@ -32,7 +32,6 @@ struct Owner {
 
 async fn start(root: &Path) -> Arc<Service> {
     Service::new(Config {
-        gh_bin: "false".into(),
         ..common::config(root)
     })
     .await
