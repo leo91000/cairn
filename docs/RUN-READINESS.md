@@ -111,7 +111,14 @@ The built-in, run-scoped MCP exposes `report_outcome`:
 }
 ```
 
-Statuses are `completed`, `blocked`, and `needs_input`. This is an explicit agent
+Statuses are `completed`, `blocked`, and `needs_input`. Blocked and input-required
+reports may add `waitingOn`: `user` (the default), `requester` (the conversation or
+mission whose agent started this run through `run_task`, recorded on the run as
+`requestedBy`) or `external` (CI, a reviewer or another system). The Fil only asks
+the user about outcomes that wait on them: the others sit in Recent, and a requester
+that no longer exists leaves the user to act. Each account can also dismiss a
+blocked mission's outcome or snooze it (`POST /api/dismissals`) until the mission
+finishes another run. This is an explicit agent
 report, not an inference from logs or independently verified delivery. Historical
 runs without a report remain unreported. Chats clear the previous outcome when a
 new message starts; explicit resume clears it too. Expired grants and grants for

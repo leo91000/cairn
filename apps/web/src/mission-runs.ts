@@ -34,6 +34,11 @@ export async function refreshMissionRuns() {
   }
 }
 
+/** Shows a change made here before the next poll confirms it. */
+export function patchMissionRun(id: string, patch: Partial<RunListItem>) {
+  runs.value = runs.value.map(run => run.id === id ? { ...run, ...patch } : run)
+}
+
 /** Views showing missions load them at once; the shell's badges wait so pages load first. */
 export function useMissionRuns({ eager = true } = {}) {
   let first: ReturnType<typeof setTimeout> | undefined

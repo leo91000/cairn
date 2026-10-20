@@ -17,6 +17,7 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.add
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
@@ -250,9 +251,72 @@ constructor(
     val localReads = androidx.compose.runtime.mutableStateMapOf<String, Long>()
     private var readsGeneration = 0
 
+    /**
+     * Mission outcomes set aside on this device, by run, until the mission poll reflects them. A
+     * null value brings one back.
+     */
+    val localDismissals = androidx.compose.runtime.mutableStateMapOf<String, OutcomeDismissal?>()
+
     private fun clearReads() {
         readsGeneration++
         localReads.clear()
+        localDismissals.clear()
+    }
+
+    /**
+     * Sets a blocked mission's outcome aside for this account, on every device: dismissed, or
+     * snoozed [until] a time. It asks again when the mission finishes another run.
+     */
+    fun setAside(runId: String, taskId: String, finishedAt: Long, until: Long? = null) =
+        dismissal(
+            runId,
+            OutcomeDismissal(until),
+            buildJsonObject {
+                put("key", "task:$taskId")
+                put("finishedAt", finishedAt)
+                if (until != null) put("until", until)
+            },
+            if (until == null) "Écartée jusqu’au prochain résultat de la mission"
+            else "Rappel demain à 9 h",
+        )
+
+    /** Brings a dismissed or snoozed outcome back to Pour vous. */
+    fun restoreOutcome(runId: String, taskId: String) =
+        dismissal(
+            runId,
+            null,
+            buildJsonObject {
+                put("key", "task:$taskId")
+                put("restore", true)
+            },
+            "De retour dans Pour vous",
+        )
+
+    private fun dismissal(
+        runId: String,
+        value: OutcomeDismissal?,
+        item: JsonObject,
+        message: String,
+    ) {
+        val target = connection ?: return
+        if (!state.value.session.authenticated || state.value.signingOut) return
+        val generation = readsGeneration
+        localDismissals[runId] = value
+        viewModelScope.launch {
+            try {
+                target.request(
+                    "POST",
+                    "/dismissals",
+                    buildJsonObject { putJsonArray("items") { add(item) } },
+                )
+                notify(message)
+            } catch (e: Exception) {
+                if (e is CancellationException) throw e
+                if (generation != readsGeneration || connection !== target) return@launch
+                localDismissals.remove(runId)
+                report(e)
+            }
+        }
     }
 
     /** Marks finished work (`chat:<id>` or `task:<id>` with its finish time) as read everywhere. */

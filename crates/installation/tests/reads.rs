@@ -61,6 +61,22 @@ impl App {
         body
     }
 
+    /// How the account set the mission run aside, as the Fil lists it.
+    async fn dismissal(&self, who: &RelayContext, run: &str) -> Value {
+        let runs = self.get(who, "/api/tasks/activity").await;
+        find(&runs, "id", run)["dismissal"].clone()
+    }
+
+    async fn dismiss(&self, items: Value) -> (StatusCode, Value) {
+        self.request(
+            &self.owner,
+            "POST",
+            "/api/dismissals",
+            json!({ "items": items }),
+        )
+        .await
+    }
+
     async fn read(&self, who: &RelayContext, items: &[String]) -> (StatusCode, Value) {
         self.request(who, "POST", "/api/reads", json!({ "items": items }))
             .await
@@ -462,5 +478,84 @@ async fn read_watermark_measurements() {
         println!(
             "monotonic={monotonic} marks=200 encoded_bytes={encoded_bytes} cold_ms={cold_ms:.3} warm_ms={warm_ms:.3} write_ms={write_ms:.3} read_cpu_ms={read_cpu_ms:.3} write_cpu_ms={write_cpu_ms:.3}"
         );
+    }
+}
+
+#[tokio::test]
+async fn blocked_missions_stay_set_aside_for_each_account_until_they_finish_again() {
+    let app = App::new().await;
+    let task = app
+        .service
+        .task(
+            json!({ "name": "Device proof", "prompt": "Prove it", "agentId": MAIN_AGENT_ID }),
+            None,
+        )
+        .await
+        .unwrap();
+    let task_id = text(&task, "id");
+    let key = format!("task:{task_id}");
+    let blocked =
+        |status: &str| json!({ "outcome": { "status": status, "reason": "CI is the parent's." } });
+    let run = app.finished_run(task_id, "mcp", RunStatus::Succeeded).await;
+    let stored = app
+        .service
+        .store
+        .patch_run(&run, blocked("blocked"))
+        .await
+        .unwrap();
+    let finished_at = stored["finishedAt"].as_i64().unwrap();
+    assert!(app.dismissal(&app.owner, &run).await.is_null());
+
+    let (status, body) = app
+        .dismiss(json!([{ "key": key, "finishedAt": finished_at }]))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        app.dismissal(&app.owner, &run).await,
+        json!({ "until": null })
+    );
+    // Each member sets work aside on their own.
+    assert!(app.dismissal(&app.member, &run).await.is_null());
+
+    // Input the agent asked for can only be snoozed.
+    app.service
+        .store
+        .patch_run(&run, blocked("needs_input"))
+        .await
+        .unwrap();
+    assert!(app.dismissal(&app.owner, &run).await.is_null());
+    let until = now() + 60_000;
+    app.dismiss(json!([{ "key": key, "finishedAt": finished_at, "until": until }]))
+        .await;
+    assert_eq!(
+        app.dismissal(&app.owner, &run).await,
+        json!({ "until": until })
+    );
+
+    let (status, _) = app.dismiss(json!([{ "key": key, "restore": true }])).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(app.dismissal(&app.owner, &run).await.is_null());
+
+    // A later finish asks again.
+    app.dismiss(json!([{ "key": key, "finishedAt": finished_at }]))
+        .await;
+    let next = app.finished_run(task_id, "mcp", RunStatus::Succeeded).await;
+    app.service
+        .store
+        .patch_run(&next, blocked("blocked"))
+        .await
+        .unwrap();
+    let runs = app.get(&app.owner, "/api/tasks/activity").await;
+    assert!(find(&runs, "id", &next)["dismissal"].is_null());
+
+    for items in [
+        json!([]),
+        json!([{ "key": format!("chat:{}", id()), "finishedAt": finished_at }]),
+        json!([{ "key": key }]),
+        json!([{ "key": key, "finishedAt": finished_at, "until": now() - 1 }]),
+        json!([{ "key": key, "finishedAt": finished_at, "until": now() + 31 * 24 * 60 * 60 * 1000 }]),
+    ] {
+        let (status, body) = app.dismiss(items.clone()).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{items}: {body}");
     }
 }

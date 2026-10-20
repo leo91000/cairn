@@ -448,7 +448,9 @@ defineExpose({
                   :key="`${visibleOutcome.messageId}:${visibleOutcome.reportedAt}`"
                   :outcome="visibleOutcome"
                   :agent="agent"
-                />
+                >
+                  <slot name="outcome" />
+                </ChatOutcome>
               </template>
 
               <ChatOutcome
@@ -456,7 +458,9 @@ defineExpose({
                 :key="`${visibleOutcome.messageId}:${visibleOutcome.reportedAt}`"
                 :outcome="visibleOutcome"
                 :agent="agent"
-              />
+              >
+                <slot name="outcome" />
+              </ChatOutcome>
 
               <p v-if="active && suspended" role="status" class="mt-4 mb-0.5 text-xs text-muted">
                 {{ exclusiveSuspensionLabel }}. Work resumes automatically when the reservation and other pauses are cleared.

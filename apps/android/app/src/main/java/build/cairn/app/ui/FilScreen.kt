@@ -7,6 +7,8 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
@@ -28,6 +30,7 @@ import androidx.compose.ui.unit.dp
 import build.cairn.app.R
 import build.cairn.app.data.*
 import kotlinx.coroutines.delay
+import kotlinx.serialization.json.encodeToJsonElement
 
 internal enum class FeedKind {
     QUESTION,
@@ -41,8 +44,25 @@ internal enum class FeedKind {
     RUNNING_CHAT,
     RUNNING_TASK,
     WAITING_CHAT,
+    /** A blocked mission snoozed until [FeedItem.wakeAt]. */
+    SNOOZED_TASK,
+    /** A blocked mission that waits on someone else, or that the user dismissed. */
+    SET_ASIDE_TASK,
     CHAT,
 }
+
+/**
+ * Why a blocked mission sits in Récents rather than Pour vous: it waits on the agent work that
+ * started it, on an outside system, or the user dismissed it.
+ */
+internal enum class SetAside {
+    REQUESTER,
+    EXTERNAL,
+    DISMISSED,
+}
+
+/** The conversation or mission that started a mission, while it still exists. */
+internal data class FeedRequester(val title: String, val chatId: String?, val runId: String?)
 
 internal data class FeedItem(
     val key: String,
@@ -66,7 +86,15 @@ internal data class FeedItem(
     val resolved: Boolean = false,
     /** The opening of the agent's final message, for finished work not read yet. */
     val preview: String? = null,
+    /** A mission's outcome that is not complete: what its actions apply to. */
+    val outcome: String? = null,
+    val setAside: SetAside? = null,
+    val requester: FeedRequester? = null,
 ) {
+    /** Only a blocked outcome can be dismissed; input the agent asked for can only be snoozed. */
+    val dismissible
+        get() = kind == FeedKind.REVIEW_TASK && outcome == "blocked"
+
     val unread
         get() = kind == FeedKind.UNREAD_CHAT || kind == FeedKind.UNREAD_TASK
 
@@ -94,16 +122,35 @@ internal data class Feed(
 private fun context(agent: String, project: String?) =
     listOfNotNull(agent.ifBlank { null }, project?.ifBlank { null }).joinToString(" · ")
 
+/** 9:00 tomorrow, local time: when a snoozed mission asks again. */
+internal fun tomorrowMorning(
+    now: Long = System.currentTimeMillis(),
+    zone: java.time.ZoneId = java.time.ZoneId.systemDefault(),
+): Long =
+    java.time.Instant.ofEpochMilli(now)
+        .atZone(zone)
+        .toLocalDate()
+        .plusDays(1)
+        .atTime(9, 0)
+        .atZone(zone)
+        .toInstant()
+        .toEpochMilli()
+
 /**
  * One home for conversations and missions, grouped by what they ask of the user: things that need
  * an answer or decision, finished work not read yet, work in progress, waiting conversations, then
  * everything else by recency. [read] holds local marks until the server reflects them.
+ *
+ * A blocked mission asks the user only when it waits on them: one waiting on the agent work that
+ * started it or on an outside system, or one the user dismissed, sits in Récents. A snoozed one
+ * waits until [now] reaches its time.
  */
 internal fun buildFeed(
     chats: List<Chat>,
     activity: List<Run>,
     tasks: List<Task>,
     read: Map<String, Long> = emptyMap(),
+    now: Long = System.currentTimeMillis(),
 ): Feed {
     fun unreadNow(key: String, finishedAt: Long?) =
         (read[key] ?: Long.MIN_VALUE) < (finishedAt ?: 0)
@@ -190,6 +237,19 @@ internal fun buildFeed(
             }
         }
     val names = tasks.associateBy { it.id }
+    val missionRuns = activity.filter { it.trigger != "chat" }.associateBy { it.taskId }
+    // The work that started a mission, while it is still there to act.
+    fun requesterOf(run: Run): FeedRequester? {
+        val requested = run.requestedBy ?: return null
+        chats
+            .find { it.id == requested.chatId }
+            ?.let {
+                return FeedRequester(it.title, it.id, null)
+            }
+        val mission = names[requested.taskId]?.takeIf { !it.archived } ?: return null
+        val missionRun = missionRuns[mission.id] ?: return null
+        return FeedRequester(mission.name, null, missionRun.id)
+    }
     activity
         .filter { it.trigger != "chat" && it.taskId.isNotBlank() }
         .sortedByDescending { it.finishedAt ?: it.startedAt ?: it.createdAt }
@@ -233,8 +293,40 @@ internal fun buildFeed(
                         )
                 run.status == "succeeded" &&
                     run.outcome != null &&
-                    run.outcome.status != "completed" ->
-                    forYou += item(FeedKind.REVIEW_TASK, outcomeLabel(run.outcome))
+                    run.outcome.status != "completed" -> {
+                    val label = outcomeLabel(run.outcome)
+                    val review =
+                        item(FeedKind.REVIEW_TASK, label).copy(outcome = run.outcome.status)
+                    fun setAside(reason: SetAside, subtitle: String) =
+                        review.copy(
+                            kind = FeedKind.SET_ASIDE_TASK,
+                            setAside = reason,
+                            subtitle = "$label · $subtitle",
+                        )
+                    // A requester that is gone leaves the user to act.
+                    val requester =
+                        if (run.outcome.waitingOn == "requester") requesterOf(run) else null
+                    val until = run.dismissal?.until
+                    when {
+                        requester != null ->
+                            recent +=
+                                setAside(SetAside.REQUESTER, "En attente de ${requester.title}")
+                                    .copy(requester = requester)
+                        run.outcome.waitingOn == "external" ->
+                            recent +=
+                                setAside(SetAside.EXTERNAL, "En attente d’une vérification externe")
+                        run.dismissal != null && until == null && run.outcome.status == "blocked" ->
+                            recent += setAside(SetAside.DISMISSED, "Écartée")
+                        until != null && until > now ->
+                            waiting +=
+                                review.copy(
+                                    kind = FeedKind.SNOOZED_TASK,
+                                    subtitle = "Rappel prévu · $label",
+                                    wakeAt = until,
+                                )
+                        else -> forYou += review
+                    }
+                }
                 run.status == "succeeded" &&
                     run.unread &&
                     unreadNow("task:${run.taskId}", run.finishedAt) ->
@@ -245,7 +337,7 @@ internal fun buildFeed(
     return Feed(
         forYou + toRead.sortedByDescending { it.stamp },
         running.sortedBy { it.startedAt ?: Long.MAX_VALUE },
-        recent,
+        recent.sortedByDescending { it.stamp },
         // A wait whose result arrived resumes first, before any deadline.
         waiting.sortedWith(compareBy({ !it.resolved }, { it.wakeAt })),
     )
@@ -277,8 +369,16 @@ internal fun rememberFilActivity(vm: CairnViewModel): List<Run>? {
             vm.report(e)
         }
     }
-    return activity
+    return activity?.let { withLocalDismissals(it, vm.localDismissals) }
 }
+
+/** Outcomes set aside on this device show at once, before the next poll confirms them. */
+internal fun withLocalDismissals(activity: List<Run>, local: Map<String, OutcomeDismissal?>) =
+    if (local.isEmpty()) activity
+    else
+        activity.map { run ->
+            if (run.id in local) run.copy(dismissal = local[run.id]) else run
+        }
 
 internal fun feedSummary(feed: Feed): String {
     val parts = mutableListOf<String>()
@@ -327,10 +427,23 @@ fun FilScreen(
     }
     val trash = rememberConversationTrash(vm)
     val chats = live.state?.chats?.filter { it.id !in trash.hidden }
-    val feed = buildFeed(chats.orEmpty(), activity, state.tasks, vm.localReads)
+    val feed = buildFeed(chats.orEmpty(), activity, state.tasks, vm.localReads, now)
     fun retry(item: FeedItem) {
         val task = item.taskId ?: return
         vm.perform { openRun(api.send<Run>("POST", "/tasks/${segment(task)}/run").id) }
+    }
+    fun setAside(item: FeedItem, until: Long? = null) {
+        vm.setAside(item.runId ?: return, item.taskId ?: return, item.stamp, until)
+    }
+    fun archive(item: FeedItem) {
+        val task = state.tasks.find { it.id == item.taskId } ?: return
+        vm.perform {
+            save(
+                "tasks",
+                task.id,
+                wireJson.encodeToJsonElement(task.copy(archived = true, enabled = false)),
+            )
+        }
     }
     fun open(item: FeedItem) {
         when {
@@ -408,6 +521,9 @@ fun FilScreen(
                     { open(item) },
                     { retry(item) },
                     { vm.markRead(listOf(item.read)) },
+                    dismiss = { setAside(item) },
+                    snooze = { setAside(item, tomorrowMorning(now)) },
+                    archive = { archive(item) },
                 )
             }
         }
@@ -472,7 +588,10 @@ private fun androidx.compose.foundation.lazy.LazyListScope.section(
     items(items, key = { it.key }) { Box(Modifier.animateItem()) { row(it) } }
 }
 
-/** The one action a "for you" row offers: answer, reconnect, retry, mark read, or its time. */
+/**
+ * What a "for you" row offers: answer, reconnect, retry, mark read, set a blocked mission aside, or
+ * its time.
+ */
 @Composable
 private fun ForYouAction(
     item: FeedItem,
@@ -481,8 +600,62 @@ private fun ForYouAction(
     open: () -> Unit,
     retry: () -> Unit,
     markRead: () -> Unit,
+    dismiss: () -> Unit = {},
+    snooze: () -> Unit = {},
+    archive: () -> Unit = {},
 ) {
-    if (item.unread)
+    if (item.kind == FeedKind.REVIEW_TASK)
+        Row(
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            if (item.dismissible)
+                RoundAction(
+                    "Écarter ${item.title}",
+                    CairnIcons.Check,
+                    size = 38.dp,
+                    onClick = dismiss,
+                )
+            var menu by remember { mutableStateOf(false) }
+            Box {
+                RoundAction(
+                    "Autres actions pour ${item.title}",
+                    CairnIcons.More,
+                    size = 38.dp,
+                ) {
+                    menu = true
+                }
+                DropdownMenu(menu, { menu = false }) {
+                    DropdownMenuItem(
+                        text = { Text("Me le rappeler demain") },
+                        leadingIcon = { androidx.compose.material3.Icon(CairnIcons.Clock, null) },
+                        onClick = {
+                            menu = false
+                            snooze()
+                        },
+                    )
+                    DropdownMenuItem(
+                        text = { Text("Relancer") },
+                        leadingIcon = { androidx.compose.material3.Icon(CairnIcons.Retry, null) },
+                        enabled = enabled,
+                        onClick = {
+                            menu = false
+                            retry()
+                        },
+                    )
+                    DropdownMenuItem(
+                        text = { Text("Archiver la mission") },
+                        leadingIcon = { androidx.compose.material3.Icon(CairnIcons.Trash, null) },
+                        enabled = enabled,
+                        onClick = {
+                            menu = false
+                            archive()
+                        },
+                    )
+                }
+            }
+        }
+    else if (item.unread)
         RoundAction(
             "Marquer ${item.title} comme lu",
             CairnIcons.Check,
@@ -566,7 +739,9 @@ private fun FeedRow(
             FeedKind.RECONNECT -> AvatarBadge.ATTENTION
             FeedKind.UNREAD_CHAT,
             FeedKind.UNREAD_TASK -> AvatarBadge.DONE
-            FeedKind.WAITING_CHAT -> AvatarBadge.WAITING
+            FeedKind.WAITING_CHAT,
+            FeedKind.SNOOZED_TASK -> AvatarBadge.WAITING
+            FeedKind.SET_ASIDE_TASK,
             FeedKind.CHAT -> null
         }
     SwipeToTrashRow(enabled = onDelete != null, onTrash = { onDelete?.invoke() }) { swipe ->

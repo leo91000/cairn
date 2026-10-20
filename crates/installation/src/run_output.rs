@@ -349,7 +349,7 @@ pub fn prompt(run: &Value, chat: bool) -> String {
             unopened repositories are not on disk):\n{}\n\n{tooling}\n\nSelected skills (read a skill's SKILL.md before using it; its \
             scripts and references sit beside it):\n{skills}\n\n{plugins}\n\nRun this task to completion within \
             its stated scope. Preserve unrelated files. Do not expose credentials. \
-            {interaction}\n{deliverables}\n{waiting} All task-authorized effects such as creating \
+            {interaction}\n{deliverables}{requested}\n{waiting} All task-authorized effects such as creating \
             PRs or releasing must follow their checks. Use .agents/skills for skills. \
             Summarize actual changes, validation, external links and remaining blockers \
             at the end.",
@@ -359,6 +359,13 @@ pub fn prompt(run: &Value, chat: bool) -> String {
             "No projects assigned; use the task workspace."
         } else {
             &projects
+        },
+        requested = if run["requestedBy"].is_object() && run["isolated"] == true {
+            " Another agent's work started this run. When the steps left belong to that work, \
+                for example because it asked you to stop before them, report the outcome with \
+                waitingOn requester so it goes back to that work rather than to the user."
+        } else {
+            ""
         },
         waiting = if chat && run["isolated"] == true {
             crate::chats::sleep::INSTRUCTIONS
