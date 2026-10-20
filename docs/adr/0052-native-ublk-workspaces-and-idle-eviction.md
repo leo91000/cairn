@@ -74,8 +74,10 @@ records lack a release timestamp.
 
 Eviction preserves the journal, current manifest, grant context, runtime and all
 unpublished writes. Resumption opens the same disk and fetches missing blocks on
-demand. It neither downloads a full native file archive nor seeds the original
-project again. Chat history, published artifacts and shared pinned engine bundles
+demand. It neither restores the current disk from a full native file archive nor
+seeds the original project into an initialized disk again. The unchanged remote
+connector still transfers the original checkout in attempt staging, as for VMs;
+that transfer is separate from journal demand loading and remains a startup cost. Chat history, published artifacts and shared pinned engine bundles
 are retained. The one-hour policy and live storage behavior apply equally to web
 and Android; no new client setting is introduced.
 

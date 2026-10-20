@@ -397,6 +397,9 @@ def main():
                 raise AssertionError('Eviction removed unpublished journal writes.')
             manager('restore', run=run, backupId=point['backupId'])
             restored = start(run, legacy=True)
+            # The next start expects the retained 'changed' value. A no-op
+            # second restore would leave this distinct mutation and fail it.
+            (managed(run) / 'persisted').write_text('second unpublished mutation')
             api('/runs/' + restored, method='DELETE')
             fenced(run, restored)
             # Restore idempotence must be invalidated by later writes, even for
