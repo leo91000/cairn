@@ -451,6 +451,14 @@ test('native enrollment requires explicit people and native agent grants', async
   // Native ublk disks honor the node storage policy like VM disks.
   await expect(node.getByRole('button', { name: 'Storage', exact: true })).toBeVisible()
   await expect(node).toContainText('ublk is unavailable')
+  await node.getByText('Technical details', { exact: true }).click()
+  await expect(node).toContainText('ublk unavailable')
+  await node.getByRole('button', { name: 'Revoke', exact: true }).click()
+  const revoke = page.getByRole('dialog', { name: 'Revoke node', exact: true })
+  await expect(revoke).toContainText('findmnt -rno TARGET')
+  await expect(revoke).toContainText('the command stops before deleting anything')
+  await page.keyboard.press('Escape')
+  await expect(revoke).toHaveCount(0)
   // Agents are granted on their own page; the card lists them read-only.
   await expect(node).toContainText(`1 agent can run here: ${agent.name}`)
   expect((await workspace.api('/api/agents')).find((item: { id: string }) => item.id === agent.id).access.nodes).toContain(desktop)

@@ -204,6 +204,21 @@ abstract class NodePlacementCases {
                 grant["agentIds"]!!.jsonArray.map { it.jsonPrimitive.content },
             )
             assertEquals(JsonPrimitive(true), grant["add"])
+            // The ublk storage policy applies to native disks; technical details name ublk.
+            compose.onNodeWithText("Stockage").performScrollTo().assertExists()
+            compose.onNodeWithText("Détails techniques").performScrollTo().performClick()
+            compose.onNodeWithText("disque · ublk indisponible", substring = true).assertExists()
+            compose
+                .onNodeWithText(
+                    "ublk indisponible : chargez le module noyau ublk_drv",
+                    substring = true,
+                )
+                .assertExists()
+            compose.onNodeWithText("Révoquer").performScrollTo().performClick()
+            compose.onNodeWithText("findmnt -rno TARGET", substring = true).assertExists()
+            compose
+                .onNodeWithText("la commande s’arrête avant de supprimer", substring = true)
+                .assertExists()
         }
     }
 

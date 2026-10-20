@@ -441,8 +441,12 @@ fun NodesScreen(
                         " Les conversations en cours se mettent en pause après le délai de déconnexion, puis reprennent depuis leur dernier point de reprise sur une autre machine autorisée qui a de la capacité. Celles fixées à cette machine, ou sans point de reprise, attendent."
                     )
                 append(
-                    "\n\nLes fichiers restent sur la machine. Pour la désinstaller, lancez dessus :\n${if (node.capabilities.backend == "native") "sudo systemctl disable --now cairn-native-node && sudo rm -rf --one-file-system /opt/cairn-native /var/lib/cairn-native && sudo rm -f /etc/systemd/system/cairn-native-node.service && sudo systemctl daemon-reload && sudo userdel cairn-workload" else UNINSTALL_COMMAND}\n(supprimer ces répertoires efface aussi les disques de conversation conservés sur la machine)."
+                    "\n\nLes fichiers restent sur la machine. Pour la désinstaller, lancez dessus :\n${if (node.capabilities.backend == "native") "sudo systemctl disable --now cairn-native-node && ! findmnt -rno TARGET | grep -q '^/var/lib/cairn-native/' && { sudo rm -rf /opt/cairn-native /var/lib/cairn-native; sudo rm -f /etc/systemd/system/cairn-native-node.service; sudo systemctl daemon-reload; sudo userdel cairn-workload; }" else UNINSTALL_COMMAND}\n(supprimer ces répertoires efface aussi les disques de conversation conservés sur la machine)."
                 )
+                if (node.capabilities.backend == NATIVE_BACKEND)
+                    append(
+                        "\nSi un disque de conversation est encore monté, la commande s’arrête avant de supprimer quoi que ce soit : démontez-le puis relancez-la."
+                    )
             },
             state.busy,
             state.error,

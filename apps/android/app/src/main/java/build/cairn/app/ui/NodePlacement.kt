@@ -122,7 +122,7 @@ fun NodePlacement(vm: CairnViewModel, run: Run) {
             // workspaces wait for the stop.
             run.executionBackend == "native" &&
                 run.status == "running" &&
-                run.storage?.mode != "on-demand" -> "Travail local · sauvegardé après l’arrêt"
+                run.storage?.mode == "native" -> "Travail local · sauvegardé après l’arrêt"
             run.backup?.capturedAt != null ->
                 "Synchronisé ${relativeAge(run.backup.capturedAt, now)}"
             else -> "Pas encore synchronisé"
@@ -152,7 +152,7 @@ fun NodePlacement(vm: CairnViewModel, run: Run) {
             Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
                 Text(current, style = MaterialTheme.typography.titleMedium)
                 if (run.executionBackend == "native") Text("Processus natif · GPU partagé")
-                if (run.executionBackend == "native" && run.storage?.mode != "on-demand")
+                if (run.executionBackend == "native" && run.storage?.mode == "native")
                     Text(
                         "Sauvegarde entre les tours",
                         style = MaterialTheme.typography.bodySmall,

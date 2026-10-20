@@ -114,7 +114,7 @@ const status = computed((): { tone: 'bad' | 'warn' | 'busy' | 'ok' | 'idle', lab
   if (dirtyBytes.value)
     return { tone: 'warn', label: `${formatBytes(dirtyBytes.value)} unsaved` }
   // Native ublk disks synchronize while running like VM disks; only legacy file workspaces wait for the stop.
-  if (run.executionBackend === 'native' && run.status === 'running' && run.storage?.mode !== 'on-demand')
+  if (run.executionBackend === 'native' && run.status === 'running' && run.storage?.mode === 'native')
     return { tone: 'warn', label: 'Local work · saved when execution stops' }
   if (run.backup?.capturedAt)
     return { tone: 'ok', label: `Synced ${relativeAge(run.backup.capturedAt, now.value)}` }
@@ -314,7 +314,7 @@ onUnmounted(() => {
             </h2>
             <p class="m-0! mt-0.5!">
               <template v-if="run.executionBackend === 'native'">
-                Native process · shared host GPU · {{ run.storage?.mode === 'on-demand' ? 'files load on demand' : 'checkpoints between turns' }}
+                Native process · shared host GPU · {{ run.storage?.mode === 'native' ? 'checkpoints between turns' : 'files load on demand' }}
               </template>
               <template v-else-if="run.storage?.mode === 'on-demand'">
                 Files load on demand

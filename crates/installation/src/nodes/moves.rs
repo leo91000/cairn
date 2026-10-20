@@ -679,9 +679,12 @@ async fn resume_at_destination(s: &Service, current: &Value, backup: &Value) -> 
     } else {
         RunStatus::Queued
     };
+    // The transfer already validated this manifest; an unreadable one keeps the default.
+    let manifest = super::publication::manifest(s, backup)
+        .await
+        .unwrap_or_default();
     let patch = json!({
-        // Native and VM conversations both resume from on-demand journal disks.
-        "storage": { "mode": super::ON_DEMAND },
+        "storage": { "mode": restored_storage_mode(&manifest) },
         "movementError": null,
         "accountWaitReason": null,
         "nodeId": node,
@@ -754,6 +757,17 @@ pub async fn latest(s: &Service, run: &str) -> Result<Option<Value>> {
     }
 }
 
+/// The storage a restored point mounts until the next launch records its own: a
+/// legacy native file checkpoint restores a file workspace, every other point an
+/// on-demand journal disk.
+fn restored_storage_mode(manifest: &Value) -> &'static str {
+    if manifest["kind"] == "native-files-v1" {
+        "native"
+    } else {
+        super::ON_DEMAND
+    }
+}
+
 async fn release_destination(s: &Service, run: &Value) -> Result<()> {
     for reservation in [
         run["moveRequest"]["reservation"].as_str(),
@@ -765,4 +779,25 @@ async fn release_destination(s: &Service, run: &Value) -> Result<()> {
         super::placement::release(s, reservation).await?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::restored_storage_mode;
+    use serde_json::json;
+
+    #[test]
+    fn only_legacy_native_file_checkpoints_restore_without_a_journal() {
+        assert_eq!(
+            restored_storage_mode(&json!({ "kind": "native-files-v1" })),
+            "native"
+        );
+        for manifest in [
+            json!({ "kind": "native-ext4-v1" }),
+            json!({ "kind": "paired-ext4-v2" }),
+            json!(null),
+        ] {
+            assert_eq!(restored_storage_mode(&manifest), "on-demand");
+        }
+    }
 }
