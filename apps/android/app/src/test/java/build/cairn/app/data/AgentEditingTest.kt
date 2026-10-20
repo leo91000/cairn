@@ -576,6 +576,8 @@ class AgentEditingTest {
         val granted = agent.copy(plugins = listOf("prod", "staging")).withExclusive("mac", true)
         // Without the catalog or machines: counts, and no exclusivity that may not apply.
         assertEquals("2 projets · 2 nodes · 2 plugins", agentAccessSummary(granted))
+        // An older installation records them on its resources: unknown without the catalog.
+        assertEquals("2 projets · 2 nodes", agentAccessSummary(granted, older = true))
         assertEquals(
             "2 projets · 2 nodes · Exclusivité",
             agentAccessSummary(agent.withExclusive("gpu", true), nodes = nodes),

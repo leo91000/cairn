@@ -758,8 +758,12 @@ export function issues(draft: AgentDraft, context: Context, isMain: boolean, age
 }
 
 /** "3 projects · 2 nodes · 1Password" for the agents list. */
-export function accessSummary(agent: Agent, context: Pick<Context, 'packages' | 'connections'> & { nodes?: ExecutionNode[] }) {
+export function accessSummary(agent: Agent, context: Pick<Context, 'packages' | 'connections'> & { nodes?: ExecutionNode[] }, older = false) {
   const access = agent.access ?? {} as AgentAccess
+  // An older installation keeps plugin grants on its instances (unknown to members, who get none).
+  const plugins = older
+    ? context.connections.filter(connection => connection.agentIds?.includes(agent.id)).map(connection => connection.id)
+    : agent.plugins ?? []
   const count = (value: string[] | null | undefined, noun: string, all: string) => value === null || value === undefined
     ? all
     : `${value.length || 'No'} ${noun}${value.length === 1 ? '' : 's'}`
@@ -772,7 +776,7 @@ export function accessSummary(agent: Agent, context: Pick<Context, 'packages' | 
   // Named by package when the catalogue says which; members, who do not see plugins, get a count.
   const packages = new Set<string>()
   let unnamed = 0
-  for (const id of agent.plugins ?? []) {
+  for (const id of plugins) {
     const connection = context.connections.find(item => item.id === id)
     const name = context.packages.find(entry => entry.id === connection?.pluginId)?.manifest?.name
     if (name)
@@ -785,7 +789,7 @@ export function accessSummary(agent: Agent, context: Pick<Context, 'packages' | 
   if (unnamed)
     parts.push(`${unnamed} ${packages.size ? 'other ' : ''}plugin${unnamed === 1 ? '' : 's'}`)
   // Only an effective reservation, which the node list says; without it, none is claimed.
-  if (agent.exclusiveNodes?.length && context.nodes && effectiveExclusive({ access, exclusiveNodes: agent.exclusiveNodes }, context.nodes).length)
+  if (!older && agent.exclusiveNodes?.length && context.nodes && effectiveExclusive({ access, exclusiveNodes: agent.exclusiveNodes }, context.nodes).length)
     parts.push('Exclusive reservation')
   if (access.installation)
     parts.push('Installation management')

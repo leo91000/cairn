@@ -77,7 +77,10 @@ fun ResourcesScreen(
                             }
                             if (agent.description.isNotBlank()) Text(agent.description)
                             Text(
-                                agentAccessSummary(agent),
+                                agentAccessSummary(
+                                    agent,
+                                    older = olderInstallation(state.agents),
+                                ),
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                             )

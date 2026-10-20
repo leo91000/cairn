@@ -135,6 +135,9 @@ it('summarizes an agent for the list and places server errors in their section',
     plugins: ['prod'],
   } as unknown as Agent
   expect(accessSummary(agent, context)).toBe('3 projects · 2 nodes · 1Password')
+  // An older installation records plugin grants on the instances only.
+  expect(accessSummary(agent, { ...context, connections: context.connections.map(connection => ({ ...connection, agentIds: [] })) }, true)).toBe('3 projects · 2 nodes')
+  expect(accessSummary({ ...agent, plugins: [] }, { ...context, connections: context.connections.map(connection => connection.id === 'prod' ? { ...connection, agentIds: ['a'] } : connection) }, true)).toBe('3 projects · 2 nodes · 1Password')
   expect(errorSection('A selected plugin instance no longer exists.')).toBe('plugins')
   expect(errorSection('A revoked node cannot be reserved.')).toBe('nodes')
 })

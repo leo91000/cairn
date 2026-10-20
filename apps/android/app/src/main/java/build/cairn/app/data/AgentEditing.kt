@@ -569,17 +569,23 @@ fun agentAccessSummary(
     catalog: PluginCatalog? = null,
     /** Known machines, to show exclusivity only where it takes effect; null (unknown) omits it. */
     nodes: List<ExecutionNode>? = null,
+    /**
+     * An older installation keeps live grants on its resources: they come from [catalog] and
+     * [nodes], and are omitted without them.
+     */
+    older: Boolean = false,
 ): String {
     val access = agent.access
+    val shown = if (older) agent.withResourceGrants(catalog, nodes.orEmpty()) else agent
     return buildList {
             add(access.projects?.let { plural(it.size, "projet") } ?: "Tous les projets")
             add(access.nodes?.let { plural(it.size, "node") } ?: "Toutes les nodes")
             if (access.backend == NATIVE_BACKEND) add(backendLabel(access.backend))
-            if (agent.plugins.isNotEmpty())
-                if (catalog == null) add(plural(agent.plugins.size, "plugin"))
+            if (shown.plugins.isNotEmpty())
+                if (catalog == null) add(plural(shown.plugins.size, "plugin"))
                 else
                     addAll(
-                        agent.plugins
+                        shown.plugins
                             .map { id ->
                                 val connection = catalog.connections.find { it.id == id }
                                 catalog.packages.find { it.id == connection?.pluginId }?.name
@@ -589,7 +595,7 @@ fun agentAccessSummary(
                     )
             if (
                 // Only where it takes effect, so never while the machines are unknown.
-                nodes != null && agent.effectiveExclusive(nodes).isNotEmpty()
+                nodes != null && shown.effectiveExclusive(nodes).isNotEmpty()
             )
                 add("Exclusivité")
             if (access.installation) add("Gestion de l’installation")
