@@ -1,23 +1,16 @@
 <script setup lang="ts">
-import { computed, watch } from 'vue'
+import { computed } from 'vue'
 import { useRoute } from 'vue-router'
-import { publishChats } from '../chat-list'
 import Icon from '../components/Icon.vue'
 import RunWorkspace from '../components/RunWorkspace.vue'
 import { Plus } from '../icons'
 import { modifier } from '../shortcuts'
 import { filRunPath } from '../signal'
-import { useLiveRun } from '../use-live-run'
 
 // Home: the Fil beside its reading pane on wide screens, the Fil alone on phones. A mission opened
 // from the Fil reads in that pane; on narrow screens it takes the page, as a conversation does.
 const route = useRoute()
 const runId = computed(() => route.params.id as string | undefined)
-const live = useLiveRun(() => '/chats/stream')
-watch(live.snapshot, (value) => {
-  if (value?.chats)
-    publishChats(value.chats)
-})
 </script>
 
 <template>

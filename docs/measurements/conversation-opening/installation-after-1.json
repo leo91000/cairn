@@ -1,0 +1,40 @@
+{
+  "cold_open": {
+    "p50_ms": 9.64,
+    "p95_ms": 12.61,
+    "samples": 15
+  },
+  "cold_open_first_batch_bytes": 164895,
+  "cold_open_with_list": {
+    "p50_ms": 9.25,
+    "p95_ms": 11.09,
+    "samples": 15
+  },
+  "cold_open_with_list_first_batch_bytes": 202868,
+  "delivery_process_cpu_ms": 645.0,
+  "delivery_with_12_idle_streams": {
+    "p50_ms": 29.34,
+    "p95_ms": 29.97,
+    "samples": 60
+  },
+  "events": 4021,
+  "history_pages": {
+    "p50_ms": 4.32,
+    "p95_ms": 4.55,
+    "samples": 21
+  },
+  "list_first_batch_bytes": 38132,
+  "list_open": {
+    "p50_ms": 3.76,
+    "p95_ms": 4.04,
+    "samples": 15
+  },
+  "resume_after_streamed_answer": {
+    "p50_ms": 7.65,
+    "p95_ms": 8.1,
+    "samples": 15
+  },
+  "resume_events": 54,
+  "resume_first_batch_bytes": 108114,
+  "resume_reset": false
+}

@@ -150,22 +150,51 @@ watch(showLatest, (shown) => {
   scroller.value?.focus({ preventScroll: true })
 })
 let scrollEnd: ReturnType<typeof setTimeout> | undefined
-let restoredTop: number | undefined
 let pagingFrame: number | undefined
 let prependPending = false
 let resizeObserver: ResizeObserver | undefined
+// The browser keeps the text under the reader in place while content changes above or
+// below it (scroll anchoring); following pins the end after every change of size.
+const anchoring = CSS.supports('overflow-anchor', 'auto')
+// The position the feed set itself, whose scroll event is not the reader's.
+let assigned: number | undefined
+let lastTop = 0
+// Opening shows the conversation first, filling only the view and one screen above it.
+// Once the browser is idle, older pages keep Android's three-screen buffer ahead of the
+// reader; anchoring keeps them out of sight.
+const settled = ref(false)
+// The reader scrolled up by themselves: the history banner may tell them to wait.
+const reading = ref(false)
+const idle = window.requestIdleCallback ?? ((callback: () => void) => setTimeout(callback, 200))
+const cancelIdle = window.cancelIdleCallback ?? clearTimeout
+const settling = idle(() => settled.value = true, { timeout: 1000 })
+
+function setScroll(el: HTMLElement, top: number) {
+  el.scrollTop = top
+  assigned = el.scrollTop
+  lastTop = assigned
+}
+
+// Runs after layout and before paint, so following never shows an intermediate frame.
+function stick() {
+  const el = scroller.value
+  if (el && follow.value)
+    setScroll(el, el.scrollHeight)
+}
+
 watch([scroller, conversation], ([element, content]) => {
   resizeObserver?.disconnect()
   if (!element)
     return
   follow.value = props.position?.follow ?? true
   if (follow.value)
-    jump()
+    stick()
   else if (props.position)
-    restore(element, props.position.top)
+    setScroll(element, props.position.top)
+  // A reader who left older messages open keeps reading there.
+  reading.value = !follow.value
   resizeObserver = new ResizeObserver(() => {
-    if (follow.value)
-      jump()
+    stick()
     measureEnd()
     schedulePaging()
   })
@@ -177,25 +206,17 @@ watch([scroller, conversation], ([element, content]) => {
 onBeforeUnmount(() => {
   savePosition()
   resizeObserver?.disconnect()
+  cancelIdle(settling)
   clearTimeout(scrollEnd)
   if (pagingFrame !== undefined)
     cancelAnimationFrame(pagingFrame)
 })
-
-function jump() {
-  scroller.value?.scrollTo({ top: scroller.value.scrollHeight })
-}
 
 // As Android's canScrollForward: a resize can leave nothing below without a scroll event.
 function measureEnd() {
   const el = scroller.value
   if (el)
     atEnd.value = el.scrollHeight - el.scrollTop - el.clientHeight < 2
-}
-
-function restore(el: HTMLElement, top: number) {
-  el.scrollTop = top
-  restoredTop = el.scrollTop
 }
 
 function savePosition() {
@@ -205,7 +226,7 @@ function savePosition() {
 
 function followLatest() {
   follow.value = true
-  jump()
+  stick()
   savePosition()
 }
 
@@ -219,17 +240,14 @@ function loadOlder() {
 watch([() => props.events, () => props.loadingOlder], async () => {
   if (props.loadingOlder || !prependPending)
     return
-  // Capture immediately before rendering the page, not when the request starts:
-  // the reader may have kept scrolling while the response was in flight.
+  // Anchoring keeps the reader's text in place, except at the very top, where browsers
+  // never anchor, and in engines without it. Measure just before the page renders: the
+  // reader may have kept scrolling while the response was in flight.
   const el = scroller.value
-  const anchor = el && { height: el.scrollHeight, top: el.scrollTop }
+  const anchor = el && !follow.value && (!anchoring || el.scrollTop < 1) && { height: el.scrollHeight, top: el.scrollTop }
   await nextTick()
-  if (el && anchor && !props.olderError) {
-    if (follow.value)
-      jump()
-    else
-      restore(el, anchor.top + el.scrollHeight - anchor.height)
-  }
+  if (el && anchor && !props.olderError)
+    setScroll(el, anchor.top + el.scrollHeight - anchor.height)
 
   prependPending = false
   savePosition()
@@ -245,25 +263,36 @@ function schedulePaging() {
     if (!el || el.clientHeight === 0)
       return
     atStart.value = el.scrollTop < 1
-    // Match Android's three-screen buffer, including pages that fold into only
-    // a few rows. Following new output is independent from fetching history.
-    if (el.scrollTop < 3 * el.clientHeight && !props.olderError)
+    // Pages can fold into only a few rows. Following new output is independent from history.
+    const buffer = settled.value || reading.value ? 3 * el.clientHeight : el.clientHeight
+    if (el.scrollTop < buffer && !props.olderError)
       loadOlder()
   })
 }
 
-watch([entries, () => props.more, () => props.loading, () => props.olderError], schedulePaging, { flush: 'post' })
+watch([entries, settled, () => props.more, () => props.loading, () => props.olderError], schedulePaging, { flush: 'post' })
 
-// As on Android, reading older output pauses following and scrolling back to the end resumes
-// it. Restoring a reading position may land at the end without resuming.
+// As on Android, scrolling up pauses following and scrolling back to the end resumes it.
+// Positions the feed sets itself, and the browser's anchoring, change neither.
 function scrolled() {
   const el = scroller.value
-  const restored = el?.scrollTop === restoredTop
-  restoredTop = undefined
-  if (el && el.scrollHeight - el.scrollTop - el.clientHeight > 60)
-    follow.value = false
-  else if (el && !restored)
-    follow.value = true
+  if (!el)
+    return
+  const top = el.scrollTop
+  const own = assigned !== undefined && Math.abs(top - assigned) < 1
+  assigned = undefined
+  if (!own) {
+    const distance = el.scrollHeight - top - el.clientHeight
+    if (distance <= 60) {
+      follow.value = true
+    }
+    else if (top < lastTop - 1) {
+      follow.value = false
+      reading.value = true
+    }
+  }
+
+  lastTop = top
   measureEnd()
   scrolling.value = true
   clearTimeout(scrollEnd)
@@ -272,12 +301,6 @@ function scrolled() {
   savePosition()
 }
 
-watch([entries, () => props.outcome?.reportedAt, () => props.loading], async () => {
-  if (!follow.value)
-    return
-  await nextTick()
-  jump()
-})
 let fullscreenReturnFocus: HTMLElement | null = null
 
 async function enterFullscreen() {
@@ -286,8 +309,7 @@ async function enterFullscreen() {
   fullscreen.value = true
   await nextTick()
   fullscreenButton.value?.focus()
-  if (follow.value)
-    jump()
+  stick()
 }
 
 async function exitFullscreen() {
@@ -346,7 +368,7 @@ defineExpose({
           </div>
         </header>
         <div class="relative flex flex-1 min-h-0 flex-col">
-          <div v-if="olderError || (loadingOlder && atStart)" role="status" class="absolute top-2 left-1/2 -translate-x-1/2 z-10 flex items-center gap-2 rounded-xl bg-raised px-3 py-2 text-xs shadow-md max-w-[90%]">
+          <div v-if="olderError || (loadingOlder && atStart && reading)" role="status" class="absolute top-2 left-1/2 -translate-x-1/2 z-10 flex items-center gap-2 rounded-xl bg-raised px-3 py-2 text-xs shadow-md max-w-[90%]">
             <template v-if="olderError">
               <span class="text-danger">{{ olderError }}</span>
               <UiButton class="text-xs" :disabled="loadingOlder" @click="loadOlder">
@@ -357,7 +379,7 @@ defineExpose({
           </div>
           <div
             ref="scroller"
-            class="activity-scroll flex flex-col flex-1 min-h-0 overflow-auto overscroll-contain [overflow-anchor:none] [scrollbar-width:thin] [scrollbar-color:var(--color-control)_transparent] focus-visible:outline-2 focus-visible:outline-offset-[-3px] focus-visible:outline-accent"
+            class="activity-scroll flex flex-col flex-1 min-h-0 overflow-auto overscroll-contain [scrollbar-width:thin] [scrollbar-color:var(--color-control)_transparent] focus-visible:outline-2 focus-visible:outline-offset-[-3px] focus-visible:outline-accent"
             tabindex="0"
             role="region"
             aria-label="Activity output"

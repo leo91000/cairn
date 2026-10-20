@@ -133,10 +133,13 @@ test('reads and creates conversations through the previous relay protocol', asyn
     await page.goto(conversationUrl.replace(sourceSlug, identity.installationId))
     await expect(page.getByRole('status', { name: 'Installation availability' })).toHaveText('Online')
     await expect(page.getByRole('heading', { name: 'A conversation from the current version', exact: true })).toBeVisible()
+    const fil = page.getByRole('complementary', { name: 'Fil' })
+    await expect(fil.getByText('A conversation from the current version', { exact: true }).first()).toBeVisible()
     await page.getByRole('link', { name: 'New conversation', exact: true }).first().click()
     await page.getByLabel('Message', { exact: true }).fill('A message using the previous protocol')
     await page.getByRole('button', { name: /^(Send|Queue)$/, exact: true }).click()
     await expect(page.getByRole('heading', { name: 'A message using the previous protocol', exact: true })).toBeVisible()
+    await expect(fil.getByText('A message using the previous protocol', { exact: true }).first()).toBeVisible()
     expect(errors).toEqual([])
   }
   finally {

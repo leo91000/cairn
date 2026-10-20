@@ -310,6 +310,21 @@ internal fun ConversationList(
     }
 }
 
+/**
+ * A saved conversation is current when the Fil shows nothing new since it was saved: the same
+ * finished turn, no work in progress and no later change, as on the web.
+ */
+internal fun savedIsCurrent(saved: CachedHistory, chats: List<Chat>?): Boolean {
+    val chat = saved.state.chat ?: return true
+    val known = chats?.find { it.id == chat.id } ?: return true
+    val run = saved.state.run
+    return known.runId == run?.id &&
+        known.status == (run?.status ?: "idle") &&
+        known.status !in listOf("queued", "running") &&
+        known.finishedAt == run?.finishedAt &&
+        known.updatedAt <= chat.updatedAt
+}
+
 @Composable
 internal fun ChatPage(
     vm: CairnViewModel,
@@ -328,7 +343,14 @@ internal fun ChatPage(
 ) {
     val live =
         if (id == null) conversations
-        else rememberLive(vm, state, "/chats/${segment(id)}/stream", streaming = selected)
+        else
+            rememberLive(
+                vm,
+                state,
+                "/chats/${segment(id)}/stream",
+                streaming = selected,
+                current = { savedIsCurrent(it, conversations.state?.chats) },
+            )
     val chat = live.state?.chat?.takeIf { it.id == id }
     ReadWhileOpen(
         vm,

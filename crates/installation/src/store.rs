@@ -7,10 +7,7 @@ use serde::{Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
 use std::{
     path::Path,
-    sync::{
-        Arc,
-        atomic::{AtomicUsize, Ordering},
-    },
+    sync::{Arc, Mutex},
 };
 use tokio::sync::{mpsc, oneshot, watch};
 
@@ -34,22 +31,35 @@ pub struct Store(Arc<Pool>);
 
 struct Pool {
     writer: mpsc::Sender<Job>,
-    readers: Vec<mpsc::Sender<Job>>,
-    next: AtomicUsize,
+    readers: mpsc::Sender<Job>,
     changes: watch::Sender<u64>,
 }
 
-fn actor(connection: Connection) -> mpsc::Sender<Job> {
-    let (tx, mut rx) = mpsc::channel::<Job>(256);
-    std::thread::Builder::new()
-        .name("cairn-sqlite".into())
-        .spawn(move || {
-            let mut db = connection;
-            while let Some(job) = rx.blocking_recv() {
-                job(&mut db);
-            }
-        })
-        .expect("database thread");
+/// Read connections. WAL readers do not block each other or the writer; a few
+/// cover the live streams of several open tabs without queueing behind one page.
+const READERS: usize = 4;
+
+/// Connections that take their next job from one queue. A slow read occupies
+/// only its own connection: the next job goes to whichever is free.
+fn actors(connections: Vec<Connection>) -> mpsc::Sender<Job> {
+    let (tx, rx) = mpsc::channel::<Job>(256);
+    let rx = Arc::new(Mutex::new(rx));
+    for mut db in connections {
+        let rx = rx.clone();
+        std::thread::Builder::new()
+            .name("cairn-sqlite".into())
+            .spawn(move || {
+                loop {
+                    // The guard is released before the job runs.
+                    let job = rx.lock().ok().and_then(|mut rx| rx.blocking_recv());
+                    let Some(job) = job else {
+                        break;
+                    };
+                    job(&mut db);
+                }
+            })
+            .expect("database thread");
+    }
     tx
 }
 
@@ -112,17 +122,16 @@ CREATE INDEX IF NOT EXISTS events_messages ON events(run_id,json_extract(payload
 
         tx.commit()?;
         let mut readers = Vec::new();
-        for _ in 0..2 {
+        for _ in 0..READERS {
             let connection = Connection::open(&file)?;
             connection.busy_timeout(std::time::Duration::from_secs(5))?;
             connection.execute_batch("PRAGMA query_only=ON; PRAGMA foreign_keys=ON;")?;
             connection.set_prepared_statement_cache_capacity(128);
-            readers.push(actor(connection));
+            readers.push(connection);
         }
         Ok(Self(Arc::new(Pool {
-            writer: actor(writer),
-            readers,
-            next: AtomicUsize::new(0),
+            writer: actors(vec![writer]),
+            readers: actors(readers),
             changes: watch::channel(0).0,
         })))
     }
@@ -146,11 +155,7 @@ CREATE INDEX IF NOT EXISTS events_messages ON events(run_id,json_extract(payload
         &self,
         f: impl FnOnce(&mut Db<'_>) -> Result<T> + Send + 'static,
     ) -> Result<T> {
-        self.call(
-            &self.0.readers[self.0.next.fetch_add(1, Ordering::Relaxed) % self.0.readers.len()],
-            f,
-        )
-        .await
+        self.call(&self.0.readers, f).await
     }
 
     pub async fn write<T: Send + 'static>(
@@ -173,6 +178,11 @@ CREATE INDEX IF NOT EXISTS events_messages ON events(run_id,json_extract(payload
 
     pub fn subscribe(&self) -> watch::Receiver<u64> {
         self.0.changes.subscribe()
+    }
+
+    /// Counts the commits that changed something, as notified to subscribers.
+    pub fn revision(&self) -> u64 {
+        *self.0.changes.borrow()
     }
 
     pub async fn transaction<T: Send + 'static>(
@@ -705,27 +715,23 @@ impl Db<'_> {
         limit: i64,
         max_bytes: usize,
     ) -> Result<Vec<Event>> {
-        self.event_slice(run, after, limit, max_bytes, false)
-            .map(|(events, _)| events)
+        let sql = "SELECT id,run_id,created_at,type,text,payload FROM events WHERE run_id=? \
+            AND id>? ORDER BY id LIMIT ?";
+        let mut stmt = self.0.prepare_cached(sql)?;
+        let rows = stmt.query_map(params![run, after, limit], event_row)?;
+        within_budget(rows, limit, max_bytes)
     }
 
     pub fn events_before(&self, run: &str, before: i64) -> Result<(Vec<Event>, bool)> {
-        let (mut events, more) = self.event_slice(run, before, 100, 256 * 1024, true)?;
-        events.reverse();
-        Ok((events, more))
+        self.events_between(run, 0, before)
     }
 
-    fn event_slice(
-        &self,
-        run: &str,
-        boundary: i64,
-        limit: i64,
-        max_bytes: usize,
-        backwards: bool,
-    ) -> Result<(Vec<Event>, bool)> {
-        let sql = if backwards {
-            "SELECT e.id,e.run_id,e.created_at,e.type,e.text,e.payload FROM events e
-WHERE e.run_id=? AND e.id<? AND (
+    /// The newest page of events between two IDs (both exclusive), in order, without
+    /// text snapshots a later snapshot of the same message replaced within its turn.
+    /// Also reports whether earlier such events remain above `after`.
+    pub fn events_between(&self, run: &str, after: i64, before: i64) -> Result<(Vec<Event>, bool)> {
+        let sql = "SELECT e.id,e.run_id,e.created_at,e.type,e.text,e.payload FROM events e
+WHERE e.run_id=? AND e.id>? AND e.id<? AND (
  json_extract(e.payload,'$.item.type') IS NOT 'agent_message'
  OR COALESCE(json_extract(e.payload,'$.item.id'),'')=''
  OR NOT EXISTS (
@@ -733,52 +739,27 @@ WHERE e.run_id=? AND e.id<? AND (
    AND json_extract(n.payload,'$.item.type')='agent_message'
    AND json_extract(n.payload,'$.item.id')=json_extract(e.payload,'$.item.id')
    AND n.id>e.id AND n.id<COALESCE((SELECT t.id FROM events t WHERE t.run_id=e.run_id AND t.type='turn.started' AND t.id>e.id ORDER BY t.id LIMIT 1),9223372036854775807)
- )) ORDER BY e.id DESC LIMIT ?"
-        } else {
-            "SELECT id,run_id,created_at,type,text,payload FROM events WHERE run_id=? \
-                AND id>? ORDER BY id LIMIT ?"
-        };
+ )) ORDER BY e.id DESC LIMIT ?";
         let mut stmt = self.0.prepare_cached(sql)?;
-        let mut rows =
-            stmt.query_map(params![run, boundary, limit + i64::from(backwards)], |r| {
-                Ok((
-                    r.get::<_, i64>(0)?,
-                    r.get::<_, String>(1)?,
-                    r.get::<_, i64>(2)?,
-                    r.get::<_, String>(3)?,
-                    r.get::<_, String>(4)?,
-                    r.get::<_, Option<String>>(5)?,
-                ))
-            })?;
-        let mut events = Vec::new();
-        let mut bytes = 0;
-        for row in rows.by_ref() {
-            let (id, run, created, kind, text, payload) = row?;
-            bytes += text.len() + payload.as_ref().map_or(0, String::len) + 256;
-            events.push(Event {
-                id,
-                run_id: run,
-                created_at: created,
-                kind,
-                text,
-                payload: payload
-                    .map(serde_json::value::RawValue::from_string)
-                    .transpose()?,
-            });
-            if bytes >= max_bytes || events.len() >= limit as usize {
-                break;
-            }
-        }
-        let more = backwards && rows.next().transpose()?.is_some();
+        let mut rows = stmt.query_map(
+            params![run, after, before, HISTORY_PAGE_EVENTS + 1],
+            event_row,
+        )?;
+        let mut events = within_budget(&mut rows, HISTORY_PAGE_EVENTS, HISTORY_PAGE_BYTES)?;
+        let more = rows.next().transpose()?.is_some();
+        events.reverse();
         Ok((events, more))
     }
 
-    pub fn require_run(&self, id: &str) -> Result<()> {
-        let exists = self
+    pub fn has_run(&self, id: &str) -> Result<bool> {
+        Ok(self
             .0
             .prepare_cached("SELECT 1 FROM runs WHERE id=?")?
-            .exists([id])?;
-        if !exists {
+            .exists([id])?)
+    }
+
+    pub fn require_run(&self, id: &str) -> Result<()> {
+        if !self.has_run(id)? {
             return Err(Error::not_found("Run not found."));
         }
         Ok(())
@@ -812,6 +793,53 @@ WHERE e.run_id=? AND e.id<? AND (
             .execute(params![now(), action, detail.to_string()])?;
         Ok(())
     }
+}
+
+/// Events per page of history, and their approximate byte budget.
+const HISTORY_PAGE_EVENTS: i64 = 100;
+const HISTORY_PAGE_BYTES: usize = 256 * 1024;
+
+type EventRow = (i64, String, i64, String, String, Option<String>);
+
+fn event_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<EventRow> {
+    Ok((
+        r.get(0)?,
+        r.get(1)?,
+        r.get(2)?,
+        r.get(3)?,
+        r.get(4)?,
+        r.get(5)?,
+    ))
+}
+
+/// Stops reading rows at the byte budget, rather than allocating an entire page
+/// of large historical outputs. Stored payloads are already JSON: their bytes are
+/// kept as they are instead of being parsed into intermediate object nodes.
+fn within_budget(
+    rows: impl Iterator<Item = rusqlite::Result<EventRow>>,
+    limit: i64,
+    max_bytes: usize,
+) -> Result<Vec<Event>> {
+    let mut events = Vec::new();
+    let mut bytes = 0;
+    for row in rows {
+        let (id, run, created, kind, text, payload) = row?;
+        bytes += text.len() + payload.as_ref().map_or(0, String::len) + 256;
+        events.push(Event {
+            id,
+            run_id: run,
+            created_at: created,
+            kind,
+            text,
+            payload: payload
+                .map(serde_json::value::RawValue::from_string)
+                .transpose()?,
+        });
+        if bytes >= max_bytes || events.len() >= limit as usize {
+            break;
+        }
+    }
+    Ok(events)
 }
 
 /// Shallow merge: every top-level key of `patch` replaces the key in `value`

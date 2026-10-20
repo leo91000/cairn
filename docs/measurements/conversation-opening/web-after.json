@@ -1,0 +1,236 @@
+{
+  "results": [
+    {
+      "round": 0,
+      "scenario": "first open",
+      "firstContentMs": 258,
+      "previousFrames": 0,
+      "outdatedFrames": 0,
+      "loaderFrames": 11,
+      "historyBannerFrames": 0,
+      "movesAfterContent": 0,
+      "layoutShift": 0,
+      "historyRequests": 1
+    },
+    {
+      "round": 0,
+      "scenario": "back to a saved conversation",
+      "firstContentMs": 67,
+      "previousFrames": 0,
+      "outdatedFrames": 0,
+      "loaderFrames": 0,
+      "historyBannerFrames": 0,
+      "movesAfterContent": 0,
+      "layoutShift": 0,
+      "historyRequests": 0
+    },
+    {
+      "round": 0,
+      "scenario": "saved long conversation",
+      "firstContentMs": 79,
+      "previousFrames": 0,
+      "outdatedFrames": 0,
+      "loaderFrames": 0,
+      "historyBannerFrames": 0,
+      "movesAfterContent": 0,
+      "layoutShift": 0,
+      "historyRequests": 0
+    },
+    {
+      "round": 0,
+      "scenario": "first open of folded tool calls",
+      "firstContentMs": 235,
+      "previousFrames": 0,
+      "outdatedFrames": 0,
+      "loaderFrames": 11,
+      "historyBannerFrames": 0,
+      "movesAfterContent": 0,
+      "layoutShift": 0,
+      "historyRequests": 3
+    },
+    {
+      "round": 0,
+      "scenario": "outdated saved conversation",
+      "firstContentMs": 235,
+      "previousFrames": 0,
+      "outdatedFrames": 0,
+      "loaderFrames": 10,
+      "historyBannerFrames": 0,
+      "movesAfterContent": 0,
+      "layoutShift": 0,
+      "historyRequests": 0
+    },
+    {
+      "round": 1,
+      "scenario": "first open",
+      "firstContentMs": 281,
+      "previousFrames": 0,
+      "outdatedFrames": 0,
+      "loaderFrames": 12,
+      "historyBannerFrames": 0,
+      "movesAfterContent": 0,
+      "layoutShift": 0,
+      "historyRequests": 1
+    },
+    {
+      "round": 1,
+      "scenario": "back to a saved conversation",
+      "firstContentMs": 46,
+      "previousFrames": 0,
+      "outdatedFrames": 0,
+      "loaderFrames": 0,
+      "historyBannerFrames": 0,
+      "movesAfterContent": 0,
+      "layoutShift": 0,
+      "historyRequests": 0
+    },
+    {
+      "round": 1,
+      "scenario": "saved long conversation",
+      "firstContentMs": 53,
+      "previousFrames": 0,
+      "outdatedFrames": 0,
+      "loaderFrames": 0,
+      "historyBannerFrames": 0,
+      "movesAfterContent": 0,
+      "layoutShift": 0,
+      "historyRequests": 0
+    },
+    {
+      "round": 1,
+      "scenario": "first open of folded tool calls",
+      "firstContentMs": 237,
+      "previousFrames": 0,
+      "outdatedFrames": 0,
+      "loaderFrames": 11,
+      "historyBannerFrames": 0,
+      "movesAfterContent": 0,
+      "layoutShift": 0,
+      "historyRequests": 3
+    },
+    {
+      "round": 1,
+      "scenario": "outdated saved conversation",
+      "firstContentMs": 265,
+      "previousFrames": 0,
+      "outdatedFrames": 0,
+      "loaderFrames": 10,
+      "historyBannerFrames": 0,
+      "movesAfterContent": 0,
+      "layoutShift": 0,
+      "historyRequests": 0
+    },
+    {
+      "round": 2,
+      "scenario": "first open",
+      "firstContentMs": 258,
+      "previousFrames": 0,
+      "outdatedFrames": 0,
+      "loaderFrames": 12,
+      "historyBannerFrames": 0,
+      "movesAfterContent": 0,
+      "layoutShift": 0,
+      "historyRequests": 1
+    },
+    {
+      "round": 2,
+      "scenario": "back to a saved conversation",
+      "firstContentMs": 58,
+      "previousFrames": 0,
+      "outdatedFrames": 0,
+      "loaderFrames": 0,
+      "historyBannerFrames": 0,
+      "movesAfterContent": 0,
+      "layoutShift": 0,
+      "historyRequests": 0
+    },
+    {
+      "round": 2,
+      "scenario": "saved long conversation",
+      "firstContentMs": 70,
+      "previousFrames": 0,
+      "outdatedFrames": 0,
+      "loaderFrames": 0,
+      "historyBannerFrames": 0,
+      "movesAfterContent": 0,
+      "layoutShift": 0,
+      "historyRequests": 0
+    },
+    {
+      "round": 2,
+      "scenario": "first open of folded tool calls",
+      "firstContentMs": 251,
+      "previousFrames": 0,
+      "outdatedFrames": 0,
+      "loaderFrames": 11,
+      "historyBannerFrames": 0,
+      "movesAfterContent": 2,
+      "layoutShift": 0,
+      "historyRequests": 3
+    },
+    {
+      "round": 2,
+      "scenario": "outdated saved conversation",
+      "firstContentMs": 264,
+      "previousFrames": 0,
+      "outdatedFrames": 0,
+      "loaderFrames": 10,
+      "historyBannerFrames": 0,
+      "movesAfterContent": 0,
+      "layoutShift": 0,
+      "historyRequests": 0
+    }
+  ],
+  "summary": {
+    "first open": {
+      "firstContentMs": 258,
+      "previousFrames": 0,
+      "outdatedFrames": 0,
+      "loaderFrames": 12,
+      "historyBannerFrames": 0,
+      "movesAfterContent": 0,
+      "layoutShift": 0,
+      "historyRequests": 1
+    },
+    "back to a saved conversation": {
+      "firstContentMs": 58,
+      "previousFrames": 0,
+      "outdatedFrames": 0,
+      "loaderFrames": 0,
+      "historyBannerFrames": 0,
+      "movesAfterContent": 0,
+      "layoutShift": 0,
+      "historyRequests": 0
+    },
+    "saved long conversation": {
+      "firstContentMs": 70,
+      "previousFrames": 0,
+      "outdatedFrames": 0,
+      "loaderFrames": 0,
+      "historyBannerFrames": 0,
+      "movesAfterContent": 0,
+      "layoutShift": 0,
+      "historyRequests": 0
+    },
+    "first open of folded tool calls": {
+      "firstContentMs": 237,
+      "previousFrames": 0,
+      "outdatedFrames": 0,
+      "loaderFrames": 11,
+      "historyBannerFrames": 0,
+      "movesAfterContent": 0,
+      "layoutShift": 0,
+      "historyRequests": 3
+    },
+    "outdated saved conversation": {
+      "firstContentMs": 264,
+      "previousFrames": 0,
+      "outdatedFrames": 0,
+      "loaderFrames": 10,
+      "historyBannerFrames": 0,
+      "movesAfterContent": 0,
+      "layoutShift": 0,
+      "historyRequests": 0
+    }
+  }
+}

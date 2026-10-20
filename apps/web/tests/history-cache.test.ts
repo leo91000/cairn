@@ -8,6 +8,8 @@ import {
 import {
   cacheScope,
   clearHistoryCache,
+  knownScope,
+  peekHistory,
   readHistory,
   writeHistory,
 } from '../src/history-cache'
@@ -41,6 +43,19 @@ it('isolates sessions and routes, and copies snapshots before retaining them', a
   expect(await readHistory('other', '/chats/a/stream')).toBeUndefined()
   expect(await readHistory('session', '/runs/a/stream')).toBeUndefined()
   expect(await cacheScope('session')).not.toContain('session')
+})
+it('shows a conversation saved in this page without waiting for storage', async () => {
+  const scope = await cacheScope('page')
+  expect(knownScope('page')).toBe(scope)
+  expect(knownScope('another page')).toBeUndefined()
+  await writeHistory(scope, '/chats/a/stream', record())
+  const shown = peekHistory(scope, '/chats/a/stream')
+  expect(shown?.events[0].text).toBe('saved')
+  shown!.events[0].text = 'mutated'
+  expect(peekHistory(scope, '/chats/a/stream')?.events[0].text).toBe('saved')
+  expect(peekHistory(scope, '/chats/b/stream')).toBeUndefined()
+  await clearHistoryCache()
+  expect(peekHistory(scope, '/chats/a/stream')).toBeUndefined()
 })
 it('expires, bounds and clears caches even when IndexedDB is unavailable', async () => {
   await writeHistory('s', 'expired', { ...record(), savedAt: Date.now() - 8 * 86400000 })

@@ -13,8 +13,11 @@ export interface CachedHistory {
   savedAt: number
   position?: ReadingPosition
 }
-const memory = new Map<string, CachedHistory>()
+// Serialized entries: a read parses its own copy, and trimming needs no re-serialization.
+const memory = new Map<string, { text: string, size: number }>()
+const scopes = new Map<string, string>()
 const MAX_ENTRY = 4 * 1024 * 1024
+const MAX_HISTORY = 3 * 1024 * 1024
 const MAX_TOTAL = 20 * 1024 * 1024
 const MAX_COUNT = 12
 const TTL = 7 * 24 * 60 * 60 * 1000
@@ -22,8 +25,18 @@ let epoch = 0
 let serial = Promise.resolve()
 
 export async function cacheScope(session: string) {
+  const known = scopes.get(session)
+  if (known)
+    return known
   const bytes = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(session))
-  return Array.from(new Uint8Array(bytes), n => n.toString(16).padStart(2, '0')).join('')
+  const scope = Array.from(new Uint8Array(bytes), n => n.toString(16).padStart(2, '0')).join('')
+  scopes.set(session, scope)
+  return scope
+}
+
+/** The scope of a session already hashed in this page, without waiting for the digest. */
+export function knownScope(session: string) {
+  return scopes.get(session)
 }
 
 function valid(value: CachedHistory): boolean {
@@ -37,10 +50,25 @@ function valid(value: CachedHistory): boolean {
     && value.events.every(e => !!e && typeof e.text === 'string' && Number.isSafeInteger(e.id) && e.id > 0 && e.id <= value.cursor && typeof e.type === 'string')
 }
 
+// Saved conversations, with an index of their ages and sizes so eviction never loads
+// one. The previous database had no index: it is removed rather than migrated, and a
+// previous build that opens it again simply starts from an empty one.
+const DATABASE = 'cairn-history-v2'
+let previousRemoved = false
+
 function db() {
+  if (!previousRemoved) {
+    previousRemoved = true
+    indexedDB.deleteDatabase('cairn-history-v1')
+  }
+
   return new Promise<IDBDatabase>((resolve, reject) => {
-    const request = indexedDB.open('cairn-history-v1', 1)
-    request.onupgradeneeded = () => request.result.createObjectStore('entries', { keyPath: 'key' })
+    const request = indexedDB.open(DATABASE, 1)
+    request.onupgradeneeded = () => {
+      const store = request.result.createObjectStore('entries', { keyPath: 'key' })
+      store.createIndex('age', ['savedAt', 'size'])
+    }
+
     request.onsuccess = () => resolve(request.result)
     request.onerror = () => reject(request.error)
   })
@@ -67,36 +95,75 @@ function enqueue(work: () => Promise<void>) {
   return serial
 }
 
+// Newest first: deletes entries beyond the count, the total size or their age.
+function evict(store: IDBObjectStore) {
+  let count = 0
+  let total = 0
+  const request = store.index('age').openKeyCursor(null, 'prev')
+  request.onsuccess = () => {
+    const cursor = request.result
+    if (!cursor)
+      return
+    const [savedAt, size] = cursor.key as [number, number]
+    count++
+    total += size
+    if (count > MAX_COUNT || total > MAX_TOTAL || Date.now() - savedAt >= TTL)
+      store.delete(cursor.primaryKey)
+    cursor.continue()
+  }
+}
+
+function remember(key: string, text: string) {
+  memory.delete(key)
+  memory.set(key, { text, size: text.length * 2 })
+  let total = 0
+  for (const [index, [id, item]] of [...memory].reverse().entries()) {
+    total += item.size
+    if (total > MAX_TOTAL || index >= MAX_COUNT)
+      memory.delete(id)
+  }
+}
+
+function parse(text: string | undefined) {
+  if (!text || text.length * 2 > MAX_ENTRY)
+    return undefined
+  const value = JSON.parse(text) as CachedHistory
+  return valid(value) ? value : undefined
+}
+
+/** A conversation read in this page, available without waiting for storage. */
+export function peekHistory(scope: string, path: string): CachedHistory | undefined {
+  try {
+    return parse(memory.get(`${scope}:${path}`)?.text)
+  }
+  catch {
+    return undefined
+  }
+}
+
 export async function readHistory(scope: string, path: string): Promise<CachedHistory | undefined> {
   const key = `${scope}:${path}`
   const current = epoch
-  let value = memory.get(key)
-  if (!value) {
+  let text = memory.get(key)?.text
+  if (text === undefined) {
     try {
-      const text = await transaction<string | undefined>('readonly', (store, done) => {
+      text = await transaction<string | undefined>('readonly', (store, done) => {
         const r = store.get(key)
         r.onsuccess = () => done(r.result?.text)
       })
-      if (text && text.length * 2 <= MAX_ENTRY)
-        value = JSON.parse(text)
     }
     catch { /* Cache miss; the stream remains authoritative. */ }
   }
 
-  if (current !== epoch || !value || !valid(value))
+  try {
+    const value = parse(text)
+    if (current !== epoch || !value)
+      return undefined
+    remember(key, text!)
+    return value
+  }
+  catch {
     return undefined
-  memory.delete(key)
-  memory.set(key, value)
-  trimMemory()
-  return structuredClone(value)
-}
-
-function trimMemory() {
-  let total = 0
-  for (const [index, [id, item]] of [...memory].reverse().entries()) {
-    total += JSON.stringify(item).length * 2
-    if (total > MAX_TOTAL || index >= MAX_COUNT)
-      memory.delete(id)
   }
 }
 
@@ -105,28 +172,24 @@ export function writeHistory(scope: string, path: string, value: CachedHistory) 
   const current = epoch
   if (!valid(value))
     return removeHistory(scope, path)
-  value = recentHistory(value)
-  const text = JSON.stringify(value)
+  let text = JSON.stringify(value)
+  // Most conversations fit: only a long one pays for measuring each event.
+  if (text.length * 2 + 4096 > MAX_HISTORY)
+    text = JSON.stringify(recentHistory(value))
   if (text.length * 2 > MAX_ENTRY)
     return removeHistory(scope, path)
-  memory.delete(key)
-  memory.set(key, JSON.parse(text))
-  trimMemory()
+  remember(key, text)
   return enqueue(async () => {
     if (current !== epoch)
       return
     await transaction<void>('readwrite', (store) => {
-      store.put({ key, text, savedAt: value.savedAt })
-      const request = store.getAll()
-      request.onsuccess = () => {
-        let size = 0
-        const entries = request.result.sort((a, b) => b.savedAt - a.savedAt)
-        entries.forEach((entry, index) => {
-          size += entry.text.length * 2
-          if (index >= MAX_COUNT || size > MAX_TOTAL || Date.now() - entry.savedAt >= TTL)
-            store.delete(entry.key)
-        })
-      }
+      store.put({
+        key,
+        text,
+        savedAt: value.savedAt,
+        size: text.length * 2,
+      })
+      evict(store)
     })
   })
 }
@@ -153,7 +216,7 @@ export function recentHistory(value: CachedHistory): CachedHistory {
   let start = ordered.length
   while (start > 0) {
     const bytes = JSON.stringify(ordered[start - 1]).length * 2 + 2
-    if (size + bytes > 3 * 1024 * 1024)
+    if (size + bytes > MAX_HISTORY)
       break
     size += bytes
     start--

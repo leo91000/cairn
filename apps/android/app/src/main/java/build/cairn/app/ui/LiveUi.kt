@@ -23,6 +23,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.transformWhile
@@ -30,18 +31,41 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.*
 
+/** How long a revalidation of a saved conversation may take before the reader is told. */
+private const val SLOW_UPDATE_MILLIS = 1000L
+
 @Composable
 fun rememberLive(
     vm: CairnViewModel,
     workspace: Workspace,
     path: String,
     streaming: Boolean = true,
+    /**
+     * Whether a saved conversation still matches what the server holds. An outdated one only
+     * resumes the stream from its cursor: the reader waits for the update instead of seeing older
+     * output that is about to change, as on the web. Previews always show their copy.
+     */
+    current: (CachedHistory) -> Boolean = { true },
 ): LiveSnapshot {
     val owner = LocalLifecycleOwner.current
+    val isCurrent by rememberUpdatedState(current)
     val enabled = workspace.session.authenticated && !workspace.signingOut
     val api = if (enabled) vm.api else null
     var value by remember(path, api) { mutableStateOf(LiveSnapshot()) }
     val session = remember(path, api) { LiveSession() }
+    // Retained pager pages become previews and then selected again without being restored.
+    // Recheck their latest snapshot at selection, before a frame of old content can show.
+    var waiting by
+        remember(path, api, streaming) {
+            val previous = session.snapshot
+            val detail = previous.state
+            val history = previous.history
+            val saved =
+                if (detail != null && history != null)
+                    CachedHistory(previous.cursor, history, detail, previous.events)
+                else null
+            mutableStateOf(streaming && saved != null && !current(saved))
+        }
     val parentScope = rememberCoroutineScope()
     val scope =
         remember(path, api) {
@@ -60,8 +84,10 @@ fun rememberLive(
             if (session.path != path)
                 vm.historyCache.read(key)?.let {
                     session.restore(it, path, api.streamGeneration.get())
-                    value = session.snapshot
+                    waiting = streaming && !isCurrent(it)
+                    if (!waiting) value = session.snapshot
                 }
+            val replay = session.snapshot
             try {
                 owner.lifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) {
                     try {
@@ -75,12 +101,16 @@ fun rememberLive(
                                 streaming || (it.catchingUp && it.httpStatus == null)
                             }
                             .collect {
+                                // The stream's own state replaces an outdated copy; without a
+                                // connection, the copy is still better than nothing.
+                                if (waiting && it === replay) return@collect
                                 vm.acceptCacheRevision(it.state?.cacheRevision)
                                 cacheGeneration = vm.historyCache.generation
                                 if (!it.catchingUp || it.httpStatus != null) {
                                     if (it.history != value.history || it.epoch != value.epoch)
                                         olderError = null
                                     value = pages.display(it)
+                                    waiting = false
                                 }
                                 if (it.httpStatus in listOf(401, 403, 404, 409)) {
                                     vm.historyCache.remove(key)
@@ -123,7 +153,8 @@ fun rememberLive(
             }
         }
     }
-    return value.copy(
+    val visible = if (waiting) LiveSnapshot() else value
+    return visible.copy(
         loadingOlder = loadingOlder,
         olderError = olderError,
         loadOlder = {
@@ -261,11 +292,17 @@ internal fun BoxScope.HistoryStatus(
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.spacedBy(6.dp),
     ) {
+        // A revalidation that takes a moment says so; a quick one stays silent, as on the web.
+        var notice by remember { mutableStateOf(connection.takeIf { it != UPDATING_STATUS }) }
+        LaunchedEffect(connection) {
+            if (connection == UPDATING_STATUS) delay(SLOW_UPDATE_MILLIS)
+            notice = connection
+        }
         // Keep the last text while fading out, so the pill does not empty before it disappears.
-        var shown by remember { mutableStateOf(connection.orEmpty()) }
-        if (connection != null) shown = connection
+        var shown by remember { mutableStateOf(notice.orEmpty()) }
+        notice?.let { shown = it }
         androidx.compose.animation.AnimatedVisibility(
-            connection != null,
+            notice != null,
             enter = androidx.compose.animation.fadeIn(),
             exit = androidx.compose.animation.fadeOut(),
         ) {

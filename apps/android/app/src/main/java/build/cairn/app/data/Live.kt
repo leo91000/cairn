@@ -107,6 +107,9 @@ class LiveAccumulator {
 
 data class StreamFrame(val cursor: Long, val batch: LiveBatch)
 
+/** A saved conversation is shown while its stream revalidates it. */
+const val UPDATING_STATUS = "Actualisation…"
+
 data class LiveSnapshot(
     val state: LiveState? = null,
     val events: List<RunEvent> = emptyList(),
@@ -257,7 +260,7 @@ class LiveSession {
             LiveSnapshot(
                 value.state,
                 value.events,
-                status = "Actualisation…",
+                status = UPDATING_STATUS,
                 catchingUp = false,
                 history = value.history,
                 cursor = value.cursor,

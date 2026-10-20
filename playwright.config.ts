@@ -58,6 +58,8 @@ export default defineConfig({
     { name: 'layout-webkit-chat-attachments', testMatch: 'chat-attachments.spec.ts', use: { browserName: 'webkit', hasTouch: true } },
     { name: 'layout-webkit-chats', testMatch: 'chats.spec.ts', use: { browserName: 'webkit', hasTouch: true } },
     { name: 'layout-chromium-scrolling', testMatch: 'scrolling.spec.ts' },
+    // Opt-in measurement (CAIRN_MEASURE_OPENING=1), outside the CI groups.
+    { name: 'measure-opening', testMatch: 'opening-measurement.spec.ts' },
     { name: 'layout-webkit-scrolling', testMatch: 'scrolling.spec.ts', use: { browserName: 'webkit' } },
     { name: 'journeys', testMatch: ['workspace.spec.ts', 'local-login-retirement.spec.ts'], grepInvert: /appearance follows|dark appearance settings/ },
     { name: 'journeys-appearance', testMatch: 'workspace.spec.ts', grep: /appearance follows|dark appearance settings/ },

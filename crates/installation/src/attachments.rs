@@ -68,6 +68,37 @@ fn media(bytes: &[u8]) -> &'static str {
     "application/octet-stream"
 }
 
+/// An image's size as it displays, after the camera's orientation, read from its
+/// header without decoding the picture. Readers reserve this box before it loads.
+fn dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
+    use image::ImageDecoder;
+
+    if bytes.starts_with(b"GIF8") {
+        let width = u16::from_le_bytes(bytes.get(6..8)?.try_into().ok()?);
+        let height = u16::from_le_bytes(bytes.get(8..10)?.try_into().ok()?);
+        return Some((width.into(), height.into())).filter(|(w, h)| *w > 0 && *h > 0);
+    }
+    let mut decoder = image::ImageReader::new(std::io::Cursor::new(bytes))
+        .with_guessed_format()
+        .ok()?
+        .into_decoder()
+        .ok()?;
+    let (width, height) = decoder.dimensions();
+    let turned = matches!(
+        decoder.orientation().ok()?,
+        image::metadata::Orientation::Rotate90
+            | image::metadata::Orientation::Rotate270
+            | image::metadata::Orientation::Rotate90FlipH
+            | image::metadata::Orientation::Rotate270FlipH
+    );
+    let size = if turned {
+        (height, width)
+    } else {
+        (width, height)
+    };
+    Some(size).filter(|(w, h)| *w > 0 && *h > 0)
+}
+
 pub fn message(db: &Db<'_>, chat: &str, value: &mut Value) -> Result<()> {
     let ids = value["attachmentIds"]
         .as_array()
@@ -131,6 +162,11 @@ struct Attachment {
     kind: AttachmentKind,
     digest: String,
     created_at: i64,
+    /// Pixel size of an image, as it displays. Absent for files and older uploads.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    width: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    height: Option<u32>,
 }
 
 impl Attachment {
@@ -282,6 +318,9 @@ impl Service {
         } else {
             AttachmentKind::File
         };
+        let size = (kind == AttachmentKind::Image)
+            .then(|| dimensions(bytes))
+            .flatten();
         let attachment = serde_json::to_value(Attachment {
             id: id.to_owned(),
             chat_id: chat.to_owned(),
@@ -291,6 +330,8 @@ impl Service {
             kind,
             digest,
             created_at: now(),
+            width: size.map(|(width, _)| width),
+            height: size.map(|(_, height)| height),
         })?;
         let path = self.attachment_path(chat, id);
         private_dir(path.parent().unwrap()).await?;
@@ -536,8 +577,54 @@ pub fn input(message: &str, attachments: &Value, directory: &Path) -> Value {
 
 #[cfg(test)]
 mod tests {
-    use super::{filename, text_summary};
+    use super::{dimensions, filename, text_summary};
     use serde_json::json;
+
+    fn encoded(width: u32, height: u32, format: image::ImageFormat) -> Vec<u8> {
+        let mut bytes = std::io::Cursor::new(Vec::new());
+        image::RgbImage::new(width, height)
+            .write_to(&mut bytes, format)
+            .unwrap();
+        bytes.into_inner()
+    }
+
+    /// A JPEG whose EXIF header asks viewers to turn it a quarter clockwise, as phone cameras do.
+    fn rotated_jpeg(width: u32, height: u32) -> Vec<u8> {
+        let jpeg = encoded(width, height, image::ImageFormat::Jpeg);
+        let mut exif = b"Exif\0\0MM\0\x2a\0\0\0\x08\0\x01".to_vec();
+        // Orientation (0x0112), SHORT, one value: 6, then no further directory.
+        exif.extend_from_slice(b"\x01\x12\0\x03\0\0\0\x01\0\x06\0\0\0\0\0\0");
+        let mut bytes = jpeg[..2].to_vec();
+        bytes.extend_from_slice(&[0xff, 0xe1]);
+        bytes.extend_from_slice(&u16::try_from(exif.len() + 2).unwrap().to_be_bytes());
+        bytes.extend_from_slice(&exif);
+        bytes.extend_from_slice(&jpeg[2..]);
+        bytes
+    }
+
+    #[test]
+    fn image_dimensions_come_from_headers_as_the_picture_displays() {
+        assert_eq!(
+            dimensions(&encoded(64, 32, image::ImageFormat::Png)),
+            Some((64, 32))
+        );
+        assert_eq!(
+            dimensions(&encoded(48, 30, image::ImageFormat::Jpeg)),
+            Some((48, 30))
+        );
+        assert_eq!(dimensions(&rotated_jpeg(48, 30)), Some((30, 48)));
+        assert_eq!(
+            dimensions(&encoded(20, 40, image::ImageFormat::WebP)),
+            Some((20, 40))
+        );
+        assert_eq!(
+            dimensions(b"GIF89a\x40\x01\xf0\x00\0\0\0"),
+            Some((320, 240))
+        );
+        assert_eq!(dimensions(b"GIF89a\0\0"), None);
+        assert_eq!(dimensions(b"\x89PNG\r\n\x1a\ntruncated"), None);
+        assert_eq!(dimensions(b"plain text"), None);
+    }
 
     #[test]
     fn text_summaries_count_lines_and_skip_binary_content() {
