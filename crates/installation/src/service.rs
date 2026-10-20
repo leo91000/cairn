@@ -1038,8 +1038,20 @@ fn save_agent(db: &Db<'_>, mut agent: Value, access: &Value) -> Result<Value> {
         .and_then(|saved| policy(&saved)["nodes"].as_array().cloned());
     // Serialize grants with revocation; a concurrent editor must never
     // restore a grant that the revocation transaction just removed.
+    // Nodes the agent already held stay accepted, so unrelated edits still save.
+    let held = |node: &Value| {
+        previous_nodes
+            .as_ref()
+            .is_some_and(|nodes| nodes.iter().any(|held| held == node))
+    };
     for node in access["nodes"].as_array().into_iter().flatten() {
         if node == crate::nodes::LOCAL_NODE_ID {
+            // The current runner only runs Firecracker VMs.
+            if access["backend"] == "native" && !held(node) {
+                return Err(Error::bad(
+                    "Choose nodes that use this agent's execution backend.",
+                ));
+            }
             continue;
         }
         let record = required(
@@ -1049,11 +1061,9 @@ fn save_agent(db: &Db<'_>, mut agent: Value, access: &Value) -> Result<Value> {
         if record["revoked"] == true {
             return Err(Error::bad("A revoked node cannot be authorized."));
         }
-        // Nodes the agent already held stay accepted, so unrelated edits still save.
-        let held = previous_nodes
-            .as_ref()
-            .is_some_and(|nodes| nodes.iter().any(|held| held == node));
-        if !held && crate::native::policy::node_native(&record) != (access["backend"] == "native") {
+        if !held(node)
+            && crate::native::policy::node_native(&record) != (access["backend"] == "native")
+        {
             return Err(Error::bad(
                 "Choose nodes that use this agent's execution backend.",
             ));

@@ -252,11 +252,18 @@ export function savedDraft(draft: AgentDraft, existingMcps?: string[]): AgentDra
 }
 
 /**
- * An installation that predates agent revisions also predates live grants on the agent: it ignores
- * top-level `exclusiveNodes` and `plugins` and keeps them on the resources, as Android handles it.
+ * An installation that predates live grants on the agent ignores top-level `exclusiveNodes` and
+ * `plugins` and keeps them on the resources, as Android handles it. Current installations mark
+ * every listed agent with the computed `grantsOnAgent` capability; revisions alone are not proof,
+ * since agents keep them after a rollback.
  */
-export function olderInstallation(agents: Pick<Agent, 'revision'>[]) {
-  return agents.length > 0 && agents.every(agent => !agent.revision)
+export function olderInstallation(agents: object[]) {
+  return agents.length > 0 && !agents.some(agent => (agent as { grantsOnAgent?: unknown }).grantsOnAgent === true)
+}
+
+/** The draft as the server applies it: an older installation never receives live grant changes. */
+export function sentDraft(saved: AgentDraft, draft: AgentDraft, older: boolean): AgentDraft {
+  return older ? { ...draft, exclusiveNodes: saved.exclusiveNodes, plugins: saved.plugins } : draft
 }
 
 /** On an older installation, the agent's live grants as its resources record them. */
@@ -272,7 +279,7 @@ export function withResourceGrants(draft: AgentDraft, agentId: string, connectio
  * The agents an instance save must send back unchanged on an older installation, which replaces
  * the list when it is omitted; undefined when it should be omitted.
  */
-export function keptAgentIds(agents: Pick<Agent, 'revision'>[], entry: Pick<PluginEntry, 'manifest'> | undefined, connection: Pick<PluginConnection, 'agentIds'> | null | undefined) {
+export function keptAgentIds(agents: object[], entry: Pick<PluginEntry, 'manifest'> | undefined, connection: Pick<PluginConnection, 'agentIds'> | null | undefined) {
   if (!olderInstallation(agents) || !entry?.manifest?.agentAccess || !connection?.agentIds?.length)
     return undefined
   return [...connection.agentIds]

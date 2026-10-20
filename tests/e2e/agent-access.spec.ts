@@ -428,6 +428,8 @@ test('exclusive reservation is granted per node from the agent page once the age
 })
 
 test('leaving with unsaved changes asks first, and a concurrent change is merged into the kept draft', async ({ page, workspace }) => {
+  // Reloading re-reads the workspace: start with a fresh request budget, keeping the data.
+  await workspace.restart()
   const agent = await workspace.api('/api/agents', 'POST', { name: 'Docs writer' })
   await signIn(page)
   await page.goto(workspacePath(`/agents/${agent.id}?section=identity`))
@@ -939,6 +941,8 @@ test('a rejected first creation says the agent was not saved', async ({ page, wo
 })
 
 test('reloading after a conflict keeps a node granted elsewhere and the owner\'s own additions', async ({ page, workspace }) => {
+  // Reloading re-reads the workspace: start with a fresh request budget, keeping the data.
+  await workspace.restart()
   await useRelayForHttpMocks(page)
   const first = await enroll(page, workspace, 'merge-a', true)
   const mine = await enroll(page, workspace, 'merge-b', true)
@@ -1042,6 +1046,8 @@ test('once the token state loads, a pending switch from the shared connection us
 })
 
 test('a token typed before its state fails to reload stays pending and is not claimed saved', async ({ page, workspace }) => {
+  // Reloading re-reads the workspace: start with a fresh request budget, keeping the data.
+  await workspace.restart()
   await useRelayForHttpMocks(page)
   const agent = await workspace.api('/api/agents', 'POST', { name: 'Typed token', access: { projects: [], github: false } })
   let tokenFails = false
@@ -1085,7 +1091,8 @@ test('a token typed before its state fails to reload stays pending and is not cl
 test('on an older installation, live grants are read-only and never sent', async ({ page, workspace }) => {
   await useRelayForHttpMocks(page)
   const agent = await workspace.api('/api/agents', 'POST', { name: 'Older grants' })
-  // An installation before agent revisions: no revision, no preview.
+  // An installation before live grants on agents, e.g. after a rollback: agents keep their
+  // revision, but lack the capability marker and the grants; it has no preview.
   await page.route('**/api/agents', async (route) => {
     if (route.request().method() !== 'GET') {
       await route.continue()
@@ -1097,7 +1104,7 @@ test('on an older installation, live grants are read-only and never sent', async
     await route.fulfill({
       response,
       json: agents.map(({
-        revision: _revision,
+        grantsOnAgent: _marker,
         exclusiveNodes: _nodes,
         plugins: _plugins,
         ...item
@@ -1119,11 +1126,14 @@ test('on an older installation, live grants are read-only and never sent', async
   expect(sent).not.toHaveProperty('exclusiveNodes')
   expect(sent).not.toHaveProperty('plugins')
   expect(sent).not.toHaveProperty('revision')
+  expect(sent).not.toHaveProperty('grantsOnAgent')
   await expect(page.getByRole('region', { name: 'Unsaved changes' })).toHaveCount(0)
   await page.unrouteAll({ behavior: 'ignoreErrors' })
 })
 
 test('reloading after a conflict never removes a token saved meanwhile', async ({ page, workspace }) => {
+  // Reloading re-reads the workspace: start with a fresh request budget, keeping the data.
+  await workspace.restart()
   await useRelayForHttpMocks(page)
   const agent = await workspace.api('/api/agents', 'POST', { name: 'Late token', access: { projects: [], github: false } })
   const tokenSaves: string[] = []

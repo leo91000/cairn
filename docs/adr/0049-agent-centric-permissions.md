@@ -72,6 +72,12 @@ ces champs (les copies sur les ressources restent, et le démarrage suivant reco
 l’agent). Le démarrage donne aussi une révision aux agents enregistrés avant son
 introduction.
 
+Les clients sont mis à jour indépendamment de l’installation (le web est servi par
+Beacon). `GET /agents` ajoute à chaque agent un indicateur calculé, jamais enregistré,
+`grantsOnAgent` : sans lui, l’installation est antérieure ou revenue en arrière. Les
+clients affichent alors ces droits en lecture seule depuis les copies, renvoient la
+liste `agentIds` d’une instance enregistrée et se passent de l’aperçu.
+
 Les autres modifications d’un agent conservent ses droits en direct, par exemple
 la suppression d’une connexion MCP, qui change aussi sa révision. Un droit déjà
 détenu sur une instance dont le package attend une revue reste accepté, pour que

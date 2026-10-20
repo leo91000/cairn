@@ -48,6 +48,7 @@ import {
   sandboxOptionsFor,
   savedDraft,
   selectionSummary,
+  sentDraft,
   skillKey,
   skillLabel,
   updateForGrants,
@@ -281,8 +282,8 @@ const disabledMcps = computed(() => state.mcps.filter(connection => !connection.
 const summaries = computed<Record<SectionId, { short: string, long: string }>>(() => ({
   identity: { short: '', long: draft.value.description || 'Name, description, portrait and instructions' },
   model: { short: provider.value.label, long: [provider.value.label, draft.value.model || 'Default model'].join(' · ') },
-  projects: { short: isMain.value ? 'Fixed' : short(access.value.projects, state.projects.length), long: isMain.value ? 'All, including future' : selectionSummary(access.value.projects, state.projects.length) },
-  skills: { short: isMain.value ? 'Fixed' : short(access.value.skills, permittedSkills.value.length), long: isMain.value ? 'All, including future' : selectionSummary(access.value.skills, permittedSkills.value.length) },
+  projects: !isMain.value && !state.workspaceLoaded ? { short: 'Unavailable', long: 'Not loaded' } : { short: isMain.value ? 'Fixed' : short(access.value.projects, state.projects.length), long: isMain.value ? 'All, including future' : selectionSummary(access.value.projects, state.projects.length) },
+  skills: !isMain.value && !state.workspaceLoaded ? { short: 'Unavailable', long: 'Not loaded' } : { short: isMain.value ? 'Fixed' : short(access.value.skills, permittedSkills.value.length), long: isMain.value ? 'All, including future' : selectionSummary(access.value.skills, permittedSkills.value.length) },
   mcps: { short: isMain.value ? 'Fixed' : short(access.value.mcps, state.mcps.length), long: isMain.value ? 'All, including future' : `${selectionSummary(access.value.mcps, state.mcps.length)}${limitedMcps.value.length ? ` · tools limited on ${limitedMcps.value.length}` : ''}${disabledMcps.value.length ? ` · ${disabledMcps.value.length} disabled` : ''}` },
   github: isMain.value || !githubError.value
     ? { short: isMain.value ? 'Fixed' : githubMode.value === 'shared' ? 'Shared' : githubMode.value === 'dedicated' ? 'Token' : 'None', long: githubSummary.value }
@@ -476,6 +477,18 @@ async function loadWorkspace() {
   await refresh().catch(() => {})
 }
 
+const workspaceLoading = ref(false)
+
+async function retryWorkspace() {
+  workspaceLoading.value = true
+  try {
+    await loadWorkspace()
+  }
+  finally {
+    workspaceLoading.value = false
+  }
+}
+
 // An installation without plugins still edits every other permission.
 async function loadCatalog() {
   try {
@@ -537,6 +550,8 @@ async function load() {
       loadNodes(),
       // An installation without plugins still edits every other permission.
       loadCatalog(),
+      // Usually loaded with the workspace already: only fetched again when it is not.
+      state.workspaceLoaded ? Promise.resolve() : loadWorkspace(),
     ])
     if (nodeList)
       nodes.value = nodeList
@@ -591,7 +606,7 @@ function body(reapprove: string[] = []) {
   // Also set once a new agent exists: a recovery update must not overwrite another client's change.
   const revision = agent.value?.revision
   // Only a loaded connection list says which ones were deleted.
-  const { exclusiveNodes: _nodes, plugins: _plugins, ...profile } = savedDraft(draft.value, state.mcps.length ? state.mcps.map(connection => connection.id) : undefined)
+  const { exclusiveNodes: _nodes, plugins: _plugins, ...profile } = savedDraft(draft.value, state.workspaceLoaded && state.installationRole === 'owner' ? state.mcps.map(connection => connection.id) : undefined)
   return {
     // An older installation has no live grants on agents nor revisions: they are not sent.
     ...(legacy.value ? profile : { ...profile, exclusiveNodes: draft.value.exclusiveNodes, plugins: draft.value.plugins }),
@@ -613,7 +628,7 @@ async function requestSave() {
     return
   }
 
-  let lines = reviewLines(saved.value, draft.value, context.value, undefined, tokenChange.value, usesSavedToken.value)
+  let lines = reviewLines(saved.value, sentDraft(saved.value, draft.value, legacy.value), context.value, undefined, tokenChange.value, usesSavedToken.value)
   let effects: DelegationEffect[] = []
   let current: Preview | null = null
   // A pending GitHub token alone changes no access: it is saved without a preview.
@@ -622,7 +637,7 @@ async function requestSave() {
     try {
       // The server says which queued or running work and which delegations the change affects.
       const preview = await api<Preview>(`/agents/${id.value}/preview`, { method: 'POST', body: JSON.stringify(body()) })
-      lines = reviewLines(saved.value, draft.value, context.value, preview.runs, tokenChange.value, usesSavedToken.value)
+      lines = reviewLines(saved.value, sentDraft(saved.value, draft.value, legacy.value), context.value, preview.runs, tokenChange.value, usesSavedToken.value)
       effects = preview.delegations.filter(item => item.suspended)
       current = preview
     }
@@ -776,7 +791,9 @@ async function reloadAgent() {
   busy.value = true
   try {
     // Nodes, plugins and MCP connections may have changed too, as the agent did.
-    const [agents, nodeList, plugins] = await Promise.all([api<Agent[]>('/agents'), loadNodes(), loadCatalog(), loadWorkspace()])
+    // The workspace refresh brings the agents too; they are only fetched alone if it fails.
+    const [refreshed, nodeList, plugins] = await Promise.all([refresh().then(() => true, () => false), loadNodes(), loadCatalog()])
+    const agents = refreshed ? state.agents : await api<Agent[]>('/agents')
     if (nodeList)
       nodes.value = nodeList
     if (plugins)
@@ -798,7 +815,7 @@ async function reloadAgent() {
     saved.value = loadedDraft(found)
     const rebased = rebaseDraft(base, mine, saved.value)
     // Tool choices of deleted MCP connections are dropped.
-    if (state.workspaceLoaded)
+    if (state.workspaceLoaded && state.installationRole === 'owner')
       rebased.access.mcpTools = Object.fromEntries(Object.entries(rebased.access.mcpTools ?? {}).filter(([connection]) => state.mcps.some(item => item.id === connection)))
     draft.value = rebased
     const knewToken = !githubError.value
@@ -1095,7 +1112,21 @@ const errorCount = computed(() => Object.keys(fieldErrors.value).length)
           </template>
 
           <template v-else-if="section === 'projects'">
+            <div v-if="!state.workspaceLoaded" class="grid gap-3 rounded-xl border border-line bg-surface p-5" role="alert">
+              <p class="text-sm">
+                Projects could not be loaded, so this agent’s projects cannot be shown or changed.
+              </p>
+              <p class="text-sm text-muted">
+                {{ access.projects === null ? 'All, including future' : access.projects.length ? `${access.projects.length} selected` : 'None' }}
+              </p>
+              <div>
+                <UiButton size="small" :disabled="workspaceLoading" @click="retryWorkspace">
+                  {{ workspaceLoading ? 'Loading…' : 'Try again' }}
+                </UiButton>
+              </div>
+            </div>
             <AgentSelection
+              v-else
               v-model="allProjects"
               title="Projects"
               noun="project"
@@ -1119,7 +1150,21 @@ const errorCount = computed(() => Object.keys(fieldErrors.value).length)
           </template>
 
           <template v-else-if="section === 'skills'">
+            <div v-if="!state.workspaceLoaded" class="grid gap-3 rounded-xl border border-line bg-surface p-5" role="alert">
+              <p class="text-sm">
+                Skills could not be loaded, so this agent’s skills cannot be shown or changed.
+              </p>
+              <p class="text-sm text-muted">
+                {{ access.skills === null ? 'All, including future' : access.skills.length ? `${access.skills.length} selected` : 'None' }}
+              </p>
+              <div>
+                <UiButton size="small" :disabled="workspaceLoading" @click="retryWorkspace">
+                  {{ workspaceLoading ? 'Loading…' : 'Try again' }}
+                </UiButton>
+              </div>
+            </div>
             <AgentSelection
+              v-else
               v-model="draft.access.skills"
               title="Skills"
               noun="skill"

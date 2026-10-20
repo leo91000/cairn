@@ -803,14 +803,15 @@ abstract class PluginsCases {
     fun anOlderInstallationKeepsTheGrantsOfAnEditedInstance() = editExistingAccount(older = true)
 
     /**
-     * An older installation (agents without revisions) reads a missing `agentIds` as "no agents":
-     * the editor then sends the instance's current grants unchanged. A current one keeps them.
+     * An older installation (agents without `grantsOnAgent`) reads a missing `agentIds` as "no
+     * agents": the editor then sends the instance's current grants unchanged. A current one keeps
+     * them.
      */
     private fun editExistingAccount(older: Boolean) {
         MockWebServer().use { server ->
             val saved = CopyOnWriteArrayList<String>()
             server.dispatcher =
-                dispatcher(revision = if (older) "" else "r1") { path, body ->
+                dispatcher(current = !older) { path, body ->
                     if (path.endsWith("/plugins/onepassword/connections/op1")) {
                         saved += body
                         "{}"
@@ -837,8 +838,8 @@ abstract class PluginsCases {
     /** Answers the workspace fixture; custom handlers can opt into GETs for polling. */
     private fun dispatcher(
         includeGet: Boolean = false,
-        /** Blank for an installation that predates agent revisions. */
-        revision: String = "r1",
+        /** False for an installation that does not mark agents with `grantsOnAgent`. */
+        current: Boolean = true,
         handle: (String, String) -> String?,
     ) =
         object : Dispatcher() {
@@ -861,12 +862,18 @@ abstract class PluginsCases {
                         "/api/installations/fixture/api/agents" ->
                             wireJson.encodeToString(
                                 listOf(
-                                    Agent(id = MAIN_AGENT_ID, name = "Cairn", revision = revision),
+                                    Agent(
+                                        id = MAIN_AGENT_ID,
+                                        name = "Cairn",
+                                        revision = "r1",
+                                        grantsOnAgent = current,
+                                    ),
                                     Agent(
                                         id = "helper",
                                         name = "Helper",
                                         access = AccessPolicy(projects = listOf("project")),
-                                        revision = revision,
+                                        revision = "r1",
+                                        grantsOnAgent = current,
                                     ),
                                 )
                             )

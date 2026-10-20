@@ -78,6 +78,11 @@ data class Agent(
     val plugins: List<String> = emptyList(),
     val provider: String = "codex",
     val avatar: AgentPortrait? = null,
+    /**
+     * Set by installations that store live grants on the agent (computed, never stored, never
+     * sent). Absent on earlier or rolled-back releases, which keep them on the resources.
+     */
+    val grantsOnAgent: Boolean = false,
     /** Changes on every save; sent back so a stale editor cannot overwrite newer access. */
     val revision: String = "",
 )

@@ -441,6 +441,22 @@ class AgentEditingTest {
     }
 
     @Test
+    fun olderInstallationsAreRecognizedByTheMissingMarkerNotTheRevision() {
+        val current = agent.copy(grantsOnAgent = true)
+        assertFalse(olderInstallation(listOf(current, agent)))
+        // A rolled-back release keeps revisions but no longer marks its agents.
+        assertTrue(olderInstallation(listOf(agent, agent.copy(id = "other"))))
+        assertFalse(olderInstallation(emptyList()))
+        // Decoded, never sent.
+        val decoded =
+            wireJson.decodeFromString<Agent>(
+                """{"id":"a","name":"A","revision":"r1","grantsOnAgent":true}"""
+            )
+        assertTrue(decoded.grantsOnAgent)
+        assertFalse("grantsOnAgent" in agentSaveBody(decoded))
+    }
+
+    @Test
     fun aBackendSwitchOnEitherSideKeepsThatSidesNodesWhole() {
         val base = agent.withExclusive("gpu", true)
         // I switched to native and chose desk; they added mac meanwhile.
@@ -633,6 +649,8 @@ class AgentEditingTest {
 
         // Scenario A: projects are restricted before the token's state has loaded.
         val early = AgentDraft(shared).withAllProjects(false, tokenSaved = false)
+        // « Pas de GitHub » is derived, not recorded as the owner's choice.
+        assertNull(early.github)
         assertEquals(GithubMode.None, early.githubMode(tokenSaved = false))
         // The token then turns out to be saved: the agent uses it, nothing is deleted.
         assertEquals(GithubMode.Dedicated, early.githubMode(tokenSaved = true))

@@ -38,6 +38,7 @@ abstract class AgentPageCases {
             "Agent principal",
             revision = "m1",
             access = AccessPolicy(nodes = listOf(LOCAL_NODE_ID)),
+            grantsOnAgent = true,
         )
     private val release =
         Agent(
@@ -46,6 +47,7 @@ abstract class AgentPageCases {
             "Publie les versions web et Android",
             model = "gpt-5",
             revision = "r1",
+            grantsOnAgent = true,
             access =
                 AccessPolicy(
                     nodes = listOf(LOCAL_NODE_ID),
@@ -159,7 +161,7 @@ abstract class AgentPageCases {
                             agents.get().find { it.id == "created" }
                                 ?: wireJson
                                     .decodeFromJsonElement<Agent>(body)
-                                    .copy(id = "created", revision = "c1")
+                                    .copy(id = "created", revision = "c1", grantsOnAgent = true)
                                     .also { agents.set(agents.get() + it) }
                         if (loseCreation.getAndSet(false))
                             return MockResponse()
@@ -203,6 +205,7 @@ abstract class AgentPageCases {
                                 .copy(
                                     id = path.removePrefix("/agents/"),
                                     revision = "saved-${saved.size}",
+                                    grantsOnAgent = true,
                                 )
                         agents.set(agents.get().map { if (it.id == updated.id) updated else it })
                         return response.setBody(wireJson.encodeToString(updated))
@@ -612,8 +615,9 @@ abstract class AgentPageCases {
                 fixture.older.set(true)
                 fixture.agents.set(
                     fixture.agents.get().map {
+                        // A rollback: agents keep their revision but lose the marker.
                         it.copy(
-                            revision = "",
+                            grantsOnAgent = false,
                             access = it.access.copy(nodes = listOf(LOCAL_NODE_ID, "gpu")),
                         )
                     }

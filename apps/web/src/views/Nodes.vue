@@ -204,7 +204,7 @@ function saveGrants() {
       }
       catch (e) {
         // An older installation only replaces the list: send the agents already allowed with the new ones.
-        if (!(e instanceof ApiError && e.status === 400 && e.message === 'Invalid node request.'))
+        if (!(e instanceof ApiError && e.status === 400 && (e.message === 'Invalid node request.' || /unknown field/i.test(e.message))))
           throw e
         const kept = (node.agents ?? []).filter(agent => !agent.allNodes).map(agent => agent.id)
         await api(`/nodes/${node.id}/agents`, { method: 'PUT', body: JSON.stringify({ agentIds: [...new Set([...kept, ...agentIds])] }) })

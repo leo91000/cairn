@@ -52,12 +52,13 @@ pub fn plugins(agent: &Value) -> Vec<String> {
 }
 
 /// Stores both grant lists without duplicates. Exclusive reservations need permission
-/// to run on the node, so turning that off also removes them.
+/// to run on the node and a Firecracker agent, so losing either also removes them.
 pub(crate) fn normalize(agent: &mut Value) {
     let access = crate::service::policy(agent);
+    let native = crate::native::policy::native(agent);
     let exclusive = exclusive_nodes(agent)
         .into_iter()
-        .filter(|node| crate::service::allowed(&access["nodes"], node))
+        .filter(|node| !native && crate::service::allowed(&access["nodes"], node))
         .collect::<Vec<_>>();
     agent[EXCLUSIVE_NODES] = json!(exclusive);
     agent[PLUGINS] = json!(plugins(agent));

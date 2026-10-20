@@ -136,12 +136,11 @@ fun newAgent() =
     )
 
 /**
- * An installation that predates agent revisions also predates live grants on the agent: it ignores
- * top-level `exclusiveNodes` and `plugins` and keeps them on the resources (instance `agentIds`,
- * node `exclusiveAgents`).
+ * An installation that does not mark its agents with `grantsOnAgent` (an earlier release, or one
+ * rolled back to it, whose agents may still carry a revision) ignores top-level `exclusiveNodes`
+ * and `plugins` and keeps them on the resources (instance `agentIds`, node `exclusiveAgents`).
  */
-fun olderInstallation(agents: List<Agent>) =
-    agents.isNotEmpty() && agents.all { it.revision.isBlank() }
+fun olderInstallation(agents: List<Agent>) = agents.isNotEmpty() && agents.none { it.grantsOnAgent }
 
 /** On an older installation, the agent's live grants as its resources record them. */
 fun Agent.withResourceGrants(catalog: PluginCatalog?, nodes: List<ExecutionNode>): Agent =
@@ -1061,6 +1060,7 @@ fun agentSaveBody(
             .jsonObject
             .toMutableMap()
     fields.remove("avatar")
+    fields.remove("grantsOnAgent")
     fields.remove("revision")
     if (agent.revision.isNotBlank()) fields["revision"] = JsonPrimitive(agent.revision)
     fun list(value: List<String>?): JsonElement =

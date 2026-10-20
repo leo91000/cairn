@@ -26,7 +26,8 @@ abstract class InstallationAccessCases {
     fun ownerCanEnableAndRevokeInstallationAccessOnTheAgentPage() {
         MockWebServer().use { server ->
             val saved = CopyOnWriteArrayList<Agent>()
-            val agent = AtomicReference(Agent(MAIN_AGENT_ID, "Agent principal"))
+            val agent =
+                AtomicReference(Agent(MAIN_AGENT_ID, "Agent principal", grantsOnAgent = true))
             server.dispatcher =
                 object : Dispatcher() {
                     override fun dispatch(request: RecordedRequest): MockResponse {
@@ -36,7 +37,9 @@ abstract class InstallationAccessCases {
                                 path == "/api/installations/fixture/api/agents/$MAIN_AGENT_ID" &&
                                     request.method == "PUT" -> {
                                     val updated =
-                                        wireJson.decodeFromString<Agent>(request.body.readUtf8())
+                                        wireJson
+                                            .decodeFromString<Agent>(request.body.readUtf8())
+                                            .copy(grantsOnAgent = true)
                                     agent.set(updated)
                                     saved += updated
                                     wireJson.encodeToString(updated)

@@ -27,6 +27,7 @@ import {
   sandboxOptionsFor,
   savedDraft,
   selectionSummary,
+  sentDraft,
   skillLabel,
   unknownNode,
   withResourceGrants,
@@ -610,8 +611,9 @@ it('never sends tool choices of deleted MCP connections', () => {
 })
 
 it('recognizes an older installation and reads its grants from the resources', () => {
-  expect(olderInstallation([{ revision: '' }, {}] as Agent[])).toBe(true)
-  expect(olderInstallation([{ revision: 'r1' }, {}] as Agent[])).toBe(false)
+  // Revisions survive a rollback: only the capability marker says live grants are on agents.
+  expect(olderInstallation([{ revision: 'r1' }, {}])).toBe(true)
+  expect(olderInstallation([{ revision: 'r1', grantsOnAgent: true }, { grantsOnAgent: true }])).toBe(false)
   expect(olderInstallation([])).toBe(false)
   const local = {
     ...gpu,
@@ -622,11 +624,18 @@ it('recognizes an older installation and reads its grants from the resources', (
   const draft = withResourceGrants(newAgentDraft(), 'a', [{ ...production, agentIds: ['a'] }, { ...production, id: 'other', agentIds: ['b'] }], [{ ...gpu, exclusiveAgents: ['a'] }, local])
   expect(draft).toMatchObject({ plugins: ['prod'], exclusiveNodes: ['gpu', LOCAL_NODE_ID] })
   // An instance save sends its agents back unchanged there, and only there.
-  const older = [{ revision: '' }] as Agent[]
+  const older = [{ revision: 'r1' }]
   expect(keptAgentIds(older, onePassword, { agentIds: ['a'] })).toEqual(['a'])
   expect(keptAgentIds(older, onePassword, { agentIds: [] })).toBeUndefined()
   expect(keptAgentIds(older, { manifest: null }, { agentIds: ['a'] })).toBeUndefined()
-  expect(keptAgentIds([{ revision: 'r1' }] as Agent[], onePassword, { agentIds: ['a'] })).toBeUndefined()
+  expect(keptAgentIds([{ grantsOnAgent: true }], onePassword, { agentIds: ['a'] })).toBeUndefined()
+  // The marker is never sent back: the draft holds only editable values.
+  expect(draftOf({
+    id: 'a',
+    name: 'Agent',
+    access: {},
+    grantsOnAgent: true,
+  } as unknown as Agent)).not.toHaveProperty('grantsOnAgent')
 })
 
 it('never merges node grants across execution backends', () => {
@@ -670,4 +679,15 @@ it('names plugin grants it cannot resolve by count, and claims reservations only
   // A member sees no catalogue nor nodes.
   expect(accessSummary(agent, { packages: [], connections: [] })).toBe('No projects · 1 node · 2 plugins')
   expect(accessSummary(agent, context)).toBe('No projects · 1 node · 1Password · 1 other plugin · Exclusive reservation')
+})
+
+it('reviews only what an older installation receives', () => {
+  const saved = newAgentDraft()
+  const draft = structuredClone(saved)
+  draft.plugins = ['prod']
+  draft.exclusiveNodes = ['gpu']
+  draft.access.installation = true
+  const kinds = (older: boolean) => reviewLines(saved, sentDraft(saved, draft, older), context).map(line => line.text.split('.')[0])
+  expect(kinds(false)).toEqual(['Added: exclusive reservation on gpu-box', 'Added: installation management', 'Added: 1Password “Production” — effective immediately, including in running conversations'])
+  expect(kinds(true)).toEqual(['Added: installation management'])
 })

@@ -842,3 +842,58 @@ async fn a_save_without_grants_never_restores_a_concurrent_revocation() {
         json!([])
     );
 }
+
+#[tokio::test]
+async fn native_agents_cannot_newly_get_the_current_runner_and_drop_reservations() {
+    let owner = Owner::new().await;
+    owner.add_node().await;
+    let mut agent = owner.create_agent("Switching").await;
+    agent["access"]["nodes"] = json!([LOCAL_NODE_ID, NODE]);
+    agent["exclusiveNodes"] = json!([NODE]);
+    let (_, agent) = owner.send("PUT", &path(&agent), agent).await;
+    assert_eq!(agent["exclusiveNodes"], json!([NODE]));
+
+    // A native switch that keeps held nodes saves and drops the reservation.
+    let mut native = agent.clone();
+    native["access"]["backend"] = "native".into();
+    native.as_object_mut().unwrap().remove("exclusiveNodes");
+    let (status, saved) = owner.send("PUT", &path(&agent), native).await;
+    assert_eq!(status, StatusCode::OK, "{saved}");
+    assert_eq!(saved["exclusiveNodes"], json!([]));
+    assert_eq!(
+        owner.stored("nodes", NODE).await["exclusiveAgents"],
+        json!([])
+    );
+
+    // A native agent cannot newly be given the current runner.
+    let mut fresh = owner.create_agent("Fresh").await;
+    fresh["access"]["nodes"] = json!([NODE]);
+    let (_, fresh) = owner.send("PUT", &path(&fresh), fresh).await;
+    let mut local = fresh.clone();
+    local["access"]["backend"] = "native".into();
+    local["access"]["nodes"] = json!([LOCAL_NODE_ID]);
+    let (status, _) = owner.send("PUT", &path(&fresh), local).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn the_agent_list_says_grants_live_on_agents() {
+    let owner = Owner::new().await;
+    let (status, agents) = owner.send("GET", "/api/agents", Value::Null).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        agents
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|agent| agent["grantsOnAgent"] == true)
+    );
+    // The marker is never stored.
+    assert!(
+        owner
+            .stored("agents", MAIN_AGENT_ID)
+            .await
+            .get("grantsOnAgent")
+            .is_none()
+    );
+}
