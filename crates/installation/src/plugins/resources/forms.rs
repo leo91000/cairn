@@ -160,6 +160,7 @@ impl Form {
 
     pub(crate) async fn recheck(self: &Arc<Self>, s: &Service) -> Result<()> {
         self.owner.recheck(s).await?;
+        self.target.recheck_package(s).await?;
         let form = self.clone();
         s.store.read(move |db| form.current(db)).await
     }

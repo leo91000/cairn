@@ -767,3 +767,146 @@ async fn resource_form_callbacks_keep_the_same_partial_values_as_root_forms() {
         assert_eq!(saved["settings"]["count"], 5);
     }
 }
+
+#[tokio::test]
+async fn installed_files_are_rechecked_after_the_last_configuration_owner_lookup() {
+    use std::sync::atomic::AtomicUsize;
+
+    for inert in [false, true] {
+        for operation in ["preview", "resource", "root"] {
+            let f = Fixture::new(inert).await;
+            let calls = Arc::new(AtomicUsize::new(0));
+            let hold_at = Arc::new(AtomicUsize::new(usize::MAX));
+            let entered = Arc::new(tokio::sync::Notify::new());
+            let release = Arc::new(tokio::sync::Notify::new());
+            let (count, gate, entering, releasing) = (
+                calls.clone(),
+                hold_at.clone(),
+                entered.clone(),
+                release.clone(),
+            );
+            let authority = Router::new().route(
+                "/api/relay/00000000-0000-4000-8000-000000000055/task-authors",
+                axum::routing::get(move || {
+                    let (calls, hold_at, entered, release) = (
+                        count.clone(),
+                        gate.clone(),
+                        entering.clone(),
+                        releasing.clone(),
+                    );
+                    async move {
+                        if calls.fetch_add(1, Ordering::SeqCst) + 1
+                            == hold_at.load(Ordering::SeqCst)
+                        {
+                            entered.notify_one();
+                            release.notified().await;
+                        }
+                        axum::Json(json!({
+                            "owner": {"account_id": "fixture-owner", "access_id": "fixture-owner"},
+                            "members": [],
+                        }))
+                    }
+                }),
+            );
+            let (origin, authority_server) = common::serve_locally(authority).await;
+            let identity_path = f
+                ._service
+                .config
+                .data_dir
+                .join("installation-relay/identity.json");
+            let mut identity: Value =
+                serde_json::from_slice(&std::fs::read(&identity_path).unwrap()).unwrap();
+            identity["origin"] = json!(origin);
+            std::fs::write(identity_path, serde_json::to_vec(&identity).unwrap()).unwrap();
+            let (path, method, mut body) = if operation == "root" {
+                let body = if inert {
+                    json!({"name": "Owner update", "revision": f.root["revision"]})
+                } else {
+                    json!({"name": "Owner update", "enabled": false})
+                };
+                (
+                    format!(
+                        "/api/plugins/resourceforms/{}/{}",
+                        if inert { "setup-drafts" } else { "connections" },
+                        text(&f.root, "id")
+                    ),
+                    if inert { "PATCH" } else { "PUT" },
+                    body,
+                )
+            } else {
+                (
+                    format!(
+                        "{}/channels{}",
+                        f.path,
+                        if operation == "preview" { "/form" } else { "" }
+                    ),
+                    "POST",
+                    f.input(),
+                )
+            };
+            // Calibrate through the real endpoint, so this gate follows its last
+            // owner lookup rather than a hard-coded implementation call count.
+            let baseline =
+                request(&f.app, &path, method, body.clone(), InstallationRole::Owner).await;
+            assert_eq!(baseline.status(), StatusCode::OK, "{inert}/{operation}");
+            let baseline = common::read_json(baseline).await;
+            let lookups = calls.swap(0, Ordering::SeqCst);
+            assert!(lookups > 0);
+            if inert && operation == "root" {
+                body["revision"] = baseline["revision"].clone();
+            }
+            let approval = f
+                ._service
+                .store
+                .get("plugin-packages", "package:resourceforms")
+                .await
+                .unwrap();
+            let resources = f._service.store.list(resources::KIND).await.unwrap();
+            let setups = f._service.store.keys("plugin-setup:").await.unwrap();
+            hold_at.store(lookups, Ordering::SeqCst);
+            let app = f.app.clone();
+            let pending = tokio::spawn(async move {
+                request(&app, &path, method, body, InstallationRole::Owner).await
+            });
+            tokio::time::timeout(std::time::Duration::from_secs(10), entered.notified())
+                .await
+                .unwrap();
+            let source = f
+                ._service
+                .config
+                .data_dir
+                .join("plugins/resourceforms/1/main.luau");
+            let changed = format!(
+                "{}\n-- changed during the last owner lookup\n",
+                std::fs::read_to_string(&source).unwrap()
+            );
+            std::fs::write(source, changed).unwrap();
+            release.notify_one();
+            let response = pending.await.unwrap();
+            let status = response.status();
+            authority_server.abort();
+            f.server.abort();
+            assert_eq!(
+                status,
+                StatusCode::FORBIDDEN,
+                "{inert}/{operation}: stale installed files were accepted"
+            );
+            assert!(
+                f._service
+                    .store
+                    .get("plugin-packages", "package:resourceforms")
+                    .await
+                    .unwrap()
+                    == approval
+            );
+            assert!(
+                f._service.store.list(resources::KIND).await.unwrap() == resources,
+                "A refused configuration published resources"
+            );
+            assert!(
+                f._service.store.keys("plugin-setup:").await.unwrap() == setups,
+                "A refused configuration changed its setup"
+            );
+        }
+    }
+}

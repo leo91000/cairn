@@ -147,6 +147,8 @@ jobs:
           restore-keys: rust-${{ runner.os }}-1.97.1-debug0-
       - name: Check formatting, lint, tests and frontend build
         run: pnpm check
+      - name: Check the C3 candidate-selection snapshot model
+        run: python3 -m unittest discover -s scripts/tests -p test_chat_candidates_study.py -v
       - run: |
           node --import tsx scripts/backend-schemas.mjs
           git diff --exit-code -- crates/installation/schemas/

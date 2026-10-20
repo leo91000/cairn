@@ -18,22 +18,24 @@ internal fun PluginResourceGrants(
     name: String,
     operations: List<PluginOperation>,
     enabled: Boolean,
+    fixedAgent: String? = null,
     activity: (Boolean) -> Unit,
 ) {
-    var opened by rememberForm(false, path)
+    val formKey = fixedAgent?.let { "$path/agent/$it" } ?: path
+    var opened by rememberForm(false, formKey)
     var ready by remember { mutableStateOf(false) }
     var busy by remember { mutableStateOf(false) }
     var writing by remember { mutableStateOf(false) }
-    var pendingWrite by rememberForm(false, path)
+    var pendingWrite by rememberForm(false, formKey)
     var generation by remember { mutableIntStateOf(0) }
     var pending by remember { mutableStateOf<Job?>(null) }
     var error by remember { mutableStateOf<String?>(null) }
     var rules by remember { mutableStateOf(emptyList<PluginResourceGrant>()) }
-    var adding by rememberForm(false, path)
+    var adding by rememberForm(false, formKey)
     var removing by remember { mutableStateOf<PluginResourceGrant?>(null) }
-    var agentId by rememberForm("", path)
-    var profile by rememberForm<PluginAccessProfile?>(null, path)
-    var overrides by rememberForm(emptyMap<String, String>(), path)
+    var agentId by rememberForm(fixedAgent.orEmpty(), formKey)
+    var profile by rememberForm<PluginAccessProfile?>(null, formKey)
+    var overrides by rememberForm(emptyMap<String, String>(), formKey)
     val scope = rememberCoroutineScope()
     val scopeNames = operations.flatMap { it.scopes }.distinct()
     val limitsDraft =
@@ -41,14 +43,14 @@ internal fun PluginResourceGrants(
             scopeNames.toSet(),
             emptyMap(),
             wireJson.encodeToString(
-                listOf(state.origin, state.session.account?.id, state.installation?.id, path)
+                listOf(state.origin, state.session.account?.id, state.installation?.id, formKey)
             ),
         )
     var limits by limitsDraft.state
     var lostDraft by remember(limitsDraft) { mutableStateOf(adding && limitsDraft.notice != null) }
 
     fun clearDraft() {
-        agentId = ""
+        agentId = fixedAgent.orEmpty()
         profile = null
         overrides = emptyMap()
         limitsDraft.clear()
@@ -57,7 +59,7 @@ internal fun PluginResourceGrants(
 
     fun currentRule() =
         PluginResourceGrant(
-            agentId = agentId,
+            agentId = fixedAgent ?: agentId,
             profile = profile,
             operations = operations.filter { overrides[it.name] == "allow" }.map { it.name },
             deniedOperations = operations.filter { overrides[it.name] == "deny" }.map { it.name },
@@ -75,6 +77,7 @@ internal fun PluginResourceGrants(
                     }
                     .toMap(),
         )
+    val visibleRules = rules.filter { fixedAgent == null || it.agentId == fixedAgent }
     val draft = currentRule()
     val allowed = operations.filter { draft.permits(it) }
     val controls = ready && enabled && !busy
@@ -233,8 +236,8 @@ internal fun PluginResourceGrants(
                 Text(if (busy) "Chargement des règles…" else "Actualiser les règles")
             }
             if (ready && !adding) {
-                if (rules.isEmpty()) Text("Aucune règle d’accès.")
-                rules.forEach { rule ->
+                if (visibleRules.isEmpty()) Text("Aucune règle d’accès.")
+                visibleRules.forEach { rule ->
                     SignalCard {
                         Text(
                             "${state.agents.find { it.id == rule.agentId }?.name ?: "Agent supprimé"} · ${rule.profile?.label ?: "Opérations choisies"}",
@@ -276,14 +279,15 @@ internal fun PluginResourceGrants(
                 }
             }
             if (adding) {
-                ChoiceList(
-                    "Agent",
-                    agentId,
-                    state.agents.map { PluginOption(it.id, it.name) },
-                    enabled = controls,
-                ) {
-                    agentId = it
-                }
+                if (fixedAgent == null)
+                    ChoiceList(
+                        "Agent",
+                        agentId,
+                        state.agents.map { PluginOption(it.id, it.name) },
+                        enabled = controls,
+                    ) {
+                        agentId = it
+                    }
                 ChoiceList(
                     "Profil",
                     profile?.name.orEmpty(),

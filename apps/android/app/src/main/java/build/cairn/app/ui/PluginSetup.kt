@@ -56,7 +56,6 @@ internal fun PluginSetup(
     }
     var token by remember(initial.id) { mutableStateOf("") }
     var secrets by remember(initial.id) { mutableStateOf(mapOf<String, String>()) }
-    var granted by rememberForm(listOf<String>(), initial.id)
     var agentId by rememberForm("", initial.id)
     var enabled by rememberForm(true, initial.id)
     var completion by remember(initial.id) { mutableStateOf<PluginForm?>(null) }
@@ -314,21 +313,9 @@ internal fun PluginSetup(
                         style = MaterialTheme.typography.titleSmall,
                     )
                     Text(
-                        "Aucun agent n’a d’accès par défaut. Les droits sur les ressources se configurent séparément après l’activation.",
+                        "Après l’activation, accordez les accès globaux sur les fiches agents. Les droits sur les ressources se règlent séparément sur chaque ressource.",
                         style = MaterialTheme.typography.bodySmall,
                     )
-                    state.agents.forEach { agent ->
-                        Toggle(agent.name, agent.id in granted) { selected ->
-                            if (
-                                !state.busy &&
-                                    !resources.busy &&
-                                    !resources.pending &&
-                                    !resources.editing &&
-                                    available
-                            )
-                                granted = if (selected) granted + agent.id else granted - agent.id
-                        }
-                    }
                 }
                 if (manifest.delegates && !state.busy && !resourceWork && available)
                     Choice(
@@ -364,7 +351,7 @@ internal fun PluginSetup(
                             buildJsonObject {
                                 put("revision", revision)
                                 put("enabled", enabled)
-                                put("agentIds", JsonArray(granted.map(::JsonPrimitive)))
+                                put("agentIds", JsonArray(emptyList()))
                                 if (manifest.delegates) {
                                     put("agentId", agentId)
                                     put(

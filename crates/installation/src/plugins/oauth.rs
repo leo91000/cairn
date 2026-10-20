@@ -559,6 +559,7 @@ async fn begin(
     };
     let key = pending_key(&state);
     let vault = s.vault.clone();
+    approved.recheck(s).await?;
     s.store
         .transaction(move |db| {
             if let Some(target) = setup_target {
@@ -931,6 +932,12 @@ async fn finish_pending(
     } else {
         None
     };
+    pending
+        .approval
+        .as_ref()
+        .ok_or_else(expired)?
+        .recheck(s, &pending.digest)
+        .await?;
     let expected = pending.clone();
     let key_claim = key.clone();
     let claimed = s
@@ -975,8 +982,13 @@ async fn finish_pending(
         instance,
         fields,
         || async {
-            registry::require_digest(s, plugin, &pending.digest).await?;
             check_initiator(s, provider, &pending).await?;
+            pending
+                .approval
+                .as_ref()
+                .ok_or_else(expired)?
+                .recheck(s, &pending.digest)
+                .await?;
             let expected = pending.clone();
             s.store
                 .transaction(move |db| current(db, &expected).map(|_| ()))
@@ -1077,6 +1089,12 @@ async fn finish_pending(
     let membership = crate::relay::task_author_policy(s)
         .await?
         .ok_or_else(|| Error::forbidden("The installation has no verified membership."))?;
+    pending
+        .approval
+        .as_ref()
+        .ok_or_else(expired)?
+        .recheck(s, &pending.digest)
+        .await?;
     s.store.transaction(move |db| {
         let owner_current = membership.owner.access_id == pending.owner_access
             && (pending.actor.is_some() || pending.external.is_some()
@@ -1402,6 +1420,7 @@ pub(crate) async fn credential_for(
     if let Some(grant) = &context.resource_grant {
         super::grants::recheck(s, grant).await?;
     }
+    approval.recheck(s, &authorization.digest).await?;
     if authorization
         .tokens
         .expires_at
@@ -1464,6 +1483,7 @@ pub(crate) async fn credential_for(
                 if let Some(grant) = &context.resource_grant {
                     super::grants::recheck(s, grant).await?;
                 }
+                approval.recheck(s, &authorization.digest).await?;
                 let connection = context.connection.clone();
                 let resource = resource.clone();
                 let grant = context.resource_grant.clone();
@@ -1512,6 +1532,7 @@ pub(crate) async fn credential_for(
         }
         resource.recheck(s, context).await?;
         recheck(s, &check).await?;
+        approval.recheck(s, &authorization.digest).await?;
         authorization.tokens = tokens;
         authorization.refreshing = false;
         authorization.revision = id();
@@ -1541,6 +1562,7 @@ pub(crate) async fn credential_for(
             .await?;
     }
     resource.recheck(s, context).await?;
+    approval.recheck(s, &authorization.digest).await?;
     Ok((
         authorization.tokens.access,
         Reference {
@@ -1556,7 +1578,8 @@ pub(crate) async fn credential_for(
 }
 
 pub(crate) async fn recheck(s: &Service, reference: &Reference) -> Result<()> {
-    if registry::active(s, &reference.plugin).await?.digest != reference.digest {
+    let approved = registry::approved(s, &reference.plugin).await?;
+    if approved.package.digest != reference.digest {
         return Err(Error::forbidden("The OAuth package approval changed."));
     }
     let owner_access = crate::relay::task_author_policy(s)
@@ -1574,10 +1597,14 @@ pub(crate) async fn recheck(s: &Service, reference: &Reference) -> Result<()> {
             "The personal OAuth requester's access changed.",
         ));
     }
+    approved.recheck(s).await?;
     let reference = reference.clone();
     let vault = s.vault.clone();
     s.store
-        .transaction(move |db| recheck_in(&vault, db, &reference))
+        .transaction(move |db| {
+            approved.recheck_in(db)?;
+            recheck_in(&vault, db, &reference)
+        })
         .await
 }
 

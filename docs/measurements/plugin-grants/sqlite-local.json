@@ -1,0 +1,401 @@
+{
+  "host": {
+    "platform": "Linux-6.12.109-x86_64-with-glibc2.36",
+    "python": "3.14.7",
+    "sqlite": "3.53.1",
+    "logicalCpus": 7
+  },
+  "limits": "Local Python SQLite/JSON query boundary; not Rust HTTP, not production latency. Fresh SQLite connections retain the OS file cache. Other qualification jobs may share this host.",
+  "workloads": {
+    "smallScopes": {
+      "write": {
+        "records": 521,
+        "encodedBytes": 196977,
+        "elapsedMs": 132.14370399964537,
+        "cpuMs": 130.39112399999996
+      },
+      "sqliteBytes": 299008,
+      "rules": 512,
+      "matchingAgentRules": 256,
+      "page": {
+        "reference": {
+          "freshConnection": {
+            "decodedRows": 512,
+            "selectedEncodedBytes": 196096,
+            "metadataLookups": 512,
+            "elapsedMs": 123.12532099986129,
+            "cpuMs": 101.91698900000002
+          },
+          "warmMedianMs": 58.58234400011497,
+          "warmMedianCpuMs": 55.40967900000005,
+          "warmTrials": [
+            {
+              "decodedRows": 512,
+              "selectedEncodedBytes": 196096,
+              "metadataLookups": 512,
+              "elapsedMs": 110.0952030001281,
+              "cpuMs": 99.24655999999999
+            },
+            {
+              "decodedRows": 512,
+              "selectedEncodedBytes": 196096,
+              "metadataLookups": 512,
+              "elapsedMs": 55.403900999863254,
+              "cpuMs": 55.40967900000005
+            },
+            {
+              "decodedRows": 512,
+              "selectedEncodedBytes": 196096,
+              "metadataLookups": 512,
+              "elapsedMs": 44.157368000014685,
+              "cpuMs": 44.134096999999926
+            },
+            {
+              "decodedRows": 512,
+              "selectedEncodedBytes": 196096,
+              "metadataLookups": 512,
+              "elapsedMs": 58.58234400011497,
+              "cpuMs": 52.36894699999994
+            },
+            {
+              "decodedRows": 512,
+              "selectedEncodedBytes": 196096,
+              "metadataLookups": 512,
+              "elapsedMs": 115.08418099992923,
+              "cpuMs": 87.48181200000005
+            }
+          ]
+        },
+        "bounded": {
+          "freshConnection": {
+            "decodedRows": 33,
+            "selectedEncodedBytes": 12639,
+            "metadataLookups": 66,
+            "elapsedMs": 9.003484999993816,
+            "cpuMs": 7.503975000000107
+          },
+          "warmMedianMs": 6.342846000279678,
+          "warmMedianCpuMs": 6.352087999999867,
+          "warmTrials": [
+            {
+              "decodedRows": 33,
+              "selectedEncodedBytes": 12639,
+              "metadataLookups": 66,
+              "elapsedMs": 6.342846000279678,
+              "cpuMs": 6.352087999999867
+            },
+            {
+              "decodedRows": 33,
+              "selectedEncodedBytes": 12639,
+              "metadataLookups": 66,
+              "elapsedMs": 8.50632499987114,
+              "cpuMs": 7.110013999999998
+            },
+            {
+              "decodedRows": 33,
+              "selectedEncodedBytes": 12639,
+              "metadataLookups": 66,
+              "elapsedMs": 6.31350800040309,
+              "cpuMs": 6.319991000000025
+            },
+            {
+              "decodedRows": 33,
+              "selectedEncodedBytes": 12639,
+              "metadataLookups": 66,
+              "elapsedMs": 6.681800000023941,
+              "cpuMs": 6.686648000000073
+            },
+            {
+              "decodedRows": 33,
+              "selectedEncodedBytes": 12639,
+              "metadataLookups": 66,
+              "elapsedMs": 6.182547000207705,
+              "cpuMs": 6.1772989999999695
+            }
+          ]
+        }
+      },
+      "counts": {
+        "reference": {
+          "freshConnection": {
+            "decodedRows": 512,
+            "selectedEncodedBytes": 196096,
+            "elapsedMs": 9.144834000380797,
+            "cpuMs": 9.124741000000158
+          },
+          "warmMedianMs": 7.231872999909683,
+          "warmMedianCpuMs": 7.238569999999944,
+          "warmTrials": [
+            {
+              "decodedRows": 512,
+              "selectedEncodedBytes": 196096,
+              "elapsedMs": 7.364808000147605,
+              "cpuMs": 7.324329000000018
+            },
+            {
+              "decodedRows": 512,
+              "selectedEncodedBytes": 196096,
+              "elapsedMs": 7.013058000211458,
+              "cpuMs": 7.019891999999972
+            },
+            {
+              "decodedRows": 512,
+              "selectedEncodedBytes": 196096,
+              "elapsedMs": 7.231872999909683,
+              "cpuMs": 7.238569999999944
+            },
+            {
+              "decodedRows": 512,
+              "selectedEncodedBytes": 196096,
+              "elapsedMs": 7.204067999737163,
+              "cpuMs": 7.210407000000085
+            },
+            {
+              "decodedRows": 512,
+              "selectedEncodedBytes": 196096,
+              "elapsedMs": 16.112479000184976,
+              "cpuMs": 8.77291899999988
+            }
+          ]
+        },
+        "bounded": {
+          "freshConnection": {
+            "decodedRows": 2,
+            "selectedEncodedBytes": 124,
+            "elapsedMs": 3.296911000234104,
+            "cpuMs": 3.2892599999998495
+          },
+          "warmMedianMs": 2.158757999950467,
+          "warmMedianCpuMs": 2.1661049999999182,
+          "warmTrials": [
+            {
+              "decodedRows": 2,
+              "selectedEncodedBytes": 124,
+              "elapsedMs": 2.1126280003045395,
+              "cpuMs": 2.116854000000057
+            },
+            {
+              "decodedRows": 2,
+              "selectedEncodedBytes": 124,
+              "elapsedMs": 2.0382820002851076,
+              "cpuMs": 2.0453630000001333
+            },
+            {
+              "decodedRows": 2,
+              "selectedEncodedBytes": 124,
+              "elapsedMs": 4.027970000151981,
+              "cpuMs": 3.74299499999986
+            },
+            {
+              "decodedRows": 2,
+              "selectedEncodedBytes": 124,
+              "elapsedMs": 2.158757999950467,
+              "cpuMs": 2.1661049999999182
+            },
+            {
+              "decodedRows": 2,
+              "selectedEncodedBytes": 124,
+              "elapsedMs": 2.8804789999412606,
+              "cpuMs": 2.8875379999999673
+            }
+          ]
+        }
+      }
+    },
+    "largeScopes": {
+      "write": {
+        "records": 521,
+        "encodedBytes": 74779505,
+        "elapsedMs": 2363.642893999895,
+        "cpuMs": 2055.6777859999993
+      },
+      "sqliteBytes": 75558912,
+      "rules": 512,
+      "matchingAgentRules": 256,
+      "page": {
+        "reference": {
+          "freshConnection": {
+            "decodedRows": 512,
+            "selectedEncodedBytes": 74778624,
+            "metadataLookups": 512,
+            "elapsedMs": 1245.3627199997754,
+            "cpuMs": 1117.2533700000004
+          },
+          "warmMedianMs": 1026.5312709998398,
+          "warmMedianCpuMs": 864.6662420000002,
+          "warmTrials": [
+            {
+              "decodedRows": 512,
+              "selectedEncodedBytes": 74778624,
+              "metadataLookups": 512,
+              "elapsedMs": 746.9769869999254,
+              "cpuMs": 727.2461369999999
+            },
+            {
+              "decodedRows": 512,
+              "selectedEncodedBytes": 74778624,
+              "metadataLookups": 512,
+              "elapsedMs": 692.0957180000187,
+              "cpuMs": 634.8485569999998
+            },
+            {
+              "decodedRows": 512,
+              "selectedEncodedBytes": 74778624,
+              "metadataLookups": 512,
+              "elapsedMs": 1106.7961470002956,
+              "cpuMs": 864.6662420000002
+            },
+            {
+              "decodedRows": 512,
+              "selectedEncodedBytes": 74778624,
+              "metadataLookups": 512,
+              "elapsedMs": 1185.9851099998195,
+              "cpuMs": 948.2106020000006
+            },
+            {
+              "decodedRows": 512,
+              "selectedEncodedBytes": 74778624,
+              "metadataLookups": 512,
+              "elapsedMs": 1026.5312709998398,
+              "cpuMs": 980.7872240000002
+            }
+          ]
+        },
+        "bounded": {
+          "freshConnection": {
+            "decodedRows": 33,
+            "selectedEncodedBytes": 4819716,
+            "metadataLookups": 66,
+            "elapsedMs": 357.09269300014057,
+            "cpuMs": 322.5978119999997
+          },
+          "warmMedianMs": 283.69981499963615,
+          "warmMedianCpuMs": 275.4177680000005,
+          "warmTrials": [
+            {
+              "decodedRows": 33,
+              "selectedEncodedBytes": 4819716,
+              "metadataLookups": 66,
+              "elapsedMs": 278.7302299998373,
+              "cpuMs": 237.04954599999974
+            },
+            {
+              "decodedRows": 33,
+              "selectedEncodedBytes": 4819716,
+              "metadataLookups": 66,
+              "elapsedMs": 283.69981499963615,
+              "cpuMs": 275.4177680000005
+            },
+            {
+              "decodedRows": 33,
+              "selectedEncodedBytes": 4819716,
+              "metadataLookups": 66,
+              "elapsedMs": 469.27940099976695,
+              "cpuMs": 357.605779
+            },
+            {
+              "decodedRows": 33,
+              "selectedEncodedBytes": 4819716,
+              "metadataLookups": 66,
+              "elapsedMs": 281.5033950000725,
+              "cpuMs": 271.97397599999994
+            },
+            {
+              "decodedRows": 33,
+              "selectedEncodedBytes": 4819716,
+              "metadataLookups": 66,
+              "elapsedMs": 497.8709870001694,
+              "cpuMs": 393.0082929999994
+            }
+          ]
+        }
+      },
+      "counts": {
+        "reference": {
+          "freshConnection": {
+            "decodedRows": 512,
+            "selectedEncodedBytes": 74778624,
+            "elapsedMs": 626.222214000336,
+            "cpuMs": 534.5901850000008
+          },
+          "warmMedianMs": 679.172539999854,
+          "warmMedianCpuMs": 636.6047359999989,
+          "warmTrials": [
+            {
+              "decodedRows": 512,
+              "selectedEncodedBytes": 74778624,
+              "elapsedMs": 554.0507590003472,
+              "cpuMs": 503.1294270000011
+            },
+            {
+              "decodedRows": 512,
+              "selectedEncodedBytes": 74778624,
+              "elapsedMs": 848.159325999859,
+              "cpuMs": 757.9245319999987
+            },
+            {
+              "decodedRows": 512,
+              "selectedEncodedBytes": 74778624,
+              "elapsedMs": 679.172539999854,
+              "cpuMs": 636.6047359999989
+            },
+            {
+              "decodedRows": 512,
+              "selectedEncodedBytes": 74778624,
+              "elapsedMs": 611.449931000152,
+              "cpuMs": 604.7914370000011
+            },
+            {
+              "decodedRows": 512,
+              "selectedEncodedBytes": 74778624,
+              "elapsedMs": 722.9159110002001,
+              "cpuMs": 677.8391450000001
+            }
+          ]
+        },
+        "bounded": {
+          "freshConnection": {
+            "decodedRows": 2,
+            "selectedEncodedBytes": 124,
+            "elapsedMs": 186.77380200006155,
+            "cpuMs": 177.93891800000063
+          },
+          "warmMedianMs": 174.45256200016956,
+          "warmMedianCpuMs": 163.5820189999997,
+          "warmTrials": [
+            {
+              "decodedRows": 2,
+              "selectedEncodedBytes": 124,
+              "elapsedMs": 174.45256200016956,
+              "cpuMs": 163.5820189999997
+            },
+            {
+              "decodedRows": 2,
+              "selectedEncodedBytes": 124,
+              "elapsedMs": 165.12049999982992,
+              "cpuMs": 158.2499419999994
+            },
+            {
+              "decodedRows": 2,
+              "selectedEncodedBytes": 124,
+              "elapsedMs": 150.323766999918,
+              "cpuMs": 149.58727299999987
+            },
+            {
+              "decodedRows": 2,
+              "selectedEncodedBytes": 124,
+              "elapsedMs": 211.94301400009863,
+              "cpuMs": 206.71514300000027
+            },
+            {
+              "decodedRows": 2,
+              "selectedEncodedBytes": 124,
+              "elapsedMs": 204.91274899995915,
+              "cpuMs": 179.9517789999996
+            }
+          ]
+        }
+      }
+    }
+  }
+}

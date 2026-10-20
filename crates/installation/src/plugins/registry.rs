@@ -58,6 +58,50 @@ pub(crate) struct Approval {
 }
 
 impl Approval {
+    fn from_record(plugin: &str, record: Option<&Value>) -> Self {
+        Self {
+            plugin: plugin.to_owned(),
+            record_digest: record.map(|value| crate::auth::hex_digest(&value.to_string())),
+        }
+    }
+
+    /// Retain native execution's current approval before any remote authority
+    /// lookup. Local checks can then fence replacement in the same transaction.
+    pub(crate) fn capture_in(db: &Db<'_>, plugin: &str, digest: &str) -> Result<Self> {
+        let changed = || Error::forbidden("The source package approval changed.");
+        let record = if let Some(package) = builtin(plugin) {
+            if package.digest != digest {
+                return Err(changed());
+            }
+            None
+        } else {
+            let record = db
+                .get(KIND, &format!("package:{plugin}"))?
+                .ok_or_else(changed)?;
+            if record["approvals"][text(&record, "active")] != digest {
+                return Err(changed());
+            }
+            Some(record)
+        };
+        Ok(Self::from_record(plugin, record.as_ref()))
+    }
+
+    /// Remote authority checks can outlive an on-disk edit as well as an approval
+    /// replacement. Check both after the last remote lookup; retain `recheck_in`
+    /// at the commit boundary to fence subsequent database changes atomically.
+    pub(crate) async fn recheck(&self, s: &Service, digest: &str) -> Result<()> {
+        let current = approved(s, &self.plugin).await?;
+        if current.snapshot().record_digest != self.record_digest {
+            return Err(Error::conflict(
+                "The package approval changed. Start the operation again.",
+            ));
+        }
+        if current.package.digest != digest {
+            return Err(Error::forbidden("The source package changed."));
+        }
+        Ok(())
+    }
+
     pub(crate) fn recheck_in(&self, db: &Db<'_>) -> Result<()> {
         if let Some(expected) = &self.record_digest {
             let current = db.get(KIND, &format!("package:{}", self.plugin))?;
@@ -74,13 +118,11 @@ impl Approval {
 
 impl ApprovedPackage {
     pub(crate) fn snapshot(&self) -> Approval {
-        Approval {
-            plugin: self.package.manifest.id.clone(),
-            record_digest: self
-                .record
-                .as_ref()
-                .map(|value| crate::auth::hex_digest(&value.to_string())),
-        }
+        Approval::from_record(&self.package.manifest.id, self.record.as_ref())
+    }
+
+    pub(crate) async fn recheck(&self, s: &Service) -> Result<()> {
+        self.snapshot().recheck(s, &self.package.digest).await
     }
 
     pub(crate) fn recheck_in(&self, db: &Db<'_>) -> Result<()> {

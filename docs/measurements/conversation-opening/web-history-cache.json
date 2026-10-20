@@ -1,0 +1,33 @@
+{
+  "reference": "293117d0",
+  "node": "v24.21.0",
+  "browser": "153.0.8010.12",
+  "host": {
+    "platform": "linux",
+    "arch": "x64",
+    "cpu": "Intel(R) Xeon(R) Processor",
+    "logicalCpus": 12,
+    "memoryGiB": 31
+  },
+  "workload": "1250 events, 20 synthetic output lines each; 30 writes, 30 warm reads, 30 fresh-module reads, then 30 writes with eleven other conversations saved; renderer CPU includes module imports and measurement setup",
+  "results": {
+    "reference": {
+      "retainedEvents": 1250,
+      "encodedUtf8Bytes": 719346,
+      "writeMs": 5.5,
+      "warmMs": 1.3,
+      "coldMs": 4.6,
+      "fullWriteMs": 18.3,
+      "rendererCpuMs": 1120
+    },
+    "current": {
+      "retainedEvents": 1250,
+      "encodedUtf8Bytes": 719346,
+      "writeMs": 2.1,
+      "warmMs": 0.4,
+      "coldMs": 2.8,
+      "fullWriteMs": 2,
+      "rendererCpuMs": 260
+    }
+  }
+}

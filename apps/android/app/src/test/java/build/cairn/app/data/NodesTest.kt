@@ -1,9 +1,7 @@
 package build.cairn.app.data
 
 import kotlinx.serialization.json.encodeToJsonElement
-import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
-import kotlinx.serialization.json.jsonPrimitive
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -65,7 +63,7 @@ class NodesTest {
     }
 
     @Test
-    fun exclusivePermissionsRemainExplicitAndLegacyConfigurationPreservesThem() {
+    fun exclusiveGrantsAreNeverSentFromTheNode() {
         val oldNode =
             wireJson.decodeFromString<ExecutionNode>(
                 """{"id":"n","name":"Desktop","status":"online"}"""
@@ -74,18 +72,9 @@ class NodesTest {
         assertFalse(oldNode.exclusiveReservations)
         assertNull(oldNode.exclusiveReservation)
 
+        // Omitted, the server keeps the grants saved on each agent.
         val configuration = NodeConfiguration("Desktop", true, emptyList(), NodeResources())
         assertFalse("exclusiveAgents" in wireJson.encodeToJsonElement(configuration).jsonObject)
-        val granted =
-            wireJson
-                .encodeToJsonElement(configuration.copy(exclusiveAgents = listOf("agent")))
-                .jsonObject
-        assertEquals("agent", granted["exclusiveAgents"]!!.jsonArray.single().jsonPrimitive.content)
-        val revoked =
-            wireJson
-                .encodeToJsonElement(configuration.copy(exclusiveAgents = emptyList()))
-                .jsonObject
-        assertTrue(revoked["exclusiveAgents"]!!.jsonArray.isEmpty())
     }
 
     @Test

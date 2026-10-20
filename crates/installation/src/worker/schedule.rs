@@ -140,10 +140,14 @@ impl Worker {
         }
         let current = s.store.run(&run_id).await?;
         let origin = run.clone();
-        let source = s
+        let source = match s
             .store
             .read(move |db| ExecutionSource::capture_in(db, &origin))
-            .await?;
+            .await
+        {
+            Ok(source) => source,
+            Err(error) => return self.source_failure(s, &run_id, error).await.map(|_| ()),
+        };
         if !self.source_ready(s, &run_id, source.as_ref()).await? {
             return Ok(());
         }

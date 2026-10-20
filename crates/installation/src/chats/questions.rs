@@ -332,15 +332,33 @@ fn answer(
     id: &str,
     input: &AnswerInput,
     origin: &crate::native::policy::Origin,
+    principal: Option<&crate::plugins::requesters::Principal>,
+    owner_control: bool,
 ) -> Result<Question> {
+    use crate::plugins::requesters::{self, Capture};
+
     chat(db, chat_id)?;
     let question = required(find_question(db, chat_id, id)?, "Question not found")?;
     let answers = serde_json::to_value(&input.answers)?;
     let previous = find_message(db, chat_id, &input.id)?;
     let already_sent = question.message_id.as_deref() == Some(input.id.as_str())
-        && previous.is_some_and(|message| message["answers"] == answers);
+        && previous
+            .as_ref()
+            .is_some_and(|message| message["answers"] == answers);
     if already_sent {
+        // A receipt is read-only. In particular, an owner's old retry must not
+        // suspend a later turn or move the answer's original provenance.
+        if !owner_control && requesters::recorded(db, chat_id, &input.id)?.as_ref() != principal {
+            return Err(Error::conflict(
+                "This message belongs to another requester.",
+            ));
+        }
         return Ok(question);
+    }
+    if previous.is_some() {
+        return Err(Error::conflict(
+            "This message identifier has already been used.",
+        ));
     }
     if question.status != QuestionStatus::Pending {
         return Err(Error::conflict(
@@ -363,6 +381,12 @@ fn answer(
             "text": answer_text(&question.fields, &input.answers),
         }),
     )?;
+    let kind = if owner_control {
+        Capture::OwnerAnswer
+    } else {
+        Capture::New
+    };
+    requesters::capture_principal(db, chat_id, &message, principal, kind)?;
     send(db, chat_id, message, Some((question, answers)), origin)?;
     required(find_question(db, chat_id, id)?, "Question not found")
 }
@@ -474,8 +498,6 @@ impl Service {
     where
         F: FnOnce(&Db<'_>, &Question) -> Result<()> + Send + 'static,
     {
-        use crate::plugins::requesters::{self, Capture};
-
         let origin = crate::native::policy::origin();
         if origin.known() {
             crate::native::policy::refresh_chat(self, chat_id).await?;
@@ -488,14 +510,15 @@ impl Service {
             .transaction(move |db| {
                 let question = required(find_question(db, &chat_id, &id)?, "Question not found")?;
                 authorize(db, &question)?;
-                let message = json!({ "id": input.id, "mode": "steer" });
-                let kind = if owner_control {
-                    Capture::OwnerAnswer
-                } else {
-                    Capture::New
-                };
-                requesters::capture_principal(db, &chat_id, &message, principal.as_ref(), kind)?;
-                answer(db, &chat_id, &id, &input, &origin)
+                answer(
+                    db,
+                    &chat_id,
+                    &id,
+                    &input,
+                    &origin,
+                    principal.as_ref(),
+                    owner_control,
+                )
             })
             .await?;
         self.worker.notify();

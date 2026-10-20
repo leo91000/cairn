@@ -81,6 +81,14 @@ impl Target {
         }
     }
 
+    pub(crate) async fn recheck_package(&self, s: &Service) -> Result<()> {
+        match self {
+            Self::Active { approved, .. } | Self::Setup { approved, .. } => {
+                approved.recheck(s).await
+            }
+        }
+    }
+
     pub(crate) fn setup_snapshot(&self) -> Option<&SetupDraft> {
         match self {
             Self::Setup { draft, .. } => Some(draft),

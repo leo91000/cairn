@@ -162,8 +162,13 @@ fn view(db: &Db<'_>, mut chat: Value) -> Result<Value> {
     Ok(chat)
 }
 
+/// Active conversations. Deleted ones are skipped before their view is built.
 pub(crate) fn list(db: &Db<'_>) -> Result<Vec<Value>> {
-    Ok(list_all(db)?.into_iter().filter(is_active).collect())
+    db.list("chats")?
+        .into_iter()
+        .filter(is_active)
+        .map(|chat| view(db, chat))
+        .collect()
 }
 
 pub(crate) fn list_all(db: &Db<'_>) -> Result<Vec<Value>> {
@@ -186,6 +191,17 @@ pub(crate) fn detail(db: &Db<'_>, id: &str) -> Result<Value> {
     result["messages"] = db.messages(id)?.into();
     result["run"] = db.run(text(&result, "runId"))?.unwrap_or(Value::Null);
     Ok(result)
+}
+
+/// The run whose history an active conversation shows, without the rest of its detail.
+pub(crate) fn history_run(db: &Db<'_>, id: &str) -> Result<String> {
+    let chat = chat(db, id)?;
+    let run = text(&chat, "runId");
+    Ok(if is_active(&chat) && db.has_run(run)? {
+        run.to_owned()
+    } else {
+        String::new()
+    })
 }
 
 /// Steering joins the running turn, whose provider, model and reasoning are fixed.

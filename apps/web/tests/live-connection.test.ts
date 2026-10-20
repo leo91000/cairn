@@ -58,6 +58,20 @@ it('resumes only accepted batches and ignores callbacks from a replaced connecti
   expect(Source.instances).toHaveLength(2)
 })
 
+it('announces every opening before creating a source so the caller can free its stream slot', () => {
+  const openedAfter: number[] = []
+  const connection = liveConnection('/chats/c/stream', vi.fn(), (_status, opening) => {
+    if (opening)
+      openedAfter.push(Source.instances.length)
+  })
+  expect(openedAfter).toEqual([0])
+  Source.instances[0].onerror?.()
+  vi.advanceTimersByTime(500)
+  expect(openedAfter).toEqual([0, 1])
+  expect(Source.instances).toHaveLength(2)
+  connection.close()
+})
+
 it('recovers silent connections, keeps idle healthy streams open, and resumes after offline', () => {
   const status = vi.fn()
   const connection = liveConnection('/chats/c/stream', vi.fn(), status)

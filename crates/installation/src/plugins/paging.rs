@@ -6,7 +6,7 @@ use crate::{
 };
 use serde_json::{Value, json};
 
-const MAX_ITEMS: usize = 32;
+pub(super) const MAX_ITEMS: usize = 32;
 const MAX_BYTES: usize = cairn_protocol::MAX_BODY / 2;
 
 pub(super) fn page(values: Vec<Value>, cursor: Option<&str>) -> Result<Value> {

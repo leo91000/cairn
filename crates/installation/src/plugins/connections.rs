@@ -134,15 +134,16 @@ impl Connection {
 /// installation, GitHub, MCP or plugin grants (such as 1Password). Checked on save and
 /// on every effect.
 pub(crate) fn public_safe(db: &Db<'_>, agent_id: &str, access: &Value) -> Result<()> {
-    let secrets = db.list(KIND)?.iter().any(|connection| {
+    public_access(access, plugin_granted(db, agent_id)?)
+}
+
+/// Whether any plugin instance or resource operation is granted to the agent.
+fn plugin_granted(db: &Db<'_>, agent_id: &str) -> Result<bool> {
+    Ok(db.list(KIND)?.iter().any(|connection| {
         connection["agentIds"]
             .as_array()
             .is_some_and(|ids| ids.iter().any(|id| id == agent_id))
-    });
-    public_access(
-        access,
-        secrets || super::grants::agent_has_grants(db, agent_id)?,
-    )
+    }) || super::grants::agent_has_grants(db, agent_id)?)
 }
 
 fn public_access(access: &Value, plugin_access: bool) -> Result<()> {
@@ -651,6 +652,7 @@ pub(crate) struct Prepared {
     encrypted: Option<Value>,
     encrypted_secrets: Option<Value>,
     updating: bool,
+    keep_agents: bool,
 }
 
 pub async fn save(
@@ -675,6 +677,7 @@ pub(crate) async fn save_owned(
     let source = existing.map_or(SaveSource::New, SaveSource::Existing);
     let prepared = prepare(s, &approved.package, input, source, Some(owner.clone())).await?;
     owner.recheck(s).await?;
+    approved.recheck(s).await?;
     let result = s
         .store
         .transaction(move |db| {
@@ -812,6 +815,8 @@ pub(crate) async fn prepare(
             "Configure the plugin credential before activation.",
         ));
     }
+    // Agents are granted from their own page; clients that omit the list keep it.
+    let keep_agents = existing.is_some() && input.get("agentIds").is_none();
     let agent_ids = agent_grants(&manifest, &input["agentIds"])?;
     let saved = match existing {
         Some(_) => secret_values(s, &connection_id).await?,
@@ -885,6 +890,7 @@ pub(crate) async fn prepare(
         encrypted,
         encrypted_secrets,
         updating,
+        keep_agents,
     })
 }
 
@@ -895,6 +901,7 @@ impl Prepared {
             encrypted,
             encrypted_secrets,
             updating,
+            keep_agents,
         } = self;
         if let Some(current) = db.get(KIND, &connection.id)? {
             if !updating || current["pluginId"] != connection.plugin_id {
@@ -945,6 +952,12 @@ impl Prepared {
                 None,
             )?;
         }
+        if !keep_agents {
+            crate::agent_grants::set_instance_agents(db, &connection.id, &connection.agent_ids)?;
+        } else if let Some(current) = db.get(KIND, &connection.id)? {
+            connection.agent_ids =
+                serde_json::from_value(current["agentIds"].clone()).unwrap_or_default();
+        }
         let value = serde_json::to_value(&connection)?;
         db.put(KIND, &value)?;
         db.audit(
@@ -953,6 +966,127 @@ impl Prepared {
         )?;
         Ok(value)
     }
+}
+
+/// What external people may reach through a delegation: one project at most, never
+/// installation access, and a read-only agent without grants when anyone may write.
+fn delegation_rules(
+    db: &Db<'_>,
+    connection: &Connection,
+    access: &Value,
+    plugin_grants: bool,
+) -> Result<()> {
+    let projects = connection
+        .project_id
+        .as_ref()
+        .map_or_else(|| json!([]), |id| json!([id]));
+    // External people never receive an installation-wide agent or project scope.
+    if access["projects"] != projects || access["installation"] == true {
+        return Err(Error::bad(
+            "Choose a dedicated agent restricted to the selected project (or no projects), with installation access disabled.",
+        ));
+    }
+    if let Some(project) = &connection.project_id
+        && db.get("projects", project)?.is_none()
+    {
+        return Err(Error::bad("Project not found."));
+    }
+    if connection.access_mode == AccessMode::Everyone {
+        public_access(access, plugin_grants)?;
+    }
+    Ok(())
+}
+
+/// Loads an instance by ID, whatever its plugin.
+pub(crate) async fn load(s: &Service, connection_id: &str) -> Result<Connection> {
+    uuid(connection_id)?;
+    let value = s.get(KIND, connection_id).await?;
+    Ok(serde_json::from_value(value)?)
+}
+
+/// Approves the agent's saved access for a delegation that answers as this agent,
+/// as saving the instance again would. Runs in the agent's save transaction.
+pub(crate) fn reapprove(db: &Db<'_>, connection_id: &str, agent: &Value) -> Result<()> {
+    let value = db
+        .get(KIND, connection_id)?
+        .ok_or_else(|| Error::bad("A plugin delegation to reapprove no longer exists."))?;
+    let mut connection: Connection = serde_json::from_value(value)?;
+    if connection.agent_id != text(agent, "id") {
+        return Err(Error::bad(
+            "This plugin delegation answers as another agent.",
+        ));
+    }
+    let access = policy(agent);
+    let plugins = !crate::agent_grants::plugins(agent).is_empty()
+        || super::grants::agent_has_grants(db, text(agent, "id"))?;
+    crate::native::policy::authorize_caller(db, agent, None)?;
+    delegation_rules(db, &connection, &access, plugins).map_err(|error| {
+        Error::bad(format!(
+            "{} cannot answer as this agent with the new access: {error}",
+            connection.name
+        ))
+    })?;
+    connection.granted_access = access;
+    connection.revision = id();
+    connection.updated_at = now();
+    db.put(KIND, &serde_json::to_value(&connection)?)?;
+    db.audit(
+        "plugin.connection.reapproved",
+        &json!({ "id": connection.id, "agentId": connection.agent_id }),
+    )
+}
+
+/// Delegations answering as an agent and how an edited agent would affect them,
+/// including `alreadySuspended` when the saved agent no longer matches the approval:
+/// `suspended` when its access no longer matches the approved one or no longer meets
+/// the delegation's rules, such as a plugin grant for an agent anyone may reach, and
+/// the reason it could not be reapproved, if any. A delegation bound to a previous
+/// installation owner already stopped answering and only its instance screen can
+/// rebind it, so it counts as already suspended and cannot be reapproved here.
+pub(crate) fn delegation_effects(
+    db: &Db<'_>,
+    agent_id: &str,
+    agent: &Value,
+    owner: Option<&str>,
+) -> Result<Value> {
+    let access = policy(agent);
+    let plugins = !crate::agent_grants::plugins(agent).is_empty()
+        || super::grants::agent_has_grants(db, text(agent, "id"))?;
+    let saved = db.get("agents", agent_id)?;
+    let mut effects = Vec::new();
+    for value in db.list(KIND)? {
+        if value["agentId"] != agent_id {
+            continue;
+        }
+        let connection: Connection = serde_json::from_value(value)?;
+        let rules = crate::native::policy::authorize_caller(db, agent, None)
+            .and_then(|()| delegation_rules(db, &connection, &access, plugins))
+            .err()
+            .map(|error| error.to_string());
+        let previous_owner = connection.owner_access_id.as_deref() != owner;
+        // Suspended before this edit, so reapproving would also approve earlier changes.
+        let already_suspended = previous_owner
+            || saved.as_ref().is_none_or(|saved| {
+                policy(saved) != connection.granted_access
+                    || (connection.access_mode == AccessMode::Everyone
+                        && public_safe(db, agent_id, &connection.granted_access).is_err())
+            });
+        effects.push(json!({
+            "id": connection.id,
+            "pluginId": connection.plugin_id,
+            "name": connection.name,
+            "enabled": connection.enabled,
+            "suspended": rules.is_some()
+                || access != connection.granted_access,
+            "blocked": if previous_owner {
+                Some("It belongs to a previous installation owner. Save it again from its instance screen.".to_owned())
+            } else {
+                rules
+            },
+            "alreadySuspended": already_suspended,
+        }));
+    }
+    Ok(effects.into())
 }
 
 /// Loads a connection and checks it belongs to the plugin named in the route.
@@ -972,6 +1106,7 @@ pub async fn remove(s: &Service, plugin_id: &str, connection_id: &str) -> Result
         .transaction(move |db| {
             db.remove(KIND, &connection_id)?;
             super::resources::remove_owned(db, &connection_id)?;
+            crate::agent_grants::forget_resource(db, crate::agent_grants::PLUGINS, &connection_id)?;
             db.delete(&format!("mcp-secret:{}", credential_key(&connection_id)))?;
             db.delete(&format!("mcp-secret:{}", secrets_key(&connection_id)))?;
             db.delete(&format!("plugin-status:{connection_id}"))?;

@@ -430,6 +430,26 @@ data class PluginCatalog(
     val packages: List<PluginEntry> = emptyList(),
     val capabilities: List<PluginCapability> = emptyList(),
     val connections: List<PluginConnection> = emptyList(),
+    val resourceGrantCounts: Map<String, Int>? = null,
+    /** The host supports owner setup drafts; absent on earlier installations. */
+    val setupDrafts: Boolean = false,
+)
+
+/** Owner-only saved resource rules; they do not imply an instance-wide grant. */
+@Serializable
+data class AgentResourceGrant(
+    val id: String = "",
+    val agentId: String = "",
+    val connectionId: String = "",
+    val resourceId: String = "",
+    val pluginId: String? = null,
+    val collection: String? = null,
+    val instanceName: String? = null,
+    val resourceName: String? = null,
+    val profile: PluginAccessProfile? = null,
+    val operations: List<String> = emptyList(),
+    val deniedOperations: List<String> = emptyList(),
+    val scopes: Map<String, List<String>> = emptyMap(),
 )
 
 enum class PluginTone {
@@ -660,3 +680,32 @@ data class PluginRouteRequest(
     val name: String = "",
     val status: String = "",
 )
+
+/**
+ * The grants an edited instance must send back unchanged, or null to omit them. An older
+ * installation reads a missing list as "no agents"; a current one keeps the grants when omitted.
+ * With the agents not loaded yet (Main always exists) the installation is unknown, so they are kept
+ * as for an older one. Only packages giving agents access have grants to keep.
+ */
+fun PluginConnection.agentIdsToKeep(agents: List<Agent>, manifest: PluginManifest): List<String>? =
+    agentIds.takeIf {
+        it.isNotEmpty() &&
+            manifest.agentAccess != null &&
+            (agents.isEmpty() || olderInstallation(agents))
+    }
+
+/**
+ * The grants to send back on an older or unknown installation, always read again just before saving
+ * ([current], null when the instance no longer exists) whatever the editor last saw: a grant
+ * revoked meanwhile is never restored, one added meanwhile is never dropped.
+ */
+suspend fun PluginConnection.agentIdsToSend(
+    agents: List<Agent>,
+    manifest: PluginManifest,
+    current: suspend () -> List<String>?,
+): List<String>? {
+    val keeps = manifest.agentAccess != null && (agents.isEmpty() || olderInstallation(agents))
+    if (!keeps) return null
+    val fresh = current() ?: return null
+    return copy(agentIds = fresh).agentIdsToKeep(agents, manifest)
+}

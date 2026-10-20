@@ -2,6 +2,8 @@ package build.cairn.app.ui
 
 import android.app.Application
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Surface
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
@@ -468,7 +470,9 @@ abstract class PluginsCases {
                 dispatcher(includeGet = true) { path, body ->
                     when (path) {
                         "/api/installations/fixture/api/plugins" ->
-                            wireJson.encodeToString(PluginCatalog(packages = listOf(entry)))
+                            wireJson.encodeToString(
+                                PluginCatalog(setupDrafts = true, packages = listOf(entry))
+                            )
                         "/api/installations/fixture/api/plugins/notes/connections" -> {
                             saved += body
                             "{}"
@@ -771,6 +775,7 @@ abstract class PluginsCases {
             }
             compose.onNodeWithText("Enregistré").assertExists()
             compose.onNodeWithText("Agents autorisés : Cairn").assertExists()
+            compose.onNodeWithText("Gérer sur les fiches agents ›").assertExists()
             capture("plugin-onepassword")
             compose.onNodeWithText("Show vaults").performScrollTo().performClick()
             compose.waitUntil(30000) {
@@ -794,7 +799,7 @@ abstract class PluginsCases {
     }
 
     @Test
-    fun serviceAccountsSendTheirTokenOnceWithExplicitGrants() {
+    fun serviceAccountsSendTheirTokenOnceAndLeaveGrantsToAgentPages() {
         MockWebServer().use { server ->
             val saved = CopyOnWriteArrayList<String>()
             server.dispatcher = dispatcher { path, body ->
@@ -818,7 +823,15 @@ abstract class PluginsCases {
             compose
                 .onNode(SemanticsMatcher.keyIsDefined(SemanticsProperties.Password))
                 .assertExists()
-            compose.onNodeWithText("Helper").performScrollTo().performClick()
+            // Grants are read-only here: they are set on each agent's page.
+            compose.onNodeWithText("Aucun agent ne peut l’utiliser pour l’instant.").assertExists()
+            assertTrue(
+                compose
+                    .onAllNodesWithText("Gérer sur les fiches agents ›")
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
+            )
+            compose.onNode(hasText("Helper") and isToggleable()).assertDoesNotExist()
             capture("plugin-instance-editor")
             compose.onNodeWithText("Enregistrer").performClick()
             compose.waitUntil(10000) { saved.isNotEmpty() }
@@ -828,7 +841,7 @@ abstract class PluginsCases {
                 buildJsonObject { put("token", "ops_android_fixture") },
                 payload["secrets"],
             )
-            assertEquals(JsonArray(listOf(JsonPrimitive("helper"))), payload["agentIds"])
+            assertFalse("agentIds" in payload)
             assertEquals(JsonObject(emptyMap()), payload["settings"])
         }
     }
@@ -891,6 +904,7 @@ abstract class PluginsCases {
                             path.endsWith("/plugins") ->
                                 wireJson.encodeToString(
                                     PluginCatalog(
+                                        setupDrafts = true,
                                         packages = listOf(entry),
                                         connections = listOfNotNull(active.get()),
                                     )
@@ -1192,7 +1206,9 @@ abstract class PluginsCases {
                     read = { path ->
                         when {
                             path.endsWith("/plugins") ->
-                                wireJson.encodeToString(PluginCatalog(packages = listOf(entry)))
+                                wireJson.encodeToString(
+                                    PluginCatalog(setupDrafts = true, packages = listOf(entry))
+                                )
                             path.endsWith("/setup-drafts/${last.id}") ->
                                 wireJson.encodeToString(last)
                             path.substringBefore('?').endsWith("/setup-drafts") -> {
@@ -1288,7 +1304,9 @@ abstract class PluginsCases {
                     read = { path ->
                         when {
                             path.endsWith("/plugins") ->
-                                wireJson.encodeToString(PluginCatalog(packages = listOf(entry)))
+                                wireJson.encodeToString(
+                                    PluginCatalog(setupDrafts = true, packages = listOf(entry))
+                                )
                             path.endsWith("/setup-drafts") ->
                                 wireJson.encodeToString(PluginPage(listOfNotNull(draft.get())))
                             else -> null
@@ -1372,7 +1390,9 @@ abstract class PluginsCases {
                     read = { path ->
                         when {
                             path.endsWith("/plugins") ->
-                                wireJson.encodeToString(PluginCatalog(packages = listOf(entry)))
+                                wireJson.encodeToString(
+                                    PluginCatalog(setupDrafts = true, packages = listOf(entry))
+                                )
                             path.endsWith("/setup-drafts/setup-feedback1") ->
                                 wireJson.encodeToString(draft.get())
                             path.endsWith("/resources/workspace") -> """{"items":[]}"""
@@ -1807,6 +1827,7 @@ abstract class PluginsCases {
                             path.endsWith("/plugins") ->
                                 wireJson.encodeToString(
                                     PluginCatalog(
+                                        setupDrafts = true,
                                         packages = listOf(entry),
                                         connections =
                                             if (active.get())
@@ -2114,6 +2135,7 @@ abstract class PluginsCases {
                             path.endsWith("/plugins") ->
                                 wireJson.encodeToString(
                                     PluginCatalog(
+                                        setupDrafts = true,
                                         packages = listOf(entry),
                                         connections = listOf(connection),
                                     )
@@ -2272,6 +2294,7 @@ abstract class PluginsCases {
                             path.endsWith("/plugins") ->
                                 wireJson.encodeToString(
                                     PluginCatalog(
+                                        setupDrafts = true,
                                         packages = listOf(entry),
                                         connections = listOf(connection),
                                     )
@@ -2413,6 +2436,7 @@ abstract class PluginsCases {
                             path.endsWith("/plugins") ->
                                 wireJson.encodeToString(
                                     PluginCatalog(
+                                        setupDrafts = true,
                                         packages = listOf(entry),
                                         connections =
                                             listOf(
@@ -3255,6 +3279,7 @@ abstract class PluginsCases {
             wireJson
                 .encodeToJsonElement(
                     PluginCatalog(
+                        setupDrafts = true,
                         packages =
                             listOf(
                                 PluginEntry(id = manifest.id, active = "1", manifest = manifest)
@@ -3640,6 +3665,7 @@ abstract class PluginsCases {
                             path.endsWith("/plugins") ->
                                 wireJson.encodeToString(
                                     PluginCatalog(
+                                        setupDrafts = true,
                                         packages =
                                             listOf(
                                                 PluginEntry(
@@ -3647,7 +3673,7 @@ abstract class PluginsCases {
                                                     active = "1",
                                                     manifest = manifest,
                                                 )
-                                            )
+                                            ),
                                     )
                                 )
                             path.endsWith("/setup-drafts") ->
@@ -4231,6 +4257,7 @@ abstract class PluginsCases {
                             path.endsWith("/plugins") ->
                                 wireJson.encodeToString(
                                     PluginCatalog(
+                                        setupDrafts = true,
                                         packages =
                                             listOf(
                                                 PluginEntry(
@@ -4238,7 +4265,7 @@ abstract class PluginsCases {
                                                     active = "1.0.0",
                                                     manifest = manifest,
                                                 )
-                                            )
+                                            ),
                                     )
                                 )
                             path.endsWith("/plugins/draft-restore/setup-drafts") ->
@@ -4459,9 +4486,248 @@ abstract class PluginsCases {
         }
     }
 
+    @Test
+    fun anAgentManagesScopedRightsWithoutWholeInstanceAccess() {
+        val entry =
+            wireJson.decodeFromString<PluginEntry>(
+                """{
+            "id":"scoped-rights","active":"1","status":"active","manifest":{
+            "id":"scoped-rights","name":"Resource service","agentAccess":{},
+            "resources":[{"name":"workspace","title":"Workspaces","singular":"Workspace"}],
+            "operations":[{"name":"read-messages","collection":"workspace","profile":"read","scopes":["channel"]},
+            {"name":"send-message","collection":"workspace","profile":"contribute","scopes":["channel"]}]}}
+        """
+            )
+        val scoped =
+            PluginCatalog(
+                setupDrafts = true,
+                packages =
+                    listOf(
+                        entry,
+                        entry.copy(
+                            id = "other-rights",
+                            manifest = entry.manifest?.copy(id = "other-rights"),
+                        ),
+                    ),
+                connections =
+                    listOf(
+                        PluginConnection(
+                            id = "app",
+                            pluginId = "scoped-rights",
+                            name = "Application",
+                        ),
+                        PluginConnection(
+                            id = "app-other",
+                            pluginId = "scoped-rights",
+                            name = "Application",
+                        ),
+                        PluginConnection(
+                            id = "other-app",
+                            pluginId = "other-rights",
+                            name = "Application",
+                        ),
+                    ),
+                resourceGrantCounts = mapOf("helper" to 1),
+            )
+        val rules =
+            CopyOnWriteArrayList<PluginResourceGrant>().apply {
+                add(
+                    PluginResourceGrant(
+                        id = "r1",
+                        resourceId = "team",
+                        agentId = "helper",
+                        profile = PluginAccessProfile.Read,
+                        scopes = mapOf("channel" to listOf("C111")),
+                    )
+                )
+            }
+        val writes = CopyOnWriteArrayList<JsonObject>()
+        val root =
+            "/api/installations/fixture/api/plugins/scoped-rights/connections/app/resources/workspace"
+        val directory = "/api/installations/fixture/api/agents/helper/plugin-resource-grants"
+        MockWebServer().use { server ->
+            server.dispatcher =
+                dispatcher(includeGet = true) { path, body ->
+                    when (path.substringBefore('?')) {
+                        directory -> buildJsonObject {
+                                put(
+                                    "items",
+                                    JsonArray(
+                                        rules.map { rule ->
+                                            buildJsonObject {
+                                                wireJson
+                                                    .encodeToJsonElement(rule)
+                                                    .jsonObject
+                                                    .forEach { (key, value) -> put(key, value) }
+                                                put("connectionId", "app")
+                                                put("pluginId", "scoped-rights")
+                                                put("collection", "workspace")
+                                                put("instanceName", "Application")
+                                                put("resourceName", "Engineering")
+                                            }
+                                        }
+                                    ),
+                                )
+                            }
+                                .toString()
+                        "$directory/r1" -> {
+                            rules.clear()
+                            "{}"
+                        }
+                        root ->
+                            """{"items":[{"id":"team","name":"Engineering","collection":"workspace"}]}"""
+                        "$root/team/grants" -> {
+                            if (body.isNotBlank()) {
+                                val input = wireJson.parseToJsonElement(body).jsonObject
+                                writes += input
+                                rules +=
+                                    wireJson
+                                        .decodeFromJsonElement<PluginResourceGrant>(input)
+                                        .copy(id = "r2", resourceId = "team")
+                                "{}"
+                            } else
+                                buildJsonObject {
+                                    put("items", wireJson.encodeToJsonElement(rules.toList()))
+                                }
+                                    .toString()
+                        }
+                        else -> null
+                    }
+                }
+            server.start()
+            show(server) { vm, state ->
+                Column(Modifier.verticalScroll(rememberScrollState())) {
+                    AgentResourceAccess(vm, state, "helper", scoped, changed = {})
+                }
+            }
+            compose.waitUntil(15000) {
+                compose.onAllNodesWithText("channel : C111").fetchSemanticsNodes().isNotEmpty()
+            }
+            compose
+                .onNodeWithText("Révoquer le droit sur la ressource")
+                .performScrollTo()
+                .performClick()
+            compose.onNodeWithText("Confirmer la révocation").performScrollTo().performClick()
+            compose.waitUntil(10000) {
+                compose
+                    .onAllNodesWithText("Aucune règle enregistrée sur les ressources.")
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
+            }
+            compose.onAllNodesWithText("Choisir…").onFirst().performScrollTo().performClick()
+            capture("agent-resource-instance-choices")
+            compose
+                .onNodeWithText("Application · app · scoped-rights (Resource service)")
+                .performClick()
+            compose.onAllNodesWithText("Choisir…").onFirst().performScrollTo().performClick()
+            compose.onNodeWithText("Workspaces").performClick()
+            compose.waitUntil(10000) {
+                compose
+                    .onAllNodesWithText("Ressource pour les droits de l’agent")
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
+            }
+            compose.onAllNodesWithText("Choisir…").onFirst().performScrollTo().performClick()
+            compose.onNodeWithText("Engineering").performClick()
+            compose.onNodeWithText("Accès des agents").performScrollTo().performClick()
+            compose.waitUntil(10000) {
+                compose.onAllNodesWithText("Ajouter une règle").fetchSemanticsNodes().isNotEmpty()
+            }
+            compose.onNodeWithText("Ajouter une règle").performScrollTo().performClick()
+            compose.onNodeWithText("Agent", substring = false).assertDoesNotExist()
+            compose.onNodeWithContentDescription("Contribution").performScrollTo().performClick()
+            compose.onNodeWithText("Limiter channel").performScrollTo().performTextInput("C222")
+            compose.onNodeWithText("Enregistrer").assertIsEnabled().performClick()
+            compose.waitUntil(10000) { writes.size == 1 }
+            assertEquals("helper", writes.single()["agentId"]?.jsonPrimitive?.content)
+            assertEquals("contribute", writes.single()["profile"]?.jsonPrimitive?.content)
+            assertEquals(
+                listOf("C222"),
+                writes.single()["scopes"]?.jsonObject?.get("channel")?.jsonArray?.map {
+                    it.jsonPrimitive.content
+                },
+            )
+            assertTrue(scoped.connections.all { it.agentIds.isEmpty() })
+            capture("agent-resource-permissions")
+        }
+    }
+
+    @Test fun editingAnInstanceLeavesItsGrantsToTheAgentPages() = editExistingAccount(older = false)
+
+    @Test
+    fun anOlderInstallationKeepsTheGrantsOfAnEditedInstance() = editExistingAccount(older = true)
+
+    @Test
+    fun aGrantRevokedWhileEditingIsNotRestored() =
+        editExistingAccount(older = true, revokedMeanwhile = true)
+
+    /**
+     * An older installation (agents without `grantsOnAgent`) reads a missing `agentIds` as "no
+     * agents": the editor then sends the instance's current grants unchanged. A current one keeps
+     * them.
+     */
+    private fun editExistingAccount(older: Boolean, revokedMeanwhile: Boolean = false) {
+        MockWebServer().use { server ->
+            val saved = CopyOnWriteArrayList<String>()
+            val editing = java.util.concurrent.atomic.AtomicBoolean(false)
+            server.dispatcher =
+                dispatcher(includeGet = true, current = !older) { path, body ->
+                    when {
+                        path.endsWith("/plugins/onepassword/connections/op1") -> {
+                            saved += body
+                            "{}"
+                        }
+                        // Revoked from an agent page while the editor is open.
+                        path == "/api/installations/fixture/api/plugins" &&
+                            revokedMeanwhile &&
+                            editing.get() ->
+                            wireJson.encodeToString(
+                                PluginCatalog(
+                                    setupDrafts = !older,
+                                    packages = listOf(onePassword, discord, notes),
+                                    connections = listOf(bot, account.copy(agentIds = emptyList())),
+                                )
+                            )
+                        else -> null
+                    }
+                }
+            server.start()
+            show(server) { vm, state -> PluginScreen(vm, state, "onepassword") {} }
+            compose.waitUntil(30000) {
+                compose.onAllNodesWithText("Modifier").fetchSemanticsNodes().isNotEmpty()
+            }
+            compose.onNodeWithText("Modifier").performScrollTo().performClick()
+            compose.waitUntil(10000) {
+                compose.onAllNodesWithText("Enregistrer").fetchSemanticsNodes().isNotEmpty()
+            }
+            editing.set(true)
+            compose.onNodeWithText("Enregistrer").performClick()
+            // The save reads the instance again first; keep the clock moving for its reply.
+            repeat(100) {
+                if (saved.isEmpty()) {
+                    compose.mainClock.advanceTimeBy(100)
+                    androidx.test.platform.app.InstrumentationRegistry.getInstrumentation()
+                        .waitForIdleSync()
+                    Thread.sleep(50)
+                }
+            }
+            compose.waitUntil(10000) { saved.isNotEmpty() }
+            if (older) {
+                val paths = List(server.requestCount) { server.takeRequest().path.orEmpty() }
+                assertFalse(paths.any { "/setup-drafts" in it })
+            }
+            val payload = wireJson.parseToJsonElement(saved.single()).jsonObject
+            if (revokedMeanwhile) assertFalse("agentIds" in payload)
+            else if (older)
+                assertEquals(JsonArray(listOf(JsonPrimitive(MAIN_AGENT_ID))), payload["agentIds"])
+            else assertFalse("agentIds" in payload)
+        }
+    }
+
     private fun dispatcher(
         includeGet: Boolean = false,
         read: (String) -> String? = { null },
+        current: Boolean = true,
         handle: (String, String) -> String?,
     ) =
         object : Dispatcher() {
@@ -4473,7 +4739,8 @@ abstract class PluginsCases {
                         return MockResponse().setBody(it)
                     }
                 if (request.method == "GET" && path.endsWith("/setup-drafts"))
-                    return MockResponse().setBody("""{"items":[]}""")
+                    return if (current) MockResponse().setBody("""{"items":[]}""")
+                    else MockResponse().setResponseCode(404)
                 if (request.method != "GET") {
                     if (request.getHeader("X-CSRF-Token") != "fixture-csrf")
                         return MockResponse().setResponseCode(403)
@@ -4498,17 +4765,25 @@ abstract class PluginsCases {
                         "/api/installations/fixture/api/agents" ->
                             wireJson.encodeToString(
                                 listOf(
-                                    Agent(id = MAIN_AGENT_ID, name = "Cairn"),
+                                    Agent(
+                                        id = MAIN_AGENT_ID,
+                                        name = "Cairn",
+                                        revision = "r1",
+                                        grantsOnAgent = current,
+                                    ),
                                     Agent(
                                         id = "helper",
                                         name = "Helper",
                                         access = AccessPolicy(projects = listOf("project")),
+                                        revision = "r1",
+                                        grantsOnAgent = current,
                                     ),
                                 )
                             )
                         "/api/installations/fixture/api/plugins" ->
                             wireJson.encodeToString(
                                 PluginCatalog(
+                                    setupDrafts = current,
                                     packages =
                                         listOf(
                                             onePassword,

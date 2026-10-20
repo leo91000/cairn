@@ -124,6 +124,7 @@ pub async fn load(s: &Service, draft: &str) -> Result<SetupDraft> {
     }
     // Owner verification is network I/O. Retire the held snapshot if setup or
     // approval changed while that response was in flight, including expiry.
+    approved.recheck(s).await.map_err(|_| missing())?;
     s.store
         .read(move |db| {
             approved.recheck_in(db).map_err(|_| missing())?;
@@ -305,6 +306,7 @@ pub async fn save(
     let secret_key = connections::secrets_key(&draft_id);
     let encrypted = s.vault.encrypt(&secret_key, &json!({"fields": fields}))?;
     let result = draft.public(true);
+    approved.recheck(s).await?;
     s.store
         .transaction(move |db| {
             approved.recheck_in(db)?;

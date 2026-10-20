@@ -1720,7 +1720,11 @@ async fn personal_oauth_isolated_by_verified_account_and_provider_subject() {
                 .iter()
                 .any(|m| m["id"] == stale && m["status"] == "cancelled")
         );
-        let retry = common::send(&app, member_request("POST", &message_path, message, other)).await;
+        let retry = common::send(
+            &app,
+            member_request("POST", &message_path, message.clone(), other),
+        )
+        .await;
         assert_eq!(
             retry.status(),
             StatusCode::CONFLICT,
@@ -1880,6 +1884,113 @@ async fn personal_oauth_isolated_by_verified_account_and_provider_subject() {
                     .await
                     .is_err(),
                 "Original-author control restored suspended personal OAuth"
+            );
+            // Settle Alice's turn through ordinary delivery acknowledgements,
+            // then let Bob submit his own turn in the same conversation/run.
+            for delivered in [
+                text(&message, "id"),
+                text(&answer, "id"),
+                text(&next_answer, "id"),
+            ] {
+                s.chat_acknowledge(text(&run, "id"), delivered)
+                    .await
+                    .unwrap();
+            }
+            s.store
+                .set(
+                    &format!("run-checkpoint:{}", text(&run, "id")),
+                    json!({"completed": true, "launched": true}),
+                    None,
+                )
+                .await
+                .unwrap();
+            s.store
+                .patch_run(text(&run, "id"), json!({"status": "succeeded"}))
+                .await
+                .unwrap();
+            let bob_message = cairn_installation::config::id();
+            assert_eq!(
+                common::send(
+                    &app,
+                    member_request(
+                        "POST",
+                        &message_path,
+                        json!({
+                            "id": bob_message,
+                            "text": "A separate request with Bob's authorization",
+                        }),
+                        "bob",
+                    ),
+                )
+                .await
+                .status(),
+                StatusCode::OK
+            );
+            s.chat_tick(&HashSet::new()).await.unwrap();
+            let detail = s.chat_detail(text(&chat, "id")).await.unwrap();
+            assert_eq!(detail["run"]["id"], run["id"]);
+            assert_eq!(detail["run"]["chatExecution"]["messageId"], bob_message);
+            let bob_run = s
+                .store
+                .patch_run(
+                    text(&run, "id"),
+                    json!({"status": "running", "isolated": true}),
+                )
+                .await
+                .unwrap();
+            let configuration = s.mcps.run_configuration(&s, &bob_run).await.unwrap();
+            let bob_bearer = text(&configuration["env"], "CAIRN_MCP_RUN_TOKEN");
+            let input = json!({"resource": resource});
+            assert_eq!(
+                agents::call_tool(&s, bob_bearer, "example_read", &input)
+                    .await
+                    .unwrap()
+                    .unwrap()["subject"],
+                "U222"
+            );
+            let retried = common::send(
+                &app,
+                request("POST", &answer_path, answer.clone(), Some("fixture-owner")),
+            )
+            .await;
+            assert_eq!(retried.status(), StatusCode::OK);
+            assert_eq!(
+                agents::call_tool(&s, bob_bearer, "example_read", &input)
+                    .await
+                    .expect("Retrying an old owner answer suspended the later requester's OAuth")
+                    .unwrap()["subject"],
+                "U222"
+            );
+            let foreign_retry = common::send(
+                &app,
+                member_request("POST", &answer_path, answer.clone(), "bob"),
+            )
+            .await;
+            assert_eq!(foreign_retry.status(), StatusCode::CONFLICT);
+            // Providers can reuse question IDs in a later turn. The old answer
+            // message is not a new intervention in that repeated question.
+            s.question_receive(
+                text(&run, "id"),
+                json!({
+                    "id": question,
+                    "blocking": false,
+                    "fields": [{"id": "choice", "title": "Continue?", "options": []}],
+                }),
+            )
+            .await
+            .unwrap();
+            let reused = common::send(
+                &app,
+                request("POST", &answer_path, answer.clone(), Some("fixture-owner")),
+            )
+            .await;
+            assert_eq!(reused.status(), StatusCode::CONFLICT);
+            assert_eq!(
+                agents::call_tool(&s, bob_bearer, "example_read", &input)
+                    .await
+                    .unwrap()
+                    .unwrap()["subject"],
+                "U222"
             );
         }
         if account == "bob" {
@@ -3389,7 +3500,7 @@ async fn personal_authorization_discovery_pages_only_personal_providers() {
 
 #[tokio::test]
 async fn personal_discovery_rechecks_membership_owner_and_package_after_loading_metadata() {
-    for changed in ["membership", "owner", "approval"] {
+    for changed in ["membership", "owner", "approval", "files"] {
         let (_root, s, _instance, _resource, _path, app) = configured_fixture(false, true).await;
         let reads = Arc::new(AtomicUsize::new(0));
         let entered = Arc::new(tokio::sync::Notify::new());
@@ -3464,6 +3575,11 @@ async fn personal_discovery_rechecks_membership_owner_and_package_after_loading_
             )
             .await;
             assert_eq!(approved.status(), StatusCode::OK);
+        }
+        if changed == "files" {
+            let source = s.config.data_dir.join("plugins/example/1/main.luau");
+            let content = std::fs::read_to_string(&source).unwrap();
+            std::fs::write(source, format!("{content}\n-- late discovery edit\n")).unwrap();
         }
         release.notify_one();
         let response = pending.await.unwrap();
@@ -4138,12 +4254,15 @@ async fn oauth_completion_rechecks_the_final_owner_and_personal_membership_proof
         "personal-owner",
         "member-removed",
         "member-reinvited",
+        "owner-files",
+        "setup-files",
+        "personal-files",
     ] {
         for changed in [false, true] {
-            let personal = !matches!(kind, "owner" | "setup");
+            let personal = !kind.starts_with("owner") && !kind.starts_with("setup");
             let (root, s, instance, _resource, path, app) =
                 configured_fixture(false, personal).await;
-            let (_root, instance, path, setup_revision) = if kind == "setup" {
+            let (_root, instance, path, setup_revision) = if kind.starts_with("setup") {
                 let (draft, _resource, path) = create_setup(&app).await;
                 (
                     root,
@@ -4160,6 +4279,9 @@ async fn oauth_completion_rechecks_the_final_owner_and_personal_membership_proof
             // The next reply is the final policy snapshot used by the commit.
             let final_check = if personal { 3 } else { 2 };
             let (responded, policy_checks) = (returned.clone(), checks.clone());
+            let source = s.config.data_dir.join("plugins/example/1/main.luau");
+            let original_source = std::fs::read_to_string(&source).unwrap();
+            let edited_source = source.clone();
             let authority = axum::Router::new().route(
                 "/api/relay/00000000-0000-4000-8000-000000000055/task-authors",
                 axum::routing::get(move || {
@@ -4169,7 +4291,15 @@ async fn oauth_completion_rechecks_the_final_owner_and_personal_membership_proof
                     } else {
                         0
                     };
-                    let retired = changed && check >= final_check;
+                    let retired = changed && check >= final_check && !kind.ends_with("files");
+                    if changed && check == final_check && kind.ends_with("files") {
+                        let content = std::fs::read_to_string(&edited_source).unwrap();
+                        std::fs::write(
+                            &edited_source,
+                            format!("{content}\n-- late package edit\n"),
+                        )
+                        .unwrap();
+                    }
                     let owner_access = if retired && !kind.starts_with("member-") {
                         "replacement-owner-access"
                     } else {
@@ -4274,7 +4404,9 @@ async fn oauth_completion_rechecks_the_final_owner_and_personal_membership_proof
             );
             assert_eq!(
                 response.status(),
-                if changed {
+                if changed && kind.ends_with("files") {
+                    StatusCode::FORBIDDEN
+                } else if changed {
                     StatusCode::CONFLICT
                 } else {
                     StatusCode::OK
@@ -4288,6 +4420,7 @@ async fn oauth_completion_rechecks_the_final_owner_and_personal_membership_proof
             // Restore authority for reads: a refused completion must remain absent
             // even if the same account becomes available again immediately.
             returned.store(false, Ordering::SeqCst);
+            std::fs::write(&source, original_source).unwrap();
             if changed {
                 let response = common::send(&app, own_request("GET", &path, Value::Null)).await;
                 assert_eq!(

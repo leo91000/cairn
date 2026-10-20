@@ -10,7 +10,7 @@ import {
 } from 'vue'
 import { useRouter } from 'vue-router'
 import { api, notify, state } from '../api'
-import { chatList, refreshChats } from '../chat-list'
+import { chatList } from '../chat-list'
 import {
   Activity,
   BookOpen,
@@ -309,7 +309,6 @@ onBeforeUnmount(() => {
 onMounted(() => {
   dialog.value?.showModal()
   input.value?.focus()
-  void refreshChats()
 })
 
 function run(command: Command) {

@@ -315,7 +315,7 @@ pub(crate) struct RunRequester {
 /// Native execution retains its admitted source across capacity waits and slow
 /// preparation. Owner intervention suspends OAuth, not this source boundary.
 #[derive(Clone)]
-pub(crate) struct ExecutionSource(RunRequester);
+pub(crate) struct ExecutionSource(RunRequester, super::registry::Approval);
 
 impl ExecutionSource {
     pub(crate) fn is_unavailable(error: &Error) -> bool {
@@ -327,20 +327,33 @@ impl ExecutionSource {
     }
 
     pub(crate) fn capture_in(db: &Db<'_>, run: &Value) -> Result<Option<Self>> {
-        Ok(captured_run(db, run)?
-            .filter(|requester| matches!(&requester.principal, Principal::External(_)))
-            .map(Self))
+        let Some(requester) = captured_run(db, run)? else {
+            return Ok(None);
+        };
+        let Principal::External(actor) = &requester.principal else {
+            return Ok(None);
+        };
+        let connection = external_in(db, actor)?;
+        let approval = super::registry::Approval::capture_in(
+            db,
+            &connection.plugin_id,
+            &actor.binding.digest,
+        )?;
+        Ok(Some(Self(requester, approval)))
     }
 
     pub(crate) async fn recheck(&self, s: &Service) -> Result<()> {
         if let Principal::External(actor) = &self.0.principal {
-            external(s, actor).await?;
+            let connection = external(s, actor).await?;
+            super::registry::require_digest(s, &connection.plugin_id, &actor.binding.digest)
+                .await?;
         }
         let source = self.clone();
         s.store.read(move |db| source.recheck_in(db)).await
     }
 
     pub(crate) fn recheck_in(&self, db: &Db<'_>) -> Result<()> {
+        self.1.recheck_in(db)?;
         recheck_turn_in(db, &self.0).map(|_| ())
     }
 }

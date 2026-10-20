@@ -283,7 +283,7 @@ These are available platform contracts, not accepted feature exclusions:
   authorization. Opened Q10 (transient search), Q11 (catalogue) and Q12 (thread
   mapping). No implementation has started.
 - 2026-10-17: accepted Q10–Q12 as proposed. Recorded the transient boundary in
-  [ADR-0051](adr/0051-transient-plugin-contexts.md). Re-presented unanswered Q9
+  [consultations éphémères des plugins](adr/0051-transient-plugin-contexts.md). Re-presented unanswered Q9
   alongside Q13 (controls), Q14 (automations) and Q15 (tool profiles).
 - 2026-10-17: accepted Q9 and Q13–Q15 as proposed. Beacon relay/direct addressing,
   per-run control, bounded explicit automations and scoped tool profiles are

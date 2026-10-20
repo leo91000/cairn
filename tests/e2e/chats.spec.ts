@@ -321,10 +321,11 @@ test('verbose tool calls keep their action steps with abbreviated details', asyn
   await authenticateWorkspace(page)
   await expect(page.getByText('Ready for the next step.', { exact: false }).last()).toBeVisible()
   const actions = page.getByTestId('agent-actions').filter({ hasText: /ran \d+ commands?/i })
-  // The fixture also searches once: all 61 actions remain available in bounded groups.
+  // The fixture also searches once: all 61 actions remain available in bounded groups,
+  // the earlier ones arriving with the older pages loaded once the conversation shows.
   await expect(actions.first()).toBeVisible()
+  await expect.poll(() => actions.count()).toBeGreaterThanOrEqual(3)
   const count = await actions.count()
-  expect(count).toBeGreaterThanOrEqual(3)
   for (let index = 0; index < count; index++) {
     const group = actions.nth(index)
     await group.locator(':scope > button').click()

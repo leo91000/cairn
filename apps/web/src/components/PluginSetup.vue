@@ -40,7 +40,6 @@ const token = ref('')
 const credentialErrorId = useId()
 const enabled = ref(true)
 const agentId = ref('')
-const agentIds = ref<string[]>([])
 const completion = ref<FormResult>()
 const completing = ref(false)
 const busy = ref(false)
@@ -159,7 +158,7 @@ async function activate() {
     await pluginOperation(`${path}/activate`, {
       revision: draft.value.revision,
       enabled: enabled.value,
-      agentIds: agentIds.value,
+      agentIds: [],
       ...(delegates(props.manifest) && { agentId: agentId.value, projectId: agent?.access.projects?.[0] ?? null, accessMode: 'requests' }),
     })
     emit('activated')
@@ -262,17 +261,8 @@ onBeforeUnmount(() => {
           Instance commands and tools
         </h3>
         <p class="text-xs text-muted">
-          No agent has access by default. Resource permissions are configured separately after activation.
+          After activation, grant instance access from each agent’s page. Resource permissions are configured separately on each resource.
         </p>
-        <label v-for="agent in state.agents" :key="agent.id" class="flex flex-row! items-center gap-2!">
-          <input
-            v-model="agentIds"
-            type="checkbox"
-            class="w-auto!"
-            :value="agent.id"
-            :disabled="busy || resourceWork || !available"
-          >{{ agent.name }}
-        </label>
       </section>
       <div v-if="delegates(manifest)" class="grid gap-1">
         <VirtualSelect

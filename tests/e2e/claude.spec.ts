@@ -1,8 +1,11 @@
 import { connectClaude } from './accounts'
 import {
   signIn as authenticateWorkspace,
+  createAgent,
   expect,
   expectSingleScroll,
+  grantFullAccess,
+  openAgentSection,
   test,
   useRelayForHttpMocks,
   workspacePath,
@@ -13,16 +16,17 @@ test('Claude agents, chats, questions and scheduled work run on a connected Clau
   expect((await connectClaude(workspace)).state).toBe('complete')
   await page.goto(workspacePath('/agents'))
   await authenticateWorkspace(page)
-  await page.getByRole('button', { name: 'New agent', exact: true }).click()
+  await page.getByRole('link', { name: 'New agent', exact: true }).click()
   await page.getByLabel('Name', { exact: true }).fill('Claude engineer')
+  await grantFullAccess(page)
+  await openAgentSection(page, 'Coding agent & model')
   await page.getByRole('button', { name: /^Agent, model and reasoning/ }).click()
   const agentMenu = page.getByRole('dialog', { name: 'Agent & model' })
   await agentMenu.getByRole('radio', { name: 'Claude Code', exact: true }).click()
   await agentMenu.getByRole('radio', { name: 'Sonnet', exact: true }).click()
   await agentMenu.getByRole('button', { name: 'Close', exact: true }).click()
   await expect(page.getByRole('button', { name: /^Agent, model and reasoning: Claude Code · Sonnet/ })).toBeVisible()
-  await page.getByRole('button', { name: 'Save agent', exact: true }).click()
-  await expect(page.getByRole('dialog')).toHaveCount(0)
+  await createAgent(page)
   const agent = (await workspace.api('/api/agents')).find((a: { name: string }) => a.name === 'Claude engineer')
   expect(agent.provider).toBe('claude')
   const chat = await workspace.api('/api/chats', 'POST', { agentId: agent.id })
@@ -175,10 +179,10 @@ test('Claude default names follow available metadata without pinning the model',
       error: '',
     },
   }))
-  await page.goto(workspacePath('/agents'))
+  await page.goto(workspacePath('/agents/new'))
   await authenticateWorkspace(page)
-  await page.getByRole('button', { name: 'New agent', exact: true }).click()
   await page.getByLabel('Name', { exact: true }).fill('Claude default labels')
+  await openAgentSection(page, 'Coding agent & model')
   const picker = page.getByRole('button', { name: /^Agent, model and reasoning/ })
   await picker.click()
   const menu = page.getByRole('dialog', { name: 'Agent & model' })
@@ -210,8 +214,7 @@ test('Claude default names follow available metadata without pinning the model',
   await page.emulateMedia({ colorScheme: 'dark' })
   await page.screenshot({ path: testInfo.outputPath('claude-default-mobile-dark.png'), animations: 'disabled' })
   await menu.getByRole('button', { name: 'Close', exact: true }).click()
-  await page.getByRole('button', { name: 'Save agent', exact: true }).click()
-  await expect(page.getByRole('dialog')).toHaveCount(0)
+  await createAgent(page)
   const saved = (await workspace.api('/api/agents')).find((agent: { name: string }) => agent.name === 'Claude default labels')
   expect(saved).toMatchObject({ provider: 'claude', model: '', reasoning: '' })
 })

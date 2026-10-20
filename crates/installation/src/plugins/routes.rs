@@ -339,6 +339,7 @@ pub async fn save(
     };
     let previous_revision = input.revision;
     let updating = existing.is_some();
+    target.recheck_package(s).await?;
     s.store
         .transaction(move |db| {
             current_resource(db, &target, &resource)?;
@@ -435,6 +436,7 @@ pub async fn remove(
         route.to_owned(),
         input["revision"].as_str().map(str::to_owned),
     );
+    target.recheck_package(s).await?;
     s.store
         .transaction(move |db| {
             current_resource(db, &target, &resource)?;
@@ -670,6 +672,7 @@ pub async fn people(
         user.to_owned(),
         action.to_owned(),
     );
+    target.recheck_package(s).await?;
     s.store
         .transaction(move |db| {
             current_resource(db, &target, &resource)?;

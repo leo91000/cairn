@@ -3,6 +3,7 @@ import { Buffer } from 'node:buffer'
 import { createHmac } from 'node:crypto'
 import {
   expect,
+  openAgentSection,
   signIn,
   test,
   useRelayForHttpMocks,
@@ -76,6 +77,39 @@ async function discordForm(route: Route) {
     },
   })
 }
+
+test('older hosts keep existing plugin pages without a setup drafts endpoint', async ({ page, workspace }) => {
+  await useRelayForHttpMocks(page)
+  const account = await workspace.api('/api/plugins/onepassword/connections', 'POST', {
+    name: 'Earlier host account',
+    secrets: { token: 'ops_earlier_host_fixture' },
+    enabled: false,
+  })
+  let draftReads = 0
+  await page.route('**/api/plugins', async (route) => {
+    const response = await route.fetch()
+    const catalog = await response.json()
+    delete catalog.setupDrafts
+    delete catalog.resourceGrantCounts
+    await route.fulfill({ response, json: catalog })
+  })
+  await page.route('**/plugins/onepassword/setup-drafts*', async (route) => {
+    draftReads++
+    await route.fulfill({ status: 404, json: { error: 'Not found' } })
+  })
+  await page.goto(workspacePath('/plugins/onepassword'))
+  await signIn(page)
+  const instance = page.getByRole('article', { name: 'Earlier host account', exact: true })
+  await expect(instance).toBeVisible()
+  await instance.getByRole('button', { name: 'Edit Earlier host account', exact: true }).click()
+  const editor = page.getByRole('dialog', { name: 'Edit Earlier host account', exact: true })
+  await editor.getByLabel('Name', { exact: true }).fill('Updated on earlier host')
+  await editor.getByRole('button', { name: 'Save service account', exact: true }).click()
+  await expect(editor).not.toBeVisible()
+  await expect(page.getByRole('article', { name: 'Updated on earlier host', exact: true })).toBeVisible()
+  expect(draftReads).toBe(0)
+  expect((await workspace.api('/api/plugins')).connections.find((item: { id: string }) => item.id === account.id).name).toBe('Updated on earlier host')
+})
 
 test('Discord bots are set up through the package’s own form and keep the token private', async ({ page, workspace }) => {
   test.setTimeout(90000)
@@ -173,6 +207,61 @@ test('Discord bots are set up through the package’s own form and keep the toke
   await editor.getByRole('button', { name: 'Save bot' }).click()
   await expect(bot.getByText('1 person · only listed people')).toBeVisible()
   expect((await workspace.api('/api/plugins')).connections[0].settings.channelName).toBe('support')
+
+  // The agent's page lists the delegation read-only; changing its access offers to reapprove it.
+  const botId = (await workspace.api('/api/plugins')).connections[0].id
+  await page.goto(workspacePath(`/agents/${helper.id}?section=plugins`))
+  const delegation = page.getByRole('region', { name: 'Answers as this agent' })
+  await expect(delegation).toContainText('Answers as this agent on #support on Acme')
+  await expect(delegation.getByText('Set on the instance', { exact: true })).toBeVisible()
+  await openAgentSection(page, 'Skills')
+  await page.getByRole('group', { name: 'Skills access' }).getByRole('button', { name: 'All, including future', exact: true }).click()
+  await page.getByRole('region', { name: 'Unsaved changes' }).getByRole('button', { name: 'Save', exact: true }).click()
+  const review = page.getByRole('dialog', { name: 'Review before saving' })
+  await expect(review.getByRole('checkbox', { name: /Reapprove the new access for #support on Acme/ })).toBeChecked()
+  const saving = page.waitForRequest(request => request.method() === 'PUT' && new URL(request.url()).pathname.endsWith(`/agents/${helper.id}`))
+  await review.getByRole('button', { name: 'Save', exact: true }).click()
+  expect((await saving).postDataJSON().reapproveDelegations).toEqual([botId])
+  await expect(review).toHaveCount(0)
+
+  // An earlier change elsewhere already suspended the bot: a later edit never reapproves it by default.
+  const reapproved = (await workspace.api('/api/agents')).find((item: { id: string }) => item.id === helper.id)
+  await workspace.api(`/api/agents/${helper.id}`, 'PUT', { ...reapproved, access: { ...reapproved.access, skills: [] } })
+  await page.goto(workspacePath(`/agents/${helper.id}?section=identity`))
+  const describe = async (text: string) => {
+    await page.getByLabel('Description', { exact: true }).fill(text)
+    await page.getByRole('region', { name: 'Unsaved changes' }).getByRole('button', { name: 'Save', exact: true }).click()
+  }
+
+  // Alone, a delegation already suspended does not open the review, and is not reapproved.
+  const direct = page.waitForRequest(request => request.method() === 'PUT' && new URL(request.url()).pathname.endsWith(`/agents/${helper.id}`))
+  await describe('Answers support questions')
+  expect((await direct).postDataJSON()).not.toHaveProperty('reapproveDelegations')
+  await expect(page.getByRole('region', { name: 'Unsaved changes' })).toHaveCount(0)
+  await expect(review).toHaveCount(0)
+
+  // When the review opens for another reason, here queued work, it is listed unchecked.
+  await page.route(`**/api/agents/${helper.id}/preview`, async (route) => {
+    const response = await route.fetch()
+    const preview = await response.json()
+    await route.fulfill({ response, json: { ...preview, runs: { queued: 1, running: 0 } } })
+  })
+  await describe('Answers support questions on Acme')
+  const earlier = review.getByRole('checkbox', { name: /Reapprove the new access for #support on Acme/ })
+  await expect(earlier).not.toBeChecked()
+  await expect(review).toContainText('Already suspended by an earlier change. Reapprove only after checking its current access.')
+  const unchecked = page.waitForRequest(request => request.method() === 'PUT' && new URL(request.url()).pathname.endsWith(`/agents/${helper.id}`))
+  await review.getByRole('button', { name: 'Save', exact: true }).click()
+  expect((await unchecked).postDataJSON()).not.toHaveProperty('reapproveDelegations')
+  await expect(review).toHaveCount(0)
+  // Checked deliberately, it is reapproved.
+  await describe('Answers support questions in Acme')
+  await earlier.check()
+  const checked = page.waitForRequest(request => request.method() === 'PUT' && new URL(request.url()).pathname.endsWith(`/agents/${helper.id}`))
+  await review.getByRole('button', { name: 'Save', exact: true }).click()
+  expect((await checked).postDataJSON().reapproveDelegations).toEqual([botId])
+  await expect(review).toHaveCount(0)
+  await page.goto(workspacePath('/plugins/discord'))
 
   await bot.getByRole('button', { name: 'Delete #support on Acme' }).click()
   await page.getByRole('dialog').getByRole('button', { name: 'Delete bot' }).click()
@@ -1132,7 +1221,12 @@ async function resourceAccessFixture(workspace: import('./fixtures').Workspace, 
   const root = `/plugins/${id}/connections/${instance.id}/resources/workspace`
   const resource = await workspace.api(`/api${root}`, 'POST', { name: 'Engineering' })
   const path = `/api${root}/${resource.id}/grants`
-  return { id, agent, path }
+  return {
+    id,
+    agent,
+    path,
+    instance,
+  }
 }
 
 for (const scope of ['constructor', 'toString']) {
@@ -1217,7 +1311,7 @@ test('resource access combines explicit profiles, operation exceptions and scope
   await access.getByRole('button', { name: 'Close dialog', exact: true }).click()
   const application = page.getByRole('article', { name: 'Application', exact: true })
   await expect(application.getByText('No agent can use it yet.', { exact: true })).toHaveCount(0)
-  await expect(application.getByText('Instance-wide access: no agents.', { exact: true })).toBeVisible()
+  await expect(application).toContainText('Instance-wide access: no agents.')
   await card.getByRole('button', { name: 'Agent access', exact: true }).click()
   await expect(access.getByText('channel: C111, C222', { exact: true })).toBeVisible()
 
@@ -2388,3 +2482,38 @@ for (const prepared of [false, true]) {
     expect(writes).toBe(1)
   })
 }
+
+test('agent pages show scoped resource rights independently from instance grants', async ({ page, workspace }) => {
+  test.setTimeout(90000)
+  const { agent, path, instance } = await resourceAccessFixture(workspace, 'agent-resource-access')
+  await resourceAccessFixture(workspace, 'agent-resource-access-other')
+  await workspace.api('/api/plugins/agent-resource-access/connections', 'POST', { name: 'Application', enabled: true })
+  await workspace.api(path, 'POST', { agentId: agent.id, profile: 'read', scopes: { channel: ['C111'] } })
+  await page.goto(workspacePath(`/agents/${agent.id}`))
+  await signIn(page)
+  await expect(page.getByRole('region', { name: 'What this agent can access', exact: true }).getByRole('button', { name: /Secrets & plugins/ })).toContainText('1 saved resource rule')
+  await openAgentSection(page, 'Secrets & plugins')
+  const access = page.getByRole('region', { name: 'Resource operation access', exact: true })
+  await expect(access.getByRole('article', { name: 'Saved resource access rule' })).toHaveCount(1)
+  await expect(access.getByText('channel: C111', { exact: true })).toBeVisible()
+  await access.getByRole('button', { name: 'Revoke resource rule', exact: true }).click()
+  await access.getByRole('button', { name: 'Confirm revoke', exact: true }).click()
+  await expect(access.getByText('No saved resource access rules.', { exact: true })).toBeVisible()
+  expect((await workspace.api(path)).items).toEqual([])
+  await selectField(access, 'Resource app instance', `Application · ${instance.id} · agent-resource-access (Resource access)`)
+  await selectField(access, 'Resource collection', 'Workspaces')
+  await selectField(access, 'Resource for agent access', 'Engineering')
+  await access.getByRole('button', { name: 'Agent access', exact: true }).click()
+  const editor = page.getByRole('dialog', { name: 'Agent access · Engineering', exact: true })
+  await editor.getByRole('button', { name: 'Add access rule', exact: true }).click()
+  await expect(editor.getByRole('combobox', { name: 'Agent', exact: true })).toHaveCount(0)
+  await selectField(editor, 'Profile', 'Contribution')
+  await editor.getByLabel('Limit channel', { exact: true }).fill('C222')
+  await editor.getByRole('button', { name: 'Grant access', exact: true }).click()
+  await expect(editor.getByRole('button', { name: 'Add access rule', exact: true })).toBeVisible()
+  const rules = (await workspace.api(path)).items
+  expect(rules).toHaveLength(1)
+  expect(rules[0]).toMatchObject({ agentId: agent.id, profile: 'contribute', scopes: { channel: ['C222'] } })
+  const saved = (await workspace.api('/api/agents')).find((item: any) => item.id === agent.id)
+  expect(saved.plugins).toEqual([])
+})

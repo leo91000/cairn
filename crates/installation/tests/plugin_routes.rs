@@ -6255,7 +6255,14 @@ async fn staged_routed_requests_lose_native_worker_admission_when_their_source_i
 
 #[tokio::test]
 async fn native_source_is_retained_across_owner_lookup_and_temporary_failures() {
-    for change in ["person", "reapprove", "unavailable"] {
+    for change in [
+        "person",
+        "reapprove",
+        "package",
+        "same-package",
+        "file",
+        "unavailable",
+    ] {
         let QueuedRoutedRequest {
             _root,
             s,
@@ -6301,12 +6308,53 @@ async fn native_source_is_retained_across_owner_lookup_and_temporary_failures() 
             serde_json::from_slice(&std::fs::read(&identity_path).unwrap()).unwrap();
         identity["origin"] = json!(origin);
         std::fs::write(&identity_path, serde_json::to_vec(&identity).unwrap()).unwrap();
+        let saved_route_before = s
+            .store
+            .get("plugin-routes", text(&route, "id"))
+            .await
+            .unwrap();
         let service = s.clone();
         let ticking = tokio::spawn(async move { service.worker.tick(&service).await });
         tokio::time::timeout(std::time::Duration::from_secs(10), entered.notified())
             .await
             .unwrap();
-        if !unavailable {
+        if change == "file" {
+            std::fs::write(
+                s.config.data_dir.join("plugins/router/1/main.luau"),
+                "return { changed = true }",
+            )
+            .unwrap();
+        } else if matches!(change, "package" | "same-package") {
+            let package = registry::active(&s, "router").await.unwrap();
+            if change == "same-package" {
+                registry::approve(&s, "router", "1", &package.digest)
+                    .await
+                    .unwrap();
+            } else {
+                let mut manifest = serde_json::to_value(&package.manifest).unwrap();
+                manifest["version"] = json!("2");
+                let replacement = registry::install(
+                    &s,
+                    &json!({
+                        "manifest": manifest,
+                        "source": package.source.main,
+                        "modules": package.source.modules,
+                    }),
+                )
+                .await
+                .unwrap();
+                registry::approve(&s, "router", "2", text(&replacement, "digest"))
+                    .await
+                    .unwrap();
+            }
+            let saved_route = s
+                .store
+                .get("plugin-routes", text(&route, "id"))
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(Some(saved_route), saved_route_before);
+        } else if !unavailable {
             let route_path = format!(
                 "/api/plugins/router/connections/{instance}/resources/workspace/{resource}/routes/{}",
                 text(&route, "id"),

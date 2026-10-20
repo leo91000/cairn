@@ -14,6 +14,7 @@ const props = defineProps<{
   name: string
   operations: PluginOperation[]
   enabled: boolean
+  fixedAgent?: string
 }>()
 const emit = defineEmits<{ activity: [active: boolean] }>()
 const opened = ref(false)
@@ -24,6 +25,7 @@ let generation = 0
 let reader: AbortController | undefined
 const error = ref('')
 const rules = ref<PluginResourceGrant[]>([])
+const visibleRules = computed(() => props.fixedAgent ? rules.value.filter(rule => rule.agentId === props.fixedAgent) : rules.value)
 const adding = ref(false)
 const removing = ref<PluginResourceGrant>()
 const agent = ref('')
@@ -113,7 +115,7 @@ function close() {
 }
 
 function add() {
-  agent.value = ''
+  agent.value = props.fixedAgent ?? ''
   profile.value = ''
   overrides.value = Object.create(null)
   limits.value = Object.create(null)
@@ -179,11 +181,11 @@ onBeforeUnmount(() => {
         {{ busy ? 'Loading rules…' : 'Refresh rules' }}
       </UiButton>
       <template v-if="ready">
-        <p v-if="!rules.length" class="text-sm text-muted">
+        <p v-if="!visibleRules.length" class="text-sm text-muted">
           No access rules yet.
         </p>
         <article
-          v-for="rule in rules"
+          v-for="rule in visibleRules"
           :key="rule.id"
           class="grid min-w-0 gap-2 rounded-lg border border-line p-3"
           aria-label="Access rule"
@@ -231,6 +233,7 @@ onBeforeUnmount(() => {
           @submit.prevent="mutate('POST')"
         >
           <VirtualSelect
+            v-if="!fixedAgent"
             v-model="agent"
             label="Agent"
             :options="agentOptions"

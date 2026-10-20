@@ -266,6 +266,7 @@ pub(super) async fn save_for(
     };
     let encrypted = s.vault.encrypt(&key, &json!({ "fields": secrets }))?;
     owner.recheck(s).await?;
+    target.recheck_package(s).await?;
     let input = input.clone();
     s.store
         .transaction(move |db| {

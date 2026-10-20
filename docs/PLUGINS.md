@@ -99,9 +99,9 @@ A manifest declares `"apiVersion": 2` (the only version Cairn loads) and:
 - `programs` (with `exec`): `[{ name, path?, installer?, description }]`; exactly
   one of an absolute administrator-installed `path` or a package-relative Luau
   `installer`. Installers also require `http` and declared `hosts`; see below;
-- `agentAccess`: `{ description }`; the owner grants instance-wide access or
-  individual resource operations. Only granted agents receive the corresponding
-  commands, tools and instructions;
+- `agentAccess`: `{ description }`; the owner grants instance-wide access on each
+  agent's page (`plugins`), or individual resource operations on the resource. Only
+  granted agents receive the corresponding commands, tools and instructions;
 - `commands`, `tools`, `instructions` (need `agentAccess`), `instanceView`,
   `instanceTest` and `instanceForm`: see [Contributions](#contributions).
 
@@ -311,6 +311,11 @@ the instance's admission rules or grants public requests conversation control.
 
 ### Setup drafts
 
+The `/api/plugins` catalogue advertises `setupDrafts: true`. Independently updated
+clients only list drafts when this marker is present; earlier installations still
+load and manage their existing instances without calling the new endpoint. A draft
+read failure on a supporting host remains visible without hiding the catalogue.
+
 Owner-only `/api/plugins/<plugin>/setup-drafts` supports POST and GET (a list of
 `{items, nextCursor: null}`). Append `/<draft>` for GET, PATCH or DELETE. POST
 accepts `{name, settings?, secrets?, token?}`; PATCH additionally requires the last
@@ -362,7 +367,11 @@ fields retain the schema and 64 KiB limits. Parents must belong to the same draf
 and declared collection tree. Resources and their encrypted fields expire with the
 draft and are removed on discard/uninstall. They never appear through live instance
 APIs and provide no agent or delegation authority. Both active and draft
-configuration writes recheck their exact loaded package approval before committing.
+configuration writes recheck their exact loaded package approval and installed files
+after the last remote authority lookup, before committing. Resource form previews,
+OAuth exchanges and OAuth publication use the same boundary. The final database
+transaction also fences approval and configuration revisions; a delayed owner or
+membership response cannot make edited or missing package files usable.
 
 Owner OAuth uses `/<draft>/resources/<collection>/<resource>/oauth/<provider>`
 (POST consent, GET safe status, DELETE local disconnect) and `/finish` (POST).
@@ -596,6 +605,10 @@ payload. Instance, ancestor-resource, route, owner-access and package revisions
 are checked again before effects and after slow results. Adding a more specific
 route can revoke older queued authority. Each worker is checked against the exact
 manifest and source files it loaded, including across package approval changes.
+Native execution also retains its precise package approval across remote owner
+checks and preparation, and verifies it with the local route, person and run
+before registration or starting the agent. Reapproving identical files does not
+release work whose retained approval changed during that verification.
 Commands and MCP tools retain their run's original requester, including when the
 target integration uses an instance-wide agent grant. That separate target grant
 does not bypass revocation of the source participant, route or owner access.
@@ -815,6 +828,11 @@ accepts only an exact owner-answer provenance record for cross-author control,
 never an arbitrary anonymous input. A turn admitted without personal proof can
 still be steered by that same authenticated account after Beacon recovers, without
 upgrading the turn's proof. A new turn can use its own requester again.
+Retrying a previously accepted answer returns its receipt without changing the
+answer's original provenance or suspending a later turn. Non-owner retries still
+require the answer's recorded requester; current-owner control cannot transfer
+that earlier answer to another turn. A repeated question ID in a new turn still
+requires a fresh answer message ID.
 
 Finishing personal OAuth also links its proved external subject to that account
 for this resource and provider. An active external identity cannot be linked to
@@ -947,7 +965,9 @@ Instance routes add `GET …/connections/{id}/view`, `POST …/connections/{id}/
 the generic `POST …/connections/{id}/test` and `POST /api/plugins/{id}/form`
 (`{ instance?, settings, secrets?, token?, changed? }`). Secret fields are saved with
 `secrets: { key: value }`; an empty or missing value keeps the saved one and the API
-only returns their names (`secretKeys`). Grants are saved as `agentIds`. Instances of
+only returns their names (`secretKeys`). Grants are saved on agents
+(`plugins`); each instance keeps a synchronized `agentIds` copy, and a save
+that omits `agentIds` keeps it. Instances of
 packages that need no worker (no socket, inbound messages, conversations or timers)
 start nothing and show as ready while enabled.
 

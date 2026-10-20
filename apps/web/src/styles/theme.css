@@ -71,6 +71,9 @@
   --color-coral: light-dark(#e2512f, #ff7b5e);
   --color-coral-soft: light-dark(#fbe6df, #3a211c);
   --color-success: light-dark(#12806f, #4fc7a8);
+  /* Elevated agent rights (exclusive reservations, installation management). */
+  --color-power: light-dark(#5b3d99, var(--dark-purple));
+  --color-power-surface: light-dark(#f1ecfa, var(--dark-purple-surface));
   /* Claude Code's brand mark, beside the ink mark of Codex. */
   --color-claude: light-dark(#d97757, #e08a6c);
   --shadow-lift: 0 10px 30px -12px light-dark(#16151d33, #000c);

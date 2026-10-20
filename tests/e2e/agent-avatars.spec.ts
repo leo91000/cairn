@@ -2,7 +2,10 @@ import { Buffer } from 'node:buffer'
 import { readFile } from 'node:fs/promises'
 import {
   signIn as authenticateWorkspace,
+  createAgent,
   expect,
+  openAgentSection,
+  saveAgent,
   test,
   useRelayForHttpMocks,
   workspacePath,
@@ -11,21 +14,19 @@ import {
 async function signIn(page: import('@playwright/test').Page) {
   await page.goto(workspacePath('/agents'))
   await authenticateWorkspace(page)
-  await expect(page.getByRole('button', { name: 'New agent', exact: true })).toBeVisible()
+  await expect(page.getByRole('link', { name: 'New agent', exact: true })).toBeVisible()
 }
 
 test('uploads a persistent portrait, preserves it on edits and shows it in conversations', async ({ page, workspace }, testInfo) => {
   await signIn(page)
   await page.setViewportSize({ width: 390, height: 844 })
-  await page.getByRole('button', { name: 'New agent', exact: true }).click()
-  const dialog = page.getByRole('dialog')
-  await dialog.getByLabel('Name', { exact: true }).fill('Portrait reviewer')
-  await expect(dialog).toContainText('Save your agent to upload a portrait.')
-  await expect(dialog).toContainText('Connect and enable a Codex account in Connections')
-  await dialog.getByRole('button', { name: 'Save agent', exact: true }).click()
-  await expect(dialog).toHaveCount(0)
-  await page.getByRole('button', { name: 'Edit Portrait reviewer', exact: true }).click()
-  const portrait = dialog.getByRole('region', { name: 'Agent portrait' })
+  await page.getByRole('link', { name: 'New agent', exact: true }).click()
+  await page.getByLabel('Name', { exact: true }).fill('Portrait reviewer')
+  await expect(page.getByRole('region', { name: 'Agent portrait' })).toContainText('Save your agent to upload a portrait.')
+  await expect(page.getByRole('region', { name: 'Agent portrait' })).toContainText('Connect and enable a Codex account in Connections')
+  await createAgent(page)
+  await openAgentSection(page, 'Identity & instructions')
+  const portrait = page.getByRole('region', { name: 'Agent portrait' })
   await portrait.getByLabel('Upload agent portrait').setInputFiles('tests/fixtures/artifacts/thumbnail.png')
   await expect(portrait.locator('img')).toBeVisible()
   await expect(portrait.locator('img')).toHaveJSProperty('naturalWidth', 256)
@@ -41,10 +42,10 @@ test('uploads a persistent portrait, preserves it on edits and shows it in conve
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
   }
 
-  await dialog.getByLabel('Description', { exact: true }).fill('A new role without changing identity')
-  await dialog.getByRole('button', { name: 'Save agent', exact: true }).click()
-  await expect(dialog).toHaveCount(0)
-  const card = page.locator('article').filter({ has: page.getByRole('button', { name: 'Portrait reviewer', exact: true }) })
+  await page.getByLabel('Description', { exact: true }).fill('A new role without changing identity')
+  await saveAgent(page)
+  await page.getByRole('link', { name: 'Back to agents' }).click()
+  const card = page.locator('article').filter({ has: page.getByRole('link', { name: 'Portrait reviewer', exact: true }) })
   await expect(card.locator('img')).toHaveAttribute('src', source!)
   await workspace.restart()
   await page.reload()
@@ -66,7 +67,8 @@ test('shows generation progress, refreshes the portrait and falls back if an ima
     await route.fulfill({ json: pending })
   })
   await signIn(page)
-  await page.getByRole('button', { name: 'Edit Generated identity', exact: true }).click()
+  await page.getByRole('link', { name: 'Edit Generated identity', exact: true }).click()
+  await openAgentSection(page, 'Identity & instructions')
   const portrait = page.getByRole('region', { name: 'Agent portrait' })
   await portrait.getByRole('button', { name: 'Generate portrait', exact: true }).click()
   await expect(portrait.getByRole('status')).toContainText('Creating a portrait')
@@ -84,8 +86,8 @@ test('shows generation progress, refreshes the portrait and falls back if an ima
   await expect(portrait.getByRole('button', { name: 'Regenerate portrait', exact: true })).toBeEnabled()
   await expect(portrait.locator('img')).toHaveJSProperty('naturalWidth', 256)
   await page.route(`**/api/agents/${agent.id}/avatar?**`, route => route.fulfill({ status: 404, body: '' }))
-  await page.reload()
-  const card = page.locator('article').filter({ has: page.getByRole('button', { name: 'Generated identity', exact: true }) })
+  await page.goto(workspacePath('/agents'))
+  const card = page.locator('article').filter({ has: page.getByRole('link', { name: 'Generated identity', exact: true }) })
   await expect(card.locator('.agent-avatar')).toHaveText('G')
   await expect(card.locator('img')).toHaveCount(0)
 })

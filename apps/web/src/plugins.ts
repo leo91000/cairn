@@ -281,6 +281,9 @@ export interface PluginEntry {
 }
 
 export interface Catalog {
+  /** The host supports owner setup drafts; absent on earlier installations. */
+  setupDrafts?: boolean
+  resourceGrantCounts?: Record<string, number>
   packages: PluginEntry[]
   capabilities: { name: string, description: string }[]
   connections: PluginConnection[]

@@ -150,7 +150,11 @@ struct Stream {
 
 impl Stream {
     async fn batch(&mut self) -> (i64, Value) {
-        tokio::time::timeout(Duration::from_secs(4), async {
+        self.batch_with_timeout(Duration::from_secs(4)).await
+    }
+
+    async fn batch_with_timeout(&mut self, timeout: Duration) -> (i64, Value) {
+        tokio::time::timeout(timeout, async {
             loop {
                 if let Some(end) = self.pending.find("\n\n") {
                     let frame: String = self.pending.drain(..end + 2).collect();
@@ -374,6 +378,166 @@ async fn following_viewer_resumes_a_long_backlog_on_the_recent_window() {
     let (next, batch) = resumed.batch().await;
     assert_eq!(batch["reset"], false);
     assert_eq!(event_ids(&batch["events"]), vec![next]);
+}
+
+#[tokio::test]
+async fn resuming_past_replaced_text_snapshots_keeps_the_cached_history() {
+    let f = Fixture::new().await;
+    f.service
+        .store
+        .patch_run(&f.run, json!({ "trigger": "chat" }))
+        .await
+        .unwrap();
+    let mut chat = f.service.chat_create(json!({})).await.unwrap();
+    chat["runId"] = f.run.clone().into();
+    let path = format!("/api/chats/{}/stream", text(&chat, "id"));
+    f.service.store.put("chats", chat).await.unwrap();
+    let mut initial = f.open_path(&format!("{path}?window=1"), None).await;
+    let (cursor, batch) = initial.batch().await;
+    let history = batch["history"].as_str().unwrap().to_owned();
+    drop(initial);
+
+    // While the reader was away, an answer streamed as 300 snapshots after a tool call.
+    let run = f.run.clone();
+    f.service
+        .store
+        .transaction(move |db| {
+            let tool =
+                json!({ "item": { "id": "tool", "type": "command_execution", "command": "ls" } });
+            db.event(&run, "item.completed", "ls", Some(&tool))?;
+            let mut answer = String::new();
+            for n in 0..=300 {
+                answer.push_str(&format!("word {n} "));
+                let kind = if n == 300 {
+                    "item.completed"
+                } else {
+                    "item.updated"
+                };
+                let message =
+                    json!({ "item": { "id": "answer", "type": "agent_message", "text": answer } });
+                db.event(&run, kind, &answer, Some(&message))?;
+            }
+            db.event(&run, "turn.completed", "", None)?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let all = ids(&f).await;
+    let replaced = all[all.len() - 302..all.len() - 2].to_vec();
+
+    // Following or not, the catch-up is the tool call, the final answer, the turn's
+    // end and any later output: none of the 300 replaced snapshots.
+    for following in ["&recent=1", ""] {
+        let expected: Vec<i64> = ids(&f)
+            .await
+            .into_iter()
+            .filter(|id| *id > cursor && !replaced.contains(id))
+            .collect();
+        let latest = *expected.last().unwrap();
+        let mut resumed = f
+            .open_path(
+                &format!("{path}?after={cursor}&history={history}&window=1{following}"),
+                None,
+            )
+            .await;
+        let (id, batch) = resumed.batch().await;
+        assert_eq!(id, latest);
+        assert_eq!(batch["reset"], false);
+        assert_eq!(batch["more"], false);
+        assert!(batch.get("oldest").is_none());
+        assert_eq!(event_ids(&batch["events"]), expected);
+        assert!(
+            batch["events"][1]["payload"]["item"]["text"]
+                .as_str()
+                .unwrap()
+                .ends_with("word 300 ")
+        );
+
+        // Live output then continues on the same connection.
+        f.append(1).await;
+        let (next, update) = resumed.batch().await;
+        assert_eq!(update["reset"], false);
+        assert_eq!(event_ids(&update["events"]), vec![next]);
+    }
+}
+
+#[tokio::test]
+async fn idle_streams_refresh_lists_after_external_database_writes() {
+    async fn refreshed(stream: &mut Stream, chat_id: &str) {
+        loop {
+            let (_, batch) = stream.batch_with_timeout(Duration::from_secs(20)).await;
+            let chats = batch["state"]["chats"].as_array().unwrap();
+            if chats
+                .iter()
+                .any(|chat| chat["id"] == chat_id && chat["title"] == "After maintenance")
+            {
+                break;
+            }
+        }
+    }
+
+    let f = Fixture::new().await;
+    let chat = f
+        .service
+        .chat_create(json!({ "title": "Before maintenance" }))
+        .await
+        .unwrap();
+    let chat_id = text(&chat, "id");
+    let mut conversation = f
+        .open_path(
+            &format!("/api/chats/{chat_id}/stream?window=1&list=1"),
+            None,
+        )
+        .await;
+    conversation.batch().await;
+    let mut list = f.open_path("/api/chats/stream", None).await;
+    list.batch().await;
+
+    // This bypasses the actor and its revision counter, as an external maintenance tool does.
+    let revision = f.service.store.revision();
+    let external =
+        rusqlite::Connection::open(f.service.config.data_dir.join("manager.db")).unwrap();
+    external
+        .execute(
+            "UPDATE records SET data=json_set(data,'$.title',?) WHERE kind='chats' AND id=?",
+            ["After maintenance", chat_id],
+        )
+        .unwrap();
+    drop(external);
+    assert_eq!(f.service.store.revision(), revision);
+
+    tokio::join!(
+        refreshed(&mut conversation, chat_id),
+        refreshed(&mut list, chat_id)
+    );
+    assert_eq!(f.service.store.revision(), revision);
+}
+
+#[tokio::test]
+async fn a_conversation_stream_carries_the_conversation_list_only_on_request() {
+    let f = Fixture::new().await;
+    let chat = f.service.chat_create(json!({})).await.unwrap();
+    let path = format!("/api/chats/{}/stream?window=1", text(&chat, "id"));
+    let mut conversation = f.open_path(&path, None).await;
+    let (_, batch) = conversation.batch().await;
+    assert_eq!(batch["state"]["chat"]["id"], chat["id"]);
+    assert!(batch["state"].get("chats").is_none());
+
+    // A browser tab reading a conversation follows the list on the same stream.
+    let mut carrying = f.open_path(&format!("{path}&list=1"), None).await;
+    let (_, batch) = carrying.batch().await;
+    assert_eq!(batch["state"]["chats"][0]["id"], chat["id"]);
+
+    let mut list = f.open_path("/api/chats/stream", None).await;
+    let (_, batch) = list.batch().await;
+    assert_eq!(batch["state"]["chats"][0]["id"], chat["id"]);
+
+    // Both follow changes; the list stream at most every quarter of a second.
+    f.service.chat_pause(text(&chat, "id"), true).await.unwrap();
+    let (_, batch) = carrying.batch().await;
+    assert_eq!(batch["state"]["chats"][0]["paused"], true);
+    let (_, batch) = list.batch().await;
+    assert_eq!(batch["state"]["chats"][0]["paused"], true);
 }
 
 #[tokio::test]
@@ -930,4 +1094,250 @@ async fn backwards_pages_skip_superseded_long_answers_but_keep_reused_ids_in_old
         .collect();
     assert_eq!(messages.len(), 1);
     assert_eq!(messages[0]["payload"]["item"]["text"], "previous turn");
+}
+
+/// Process CPU time, including the SQLite actor threads, in milliseconds.
+fn cpu_ms() -> f64 {
+    let mut time = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    assert_eq!(
+        unsafe { libc::clock_gettime(libc::CLOCK_PROCESS_CPUTIME_ID, &mut time) },
+        0
+    );
+    time.tv_sec as f64 * 1000.0 + time.tv_nsec as f64 / 1_000_000.0
+}
+
+/// Percentile of sorted samples, in milliseconds.
+fn percentile(sorted: &[f64], fraction: f64) -> f64 {
+    let index = ((sorted.len() - 1) as f64 * fraction).round() as usize;
+    (sorted[index] * 100.0).round() / 100.0
+}
+
+fn summary(mut samples: Vec<f64>) -> Value {
+    samples.sort_by(f64::total_cmp);
+    json!({
+        "samples": samples.len(),
+        "p50_ms": percentile(&samples, 0.5),
+        "p95_ms": percentile(&samples, 0.95),
+    })
+}
+
+/// Opt-in: `CAIRN_PROFILE_OPENING=1 cargo test --release --test live profile_conversation_opening -- --nocapture`.
+/// Seeds a Fil with 80 active conversations and 200 in the trash, one of them a
+/// 40-turn conversation with tool calls and streamed answers, then measures what
+/// opening, paging and resuming that conversation costs the installation.
+#[tokio::test]
+async fn profile_conversation_opening() {
+    if std::env::var_os("CAIRN_PROFILE_OPENING").is_none() {
+        return;
+    }
+    let f = Fixture::new().await;
+    let template = f.service.store.run(&f.run).await.unwrap();
+    let mut chats = Vec::new();
+    for n in 0..281 {
+        chats.push(f.service.chat_create(json!({})).await.unwrap());
+        if n % 50 == 0 {
+            tokio::task::yield_now().await;
+        }
+    }
+    let heavy = text(&chats[0], "id").to_owned();
+    let seeded = chats.clone();
+    let heavy_run = f.run.clone();
+    f.service
+        .store
+        .transaction(move |db| {
+            let summary = "A finished answer with **Markdown** and a few lines.\n".repeat(60);
+            for (n, chat) in seeded.into_iter().enumerate() {
+                let run_id = if n == 0 {
+                    heavy_run.clone()
+                } else {
+                    let mut run = template.clone();
+                    let id = id();
+                    run["id"] = id.clone().into();
+                    run["status"] = "succeeded".into();
+                    run["trigger"] = "chat".into();
+                    run["summary"] = summary.clone().into();
+                    run["finishedAt"] = 1.into();
+                    db.add_run(&run, None)?;
+                    id
+                };
+                let mut chat = chat;
+                chat["runId"] = run_id.into();
+                if n > 80 {
+                    chat["lifecycle"] = "trash".into();
+                    chat["purgeAt"] = i64::MAX.into();
+                }
+                db.put("chats", &chat)?;
+            }
+            let output = "test output line\n".repeat(90);
+            for turn in 0..40 {
+                db.event(&heavy_run, "turn.started", "", None)?;
+                db.event(&heavy_run, "chat.user", &format!("Question {turn}"), None)?;
+                for call in 0..25 {
+                    let item = format!("tool-{turn}-{call}");
+                    let started = json!({ "item": { "id": item, "type": "command_execution", "command": "pnpm test", "status": "in_progress" } });
+                    db.event(&heavy_run, "item.started", "pnpm test", Some(&started))?;
+                    let completed = json!({ "item": { "id": item, "type": "command_execution", "command": "pnpm test", "aggregated_output": output, "exit_code": 0, "status": "completed" } });
+                    db.event(&heavy_run, "item.completed", "pnpm test", Some(&completed))?;
+                }
+                // The last answer streams as many small snapshots, as a long reply does.
+                let updates = if turn == 39 { 300 } else { 40 };
+                let mut answer = String::new();
+                for update in 0..=updates {
+                    answer.push_str(&format!("Paragraph {update} of the answer to turn {turn}. "));
+                    answer.push_str(&"More detail. ".repeat(6));
+                    let kind = if update == updates { "item.completed" } else { "item.updated" };
+                    let message = json!({ "item": { "id": format!("answer-{turn}"), "type": "agent_message", "text": answer } });
+                    db.event(&heavy_run, kind, &answer, Some(&message))?;
+                }
+                db.event(&heavy_run, "turn.completed", "", None)?;
+            }
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let all = ids(&f).await;
+    let stream_path = format!("/api/chats/{heavy}/stream");
+
+    // Cold opening: the first batch carries the recent window and its metadata. A browser
+    // tab asks its conversation stream to carry the list as well (`list=1`); a reference
+    // without that parameter carries the list on every conversation stream.
+    let mut cold = Vec::new();
+    let mut cold_bytes = 0;
+    let mut history = String::new();
+    let mut oldest = 0;
+    for _ in 0..15 {
+        let start = Instant::now();
+        let mut stream = f
+            .open_path(&format!("{stream_path}?after=0&window=1"), None)
+            .await;
+        let (_, batch) = stream.batch().await;
+        cold.push(start.elapsed().as_secs_f64() * 1000.0);
+        cold_bytes = stream.received;
+        history = batch["history"].as_str().unwrap().to_owned();
+        oldest = batch["oldest"].as_i64().unwrap();
+    }
+    let mut listed = Vec::new();
+    let mut listed_bytes = 0;
+    for _ in 0..15 {
+        let start = Instant::now();
+        let mut stream = f
+            .open_path(&format!("{stream_path}?after=0&window=1&list=1"), None)
+            .await;
+        stream.batch().await;
+        listed.push(start.elapsed().as_secs_f64() * 1000.0);
+        listed_bytes = stream.received;
+    }
+
+    // The conversation list on its own.
+    let mut list = Vec::new();
+    let mut list_bytes = 0;
+    for _ in 0..15 {
+        let start = Instant::now();
+        let mut stream = f.open_path("/api/chats/stream", None).await;
+        stream.batch().await;
+        list.push(start.elapsed().as_secs_f64() * 1000.0);
+        list_bytes = stream.received;
+    }
+
+    // Every older page back to the start of the conversation.
+    let mut pages = Vec::new();
+    let mut before = oldest;
+    loop {
+        let start = Instant::now();
+        let page: Value = reqwest::Client::new()
+            .get(format!(
+                "{}/api/chats/{heavy}/history?before={before}&history={history}",
+                f.url
+            ))
+            .header("x-test-relay-token", &f.token)
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        pages.push(start.elapsed().as_secs_f64() * 1000.0);
+        if page["hasOlder"] != true {
+            break;
+        }
+        before = page["oldest"].as_i64().unwrap();
+    }
+
+    // A reader who left before the last turn comes back to the latest output.
+    let resume_after = all[all.len() - 355];
+    let mut resume = Vec::new();
+    let mut resume_batch = Value::Null;
+    let mut resume_bytes = 0;
+    for _ in 0..15 {
+        let start = Instant::now();
+        let mut stream = f
+            .open_path(
+                &format!("{stream_path}?after={resume_after}&history={history}&window=1&recent=1"),
+                None,
+            )
+            .await;
+        let (_, batch) = stream.batch().await;
+        resume.push(start.elapsed().as_secs_f64() * 1000.0);
+        resume_bytes = stream.received;
+        resume_batch = batch;
+    }
+
+    // Delivery to a following reader while other tabs keep the list and other conversations
+    // (each carrying the list, as a browser tab does) open.
+    let mut idle = Vec::new();
+    for chat in chats.iter().skip(1).take(6) {
+        idle.push(
+            f.open_path(
+                &format!(
+                    "/api/chats/{}/stream?after=0&window=1&list=1",
+                    text(chat, "id")
+                ),
+                None,
+            )
+            .await,
+        );
+        idle.push(f.open_path("/api/chats/stream", None).await);
+    }
+    for stream in &mut idle {
+        stream.batch().await;
+    }
+    let mut follower = f
+        .open_path(&format!("{stream_path}?after=0&window=1"), None)
+        .await;
+    follower.batch().await;
+    let cpu = cpu_ms();
+    let mut delivery = Vec::new();
+    for n in 0..60 {
+        let start = Instant::now();
+        let run = f.run.clone();
+        f.service
+            .store
+            .transaction(move |db| db.event(&run, "output", &format!("live {n}"), None))
+            .await
+            .unwrap();
+        let (_, batch) = follower.batch().await;
+        assert!(!batch["events"].as_array().unwrap().is_empty());
+        delivery.push(start.elapsed().as_secs_f64() * 1000.0);
+    }
+
+    let profile = json!({
+        "events": all.len(),
+        "cold_open": summary(cold),
+        "cold_open_first_batch_bytes": cold_bytes,
+        "cold_open_with_list": summary(listed),
+        "cold_open_with_list_first_batch_bytes": listed_bytes,
+        "list_open": summary(list),
+        "list_first_batch_bytes": list_bytes,
+        "history_pages": summary(pages),
+        "resume_after_streamed_answer": summary(resume),
+        "resume_reset": resume_batch["reset"],
+        "resume_events": resume_batch["events"].as_array().unwrap().len(),
+        "resume_first_batch_bytes": resume_bytes,
+        "delivery_with_12_idle_streams": summary(delivery),
+        "delivery_process_cpu_ms": (cpu_ms() - cpu).round(),
+    });
+    println!("CONVERSATION_OPEN_PROFILE {profile}");
 }

@@ -88,6 +88,102 @@ pub(crate) fn agent_has_grants(db: &Db<'_>, agent: &str) -> Result<bool> {
     Ok(db.list(KIND)?.iter().any(|grant| grant["agentId"] == agent))
 }
 
+/// Saved rules, including inactive rules. Never interpreted as whole-instance access.
+pub(crate) fn counts(db: &Db<'_>) -> Result<Value> {
+    let mut counts = serde_json::Map::new();
+    let rows = db.json_rows(
+        "WITH agents AS MATERIALIZED (
+             SELECT json_extract(data,'$.agentId') AS id FROM records WHERE kind=?
+         ) SELECT json_object('agentId',id,'count',count(*)) FROM agents GROUP BY id",
+        [KIND],
+    )?;
+    for row in rows {
+        let id = text(&row, "agentId");
+        if !id.is_empty() {
+            counts.insert(id.to_owned(), row["count"].clone());
+        }
+    }
+    Ok(Value::Object(counts))
+}
+
+/// The owner can inspect every saved rule for an agent, including rules whose
+/// package is paused or awaiting approval. Credential values never enter this list.
+pub(crate) async fn for_agent(s: &Service, agent: &str, cursor: Option<&str>) -> Result<Value> {
+    uuid(agent)?;
+    if let Some(cursor) = cursor {
+        uuid(cursor)?;
+    }
+    let agent = agent.to_owned();
+    let cursor = cursor.map(str::to_owned);
+    s.store
+        .read(move |db| {
+            db.get("agents", &agent)?
+                .ok_or_else(|| Error::not_found("Agent not found."))?;
+            let mut items = Vec::new();
+            // One lookahead record keeps continuation truthful. Apply the ID and
+            // agent filters before decoding large rules or loading their metadata.
+            let values = db.json_rows(
+                "SELECT data FROM records WHERE kind=? AND json_extract(data,'$.agentId')=?
+                 AND id>? ORDER BY id LIMIT ?",
+                rusqlite::params![
+                    KIND,
+                    agent,
+                    cursor.as_deref().unwrap_or(""),
+                    (super::paging::MAX_ITEMS + 1) as i64,
+                ],
+            )?;
+            for value in values {
+                let grant: Grant = serde_json::from_value(value)?;
+                let connection = db
+                    .get(connections::KIND, &grant.connection_id)?
+                    .unwrap_or(Value::Null);
+                let resource = db
+                    .get(resources::KIND, &grant.resource_id)?
+                    .unwrap_or(Value::Null);
+                let mut item = summary(&grant);
+                item["connectionId"] = grant.connection_id.into();
+                item["pluginId"] = connection["pluginId"].clone();
+                item["instanceName"] = connection["name"].clone();
+                item["collection"] = resource["collection"].clone();
+                item["resourceName"] = resource["name"].clone();
+                items.push(item);
+            }
+            super::paging::page(items, cursor.as_deref())
+        })
+        .await
+}
+
+/// Revocation stays available even when a package/resource can no longer load.
+/// The exact agent and rule must match; removing instance grants never removes it.
+pub(crate) async fn revoke_for_agent(
+    s: &Service,
+    agent: &str,
+    grant: &str,
+    account: &str,
+) -> Result<Value> {
+    uuid(agent)?;
+    uuid(grant)?;
+    let owner = super::operations::Owner::for_account(s, account).await?;
+    let (agent, grant) = (agent.to_owned(), grant.to_owned());
+    owner.recheck(s).await?;
+    s.store
+        .transaction(move |db| {
+            let value = db
+                .get(KIND, &grant)?
+                .ok_or_else(|| Error::not_found("Resource grant not found."))?;
+            if value["agentId"] != agent {
+                return Err(Error::not_found("Resource grant not found."));
+            }
+            db.remove(KIND, &grant)?;
+            db.audit(
+                "plugin.resource.revoked",
+                &json!({ "id": grant, "agentId": agent, "connectionId": value["connectionId"] }),
+            )?;
+            Ok(json!({ "deleted": true }))
+        })
+        .await
+}
+
 pub async fn create(
     s: &Service,
     plugin: &str,
@@ -160,6 +256,7 @@ pub async fn create(
         revision: id(),
         updated_at: now(),
     };
+    approved.recheck(s).await?;
     s.store
         .transaction(move |db| {
             approved.recheck_in(db)?;

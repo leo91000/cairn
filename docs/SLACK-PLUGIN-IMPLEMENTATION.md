@@ -122,7 +122,18 @@ and Android, including exact choice IDs, numeric values, empty values and secret
 whitespace. Web dictionaries for plugin-defined collection and field names have
 no inherited entries.
 
-The current integration includes main through `176969f5`. New persisted plugin
+The current integration includes main through `23ead10f`, including agent-centric
+instance grants. Saved resource rules remain separate and never grant instance
+access themselves. Both clients retain existing plugin editing on hosts without
+the served `setupDrafts` marker; supporting hosts still load every setup page.
+
+Configuration writes and resource previews revalidate installed files after the
+last remote authority lookup, then retain their transactional approval/revision
+fence. OAuth completion and renewal use this boundary too. Question-answer receipt
+retries acknowledge an existing answer without recapturing a later turn's author;
+reusing that receipt ID for a new question is refused.
+
+New persisted plugin
 manifests require a separate compatibility boundary: epoch 7, above the inherited
 epoch 4 and upstream main's reserved epochs 5 and 6. The [persistent-format inventory and
 forward recovery plan](SLACK-PLUGIN-COMPATIBILITY.md) retain the unchanged legacy

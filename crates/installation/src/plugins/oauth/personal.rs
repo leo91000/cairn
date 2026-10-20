@@ -82,6 +82,9 @@ pub(crate) async fn list(s: &Service, account: &str, cursor: Option<&str>) -> Re
             "Installation access changed. Reload personal connections.",
         ));
     }
+    for package in packages.values() {
+        package.recheck(s).await?;
+    }
     let vault = s.vault.clone();
     s.store
         .read(move |db| {

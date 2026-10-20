@@ -65,6 +65,7 @@ pub(crate) async fn activate(
             "Setup authority changed. Reload before activating.",
         ));
     }
+    target.recheck_package(s).await?;
     let vault = s.vault.clone();
     let result = s
         .store

@@ -391,6 +391,8 @@ pub async fn routes(s: &Arc<Service>, input: &Input) -> Result<Value> {
                 }
             }
             catalog["connections"] = json!(overview);
+            catalog["setupDrafts"] = json!(true);
+            catalog["resourceGrantCounts"] = s.store.read(|db| grants::counts(db)).await?;
             Ok(catalog)
         }
         ("POST", ["plugins", "packages"]) => registry::install(s, body).await,

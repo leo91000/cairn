@@ -2,8 +2,10 @@ import { setTimeout } from 'node:timers/promises'
 import { mcpProvider } from '../fixtures/mcp-provider'
 import {
   signIn as authenticateWorkspace,
+  createAgent,
   expect,
   expectSingleScroll,
+  openAgentSection,
   test,
   useRelayForHttpMocks,
   workspacePath,
@@ -66,7 +68,7 @@ test('OAuth navigation does not leave background polls running in the departing 
   finally { await provider.close() }
 })
 
-test('manages MCP connections, OAuth consent, tools and agent access on desktop and mobile', async ({ page }, testInfo) => {
+test('manages MCP connections, OAuth consent, tools and agent access on desktop and mobile', async ({ page, workspace }, testInfo) => {
   const provider = await mcpProvider()
   const errors: string[] = []
   page.on('pageerror', error => errors.push(error.message))
@@ -114,16 +116,19 @@ test('manages MCP connections, OAuth consent, tools and agent access on desktop 
     await page.screenshot({ path: testInfo.outputPath('dark-mobile-tools.png'), animations: 'disabled' })
     await dialog.getByRole('button', { name: 'Cancel', exact: true }).click()
     await page.goto(workspacePath('/agents'))
-    await page.getByRole('button', { name: 'New agent', exact: true }).click()
-    await dialog.getByLabel('Name', { exact: true }).fill('MCP reader')
-    await dialog.getByLabel('All MCP connections, including future connections').uncheck()
-    await dialog.getByLabel('Design workspace', { exact: true }).check()
-    await dialog.getByText('Tool access', { exact: true }).click()
-    await dialog.getByLabel('All enabled tools', { exact: true }).uncheck()
-    await dialog.getByLabel('echo', { exact: true }).check()
+    await page.getByRole('link', { name: 'New agent', exact: true }).click()
+    await page.getByLabel('Name', { exact: true }).fill('MCP reader')
+    await openAgentSection(page, 'MCP & tools')
+    await page.getByRole('group', { name: 'MCP connections access' }).getByRole('button', { name: 'Choose', exact: true }).click()
+    await page.getByLabel('Design workspace', { exact: true }).check()
+    await page.locator('summary').filter({ hasText: 'Tools ·' }).click()
+    await page.getByLabel('All enabled tools', { exact: true }).uncheck()
+    await page.getByLabel('echo', { exact: true }).check()
+    await expectSingleScroll(page)
     await page.screenshot({ path: testInfo.outputPath('dark-mobile-agent-access.png'), animations: 'disabled' })
-    await dialog.getByRole('button', { name: 'Save agent', exact: true }).click()
-    await expect(dialog).toHaveCount(0)
+    const id = await createAgent(page)
+    const reader = (await workspace.api('/api/agents')).find((agent: { id: string }) => agent.id === id)
+    expect(reader.access.mcpTools).toEqual({ [reader.access.mcps[0]]: ['echo'] })
     await page.goto(workspacePath('/mcps'))
     await page.getByRole('button', { name: 'Add MCP', exact: true }).click()
     await dialog.getByRole('combobox', { name: 'Connection type', exact: true }).click()
