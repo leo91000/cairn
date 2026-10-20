@@ -357,6 +357,9 @@ impl Service {
             .await?;
         let agent = draft.agent;
         let id = existing_id.to_owned();
+        let owner = crate::relay::task_author_policy(self)
+            .await?
+            .map(|policy| policy.owner.access_id);
         self.store
             .read(move |db| {
                 let mut queued = 0;
@@ -372,7 +375,12 @@ impl Service {
                         running += 1;
                     }
                 }
-                let delegations = crate::plugins::connections::delegation_effects(db, &id, &agent)?;
+                let delegations = crate::plugins::connections::delegation_effects(
+                    db,
+                    &id,
+                    &agent,
+                    owner.as_deref(),
+                )?;
                 Ok(json!({
                     "runs": { "queued": queued, "running": running },
                     "delegations": delegations,

@@ -819,8 +819,15 @@ pub(crate) fn reapprove(db: &Db<'_>, connection_id: &str, agent: &Value) -> Resu
 /// including `alreadySuspended` when the saved agent no longer matches the approval:
 /// `suspended` when its access no longer matches the approved one or no longer meets
 /// the delegation's rules, such as a plugin grant for an agent anyone may reach, and
-/// the reason it could not be reapproved, if any.
-pub(crate) fn delegation_effects(db: &Db<'_>, agent_id: &str, agent: &Value) -> Result<Value> {
+/// the reason it could not be reapproved, if any. A delegation bound to a previous
+/// installation owner already stopped answering and only its instance screen can
+/// rebind it, so it counts as already suspended and cannot be reapproved here.
+pub(crate) fn delegation_effects(
+    db: &Db<'_>,
+    agent_id: &str,
+    agent: &Value,
+    owner: Option<&str>,
+) -> Result<Value> {
     let access = policy(agent);
     let plugins = !crate::agent_grants::plugins(agent).is_empty();
     let saved = db.get("agents", agent_id)?;
@@ -830,23 +837,29 @@ pub(crate) fn delegation_effects(db: &Db<'_>, agent_id: &str, agent: &Value) -> 
             continue;
         }
         let connection: Connection = serde_json::from_value(value)?;
-        let blocked = delegation_rules(db, &connection, &access, plugins)
+        let rules = delegation_rules(db, &connection, &access, plugins)
             .err()
             .map(|error| error.to_string());
+        let previous_owner = connection.owner_access_id.as_deref() != owner;
         // Suspended before this edit, so reapproving would also approve earlier changes.
-        let already_suspended = saved.as_ref().is_none_or(|saved| {
-            policy(saved) != connection.granted_access
-                || (connection.access_mode == AccessMode::Everyone
-                    && public_safe(db, agent_id, &connection.granted_access).is_err())
-        });
+        let already_suspended = previous_owner
+            || saved.as_ref().is_none_or(|saved| {
+                policy(saved) != connection.granted_access
+                    || (connection.access_mode == AccessMode::Everyone
+                        && public_safe(db, agent_id, &connection.granted_access).is_err())
+            });
         effects.push(json!({
             "id": connection.id,
             "pluginId": connection.plugin_id,
             "name": connection.name,
             "enabled": connection.enabled,
-            "suspended": blocked.is_some()
+            "suspended": rules.is_some()
                 || access != connection.granted_access,
-            "blocked": blocked,
+            "blocked": if previous_owner {
+                Some("It belongs to a previous installation owner. Save it again from its instance screen.".to_owned())
+            } else {
+                rules
+            },
             "alreadySuspended": already_suspended,
         }));
     }

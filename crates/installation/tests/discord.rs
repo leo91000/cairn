@@ -1292,8 +1292,19 @@ async fn agent_edits_preview_and_reapprove_the_bot_answering_as_the_agent() {
     // A later unrelated edit reports that the bot was already suspended.
     let mut renamed = widened.clone();
     renamed["description"] = "Renamed".into();
-    let preview = s.agent_preview(renamed, &id).await.unwrap();
+    let preview = s.agent_preview(renamed.clone(), &id).await.unwrap();
     assert_eq!(effect(&preview)["suspended"], true);
+    assert_eq!(effect(&preview)["alreadySuspended"], true);
+
+    // A bot bound to a previous installation owner cannot be reapproved from the agent.
+    let mut previous = stored.clone();
+    previous["ownerAccessId"] = "previous-owner".into();
+    s.store.put(connections::KIND, previous).await.unwrap();
+    let mut restored = renamed.clone();
+    restored["access"] = updated["access"].clone();
+    let preview = s.agent_preview(restored, &id).await.unwrap();
+    assert_eq!(effect(&preview)["suspended"], false);
+    assert!(effect(&preview)["blocked"].is_string());
     assert_eq!(effect(&preview)["alreadySuspended"], true);
 }
 
