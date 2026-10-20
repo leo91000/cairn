@@ -370,6 +370,62 @@ async fn run_to_end(c: &Config, p: Value) -> (Result<()>, Vec<Value>) {
     (result, drain(rx).await)
 }
 
+#[tokio::test]
+async fn managed_native_credentials_use_the_transient_store_and_keep_user_state() {
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+    let root = TempDir::new().unwrap();
+    let c = setup(&root);
+    let home = c.home.join(".claude");
+    std::fs::remove_file(home.join(".credentials.json")).unwrap();
+    std::fs::write(home.join("CLAUDE.md"), "durable user instructions").unwrap();
+    let credentials = root.path().join("transient-auth");
+    std::fs::create_dir(&credentials).unwrap();
+    let listener = tokio::net::UnixListener::bind(credentials.join("cairn-auth.sock")).unwrap();
+    let broker = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut stream = BufReader::new(stream);
+        let mut request = String::new();
+        stream.read_line(&mut request).await.unwrap();
+        let snapshot = json!({
+            "claudeAiOauth": {
+                "accessToken": "synthetic-native-access",
+                "refreshToken": "manager-only-refresh",
+                "expiresAt": now() + 3_600_000,
+                "scopes": ["user:inference"]
+            }
+        });
+        stream
+            .get_mut()
+            .write_all(format!("{snapshot}\n").as_bytes())
+            .await
+            .unwrap();
+    });
+
+    let mut p = plan(&root, "Inspect the workspace");
+    p["claudeManagedAuth"] = true.into();
+    p["claudeCredentialsDirectory"] = json!(credentials);
+    let (result, events) = run_to_end(&c, p).await;
+    result.unwrap();
+    broker.await.unwrap();
+
+    assert!(completes(&events));
+    assert!(home.join("invocations.jsonl").exists());
+    assert_eq!(
+        std::fs::read_to_string(home.join("CLAUDE.md")).unwrap(),
+        "durable user instructions"
+    );
+    assert!(!home.join(".credentials.json").exists());
+    let snapshot: Value =
+        serde_json::from_slice(&std::fs::read(credentials.join(".credentials.json")).unwrap())
+            .unwrap();
+    assert_eq!(
+        snapshot["claudeAiOauth"]["accessToken"],
+        "synthetic-native-access"
+    );
+    assert!(snapshot["claudeAiOauth"]["refreshToken"].is_null());
+}
+
 async fn drain(mut rx: mpsc::Receiver<Value>) -> Vec<Value> {
     let mut events = Vec::new();
     while let Some(event) = rx.recv().await {

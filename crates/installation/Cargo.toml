@@ -13,6 +13,10 @@ path = "src/main.rs"
 name = "ublk_probe"
 required-features = [ "ublk-prototype" ]
 
+[[example]]
+name = "native_storage_qualifier"
+required-features = [ "ublk" ]
+
 [features]
 ublk = [ "dep:libublk" ]
 ublk-prototype = [ "ublk" ]

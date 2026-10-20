@@ -310,6 +310,39 @@ pub(crate) async fn seal_target(
     })
 }
 
+/// A host filesystem supplies its own freeze/ownership barrier. Use its already
+/// owned Volume: reopening a cancelled volume while retaining it would wait for
+/// the caller's own reference to drain. Crash capture also remains available while
+/// filesystem shutdown waits for publication to free journal headroom.
+pub(crate) async fn seal_host(
+    state: &Path,
+    run: &str,
+    volume: Arc<super::runtime::Volume>,
+    crash_consistent: bool,
+    stop: CancellationToken,
+) -> Result<SealedCapture> {
+    let directory = super::environment::directory(state, run)?;
+    if !super::runtime::live(&directory).is_some_and(|current| Arc::ptr_eq(&current, &volume))
+        || stop.is_cancelled()
+        || volume.stop.is_cancelled()
+    {
+        return Err(Error::conflict("Native disk capture ownership changed."));
+    }
+    let captured_at = crate::config::now();
+    let generation = volume.seal().await?;
+    Ok(SealedCapture {
+        volume,
+        directory,
+        generation,
+        captured_at,
+        pause_ms: json!(0),
+        crash_consistent,
+        stop,
+        timing: crate::performance::Operation::new("disk_snapshot", run, "native_generation"),
+        _stopped_reads: None,
+    })
+}
+
 impl SealedCapture {
     pub(crate) async fn finish(self, state: &Path, run: &str) -> Result<Value> {
         let Self {
@@ -337,6 +370,9 @@ impl SealedCapture {
         timing.next("persist_snapshot");
         manifest["runtime"] =
             serde_json::from_slice(&tokio::fs::read(directory.join("runtime.json")).await?)?;
+        if manifest["runtime"]["backend"] == "native" && manifest["runtime"]["storage"] == "ublk" {
+            manifest["kind"] = "native-ext4-v1".into();
+        }
         manifest["capturedAt"] = captured_at.into();
         manifest["consistency"] = if crash_consistent {
             "crash"

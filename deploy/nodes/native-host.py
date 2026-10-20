@@ -280,6 +280,23 @@ def environment(directory):
             'CAIRN_NATIVE_SUPERVISOR_UNIT': SERVICE, 'APP_RUNTIME_ID': release['runtimeId']}
 
 
+def require_storage():
+    for binary in ('mkfs.ext4', 'e2fsck', 'resize2fs'):
+        if shutil.which(binary) is None:
+            raise ValueError('Native ublk storage requires e2fsprogs (' + binary + ').')
+    if not Path('/sys/module/ublk_drv').is_dir():
+        try:
+            subprocess.run(['modprobe', 'ublk_drv'], check=True, capture_output=True, timeout=10)
+        except (OSError, subprocess.SubprocessError) as error:
+            raise ValueError('Native storage requires a kernel with the ublk_drv module. Install the matching kernel modules before enrolling.') from error
+    try:
+        control = Path('/dev/ublk-control').stat()
+    except OSError as error:
+        raise ValueError('Native storage requires /dev/ublk-control.') from error
+    if not stat.S_ISCHR(control.st_mode):
+        raise ValueError('Native storage control must be a character device.')
+
+
 def install(manager):
     manager = origin(manager)
     if (ROOT / 'data/node/identity.json').exists():
@@ -293,6 +310,7 @@ def install(manager):
         raise ValueError('Native execution requires cgroup v2 with CPU, memory and PID controllers.') from error
     if not {'cpu', 'memory', 'pids'} <= controllers:
         raise ValueError('Native execution requires cgroup v2 with CPU, memory and PID controllers.')
+    require_storage()
     ROOT.mkdir(mode=0o700, parents=True, exist_ok=True)
     os.chmod(ROOT, 0o700)
     (ROOT / 'data').mkdir(mode=0o700, exist_ok=True)
@@ -391,6 +409,7 @@ def activate(candidate, previous, child):
 
 
 def run():
+    require_storage()
     manager = origin(json.loads((ROOT / 'settings.json').read_text())['manager'])
     identity = json.loads((ROOT / 'data/node/identity.json').read_text())
     token = identity['token']

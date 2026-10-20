@@ -671,17 +671,9 @@ impl Execution<'_> {
             .unwrap_or_default()["storage"]
             .clone();
         let storage_policy = Policy::for_node(&node_storage)?;
-        let native = prepared["backend"] == "native";
-        let grant = if native {
-            String::new()
-        } else {
-            nodes::disk_grants::new_disk(s, self.run, storage_node).await?
-        };
+        let grant = nodes::disk_grants::new_disk(s, self.run, storage_node).await?;
         s.store
-            .patch_run(
-                &self.id,
-                json!({ "storage": { "mode": if native { "native" } else { "on-demand" } } }),
-            )
+            .patch_run(&self.id, json!({ "storage": { "mode": "on-demand" } }))
             .await?;
         placement::renew_local(s, &self.id).await?;
         let plan = RunnerPlan {

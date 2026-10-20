@@ -30,6 +30,13 @@ pub async fn execution_ownership(state: &Path, run: &str) -> Result<crate::file_
         &root.join("owner.lock"),
         "Native workspace is still active.",
     )?;
+    if root.join("block-restore.pending.json").exists()
+        || root.join("legacy-block-restore.pending.json").exists()
+    {
+        return Err(Error::conflict(
+            "Native block restore must finish before execution resumes.",
+        ));
+    }
     if root.join("restore.pending.json").exists() {
         return Err(Error::conflict(
             "Native restore must finish before execution resumes.",
@@ -106,10 +113,85 @@ fn included(path: &Path) -> bool {
         .any(|private| relative == *private || relative.starts_with(&format!("{private}/")))
 }
 
+/// Local conversion is lossless for user/provider state. The old archive
+/// allowlist describes historical remote points, not everything a local user
+/// may have installed. Exclude only reserved generated/private runtime paths.
+fn migration_included(path: &Path) -> bool {
+    if path == Path::new("workspaces")
+        || path.starts_with("workspaces/")
+        || path == Path::new("output")
+        || path.starts_with("output/")
+        || path == Path::new("home")
+    {
+        return true;
+    }
+    let Ok(relative) = path.strip_prefix("home") else {
+        return false;
+    };
+    let value = relative.to_string_lossy();
+    if value.ends_with(".sock") {
+        return false;
+    }
+    for private in [
+        ".agents/skills",
+        ".ssh",
+        ".aws",
+        ".config/gh",
+        ".config/gcloud",
+    ] {
+        if relative == Path::new(private) || relative.starts_with(private) {
+            return false;
+        }
+    }
+    if [
+        ".gitconfig",
+        ".netrc",
+        ".npmrc",
+        ".git-credentials",
+        ".claude.json",
+        ".codex/auth.json",
+        ".codex/config.toml",
+        ".codex/cairn-managed-auth",
+        ".claude/.credentials.json",
+        ".claude/.claude.json",
+        ".local/share/opencode/auth.json",
+        ".config/opencode/auth.json",
+    ]
+    .iter()
+    .any(|private| relative == Path::new(private))
+    {
+        return false;
+    }
+    if relative.starts_with(".opencode")
+        && matches!(
+            relative.file_name().and_then(|name| name.to_str()),
+            Some("auth.json" | "credentials.json" | ".credentials.json")
+        )
+    {
+        return false;
+    }
+    true
+}
+
 pub async fn copy(source: &Path, target: &Path, budget: u64) -> Result<()> {
+    copy_using(source, target, budget, false).await
+}
+
+/// Migration retains user files/session state without importing generated secrets.
+pub(crate) async fn copy_durable(source: &Path, target: &Path, budget: u64) -> Result<()> {
+    copy_using(source, target, budget, true).await
+}
+
+async fn copy_using(source: &Path, target: &Path, budget: u64, durable: bool) -> Result<()> {
     let (mut writer, reader) = tokio::io::duplex(131072);
     let source = source.to_owned();
-    let send = tokio::spawn(async move { files::send(&source, &mut writer).await });
+    let send = tokio::spawn(async move {
+        if durable {
+            files::send_filtered(&source, &mut writer, migration_included).await
+        } else {
+            files::send(&source, &mut writer).await
+        }
+    });
     let result = files::receive(&mut BufReader::new(reader), target, budget).await;
     if result.is_err() {
         send.abort();
@@ -524,66 +606,144 @@ pub async fn own_tree(root: &Path, uid: u32, gid: u32) -> Result<()> {
 
 pub async fn bytes(root: &Path) -> Result<u64> {
     let root = root.to_owned();
-    tokio::task::spawn_blocking(move || {
-        use std::{
-            ffi::CString,
-            os::{
-                fd::{AsRawFd, FromRawFd},
-                unix::{ffi::OsStrExt, fs::OpenOptionsExt},
-            },
+    tokio::task::spawn_blocking(move || measure(&root, false))
+        .await
+        .map_err(Error::internal)?
+}
+
+/// Descriptor-relative traversal is shared by synchronous block admission and
+/// asynchronous status sampling. It never follows workload links or opens FIFOs.
+pub(crate) fn measure(root: &Path, physical: bool) -> Result<u64> {
+    use std::{
+        ffi::CString,
+        os::{
+            fd::{AsRawFd, FromRawFd},
+            unix::{ffi::OsStrExt, fs::OpenOptionsExt},
+        },
+    };
+    let directory = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW)
+        .open(root)?;
+    let entries = std::fs::read_dir(format!("/proc/self/fd/{}", directory.as_raw_fd()))?;
+    let mut stack = vec![(directory, entries)];
+    let mut total = 0u64;
+    while let Some((directory, entries)) = stack.last_mut() {
+        let Some(entry) = entries.next() else {
+            stack.pop();
+            continue;
         };
-        let directory = std::fs::OpenOptions::new()
-            .read(true)
-            .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW)
-            .open(root)?;
-        let entries = std::fs::read_dir(format!("/proc/self/fd/{}", directory.as_raw_fd()))?;
-        let mut stack = vec![(directory, entries)];
-        let mut total = 0u64;
-        while let Some((directory, entries)) = stack.last_mut() {
-            let Some(entry) = entries.next() else {
-                stack.pop();
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(Error::from(error)),
+        };
+        let name = CString::new(entry.file_name().as_bytes()).map_err(Error::internal)?;
+        // O_PATH never opens a device or FIFO. Each directory descriptor pins
+        // its ancestry, so renames and symlink swaps cannot escape this tree.
+        let fd = unsafe {
+            libc::openat(
+                directory.as_raw_fd(),
+                name.as_ptr(),
+                libc::O_PATH | libc::O_CLOEXEC | libc::O_NOFOLLOW,
+            )
+        };
+        if fd < 0 {
+            let error = std::io::Error::last_os_error();
+            if error.kind() == std::io::ErrorKind::NotFound {
                 continue;
-            };
-            let entry = match entry {
-                Ok(entry) => entry,
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
-                Err(error) => return Err(Error::from(error)),
-            };
-            let name = CString::new(entry.file_name().as_bytes()).map_err(Error::internal)?;
-            // O_PATH never opens a device or FIFO. Each directory descriptor pins
-            // its ancestry, so renames and symlink swaps cannot escape this tree.
-            let fd = unsafe {
-                libc::openat(
-                    directory.as_raw_fd(),
-                    name.as_ptr(),
-                    libc::O_PATH | libc::O_CLOEXEC | libc::O_NOFOLLOW,
-                )
-            };
-            if fd < 0 {
-                let error = std::io::Error::last_os_error();
-                if error.kind() == std::io::ErrorKind::NotFound {
-                    continue;
-                }
-                return Err(error.into());
             }
-            let file = unsafe { std::fs::File::from_raw_fd(fd) };
-            let metadata = file.metadata()?;
-            if metadata.is_dir() {
-                let entries = std::fs::read_dir(format!("/proc/self/fd/{}", file.as_raw_fd()))?;
-                stack.push((file, entries));
-            } else if metadata.is_file() {
-                total = total.saturating_add(metadata.len());
-            }
+            return Err(error.into());
         }
-        Ok(total)
-    })
-    .await
-    .map_err(Error::internal)?
+        let file = unsafe { std::fs::File::from_raw_fd(fd) };
+        let metadata = file.metadata()?;
+        if metadata.is_dir() {
+            let entries = std::fs::read_dir(format!("/proc/self/fd/{}", file.as_raw_fd()))?;
+            stack.push((file, entries));
+        } else if metadata.is_file() {
+            use std::os::unix::fs::MetadataExt;
+            let size = if physical {
+                metadata.blocks().saturating_mul(512)
+            } else {
+                metadata.len()
+            };
+            total = total.saturating_add(size);
+        }
+    }
+    Ok(total)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn local_block_migration_preserves_model_cache_and_sessions_without_managed_auth() {
+        let root = tempfile::tempdir().unwrap();
+        let source = root.path().join("source");
+        let target = root.path().join("target");
+        for directory in ["home/.cache/models", "home/.codex/sessions", "workspaces"] {
+            private_dir(&source.join(directory)).await.unwrap();
+        }
+        for (path, contents) in [
+            ("home/.cache/models/model", "user model bytes"),
+            ("home/.codex/sessions/user", "session state"),
+            ("home/.codex/auth.json", "managed synthetic credential"),
+            ("workspaces/code", "user code"),
+            ("home/.codex/skills/user/SKILL.md", "Codex user skill"),
+            ("home/.claude/tasks/task", "Claude task state"),
+            ("home/.claude/plugins/user/tool", "installed plugin"),
+            ("home/.claude/skills/user/SKILL.md", "Claude user skill"),
+            ("home/.claude/agents/assistant.md", "user agent"),
+            ("home/.claude/.credentials.json", "managed Claude token"),
+        ] {
+            private_dir(source.join(path).parent().unwrap())
+                .await
+                .unwrap();
+            tokio::fs::write(source.join(path), contents).await.unwrap();
+        }
+        copy_durable(&source, &target, 1048576).await.unwrap();
+        assert_eq!(
+            tokio::fs::read(target.join("home/.cache/models/model"))
+                .await
+                .unwrap(),
+            b"user model bytes"
+        );
+        assert_eq!(
+            tokio::fs::read(target.join("home/.codex/sessions/user"))
+                .await
+                .unwrap(),
+            b"session state"
+        );
+        assert_eq!(
+            tokio::fs::read(target.join("workspaces/code"))
+                .await
+                .unwrap(),
+            b"user code"
+        );
+        assert!(!target.join("home/.codex/auth.json").exists());
+        for (path, contents) in [
+            ("home/.codex/skills/user/SKILL.md", "Codex user skill"),
+            ("home/.claude/tasks/task", "Claude task state"),
+            ("home/.claude/plugins/user/tool", "installed plugin"),
+            ("home/.claude/skills/user/SKILL.md", "Claude user skill"),
+            ("home/.claude/agents/assistant.md", "user agent"),
+        ] {
+            assert_eq!(
+                tokio::fs::read(target.join(path)).await.unwrap(),
+                contents.as_bytes()
+            );
+            assert!(
+                !included(Path::new(path)),
+                "Archive filtering stays unchanged"
+            );
+        }
+        assert!(!target.join("home/.claude/.credentials.json").exists());
+        assert!(
+            !included(Path::new("home/.cache/models/model")),
+            "Legacy archive contract is unchanged"
+        );
+    }
 
     #[tokio::test]
     async fn native_checkpoint_restores_files_modes_and_session_state_without_managed_credentials()

@@ -67,6 +67,7 @@ impl Fixture {
             "runtimes": ["development"],
             "capabilities": {
                 "backend": "native",
+                "ublk": true,
                 "os": "linux",
                 "arch": "x86_64",
                 "cpu": 4,

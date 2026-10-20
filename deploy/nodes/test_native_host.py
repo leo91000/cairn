@@ -39,6 +39,31 @@ class NativeHostTests(unittest.TestCase):
                     enrollment.assert_not_called()
                     prepare.assert_not_called()
 
+    def test_native_storage_loads_only_its_missing_driver_and_checks_control(self):
+        with patch.object(host.shutil, 'which', return_value='/synthetic/tool'), \
+                patch.object(host.Path, 'is_dir', return_value=False), \
+                patch.object(host.Path, 'stat', return_value=Mock(st_mode=host.stat.S_IFCHR)), \
+                patch.object(host.subprocess, 'run') as run:
+            host.require_storage()
+            self.assertEqual(['modprobe', 'ublk_drv'], run.call_args.args[0])
+
+    def test_loaded_storage_driver_does_not_need_its_module_file_again(self):
+        with patch.object(host.shutil, 'which', return_value='/synthetic/tool'), \
+                patch.object(host.Path, 'is_dir', return_value=True), \
+                patch.object(host.Path, 'stat', return_value=Mock(st_mode=host.stat.S_IFCHR)), \
+                patch.object(host.subprocess, 'run') as run:
+            host.require_storage()
+            run.assert_not_called()
+
+    def test_missing_storage_tooling_or_wrong_control_device_fail_closed(self):
+        with patch.object(host.shutil, 'which', return_value=None), self.assertRaisesRegex(ValueError, 'e2fsprogs'):
+            host.require_storage()
+        with patch.object(host.shutil, 'which', return_value='/synthetic/tool'), \
+                patch.object(host.Path, 'is_dir', return_value=True), \
+                patch.object(host.Path, 'stat', return_value=Mock(st_mode=host.stat.S_IFREG)), \
+                self.assertRaisesRegex(ValueError, 'character device'):
+            host.require_storage()
+
     def test_origin_cannot_redirect_credentials_to_another_path_or_scheme(self):
         self.assertEqual('https://manager.example.test', host.origin('https://manager.example.test/'))
         self.assertEqual('http://127.0.0.1:4310', host.origin('http://127.0.0.1:4310'))

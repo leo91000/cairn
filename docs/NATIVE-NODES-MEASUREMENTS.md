@@ -1,4 +1,91 @@
-# Native stopped checkpoint measurements
+# Native storage measurements
+
+## Host ublk and lazy S3 resume
+
+Measured on 2026-10-20, 15:52–15:53 UTC, at
+`883c6e6ede971414c4c0642307ea045219fcab51` in the successful
+[disposable-host qualification](https://github.com/leo91000/cairn/actions/runs/39451413776/job/118729775461).
+The [recorded JSON](measurements/native-storage-883c6e6e.json) is the workflow's
+`native-storage-evidence/native-storage.json` artifact. Later qualification adds a
+distinct second unpublished mutation to make the repeated-restore assertion catch
+a skipped restore; these timings remain evidence for the measured source above.
+
+The runner reported Linux `7.0.0-1017-azure`, x86-64, four visible CPUs, AMD EPYC
+9V45, and 16,367,524 kB total RAM. `stat -f` reported the host filesystem family as
+`ext2/ext3`. Native execution used one CPU, 512 MiB RAM and a 256 MiB ext4 disk on
+ublk. The reference ran as host root without those workload cgroup limits. This
+is one sequential sample per path on a hosted runner; CPU allocation, cache state
+and unrelated host activity were not held constant. It does not isolate the cost
+of ublk from cgroup, journal, SDK, encryption or host scheduling costs.
+
+The exact same Python workload writes and fsyncs 128 text files of 4 KiB, then
+reads an 8 MiB random asset seeded with 42 twice. The reference accesses the host
+filesystem directly. `nativeRetained` uses the initialized journal-backed disk;
+`nativeEvicted` runs after acknowledged clean-cache eviction, controller restart
+and remount. The controller and Cairn runner use a development build with debug info
+and incremental compilation disabled. S3 is Moto 5.2.3 on loopback with synthetic
+credentials: these numbers contain no WAN or production S3 latency, model calls,
+GPU execution or personal desktop measurements.
+
+| Operation, wall / workload CPU ms | Direct host reference | Native retained | Native after eviction |
+| --- | ---: | ---: | ---: |
+| 128 fsynced 4 KiB writes | 76.32 / 7.70 | 261.65 / 12.38 | 214.30 / 12.04 |
+| Cold-hinted 8 MiB read | 3.08 / 3.08 | 6.98 / 3.76 | 940.76 / 4.05 |
+| Following warm 8 MiB read | 3.61 / 3.61 | 3.71 / 3.71 | 3.64 / 3.64 |
+
+Wall time uses `perf_counter`; CPU is `process_time` of the Python workload,
+excluding controller/backend, S3 server, encryption/decompression workers and
+other processes. It is not total storage CPU. Cold reads use advisory
+`POSIX_FADV_DONTNEED` on that file only; neither all host caches nor cold physical
+I/O are verified. The warm sample follows the hinted read immediately. After
+eviction, the controller restart also clears its userspace caches. The observed
+post-eviction hinted read was about 0.94 s even on loopback; repeated realistic
+workloads and release builds are needed before making throughput claims.
+
+| Byte accounting | Observed bytes |
+| --- | ---: |
+| Reference raw payload, asset + 128 text files | 8,912,896 |
+| First published point, encoded S3 objects | 8,434,414 across 10 objects |
+| Clean local cache reclaimed | 37,748,736 |
+| S3 inventory after all scenarios, before purge | 8,566,387 across 29 objects |
+
+The first-point total includes compressed/authenticated-encrypted blocks and its
+encrypted manifest record, including filesystem metadata and durable provider/user
+state. It excludes HTTP overhead and is not the same content boundary as the raw
+payload-only reference. The final inventory covers the whole qualification, not
+one checkpoint. Native retained/evicted remote-request deltas were 0/2. Despite the
+JSON key `readTriggeredRemoteRequests`, that counter spans both the fsynced writes
+and the asset reads: it proves demand requests occurred during that combined
+workload, not a read-only request count. The script checks that unrelated
+conversation cache is unchanged and that purge leaves the synthetic bucket empty.
+
+This harness manually stages attempt inputs and invokes the real controller. It
+covers kernel ublk/ext4, unprivileged execution, secret bindings, legacy migration,
+publication/acknowledgement, active/dirty/stale eviction refusals, CPU pause/resume,
+restore, lease/guardian/controller fencing, crash recovery and stopped capture.
+It does not measure the production remote connector's total startup transfer.
+That shared VM connector still transfers the original checkout in attempt staging;
+the initialized journal remains authoritative and does not reseed from it.
+
+Reproduce only on a disposable Linux systemd host with cgroup v2, `ublk_drv`,
+e2fsprogs and the isolated Python/Moto/AWS CLI environment prepared by the
+[workflow](../.github/workflows/ci.yaml) `native-runtime` job:
+
+```sh
+CARGO_PROFILE_DEV_DEBUG=0 CARGO_INCREMENTAL=0 \
+  cargo build --locked --bin cairn --example native_storage_qualifier --features ublk
+sudo env PATH="$PWD/.native-s3-test/bin:$PATH" CAIRN_NATIVE_DISPOSABLE_HOST=1 \
+  NATIVE_STORAGE_EVIDENCE_DIR="$PWD/native-storage-evidence" \
+  .native-s3-test/bin/python scripts/tests/node_s3_test.py \
+  --native-runtime target/debug/cairn \
+  --qualifier target/debug/examples/native_storage_qualifier
+```
+
+## Legacy file-archive measurements
+
+Historical epoch-6 native file-backend reference, retained for comparison of the
+old approach. These numbers do not describe the current ublk implementation and
+were collected on a different host with a different workload path.
 
 Local measurement rerun after the retained-pool and failed-capture corrections on
 2026-10-19, 14:47–14:48 UTC, Linux 6.12.109 x86-64, overlayfs in a shared

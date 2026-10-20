@@ -16,6 +16,17 @@ pub async fn prepare(
     prepare_source(directory, size, context, stop, false, None).await
 }
 
+/// Native host workspaces have one ext4 filesystem and no guest system view.
+#[cfg(feature = "ublk")]
+pub(crate) async fn prepare_native(
+    directory: &Path,
+    size: u64,
+    context: &Value,
+    stop: &tokio_util::sync::CancellationToken,
+) -> Result<()> {
+    prepare_source(directory, size, context, stop, false, Some(Layout::Flat)).await
+}
+
 /// Build an anonymous, entirely local disk without minting or borrowing any
 /// conversation's S3 authority. Only prepared environments may use this path.
 pub async fn prepare_unassigned(

@@ -8,10 +8,13 @@ never crash a driver. Review code before testing on a personal workstation.
 
 ## Requirements and enrollment
 
-Use Linux x86-64 with systemd 252+, cgroup v2, Python 3, curl, useradd/usermod, and
-host libraries compatible with the published coding engines. The installed GPU
+Use Linux x86-64 with systemd 252+, cgroup v2, Python 3, curl, useradd/usermod,
+e2fsprogs, io_uring and a working `ublk_drv` kernel driver. Host libraries must be
+compatible with the published coding engines. The installed GPU
 driver, render/video device permissions and application libraries must already
-work. Cairn does not install drivers, detach a GPU or close a graphical session.
+work. Cairn does not install GPU drivers, detach a GPU or close a graphical session.
+Enrollment loads the existing ublk storage module and checks its control device;
+unsupported kernels must be provisioned before native execution can start.
 The installation manager and its S3 storage must be configured normally.
 
 As the installation owner, open Nodes, add a machine and choose Native process.
@@ -52,37 +55,73 @@ written into arbitrary project files.
 
 ## Storage and recovery
 
-Local workspace changes persist between turns. Stopped checkpoints publish to S3;
-active work has no live coherent backup. A sudden power loss can lose changes
-since the last checkpoint, just as other unsynchronized local work can. Keep the
-node available long enough for final synchronization. Sync errors retain local
-files and surface in the execution-node details.
+The native controller mounts ext4 directly on ublk, using the same local journal,
+scoped S3 block reads, encrypted immutable publications and cache as a VM. There
+is no guest kernel. Same-node resume reopens that disk and loads missing blocks on
+demand; it does not restore the current workspace from a complete file archive
+or replace it with the original project checkout. The remote connector still
+transfers the original checkout in attempt staging, as it does for VM nodes; an
+initialized disk does not consume that seed. Lazy disk resume therefore does not
+mean total startup traffic consists only of demanded blocks. See the
+[storage measurements](NATIVE-NODES-MEASUREMENTS.md) for the measured boundary.
 
-Root-private data is under `/var/lib/cairn-native`: transfer staging in `data/`,
-conversation files in `state/native/<run>/data/`, stopped archives in `state/snapshots/`.
-The local controller socket is root-private at `state/controller.sock`.
-Disk budgets cover the shared logical size of all retained conversations, archives,
-seed/restore staging, logs and artifact copies on this node. Each conversation also
-has its own workspace ceiling; those ceilings are not preallocated reservations.
-Controlled copies use the remaining shared budget, and running work is stopped
-when either ceiling is exceeded. These are monitored limits, not hard filesystem
-quotas. Checkpoint creation needs spare space for a full framed archive and its
-metadata while the prior archive is retained, plus a safety reserve.
-Previous work displaced by restore remains in `stale-*` until explicit prune or
-delete. Restore staging is journaled. If a restore is interrupted, retry that same
-backup before resuming execution. Never delete a lock or active marker to force
-concurrent writers. Stop the service before manually inspecting or repairing state.
+Periodic live checkpoints are crash consistent. Completed turns fence their
+processes and flush/unmount the filesystem before sealing their completed journal
+prefix. Final S3 publication can finish asynchronously while a later turn starts.
+A controller or machine crash can lose unflushed kernel pages; committed local
+journal writes remain recoverable. Missing or unauthorized S3 bytes never become
+zero-filled files. Unavailable storage can delay I/O and shutdown until recovery;
+keep the node available for synchronization. Sync errors retain the journal and
+surface in the execution-node details.
 
-Stopping for maintenance waits for fencing, final capture and workspace ownership
-release within the maintenance deadline. A failed capture keeps local work and
-invalidates its previous checkpoint. After freeing space or fixing the cause,
-retry synchronization: the stopped capture is retried safely, and only a successful
-replacement clears the error.
+After one idle hour, Cairn automatically reclaims a terminal conversation's clean
+local block cache and obsolete generated attempt files. The sweep checks bounded
+batches every minute, so reclamation can occur later than the one-hour threshold.
+It requires the exact latest acknowledged S3 generation and no active attempt,
+pending publication or movement. Unpublished journal writes are never evicted. The
+journal metadata, base manifest, scoped grant and pinned runtime remain, so the
+next execution can read its files from S3 on demand. Chat history, published
+artifacts and shared engine/tool bundles remain available.
 
-Cross-node recovery requires native Linux x86-64 and the pinned coding-engine
+Root-private data is under `/var/lib/cairn-native`. Transfer staging is in `data/`;
+journals and clean cache are in `state/disks/<run>/lazy/`. The mounted conversation
+filesystem is `state/native/<run>/data/` under the root-private state directory,
+in the system manager's mount namespace. The unprivileged workload gets only its
+selected directory binds; the ublk backend has a separate private namespace that
+never contains its consumer filesystem. Stopped execution leaves an empty
+mountpoint. Restart fences workloads and verifies/unmounts retained owned mounts
+before device cleanup and journal recovery.
+Temporary files in `state/native/<run>/tmp/` are outside the durable filesystem.
+The root-private controller socket is `state/controller.sock`. Do not mount the
+disk elsewhere or delete ownership/active markers to force a second writer.
+
+The conversation filesystem size enforces its workspace capacity. The shared node
+budget charges retained journals, caches, migration copies, staging, logs and
+artifacts; the mounted view is not charged a second time. Temporary files and
+other host-side copies remain monitored limits rather than hard host filesystem
+quotas. Physical free-space reserves and journal admission still apply. First-time
+migration from native file storage, and exceptional filesystem growth, can need
+extra temporary capacity. Ordinary remounts keep demand loading.
+
+Generated runtime configuration, account credentials and frozen skills are bound
+from per-attempt staging instead of being copied into persisted blocks. Provider
+session files, user tools and workspace/output files stay on the journal-backed
+filesystem. This does not detect secrets deliberately written into arbitrary user
+files. A different workload UID on a destination can require a one-time ownership
+reconciliation of filesystem metadata.
+
+Existing stopped `native-files-v1` checkpoints remain readable. Local file work is
+copied into the block filesystem while retaining the old source until its new S3
+point is acknowledged. Displaced recovery copies remain under `stale-*` for explicit
+prune/delete. Restore staging is journaled; retry that same recovery point after an
+interruption. A failed restore cannot silently fall back to an original seed.
+
+Cross-node recovery requires native Linux x86-64, ublk and the pinned coding-engine
 runtime on the destination. Different installed application dependencies can still
 prevent a project from running. Native-to-VM and cross-OS environment conversion
-are not supported. The immutable source and artifact protocols remain shared.
+remain unsupported. This storage change advances installation data epoch 6 to 7;
+follow the reviewed transition in [ADR 0052](adr/0052-native-ublk-workspaces-and-idle-eviction.md)
+before upgrading. An older native binary must not be started against the new state.
 
 ## Updates and removal
 
@@ -98,3 +137,10 @@ host. Removing `/opt/cairn-native` and `/var/lib/cairn-native` deletes binaries 
 all retained local work; do this only after synchronization and recovery review.
 Remove its systemd unit and run `systemctl daemon-reload` when uninstalling. The
 installer leaves GPU drivers and the personal desktop session untouched.
+
+Claude's broker and CLI use a separate writable transient secure store for
+credentials. The full Claude user directory remains journal-backed, including
+root-level instructions/settings, arbitrary tool state, projects, sessions and
+installed plugins. Cairn-generated account metadata and configuration are bound
+from staging; generated Codex configuration and frozen Cairn skills retain read-only
+bindings. Other user tools and model caches in the private home remain durable.

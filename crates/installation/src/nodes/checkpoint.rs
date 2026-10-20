@@ -92,7 +92,7 @@ pub async fn capture_completed(state: &Path, run: &str, stop: CancellationToken)
     crate::storage::checkpoint::capture_completed(state, run, stop).await
 }
 
-async fn prepare_capture(state: &Path, run: &str) -> Result<crate::file_lock::Guard> {
+pub(crate) async fn prepare_capture(state: &Path, run: &str) -> Result<crate::file_lock::Guard> {
     crate::validation::uuid(run)?;
     let disk = crate::storage::environment::directory(state, run)?;
     let capture = crate::file_lock::exclusive(

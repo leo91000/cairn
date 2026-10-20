@@ -1,10 +1,11 @@
 //! Native implementation of the existing authenticated node controller protocol.
-use super::{atomic_write, disk, systemd, workspace};
+use super::{atomic_write, block, disk, systemd, workspace};
 use crate::{
     error::{Error, Result},
     microvm::{plan::Plan, protocol::Event, wire},
     nodes::snapshots,
     skills::private_dir,
+    storage,
     validation::{text, uuid},
 };
 use axum::{
@@ -35,6 +36,8 @@ const MAX_LOG: u64 = 64 * 1024 * 1024;
 struct Attempt {
     run: String,
     stop: CancellationToken,
+    started: bool,
+    protection: Option<tokio::task::JoinHandle<()>>,
 }
 
 #[derive(Clone)]
@@ -42,6 +45,7 @@ struct Controller {
     data: PathBuf,
     state: PathBuf,
     active: Arc<Mutex<HashMap<String, Attempt>>>,
+    mounted: Arc<Mutex<HashMap<String, Arc<block::Handle>>>>,
     leases: Arc<Mutex<HashMap<String, u64>>>,
     admission: Arc<Mutex<()>>,
     budget: Arc<Mutex<Value>>,
@@ -154,15 +158,55 @@ impl Controller {
             Attempt {
                 run: text(&plan, "runId").into(),
                 stop: stop.clone(),
+                started: false,
+                protection: None,
             },
         );
         let (controller, id) = (self.clone(), id.to_owned());
+        let (lease_controller, lease_id, lease_stop) =
+            (controller.clone(), id.clone(), stop.clone());
         tokio::spawn(async move {
-            let result = controller.execute(&id, &plan, stop).await;
+            loop {
+                tokio::select! {
+                    () = lease_stop.cancelled() => {},
+                    () = tokio::time::sleep(Duration::from_millis(100)) => {
+                        if lease_controller.leased(&lease_id).await { continue; }
+                        lease_stop.cancel();
+                    }
+                }
+                let preparation = lease_controller
+                    .active
+                    .lock()
+                    .await
+                    .get(&lease_id)
+                    .is_some_and(|attempt| !attempt.started);
+                if preparation {
+                    let _ = lease_controller.abort_disk(&lease_id).await;
+                }
+                break;
+            }
+        });
+        tokio::spawn(async move {
+            let result = controller.execute(&id, &plan, stop.clone()).await;
+            // Reject in-flight file mutations before flushing/unmounting. Any
+            // already admitted copy retains the global mutation lock.
+            stop.cancel();
             // The physical owner lock and active marker survive any uncertain stop.
             while let Err(error) = systemd::stop(&id).await {
+                let _ = controller.abort_disk(&id).await;
                 tracing::error!(attempt = id, message = %error.message, "Native workload fencing must be retried");
                 tokio::time::sleep(Duration::from_secs(2)).await;
+            }
+            let protection = controller
+                .active
+                .lock()
+                .await
+                .get_mut(&id)
+                .and_then(|attempt| attempt.protection.take());
+            if let Some(protection) = protection {
+                // A late freeze/thaw must finish before this mount's leases or
+                // volume can be released to a following attempt.
+                let _ = protection.await;
             }
             let code = match result {
                 Ok(code) => code,
@@ -172,20 +216,6 @@ impl Controller {
                     crate::runner::CONTROLLER_FAILED
                 }
             };
-            let budget = plan["resources"]["diskMiB"]
-                .as_u64()
-                .unwrap_or(32768)
-                .saturating_mul(1_048_576);
-            let captured = controller
-                .capture_checkpoint(text(&plan, "runId"), &id, budget)
-                .await;
-            if let Err(error) = captured {
-                tracing::error!(attempt = id, message = %error.message, "Native checkpoint failed; local work retained");
-                let _ =
-                    atomic_write(&root.join("checkpoint-error"), error.message.as_bytes()).await;
-            } else {
-                let _ = tokio::fs::remove_file(root.join("checkpoint-error")).await;
-            }
             // Deliver the legacy result path expected by the node connector.
             let result = root.join("data/output/result.md");
             if let Ok(file) = crate::artifacts::file::open_export(&result, &root.join("data")) {
@@ -200,6 +230,58 @@ impl Controller {
                         .join(text(&plan, "runId"))
                         .join("output/result.md");
                     let _ = atomic_write(&target, &bytes).await;
+                }
+            }
+            let native_block =
+                block::exists(&controller.state, text(&plan, "runId")).unwrap_or(true);
+            if native_block {
+                let mounted = {
+                    controller
+                        .mounted
+                        .lock()
+                        .await
+                        .get(text(&plan, "runId"))
+                        .cloned()
+                };
+                let had_mount = mounted.is_some();
+                if let Some(mounted) = mounted {
+                    loop {
+                        let result = async {
+                            let _disk = disk::lock(&controller.state).await?;
+                            mounted.mount.lock().await.close().await
+                        }
+                        .await;
+                        match result {
+                            Ok(()) => break,
+                            Err(error) => {
+                                tracing::error!(attempt = id, %error, "Native filesystem must finish flushing and unmounting before ownership release");
+                                tokio::time::sleep(Duration::from_secs(2)).await;
+                            }
+                        }
+                    }
+                }
+                controller.mounted.lock().await.remove(text(&plan, "runId"));
+                while !had_mount
+                    && let Err(error) =
+                        block::recover_completed(&controller.state, text(&plan, "runId"), &id).await
+                {
+                    tracing::error!(attempt = id, %error, "Native completed generation must be recovered before ownership release");
+                    tokio::time::sleep(Duration::from_secs(2)).await;
+                }
+            } else {
+                let budget = plan["resources"]["diskMiB"]
+                    .as_u64()
+                    .unwrap_or(32768)
+                    .saturating_mul(1_048_576);
+                let captured = controller
+                    .capture_checkpoint(text(&plan, "runId"), &id, budget)
+                    .await;
+                if let Err(error) = captured {
+                    tracing::error!(attempt = id, message = %error.message, "Native checkpoint failed; local work retained");
+                    let _ = atomic_write(&root.join("checkpoint-error"), error.message.as_bytes())
+                        .await;
+                } else {
+                    let _ = tokio::fs::remove_file(root.join("checkpoint-error")).await;
                 }
             }
             // Release physical ownership before reporting completion to a replacement.
@@ -266,72 +348,56 @@ impl Controller {
             .as_str()
             .ok_or_else(|| Error::bad("Missing pinned native runtime."))?;
         super::systemd::tools(runtime)?;
-        if !root.join("initialized").exists() {
-            if !data.join(".cairn-seed-complete").exists() {
-                if data.exists() {
-                    return Err(Error::conflict(
-                        "Incomplete native preparation retained local data; inspect it before replacing it.",
-                    ));
-                }
-                let seed = tempfile::tempdir_in(&root)?;
-                let staged = seed.path().join("data");
-                private_dir(&staged).await?;
-                for directory in ["home", "output", "tmp"] {
-                    private_dir(&staged.join(directory)).await?;
-                }
-                let source = Plan::new(plan.clone())
-                    .imports()
-                    .find(|import| import.target == text(plan, "projectRoot"))
-                    .map(|import| import.source.to_owned())
-                    .ok_or_else(|| Error::bad("Missing native workspace seed."))?;
-                workspace::copy(
-                    &source,
-                    &staged.join("workspaces"),
-                    self.disk_budget(plan).min(self.disk_growth().await?),
-                )
-                .await?;
-                workspace::sync_directories(&staged).await?;
-                atomic_write(&staged.join(".cairn-seed-complete"), b"1").await?;
-                tokio::fs::rename(staged, &data).await?;
-                tokio::fs::File::open(&root).await?.sync_all().await?;
-            }
-            let runtime_record = json!({
-                "backend": "native",
-                "os": "linux",
-                "arch": "x86_64",
-                "runtimeId": runtime,
-            });
-            atomic_write(
-                &root.join("runtime.json"),
-                &serde_json::to_vec(&runtime_record)?,
-            )
-            .await?;
-            atomic_write(&root.join("initialized"), b"1").await?;
+        let mounted = block::mount(&self.state, text(plan, "runId"), plan, &stop).await?;
+        self.mounted.lock().await.insert(
+            text(plan, "runId").to_owned(),
+            Arc::new(block::Handle::new(mounted)),
+        );
+        if stop.is_cancelled() {
+            return Ok(143);
         }
-        let temporary = data.join("tmp");
+        block::initialize(
+            &self.state,
+            text(plan, "runId"),
+            plan,
+            self.disk_budget(plan).min(self.disk_growth().await?),
+        )
+        .await?;
+        let temporary = root.join("tmp");
         if temporary.exists() {
             tokio::fs::remove_dir_all(&temporary).await?;
         }
-        for directory in ["home", "workspaces", "output", "tmp"] {
-            private_dir(&data.join(directory)).await?;
-        }
-        let recorded: Value =
-            serde_json::from_slice(&tokio::fs::read(root.join("runtime.json")).await?)?;
-        if recorded["runtimeId"] != runtime {
-            return Err(Error::conflict(
-                "Native environment runtime changed. Start a new conversation.",
-            ));
-        }
+        private_dir(&temporary).await?;
+        workspace::own_tree(&temporary, self.identity.uid, self.identity.gid).await?;
         let stage = self.data.join("runs").join(text(plan, "runId"));
-        install_home(&stage.join("home"), &data.join("home")).await?;
-        if workspace::bytes(&data).await? > self.disk_budget(plan)
-            || disk::used(&self.data, &self.state).await? > self.disk_limit().await?
-        {
+        let bindings = super::home::prepare(
+            &stage.join("home"),
+            &data.join("home"),
+            self.identity.uid,
+            self.identity.gid,
+        )
+        .await?;
+        workspace::own_tree(&stage.join("home"), self.identity.uid, self.identity.gid).await?;
+        let ownership = json!({ "uid": self.identity.uid, "gid": self.identity.gid });
+        let saved_owner: Value = match tokio::fs::read(root.join("file-owner.json")).await {
+            Ok(bytes) => serde_json::from_slice(&bytes)?,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Value::Null,
+            Err(error) => return Err(error.into()),
+        };
+        if saved_owner != ownership {
+            workspace::own_tree(&data, self.identity.uid, self.identity.gid).await?;
+            block::sync(&data).await?;
+            atomic_write(
+                &root.join("file-owner.json"),
+                &serde_json::to_vec(&ownership)?,
+            )
+            .await?;
+        }
+        if disk::used(&self.data, &self.state).await? > self.disk_limit().await? {
             return Err(Error::conflict(
                 "Native preparation exceeds the shared node disk budget; local work is retained.",
             ));
         }
-        workspace::own_tree(&data, self.identity.uid, self.identity.gid).await?;
         let container = self.state.join("roots").join(id);
         tokio::fs::create_dir_all(&container).await?;
         tokio::fs::set_permissions(&container, std::fs::Permissions::from_mode(0o755)).await?;
@@ -348,6 +414,10 @@ impl Controller {
             tokio::fs::create_dir_all(container.join(dir)).await?;
         }
         let mut plan = plan.clone();
+        plan["nativeHomeBindings"] = serde_json::to_value(bindings)?;
+        if plan["chat"]["provider"] == "claude" {
+            plan["chat"]["claudeCredentialsDirectory"] = super::home::CLAUDE_AUTH_DIRECTORY.into();
+        }
         let mcp_stop = stop.child_token();
         let _mcp_guard = mcp_stop.clone().drop_guard();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
@@ -412,14 +482,43 @@ impl Controller {
             workspace: &data.join("workspaces"),
             output: &data.join("output"),
             identity: &self.identity,
+            temporary: &temporary,
             auth: auth.as_deref(),
         };
         drop(disk_owner);
         if !self.leased(id).await || stop.is_cancelled() {
             return Ok(143);
         }
+        if let Some(attempt) = self.active.lock().await.get_mut(id) {
+            attempt.started = true;
+        }
         systemd::start_guardian(id, &self.file(id, "lease")).await?;
         let mut child = systemd::spawn(&launch)?;
+        let storage_stop = stop.child_token();
+        let _storage_guard = storage_stop.clone().drop_guard();
+        let mounted = self
+            .mounted
+            .lock()
+            .await
+            .get(text(&plan, "runId"))
+            .cloned()
+            .ok_or_else(|| Error::internal("Native disk ownership missing."))?;
+        let (protection_id, protection_stop) = (id.to_owned(), stop.clone());
+        let protection = tokio::spawn(async move {
+            if let Err(error) =
+                super::protection::monitor(mounted.volume.clone(), &protection_id, storage_stop)
+                    .await
+            {
+                tracing::error!(attempt = protection_id, %error, "Native storage CPU protection failed; fencing workload");
+                protection_stop.cancel();
+                if systemd::stop(&protection_id).await.is_err() {
+                    let _ = mounted.abort_io().await;
+                }
+            }
+        });
+        if let Some(attempt) = self.active.lock().await.get_mut(id) {
+            attempt.protection = Some(protection);
+        }
         let stdout = child
             .stdout
             .take()
@@ -443,7 +542,8 @@ impl Controller {
                 }
                 _ = timer.tick() => {
                     let expired = plan["expires"].as_i64().is_some_and(|until| crate::config::now() >= until);
-                    let oversized = workspace::bytes(&data).await? > self.disk_budget(&plan)
+                    let conversation_bytes = block::used_bytes(&data)?.saturating_add(disk::bytes_if_present(&temporary).await?);
+                    let oversized = conversation_bytes > self.disk_budget(&plan)
                         || disk::used(&self.data, &self.state).await? > self.disk_limit().await?;
                     if !self.leased(id).await || expired || oversized {
                         systemd::stop(id).await?;
@@ -508,7 +608,11 @@ impl Controller {
     async fn check_preparation_space(&self, plan: &Value) -> Result<()> {
         let run = text(plan, "runId");
         let root = workspace::directory(&self.state, run)?;
-        let current = disk::bytes_if_present(&root.join("data")).await?;
+        let current = if block::exists(&self.state, run)? {
+            0
+        } else {
+            disk::bytes_if_present(&root.join("data")).await?
+        };
         let seed = if !root.join("initialized").exists()
             && !root.join("data/.cairn-seed-complete").exists()
         {
@@ -541,6 +645,32 @@ impl Controller {
 
     async fn stopped_snapshot(&self, run: &str, force: bool) -> Result<Value> {
         let _disk = disk::lock(&self.state).await?;
+        if block::exists(&self.state, run)? {
+            let root = workspace::directory(&self.state, run)?;
+            if !root.join("block-initialized").exists() {
+                return Err(Error::conflict(
+                    "Native block initialization must finish before publication.",
+                ));
+            }
+            if !force {
+                return crate::nodes::checkpoint::capture_completed(
+                    &self.state,
+                    run,
+                    CancellationToken::new(),
+                )
+                .await;
+            }
+            return crate::nodes::checkpoint::capture(
+                &self.state,
+                run,
+                None,
+                Arc::default(),
+                CancellationToken::new(),
+                "",
+                storage::checkpoint::Consistency::Filesystem,
+            )
+            .await;
+        }
         if self
             .active
             .lock()
@@ -576,6 +706,22 @@ impl Controller {
         workspace::capture(&self.state, run, &attempt, limit, self.disk_growth().await?).await
     }
 
+    async fn abort_disk(&self, id: &str) -> Result<()> {
+        let run = self
+            .active
+            .lock()
+            .await
+            .get(id)
+            .map(|attempt| attempt.run.clone());
+        if let Some(run) = run {
+            let mounted = self.mounted.lock().await.get(&run).cloned();
+            if let Some(mounted) = mounted {
+                mounted.abort_io().await?;
+            }
+        }
+        Ok(())
+    }
+
     async fn stop_attempt(&self, id: &str) -> Result<()> {
         uuid(id)?;
         let _admission = self.admission.lock().await;
@@ -583,7 +729,19 @@ impl Controller {
         if let Some(attempt) = self.active.lock().await.get(id) {
             attempt.stop.cancel();
         }
-        systemd::stop(id).await?;
+        let preparing = self
+            .active
+            .lock()
+            .await
+            .get(id)
+            .is_some_and(|attempt| !attempt.started);
+        if preparing {
+            self.abort_disk(id).await?;
+        }
+        if let Err(error) = systemd::stop(id).await {
+            self.abort_disk(id).await?;
+            return Err(error);
+        }
         self.wait_stopped(id).await?;
         Ok(())
     }
@@ -619,6 +777,7 @@ fn guest_data(plan: &Value, data: &Path) -> PathBuf {
         .map_or_else(|| data.to_owned(), PathBuf::from)
 }
 
+#[cfg(test)]
 async fn install_home(source: &Path, target: &Path) -> Result<()> {
     let agents = target.join(".agents");
     if let Ok(metadata) = tokio::fs::symlink_metadata(&agents).await {
@@ -757,12 +916,24 @@ async fn route(controller: Controller, request: Request) -> Result<Response> {
             if value["slots"] != 1 {
                 return Err(Error::bad("Native nodes support one active execution."));
             }
+            atomic_write(
+                &controller.state.join(crate::microvm::budget::FILE),
+                &serde_json::to_vec(&value)?,
+            )
+            .await?;
             *controller.budget.lock().await = value;
             json!({ "ready": true })
         }
         ("POST", ["storage-policy"]) => {
-            let _: crate::storage::policy::Policy =
+            let policy: crate::storage::policy::Policy =
                 serde_json::from_value(input(request, 16384).await?)?;
+            policy.validate()?;
+            atomic_write(
+                &controller.state.join("storage-policy.json"),
+                &serde_json::to_vec(&policy)?,
+            )
+            .await?;
+            crate::storage::runtime::configure(&controller.state, &policy)?;
             json!({ "ready": true })
         }
         ("POST", ["runs", id, "lease"]) => {
@@ -831,6 +1002,9 @@ async fn route(controller: Controller, request: Request) -> Result<Response> {
         }
         ("POST", ["disks", run, "storage-status"]) => {
             uuid(run)?;
+            if block::exists(&controller.state, run)? {
+                return Ok(Json(block::status(&controller.state, run).await?).into_response());
+            }
             let root = workspace::directory(&controller.state, run)?;
             let active_local = disk::bytes_if_present(&root.join("data")).await?;
             let local = workspace::retained_bytes(&controller.state, run).await?;
@@ -854,6 +1028,13 @@ async fn route(controller: Controller, request: Request) -> Result<Response> {
                 "checkpointConsistency": "stopped", "published": published })
         }
         ("POST", ["disks", run, "published"]) => {
+            uuid(run)?;
+            if block::exists(&controller.state, run)? {
+                let receipt = input(request, 16384).await?;
+                return Ok(
+                    Json(block::published(&controller.state, run, &receipt).await?).into_response(),
+                );
+            }
             let _disk = disk::lock(&controller.state).await?;
             uuid(run)?;
             let receipt = input(request, 16384).await?;
@@ -883,6 +1064,41 @@ async fn route(controller: Controller, request: Request) -> Result<Response> {
         }
         ("POST", ["runs", id, "snapshot"]) => {
             uuid(id)?;
+            let active = {
+                controller
+                    .active
+                    .lock()
+                    .await
+                    .get(*id)
+                    .map(|attempt| (attempt.run.clone(), attempt.stop.clone()))
+            };
+            if let Some((run, stop)) = active
+                && block::exists(&controller.state, &run)?
+            {
+                let value = input(request, 16384).await?;
+                let mounted = controller
+                    .mounted
+                    .lock()
+                    .await
+                    .get(&run)
+                    .cloned()
+                    .ok_or_else(|| Error::conflict("Native filesystem is not mounted."))?;
+                return Ok(Json(
+                    block::capture_active(
+                        &controller.state,
+                        &run,
+                        mounted,
+                        value["consistency"] != "crash",
+                        if value["consistency"] == "crash" {
+                            CancellationToken::new()
+                        } else {
+                            stop
+                        },
+                    )
+                    .await?,
+                )
+                .into_response());
+            }
             if controller.active.lock().await.contains_key(*id) {
                 return Err(Error::conflict(
                     "Native checkpoints require the workload to stop.",
@@ -915,15 +1131,37 @@ async fn route(controller: Controller, request: Request) -> Result<Response> {
                 }
             }
         }
+        ("POST", ["disks", run, "evict"]) => {
+            let _disk = disk::lock(&controller.state).await?;
+            uuid(run)?;
+            if controller
+                .active
+                .lock()
+                .await
+                .values()
+                .any(|attempt| attempt.run == *run)
+            {
+                return Err(Error::conflict(
+                    "Native execution must finish stopping before cache eviction.",
+                ));
+            }
+            let expected = input(request, 16384).await?;
+            block::evict(&controller.data, &controller.state, run, &expected).await?
+        }
         ("POST", ["disks", run, "restore"]) => {
             let _disk = disk::lock(&controller.state).await?;
             uuid(run)?;
             let request = input(request, snapshots::MAX_MANIFEST_BYTES).await?;
+            if request["manifest"]["kind"] == block::KIND {
+                return Ok(
+                    Json(block::restore(&controller.state, run, request).await?).into_response()
+                );
+            }
             let limit = controller.budget.lock().await["limits"]["diskMiB"]
                 .as_u64()
                 .unwrap_or(32768)
                 * 1_048_576;
-            workspace::restore(
+            block::restore_files(
                 &controller.state,
                 run,
                 &request,
@@ -941,11 +1179,16 @@ async fn route(controller: Controller, request: Request) -> Result<Response> {
                 &root.join("owner.lock"),
                 "Native workspace is active.",
             )?;
-            if root.join("restore.pending.json").exists() && *action == "prune" {
+            if (root.join("restore.pending.json").exists()
+                || root.join("block-restore.pending.json").exists()
+                || root.join("legacy-block-restore.pending.json").exists())
+                && *action == "prune"
+            {
                 return Err(Error::conflict(
                     "Finish native restore before pruning retained local work.",
                 ));
             }
+            let retired_grants = block::action(&controller.state, run, *action == "delete").await?;
             let mut entries = tokio::fs::read_dir(&root).await?;
             while let Some(entry) = entries.next_entry().await? {
                 if (entry.file_name().to_string_lossy().starts_with("stale-")
@@ -967,6 +1210,13 @@ async fn route(controller: Controller, request: Request) -> Result<Response> {
                     "published.json",
                     "runtime.json",
                     "restore.pending.json",
+                    "block-initialized",
+                    "file-owner.json",
+                    "block-seeding",
+                    "block-restore.pending.json",
+                    "legacy-block-restore.pending.json",
+                    "legacy-data",
+                    "tmp",
                 ] {
                     let path = root.join(entry);
                     if let Ok(meta) = tokio::fs::symlink_metadata(&path).await {
@@ -1024,7 +1274,7 @@ async fn route(controller: Controller, request: Request) -> Result<Response> {
                     }
                 }
             }
-            json!({ "deleted": *action == "delete", "pruned": *action == "prune", "retiredGrants": [] })
+            json!({ "deleted": *action == "delete", "pruned": *action == "prune", "retiredGrants": retired_grants })
         }
         ("POST", ["runs", id, "artifact"]) => {
             let disk_owner = disk::lock(&controller.state).await?;
@@ -1034,24 +1284,26 @@ async fn route(controller: Controller, request: Request) -> Result<Response> {
             let attempt = active
                 .get(*id)
                 .ok_or_else(|| Error::conflict("Native attempt is not active."))?;
-            if value["runId"] != attempt.run {
+            if value["runId"] != attempt.run || attempt.stop.is_cancelled() {
                 return Err(Error::forbidden("Wrong native artifact scope."));
             }
             let plan = controller.plan(id).await?;
-            let root = workspace::directory(&controller.state, &attempt.run)?.join("data");
+            let environment = workspace::directory(&controller.state, &attempt.run)?;
+            let root = environment.join("data");
             let path = Path::new(text(&value, "path"));
             let project_root = Path::new(text(&plan, "projectRoot"));
-            let source = if let Ok(relative) = path.strip_prefix(project_root) {
-                root.join("workspaces").join(relative)
+            let (source, allowed) = if let Ok(relative) = path.strip_prefix(project_root) {
+                (root.join("workspaces").join(relative), root.clone())
             } else if let Ok(relative) = path.strip_prefix(
                 guest_data(&plan, &controller.data)
                     .join("runs")
                     .join(&attempt.run)
                     .join("output"),
             ) {
-                root.join("output").join(relative)
+                (root.join("output").join(relative), root.clone())
             } else if let Ok(relative) = path.strip_prefix("/tmp") {
-                root.join("tmp").join(relative)
+                let temporary = environment.join("tmp");
+                (temporary.join(relative), temporary)
             } else {
                 return Err(Error::forbidden(
                     "Native artifacts must be in this conversation's workspace, output directory or /tmp.",
@@ -1061,7 +1313,7 @@ async fn route(controller: Controller, request: Request) -> Result<Response> {
             private_dir(&exports).await?;
             let (snapshot, size) = crate::artifacts::file::snapshot_in(
                 &source,
-                &root,
+                &allowed,
                 &exports,
                 controller.disk_growth().await?,
             )
@@ -1093,7 +1345,7 @@ async fn route(controller: Controller, request: Request) -> Result<Response> {
             let attempt = active
                 .get(*id)
                 .ok_or_else(|| Error::conflict("Native attempt is not active."))?;
-            if value["runId"] != attempt.run {
+            if value["runId"] != attempt.run || attempt.stop.is_cancelled() {
                 return Err(Error::forbidden("Wrong native project scope."));
             }
             let plan = controller.plan(id).await?;
@@ -1120,13 +1372,12 @@ async fn route(controller: Controller, request: Request) -> Result<Response> {
                 .join("data/workspaces")
                 .join(project);
             if !target.exists() {
-                let root = workspace::directory(&controller.state, &attempt.run)?;
-                let staged = tempfile::tempdir_in(&root)?;
-                let received = staged.path().join("project");
                 let data = workspace::directory(&controller.state, &attempt.run)?.join("data");
-                let remaining = controller
-                    .disk_budget(&plan)
-                    .saturating_sub(workspace::bytes(&data).await?);
+                // Stage on the mounted filesystem so installation is an atomic
+                // rename, and do not walk all lazy files to estimate free space.
+                let staged = tempfile::tempdir_in(&data)?;
+                let received = staged.path().join("project");
+                let remaining = block::free_bytes(&data)?;
                 workspace::copy(
                     &source,
                     &received,
@@ -1166,13 +1417,24 @@ pub async fn serve(stop: CancellationToken) -> Result<()> {
     let data = crate::nodes::node_data_dir();
     let state = super::state_dir();
     private_dir(&state).await?;
+    if !state.is_absolute() || tokio::fs::canonicalize(&state).await? != state {
+        return Err(Error::bad(
+            "Native state must use a canonical absolute directory.",
+        ));
+    }
     let _lock = crate::file_lock::exclusive(
         &state.join("controller.lock"),
         "Another native controller owns this storage.",
     )?;
     disk::recover_exports(&state).await?;
+    atomic_write(
+        &state.join("native-accounting.json"),
+        &serde_json::to_vec(&json!({ "data": data }))?,
+    )
+    .await?;
     let identity = Arc::new(systemd::identity().await?);
     private_dir(&state.join("roots")).await?;
+    let mut interrupted = Vec::new();
     let mut entries = tokio::fs::read_dir(&state).await?;
     while let Some(entry) = entries.next_entry().await? {
         if entry
@@ -1180,31 +1442,64 @@ pub async fn serve(stop: CancellationToken) -> Result<()> {
             .extension()
             .is_some_and(|extension| extension == "active")
         {
-            let id = entry
+            let attempt = entry
                 .path()
                 .file_stem()
                 .unwrap()
                 .to_string_lossy()
                 .into_owned();
-            uuid(&id)?;
-            systemd::stop(&id).await?;
-            atomic_write(
-                &entry.path().with_extension("exit"),
-                crate::runner::CONTROLLER_INTERRUPTED.to_string().as_bytes(),
-            )
-            .await?;
-            tokio::fs::remove_file(entry.path()).await?;
+            uuid(&attempt)?;
+            let run = tokio::fs::read_to_string(entry.path()).await?;
+            uuid(&run)?;
+            systemd::request_stop(&attempt).await?;
+            interrupted.push((attempt, run, entry.path()));
         }
     }
+    // Host mounts survive controller death. Recovery aborts only verified dead
+    // backends to release blocked I/O, confirms fencing, then unmounts. Complete
+    // all other attributed fences before retiring any kernel device.
+    block::recover_host_mounts(&state).await?;
+    for (attempt, _, _) in &interrupted {
+        systemd::stop(attempt).await?;
+    }
+    #[cfg(feature = "ublk")]
+    {
+        let state = state.clone();
+        tokio::task::spawn_blocking(move || storage::ublk::cleanup_stale(&state))
+            .await
+            .map_err(Error::internal)??;
+    }
+    for (attempt, run, marker) in interrupted {
+        block::recover_completed(&state, &run, &attempt).await?;
+        atomic_write(
+            &marker.with_extension("exit"),
+            crate::runner::CONTROLLER_INTERRUPTED.to_string().as_bytes(),
+        )
+        .await?;
+        tokio::fs::remove_file(marker).await?;
+    }
+    let budget_path = state.join(crate::microvm::budget::FILE);
+    let budget: Value = match tokio::fs::read(&budget_path).await {
+        Ok(bytes) => serde_json::from_slice(&bytes)?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            json!({ "slots": 1, "limits": crate::nodes::placement::defaults() })
+        }
+        Err(error) => return Err(error.into()),
+    };
+    let limits: crate::nodes::Resources = serde_json::from_value(budget["limits"].clone())?;
+    limits.validate()?;
+    if budget["slots"] != 1 {
+        return Err(Error::bad("Native nodes support one execution slot."));
+    }
+    atomic_write(&budget_path, &serde_json::to_vec(&budget)?).await?;
     let controller = Controller {
         data,
         state,
         active: Arc::default(),
+        mounted: Arc::default(),
         leases: Arc::default(),
         admission: Arc::default(),
-        budget: Arc::new(Mutex::new(
-            json!({ "slots": 1, "limits": crate::nodes::placement::defaults() }),
-        )),
+        budget: Arc::new(Mutex::new(budget)),
         changed: Arc::default(),
         log_lock: Arc::default(),
         stop: stop.clone(),
@@ -1260,6 +1555,7 @@ mod tests {
             data,
             state,
             active: Arc::default(),
+            mounted: Arc::default(),
             leases: Arc::default(),
             admission: Arc::default(),
             budget: Arc::new(Mutex::new(
@@ -1307,6 +1603,87 @@ mod tests {
             .await
             .unwrap();
         root
+    }
+
+    #[tokio::test]
+    async fn tmp_artifact_uses_the_ephemeral_path_and_rejects_redirects() {
+        let (_fixture, controller) = fixture().await;
+        let run = crate::config::id();
+        let attempt = crate::config::id();
+        let stage = controller.data.join("runs").join(&run);
+        let environment = workspace::directory(&controller.state, &run).unwrap();
+        for directory in [
+            stage.join("workspace"),
+            stage.join("home"),
+            environment.join("tmp"),
+            environment.join("data/tmp"),
+            controller.data.join("runner-plans"),
+        ] {
+            private_dir(&directory).await.unwrap();
+        }
+        let plan = json!({
+            "id": attempt, "runId": run, "backend": "native", "nodeLeaseRequired": true, "expires": null,
+            "cwd": stage.join("workspace"), "projectRoot": stage.join("workspace"),
+            "sandbox": "workspace-write", "args": [], "prompt": "fixture",
+            "resources": { "cpu": 1, "memoryMiB": 128, "diskMiB": 128 },
+            "imports": [
+                { "source": stage.join("workspace"), "target": stage.join("workspace") },
+                { "source": stage.join("home"), "target": "/home/node" }
+            ]
+        });
+        atomic_write(
+            &controller
+                .data
+                .join("runner-plans")
+                .join(format!("{attempt}.json")),
+            &serde_json::to_vec(&plan).unwrap(),
+        )
+        .await
+        .unwrap();
+        controller.active.lock().await.insert(
+            attempt.clone(),
+            Attempt {
+                run: run.clone(),
+                stop: CancellationToken::new(),
+                started: true,
+                protection: None,
+            },
+        );
+        tokio::fs::write(environment.join("tmp/result"), b"actual temporary artifact")
+            .await
+            .unwrap();
+        tokio::fs::write(environment.join("data/tmp/result"), b"wrong stale bytes")
+            .await
+            .unwrap();
+        let response = route(
+            controller.clone(),
+            request(
+                &format!("/runs/{attempt}/artifact"),
+                &json!({ "runId": run, "path": "/tmp/result" }),
+            ),
+        )
+        .await
+        .unwrap();
+        let bytes = axum::body::to_bytes(response.into_body(), 1024)
+            .await
+            .unwrap();
+        assert_eq!(bytes.as_ref(), b"actual temporary artifact");
+        std::os::unix::fs::symlink(
+            environment.join("data/tmp/result"),
+            environment.join("tmp/redirect"),
+        )
+        .unwrap();
+        assert!(
+            route(
+                controller,
+                request(
+                    &format!("/runs/{attempt}/artifact"),
+                    &json!({ "runId": run, "path": "/tmp/redirect" })
+                )
+            )
+            .await
+            .is_err()
+        );
     }
 
     #[tokio::test]
@@ -1367,6 +1744,8 @@ mod tests {
             Attempt {
                 run: run.clone(),
                 stop: CancellationToken::new(),
+                started: true,
+                protection: None,
             },
         );
         let (waiting_controller, waiting_attempt) = (controller.clone(), attempt.clone());
