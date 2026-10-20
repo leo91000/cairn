@@ -1,8 +1,8 @@
 import type { ChatView, ChatWakeup } from '../../../packages/contracts/chats'
 import type { ActivityWait } from './activity'
 
-/** What a conversation waits for: a timer, PR checks, a workflow run or another Cairn run. */
-export type WaitKind = 'timer' | 'pr' | 'workflow' | 'run'
+/** What a conversation waits for: a timer, a plugin's condition or another Cairn run. */
+export type WaitKind = 'timer' | 'condition' | 'run'
 export type WaitTone = 'ok' | 'error' | 'warning' | 'neutral'
 
 export interface WaitTarget {
@@ -21,8 +21,6 @@ export interface WaitOutcome {
   detail: string
 }
 
-const shortSha = (sha: unknown) => typeof sha === 'string' ? sha.slice(0, 7) : ''
-const number = (value: unknown) => typeof value === 'number' ? value : null
 const words = (value: string) => value.replaceAll('_', ' ')
 
 /** The time of day, with the date when it is not today. */
@@ -61,32 +59,25 @@ export function waited(ms: number) {
   return minutes < 1 ? 'under a minute' : timeLeft(minutes * 60000)
 }
 
-export function waitTarget(wakeup: Pick<ChatWakeup, 'condition' | 'wakeAt'>, now = Date.now()): WaitTarget {
+export function waitTarget(wakeup: Pick<ChatWakeup, 'condition' | 'display' | 'wakeAt'>, now = Date.now()): WaitTarget {
   const condition = wakeup.condition
-  if (condition?.type === 'github_pr_checks') {
-    return {
-      kind: 'pr',
-      title: `Waiting for required checks on PR #${condition.prNumber}`,
-      short: `PR #${condition.prNumber} checks`,
-      details: [shortSha(condition.headSha)],
-    }
-  }
-
-  if (condition?.type === 'github_workflow') {
-    return {
-      kind: 'workflow',
-      title: 'Waiting for a GitHub workflow run',
-      short: 'GitHub workflow',
-      details: [`Run ${condition.runId}`, shortSha(condition.headSha)],
-    }
-  }
-
   if (condition?.type === 'run_finished') {
     return {
       kind: 'run',
       title: 'Waiting for another run to finish',
       short: 'Another run',
       details: [],
+    }
+  }
+
+  // A plugin condition reads as its plugin words it.
+  if (condition) {
+    const display = wakeup.display
+    return {
+      kind: 'condition',
+      title: display?.title || 'Waiting for a condition',
+      short: display?.short || 'Condition',
+      details: display?.details ?? [],
     }
   }
 
@@ -103,7 +94,7 @@ export function waitTarget(wakeup: Pick<ChatWakeup, 'condition' | 'wakeAt'>, now
  * A wait seen only in a run's history: whether it still stands is unknown, so it reads as what
  * was scheduled rather than what will happen.
  */
-export function recordedTitle(wakeup: Pick<ChatWakeup, 'condition' | 'wakeAt'>, now = Date.now()) {
+export function recordedTitle(wakeup: Pick<ChatWakeup, 'condition' | 'display' | 'wakeAt'>, now = Date.now()) {
   const target = waitTarget(wakeup, now)
   return target.kind === 'timer' ? `Scheduled to resume at ${wakeTime(wakeup.wakeAt, now)}` : `Wait scheduled · ${target.short}`
 }
@@ -171,7 +162,7 @@ export interface WaitProgress {
 
 export function waitProgress(wait: ActivityWait, live?: LiveWait): WaitProgress {
   const current = !!wait.wakeup && live?.wakeup?.id === wait.wakeup.id
-  // GitHub polling records the result on the pending wakeup too, which matters when its event is
+  // Plugin condition polling records the result on the pending wakeup too, which matters when its event is
   // unloaded. Another run's result is only computed when the conversation resumes.
   const observation = wait.observation !== undefined ? wait.observation : current ? (live!.wakeup!.observation ?? undefined) : undefined
   const finished = !!wait.resumedAt || observation !== undefined
@@ -201,32 +192,46 @@ export function waitLeft(wakeup: { wakeAt: number, condition?: boolean, resolved
   return wakeup.condition ? `≤ ${timeLeft(left)}` : timeLeft(left)
 }
 
-/** What a result answers, for a card that has no scheduled wakeup to name it. */
+/** A plugin's words for a result, when it gave them. */
+function resultDisplay(observation: Record<string, unknown>) {
+  const display = observation.display as Partial<WaitOutcome> | null | undefined
+  if (!display || typeof display !== 'object' || typeof display.title !== 'string' || !display.title)
+    return null
+  const tone = ['ok', 'error', 'warning', 'neutral'].includes(display.tone as string) ? display.tone as WaitTone : 'neutral'
+  return { tone, title: display.title, detail: typeof display.detail === 'string' ? display.detail : '' }
+}
+
+/**
+ * What a result answers, for a card that has no scheduled wakeup to name it. A plugin result
+ * only names itself when its plugin gives a short wording.
+ */
 export function observedTarget(observation: Record<string, unknown> | null | undefined) {
-  if (observation?.type === 'github_pr_checks')
-    return `PR #${observation.prNumber} checks`
-  if (observation?.type === 'github_workflow')
-    return 'GitHub workflow'
-  if (observation?.type === 'run_finished')
+  if (!observation)
+    return ''
+  if (observation.type === 'run_finished')
     return 'Another run'
-  return ''
+  const display = observation.display as { short?: unknown } | null | undefined
+  if (typeof display?.short === 'string' && display.short)
+    return display.short
+  return observation.type || observation.pluginId ? 'A condition' : ''
 }
 
 const runOutcomes: Record<string, string> = { blocked: 'Blocked', needs_input: 'Needs your input' }
+const failures = ['failure', 'failed', 'error', 'startup_failure', 'timed_out']
 
 /** What Cairn observed when a wait ended; a plain timer observes nothing and reads as neutral. */
 export function waitOutcome(observation: Record<string, unknown> | null | undefined): WaitOutcome {
   const state = observation?.state
   if (!observation || !state)
     return { tone: 'neutral', title: 'Wait finished', detail: '' }
+
+  const display = resultDisplay(observation)
+  if (display)
+    return display
   if (state === 'timed_out')
     return { tone: 'warning', title: 'Deadline reached without a result', detail: '' }
   if (state === 'unavailable')
     return { tone: 'warning', title: 'Result unavailable', detail: typeof observation.message === 'string' ? observation.message : '' }
-  if (state === 'superseded')
-    return { tone: 'warning', title: 'A new commit was pushed', detail: `${shortSha(observation.headSha)} → ${shortSha(observation.currentHeadSha)}` }
-  if (state === 'closed')
-    return { tone: 'warning', title: `PR #${observation.prNumber} was ${observation.pullRequestState === 'MERGED' ? 'merged' : 'closed'}`, detail: '' }
 
   if (observation.type === 'run_finished') {
     const status = String(observation.status ?? '')
@@ -236,34 +241,13 @@ export function waitOutcome(observation: Record<string, unknown> | null | undefi
     return { tone: status === 'failed' ? 'error' : 'warning', title: `The run ${ended}`, detail: '' }
   }
 
-  if (observation.type === 'github_workflow') {
-    const conclusion = String(observation.conclusion ?? '')
-    const attempt = number(observation.runAttempt)
-    const detail = attempt && attempt > 1 ? `Attempt ${attempt}` : ''
+  // A plugin result without its own wording: its conclusion, when it has one.
+  const conclusion = observation.conclusion
+  if (typeof conclusion === 'string' && conclusion) {
     if (conclusion === 'success')
-      return { tone: 'ok', title: 'Workflow passed', detail }
-    if (['failure', 'startup_failure', 'timed_out'].includes(conclusion))
-      // A plain failure needs no detail; the other failures say how.
-      return { tone: 'error', title: 'Workflow failed', detail: [conclusion === 'failure' ? '' : words(conclusion), detail].filter(Boolean).join(' · ') }
-    return { tone: 'warning', title: `Workflow ${words(conclusion)}`, detail }
-  }
-
-  if (observation.type === 'github_pr_checks') {
-    const conclusion = observation.conclusion
-    const checks = Array.isArray(observation.checks) ? observation.checks as { name?: unknown, state?: unknown }[] : []
-    const named = (wanted: string) => checks.filter(check => check.state === wanted).map(check => String(check.name ?? ''))
-    const list = (names: string[]) => names.length > 3 ? `${names.slice(0, 3).join(', ')} +${names.length - 3}` : names.join(', ')
-    if (conclusion === 'success') {
-      const count = number(observation.requiredCount)
-      return { tone: 'ok', title: 'Required checks passed', detail: count ? `${count} check${count === 1 ? '' : 's'}` : '' }
-    }
-
-    if (conclusion === 'failure')
-      return { tone: 'error', title: 'Required checks failed', detail: list(named('failure')) }
-    if (conclusion === 'cancelled')
-      return { tone: 'warning', title: 'Required checks were cancelled', detail: list(named('cancelled')) }
-    if (conclusion === 'no_required_checks')
-      return { tone: 'warning', title: 'This PR has no required checks', detail: '' }
+      return { tone: 'ok', title: 'Succeeded', detail: '' }
+    const title = words(conclusion)
+    return { tone: failures.includes(conclusion) ? 'error' : 'warning', title: title[0]!.toUpperCase() + title.slice(1), detail: '' }
   }
 
   return { tone: 'neutral', title: 'Wait finished', detail: '' }

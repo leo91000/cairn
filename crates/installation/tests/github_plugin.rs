@@ -404,6 +404,7 @@ async fn repositories_are_listed_and_imported_with_the_instance() {
     let items = page["items"].as_array().unwrap();
     assert_eq!(items.len(), 2);
     assert_eq!(items[0]["id"], "fixture/repo");
+    assert_eq!(items[0]["projectName"], "repo");
     assert_eq!(items[0]["badges"], json!(["Private", "Rust"]));
     assert_eq!(items[1]["badges"], json!(["Public", "Fork", "Archived"]));
     assert_eq!(items[0]["imported"], false);

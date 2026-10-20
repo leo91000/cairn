@@ -358,10 +358,13 @@ usual limits.
 
 ```toml
 [credential.deviceFlow]
-authorizationUrl = "https://example.com/login/device/code"   # HTTPS, declared host
-tokenUrl = "https://example.com/login/oauth/access_token"   # HTTPS, declared host
+authorizationUrl = "https://example.com/login/device/code" # HTTPS, declared host
+tokenUrl = "https://example.com/login/oauth/access_token" # HTTPS, declared host
 clientId = "the publisher's public client ID"
-scopes = ["read", "write"]
+scopes = [
+  "read",
+  "write"
+]
 ```
 
 The host runs the OAuth 2.0 device authorization grant (RFC 8628) for the owner:
@@ -383,8 +386,8 @@ The host runs the OAuth 2.0 device authorization grant (RFC 8628) for the owner:
 
 ```toml
 [runCredentials]
-files = [{ path = ".config/tool/hosts.yml", content = "token: {{credential}}\n" }]
-git = [{ url = "https://example.com", username = "x-access-token", password = "{{credential}}" }]
+files = [ { path = ".config/tool/hosts.yml", content = "token: {{credential}}\n" } ]
+git = [ { url = "https://example.com", username = "x-access-token", password = "{{credential}}" } ]
 gitIdentity = { name = "{{settings.name}}", email = "{{settings.email}}" }
 ```
 
@@ -426,8 +429,8 @@ title = "Repository"
 ```
 
 The `projects` handler receives `{ op = "list", source, page, query, instance }` and
-returns `{ items = { { id, name, description?, defaultBranch?, badges?, updatedAt?,
-url?, origin? } }, nextPage? }` (200 items at most; `origin` marks imported ones), or
+returns `{ items = { { id, name, projectName?, description?, defaultBranch?, badges?,
+updatedAt?, url?, origin? } }, nextPage? }` (200 items at most; `origin` marks imported ones), or
 `{ op = "resolve", source, id, instance }` and returns `{ id, name, description?,
 origin, defaultBranch? }`. `origin` must be HTTPS on a declared host.
 
@@ -445,9 +448,11 @@ origin, defaultBranch? }`. `origin` must be HTTPS on a declared host.
 name = "checks"
 project = true
 description = "What completes, what the results mean."
+
 [conditions.inputSchema]
 type = "object"
-required = ["sha"]
+required = [ "sha" ]
+
 properties.sha = { type = "string", pattern = "^[0-9a-f]{40}$" }
 ```
 
@@ -477,6 +482,7 @@ batches of 16 shared by identical requests. Withdrawing the grant ends the wait 
 [[skillSources]]
 name = "repository"
 title = "Repository"
+
 [[skillSources.fields]]
 key = "repository"
 title = "Repository"

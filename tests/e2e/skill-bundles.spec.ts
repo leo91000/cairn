@@ -13,6 +13,23 @@ import {
 
 const manifest = (name: string, description: string) => `---\nname: ${name}\ndescription: ${description}\n---\n\n# ${name}\n\nRun \`scripts/check.sh\` and read references/notes.md.\n`
 
+// Where a skill imported through a plugin's skill source came from, as the installation records it.
+function pluginSource(values: Record<string, unknown> = {}) {
+  return {
+    pluginId: 'github',
+    source: 'repository',
+    instance: 'work',
+    label: 'acme/skills',
+    location: { repository: 'acme/skills', ref: 'main' },
+    url: 'https://github.com/acme/skills/tree/main/review',
+    folder: 'review',
+    version: 'a'.repeat(40),
+    importedAt: 1,
+    modified: false,
+    ...values,
+  }
+}
+
 // A stored (uncompressed) zip: enough for import fixtures without a dependency.
 function crc32(bytes: Uint8Array) {
   let crc = 0xFFFFFFFF
@@ -492,33 +509,94 @@ test('an archive cannot be replaced while its upload is pending', async ({ page 
   await expect(page.getByRole('dialog', { name: 'Edit skill' }).getByRole('heading', { name: 'archive-a', exact: true })).toBeVisible()
 })
 
-test('GitHub candidate selections reset when repository, folder or ref changes', async ({ page }) => {
+test('plugin skill source candidates reset when its fields or the folder change', async ({ page }) => {
   await useRelayForHttpMocks(page)
-  const requests: Record<string, string>[] = []
+  await page.route('**/api/plugins', route => route.fulfill({
+    json: {
+      packages: [{
+        id: 'github',
+        builtin: true,
+        status: 'active',
+        active: '1.0.0',
+        manifest: {
+          id: 'github',
+          name: 'GitHub',
+          version: '1.0.0',
+          apiVersion: 2,
+          description: 'Import skills from repositories.',
+          capabilities: ['http'],
+          skillSources: [{
+            name: 'repository',
+            title: 'GitHub repository',
+            description: 'A public or private repository this account can read.',
+            fields: [
+              {
+                key: 'repository',
+                title: 'Repository',
+                type: 'string',
+                required: true,
+                placeholder: 'owner/name or https://github.com/owner/name/tree/main/skills',
+              },
+              { key: 'ref', title: 'Branch, tag or commit', type: 'string' },
+            ],
+          }],
+        },
+        versions: [],
+      }],
+      capabilities: [],
+      connections: [{
+        id: 'work',
+        pluginId: 'github',
+        name: 'Work',
+        enabled: true,
+        settings: {},
+        status: { state: 'ready' },
+      }],
+    },
+  }))
+  const requests: Record<string, unknown>[] = []
   await page.route(/\/skills\/global\/import$/, async (route) => {
     requests.push(route.request().postDataJSON())
     await route.fulfill({ json: { imported: null, candidates: ['skills/first', 'skills/old-repo'] } })
   })
   await page.goto(workspacePath('/skills'))
   await authenticateWorkspace(page)
-  for (const [label, value, field] of [
-    ['Repository', 'bob/new-repo', 'repository'],
-    ['Folder in repository', 'skills/new-folder', 'path'],
-    ['Ref', 'develop', 'ref'],
+  const base = {
+    source: 'plugin',
+    pluginId: 'github',
+    skillSource: 'repository',
+    instance: 'work',
+  }
+  for (const [label, value, expected] of [
+    ['Repository', 'bob/new-repo', { location: { repository: 'bob/new-repo' } }],
+    ['Folder', 'skills/new-folder', { location: { repository: 'alice/old-repo' }, folder: 'skills/new-folder' }],
+    ['Branch, tag or commit', 'develop', { location: { repository: 'alice/old-repo', ref: 'develop' } }],
   ] as const) {
     await page.getByRole('button', { name: 'Import', exact: true }).click()
     const dialog = page.getByRole('dialog', { name: 'Import a skill', exact: true })
-    await dialog.getByRole('button', { name: 'GitHub', exact: true }).click()
-    await page.getByLabel('Repository', { exact: true }).fill('alice/old-repo')
+    await dialog.getByRole('button', { name: 'GitHub repository', exact: true }).click()
+    await expect(dialog.getByRole('button', { name: 'Import skill', exact: true })).toBeDisabled()
+    await dialog.getByLabel('Repository', { exact: true }).fill('alice/old-repo')
     await dialog.getByRole('button', { name: 'Import skill', exact: true }).click()
+    await expect.poll(() => requests.at(-1)).toEqual({ ...base, location: { repository: 'alice/old-repo' } })
+    // A candidate is a folder: choosing one submits it as the folder.
     await dialog.getByRole('radiogroup', { name: 'Skill folder', exact: true }).getByText('skills/old-repo', { exact: true }).click()
-    await page.getByLabel(label, { exact: true }).fill(value)
+    await dialog.getByLabel(label, { exact: true }).fill(value)
     await expect(dialog.getByRole('radiogroup', { name: 'Skill folder', exact: true })).toHaveCount(0)
     await dialog.getByRole('button', { name: 'Import skill', exact: true }).click()
-    await expect.poll(() => requests.length).toBe((['repository', 'path', 'ref'].indexOf(field) + 1) * 2)
-    expect(requests.at(-1)).toEqual({ source: 'github', repository: 'alice/old-repo', [field]: value })
+    await expect.poll(() => requests.at(-1)).toEqual({ ...base, ...expected })
     await dialog.getByRole('button', { name: 'Close dialog', exact: true }).click()
   }
+
+  // A chosen candidate is sent back as the folder to import.
+  await page.getByRole('button', { name: 'Import', exact: true }).click()
+  const dialog = page.getByRole('dialog', { name: 'Import a skill', exact: true })
+  await dialog.getByRole('button', { name: 'GitHub repository', exact: true }).click()
+  await dialog.getByLabel('Repository', { exact: true }).fill('alice/old-repo')
+  await dialog.getByRole('button', { name: 'Import skill', exact: true }).click()
+  await dialog.getByRole('radiogroup', { name: 'Skill folder', exact: true }).getByText('skills/first', { exact: true }).click()
+  await dialog.getByRole('button', { name: 'Import selected skill', exact: true }).click()
+  await expect.poll(() => requests.at(-1)).toEqual({ ...base, location: { repository: 'alice/old-repo' }, folder: 'skills/first' })
 })
 
 test('pending replacement reads lock draft resets and source mutations', async ({ page, workspace }) => {
@@ -529,15 +607,7 @@ test('pending replacement reads lock draft resets and source mutations', async (
     await route.fulfill({
       json: {
         ...bundle,
-        source: {
-          type: 'github',
-          repository: 'acme/skills',
-          path: 'review',
-          ref: 'main',
-          commit: 'a'.repeat(40),
-          importedAt: 1,
-          modified: false,
-        },
+        source: pluginSource(),
       },
     })
   })
@@ -569,7 +639,7 @@ test('pending replacement reads lock draft resets and source mutations', async (
     await expect.poll(() => page.evaluate(() => (window as unknown as { skillReadStarted: boolean }).skillReadStarted)).toBe(true)
     await expect(page.getByRole('button', { name: 'Discard', exact: true })).toBeDisabled()
     await showTree(page)
-    await page.getByRole('button', { name: 'Open GitHub source', exact: true }).click()
+    await page.getByRole('button', { name: 'Open imported source', exact: true }).click()
     await expect(page.getByRole('button', { name: 'Check for updates', exact: true })).toHaveCount(0)
   }
   finally {
@@ -581,7 +651,7 @@ test('pending replacement reads lock draft resets and source mutations', async (
   await expect(page.getByRole('button', { name: 'Save skill', exact: true })).toBeEnabled()
 })
 
-test('detaching a GitHub source preserves unsaved files', async ({ page, workspace }) => {
+test('detaching a plugin source preserves unsaved files', async ({ page, workspace }) => {
   let releaseDetach!: () => void
   const detachGate = new Promise<void>((resolve) => {
     releaseDetach = resolve
@@ -589,15 +659,7 @@ test('detaching a GitHub source preserves unsaved files', async ({ page, workspa
   let detachStarted = false
   await useRelayForHttpMocks(page)
   await workspace.api('/api/skills/global/detach-draft/bundle', 'POST', { base: null, changes: [{ op: 'write', path: 'SKILL.md', content: manifest('detach-draft', 'Initial') }] })
-  const source = {
-    type: 'github',
-    repository: 'acme/skills',
-    path: 'review',
-    ref: 'main',
-    commit: 'a'.repeat(40),
-    importedAt: 1,
-    modified: false,
-  }
+  const source = pluginSource()
   let detached = false
   await page.route(/\/skills\/global\/detach-draft\/bundle$/, async (route) => {
     const bundle = await workspace.api('/api/skills/global/detach-draft/bundle')
@@ -616,18 +678,18 @@ test('detaching a GitHub source preserves unsaved files', async ({ page, workspa
   const edited = manifest('detach-draft', 'Unsaved local changes')
   await page.getByLabel('Skill content').fill(edited)
   await showTree(page)
-  await page.getByRole('button', { name: 'Open GitHub source', exact: true }).click()
+  await page.getByRole('button', { name: 'Open imported source', exact: true }).click()
   await page.getByRole('button', { name: 'Detach source', exact: true }).click()
   await page.getByRole('button', { name: 'Confirm detach', exact: true }).click()
   try {
     await expect.poll(() => detachStarted).toBe(true)
     await expect(page.getByRole('button', { name: 'Close source', exact: true })).toBeDisabled()
     if (!phone(page))
-      await expect(page.getByRole('button', { name: 'GitHub source', exact: true })).toBeDisabled()
+      await expect(page.getByRole('button', { name: 'Imported source', exact: true })).toBeDisabled()
     await showTree(page)
     await row(page, 'SKILL.md').click()
     if (phone(page))
-      await page.getByRole('button', { name: 'Open GitHub source', exact: true }).click()
+      await page.getByRole('button', { name: 'Open imported source', exact: true }).click()
     await expect(page.getByRole('button', { name: 'Confirm detach', exact: true })).toBeVisible()
   }
   finally {
@@ -650,15 +712,7 @@ test('a source update ignores file responses from the preceding revision', async
       { op: 'write', path: 'notes.txt', content: 'Old notes' },
     ],
   })
-  const source = {
-    type: 'github',
-    repository: 'acme/skills',
-    path: 'review',
-    ref: 'main',
-    commit: 'a'.repeat(40),
-    importedAt: 1,
-    modified: false,
-  }
+  const source = pluginSource()
   const latest = 'b'.repeat(40)
   let releaseOld!: () => void
   let releaseNew!: () => void
@@ -686,7 +740,7 @@ test('a source update ignores file responses from the preceding revision', async
   await page.route(/\/skills\/global\/read-race\/source$/, route => route.fulfill({
     json: {
       source,
-      latest: { commit: latest, message: 'New notes', date: '2026-10-14T00:00:00Z' },
+      latest: { version: latest, message: 'New notes', date: '2026-10-14T00:00:00Z' },
       current: false,
       changes: [{ path: 'notes.txt', status: 'modified', binary: false }],
     },
@@ -694,7 +748,7 @@ test('a source update ignores file responses from the preceding revision', async
   await page.route(/\/skills\/global\/read-race\/source\/update$/, async (route) => {
     const current = await workspace.api('/api/skills/global/read-race/bundle')
     const saved = await workspace.api('/api/skills/global/read-race/bundle', 'POST', { base: current.revision, changes: [{ op: 'write', path: 'notes.txt', content: 'New notes' }] })
-    await route.fulfill({ json: { ...saved, source: { ...source, commit: latest } } })
+    await route.fulfill({ json: { ...saved, source: { ...source, version: latest } } })
   })
   try {
     await page.goto(workspacePath('/skills'))
@@ -703,7 +757,7 @@ test('a source update ignores file responses from the preceding revision', async
     await openFile(page, 'notes.txt')
     await expect.poll(() => reads).toBe(1)
     await showTree(page)
-    await page.getByRole('button', { name: 'Open GitHub source', exact: true }).click()
+    await page.getByRole('button', { name: 'Open imported source', exact: true }).click()
     await page.getByRole('button', { name: 'Check for updates', exact: true }).click()
     await page.getByRole('button', { name: /^Update to/ }).click()
     await expect.poll(() => reads).toBe(2)
@@ -756,7 +810,7 @@ test('members browse a skill bundle read-only', async ({ page, workspace }, test
   await capture(page, testInfo, 'skill-member-readonly')
 })
 
-test('reviews a GitHub update as a diff before replacing local files', async ({ page, workspace }, testInfo) => {
+test('reviews a source update as a diff before replacing local files', async ({ page, workspace }, testInfo) => {
   await useRelayForHttpMocks(page)
   await workspace.api('/api/skills/global/upstream/bundle', 'POST', {
     base: null,
@@ -770,17 +824,17 @@ test('reviews a GitHub update as a diff before replacing local files', async ({ 
       },
     ],
   })
-  const source = {
-    type: 'github',
-    repository: 'acme/agent-skills',
-    path: 'skills/upstream',
-    ref: 'main',
-    commit: '1a2b3c4d5e6f7a8b9c0d',
+  const source = pluginSource({
+    label: 'acme/agent-skills',
+    location: { repository: 'acme/agent-skills', ref: 'main' },
+    url: 'https://github.com/acme/agent-skills/tree/1a2b3c4d5e6f7a8b9c0d/skills/upstream',
+    folder: 'skills/upstream',
+    version: '1a2b3c4d5e6f7a8b9c0d',
     importedAt: Date.now() - 86400000,
     modified: true,
-  }
+  })
   const latest = '9f8e7d6c5b4a39281706'
-  let updated: { commit: string, base: string } | undefined
+  let updated: { version: string, base: string } | undefined
   await page.route(/\/api\/skills$/, async (route) => {
     const skills = await (await route.fetch()).json()
     await route.fulfill({ json: skills.map((skill: { name: string }) => skill.name === 'upstream' ? { ...skill, source } : skill) })
@@ -792,7 +846,7 @@ test('reviews a GitHub update as a diff before replacing local files', async ({ 
   await page.route(/\/skills\/global\/upstream\/source$/, route => route.fulfill({
     json: {
       source,
-      latest: { commit: latest, message: 'Teach the skill to lint docs\n\nAlso checks links.', date: new Date().toISOString() },
+      latest: { version: latest, message: 'Teach the skill to lint docs\n\nAlso checks links.', date: new Date().toISOString() },
       current: false,
       changes: [
         {
@@ -823,7 +877,7 @@ test('reviews a GitHub update as a diff before replacing local files', async ({ 
   await page.route(/\/skills\/global\/upstream\/source\/update$/, async (route) => {
     updated = route.request().postDataJSON()
     const bundle = await workspace.api('/api/skills/global/upstream/bundle')
-    await route.fulfill({ json: { ...bundle, source: { ...source, commit: latest, modified: false } } })
+    await route.fulfill({ json: { ...bundle, source: { ...source, version: latest, modified: false } } })
   })
 
   await page.goto(workspacePath('/skills'))
@@ -833,7 +887,10 @@ test('reviews a GitHub update as a diff before replacing local files', async ({ 
   await capture(page, testInfo, 'skills-list')
   await page.getByRole('button', { name: 'Edit upstream', exact: true }).click()
   await showTree(page)
-  await page.getByRole('button', { name: 'Open GitHub source', exact: true }).click()
+  await page.getByRole('button', { name: 'Open imported source', exact: true }).click()
+  // The plugin's label, folder and link; no address is built on the client.
+  await expect(page.getByRole('link', { name: 'acme/agent-skills' })).toHaveAttribute('href', source.url)
+  await expect(page.getByText('skills/upstream', { exact: true })).toBeVisible()
   await expect(page.getByText('This skill was edited in Cairn since its last import.')).toBeVisible()
   await page.getByRole('button', { name: 'Check for updates', exact: true }).click()
   const update = page.getByRole('region', { name: 'Available update' })
@@ -846,6 +903,6 @@ test('reviews a GitHub update as a diff before replacing local files', async ({ 
   await update.getByRole('button', { name: 'Update to 9f8e7d6', exact: true }).click()
   await expect(page.getByRole('alert').filter({ hasText: 'Edits made in Cairn since the import will be lost.' })).toBeVisible()
   await update.getByRole('button', { name: 'Replace my edits', exact: true }).click()
-  await expect.poll(() => updated?.commit).toBe(latest)
+  await expect.poll(() => updated?.version).toBe(latest)
   expect(updated!.base).toMatch(/\w{16,}/)
 })

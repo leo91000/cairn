@@ -16,9 +16,10 @@ test('1Password service accounts are plugin instances with private tokens, grant
   await useRelayForHttpMocks(page)
   await page.goto(workspacePath('/connections'))
   await authenticateWorkspace(page)
-  // 1Password lives with the plugins only: Connections keeps coding agent accounts and GitHub.
+  // 1Password and GitHub live with the plugins only: Connections keeps coding agent accounts.
   await expect(page.getByRole('heading', { name: 'Coding agents' })).toBeVisible()
   await expect(page.getByText('1Password')).toHaveCount(0)
+  await expect(page.getByRole('heading', { name: 'GitHub' })).toHaveCount(0)
   await page.goto(workspacePath('/plugins'))
   await page.getByRole('link', { name: '1Password · Set up' }).click()
   await expect(page).toHaveURL(workspacePath('/plugins/onepassword'))

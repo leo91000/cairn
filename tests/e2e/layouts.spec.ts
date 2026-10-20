@@ -107,7 +107,7 @@ async function checkMobileLayouts(page: Page, workspace: Workspace, testInfo: Te
     ['agents', '/agents', '.resource-card'],
     ['projects', '/projects', '.resource-card'],
     ['skills', '/skills', '.skill-card'],
-    ['connections', '/connections', '.connection-card'],
+    ['connections', '/connections', '.account-group'],
     ['settings', '/settings/installation', '.settings-section'],
     ['mcps', '/mcps', '.page-heading'],
     ['result', `/runs/${run.id}`, '.run-panel'],
@@ -297,7 +297,6 @@ async function checkMobileLayouts(page: Page, workspace: Workspace, testInfo: Te
     access: {
       projects: null,
       skills: null,
-      github: true,
       sandbox: 'yolo',
     },
   }))

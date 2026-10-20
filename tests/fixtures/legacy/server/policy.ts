@@ -13,6 +13,10 @@ const legacyAccess = accessPolicy.extend({ github: z.boolean().default(true) })
 
 export function policy(agent: Agent) {
   const access = legacyAccess.parse(agent.access ?? {})
+  // Agents saved by the current contract have no setting: they had the shared
+  // connection only with access to every project.
+  if (agent.access && !Object.hasOwn(agent.access, 'github'))
+    access.github = access.projects === null
   if (agent.id !== MAIN_AGENT_ID && agent.access && !Object.hasOwn(agent.access, 'mcps') && (access.projects !== null || access.skills !== null || !access.github || access.sandbox !== 'yolo'))
     access.mcps = []
   return access

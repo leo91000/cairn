@@ -665,6 +665,8 @@ data class PluginProject(
     val url: String? = null,
     /** Already registered: shown, not selectable. */
     val imported: Boolean = false,
+    /** The name a project imported from this item takes. */
+    val projectName: String? = null,
 )
 
 @Serializable

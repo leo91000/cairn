@@ -384,9 +384,6 @@ export async function grantFullAccess(page: Page) {
     await openAgentSection(page, section!)
     await page.getByRole('group', { name: group }).getByRole('button', { name: 'All, including future', exact: true }).click()
   }
-
-  await openAgentSection(page, 'GitHub')
-  await page.getByRole('radio', { name: /^Shared connection/ }).check()
 }
 
 // Creates the agent drafted on /agents/new and waits for its own page.

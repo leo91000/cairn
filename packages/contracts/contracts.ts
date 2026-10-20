@@ -285,7 +285,7 @@ export interface SkillSourceChange {
 }
 export interface SkillSourceStatus {
   source: SkillSource
-  latest: { commit: string, message: string, date: string }
+  latest: { version: string, message: string, date: string }
   current: boolean
   changes: SkillSourceChange[]
 }
@@ -313,6 +313,8 @@ export type RunListItem = Omit<Run, 'snapshot' | 'summary'> & {
 export interface PluginProject {
   id: string
   name: string
+  /** The name a project imported from this item takes. */
+  projectName?: string
   description: string
   defaultBranch: string
   badges: string[]

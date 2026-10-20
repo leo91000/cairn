@@ -279,7 +279,7 @@ internal fun ProjectEditor(
                     item = it.id
                     form =
                         form.copy(
-                            name = it.name.take(100),
+                            name = (it.projectName?.ifBlank { null } ?: it.name).take(100),
                             description = it.description.take(500),
                             baseBranch = it.defaultBranch.ifBlank { form.baseBranch },
                         )

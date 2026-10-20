@@ -71,9 +71,14 @@ fn item(raw: &Value, projects: &[Value], plugin: &str) -> Option<Value> {
     });
     let url = plain(&raw["url"], 500)
         .filter(|raw| url::Url::parse(raw).is_ok_and(|url| url.scheme() == "https"));
+    // The name a new project takes, when it differs from what identifies the item.
+    let project_name = plain(&raw["projectName"], 100)
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| name.clone());
     Some(json!({
         "id": id,
         "name": name,
+        "projectName": project_name,
         "description": plain(&raw["description"], 500).unwrap_or_default(),
         "defaultBranch": plain(&raw["defaultBranch"], 200).unwrap_or_default(),
         "badges": badges,

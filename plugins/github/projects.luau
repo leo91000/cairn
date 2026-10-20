@@ -28,6 +28,7 @@ local function item(repo: any): any?
     return {
         id = name,
         name = name,
+        projectName = repo.name or name,
         description = repo.description or "",
         defaultBranch = repo.default_branch or "",
         badges = cairn.array(badges(repo)),
