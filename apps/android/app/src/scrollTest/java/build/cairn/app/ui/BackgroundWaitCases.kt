@@ -196,13 +196,26 @@ abstract class BackgroundWaitCases {
                 condition =
                     buildJsonObject {
                         put("type", "github_pr_checks")
+                        put("pluginId", "github")
                         put("prNumber", 1)
                     },
+                display =
+                    buildJsonObject {
+                        put("title", "Waiting for required checks on PR #1")
+                        put("short", "PR #1 checks")
+                    },
             )
+        // The plugin words its result; the app shows it as given.
         val observation = buildJsonObject {
             put("state", "completed")
             put("type", "github_pr_checks")
+            put("pluginId", "github")
             put("conclusion", "success")
+            putJsonObject("display") {
+                put("tone", "ok")
+                put("title", "Required checks passed")
+                put("detail", "1 check")
+            }
         }
         val resolved = ActivityWait(wakeup, observation, observed = true)
         var wait by mutableStateOf(resolved)
@@ -229,7 +242,8 @@ abstract class BackgroundWaitCases {
             .onNodeWithText("Remplacée par un nouvel appel d’attente", substring = true)
             .assertExists()
         compose.runOnIdle { wait = resolved.copy(resumedAt = 1000) }
-        compose.onNodeWithText("Checks requis réussis").assertExists()
+        compose.onNodeWithText("Required checks passed").assertExists()
+        compose.onNodeWithText("PR #1 checks", substring = true).assertExists()
         compose.runOnIdle { wait = ActivityWait(null, observation, observed = true) }
         compose.onNodeWithText("Le résultat était déjà disponible", substring = true).assertExists()
     }

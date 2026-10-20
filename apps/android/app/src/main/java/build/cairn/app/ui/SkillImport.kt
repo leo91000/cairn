@@ -13,6 +13,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.runtime.saveable.listSaver
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -28,7 +29,10 @@ import build.cairn.app.data.*
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.launch
 
-/** Imports a new skill from a `.zip`/`.skill` archive or from a GitHub repository. */
+/**
+ * Imports a new skill from a `.zip`/`.skill` archive or from a plugin's skill source, such as a
+ * repository of a GitHub account.
+ */
 @Composable
 internal fun SkillImportSheet(
     vm: CairnViewModel,
@@ -43,9 +47,17 @@ internal fun SkillImportSheet(
     var skillScope by rememberSaveable {
         mutableStateOf(initialScope.takeIf { it != "all" } ?: "global")
     }
-    var repository by rememberSaveable { mutableStateOf("") }
+    // The plugin's skill source ("plugin/source"), its instance (the first enabled one unless the
+    // owner picks another) and the location's fields, rendered like instance settings.
+    var sourceKey by rememberSaveable { mutableStateOf("") }
+    var instance by rememberSaveable { mutableStateOf("") }
+    var values by
+        rememberSaveable(sourceKey, saver = stringMapSaver) {
+            mutableStateOf(emptyMap<String, String>())
+        }
     var folder by rememberSaveable { mutableStateOf("") }
-    var ref by rememberSaveable { mutableStateOf("") }
+    var catalog by remember { mutableStateOf<PluginCatalog?>(null) }
+    var catalogError by remember { mutableStateOf<String?>(null) }
     var archiveName by rememberSaveable { mutableStateOf<String?>(null) }
     var archiveSize by rememberSaveable { mutableLongStateOf(0L) }
     var upload by rememberSaveable { mutableStateOf<String?>(null) }
@@ -53,7 +65,24 @@ internal fun SkillImportSheet(
     var chosen by rememberSaveable { mutableStateOf<String?>(null) }
     var working by remember { mutableStateOf<String?>(null) }
     var error by remember { mutableStateOf<String?>(null) }
-    val reference = githubSkillReference(repository)
+    LaunchedEffect(Unit) {
+        try {
+            catalog = vm.api.get<PluginCatalog>("/plugins")
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            catalogError = e.message ?: "Plugins indisponibles."
+        }
+    }
+    val sources = catalog?.skillSources().orEmpty()
+    val pluginSource = sources.find { it.key == sourceKey } ?: sources.firstOrNull()
+    val fields = pluginSource?.source?.fields.orEmpty()
+    val chosenInstance =
+        pluginSource?.instances?.let { instances ->
+            instances.find { it.id == instance } ?: instances.firstOrNull()
+        }
+    // Field defaults until the owner types something.
+    val location = fields.associate { it.key to formValue(it, null) } + values
 
     fun fail(e: Exception) {
         if (e is CancellationException) throw e
@@ -94,14 +123,19 @@ internal fun SkillImportSheet(
             try {
                 val result =
                     if (source == "archive")
-                        vm.api.importSkill(skillScope, upload = upload, path = chosen)
+                        vm.api.importSkill(skillScope, requireNotNull(upload), path = chosen)
                     else {
-                        val target = requireNotNull(reference) { "Indiquez un dépôt owner/repo." }
-                        vm.api.importSkill(
+                        val origin = requireNotNull(pluginSource) { "Choisissez une source." }
+                        vm.api.importPluginSkill(
                             skillScope,
-                            repository = target.repository,
-                            path = chosen ?: folder.trim().trim('/').ifBlank { target.path },
-                            ref = ref.trim().ifBlank { target.ref },
+                            PluginSkillImport(
+                                origin.entry.id,
+                                origin.source.name,
+                                chosenInstance?.id,
+                                pluginSettings(fields, location),
+                                // A chosen candidate is a folder of the location.
+                                folder = chosen ?: folder,
+                            ),
                         )
                     }
                 val bundle = result.imported
@@ -159,7 +193,7 @@ internal fun SkillImportSheet(
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
             SingleChoiceSegmentedButtonRow(Modifier.fillMaxWidth()) {
-                listOf("archive" to "Archive", "github" to "GitHub").forEachIndexed {
+                listOf("archive" to "Archive", "plugin" to "Plugin").forEachIndexed {
                     index,
                     (key, label) ->
                     SegmentedButton(
@@ -174,7 +208,7 @@ internal fun SkillImportSheet(
                         Modifier.testTag("skill-import-$key"),
                         icon = {
                             Icon(
-                                if (key == "archive") CairnIcons.Upload else CairnIcons.Branch,
+                                if (key == "archive") CairnIcons.Upload else CairnIcons.Plug,
                                 null,
                                 Modifier.size(16.dp),
                             )
@@ -282,54 +316,81 @@ internal fun SkillImportSheet(
                             }
                         }
                     }
-            } else {
-                OutlinedTextField(
-                    repository,
-                    {
-                        repository = it
-                        candidates = emptyList()
-                        chosen = null
-                    },
-                    Modifier.fillMaxWidth().testTag("skill-import-repository"),
-                    label = { Text("Dépôt GitHub") },
-                    placeholder = { Text("owner/repo ou URL GitHub") },
-                    singleLine = true,
-                    keyboardOptions = InputKeyboards.Literal,
-                    leadingIcon = { Icon(CairnIcons.Branch, null, Modifier.size(18.dp)) },
-                    isError = repository.isNotBlank() && reference == null,
-                    supportingText = {
-                        Text(
-                            if (repository.isNotBlank() && reference == null)
-                                "Format attendu : owner/repo"
-                            else
-                                "Les dépôts privés utilisent la connexion GitHub de l’installation."
-                        )
-                    },
-                )
-                Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                    OutlinedTextField(
-                        folder,
-                        {
-                            folder = it
-                            candidates = emptyList()
-                            chosen = null
-                        },
-                        Modifier.weight(1.4f).testTag("skill-import-path"),
-                        label = { Text("Dossier") },
-                        placeholder = { Text(reference?.path?.ifBlank { null } ?: "facultatif") },
-                        singleLine = true,
-                        keyboardOptions = InputKeyboards.Literal,
+            } else if (pluginSource == null) {
+                if (catalog == null && catalogError == null)
+                    LinearProgressIndicator(Modifier.fillMaxWidth())
+                else
+                    Text(
+                        catalogError
+                            ?: "Aucun plugin actif ne fournit de skills. Ajoutez-en un dans Atelier → Plugins.",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
-                    OutlinedTextField(
-                        ref,
-                        { ref = it },
-                        Modifier.weight(1f).testTag("skill-import-ref"),
-                        label = { Text("Référence") },
-                        placeholder = { Text(reference?.ref?.ifBlank { null } ?: "main") },
-                        singleLine = true,
-                        keyboardOptions = InputKeyboards.Literal,
+            } else {
+                fun changed() {
+                    candidates = emptyList()
+                    chosen = null
+                }
+                if (sources.size > 1)
+                    Choice(
+                        "Source",
+                        pluginSource.key,
+                        sources.map { it.key to it.label },
+                        enabled = working == null,
+                    ) {
+                        if (it != pluginSource.key) {
+                            sourceKey = it
+                            instance = ""
+                            changed()
+                        }
+                    }
+                else Text(pluginSource.label, style = MaterialTheme.typography.titleSmall)
+                if (pluginSource.source.description.isNotBlank())
+                    Text(
+                        pluginSource.source.description,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                if (pluginSource.instances.size > 1 && chosenInstance != null) {
+                    Choice(
+                        pluginSource.entry.manifest?.noun() ?: "Instance",
+                        chosenInstance.id,
+                        pluginSource.instances.map { it.id to it.name },
+                        enabled = working == null,
+                    ) {
+                        instance = it
+                        changed()
+                    }
+                }
+                Column(
+                    Modifier.testTag("skill-import-fields"),
+                    verticalArrangement = Arrangement.spacedBy(10.dp),
+                ) {
+                    PluginFields(
+                        fields,
+                        location,
+                        { key, value ->
+                            values = location + (key to value)
+                            changed()
+                        },
+                        emptyMap(),
+                        { _, _ -> },
+                        enabled = working == null,
                     )
                 }
+                OutlinedTextField(
+                    folder,
+                    {
+                        folder = it
+                        changed()
+                    },
+                    Modifier.fillMaxWidth().testTag("skill-import-path"),
+                    label = { Text("Dossier") },
+                    placeholder = { Text("facultatif") },
+                    singleLine = true,
+                    keyboardOptions = InputKeyboards.Literal,
+                    leadingIcon = { Icon(CairnIcons.Folder, null, Modifier.size(18.dp)) },
+                )
             }
             if (candidates.isNotEmpty())
                 SignalCard(
@@ -408,7 +469,8 @@ internal fun SkillImportSheet(
             val ready =
                 working == null &&
                     (candidates.isEmpty() || chosen != null) &&
-                    (if (source == "archive") upload != null else reference != null)
+                    (if (source == "archive") upload != null
+                    else pluginSource != null && !requiredMissing(fields, location))
             SignalButton(
                 if (chosen != null) "Importer ${chosen!!.substringAfterLast('/')}" else "Importer",
                 Modifier.fillMaxWidth().testTag("skill-import-submit"),
@@ -426,3 +488,12 @@ internal fun SkillImportSheet(
         }
     }
 }
+
+/** Typed location fields survive recreation; they never hold a secret. */
+private val stringMapSaver =
+    listSaver<MutableState<Map<String, String>>, String>(
+        save = { state -> state.value.flatMap { (key, value) -> listOf(key, value) } },
+        restore = { saved ->
+            mutableStateOf(saved.chunked(2).associate { (key, value) -> key to value })
+        },
+    )

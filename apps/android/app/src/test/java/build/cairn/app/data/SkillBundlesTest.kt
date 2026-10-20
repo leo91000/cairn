@@ -2,8 +2,10 @@ package build.cairn.app.data
 
 import java.util.Base64
 import kotlinx.coroutines.test.runTest
+import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.put
 import okhttp3.mockwebserver.MockResponse
 import okhttp3.mockwebserver.MockWebServer
 import org.junit.Assert.assertEquals
@@ -479,31 +481,48 @@ class SkillBundlesTest {
     }
 
     @Test
-    fun githubReferencesAcceptRepositoriesAndUrls() {
-        assertEquals(GithubSkillReference("owner/repo"), githubSkillReference(" owner/repo "))
-        assertEquals(
-            GithubSkillReference("anthropics/skills", "main", "skills/pdf"),
-            githubSkillReference("https://github.com/anthropics/skills/tree/main/skills/pdf"),
-        )
-        assertEquals(
-            GithubSkillReference("o/r", "v1", "a"),
-            githubSkillReference("github.com/o/r/blob/v1/a/SKILL.md"),
-        )
-        assertEquals(
-            GithubSkillReference("o/r"),
-            githubSkillReference("https://github.com/o/r.git"),
-        )
-        assertEquals(
-            GithubSkillReference("o/r", "main", "foo/MYSKILL.md"),
-            githubSkillReference("https://github.com/o/r/blob/main/foo/MYSKILL.md"),
-        )
-        assertEquals(
-            GithubSkillReference("o/r", "main", ""),
-            githubSkillReference("https://github.com/o/r/blob/main/SKILL.md"),
-        )
-        assertNull(githubSkillReference("owner"))
-        assertNull(githubSkillReference("https://gitlab.com/o/r"))
-        assertNull(githubSkillReference("o/r/issues/1"))
+    fun pluginSourcesAreReadAndImportedGenerically() {
+        val skill =
+            wireJson.decodeFromString<Skill>(
+                """{"name":"pdf","source":{"pluginId":"github","source":"repository","instance":"acct","label":"anthropics/skills","location":{"repository":"anthropics/skills","ref":"main"},"url":"https://github.com/anthropics/skills/tree/9b1e2c4d5/skills/pdf","folder":"skills/pdf","version":"9b1e2c4d5e6f","importedAt":1,"modified":true,"later":1}}"""
+            )
+        val source = skill.source!!
+        assertEquals("anthropics/skills", source.label)
+        assertEquals("skills/pdf", source.folder)
+        assertEquals("9b1e2c4", source.shortVersion)
+        assertEquals("anthropics/skills@9b1e2c4", source.reference)
+        assertEquals("https://github.com/anthropics/skills/tree/9b1e2c4d5/skills/pdf", source.url)
+        assertTrue(source.modified)
+        // A source without a version or label still names something.
+        assertEquals("forge", SkillSource(pluginId = "forge").reference)
+
+        val status =
+            wireJson.decodeFromString<SkillSourceStatus>(
+                """{"source":{"pluginId":"github","source":"repository","label":"o/r","location":{},"folder":"","version":"aaa","importedAt":1,"modified":false},"latest":{"version":"bbbbbbbbb","message":"Fix","date":"2026-09-01T00:00:00Z"},"current":false,"changes":[]}"""
+            )
+        assertEquals("bbbbbbb", shortVersion(status.latest.version))
+        assertFalse(status.current)
+
+        val body =
+            pluginSkillImportBody(
+                PluginSkillImport(
+                    "github",
+                    "repository",
+                    instance = null,
+                    location = buildJsonObject { put("repository", "o/r") },
+                    folder = " /skills/pdf/ ",
+                )
+            )
+        assertEquals("plugin", body["source"]!!.jsonPrimitive.content)
+        assertEquals("github", body["pluginId"]!!.jsonPrimitive.content)
+        assertEquals("repository", body["skillSource"]!!.jsonPrimitive.content)
+        assertFalse("instance" in body)
+        assertEquals("o/r", body["location"]!!.jsonObject["repository"]!!.jsonPrimitive.content)
+        assertEquals("skills/pdf", body["folder"]!!.jsonPrimitive.content)
+        val chosen =
+            pluginSkillImportBody(PluginSkillImport("github", "repository", instance = "acct"))
+        assertEquals("acct", chosen["instance"]!!.jsonPrimitive.content)
+        assertFalse("folder" in chosen)
     }
 
     @Test
@@ -527,7 +546,7 @@ class SkillBundlesTest {
         assertEquals(SkillFileKind.IMAGE, skillFileKind("assets/logo.PNG", false, false))
         assertEquals(SkillFileKind.BINARY, skillFileKind("assets/font.woff2", false, false))
         assertEquals(SkillFileKind.TEXT, skillFileKind("templates/a.json", true, false))
-        assertEquals("o/r@9b1e2c4", SkillSource(repository = "o/r", commit = "9b1e2c4d5").label)
+        assertEquals("o/r@9b1e2c4", SkillSource(label = "o/r", version = "9b1e2c4d5").reference)
     }
 
     @Test
@@ -536,7 +555,8 @@ class SkillBundlesTest {
         assertTrue(longRequest("/skills/uploads"))
         assertTrue(longRequest("/skills/global/import"))
         assertTrue(longRequest("/skills/p/review/source/update"))
-        assertTrue(longRequest("/projects/github"))
+        assertTrue(longRequest("/projects/import"))
+        assertFalse(longRequest("/projects"))
         assertFalse(longRequest("/skills/global/review/file?path=bundle"))
     }
 

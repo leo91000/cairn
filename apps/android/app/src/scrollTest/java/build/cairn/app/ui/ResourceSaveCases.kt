@@ -33,11 +33,11 @@ abstract class ResourceSaveCases {
     @Test fun projectRefreshFailureKeepsTheCreatedProject() = saveAfterFailure("projects", false)
 
     @Test
-    fun githubImportRefreshFailureKeepsTheImportedProject() = saveAfterFailure("github", false)
+    fun pluginImportRefreshFailureKeepsTheImportedProject() = saveAfterFailure("import", false)
 
     @Test
-    fun lostGithubImportResponseRecoversTheRepositoryBeforeUpdatingEdits() =
-        saveAfterFailure("github", true)
+    fun lostPluginImportResponseRecoversTheProjectBeforeUpdatingEdits() =
+        saveAfterFailure("import", true)
 
     @Test
     fun lostTaskResponseReplaysTheOriginalCreationThenUpdatesTheEditedMission() =
@@ -75,7 +75,7 @@ abstract class ResourceSaveCases {
         malformedResponse: Boolean = false,
     ) {
         val uncertainResponse = loseResponse || malformedResponse
-        val resourceKind = if (kind == "github") "projects" else kind
+        val resourceKind = if (kind == "import") "projects" else kind
         val mutations = CopyOnWriteArrayList<Pair<String, JsonObject>>()
         val failRefresh = AtomicBoolean(false)
         val closed = AtomicBoolean(false)
@@ -102,7 +102,7 @@ abstract class ResourceSaveCases {
                             request.method in listOf("POST", "PUT") &&
                                 (path == resourcePath ||
                                     path == "$resourcePath/saved" ||
-                                    path == "$resourcePath/github")
+                                    path == "$resourcePath/import")
                         ) {
                             val value =
                                 wireJson.parseToJsonElement(request.body.readUtf8()).jsonObject
@@ -121,7 +121,7 @@ abstract class ResourceSaveCases {
                             failRefresh.set(first)
                             val stored = if (request.method == "POST") committed!! else value
                             val projectPath =
-                                if (kind == "github")
+                                if (kind == "import")
                                     mapOf("path" to JsonPrimitive("/fixtures/imported"))
                                 else emptyMap()
                             return json(
@@ -150,8 +150,11 @@ abstract class ResourceSaveCases {
                             when {
                                 path == "/api/account/session" -> beaconAccountFixture("fixture")
                                 path == "/api/installations" -> beaconInstallationsFixture()
-                                path.endsWith("/github/repositories") ->
-                                    """{"repositories":[{"id":1,"name":"repository","fullName":"owner/repository","defaultBranch":"main"}]}"""
+                                // A plugin with a project source and one enabled account.
+                                path.endsWith("/api/plugins") ->
+                                    """{"packages":[{"id":"github","status":"active","active":"1.0.0","manifest":{"id":"github","name":"GitHub","projectSources":[{"name":"repositories","title":"GitHub repository"}]}}],"connections":[{"id":"acct","pluginId":"github","name":"octo","enabled":true}]}"""
+                                path.endsWith("/plugins/github/projects") ->
+                                    """{"items":[{"id":"owner/repository","name":"owner/repository","description":"","defaultBranch":"main","badges":["Private"],"imported":false}],"nextPage":null}"""
                                 path.endsWith("/overview") || path.endsWith("/models") -> "{}"
                                 path.endsWith("/agents") -> """[{"id":"agent","name":"Agent"}]"""
                                 else -> "[]"
@@ -191,14 +194,14 @@ abstract class ResourceSaveCases {
                                     close = { closed.set(true) },
                                 )
                             "projects",
-                            "github" ->
+                            "import" ->
                                 ProjectEditor(
                                     vm,
                                     state,
                                     Project(
                                         name = "Original",
                                         path = "/fixtures/project",
-                                        sourceMode = if (kind == "github") "local" else "remote",
+                                        sourceMode = if (kind == "import") "local" else "remote",
                                     ),
                                     close = { closed.set(true) },
                                 )
@@ -214,9 +217,15 @@ abstract class ResourceSaveCases {
                 }
             try {
                 waitFor { vm.state.value.installation != null && !vm.state.value.busy }
-                if (kind == "github") {
+                if (kind == "import") {
+                    compose.waitUntil(20000) {
+                        compose
+                            .onAllNodesWithText("Dossier sur le serveur")
+                            .fetchSemanticsNodes()
+                            .isNotEmpty()
+                    }
                     compose.onNodeWithText("Dossier sur le serveur").performClick()
-                    compose.onNodeWithText("GitHub").performClick()
+                    compose.onNodeWithText("GitHub repository").performClick()
                     compose.waitUntil(20000) {
                         compose
                             .onAllNodesWithText("owner/repository")
@@ -305,7 +314,13 @@ abstract class ResourceSaveCases {
                     }
                 assertEquals(expected, mutations.map { it.first })
                 assertEquals("Modifié", mutations.last().second["name"]!!.jsonPrimitive.content)
-                if (kind == "github") {
+                if (kind == "import") {
+                    val import = mutations.first().second
+                    assertEquals("github", import["pluginId"]!!.jsonPrimitive.content)
+                    assertEquals("repositories", import["source"]!!.jsonPrimitive.content)
+                    assertEquals("acct", import["instance"]!!.jsonPrimitive.content)
+                    assertEquals("owner/repository", import["id"]!!.jsonPrimitive.content)
+                    assertEquals("main", import["baseBranch"]!!.jsonPrimitive.content)
                     assertEquals(
                         "/fixtures/imported",
                         mutations.last().second["path"]!!.jsonPrimitive.content,

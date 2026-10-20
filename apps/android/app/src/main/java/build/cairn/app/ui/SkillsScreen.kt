@@ -47,7 +47,7 @@ fun SkillsScreen(vm: CairnViewModel, state: Workspace) {
     val skills =
         state.skills.filter {
             (scope == "all" || it.scope == scope) &&
-                "${it.name} ${it.description} ${it.source?.repository.orEmpty()}"
+                "${it.name} ${it.description} ${it.source?.label.orEmpty()}"
                     .contains(query.trim(), true)
         }
     Column(
@@ -127,7 +127,7 @@ fun SkillsScreen(vm: CairnViewModel, state: Workspace) {
                     )
                     Text(
                         if (state.skills.isEmpty())
-                            "Créez un skill ou importez-en un depuis une archive ou GitHub."
+                            "Créez un skill ou importez-en un depuis une archive ou un plugin."
                         else "Aucun skill ne correspond à cette recherche.",
                         style = MaterialTheme.typography.bodyMedium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -247,7 +247,7 @@ private fun SkillCard(skill: Skill, scopeName: String, open: () -> Unit) {
                     Icon(CairnIcons.Branch, null, Modifier.size(13.dp))
                     Spacer(Modifier.width(4.dp))
                     Text(
-                        source.label,
+                        source.reference,
                         style = MaterialTheme.typography.labelMedium,
                         fontFamily = FontFamily.Monospace,
                         maxLines = 1,

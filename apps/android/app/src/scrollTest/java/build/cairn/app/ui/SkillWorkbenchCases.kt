@@ -23,7 +23,7 @@ import org.junit.Test
 
 /**
  * Skill bundles against a local fixture API: library cards, the workbench tree and editors, one
- * batched save, conflicts, GitHub source updates, imports and read-only members.
+ * batched save, conflicts, plugin source updates, imports and read-only members.
  */
 abstract class SkillWorkbenchCases {
     protected open fun capture(name: String) {}
@@ -96,12 +96,57 @@ abstract class SkillWorkbenchCases {
 
     private val pdfSource =
         SkillSource(
-            repository = "anthropics/skills",
-            path = "skills/pdf",
-            ref = "main",
-            commit = "9b1e2c4d5f60718293a4",
+            pluginId = "github",
+            source = "repository",
+            instance = "acct",
+            label = "anthropics/skills",
+            location =
+                buildJsonObject {
+                    put("repository", "anthropics/skills")
+                    put("ref", "main")
+                },
+            url = "https://github.com/anthropics/skills/tree/9b1e2c4d5f60718293a4/skills/pdf",
+            folder = "skills/pdf",
+            version = "9b1e2c4d5f60718293a4",
             importedAt = 1791976037271,
             modified = true,
+        )
+
+    /** A plugin with a skill source, as `GET /plugins` lists it. */
+    private val catalog =
+        PluginCatalog(
+            packages =
+                listOf(
+                    PluginEntry(
+                        "github",
+                        builtin = true,
+                        active = "1.0.0",
+                        manifest =
+                            PluginManifest(
+                                id = "github",
+                                name = "GitHub",
+                                instances = PluginInstances("Account", "Accounts"),
+                                skillSources =
+                                    listOf(
+                                        PluginSkillSource(
+                                            "repository",
+                                            "GitHub repository",
+                                            "A public or private repository this account can read.",
+                                            listOf(
+                                                PluginSetting(
+                                                    "repository",
+                                                    "Repository",
+                                                    required = true,
+                                                    placeholder = "owner/name",
+                                                ),
+                                                PluginSetting("ref", "Branch, tag or commit"),
+                                            ),
+                                        )
+                                    ),
+                            ),
+                    )
+                ),
+            connections = listOf(PluginConnection("acct", "github", "octo")),
         )
 
     private val pdfBundle =
@@ -270,7 +315,7 @@ abstract class SkillWorkbenchCases {
                                 pdfBundle.copy(
                                     revision = "88bb02",
                                     source =
-                                        pdfSource.copy(commit = "c0ffee1234567", modified = false),
+                                        pdfSource.copy(version = "c0ffee1234567", modified = false),
                                 )
                             )
                         )
@@ -278,7 +323,7 @@ abstract class SkillWorkbenchCases {
                     path == "$api/skills/global/import" -> {
                         val body = wireJson.parseToJsonElement(request.body.readUtf8()).jsonObject
                         fixture.imports += body
-                        if (body["path"] == null)
+                        if (body["folder"] == null)
                             json(
                                 """{"imported":null,"candidates":["skills/pdf","skills/docx","skills/xlsx"]}"""
                             )
@@ -287,6 +332,7 @@ abstract class SkillWorkbenchCases {
                                 """{"imported":${wireJson.encodeToString(pdfBundle)},"candidates":[]}"""
                             )
                     }
+                    path == "$api/plugins" -> json(wireJson.encodeToString(catalog))
                     path == "$api/overview" -> json("{}")
                     path.endsWith("/models") -> json("""{"models":[]}""")
                     else -> json("[]")
@@ -297,7 +343,7 @@ abstract class SkillWorkbenchCases {
     private val sourceStatus =
         SkillSourceStatus(
             pdfSource,
-            SkillSourceCommit(
+            SkillSourceVersion(
                 "c0ffee1234567",
                 "Extract tables with pdfplumber\n\nDetails",
                 "2026-10-12T09:30:00Z",
@@ -754,7 +800,7 @@ abstract class SkillWorkbenchCases {
         }
     }
 
-    @Test fun githubSourceShowsTheDiffAndUpdatesFromTheReviewedCommit() = sourceJourney(false)
+    @Test fun pluginSourceShowsTheDiffAndUpdatesFromTheReviewedVersion() = sourceJourney(false)
 
     @Test fun darkSourceDiffKeepsReadableColours() = sourceJourney(true)
 
@@ -774,10 +820,11 @@ abstract class SkillWorkbenchCases {
             capture(if (dark) "source-diff-dark" else "source-diff")
             if (dark) return
             compose.onNodeWithTag("skill-source-update").performScrollTo().performClick()
-            shown(hasText("Mettre à jour depuis GitHub ?"))
+            shown(hasText("Mettre à jour depuis la source ?"))
             compose.onNodeWithTag("skill-source-update-confirm").performClick()
             compose.waitUntil(15000) { fixture.updates.size == 1 }
-            assertEquals("c0ffee1234567", fixture.updates[0]["commit"]!!.jsonPrimitive.content)
+            assertEquals("c0ffee1234567", fixture.updates[0]["version"]!!.jsonPrimitive.content)
+            assertFalse("commit" in fixture.updates[0])
             assertEquals("77aa01", fixture.updates[0]["base"]!!.jsonPrimitive.content)
             gone(hasTestTag("skill-source-sheet"))
             shown(hasText("anthropics/skills@c0ffee1"))
@@ -785,30 +832,35 @@ abstract class SkillWorkbenchCases {
     }
 
     @Test
-    fun githubImportLetsTheOwnerChooseAmongSeveralSkills() {
+    fun pluginImportLetsTheOwnerChooseAmongSeveralSkills() {
         val fixture = Fixture()
         launch(fixture).use {
             compose.onNodeWithTag("skill-import").performClick()
             shown(hasTestTag("skill-import-sheet"))
-            compose.onNodeWithTag("skill-import-github").performClick()
-            compose.onNodeWithTag("skill-import-repository").performTextInput("anthropics/skills")
-            compose.onNodeWithTag("skill-import-ref").performTextInput("main")
+            compose.onNodeWithTag("skill-import-plugin").performClick()
+            // The source's fields are rendered like instance settings.
+            shown(hasText("GitHub repository"))
+            compose.onNodeWithTag("skill-import-submit").assertIsNotEnabled()
+            compose.onNodeWithText("Repository").performTextInput("anthropics/skills")
+            compose.onNodeWithText("Branch, tag or commit").performTextInput("main")
             compose.onNodeWithTag("skill-import-submit").performScrollTo().performClick()
             shown(hasTestTag("skill-candidate-skills/pdf"))
-            assertNull(fixture.imports[0]["path"])
-            assertEquals("github", fixture.imports[0]["source"]!!.jsonPrimitive.content)
+            assertNull(fixture.imports[0]["folder"])
+            assertEquals("plugin", fixture.imports[0]["source"]!!.jsonPrimitive.content)
+            assertEquals("github", fixture.imports[0]["pluginId"]!!.jsonPrimitive.content)
+            assertEquals("repository", fixture.imports[0]["skillSource"]!!.jsonPrimitive.content)
+            // The package's only account imports.
+            assertEquals("acct", fixture.imports[0]["instance"]!!.jsonPrimitive.content)
             compose.onNodeWithTag("skill-import-submit").assertIsNotEnabled()
             compose.onNodeWithTag("skill-candidate-skills/pdf").performScrollTo().performClick()
             hideKeyboard()
             capture("import-candidates")
             compose.onNodeWithTag("skill-import-submit").performScrollTo().performClick()
             compose.waitUntil(15000) { fixture.imports.size == 2 }
-            assertEquals("skills/pdf", fixture.imports[1]["path"]!!.jsonPrimitive.content)
-            assertEquals("main", fixture.imports[1]["ref"]!!.jsonPrimitive.content)
-            assertEquals(
-                "anthropics/skills",
-                fixture.imports[1]["repository"]!!.jsonPrimitive.content,
-            )
+            assertEquals("skills/pdf", fixture.imports[1]["folder"]!!.jsonPrimitive.content)
+            val location = fixture.imports[1]["location"]!!.jsonObject
+            assertEquals("main", location["ref"]!!.jsonPrimitive.content)
+            assertEquals("anthropics/skills", location["repository"]!!.jsonPrimitive.content)
             shown(hasTestTag("skill-workbench"))
             treeRow("scripts/extract.py")
         }

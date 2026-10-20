@@ -42,7 +42,6 @@ data class AccessPolicy(
     val mcps: List<String>? = null,
     val mcpTools: Map<String, List<String>> = emptyMap(),
     val installation: Boolean = false,
-    val github: Boolean = true,
     val sandbox: String = "yolo",
     val backend: String = "firecracker",
 )
@@ -241,24 +240,6 @@ data class Overview(
 )
 
 @Serializable
-data class Connection(
-    val provider: String,
-    val installed: Boolean = false,
-    val connected: Boolean = false,
-    val account: String? = null,
-    val version: String? = null,
-)
-
-@Serializable
-data class DeviceFlow(
-    val provider: String = "",
-    val state: String = "",
-    val code: String? = null,
-    val url: String? = null,
-    val error: String? = null,
-)
-
-@Serializable
 data class Settings(
     val nativeMcpOauth: Boolean = false,
     val publicUrl: String = "",
@@ -322,22 +303,3 @@ data class ChatExecution(
     val text: String = "",
     val recovery: Boolean = false,
 )
-
-@kotlinx.serialization.Serializable
-data class GithubRepository(
-    val fullName: String,
-    val name: String,
-    val description: String = "",
-    val defaultBranch: String = "",
-    @kotlinx.serialization.SerialName("private") val isPrivate: Boolean = false,
-    val archived: Boolean = false,
-    val fork: Boolean = false,
-    val owner: String = "",
-    val language: String = "",
-    val stars: Int = 0,
-    val pushedAt: String = "",
-    val imported: Boolean = false,
-)
-
-@kotlinx.serialization.Serializable
-data class GithubRepositoryPage(val repositories: List<GithubRepository>, val nextPage: Int? = null)
