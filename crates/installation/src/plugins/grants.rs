@@ -99,7 +99,8 @@ pub async fn create(
 ) -> Result<Value> {
     let connection = connections::get(s, plugin, instance).await?;
     let resource = resources::get(s, plugin, instance, collection, resource).await?;
-    let package = registry::active(s, plugin).await?;
+    let approved = registry::approved(s, plugin).await?;
+    let package = &approved.package;
     if package.manifest.agent_access.is_none() {
         return Err(Error::bad("This package declares no agent access."));
     }
@@ -161,6 +162,7 @@ pub async fn create(
     };
     s.store
         .transaction(move |db| {
+            approved.recheck_in(db)?;
             let current = db.get(connections::KIND, &connection.id)?;
             let current_resource = db.get(resources::KIND, &resource.id)?;
             if !current.is_some_and(|value| value["revision"] == connection.revision)

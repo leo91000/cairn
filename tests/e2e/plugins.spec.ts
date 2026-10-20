@@ -550,6 +550,97 @@ test('personal plugin accounts select scopes and complete only their own authori
   await expect(page.getByRole('button', { name: 'Refresh', exact: true })).toBeEnabled()
 })
 
+test('personal account refresh preserves later-page sign-ins and their original consent', async ({ page }) => {
+  await useRelayForHttpMocks(page)
+  const root = '/plugins/personal-pages/connections/app/resources/workspace'
+  const connected = new Set<string>()
+  const starts: string[] = []
+  const finishes: string[] = []
+  let shifted = false
+
+  function item(id: string) {
+    return {
+      id,
+      pluginId: 'personal-pages',
+      pluginName: 'Personal service',
+      instanceId: 'app',
+      instanceName: 'Company service',
+      collection: 'workspace',
+      resourceId: id,
+      resourceName: id,
+      providerName: 'personal',
+      title: 'Personal access',
+      scopes: ['messages:read'],
+      enabled: true,
+      authorization: connected.has(id)
+        ? { status: 'authorized', scopes: ['messages:read'], subject: `U-${id}` }
+        : { status: 'disconnected' },
+    }
+  }
+
+  await page.route('**/plugins/personal-authorizations*', async (route) => {
+    const cursor = new URL(route.request().url()).searchParams.get('cursor')
+    const ids = shifted ? ['Intro', 'Engineering', 'Sales'] : ['Engineering', 'Sales']
+    const index = cursor ? ids.indexOf(cursor) + 1 : 0
+    const id = ids[index]
+    await route.fulfill({
+      json: {
+        items: id ? [item(id)] : [],
+        nextCursor: index + 1 < ids.length ? id : null,
+      },
+    })
+  })
+  await page.route(`**${root}/*/oauth/personal{,/finish}`, async (route) => {
+    const path = new URL(route.request().url()).pathname
+    const id = path.split('/workspace/')[1].split('/')[0]
+    if (path.endsWith('/finish')) {
+      expect(route.request().postDataJSON()).toEqual({ state: `consent-${id}` })
+      finishes.push(id)
+      connected.add(id)
+      await route.fulfill({ json: item(id).authorization })
+    }
+    else if (route.request().method() === 'POST') {
+      expect(route.request().postDataJSON()).toEqual({ scopes: ['messages:read'] })
+      starts.push(id)
+      await route.fulfill({
+        json: {
+          state: `consent-${id}`,
+          url: `https://provider.example.test/authorize?resource=${id}`,
+          expiresAt: Date.now() + 600000,
+        },
+      })
+    }
+    else {
+      connected.delete(id)
+      await route.fulfill({ json: item(id).authorization })
+    }
+  })
+  await page.goto(workspacePath('/personal-connections'))
+  await signIn(page)
+  const first = page.getByRole('article', { name: 'Engineering · Personal access', exact: true })
+  const second = page.getByRole('article', { name: 'Sales · Personal access', exact: true })
+  await first.getByRole('checkbox', { name: 'messages:read', exact: true }).check()
+  await first.getByRole('button', { name: 'Connect', exact: true }).click()
+  await page.getByRole('button', { name: 'More personal connections', exact: true }).click()
+  await second.getByRole('checkbox', { name: 'messages:read', exact: true }).check()
+  await second.getByRole('button', { name: 'Connect', exact: true }).click()
+  const link = second.getByRole('link', { name: 'Open authorization page', exact: true })
+  await expect(link).toHaveAttribute('href', 'https://provider.example.test/authorize?resource=Sales')
+  await first.getByRole('button', { name: 'Check authorization', exact: true }).click()
+  await expect(page.getByRole('button', { name: 'Refresh', exact: true })).toBeEnabled()
+  await expect(first.getByText('Connected as U-Engineering', { exact: true })).toBeVisible()
+  await expect(link).toHaveAttribute('href', 'https://provider.example.test/authorize?resource=Sales')
+  // Inserting a first-page resource must also retain the already-open consent.
+  shifted = true
+  await page.getByRole('button', { name: 'Refresh', exact: true }).click()
+  await expect(page.getByRole('article', { name: 'Intro · Personal access', exact: true })).toBeVisible()
+  await expect(link).toHaveAttribute('href', 'https://provider.example.test/authorize?resource=Sales')
+  await second.getByRole('button', { name: 'Check authorization', exact: true }).click()
+  await expect(second.getByText('Connected as U-Sales', { exact: true })).toBeVisible()
+  expect(starts).toEqual(['Engineering', 'Sales'])
+  expect(finishes).toEqual(['Engineering', 'Sales'])
+})
+
 test('owner resource OAuth gates setup until every consent settles and remains manageable after activation', async ({ page, workspace }) => {
   test.setTimeout(90000)
   await useRelayForHttpMocks(page)

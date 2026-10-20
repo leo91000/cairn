@@ -136,6 +136,56 @@ async fn empty_start_does_not_touch_unselected_repositories_and_selected_start_l
     );
 }
 
+#[tokio::test]
+async fn managed_resume_does_not_depend_on_unopened_project_sources() {
+    for backend in ["firecracker", "native"] {
+        for selected in [false, true] {
+            let (_root, s, projects) = fixture().await;
+            let project = if selected {
+                projects[0]["id"].clone()
+            } else {
+                Value::Null
+            };
+            let mut run = run(&s, project, MAIN_AGENT_ID).await;
+            run["snapshot"]["agent"]["access"]["backend"] = backend.into();
+            let prepared = execution::prepare(&run, &s.config, None, None, None)
+                .await
+                .unwrap();
+            assert_eq!(prepared["backend"], backend);
+            assert_eq!(
+                prepared["workspaces"].as_array().unwrap().len(),
+                usize::from(selected)
+            );
+            let working_file = Path::new(text(&prepared, "cwd")).join("retained-untracked");
+            std::fs::write(&working_file, b"retained native or VM work").unwrap();
+            // This authorized repository was never opened. Its removal must not
+            // prevent continuing the private working tree or an empty conversation.
+            std::fs::remove_dir_all(text(&projects[1], "path")).unwrap();
+            if !selected {
+                std::fs::remove_dir_all(text(&projects[0], "path")).unwrap();
+            }
+            let restored = execution::restore(&run, prepared.clone(), &s.config, None)
+                .await
+                .unwrap();
+            assert_eq!(restored, prepared);
+            assert_eq!(
+                std::fs::read(&working_file).unwrap(),
+                b"retained native or VM work"
+            );
+            if selected {
+                // Keep the existing location check for an actually opened project.
+                std::fs::remove_dir_all(text(&projects[0], "path")).unwrap();
+                assert!(
+                    execution::restore(&run, restored, &s.config, None)
+                        .await
+                        .is_err()
+                );
+                assert!(working_file.exists());
+            }
+        }
+    }
+}
+
 #[test]
 fn access_covers_unchanged_or_wider_grants_but_not_reduced_ones() {
     let agent = |access: Value| json!({ "id": "agent", "access": access });

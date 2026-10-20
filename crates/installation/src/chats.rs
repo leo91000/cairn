@@ -273,13 +273,15 @@ fn require_sendable(db: &Db<'_>, chat: &Value, messages: &[Value], id: &str) -> 
     Ok(())
 }
 
-fn send(
+pub(crate) fn send(
     db: &Db<'_>,
     chat_id: &str,
     mut values: Value,
     answer: Option<(Question, Value)>,
+    origin: &crate::native::policy::Origin,
 ) -> Result<Value> {
     let mut chat = chat(db, chat_id)?;
+    crate::native::policy::authorize_chat(db, &mut chat, origin)?;
     require_active(&chat)?;
     crate::attachments::message(db, chat_id, &mut values)?;
     let messages = db.messages(chat_id)?;
@@ -339,8 +341,18 @@ fn withdraw(db: &Db<'_>, chat_id: &str, message: &Value) -> Result<Value> {
     Ok(json!({ "deleted": true }))
 }
 
-fn edit(db: &Db<'_>, chat_id: &str, message_id: &str, values: Option<Value>) -> Result<Value> {
-    let chat = chat(db, chat_id)?;
+pub(crate) fn edit_as(
+    db: &Db<'_>,
+    chat_id: &str,
+    message_id: &str,
+    values: Option<Value>,
+    origin: &crate::native::policy::Origin,
+) -> Result<Value> {
+    let mut chat = chat(db, chat_id)?;
+    if values.is_some() {
+        crate::native::policy::authorize_chat(db, &mut chat, origin)?;
+        db.put("chats", &chat)?;
+    }
     require_active(&chat)?;
     let mut current = required(find_message(db, chat_id, message_id)?, "Message not found")?;
     if current["status"] != MessageStatus::Queued {
@@ -401,12 +413,56 @@ fn acknowledge(db: &Db<'_>, run_id: &str, message_id: &str) -> Result<()> {
     Ok(())
 }
 
+/// A source refusal cancels just this control and reopens its still-current
+/// question. Temporary authority outages leave the input queued for a later tick.
+fn steering_ready(
+    db: &Db<'_>,
+    chat: &str,
+    run: &Value,
+    message: &Value,
+    source: &Result<Option<crate::plugins::requesters::SteeringSource>>,
+) -> Result<bool> {
+    let allowed = crate::plugins::requesters::steering_authorized(db, chat, run, message, source);
+    match allowed {
+        Ok(true) => return Ok(true),
+        Err(error) if error.status == 503 => return Ok(false),
+        Err(error) if !crate::plugins::requesters::ExecutionSource::is_revoked(&error) => {
+            return Err(error);
+        }
+        _ => {}
+    }
+    let mut refused = message.clone();
+    refused["status"] = MessageStatus::Cancelled.into();
+    db.put_message(&refused)?;
+    if let Some(id) = message["questionId"].as_str()
+        && let Some(mut question) = find_question(db, chat, id)?
+        && question.run_id == text(run, "id")
+        && question.turn_id == text(&run["chatExecution"], "messageId")
+        && question.message_id.as_deref() == message["id"].as_str()
+        && question.status == QuestionStatus::Answering
+    {
+        question.status = QuestionStatus::Pending;
+        question.message_id = None;
+        save_question(db, &question)?;
+    }
+    db.audit(
+        "chat.steering.refused",
+        &json!({
+            "chatId": chat,
+            "runId": run["id"],
+            "messageId": message["id"],
+        }),
+    )?;
+    Ok(false)
+}
+
 /// Marks steering messages as sending so the running turn picks them up.
 fn claim_steering(
     db: &Db<'_>,
     chat_id: &str,
     delivering: &Value,
     run_id: &str,
+    source: &Result<Option<crate::plugins::requesters::SteeringSource>>,
 ) -> Result<Vec<Value>> {
     let Some(current_chat) = db.get("chats", chat_id)? else {
         return Ok(Vec::new());
@@ -432,15 +488,7 @@ fn claim_steering(
             && message["mode"] == MessageMode::Steer
             && message["id"] != *delivering
         {
-            if !crate::plugins::requesters::steering_authorized(db, chat_id, &run, &message)? {
-                message["status"] = MessageStatus::Cancelled.into();
-                db.put_message(&message)?;
-                db.audit(
-                    "chat.steering.refused",
-                    &json!({
-                        "chatId": chat_id, "runId": run_id, "messageId": message["id"],
-                    }),
-                )?;
+            if !steering_ready(db, chat_id, &run, &message, source)? {
                 continue;
             }
             message["status"] = MessageStatus::Sending.into();
@@ -728,6 +776,7 @@ fn launch_turn(
     if let Some(run) = run {
         continue_run(db, &chat, &run, &snapshot, execution)?;
     } else {
+        crate::native::policy::apply(&mut snapshot, &chat);
         snapshot["chatExecution"] = serde_json::to_value(execution)?;
         db.add_run(&snapshot, None)?;
         chat["runId"] = snapshot["id"].clone();
@@ -756,10 +805,19 @@ fn launch_turn(
 }
 
 pub(crate) fn create_in(db: &Db<'_>, input: Value) -> Result<Value> {
+    create_as(db, input, &crate::native::policy::Origin::default())
+}
+
+pub(crate) fn create_as(
+    db: &Db<'_>,
+    input: Value,
+    origin: &crate::native::policy::Origin,
+) -> Result<Value> {
     let input = parse_as::<ChatInput>("chat", input)?;
     let agent = required(db.get("agents", &input.agent_id)?, "Agent not found")?;
+    crate::native::policy::authorize_origin(db, &agent, origin)?;
     let created_at = now();
-    let chat = serde_json::to_value(NewChat {
+    let mut chat = serde_json::to_value(NewChat {
         id: id(),
         title: "New chat",
         agent_id: input.agent_id,
@@ -769,17 +827,20 @@ pub(crate) fn create_in(db: &Db<'_>, input: Value) -> Result<Value> {
         created_at,
         updated_at: created_at,
     })?;
+    crate::native::policy::authorize_chat(db, &mut chat, origin)?;
     task_projects(&agent, &chat, &db.list("projects")?)?;
     db.put("chats", &chat)
 }
 
 /// Capture the host-verified requester in the same transaction as the message.
 /// Management commands supply no personal author.
+/// Native host authority is separate and never supplies personal OAuth proof.
 pub(crate) fn send_in(
     db: &Db<'_>,
     chat: &str,
     input: Value,
     requester: Option<&crate::plugins::requesters::Principal>,
+    origin: &crate::native::policy::Origin,
 ) -> Result<Value> {
     let message = parse("message", input)?;
     crate::plugins::requesters::capture_principal(
@@ -789,7 +850,7 @@ pub(crate) fn send_in(
         requester,
         crate::plugins::requesters::Capture::New,
     )?;
-    send(db, chat, message, None)
+    send(db, chat, message, None, origin)
 }
 
 pub(crate) fn edit_in(
@@ -797,6 +858,7 @@ pub(crate) fn edit_in(
     chat: &str,
     message: &str,
     input: Option<Value>,
+    origin: &crate::native::policy::Origin,
 ) -> Result<Value> {
     let values = input
         .map(|mut input| {
@@ -815,7 +877,7 @@ pub(crate) fn edit_in(
         None,
         crate::plugins::requesters::Capture::Edit,
     )?;
-    edit(db, chat, message, values)
+    edit_as(db, chat, message, values, origin)
 }
 
 pub(crate) fn pause_in(db: &Db<'_>, id: &str, paused: bool) -> Result<Value> {
@@ -847,7 +909,19 @@ impl Service {
     }
 
     pub async fn chat_create(&self, input: Value) -> Result<Value> {
-        self.store.transaction(move |db| create_in(db, input)).await
+        let origin = crate::native::policy::origin();
+        if origin.known() {
+            crate::native::policy::refresh_agent(
+                self,
+                input["agentId"]
+                    .as_str()
+                    .unwrap_or(crate::config::MAIN_AGENT_ID),
+            )
+            .await?;
+        }
+        self.store
+            .transaction(move |db| create_as(db, input, &origin))
+            .await
     }
 
     pub async fn chat_send(&self, id: &str, input: Value) -> Result<Value> {
@@ -861,6 +935,10 @@ impl Service {
         identity: Option<&crate::auth::InstallationIdentity>,
     ) -> Result<Value> {
         let values = parse("message", input)?;
+        let origin = crate::native::policy::origin();
+        if origin.known() {
+            crate::native::policy::refresh_chat(self, id).await?;
+        }
 
         let actor = match identity {
             Some(identity) => {
@@ -880,7 +958,7 @@ impl Service {
                     actor.as_ref(),
                     crate::plugins::requesters::Capture::New,
                 )?;
-                send(db, &id, values, None)
+                send(db, &id, values, None, &origin)
             })
             .await?;
         self.worker.notify();
@@ -898,6 +976,11 @@ impl Service {
         input: Option<Value>,
         identity: Option<&crate::auth::InstallationIdentity>,
     ) -> Result<Value> {
+        let origin = crate::native::policy::origin();
+        if origin.known() {
+            crate::native::policy::refresh_chat(self, id).await?;
+        }
+
         let actor = match identity {
             Some(identity) if input.is_some() => {
                 Some(crate::plugins::requesters::message_actor(self, &identity.account_id).await?)
@@ -925,7 +1008,7 @@ impl Service {
                     actor.as_ref(),
                     crate::plugins::requesters::Capture::Edit,
                 )?;
-                edit(db, &id, &message, values)
+                edit_as(db, &id, &message, values, &origin)
             })
             .await?;
         self.worker.notify();
@@ -1070,9 +1153,11 @@ impl Service {
         let chat_id = text(chat, "id").to_owned();
         let delivering = run["chatExecution"]["messageId"].clone();
         let run_id = text(run, "id").to_owned();
+        let source = crate::plugins::requesters::SteeringSource::capture(self, run).await;
+        let admitted = source.clone();
         let mut steering = self
             .store
-            .transaction(move |db| claim_steering(db, &chat_id, &delivering, &run_id))
+            .transaction(move |db| claim_steering(db, &chat_id, &delivering, &run_id, &admitted))
             .await?;
         let skills = &run["snapshot"]["skills"];
         for message in &mut steering {
@@ -1080,6 +1165,42 @@ impl Service {
                 .await?;
             message["text"] = with_invoked_skills(text(message, "text"), skills).into();
         }
+        let source = match source {
+            Ok(Some(source)) => source.recheck(self).await.map(|()| Some(source)),
+            value => value,
+        };
+        let (chat_id, expected_run) = (text(chat, "id").to_owned(), run.clone());
+        let steering = self
+            .store
+            .transaction(move |db| {
+                let Some(chat) = db.get("chats", &chat_id)? else {
+                    return Ok(Vec::new());
+                };
+                let Some(run) = db.run(text(&expected_run, "id"))? else {
+                    return Ok(Vec::new());
+                };
+                if !is_active(&chat)
+                    || chat["runId"] != expected_run["id"]
+                    || !run_is_active(&run)
+                    || run["chatExecution"]["messageId"]
+                        != expected_run["chatExecution"]["messageId"]
+                {
+                    return Ok(Vec::new());
+                }
+                let mut ready = Vec::new();
+                for message in steering {
+                    if message["questionCancelled"] == true {
+                        ready.push(message);
+                    } else if let Some(current) = find_message(db, &chat_id, text(&message, "id"))?
+                        && current["status"] == MessageStatus::Sending
+                        && steering_ready(db, &chat_id, &run, &current, &source)?
+                    {
+                        ready.push(message);
+                    }
+                }
+                Ok(ready)
+            })
+            .await?;
         let directory = self
             .config
             .data_dir
@@ -1134,7 +1255,7 @@ mod tests {
         use crate::store::Store;
 
         for legacy in [false, true] {
-            for isolated in [false, true] {
+            for (isolated, native) in [(false, false), (true, false), (true, true)] {
                 let root = tempfile::tempdir().unwrap();
                 let store = Store::open(root.path()).unwrap();
                 store
@@ -1167,7 +1288,11 @@ mod tests {
                             }),
                             None,
                         )?;
-                        let prepared = json!({ "isolated": isolated, "workspace": "preserved" });
+                        let mut prepared =
+                            json!({ "isolated": isolated, "workspace": "preserved" });
+                        if native {
+                            prepared["backend"] = "native".into();
+                        }
                         db.set(
                             "run-checkpoint:run",
                             &json!({

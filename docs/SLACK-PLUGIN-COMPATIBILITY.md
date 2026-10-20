@@ -13,11 +13,11 @@ manifest parser. An older host also lacks the requester and resource-authority
 checks required by newly admitted work. Treat starting that host on this data as
 an unsafe downgrade, even when some JSON records are syntactically readable.
 
-The installation epoch advances to **6**. PR #226 inherited epoch 4; known upstream
-main `cf07bea9` already reserves epoch 5 for durable session restart (`39e58a99`).
-This plugin boundary uses a distinct higher epoch rather than reusing either
-number. `legacyTree` remains unchanged. The production release gate must refuse
-an unequal served/candidate epoch. This metadata is an operational deployment
+The installation epoch advances to **7**. PR #226 inherited epoch 4; integrated
+main `176969f5` reserves epoch 5 for durable session restart and epoch 6 for trusted
+native execution. This plugin boundary uses a distinct higher epoch rather than
+reusing those numbers. `legacyTree` remains unchanged. The production release gate
+must refuse an unequal served/candidate epoch. This metadata is an operational deployment
 fence, not a runtime promise that an old executable cannot open the directory.
 No deployment, automatic backup, restoration or epoch transition is performed.
 
@@ -57,7 +57,7 @@ data and deploy a reviewed forward fix. Repair an incompatible package as a new
 version under its existing ID, explicitly review/approve it, and retain its
 instance/resource IDs and secrets. Reconnect a provider after an uncertain
 exchange or interrupted rotation; do not replay a consumed code/token. Restoring
-an earlier image is not a supported recovery once epoch-6 data has been written.
+an earlier image is not a supported recovery once epoch-7 data has been written.
 No automatic data restore point or reversible provider-side transaction exists.
 
 ## Evidence and remaining qualification

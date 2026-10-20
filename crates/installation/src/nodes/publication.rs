@@ -331,6 +331,14 @@ async fn publish(s: &Service, run: &Value) -> Result<Value> {
     };
     let result = publication.run(&mut timing).await;
 
+    if snapshot["manifest"]["kind"] == "native-files-v1" {
+        // Native completed.json and its receipt identify this immutable stopped
+        // capture. Retain it until the next acknowledged capture or explicit purge.
+        if result.is_ok() {
+            timing.finish();
+        }
+        return result;
+    }
     if result.is_ok() {
         timing.next("discard_snapshot");
     }
@@ -425,6 +433,12 @@ impl Publication<'_> {
         let s = self.s;
         let manifest = self.snapshot["manifest"].clone();
         snapshots::validate(&manifest)?;
+        if manifest["kind"] == "native-files-v1" && manifest["attempt"] != self.attempt {
+            return Err(Error::new(
+                425,
+                "Waiting for the current native attempt's stopped checkpoint.",
+            ));
+        }
         let directory = root(s, self.run_id);
         crate::skills::private_dir(&directory.join("blocks")).await?;
         let mut intent = self.write_intent(&directory, manifest).await?;
@@ -447,6 +461,25 @@ impl Publication<'_> {
             let _ = super::storage::refresh(s, self.run).await;
         }
 
+        if intent.manifest["kind"] == "native-files-v1" {
+            let response = self
+                .s
+                .http
+                .post(format!("{}/disks/{}/published", self.base, self.run_id))
+                .bearer_auth(self.credential)
+                .json(&json!({ "backupId": intent.value["id"], "snapshotId": self.snapshot_id }))
+                .timeout(Duration::from_secs(10))
+                .send()
+                .await
+                .map_err(Error::internal)?;
+            if !response.status().is_success() {
+                return Err(Error::unavailable(
+                    "Native checkpoint acknowledgement failed.",
+                ));
+            }
+            self.complete().await?;
+            let _ = super::storage::refresh(self.s, self.run).await;
+        }
         timing.next("collect_after");
         collect_unused(s, self.run_id).await?;
         Ok(public(intent.value))
@@ -1600,7 +1633,7 @@ fn publication_due(
     let requested = run["backup"]["requestedRevision"].as_u64().unwrap_or(0);
     let acknowledged = run["backup"]["acknowledgedRevision"].as_u64().unwrap_or(0);
     protected(run)
-        && (run["sessionId"].is_string() || on_demand)
+        && (run["sessionId"].is_string() || on_demand || requested > acknowledged)
         && (!run["moveRequest"].is_object() || requested > acknowledged)
         && !synchronized
         && since_last_ms
@@ -1731,6 +1764,28 @@ mod capture_policy_tests {
         run["moveRequest"] = json!({ "idle": false });
         assert_eq!(snapshot_request(&run, false)["consistency"], "filesystem");
         assert_eq!(snapshot_request(&run, false)["baseline"], "previous");
+    }
+
+    #[test]
+    fn requested_native_work_retries_without_an_engine_session() {
+        for status in ["failed", "cancelled", "queued"] {
+            let mut run = json!({
+                "isolated": true,
+                "status": status,
+                "storage": { "mode": "native", "dirtyBytes": 4096 },
+                "backup": {
+                    "requestedRevision": 1,
+                    "acknowledgedRevision": 0,
+                    "status": "error",
+                },
+            });
+            assert!(!publication_due(&run, 4999, 60_000, 0));
+            assert!(publication_due(&run, 5000, 60_000, 0), "{status}");
+            assert!(!publication_due(&run, 5000, 60_000, 1));
+            assert!(publication_due(&run, retry_delay_ms(1), 60_000, 1));
+            run["backup"]["acknowledgedRevision"] = 1.into();
+            assert!(!publication_due(&run, 60_000, 60_000, 0));
+        }
     }
 
     #[test]

@@ -85,6 +85,13 @@ class PluginSettingsDraftStoreTest {
                     (0 until 29).associate {
                         "field$it" to "\"".repeat(10000)
                     },
+                "grant-scopes" to
+                    (0 until 8).associate { n ->
+                        "scope$n" to
+                            (0 until 100).joinToString("\n") { i ->
+                                "$n-${i.toString().padStart(3, '0')}-${"x".repeat(172)}"
+                            }
+                    },
             )
         workloads.forEach { (name, values) ->
             PluginSettingsDraftStore.clear(application)

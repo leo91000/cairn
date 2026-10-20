@@ -165,6 +165,7 @@ struct RunnerPlan<'a> {
     run_id: &'a str,
     args: &'a [String],
     cwd: &'a Value,
+    project_root: &'a Value,
     prompt: String,
     imports: Vec<Value>,
     expires: Option<i64>,
@@ -172,6 +173,8 @@ struct RunnerPlan<'a> {
     mcp_env: &'a Value,
     resources: &'a Value,
     node_lease_required: bool,
+    backend: &'a Value,
+    runtime_id: &'a Value,
     storage: RunnerStorage<'a>,
     #[serde(skip_serializing_if = "Option::is_none")]
     chat: Option<Value>,
@@ -274,6 +277,7 @@ impl Execution<'_> {
             "workspace": prepared["cwd"],
             "workspaces": prepared["workspaces"],
             "isolated": prepared["isolated"],
+            "executionBackend": prepared["backend"],
         });
         merge(self.run, &patch);
         s.store.patch_run(&self.id, patch).await?;
@@ -468,9 +472,12 @@ impl Execution<'_> {
             .map(str::to_owned);
         let stopped_by_controller =
             !self.cancel.is_cancelled() && !exit.timed_out && !exit.exhausted;
-        let firecracker = workspace.prepared["backend"] == "firecracker";
+        let managed = matches!(
+            workspace.prepared["backend"].as_str(),
+            Some("firecracker" | "native")
+        );
         let interrupted = exit.code == Some(crate::runner::CONTROLLER_INTERRUPTED);
-        if firecracker && stopped_by_controller && interrupted {
+        if managed && stopped_by_controller && interrupted {
             if saved.start_rejected == Some(true) {
                 return Err(Error::unavailable(format!(
                     "{} Working files were preserved; retry when the controller is available.",
@@ -490,7 +497,7 @@ impl Execution<'_> {
         // possibly deterministic failure here instead.
         let controller_failed = exit.code == Some(crate::runner::CONTROLLER_FAILED);
         let may_retry = saved.controller_recoveries() < super::execution::MAX_CONTROLLER_RECOVERIES;
-        if firecracker && stopped_by_controller && controller_failed && may_retry {
+        if managed && stopped_by_controller && controller_failed && may_retry {
             return Err(Error::unavailable(
                 "VM controller failed while running this attempt. The saved conversation and workspace have been preserved.",
             ));
@@ -689,9 +696,17 @@ impl Execution<'_> {
             .unwrap_or_default()["storage"]
             .clone();
         let storage_policy = Policy::for_node(&node_storage)?;
-        let grant = nodes::disk_grants::new_disk(s, self.run, storage_node).await?;
+        let native = prepared["backend"] == "native";
+        let grant = if native {
+            String::new()
+        } else {
+            nodes::disk_grants::new_disk(s, self.run, storage_node).await?
+        };
         s.store
-            .patch_run(&self.id, json!({ "storage": { "mode": "on-demand" } }))
+            .patch_run(
+                &self.id,
+                json!({ "storage": { "mode": if native { "native" } else { "on-demand" } } }),
+            )
             .await?;
         placement::renew_local(s, &self.id).await?;
         let plan = RunnerPlan {
@@ -699,6 +714,7 @@ impl Execution<'_> {
             run_id: &self.id,
             args: &launch.args,
             cwd: &prepared["cwd"],
+            project_root: &prepared["projectRoot"],
             prompt,
             imports,
             expires: self.checkpoint.deadline(),
@@ -706,6 +722,8 @@ impl Execution<'_> {
             mcp_env: &workspace.mcp["env"],
             resources: &placement["resources"],
             node_lease_required: true,
+            backend: &prepared["backend"],
+            runtime_id: &placement["runtimeId"],
             storage: RunnerStorage {
                 master: &s.config.public_url,
                 grant,

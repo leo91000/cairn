@@ -119,6 +119,11 @@ with a read-only sandbox and no installation, GitHub, MCP or 1Password access
 per-person hourly limit, and lets only listed people or a conversation's starter
 answer for it or stop it. The
 connection is bound to the owner's current access and the agent's recorded policy.
+External plugin identities do not supply the Cairn origin required by
+[trusted native execution](NATIVE-NODES.md). Delegation configuration and route
+eligibility apply that native policy without borrowing the configuring owner's
+host permissions. Agent tool grants remain a separate contract.
+
 The web and Android render this delegation, the people allowed and pending requests,
 hourly usage and recent activity for every package with `conversations.submit`.
 Routes are generic: `/api/plugins/{id}/connections[/{connection}]` with `enabled`,
@@ -576,7 +581,10 @@ An explicit native resume releases that pause and advances the next independent
 request. Answers still queued for the stopped turn are cancelled with that turn;
 ordinary requests retain their queue order. Admission, route, current thread
 binding and requester are rechecked when the new turn actually starts. A waiting
-workspace does not block other conversations. Editing or withdrawing the queued
+workspace does not block other conversations. Temporary authority lookup failures
+leave the request queued for a later tick without pausing the conversation. A
+revoked request is cancelled individually, allowing the next authorized
+participant's independent request to advance. Editing or withdrawing the queued
 message from Cairn removes its automatic new-turn intent. Omitting `newTurn`
 preserves the original-author resume path.
 

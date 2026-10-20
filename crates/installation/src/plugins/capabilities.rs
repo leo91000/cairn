@@ -98,7 +98,7 @@ async fn checked_approval(
         "conversations.cancel" => super::work::cancel(s, context, &args).await,
         "conversations.reset" => super::work::reset(s, context, &args).await,
         "inbound.accept" | "inbound.deliver" => {
-            super::work::inbound(s, context, &args, method == "inbound.deliver").await
+            super::work::inbound(s, context, &args, method == "inbound.deliver", digest).await
         }
         "instance.status" => instance_status(s, context, &args).await,
         _ if method.starts_with("oauth.") => super::oauth::call(s, context, method, &args).await,
@@ -537,29 +537,7 @@ where
     // Credential renewal and owner verification can both wait on the network.
     // Retire the caller's proof after that I/O, before starting another request.
     authorize().await?;
-    if resource.is_some() || oauth.is_some() || context.resource_grant.is_some() {
-        let connection = context.connection.clone();
-        let resource = resource.clone();
-        let oauth = oauth.clone();
-        let grant = context.resource_grant.clone();
-        let vault = s.vault.clone();
-        // No network lookup follows this snapshot: a late owner check must not
-        // revive a disconnected credential or a revoked run/resource grant.
-        s.store
-            .transaction(move |db| {
-                if let Some(grant) = &grant {
-                    super::grants::recheck_in(db, grant)?;
-                }
-                if let Some(resource) = &resource {
-                    super::resources::recheck_in(db, &connection, resource)?;
-                }
-                if let Some(oauth) = &oauth {
-                    super::oauth::recheck_in(&vault, db, oauth)?;
-                }
-                Ok(())
-            })
-            .await?;
-    }
+    recheck_http_access(s, context, resource.as_ref(), oauth.as_ref()).await?;
     let response = request
         .send()
         .await
@@ -584,18 +562,50 @@ where
         body.extend_from_slice(&chunk);
     }
     let json = serde_json::from_slice::<Value>(&body).ok();
-    if let Some(resource) = &resource {
-        super::resources::recheck(s, context, resource).await?;
-    }
     if let Some(oauth) = &oauth {
         super::oauth::recheck(s, oauth).await?;
     }
+    recheck_http_access(s, context, resource.as_ref(), oauth.as_ref()).await?;
     Ok(json!({
         "status": status,
         "headers": headers,
         "json": json,
         "text": if json.is_none() { json!(String::from_utf8_lossy(&body)) } else { Value::Null },
     }))
+}
+
+/// After awaited authority checks, inspect the resource chain and credential
+/// together. A separate OAuth lookup must not outlive a resource-only snapshot.
+async fn recheck_http_access(
+    s: &Service,
+    context: &Context,
+    resource: Option<&super::resources::Reference>,
+    oauth: Option<&super::oauth::Reference>,
+) -> Result<()> {
+    if resource.is_some() || oauth.is_some() || context.resource_grant.is_some() {
+        let connection = context.connection.clone();
+        let resource = resource.cloned();
+        let oauth = oauth.cloned();
+        let grant = context.resource_grant.clone();
+        let vault = s.vault.clone();
+        // No network lookup follows this snapshot: a late owner check must not
+        // revive a disconnected credential or a revoked run/resource grant.
+        s.store
+            .transaction(move |db| {
+                if let Some(grant) = &grant {
+                    super::grants::recheck_in(db, grant)?;
+                }
+                if let Some(resource) = &resource {
+                    super::resources::recheck_in(db, &connection, resource)?;
+                }
+                if let Some(oauth) = &oauth {
+                    super::oauth::recheck_in(&vault, db, oauth)?;
+                }
+                Ok(())
+            })
+            .await?;
+    }
+    Ok(())
 }
 
 /// Durable timers delivered later as `timer` events.

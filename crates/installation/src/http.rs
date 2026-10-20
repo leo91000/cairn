@@ -65,6 +65,26 @@ pub async fn router(service: Arc<Service>) -> Result<Router> {
     // readers require the declared Content-Length, and a proxy in front of the public
     // origin may add Accept-Encoding to these machine requests.
     let internal = Router::new()
+        .route(
+            "/internal/nodes/native-release",
+            any(crate::native::releases::download),
+        )
+        .route(
+            "/internal/nodes/native-binary",
+            any(crate::native::releases::download),
+        )
+        .route(
+            "/internal/nodes/native-tools",
+            any(crate::native::releases::download),
+        )
+        .route(
+            "/internal/nodes/native-host.py",
+            any(crate::nodes::maintenance::downloads),
+        )
+        .route(
+            "/internal/nodes/native-install.sh",
+            any(crate::nodes::maintenance::downloads),
+        )
         .route("/internal/deployment-lease", any(lease))
         .route(
             "/internal/nodes/release",

@@ -918,6 +918,17 @@ async fn only_the_current_delivery_author_can_stop_a_shared_resource_conversatio
 
 #[tokio::test]
 async fn external_question_answers_keep_the_issuing_turn_and_its_requester() {
+    queued_control_after_source_change("person").await;
+}
+
+#[tokio::test]
+async fn queued_question_answers_recheck_routes_packages_and_owner_authority() {
+    for change in ["pause", "delete", "package", "owner"] {
+        queued_control_after_source_change(change).await;
+    }
+}
+
+async fn queued_control_after_source_change(change: &str) {
     let (_root, s, instance, resource, app) = fixture().await;
     let agent = s
         .agent(
@@ -939,6 +950,7 @@ async fn external_question_answers_keep_the_issuing_turn_and_its_requester() {
                 "enabled": true,
                 "match": { "channel": channel },
                 "agentId": agent["id"],
+                "accessMode": "requests",
                 "userIds": ["alice", "bob"],
             }),
         )
@@ -984,7 +996,7 @@ async fn external_question_answers_keep_the_issuing_turn_and_its_requester() {
         .await
         .unwrap();
     let message = text(&run["chatExecution"], "messageId");
-    let question = "a".repeat(64);
+    let mut question = "a".repeat(64);
     s.question_receive(
         text(&run, "id"),
         json!({
@@ -1039,7 +1051,288 @@ async fn external_question_answers_keep_the_issuing_turn_and_its_requester() {
         "the authenticated external author could not answer their own question"
     );
     assert_eq!(detail["questions"][0]["turnId"], message);
+    let first_answer = detail["questions"][0]["messageId"].clone();
+    let inputs_path = s
+        .config
+        .data_dir
+        .join("runs")
+        .join(text(&run, "id"))
+        .join("chat-input/messages.json");
+    s.chat_tick(&std::collections::HashSet::new())
+        .await
+        .unwrap();
+    let inputs: Value = serde_json::from_slice(&std::fs::read(&inputs_path).unwrap()).unwrap();
+    assert!(
+        inputs
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|input| input["id"] == first_answer),
+        "The positive control did not deliver the current author's answer"
+    );
+    s.chat_acknowledge(text(&run, "id"), first_answer.as_str().unwrap())
+        .await
+        .unwrap();
+    let completed_question = question;
+    question = "b".repeat(64);
+    s.question_receive(
+        text(&run, "id"),
+        json!({
+            "id": question,
+            "blocking": false,
+            "fields": [{ "id": "choice", "title": "Continue again?", "options": [] }],
+        }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        deliver(
+            &app,
+            &instance,
+            json!({
+                "id": "own-answer-to-revoke",
+                "kind": "interaction",
+                "resource": resource,
+                "author": { "id": "alice" },
+                "context": { "channel": "C1", "thread": "thread" },
+                "body": { "chat": chat_id, "delivery": message, "question": question },
+            })
+        )
+        .await
+        .1["status"],
+        "accepted"
+    );
+    runtime::pump(&s, &connection, &mut session).await.unwrap();
+    let detail = s.chat_detail(chat_id).await.unwrap();
+    let pending = detail["questions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["id"] == question)
+        .unwrap();
+    assert_eq!(pending["status"], "answering");
+    let queued_answer = pending["messageId"].clone();
     session.stop().await;
+
+    let routes =
+        format!("/api/plugins/router/connections/{instance}/resources/workspace/{resource}/routes");
+    let response = common::send(&app, owner_request("GET", &routes, Value::Null)).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let listed = common::read_json(response).await;
+    let route = listed["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|route| route["match"]["channel"] == "C1")
+        .unwrap();
+    let mut authority_server = None;
+    if change == "person" {
+        let person = format!("{routes}/{}/people/alice", text(route, "id"));
+        let response = common::send(
+            &app,
+            owner_request(
+                "POST",
+                &person,
+                json!({
+                    "action": "remove",
+                    "revision": route["revision"],
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let removed = common::read_json(response).await;
+        assert_eq!(
+            deliver(
+                &app,
+                &instance,
+                json!({
+                    "id": "fresh-access-request",
+                    "resource": resource,
+                    "author": { "id": "alice" },
+                    "context": { "channel": "C1", "thread": "request" },
+                    "body": { "text": "Request access again" },
+                })
+            )
+            .await
+            .1["status"],
+            "requested"
+        );
+        let response = common::send(
+            &app,
+            owner_request(
+                "POST",
+                &person,
+                json!({
+                    "action": "approve",
+                    "revision": removed["revision"],
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+    } else if change == "pause" || change == "delete" {
+        let path = format!("{routes}/{}", text(route, "id"));
+        let (method, body) = if change == "delete" {
+            ("DELETE", json!({ "revision": route["revision"] }))
+        } else {
+            (
+                "PUT",
+                json!({
+                    "name": "C1",
+                    "enabled": false,
+                    "match": { "channel": "C1" },
+                    "agentId": agent["id"],
+                    "accessMode": "requests",
+                    "userIds": ["alice", "bob"],
+                    "revision": route["revision"],
+                }),
+            )
+        };
+        let response = common::send(&app, owner_request(method, &path, body)).await;
+        assert_eq!(response.status(), StatusCode::OK, "{change}");
+    } else if change == "package" {
+        let mut manifest = serde_json::to_value(&package.manifest).unwrap();
+        manifest["version"] = json!("2");
+        let replacement = registry::install(
+            &s,
+            &json!({
+                "manifest": manifest,
+                "source": format!("-- new approval\n{}", package.source.main),
+            }),
+        )
+        .await
+        .unwrap();
+        registry::approve(&s, "router", "2", text(&replacement, "digest"))
+            .await
+            .unwrap();
+    } else if change == "owner" {
+        let authority = axum::Router::new().route(
+            "/api/relay/00000000-0000-4000-8000-000000000055/task-authors",
+            axum::routing::get(|| async {
+                axum::Json(json!({
+                    "owner": {
+                        "account_id": "fixture-owner",
+                        "access_id": "owner-new-generation",
+                    },
+                    "members": [],
+                }))
+            }),
+        );
+        let (origin, server) = common::serve_locally(authority).await;
+        let path = s.config.data_dir.join("installation-relay/identity.json");
+        let mut identity: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        identity["origin"] = json!(origin);
+        std::fs::write(path, serde_json::to_vec(&identity).unwrap()).unwrap();
+        authority_server = Some(server);
+    } else {
+        panic!("Unknown authority change: {change}");
+    }
+
+    s.chat_tick(&std::collections::HashSet::new())
+        .await
+        .unwrap();
+    let inputs: Value = serde_json::from_slice(
+        &std::fs::read(
+            s.config
+                .data_dir
+                .join("runs")
+                .join(text(&run, "id"))
+                .join("chat-input/messages.json"),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert!(
+        inputs
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|input| input["id"] != queued_answer),
+        "A retired source answer reached the running native process"
+    );
+    let detail = s.chat_detail(chat_id).await.unwrap();
+    let answer = detail["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|answer| answer["id"] == queued_answer)
+        .unwrap();
+    assert_eq!(answer["status"], "cancelled");
+    let pending = detail["questions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["id"] == question)
+        .unwrap();
+    assert_eq!(
+        pending["status"], "pending",
+        "The owner must still be able to answer after a revoked control is refused: {change}"
+    );
+    assert_eq!(
+        detail["questions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|entry| entry["id"] == completed_question)
+            .unwrap()["status"],
+        "answered"
+    );
+
+    let owner_answer = cairn_installation::config::id();
+    let path = format!("/api/chats/{chat_id}/questions/{question}/answer");
+    let response = common::send(
+        &app,
+        owner_request(
+            "POST",
+            &path,
+            json!({
+                "id": owner_answer,
+                "answers": { "choice": ["Owner continues"] },
+            }),
+        ),
+    )
+    .await;
+    assert_eq!(
+        response.status(),
+        StatusCode::OK,
+        "Owner rescue after {change}"
+    );
+    s.chat_tick(&std::collections::HashSet::new())
+        .await
+        .unwrap();
+    let inputs: Value = serde_json::from_slice(&std::fs::read(&inputs_path).unwrap()).unwrap();
+    assert!(
+        inputs
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|input| input["id"] == owner_answer),
+        "Owner control was blocked by the retired external source: {change}"
+    );
+    assert!(
+        inputs
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|input| input["id"] != queued_answer)
+    );
+    s.chat_acknowledge(text(&run, "id"), &owner_answer)
+        .await
+        .unwrap();
+    let detail = s.chat_detail(chat_id).await.unwrap();
+    assert_eq!(
+        detail["questions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|entry| entry["id"] == question)
+            .unwrap()["status"],
+        "answered"
+    );
+    if let Some(server) = authority_server {
+        server.abort();
+    }
 }
 
 #[tokio::test]
@@ -2967,13 +3260,32 @@ async fn a_queued_new_turn_can_follow_a_stopped_author_without_inheriting_their_
 }
 
 #[tokio::test]
-async fn pending_new_turns_respect_owner_pause_revocation_and_workspace_settlement() {
-    for scenario in [
+async fn pending_new_turns_respect_owner_pause_and_workspace_settlement() {
+    pending_new_turn_scenarios(&[
         "owner-pause",
         "owner-pause-before-enqueue",
-        "revoked-person",
         "unsettled-workspace",
-    ] {
+    ])
+    .await;
+}
+
+#[tokio::test]
+async fn queued_new_turns_retry_temporary_authority_outages_without_owner_resume() {
+    pending_new_turn_scenarios(&["authority-unavailable"]).await;
+}
+
+#[tokio::test]
+async fn queued_new_turns_retire_revoked_people_and_preserve_other_participants() {
+    pending_new_turn_scenarios(&["revoked-person"]).await;
+}
+
+#[tokio::test]
+async fn queued_new_turns_recheck_participants_after_slow_authority_lookup() {
+    pending_new_turn_scenarios(&["revoked-during-lookup"]).await;
+}
+
+async fn pending_new_turn_scenarios(scenarios: &[&str]) {
+    for &scenario in scenarios {
         let (_root, s, instance, resource, app) = fixture().await;
         let agent = s
             .agent(
@@ -2994,7 +3306,7 @@ async fn pending_new_turns_respect_owner_pause_revocation_and_workspace_settleme
                 "enabled": true,
                 "match": { "channel": "C1" },
                 "agentId": agent["id"],
-                "userIds": ["alice", "bob"],
+                "userIds": ["alice", "bob", "carol"],
             }),
         )
         .await;
@@ -3062,6 +3374,13 @@ async fn pending_new_turns_respect_owner_pause_revocation_and_workspace_settleme
             "accepted"
         );
         runtime::pump(&s, &connection, &mut session).await.unwrap();
+        if scenario.starts_with("revoked-") {
+            assert_eq!(
+                deliver(&app, &instance, message("carol", true)).await.1["status"],
+                "accepted"
+            );
+            runtime::pump(&s, &connection, &mut session).await.unwrap();
+        }
         if scenario == "owner-pause" {
             let paused = common::send(
                 &app,
@@ -3113,16 +3432,108 @@ async fn pending_new_turns_respect_owner_pause_revocation_and_workspace_settleme
                 .await
                 .unwrap();
         }
-        s.chat_tick(&std::collections::HashSet::new())
-            .await
-            .unwrap();
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let authority_server = if scenario == "authority-unavailable"
+            || scenario == "revoked-during-lookup"
+        {
+            let delayed = scenario == "revoked-during-lookup";
+            let entering = entered.clone();
+            let releasing = release.clone();
+            let first = Arc::new(std::sync::atomic::AtomicBool::new(true));
+            let authority = axum::Router::new().route(
+                "/api/relay/00000000-0000-4000-8000-000000000055/task-authors",
+                axum::routing::get(move || {
+                    let first = first.swap(false, std::sync::atomic::Ordering::SeqCst);
+                    let (entered, release) = (entering.clone(), releasing.clone());
+                    async move {
+                        if first && delayed {
+                            entered.notify_one();
+                            release.notified().await;
+                        }
+                        if first && !delayed {
+                            (StatusCode::SERVICE_UNAVAILABLE, "Synthetic authority unavailable").into_response()
+                        } else {
+                            axum::Json(json!({
+                                "owner": {"account_id": "fixture-owner", "access_id": "fixture-owner"},
+                                "members": [],
+                            })).into_response()
+                        }
+                    }
+                }),
+            );
+            let (origin, server) = common::serve_locally(authority).await;
+            let identity_path = s.config.data_dir.join("installation-relay/identity.json");
+            let mut identity: Value =
+                serde_json::from_slice(&std::fs::read(&identity_path).unwrap()).unwrap();
+            identity["origin"] = json!(origin);
+            std::fs::write(identity_path, serde_json::to_vec(&identity).unwrap()).unwrap();
+            Some(server)
+        } else {
+            None
+        };
+        let service = s.clone();
+        let ticking =
+            tokio::spawn(async move { service.chat_tick(&std::collections::HashSet::new()).await });
+        if scenario == "revoked-during-lookup" {
+            tokio::time::timeout(std::time::Duration::from_secs(10), entered.notified())
+                .await
+                .unwrap();
+            let path = format!(
+                "/api/plugins/router/connections/{instance}/resources/workspace/{resource}/routes/{}/people/bob",
+                text(&route, "id")
+            );
+            let response = common::send(
+                &app,
+                owner_request(
+                    "POST",
+                    &path,
+                    json!({"action": "remove", "revision": route["revision"]}),
+                ),
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::OK);
+            release.notify_one();
+        }
+        ticking.await.unwrap().unwrap();
         let stopped = s.chat_detail(text(&chat, "id")).await.unwrap();
         assert_eq!(
             stopped["run"]["chatExecution"]["messageId"], run["chatExecution"]["messageId"],
             "advanced despite {scenario}"
         );
         assert_eq!(stopped["run"]["status"], "cancelled");
-        if scenario == "unsettled-workspace" {
+        if scenario.starts_with("revoked-") || scenario == "authority-unavailable" {
+            assert_ne!(
+                stopped["paused"], true,
+                "{scenario} permanently paused the queue"
+            );
+            let bob = stopped["messages"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|message| message["text"] == "Request from bob")
+                .unwrap();
+            assert_eq!(
+                bob["status"],
+                if scenario.starts_with("revoked-") {
+                    "cancelled"
+                } else {
+                    "queued"
+                }
+            );
+            s.chat_tick(&std::collections::HashSet::new())
+                .await
+                .unwrap();
+            let next = s.chat_detail(text(&chat, "id")).await.unwrap();
+            assert_eq!(
+                next["run"]["chatExecution"]["text"],
+                if scenario.starts_with("revoked-") {
+                    "Request from carol"
+                } else {
+                    "Request from bob"
+                }
+            );
+        } else if scenario == "unsettled-workspace" {
             assert_ne!(
                 stopped["paused"], true,
                 "waiting for settlement turned into a permanent pause"
@@ -3177,6 +3588,9 @@ async fn pending_new_turns_respect_owner_pause_revocation_and_workspace_settleme
                     "owner resume replayed the abandoned prompt instead of advancing the queued request"
                 );
             }
+        }
+        if let Some(server) = authority_server {
+            server.abort();
         }
         session.stop().await;
     }
@@ -4226,6 +4640,86 @@ async fn stale_route_edits_cannot_restore_a_revoked_participant() {
     )
     .await;
     assert_eq!(response.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn external_routes_require_an_agent_that_can_run_without_native_host_provenance() {
+    let (_root, s, instance, resource, app) = fixture().await;
+    let node = json!({
+        "id": cairn_installation::config::id(),
+        "name": "Trusted native fixture",
+        "nativeEnabled": true,
+        "nativeAccounts": ["fixture-owner"],
+        "capabilities": { "backend": "native" },
+    });
+    s.store.put("nodes", node.clone()).await.unwrap();
+    let agent = s
+        .agent(
+            json!({
+                "name": "Native external candidate",
+                "access": {
+                    "backend": "native",
+                    "nodes": [node["id"]],
+                    "projects": [],
+                    "installation": false,
+                    "github": false,
+                    "mcps": [],
+                    "sandbox": "read-only",
+                },
+            }),
+            None,
+        )
+        .await
+        .unwrap();
+    let base = format!("/api/plugins/router/connections/{instance}/resources/workspace/{resource}");
+    let response = common::send(
+        &app,
+        owner_request(
+            "GET",
+            &format!("{base}/route-eligibility?accessMode=requests"),
+            Value::Null,
+        ),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let result = common::read_json(response).await;
+    let item = result["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["agentId"] == agent["id"])
+        .unwrap();
+    assert_eq!(
+        item["eligible"], false,
+        "external routes have no native host origin"
+    );
+    assert!(text(item, "reason").contains("native node"));
+    let response = common::send(
+        &app,
+        owner_request(
+            "POST",
+            &format!("{base}/routes"),
+            json!({
+                "name": "Native route",
+                "enabled": true,
+                "agentId": agent["id"],
+                "match": {},
+                "accessMode": "requests",
+            }),
+        ),
+    )
+    .await;
+    let status = response.status();
+    let refused = common::read_json(response).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{refused}");
+    assert!(refused.to_string().contains("native node"));
+    let response = common::send(
+        &app,
+        owner_request("GET", &format!("{base}/routes"), Value::Null),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(common::read_json(response).await["items"], json!([]));
 }
 
 #[tokio::test]
@@ -6176,4 +6670,130 @@ async fn revoking_a_person_during_a_question_keeps_other_routes_running() {
     assert_eq!(reply["text"], "Bob's own result");
     session.stop().await;
     server.abort();
+}
+
+#[tokio::test]
+async fn approval_replacement_during_ingress_authority_check_keeps_no_content_or_dedupe() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let (_root, s, instance, resource, app) = fixture().await;
+    let agent = s
+        .agent(
+            json!({
+                "name": "Dedicated",
+                "access": {
+                    "projects": [],
+                    "installation": false,
+                    "github": false,
+                },
+            }),
+            None,
+        )
+        .await
+        .unwrap();
+    create_route(
+        &app,
+        &instance,
+        &resource,
+        json!({
+            "name": "Support",
+            "enabled": true,
+            "match": { "channel": "C1" },
+            "agentId": agent["id"],
+            "accessMode": "allowlist",
+            "userIds": ["alice"],
+        }),
+    )
+    .await;
+    let package = registry::active(&s, "router").await.unwrap();
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let calls = Arc::new(AtomicUsize::new(0));
+    let (entering, releasing) = (entered.clone(), release.clone());
+    let authority = axum::Router::new().route(
+        "/api/relay/00000000-0000-4000-8000-000000000055/task-authors",
+        axum::routing::get(move || {
+            let (entered, release) = (entering.clone(), releasing.clone());
+            // Route selection checks the owner first. Hold only deliver's final
+            // membership lookup, after its old package digest has been checked.
+            let hold = calls.fetch_add(1, Ordering::SeqCst) == 1;
+            async move {
+                if hold {
+                    entered.notify_one();
+                    release.notified().await;
+                }
+                axum::Json(json!({
+                    "owner": {
+                        "account_id": "fixture-owner",
+                        "access_id": "fixture-owner",
+                    },
+                    "members": []
+                }))
+            }
+        }),
+    );
+    let (origin, server) = common::serve_locally(authority).await;
+    let identity_path = s.config.data_dir.join("installation-relay/identity.json");
+    let mut identity: Value =
+        serde_json::from_slice(&std::fs::read(&identity_path).unwrap()).unwrap();
+    identity["origin"] = json!(origin);
+    std::fs::write(identity_path, serde_json::to_vec(&identity).unwrap()).unwrap();
+    let (calling, target, resource_id) = (app.clone(), instance.clone(), resource.clone());
+    let mut pending = tokio::spawn(async move {
+        deliver(
+            &calling,
+            &target,
+            json!({
+                "id": "retired-ingress",
+                "resource": resource_id,
+                "author": { "id": "alice" },
+                "context": {
+                    "channel": "C1",
+                    "thread": "private-thread",
+                },
+                "body": { "text": "This rejected content must not be retained" },
+            }),
+        )
+        .await
+    });
+    tokio::select! {
+        () = entered.notified() => {},
+
+        result = &mut pending => panic!("Ingress ended before final authority lookup: {result:?}"),
+
+        () = tokio::time::sleep(std::time::Duration::from_secs(5)) => {
+            panic!("Ingress did not reach final authority lookup")
+        },
+    }
+    let mut manifest = serde_json::to_value(&package.manifest).unwrap();
+    manifest["version"] = json!("2");
+    let replacement = registry::install(
+        &s,
+        &json!({
+            "manifest": manifest,
+            "source": format!("-- replacement\n{}", package.source.main),
+        }),
+    )
+    .await
+    .unwrap();
+    registry::approve(&s, "router", "2", text(&replacement, "digest"))
+        .await
+        .unwrap();
+    release.notify_one();
+    let (status, _) = pending.await.unwrap();
+    server.abort();
+    assert_eq!(
+        status,
+        StatusCode::FORBIDDEN,
+        "Retired ingress must be rejected by approval, not a timeout"
+    );
+    assert!(
+        s.store.list("plugin-events").await.unwrap().is_empty(),
+        "Rejected ingress persisted its message content",
+    );
+    let dedupe = format!("plugin-seen:{instance}:{resource}:retired-ingress");
+    assert!(
+        s.store.kv(&dedupe).await.unwrap().is_none(),
+        "Rejected ingress consumed its event ID"
+    );
 }

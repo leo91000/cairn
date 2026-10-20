@@ -27,12 +27,14 @@ impl WorkspaceKind {
 #[serde(rename_all = "lowercase")]
 pub enum Backend {
     Firecracker,
+    Native,
 }
 
 impl Backend {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Firecracker => "firecracker",
+            Self::Native => "native",
         }
     }
 }

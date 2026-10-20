@@ -4,6 +4,7 @@ mod client;
 mod exclusive;
 mod routes;
 
+pub(crate) use broker::validate as validate_plan;
 pub use client::client;
 
 use crate::{

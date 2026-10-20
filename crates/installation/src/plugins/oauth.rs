@@ -1073,6 +1073,19 @@ async fn finish_pending(
         .await?
         .ok_or_else(|| Error::forbidden("The installation has no verified membership."))?;
     s.store.transaction(move |db| {
+        let owner_current = membership.owner.access_id == pending.owner_access
+            && (pending.actor.is_some() || pending.external.is_some()
+                || membership.owner.account_id == pending.account);
+        let actor_current = pending.actor.as_ref().is_none_or(|actor| {
+            membership.grant(&actor.account).is_some_and(|grant| {
+                actor.access_id.as_deref() == Some(grant.access_id.as_str())
+            })
+        });
+
+        if !owner_current || !actor_current {
+            return Err(expired());
+        }
+
         if let Some(target) = &setup_target { target.current(db)?; }
         let mut resource = current(db, &pending)?;
         if let Some(personal) = &authorization.personal {

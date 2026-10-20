@@ -171,8 +171,7 @@ pub(crate) fn delegation_access(
     let agent = db
         .get("agents", agent_id)?
         .ok_or_else(|| Error::bad("Agent not found."))?;
-    let access = policy(&agent);
-    dedicated_access(&access, project)?;
+    let access = dedicated_access(db, &agent, project)?;
     if let Some(project) = project
         && db.get("projects", project)?.is_none()
     {
@@ -184,14 +183,19 @@ pub(crate) fn delegation_access(
     Ok(access)
 }
 
-fn dedicated_access(access: &Value, project: Option<&str>) -> Result<()> {
+fn dedicated_access(db: &Db<'_>, agent: &Value, project: Option<&str>) -> Result<Value> {
+    let access = policy(agent);
     let projects = project.map_or_else(|| json!([]), |id| json!([id]));
     if access["projects"] != projects || access["installation"] == true {
         return Err(Error::bad(
             "Choose a dedicated agent restricted to the selected project (or no projects), with installation access disabled.",
         ));
     }
-    Ok(())
+
+    // External people have no authenticated Cairn origin for native host execution.
+    crate::native::policy::authorize_caller(db, agent, None)?;
+
+    Ok(access)
 }
 
 /// Advisory owner preview from the same policy predicates as save/effects. Read
@@ -222,8 +226,7 @@ pub(crate) fn delegation_eligibility(
         .iter()
         .map(|agent| {
             let id = text(agent, "id");
-            let access = policy(agent);
-            let eligibility = dedicated_access(&access, project).and_then(|()| {
+            let eligibility = dedicated_access(db, agent, project).and_then(|access| {
                 if mode == AccessMode::Everyone {
                     public_access(&access, plugin_agents.contains(id))
                 } else {

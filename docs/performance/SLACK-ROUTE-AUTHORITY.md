@@ -66,7 +66,7 @@ At the measured routing checkpoint, main was integrated at
 `d01b519896c62ab3e51295eb702195975a2414ec` and compatibility metadata still
 inherited epoch **4**, with its recorded legacy tree unchanged. The later
 [whole-PR plugin-format inventory](../SLACK-PLUGIN-COMPATIBILITY.md) declares
-the separate epoch **6** boundary; the slice's additive-record analysis does not
+the separate epoch **7** boundary, above main's native-execution epoch 6; the slice's additive-record analysis does not
 establish backwards compatibility for the new persisted manifests. The published reference inspected above is epoch **2**;
 the production contract's separate epoch transition review must remain gated before
 deployment. These measurements and the additive-field decision are not whole-PR

@@ -226,3 +226,150 @@ async fn resource_profiles_and_scope_limits_apply_to_tools_commands_and_the_actu
     );
     server.abort();
 }
+
+#[tokio::test]
+async fn a_pending_profile_grant_cannot_cross_a_package_approval_change() {
+    use serde_json::Value;
+    use std::sync::Arc;
+
+    let root = TempDir::new().unwrap();
+    std::fs::create_dir_all(root.path().join("home")).unwrap();
+    let s = Service::new(common::config(root.path())).await.unwrap();
+    common::relay_fixture::claimed(&s).await.unwrap();
+    s.plugins
+        .use_worker(PathBuf::from(env!("CARGO_BIN_EXE_cairn")));
+    let mut manifest: Value = serde_json::from_str(include_str!(
+        "../../../tests/fixtures/plugin-resource-access/manifest.json"
+    ))
+    .unwrap();
+    let source = include_str!("../../../tests/fixtures/plugin-resource-access/main.luau");
+    let package = registry::install(&s, &json!({"manifest": manifest, "source": source}))
+        .await
+        .unwrap();
+    registry::approve(&s, "example", "1", text(&package, "digest"))
+        .await
+        .unwrap();
+    let instance = connections::save(
+        &s,
+        "example",
+        &json!({"name": "Example", "enabled": true}),
+        None,
+    )
+    .await
+    .unwrap();
+    let instance = text(&instance, "id").to_owned();
+    let resource = resources::save(
+        &s,
+        "example",
+        &instance,
+        "workspace",
+        &json!({"name": "Engineering", "settings": {"externalId": "T111"}, "secrets": {"token": "fixture-only"}}),
+        None,
+    )
+    .await
+    .unwrap();
+    let resource = text(&resource, "id").to_owned();
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let (entering, releasing) = (entered.clone(), release.clone());
+    let authority = axum::Router::new().route(
+        "/api/relay/00000000-0000-4000-8000-000000000055/task-authors",
+        axum::routing::get(move || {
+            let (entered, release) = (entering.clone(), releasing.clone());
+            async move {
+                entered.notify_one();
+                release.notified().await;
+                axum::Json(json!({
+                    "owner": {"account_id": "fixture-owner", "access_id": "fixture-owner"},
+                    "members": [],
+                }))
+            }
+        }),
+    );
+    let (origin, server) = common::serve_locally(authority).await;
+    let identity_path = s.config.data_dir.join("installation-relay/identity.json");
+    let previous_identity = std::fs::read(&identity_path).unwrap();
+    let mut identity: Value = serde_json::from_slice(&previous_identity).unwrap();
+    identity["origin"] = json!(origin);
+    std::fs::write(&identity_path, serde_json::to_vec(&identity).unwrap()).unwrap();
+    let app = cairn_installation::http::router(s.clone()).await.unwrap();
+    let path = format!(
+        "/api/plugins/example/connections/{instance}/resources/workspace/{resource}/grants"
+    );
+    let mut request = common::request("POST", &path)
+        .header("content-type", "application/json")
+        .body(Body::from(
+            json!({"agentId": MAIN_AGENT_ID, "profile": "read"}).to_string(),
+        ))
+        .unwrap();
+    request
+        .extensions_mut()
+        .insert(InstallationIdentity::trusted(
+            InstallationRole::Owner,
+            "fixture-owner",
+        ));
+    let pending_app = app.clone();
+    let mut pending = tokio::spawn(async move { common::send(&pending_app, request).await });
+    tokio::select! {
+        () = entered.notified() => {},
+
+        result = &mut pending => panic!("Grant ended before authority lookup: {result:?}"),
+
+        () = tokio::time::sleep(std::time::Duration::from_secs(5)) => {
+            panic!("Grant did not reach the authority lookup")
+        },
+    }
+    // The held request has already selected its authority. Package approval uses
+    // the original responsive fixture, independently of that pending response.
+    std::fs::write(&identity_path, previous_identity).unwrap();
+    manifest["version"] = json!("2");
+    let mut extra = manifest["operations"][0].clone();
+    extra["name"] = json!("export");
+    manifest["operations"].as_array_mut().unwrap().push(extra);
+    let package = registry::install(&s, &json!({"manifest": manifest, "source": source}))
+        .await
+        .unwrap();
+    registry::approve(&s, "example", "2", text(&package, "digest"))
+        .await
+        .unwrap();
+    release.notify_one();
+    let response = pending.await.unwrap();
+    server.abort();
+    assert_eq!(
+        response.status(),
+        StatusCode::CONFLICT,
+        "The uncommitted profile crossed package approval: {}",
+        common::read_text(response).await,
+    );
+    assert!(
+        s.store
+            .list("plugin-resource-grants")
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    let mut request = common::request("POST", &path)
+        .header("content-type", "application/json")
+        .body(Body::from(
+            json!({"agentId": MAIN_AGENT_ID, "profile": "read"}).to_string(),
+        ))
+        .unwrap();
+    request
+        .extensions_mut()
+        .insert(InstallationIdentity::trusted(
+            InstallationRole::Owner,
+            "fixture-owner",
+        ));
+    let response = common::send(&app, request).await;
+    assert_eq!(
+        response.status(),
+        StatusCode::OK,
+        "{}",
+        common::read_text(response).await
+    );
+    assert_eq!(common::read_json(response).await["profile"], "read");
+    assert_eq!(
+        s.store.list("plugin-resource-grants").await.unwrap().len(),
+        1
+    );
+}

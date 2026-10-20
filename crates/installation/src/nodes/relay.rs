@@ -60,6 +60,7 @@ impl<'a> End<'a> {
 /// The master connection a relayed command answers through.
 struct Master<'a> {
     client: &'a reqwest::Client,
+    controller: &'a reqwest::Client,
     url: &'a url::Url,
     token: &'a str,
 }
@@ -120,6 +121,7 @@ pub async fn run(
         .redirect(reqwest::redirect::Policy::none())
         .build()
         .map_err(Error::internal)?;
+    let controller = super::local_client()?;
     let permits = Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_COMMANDS));
     let mut tasks = tokio::task::JoinSet::new();
     let executor = Arc::new(Executor::default());
@@ -165,11 +167,13 @@ pub async fn run(
             runner.clone(),
             runner_token.clone(),
         );
+        let controller = controller.clone();
         let executor = executor.clone();
         tasks.spawn(async move {
             let _permit = permit;
             let master = Master {
                 client: &http,
+                controller: &controller,
                 url: &master,
                 token: &token,
             };
@@ -181,7 +185,7 @@ pub async fn run(
     while tasks.join_next().await.is_some() {}
     for attempt in executor.close().await {
         // Best effort: the controller also stops VMs whose lease expires.
-        let _ = client
+        let _ = controller
             .delete(
                 runner
                     .join(&format!("runs/{attempt}"))
@@ -242,10 +246,16 @@ fn route(method: &str, path: &str) -> Result<()> {
 }
 
 /// How long the controller may take to answer, by operation.
-fn controller_timeout(path: &str) -> Duration {
+fn controller_timeout(method: &str, path: &str, native: bool) -> Duration {
     Duration::from_secs(if path.ends_with("/restore") {
         120
-    } else if path.ends_with("snapshot") || path.ends_with("snapshot-completed") {
+    } else if path.ends_with("snapshot")
+        || path.ends_with("snapshot-completed")
+        || native
+            && method == "DELETE"
+            && path.starts_with("/runs/")
+            && path.matches('/').count() == 2
+    {
         300
     } else {
         25
@@ -278,7 +288,11 @@ async fn forward(
         return master.send(&End::with_status(id, status)).await;
     }
     let operation = call_controller(master, runner, runner_token, command, executor);
-    let Ok(Ok(mut response)) = tokio::time::timeout(controller_timeout(path), operation).await
+    let Ok(Ok(mut response)) = tokio::time::timeout(
+        controller_timeout(method, path, crate::native::enabled()),
+        operation,
+    )
+    .await
     else {
         let unavailable = End {
             data: Some(STANDARD.encode(b"VM controller unavailable")),
@@ -383,7 +397,7 @@ async fn call_controller(
         )
         .await?;
     master
-        .client
+        .controller
         .request(
             method.parse().map_err(Error::internal)?,
             runner.join(path).map_err(Error::internal)?,
@@ -504,7 +518,27 @@ mod tests {
         assert!(route("POST", &path).is_ok());
         assert!(route("GET", &path).is_err());
         assert!(route("POST", "/disks/not-a-conversation/snapshot-completed").is_err());
-        assert_eq!(controller_timeout(&path), Duration::from_secs(300));
+        assert_eq!(
+            controller_timeout("POST", &path, false),
+            Duration::from_secs(300)
+        );
+    }
+
+    #[test]
+    fn native_stop_allows_the_stopped_checkpoint_to_finish_before_relay_timeout() {
+        let path = format!("/runs/{}", crate::config::id());
+        assert_eq!(
+            controller_timeout("DELETE", &path, true),
+            Duration::from_secs(300)
+        );
+        assert_eq!(
+            controller_timeout("DELETE", &path, false),
+            Duration::from_secs(25)
+        );
+        assert_eq!(
+            controller_timeout("POST", &format!("{path}/lease"), true),
+            Duration::from_secs(25)
+        );
     }
 
     #[test]

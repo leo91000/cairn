@@ -491,6 +491,19 @@ pub(crate) fn request_new_session(db: &Db<'_>, id: &str) -> Result<Value> {
 
 impl Service {
     pub async fn chat_new_session(&self, id: &str, confirmed: bool) -> Result<Value> {
+        self.chat_new_session_authorized(id, confirmed, |_| Ok(()))
+            .await
+    }
+
+    pub(crate) async fn chat_new_session_authorized<F>(
+        &self,
+        id: &str,
+        confirmed: bool,
+        authorize: F,
+    ) -> Result<Value>
+    where
+        F: FnOnce(&Db<'_>) -> Result<()> + Send + 'static,
+    {
         if !confirmed {
             return Err(Error::conflict(
                 "Confirm starting a fresh agent session using the preserved history and files.",
@@ -498,7 +511,10 @@ impl Service {
         }
         let id = id.to_owned();
         self.store
-            .transaction(move |db| request_new_session(db, &id))
+            .transaction(move |db| {
+                authorize(db)?;
+                request_new_session(db, &id)
+            })
             .await
     }
 }

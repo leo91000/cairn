@@ -30,18 +30,29 @@ private fun PersonalPluginAccounts(vm: CairnViewModel) {
         busy = true
         error = null
         try {
-            val cursor = page.nextCursor.takeIf { loadingMore }
-            val next =
-                vm.api.get<PluginPage<PluginPersonalAuthorization>>(
-                    "/plugins/personal-authorizations" +
-                        (cursor?.let { "?cursor=${segment(it)}" } ?: "")
-                )
-            page =
-                if (cursor == null) next else PluginPage(page.items + next.items, next.nextCursor)
+            val more = loadingMore
+            var cursor = page.nextCursor.takeIf { more }
+            // Keep loaded widgets composed even when preceding pages change;
+            // each pending consent belongs only to its current widget's memory.
+            val remaining = page.items.map { it.id }.toMutableSet()
+            val refreshed =
+                if (more) page.items.toMutableList()
+                else mutableListOf<PluginPersonalAuthorization>()
+            do {
+                val next =
+                    vm.api.get<PluginPage<PluginPersonalAuthorization>>(
+                        "/plugins/personal-authorizations" +
+                            (cursor?.let { "?cursor=${segment(it)}" } ?: "")
+                    )
+                refreshed += next.items
+                remaining.removeAll(next.items.map { it.id }.toSet())
+                cursor = next.nextCursor
+            } while (!more && remaining.isNotEmpty() && cursor != null)
+
+            page = PluginPage(refreshed.toList(), cursor)
             loaded = true
         } catch (e: Exception) {
             if (e is CancellationException) throw e
-            page = PluginPage()
             error = e.message
             vm.report(e)
         } finally {

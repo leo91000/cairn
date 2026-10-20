@@ -30,7 +30,10 @@ pub fn uses_vm(run: &Value, config: &Config) -> bool {
     let remote_nodes = access["nodes"]
         .as_array()
         .is_some_and(|nodes| nodes.iter().any(|node| node != crate::nodes::LOCAL_NODE_ID));
-    !config.runner_url.is_empty() || access["nodes"].is_null() || remote_nodes
+    access["backend"] == "native"
+        || !config.runner_url.is_empty()
+        || access["nodes"].is_null()
+        || remote_nodes
 }
 
 pub async fn secret(directory: &Path, name: &str) -> Result<String> {
@@ -167,7 +170,13 @@ pub async fn prepare_execution(
         isolated: true,
         mounts,
         skills: Value::Array(skills),
-        backend: Some(Backend::Firecracker),
+        backend: Some(
+            if crate::native::policy::native(&run["snapshot"]["agent"]) {
+                Backend::Native
+            } else {
+                Backend::Firecracker
+            },
+        ),
     })
 }
 

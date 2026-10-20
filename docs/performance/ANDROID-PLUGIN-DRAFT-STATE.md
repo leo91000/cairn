@@ -94,3 +94,42 @@ network qualification, timing assertion or cross-run speedup claim.
 The exact nanosecond values and workload descriptions are retained in the JSON
 reference beside this note. The setup file representation is unchanged; the new
 resource workload has 29 quote-only fields, so its encoded size differs.
+
+
+## Grant scope input follow-up
+
+On 2026-10-20, the shared grant regression saved eight scope fields, each containing
+100 distinct 178-byte ASCII identifiers, matching the accepted public HTTP fixture
+in `plugin_management_pages.rs`. One editor produced a 289,488-byte activity
+Parcel before correction and 1,272 bytes afterward. Ordinary limits restore exactly;
+a missing local snapshot requires an explicit new rule and cannot silently remove
+its restrictions. Closing, cancelling and completing a submission clear its buffer.
+The four focused Compose cases and four store contracts pass; full current-tree
+JVM, device and PR qualification remain separate.
+
+The same store harness now includes this third workload. File sizes and Parcel
+sizes describe different representations; no storage or latency speedup is inferred.
+
+| Measurement | Grant scope input |
+| --- | ---: |
+| Encoded file |144,081 B|
+| Atomic write wall time |5.154 ms|
+| First new-store read |15.065 ms|
+| Mean repeated read,5 reads |3.330 ms|
+| Current-thread CPU for write/read sequence |30.573 ms|
+
+Conditions: Linux 6.12.109 x86_64/glibc2.36, seven virtual CPUs,
+19,929,366,528 bytes RAM, nested agent VM, pinned JDK21 and Robolectric API36.
+Application files are on host tmpfs, with OS cache retained. Native integration
+suites and a running AOSP36 KVM emulator overlapped the measurement. This is
+single-trial descriptive evidence, with no physical cold read, phone-storage or
+production-network claim. The JSON reference retains exact nanoseconds, source
+hashes, host conditions and the setup/resource reference measurements from this run.
+
+```sh
+mise exec -- ./gradlew testDebugUnitTest \
+  --tests '*PluginSettingsDraftStoreTest' \
+  --tests '*PluginsJourneyTest.largeGrantInputsUseSmallSavedStateAndRetainExactLimits' \
+  --tests '*PluginsJourneyTest.missingLocalGrantInputsCannotRestoreAnUnrestrictedRule' \
+  --max-workers=1 --no-daemon
+```

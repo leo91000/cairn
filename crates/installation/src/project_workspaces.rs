@@ -101,7 +101,9 @@ impl Projects {
             .unwrap_or_default();
         let prepared = &checkpoint["prepared"];
         let root = Path::new(text(prepared, "projectRoot"));
-        if prepared["backend"] != "firecracker" || !root.is_absolute() {
+        if !matches!(prepared["backend"].as_str(), Some("firecracker" | "native"))
+            || !root.is_absolute()
+        {
             return Err(Error::conflict(
                 "The private workspace is not ready. Retry when the run is active.",
             ));

@@ -18,6 +18,11 @@ internal class PluginSettingsDraft(
 
     internal var discarded = false
 
+    fun clear() {
+        state.value = emptyMap()
+        remove(key)
+    }
+
     fun discard() {
         discarded = true
         remove(key)
@@ -30,9 +35,21 @@ internal fun rememberPluginSettingsDraft(
     fields: List<PluginSetting>,
     initial: Map<String, String>,
     scope: String,
+): PluginSettingsDraft =
+    rememberPluginSettingsDraft(
+        fields.filter { it.type != "secret" }.map { it.key }.toSet(),
+        initial,
+        scope,
+    )
+
+/** Declared ordinary inputs, such as grant scope limits, share the bounded snapshot store. */
+@Composable
+internal fun rememberPluginSettingsDraft(
+    allowed: Set<String>,
+    initial: Map<String, String>,
+    scope: String,
 ): PluginSettingsDraft {
     val context = LocalContext.current.applicationContext
-    val allowed = fields.filter { it.type != "secret" }.map { it.key }.toSet()
     val store = remember(scope, allowed) { PluginSettingsDraftStore(context, scope, allowed) }
     val saver =
         remember(store) {

@@ -82,6 +82,47 @@ pub(crate) async fn task_author_policy(
         .map_err(|_| Error::unavailable("Task-author check unavailable."))
 }
 
+/// Fresh membership evidence for explicit native grants, separate from scheduling policy.
+pub(crate) async fn native_authority(
+    service: &crate::service::Service,
+) -> Result<serde_json::Value> {
+    let directory = service.config.data_dir.join("installation-relay");
+    let identity = read_identity(&directory).await?.ok_or_else(|| {
+        Error::forbidden("Claim the installation before enabling native execution.")
+    })?;
+    let url = origin(&identity.origin)?
+        .join(&format!(
+            "api/relay/{}/native-authority",
+            identity.installation_id
+        ))
+        .map_err(Error::internal)?;
+    let response = service
+        .http
+        .get(url)
+        .bearer_auth(&identity.token)
+        .timeout(Duration::from_secs(5))
+        .send()
+        .await
+        .map_err(|_| Error::unavailable("Native caller authority is unavailable."))?;
+    if !response.status().is_success() {
+        return Err(Error::forbidden(
+            "Native caller authority rejected this installation.",
+        ));
+    }
+    let value: serde_json::Value = response.json().await.map_err(Error::internal)?;
+    let accounts = value
+        .as_object()
+        .filter(|accounts| accounts.len() <= 1000)
+        .ok_or_else(|| Error::bad("Invalid native authority."))?;
+    for (id, account) in accounts {
+        crate::validation::uuid(id)?;
+        if !account["email"].is_string() || !account["accessId"].is_string() {
+            return Err(Error::bad("Invalid native account evidence."));
+        }
+    }
+    Ok(value)
+}
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct Claimed {

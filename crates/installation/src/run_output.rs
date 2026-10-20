@@ -313,9 +313,17 @@ pub fn prompt(run: &Value, chat: bool) -> String {
         .collect::<Vec<_>>()
         .join("\n");
     let skills = skill_index(&run["snapshot"]["skills"]);
-    format!(
-        "{}\n\n{}\n\nAuthorized projects (open only those needed for the task; \
-            unopened repositories are not on disk):\n{}\n\nTooling: mise manages \
+    let tooling = if crate::native::policy::native(&run["snapshot"]["agent"]) {
+        "Tooling: This execution runs on a native Linux node using its installed GPU driver. \
+            Cairn supplies the pinned coding engines, Node.js and GitHub CLI. Other tools and \
+            project SDKs depend on this node; check availability before using them. Respect \
+            the repository's runtime and package-manager pins. Install user tools under HOME \
+            when authorized; system directories and the owner's desktop are unavailable. \
+            Do not change drivers, GPU ownership or host services. Files in the managed home \
+            and workspace persist between turns; /tmp is temporary. Run GPU jobs with care \
+            because this GPU also serves the owner's desktop."
+    } else {
+        "Tooling: mise manages \
             project runtimes and global tools. Prefer rg and fd for search. Respect \
             mise.toml, .tool-versions, .nvmrc, .node-version, .python-version, \
             .java-version, rust-toolchain.toml, and package.json packageManager pins. \
@@ -334,7 +342,11 @@ pub fn prompt(run: &Value, chat: bool) -> String {
             evidence; Robolectric and JVM tests are not emulator tests. Use mise exec \
             -- <command> when project environment variables are needed; use uv for \
             Python environments. Do not upgrade project pins unless the task requests \
-            it.\n\nSelected skills (read a skill's SKILL.md before using it; its \
+            it."
+    };
+    format!(
+        "{}\n\n{}\n\nAuthorized projects (open only those needed for the task; \
+            unopened repositories are not on disk):\n{}\n\n{tooling}\n\nSelected skills (read a skill's SKILL.md before using it; its \
             scripts and references sit beside it):\n{skills}\n\n{plugins}\n\nRun this task to completion within \
             its stated scope. Preserve unrelated files. Do not expose credentials. \
             {interaction}\n{deliverables}\n{waiting} All task-authorized effects such as creating \

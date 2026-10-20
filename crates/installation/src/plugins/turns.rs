@@ -59,6 +59,56 @@ pub(crate) fn pending(db: &Db<'_>, chat: &Value, run: &Value) -> Result<bool> {
     Ok(candidate(db, chat, run)?.is_some())
 }
 
+/// Refuse only the exact request still waiting in this run. A newer turn, an
+/// edited message or a replaced intent must not be cancelled by a slow check.
+fn refuse(
+    db: &Db<'_>,
+    chat_id: &str,
+    run_id: &str,
+    message_id: &str,
+    intent: &Value,
+) -> Result<()> {
+    let Some(chat) = db.get("chats", chat_id)? else {
+        return Ok(());
+    };
+    if chat["runId"] != run_id {
+        return Ok(());
+    }
+
+    let Some(run) = db.run(run_id)? else {
+        return Ok(());
+    };
+    let Some((mut message, current)) = candidate(db, &chat, &run)? else {
+        return Ok(());
+    };
+    if message["id"] != message_id || current != *intent {
+        return Ok(());
+    }
+
+    message["status"] = crate::chats::MessageStatus::Cancelled.into();
+    db.put_message(&message)?;
+    db.delete(&key(chat_id, message_id))?;
+    db.set(
+        &abandoned_key(chat_id, message_id),
+        &serde_json::json!({
+            "runId": run_id,
+            "failed": false,
+        }),
+        None,
+    )?;
+
+    db.audit(
+        "chat.new-turn.refused",
+        &serde_json::json!({
+            "chatId": chat_id,
+            "runId": run_id,
+            "messageId": message_id,
+        }),
+    )?;
+
+    Ok(())
+}
+
 pub(crate) enum Advance {
     NoRequest,
     Waiting,
@@ -87,20 +137,39 @@ pub(crate) async fn advance(s: &Service, chat: &Value, run: &Value) -> Result<Ad
             move |db| requesters::recorded(db, &chat, &message)
         })
         .await?;
-    let Some(requesters::Principal::External(person)) = principal else {
-        return Err(Error::forbidden(
+
+    let source = match principal {
+        Some(requesters::Principal::External(person)) => requesters::external(s, &person)
+            .await
+            .map(|connection| (person, connection)),
+        _ => Err(Error::forbidden(
             "This new turn no longer has its admitted external requester.",
-        ));
+        )),
     };
-    let connection = requesters::external(s, &person).await?;
     let run_id = text(run, "id");
+    let (person, connection) = match source {
+        Ok(source) => source,
+        Err(error) if error.status == 503 => return Ok(Advance::Waiting),
+        Err(error) if requesters::ExecutionSource::is_revoked(&error) => {
+            let (chat, run, message, intent) = (
+                chat_id.clone(),
+                run_id.to_owned(),
+                message_id.clone(),
+                intent.clone(),
+            );
+            s.store
+                .transaction(move |db| refuse(db, &chat, &run, &message, &intent))
+                .await?;
+            return Ok(Advance::Waiting);
+        }
+        Err(error) => return Err(error),
+    };
+
     let expected_run = run_id.to_owned();
     let expected_chat = chat_id.clone();
     let ready = s
         .worker
         .request_new_turn_authorized(s, run_id, &chat_id, move |db| {
-            connections::authorize(db, &connection)?;
-            requesters::external_in(db, &person)?;
             let chat = db
                 .get("chats", &expected_chat)?
                 .ok_or_else(|| Error::not_found("Conversation no longer exists."))?;
@@ -108,20 +177,35 @@ pub(crate) async fn advance(s: &Service, chat: &Value, run: &Value) -> Result<Ad
                 .run(&expected_run)?
                 .ok_or_else(|| Error::not_found("Execution no longer exists."))?;
             let Some((next, current)) = candidate(db, &chat, &run)? else {
-                return Err(Error::conflict("The conversation queue changed."));
+                return Ok(false);
             };
-            if next["id"] != message_id
-                || current != intent
-                || db.kv(text(&intent, "binding"))?.as_ref()
-                    != Some(&Value::String(expected_chat.clone()))
-                || requesters::recorded(db, &expected_chat, &message_id)?
-                    != Some(requesters::Principal::External(person))
-            {
-                return Err(Error::forbidden(
-                    "The new turn's source or requester changed.",
-                ));
+            if next["id"] != message_id || current != intent {
+                return Ok(false);
             }
-            Ok(())
+
+            let authority = (|| {
+                connections::authorize(db, &connection)?;
+                requesters::external_in(db, &person)?;
+                if db.kv(text(&intent, "binding"))?.as_ref()
+                    != Some(&Value::String(expected_chat.clone()))
+                    || requesters::recorded(db, &expected_chat, &message_id)?
+                        != Some(requesters::Principal::External(person))
+                {
+                    return Err(Error::forbidden(
+                        "The new turn's source or requester changed.",
+                    ));
+                }
+                Ok(())
+            })();
+
+            match authority {
+                Ok(()) => Ok(true),
+                Err(error) if requesters::ExecutionSource::is_revoked(&error) => {
+                    refuse(db, &expected_chat, &expected_run, &message_id, &intent)?;
+                    Ok(false)
+                }
+                Err(error) => Err(error),
+            }
         })
         .await?;
     Ok(if ready {

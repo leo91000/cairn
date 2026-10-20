@@ -9,6 +9,7 @@ use crate::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use std::sync::Arc;
 
 #[derive(Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -189,11 +190,20 @@ pub(crate) fn steering_authorized(
     chat: &str,
     run: &Value,
     message: &Value,
+    source: &Result<Option<SteeringSource>>,
 ) -> Result<bool> {
     let message_id = text(message, "id");
     let actor = recorded(db, chat, message_id)?;
 
     if has_turn_authority(db, chat, run, actor.as_ref())? {
+        if matches!(actor, Some(Principal::External(_))) {
+            source
+                .as_ref()
+                .map_err(Clone::clone)?
+                .as_ref()
+                .ok_or_else(|| Error::unavailable("The external control is awaiting authority."))?
+                .recheck_in(db)?;
+        }
         return Ok(true);
     }
 
@@ -328,6 +338,69 @@ impl ExecutionSource {
 
     pub(crate) fn recheck_in(&self, db: &Db<'_>) -> Result<()> {
         recheck_turn_in(db, &self.0).map(|_| ())
+    }
+}
+
+/// A queued control keeps one exact package approval across file preparation and
+/// final consumption. Owner answers use their own explicit provenance instead.
+#[derive(Clone)]
+pub(crate) struct SteeringSource {
+    source: ExecutionSource,
+    approved: Arc<super::registry::ApprovedPackage>,
+}
+
+impl SteeringSource {
+    pub(crate) async fn capture(s: &Service, run: &Value) -> Result<Option<Self>> {
+        let run = run.clone();
+        let source = s
+            .store
+            .read(move |db| {
+                let Some(source) = ExecutionSource::capture_in(db, &run)? else {
+                    return Ok(None);
+                };
+                let pending = db.messages(&source.0.chat)?.iter().any(|message| {
+                    message["mode"] == "steer"
+                        && matches!(message["status"].as_str(), Some("queued" | "sending"))
+                        && message["id"] != source.0.message
+                });
+                Ok(pending.then_some(source))
+            })
+            .await?;
+        let Some(source) = source else {
+            return Ok(None);
+        };
+        let Principal::External(actor) = &source.0.principal else {
+            unreachable!();
+        };
+        let connection = external(s, actor).await?;
+        let approved = super::registry::approved(s, &connection.plugin_id).await?;
+        if approved.package.digest != actor.binding.digest {
+            return Err(Error::forbidden("The control's package approval changed."));
+        }
+        let result = Self {
+            source,
+            approved: Arc::new(approved),
+        };
+        let expected = result.clone();
+        s.store.read(move |db| expected.recheck_in(db)).await?;
+        Ok(Some(result))
+    }
+
+    pub(crate) async fn recheck(&self, s: &Service) -> Result<()> {
+        self.source.recheck(s).await?;
+        super::registry::require_digest(
+            s,
+            &self.approved.package.manifest.id,
+            &self.approved.package.digest,
+        )
+        .await?;
+        let expected = self.clone();
+        s.store.read(move |db| expected.recheck_in(db)).await
+    }
+
+    pub(crate) fn recheck_in(&self, db: &Db<'_>) -> Result<()> {
+        self.approved.recheck_in(db)?;
+        self.source.recheck_in(db)
     }
 }
 

@@ -244,7 +244,7 @@ pub async fn call(
     };
     if matches!(scope, Scope::Ingress(_)) && matches!(method, "inbound.accept" | "inbound.deliver")
     {
-        return capabilities::checked(s, &context, method, args.clone()).await;
+        return capabilities::approved(s, &context, &package.digest, method, args.clone()).await;
     }
     if [
         "conversations.",
@@ -300,7 +300,8 @@ pub async fn invoke(
             event,
             payload,
             |method, args| async move {
-                call(s, package, scope, &method, &args)
+                // Nested forms keep host-effect state off the caller's stack.
+                Box::pin(call(s, package, scope, &method, &args))
                     .await
                     .map_err(|error| {
                         let code = capabilities::code(&error);

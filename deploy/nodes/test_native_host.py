@@ -1,0 +1,171 @@
+"""Downloader and update recovery tests; no services, drivers or real credentials."""
+import hashlib
+import importlib.util
+import io
+import json
+import os
+from pathlib import Path
+import tempfile
+import unittest
+from unittest.mock import Mock, patch
+import zipfile
+
+SPEC = importlib.util.spec_from_file_location('native_host', Path(__file__).with_name('native-host.py'))
+host = importlib.util.module_from_spec(SPEC)
+SPEC.loader.exec_module(host)
+
+
+def release(**changes):
+    value = dict(sha256='a' * 64, toolsSha256='b' * 64, size=3, toolsSize=3,
+                 os='linux', arch='x86_64', protocolMin=2, protocolMax=2,
+                 dataEpoch=5, runtimeId='synthetic-runtime',
+                 binaryPath='/internal/nodes/native-binary', toolsPath='/internal/nodes/native-tools')
+    value.update(changes)
+    return value
+
+
+class NativeHostTests(unittest.TestCase):
+    def test_unsupported_cgroups_are_rejected_before_enrollment_or_downloads(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            for controllers in (None, 'cpu io pids'):
+                if controllers is not None:
+                    (root / 'cgroup.controllers').write_text(controllers)
+                with patch.object(host, 'ROOT', root / 'state'), patch.object(host, 'CGROUP_ROOT', root), \
+                        patch.object(host.subprocess, 'run', return_value=Mock(stdout='systemd 252')), \
+                        patch.object(host.getpass, 'getpass') as enrollment, patch.object(host, 'prepare') as prepare:
+                    with self.assertRaisesRegex(ValueError, 'cgroup v2'):
+                        host.install('https://manager.example.test')
+                    enrollment.assert_not_called()
+                    prepare.assert_not_called()
+
+    def test_origin_cannot_redirect_credentials_to_another_path_or_scheme(self):
+        self.assertEqual('https://manager.example.test', host.origin('https://manager.example.test/'))
+        self.assertEqual('http://127.0.0.1:4310', host.origin('http://127.0.0.1:4310'))
+        for value in ('http://remote.example.test', 'https://user:password@manager.test', 'https://manager.test/path', 'https://manager.test?token=x', 'file:///root/private'):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                host.origin(value)
+
+    def test_only_exact_compatible_release_artifacts_are_accepted(self):
+        self.assertEqual(release(), host.validate_release(release()))
+        for change in ({'sha256': '../escape'}, {'size': 1 << 40}, {'arch': 'aarch64'},
+                       {'os': 'windows'}, {'protocolMin': 3}, {'toolsPath': 'https://elsewhere.test/tool'},
+                       {'dataEpoch': None}, {'runtimeId': 'bad%runtime'}):
+            with self.subTest(change=change), self.assertRaises(ValueError):
+                host.validate_release(release(**change))
+
+    def test_partial_or_corrupt_download_cannot_replace_an_installed_binary(self):
+        payload = b'approved bytes'
+        metadata = release(size=len(payload), sha256=hashlib.sha256(payload).hexdigest())
+        for received in (payload[:-1], b'x' * len(payload), payload + b'x'):
+            with self.subTest(received=received), tempfile.TemporaryDirectory() as root:
+                directory = Path(root)
+                installed = directory / 'installed'
+                installed.write_bytes(b'previous version')
+                with patch.object(host, 'request', return_value=io.BytesIO(received)), self.assertRaises(ValueError):
+                    host.download('https://manager.test', metadata, directory)
+                self.assertEqual(b'previous version', installed.read_bytes())
+
+    def test_download_is_verified_before_it_becomes_executable(self):
+        payload = b'approved bytes'
+        with tempfile.TemporaryDirectory() as root, patch.object(host, 'request', return_value=io.BytesIO(payload)):
+            path = host.download('https://manager.test', release(size=len(payload), sha256=hashlib.sha256(payload).hexdigest()), Path(root))
+            self.assertEqual(payload, path.read_bytes())
+            self.assertEqual(0o555, path.stat().st_mode & 0o777)
+
+    def test_hostile_tool_archives_are_rejected_without_writing_outside_staging(self):
+        with tempfile.TemporaryDirectory() as root:
+            directory = Path(root)
+            archive = directory / 'archive.zip'
+            with zipfile.ZipFile(archive, 'w') as bundle:
+                bundle.writestr('../escape', b'outside')
+                bundle.writestr('manifest.json', json.dumps({'version': 1}))
+            with self.assertRaises(ValueError):
+                host.unpack_tools(archive, directory)
+            self.assertFalse((directory.parent / 'escape').exists())
+
+    def test_update_umask_does_not_hide_tool_directories_from_workloads(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            archive = root / 'tools.zip'
+            files = []
+            with zipfile.ZipFile(archive, 'w') as bundle:
+                bundle.writestr('bin/', b'')
+                for name in ('codex', 'claude', 'opencode', 'node', 'gh'):
+                    payload = b'synthetic executable'
+                    files.append(dict(path='bin/' + name, size=len(payload), sha256=hashlib.sha256(payload).hexdigest()))
+                    bundle.writestr('bin/' + name, payload)
+                bundle.writestr('manifest.json', json.dumps(dict(version=1, os='linux', arch='x86_64', files=files)))
+            previous = os.umask(0o077)
+            try:
+                host.unpack_tools(archive, root)
+            finally:
+                os.umask(previous)
+            self.assertEqual(0o755, (root / 'tools').stat().st_mode & 0o777)
+            self.assertEqual(0o755, (root / 'tools/bin').stat().st_mode & 0o777)
+            self.assertEqual(0o555, (root / 'tools/bin/codex').stat().st_mode & 0o777)
+
+    def test_cached_installed_payloads_are_rechecked_before_reuse(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / 'tools/bin').mkdir(parents=True)
+            payload = b'approved binary'
+            digest = hashlib.sha256(payload).hexdigest()
+            (root / 'cairn').write_bytes(payload)
+            entries = []
+            for name in ('codex', 'claude', 'opencode', 'node', 'gh'):
+                (root / 'tools/bin' / name).write_bytes(payload)
+                entries.append(dict(path='bin/' + name, size=len(payload), sha256=digest))
+            (root / 'tools/manifest.json').write_text(json.dumps(dict(files=entries)))
+            metadata = release(size=len(payload), sha256=digest)
+            host.verify_installed(root, metadata)
+            (root / 'tools/bin/codex').write_bytes(b'corrupted bytes')
+            with self.assertRaises(ValueError):
+                host.verify_installed(root, metadata)
+
+    def test_version_collection_preserves_current_previous_and_pinned_runtime(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            install, data = root / 'install', root / 'data'
+            (install / 'versions').mkdir(parents=True)
+            (data / 'state/native/run').mkdir(parents=True)
+            (data / 'state/native/run/runtime.json').write_text(json.dumps(dict(runtimeId='pinned')))
+            paths = []
+            for index, runtime in enumerate(('current', 'previous', 'pinned', 'unused')):
+                path = install / 'versions' / ((str(index) * 64) + '-' + (str(index) * 64))
+                path.mkdir()
+                (path / 'release.json').write_text(json.dumps(dict(runtimeId=runtime)))
+                paths.append(path)
+            with patch.object(host, 'INSTALL', install), patch.object(host, 'ROOT', data):
+                host.collect_versions(paths[0], paths[1])
+            self.assertTrue(all(path.exists() for path in paths[:3]))
+            self.assertFalse(paths[3].exists())
+
+    def test_failed_candidate_health_restores_the_previous_version(self):
+        previous, candidate = Path('/synthetic/previous'), Path('/synthetic/candidate')
+        active, trial, restored = Mock(), Mock(), Mock()
+        trial.poll.return_value = None
+        with patch.object(host, 'terminate') as terminate, patch.object(host, 'start_node', side_effect=[trial, restored]), \
+                patch.object(host, 'health', side_effect=[False, True]), patch.object(host, 'select') as select:
+            child, selected, error = host.activate(candidate, previous, active)
+            self.assertIs(restored, child)
+            self.assertEqual(previous, selected)
+            self.assertIn('previous compatible version restored', error)
+            select.assert_not_called()
+            self.assertEqual([unittest.mock.call(active), unittest.mock.call(trial)], terminate.call_args_list)
+
+    def test_success_selects_the_candidate_only_after_health_passes(self):
+        previous, candidate = Path('/synthetic/previous'), Path('/synthetic/candidate')
+        active, trial = Mock(), Mock()
+        trial.poll.return_value = None
+        with patch.object(host, 'terminate'), patch.object(host, 'start_node', return_value=trial), \
+                patch.object(host, 'health', return_value=True), patch.object(host, 'select') as select:
+            child, selected, error = host.activate(candidate, previous, active)
+            self.assertIs(trial, child)
+            self.assertEqual(candidate, selected)
+            self.assertIsNone(error)
+            select.assert_called_once_with(candidate)
+
+
+if __name__ == '__main__':
+    unittest.main()

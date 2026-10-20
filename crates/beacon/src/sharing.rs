@@ -61,6 +61,50 @@ pub(super) async fn task_authors(
     ))
 }
 
+/// Membership alone never grants host execution; the installation intersects this
+/// short-lived evidence with its owner's explicit native node and agent grants.
+pub(super) async fn native_authority(
+    State(service): State<Service>,
+    Path(installation): Path<String>,
+    headers: HeaderMap,
+) -> Result<
+    (
+        [(axum::http::header::HeaderName, &'static str); 1],
+        Json<Value>,
+    ),
+    ApiError,
+> {
+    let token = headers
+        .get("authorization")
+        .and_then(|header| header.to_str().ok())
+        .and_then(|value| value.strip_prefix("Bearer "))
+        .unwrap_or("");
+    let mut transaction = service.pool.begin().await?;
+    let owner: Option<(String, String)> = query_as("SELECT a.id,a.email FROM installations i JOIN cairn_accounts a ON a.id=i.owner_id WHERE i.id=$1 AND i.token_digest=$2 FOR SHARE OF i")
+        .bind(&installation).bind(super::digest(token)).fetch_optional(&mut *transaction).await?;
+    let Some((owner, email)) = owner else {
+        return Err(ApiError::Http(
+            StatusCode::UNAUTHORIZED,
+            "Invalid installation identity",
+        ));
+    };
+    let members: Vec<(String, String, String)> = query_as("SELECT m.account_id,m.access_id,a.email FROM installation_members m JOIN cairn_accounts a ON a.id=m.account_id WHERE m.installation_id=$1 ORDER BY m.account_id")
+        .bind(&installation).fetch_all(&mut *transaction).await?;
+    let mut accounts = serde_json::Map::new();
+    accounts.insert(
+        owner.clone(),
+        json!({ "email": email, "accessId": format!("owner:{installation}:{owner}") }),
+    );
+    for (id, access, email) in members {
+        accounts.insert(id, json!({ "email": email, "accessId": access }));
+    }
+    transaction.commit().await?;
+    Ok((
+        [(axum::http::header::CACHE_CONTROL, "no-store")],
+        Json(accounts.into()),
+    ))
+}
+
 async fn owner_transaction<'a>(
     service: &'a Service,
     installation: &str,

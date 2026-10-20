@@ -41,7 +41,13 @@ pub(super) async fn restore(
     github: Option<&str>,
 ) -> Result<Value> {
     let microvm = uses_vm(run, config);
-    if microvm && !is_firecracker(&prepared) {
+    let native = crate::native::policy::native(&run["snapshot"]["agent"]);
+    if prepared["backend"] == "native" && !native || native && prepared["backend"] != "native" {
+        return Err(Error::conflict(
+            "Execution backend changed; start a new conversation.",
+        ));
+    }
+    if microvm && !native && !is_firecracker(&prepared) {
         let migrated = migrate_to_vm(run, &prepared, config, github).await?;
         return Ok(serde_json::to_value(migrated)?);
     }
@@ -236,9 +242,9 @@ fn adopt_opened_projects(run: &Value, prepared: &mut Value) -> Result<()> {
 }
 
 async fn verify_project_locations(run: &Value, prepared: &Value, config: &Config) -> Result<()> {
-    let firecracker = is_firecracker(prepared);
+    let managed = is_firecracker(prepared) || prepared["backend"] == Backend::Native.as_str();
     for project in run_projects(run) {
-        if firecracker && !has_workspace(prepared, &project["id"]) {
+        if managed && !has_workspace(prepared, &project["id"]) {
             continue;
         }
         let path = Path::new(text(&project, "path"));

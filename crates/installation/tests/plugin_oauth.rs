@@ -3869,3 +3869,337 @@ async fn authenticated_chat_mutations_survive_personal_authority_unavailability(
     );
     server.abort();
 }
+
+#[tokio::test]
+async fn oauth_completion_rechecks_the_final_owner_and_personal_membership_proof() {
+    for kind in [
+        "owner",
+        "setup",
+        "personal-owner",
+        "member-removed",
+        "member-reinvited",
+    ] {
+        for changed in [false, true] {
+            let personal = !matches!(kind, "owner" | "setup");
+            let (root, s, instance, _resource, path, app) =
+                configured_fixture(false, personal).await;
+            let (_root, instance, path, setup_revision) = if kind == "setup" {
+                let (draft, _resource, path) = create_setup(&app).await;
+                (
+                    root,
+                    text(&draft, "id").to_owned(),
+                    path,
+                    Some(draft["revision"].clone()),
+                )
+            } else {
+                (root, instance, path, None)
+            };
+            let returned = Arc::new(AtomicBool::new(false));
+            let checks = Arc::new(AtomicUsize::new(0));
+            // Initiator validation uses one owner lookup or an owner+member pair.
+            // The next reply is the final policy snapshot used by the commit.
+            let final_check = if personal { 3 } else { 2 };
+            let (responded, policy_checks) = (returned.clone(), checks.clone());
+            let authority = axum::Router::new().route(
+                "/api/relay/00000000-0000-4000-8000-000000000055/task-authors",
+                axum::routing::get(move || {
+                    let post_provider = responded.load(Ordering::SeqCst);
+                    let check = if post_provider {
+                        policy_checks.fetch_add(1, Ordering::SeqCst) + 1
+                    } else {
+                        0
+                    };
+                    let retired = changed && check >= final_check;
+                    let owner_access = if retired && !kind.starts_with("member-") {
+                        "replacement-owner-access"
+                    } else {
+                        "fixture-owner"
+                    };
+                    let member_access = if retired && kind == "member-reinvited" {
+                        "alice-reinvited"
+                    } else {
+                        "alice-original"
+                    };
+                    let members = if retired && kind == "member-removed" {
+                        json!([])
+                    } else {
+                        json!([{"account_id": "alice", "access_id": member_access}])
+                    };
+
+                    async move {
+                        axum::Json(json!({
+                            "owner": {
+                                "account_id": "fixture-owner",
+                                "access_id": owner_access,
+                            },
+                            "members": members,
+                        }))
+                    }
+                }),
+            );
+            let (origin, authority_server) = common::serve_locally(authority).await;
+            let identity_path = s.config.data_dir.join("installation-relay/identity.json");
+            let mut identity: Value =
+                serde_json::from_slice(&std::fs::read(&identity_path).unwrap()).unwrap();
+            identity["origin"] = json!(origin);
+            std::fs::write(&identity_path, serde_json::to_vec(&identity).unwrap()).unwrap();
+            let account = if personal { "alice" } else { "fixture-owner" };
+            let own_request = |method: &str, path: &str, body: Value| {
+                if personal {
+                    member_request(method, path, body, account)
+                } else {
+                    request(method, path, body, Some(account))
+                }
+            };
+            let mut input = json!({"scopes": ["messages:read"]});
+            if let Some(revision) = setup_revision {
+                input["setupRevision"] = revision;
+            }
+            let response = common::send(&app, own_request("POST", &path, input)).await;
+            assert_eq!(
+                response.status(),
+                StatusCode::OK,
+                "{}",
+                common::read_text(response).await
+            );
+            let started = common::read_json(response).await;
+            let item = path.strip_suffix("/oauth/bot").unwrap();
+            let response = common::send(
+                &app,
+                request("GET", item, Value::Null, Some("fixture-owner")),
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::OK);
+            let before = common::read_json(response).await;
+            let response_ready = returned.clone();
+            let provider = axum::Router::new().route(
+                "/token",
+                axum::routing::post(move || {
+                    response_ready.store(true, Ordering::SeqCst);
+                    async {
+                        axum::Json(json!({
+                            "access_token": "final-consent-token-fixture",
+                            "scope": "messages:read",
+                            "team": {"id": "T111"},
+                            "authed_user": {"id": "U111"},
+                        }))
+                    }
+                }),
+            );
+            let (origin, server) = common::serve_locally(provider).await;
+            s.plugins.route_http_to(Some(origin));
+            let callback = format!(
+                "/api/plugin-oauth/{instance}/callback?state={}&code=final-proof",
+                text(&started, "state")
+            );
+            assert_eq!(
+                common::send(&app, request("GET", &callback, Value::Null, None))
+                    .await
+                    .status(),
+                StatusCode::OK
+            );
+            let response = common::send(
+                &app,
+                own_request(
+                    "POST",
+                    &format!("{path}/finish"),
+                    json!({"state": started["state"]}),
+                ),
+            )
+            .await;
+            assert_eq!(
+                checks.load(Ordering::SeqCst),
+                final_check,
+                "{kind} did not exercise its final policy lookup"
+            );
+            assert_eq!(
+                response.status(),
+                if changed {
+                    StatusCode::CONFLICT
+                } else {
+                    StatusCode::OK
+                },
+                "Late {kind} revocation (changed={changed}) was ignored: {}",
+                common::read_text(response).await
+            );
+            if !changed {
+                assert_eq!(common::read_json(response).await["status"], "authorized");
+            }
+            // Restore authority for reads: a refused completion must remain absent
+            // even if the same account becomes available again immediately.
+            returned.store(false, Ordering::SeqCst);
+            if changed {
+                let response = common::send(&app, own_request("GET", &path, Value::Null)).await;
+                assert_eq!(
+                    response.status(),
+                    StatusCode::OK,
+                    "{}",
+                    common::read_text(response).await
+                );
+                assert_eq!(common::read_json(response).await["status"], "disconnected");
+                let response = common::send(
+                    &app,
+                    request("GET", item, Value::Null, Some("fixture-owner")),
+                )
+                .await;
+                assert_eq!(response.status(), StatusCode::OK);
+                let after = common::read_json(response).await;
+                assert_eq!(
+                    after["revision"], before["revision"],
+                    "{kind} changed resource revision after refusal"
+                );
+                assert_eq!(
+                    after["settings"], before["settings"],
+                    "{kind} changed resource metadata after refusal"
+                );
+                assert!(
+                    s.store
+                        .keys("plugin-oauth-subject:")
+                        .await
+                        .unwrap()
+                        .is_empty()
+                );
+            }
+            server.abort();
+            authority_server.abort();
+        }
+    }
+}
+
+#[tokio::test]
+async fn resource_changes_during_post_response_oauth_verification_prevent_result_delivery() {
+    for change in ["none", "pause", "edit"] {
+        let (_root, s, instance, resource, path, app) = fixture(false).await;
+        let responded = Arc::new(AtomicBool::new(false));
+        let responding = responded.clone();
+        let provider = axum::Router::new()
+            .route(
+                "/token",
+                axum::routing::post(|| async {
+                    axum::Json(json!({
+                        "access_token": "post-response-resource-fixture",
+                        "scope": "messages:read",
+                        "team": {"id": "T111"},
+                    }))
+                }),
+            )
+            .route(
+                "/messages",
+                axum::routing::get(move |headers: axum::http::HeaderMap| {
+                    let responded = responding.clone();
+                    async move {
+                        assert_eq!(
+                            headers["authorization"],
+                            "Bearer post-response-resource-fixture"
+                        );
+                        responded.store(true, Ordering::SeqCst);
+                        axum::Json(json!({"ok": true}))
+                    }
+                }),
+            );
+        let (origin, provider_server) = common::serve_locally(provider).await;
+        s.plugins.route_http_to(Some(origin));
+        let started = begin(&app, &path).await;
+        let callback = format!(
+            "/api/plugin-oauth/{instance}/callback?state={}&code=post-response-code",
+            text(&started, "state")
+        );
+        assert_eq!(
+            common::send(&app, request("GET", &callback, Value::Null, None))
+                .await
+                .status(),
+            StatusCode::OK
+        );
+        let response = common::send(
+            &app,
+            request(
+                "POST",
+                &format!("{path}/finish"),
+                json!({"state": started["state"]}),
+                Some("fixture-owner"),
+            ),
+        )
+        .await;
+        assert_eq!(
+            response.status(),
+            StatusCode::OK,
+            "{}",
+            common::read_text(response).await
+        );
+
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let first = Arc::new(AtomicBool::new(true));
+        let (entering, releasing) = (entered.clone(), release.clone());
+        let authority = axum::Router::new().route(
+            "/api/relay/00000000-0000-4000-8000-000000000055/task-authors",
+            axum::routing::get(move || {
+                let hold = responded.load(Ordering::SeqCst) && first.swap(false, Ordering::SeqCst);
+                let (entered, release) = (entering.clone(), releasing.clone());
+                async move {
+                    if hold {
+                        entered.notify_one();
+                        release.notified().await;
+                    }
+                    axum::Json(json!({
+                        "owner": {"account_id": "fixture-owner", "access_id": "fixture-owner"},
+                        "members": [],
+                    }))
+                }
+            }),
+        );
+        let (origin, authority_server) = common::serve_locally(authority).await;
+        let identity_path = s.config.data_dir.join("installation-relay/identity.json");
+        let mut identity: Value =
+            serde_json::from_slice(&std::fs::read(&identity_path).unwrap()).unwrap();
+        identity["origin"] = json!(origin);
+        std::fs::write(identity_path, serde_json::to_vec(&identity).unwrap()).unwrap();
+        let (calling, called_instance, called_resource) =
+            (s.clone(), instance.clone(), resource.clone());
+        let mut pending = tokio::spawn(async move {
+            panels::action(
+                &calling,
+                "example",
+                &called_instance,
+                &json!({
+                    "action": "read", "payload": {"resource": called_resource},
+                }),
+            )
+            .await
+        });
+        tokio::select! {
+            () = entered.notified() => {},
+            result = &mut pending => panic!("Ended before the post-response authority lookup: {result:?}"),
+            () = tokio::time::sleep(std::time::Duration::from_secs(10)) => panic!("Post-response lookup was not reached"),
+        }
+        if change != "none" {
+            let current = resources::get(&s, "example", &instance, "workspace", &resource)
+                .await
+                .unwrap();
+            resources::save(
+                &s,
+                "example",
+                &instance,
+                "workspace",
+                &json!({
+                    "name": if change == "edit" { "Changed workspace" } else { &current.name },
+                    "enabled": change != "pause",
+                    "revision": current.revision,
+                    "settings": current.settings,
+                }),
+                Some(&resource),
+            )
+            .await
+            .unwrap();
+        }
+        release.notify_one();
+        let result = pending.await.unwrap();
+        if change == "none" {
+            assert_eq!(result.unwrap()["notice"], "Authorized");
+        } else {
+            assert_eq!(result.unwrap_err().status, 403, "{change}");
+        }
+        provider_server.abort();
+        authority_server.abort();
+    }
+}

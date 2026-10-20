@@ -122,9 +122,9 @@ and Android, including exact choice IDs, numeric values, empty values and secret
 whitespace. Web dictionaries for plugin-defined collection and field names have
 no inherited entries.
 
-The current integration includes main through `cf07bea9`. New persisted plugin
-manifests require a separate compatibility boundary: epoch 6, above the inherited
-epoch 4 and upstream main's reserved epoch 5. The [persistent-format inventory and
+The current integration includes main through `176969f5`. New persisted plugin
+manifests require a separate compatibility boundary: epoch 7, above the inherited
+epoch 4 and upstream main's reserved epochs 5 and 6. The [persistent-format inventory and
 forward recovery plan](SLACK-PLUGIN-COMPATIBILITY.md) retain the unchanged legacy
 tree and require a separately reviewed production transition. The route-authority
 measurements document bounded record shape and their limits; full native/storage
@@ -788,10 +788,11 @@ checked before persistence or worker invocation. Large valid configurations belo
 that bound retain their complete values. These corrections are undergoing native
 qualification.
 
-New persisted manifest declarations require the epoch-6 boundary and the
-[forward/recovery inventory](SLACK-PLUGIN-COMPATIBILITY.md). Main is integrated
-through `cf07bea9`; its epoch 5 remains distinct. The previous routing slice's
-additive-field analysis did not establish whole-plugin compatibility.
+New persisted manifest declarations require the separate plugin boundary and the
+[forward/recovery inventory](SLACK-PLUGIN-COMPATIBILITY.md). After integrating
+trusted native execution through `176969f5`, this boundary is epoch 7, above main's
+epochs 5 and 6. The previous routing slice's additive-field analysis did not
+establish whole-plugin compatibility.
 
 The pre-merge Android correction passes 518 JVM cases, including forty shared
 plugin journeys, four local-store contracts and nine scope transitions. Its
@@ -947,3 +948,140 @@ the revoked delivery, as reply failures already do. The regression also requires
 Bob's unrelated route to deliver its answer through the same live worker.
 Clippy's two reported form issues are corrected without suppressions. Current
 whole-checkpoint validation and a fresh independent review remain pending.
+
+## Integration with trusted native execution
+
+Main through `176969f5` introduces a separate host-execution authority. Chat send,
+edit, question and management paths retain both that authority and the plugin
+requester's personal proof; one never supplies the other. Pausing and resuming
+retain source checks, the owner's pause and the native commit-time authorization.
+The upstream skills snapshot test keeps its deterministic FIFO interleaving and
+the branch's immutable-bundle and subsequent-snapshot checks.
+
+The HTTP regression reproduced a native agent reported eligible for an external
+route whose work has no native host origin. Configuration and its eligibility
+preview now use the native policy with an explicitly unknown caller. They cannot
+borrow the configuring owner's host grant. The focused HTTP case passes; broader
+qualification of the merged tree and fresh independent review remain required. The plugin
+compatibility boundary is epoch 7, distinct from upstream native execution's 6;
+no transition or deployment is authorized by this draft checkpoint.
+
+
+## Admission approval and personal directory reconciliation
+
+A signed HTTP regression holds the final owner-authority response while another
+package version is approved. Before correction, the request was refused but its
+message content remained in the native event queue. Admission now retains the
+loaded approval across that lookup, rechecks its digest afterward and fences the
+exact approval in the same transaction as content and deduplication. Both
+one-shot ingress and persistent workers carry their loaded digest into admission.
+The real-worker red case is captured; corrected qualification is still running.
+
+The same review found that completing one personal consent refreshed only the
+first directory page, removing other loaded sign-in controls and their memory-only
+consent state. Web and shared Compose regressions now exercise two separately
+paged sign-ins and an insertion before the later pending consent. The provider
+responses in these client tests are synthetic. Both clients now reconcile previously loaded IDs before replacing directory
+records, retaining stable widgets and memory-only consent. Current corrected
+qualification is pending; no live provider or complete Slack validation is claimed.
+
+
+## Revoked controls at native consumption
+
+An actual native-input regression reproduced a question answer reaching the
+running turn after its author was removed and reapproved. Queued external controls
+now retain one exact approval and native source through input preparation. The
+consumption and final publication transactions recheck that source; slow file
+preparation is followed by fresh owner and package checks. Revocation cancels only
+that input and reopens its still-current question. Temporary authority outages
+defer external controls; the owner's exact native answer provenance remains
+independent and continues to suspend personal OAuth for the turn.
+
+The expanded current-author, person-generation, route pause/deletion,
+package/owner replacement and owner-rescue scenarios pass through native input
+publication. Whole-checkpoint qualification remains in progress. The complete Android run found
+three readiness failures; they pass unchanged in isolation. Tests now wait for
+ready fields and enabled authorization controls; the complete plugin class also
+exposed a missing wait in the new pagination scenario, corrected before its next
+run. No timeout or retry budget is widened. This does not complete the remaining
+Slack contract.
+
+A separate held-owner-response regression reproduced a profile grant committing
+after another package version was approved. Grant creation now retains its loaded
+approval through that lookup and rechecks it in the write transaction. A stale
+submission must return 409 without creating a grant; a fresh submission under the
+current package remains valid. Corrected qualification and fresh full review are
+pending.
+
+The final OAuth policy snapshot now also gates publication: the captured owner
+access and initiating Cairn member generation must still match at the transaction.
+External people retain route/person proof without acquiring a Cairn membership
+requirement. The HTTP regression captured an owner revoked in that last response
+still receiving an authorized result; owner, setup and personal variants are under
+qualification, including unchanged-authority controls and no late metadata, token
+or subject-link persistence after refusal.
+
+## Qualification corrections after native integration
+
+The merged test tree exposed three separate failures. Nested owner-form host
+effects exhausted the default test-thread stack; the callback now boxes its
+effect future. Both setup activation (3 tests) and webhooks (11 tests) pass with
+the ordinary stack size. The native-host fixture now supplies current installation
+membership as well as independent host trust, retaining its original owner; all
+19 native-node tests pass. The skills snapshot fixture removes its synchronization
+FIFO before checking the subsequent snapshot; its suite finishes unassisted with
+16 passing tests and one existing ignored test.
+
+On an actual Android device, the synthetic Beacon's native Direct authorization
+request was being counted as a plugin mutation. The shared plugin fixture now
+answers that transport endpoint explicitly before dispatching plugin requests.
+Mutation assertions retain their original guarantees and report request paths
+when they fail. No production Direct behavior or timeout budget changes.
+
+Fresh whole-checkpoint review and validation are still required. These corrections
+do not implement the remaining Slack package, transports, tools, automation or
+ephemeral search.
+
+## Large grant input restoration
+
+A shared Compose/Parcel regression reproduced 289,488 bytes of activity state
+for one valid eight-scope grant draft. Retained editors could accumulate several
+such buffers, including after a rule was saved or cancelled. Android now keeps
+these ordinary inputs in the existing bounded device-local snapshot store,
+scoped to account, installation and resource path; saved activity state retains
+only its opaque reference (1,272 bytes in the same shared JVM regression).
+[Storage measurements](performance/ANDROID-PLUGIN-DRAFT-STATE.md) record the
+144,081-byte file, read/write latency, CPU, reference workloads and host limits.
+Closing, cancelling and completing a submission retire
+the input buffer. An unavailable local snapshot cannot restore a rule with its
+limits silently removed: the owner must explicitly start and review a new rule.
+Targeted and whole-checkpoint qualification remain in progress.
+
+## Independent queued turns after authority failures
+
+Two regressions through signed ingress, Luau admission and the native conversation
+queue reproduced a permanent pause: one after a temporary authority 503, the other
+after a queued participant was revoked while another authorized person waited.
+The host now defers temporary lookup failures without pausing and retires only the
+exact revoked request. A changed message, intent or current turn cannot be retired
+by an obsolete lookup. Final admission rechecks the source inside the same
+transaction; refusal commits without starting a new turn. The owner's explicit
+pause remains authoritative.
+
+The regression suite also covers revocation during a held owner lookup. Corrected
+native and whole-checkpoint qualification are in progress. The current Android
+plugin journeys pass 45/45 on an actual AOSP API 36 emulator with KVM, including
+large grant restoration and missing local snapshots. This does not complete the
+Slack package or the remaining Q1–Q20 delivery slices.
+
+## Resource authority after the final OAuth lookup
+
+A root owner action reproduced an HTTP result reaching the Luau package after its
+resource was paused during the post-response OAuth authority lookup. That lookup
+verified the retained credential after an earlier, separate resource snapshot.
+HTTP now shares one final local snapshot of resource/ancestor revisions, resource
+grants and OAuth references, both before sending and after awaited response checks.
+The regression holds the real post-response lookup: its unchanged control succeeds,
+while pausing or editing the resource is refused with 403. All three scenarios pass
+through the installed package and actual Luau worker. Whole-checkpoint qualification
+and fresh independent review remain required.

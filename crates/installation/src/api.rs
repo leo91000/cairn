@@ -22,6 +22,18 @@ fn under(path: &str, prefix: &str) -> bool {
 }
 
 pub async fn dispatch(s: &Arc<Service>, input: &Input) -> Result<Value> {
+    crate::native::policy::authorize_request(s, input).await?;
+    let caller = input
+        .identity
+        .as_ref()
+        .filter(|identity| identity.mcp_scopes.is_none())
+        .map(|identity| identity.account_id.clone());
+    crate::native::policy::CALLER
+        .scope(caller, dispatch_inner(s, input))
+        .await
+}
+
+async fn dispatch_inner(s: &Arc<Service>, input: &Input) -> Result<Value> {
     if under(&input.path, "/api/nodes") {
         return crate::nodes::admin(s, input).await;
     }
@@ -237,8 +249,18 @@ async fn chat_routes(s: &Arc<Service>, input: &Input, route: Route<'_>) -> Resul
                 .into()
         }
         ("DELETE", ["chats", id]) => s.chat_trash(id, confirmed).await?,
-        ("POST", ["chats", id, "new-session"]) => s.chat_new_session(id, confirmed).await?,
-        ("POST", ["chats", id, "restore"]) => s.chat_restore(id).await?,
+        ("POST", ["chats", id, "new-session"]) => {
+            s.chat_new_session_authorized(
+                id,
+                confirmed,
+                crate::native::policy::chat_authorization(id),
+            )
+            .await?
+        }
+        ("POST", ["chats", id, "restore"]) => {
+            s.chat_restore_authorized(id, crate::native::policy::chat_authorization(id))
+                .await?
+        }
         ("POST", ["chats"]) => s.chat_create(input.body.clone()).await?,
         ("GET", ["chats", id]) => chat_detail(s, id).await?,
         ("POST", ["chats", id, "messages"]) => {
@@ -256,7 +278,12 @@ async fn chat_routes(s: &Arc<Service>, input: &Input, route: Route<'_>) -> Resul
         }
         ("DELETE", ["chats", id, "messages", message]) => s.chat_edit(id, message, None).await?,
         ("POST", ["chats", id, "questions", question, "cancel"]) => {
-            s.question_cancel(id, question).await?
+            s.question_cancel_authorized(
+                id,
+                question,
+                crate::native::policy::chat_authorization(id),
+            )
+            .await?
         }
         ("POST", ["chats", id, "questions", question, "answer"]) => {
             s.question_answer_as(id, question, input.body.clone(), input.identity.as_ref())

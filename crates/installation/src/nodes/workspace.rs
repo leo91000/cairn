@@ -52,7 +52,17 @@ async fn authorize(s: &Service, node: &str, attempt: &str) -> Result<(Value, Val
         .get("node-attempts", attempt)
         .await?
         .unwrap_or_default();
-    if ownership["released"] == true
+    let record = s.get("nodes", node).await?;
+    let native_allowed = if crate::native::policy::node_native(&record) {
+        let (run, record) = (run.clone(), record.clone());
+        s.store
+            .read(move |db| crate::native::policy::allows(db, &run, &record))
+            .await?
+    } else {
+        true
+    };
+    if !native_allowed
+        || ownership["released"] == true
         || ownership["nodeId"] != node
         || checkpoint["nodeId"] != node
         || checkpoint["runnerId"] != attempt
@@ -241,6 +251,24 @@ pub async fn seed(
     target: &Path,
 ) -> Result<()> {
     use futures_util::StreamExt;
+    let _disk = if crate::native::enabled() {
+        Some(crate::native::disk::lock(&crate::native::state_dir()).await?)
+    } else {
+        None
+    };
+    let budget = if crate::native::enabled() {
+        let available = crate::native::disk::staging_budget().await?;
+        // Inbox refresh copies into an inode already mounted by the workload;
+        // its received temporary tree and the replacement can coexist briefly.
+        let available = if selection["kind"] == "inbox" {
+            available / 2
+        } else {
+            available
+        };
+        SEED_BUDGET_BYTES.min(available)
+    } else {
+        SEED_BUDGET_BYTES
+    };
     let response = fetch(client, master, token, attempt, "seed", &selection).await?;
     let parent = target
         .parent()
@@ -251,12 +279,32 @@ pub async fn seed(
         .bytes_stream()
         .map(|r| r.map_err(std::io::Error::other));
     let mut reader = BufReader::new(tokio_util::io::StreamReader::new(stream));
-    super::files::receive(&mut reader, temp.path(), SEED_BUDGET_BYTES).await?;
+    super::files::receive(&mut reader, temp.path(), budget).await?;
+    // Preserve the directory inode mounted into a native workload. Replacing a
+    // bind-mounted directory would leave it reading the previous inbox forever.
+    if crate::native::enabled() && selection["kind"] == "inbox" {
+        return install_native_inbox(temp.path(), target).await;
+    }
     // Only host staging files are replaced. Guest disks remain authoritative.
     if target.exists() {
         tokio::fs::remove_dir_all(target).await?;
     }
     tokio::fs::rename(temp.path(), target).await?;
+    Ok(())
+}
+
+async fn install_native_inbox(source: &Path, target: &Path) -> Result<()> {
+    crate::skills::private_dir(target).await?;
+    let bytes = tokio::fs::read(source.join("messages.json")).await?;
+    crate::skills::atomic_write(&target.join("messages.json"), &bytes).await?;
+    tokio::fs::set_permissions(
+        target.join("messages.json"),
+        std::fs::Permissions::from_mode(0o444),
+    )
+    .await?;
+    // This root-owned inode is bind-mounted read-only into the workload. It
+    // must stay traversable after every refresh, including under UMask=0077.
+    tokio::fs::set_permissions(target, std::fs::Permissions::from_mode(0o755)).await?;
     Ok(())
 }
 
@@ -300,4 +348,41 @@ pub async fn auth_listener(
     }
     let _ = tokio::fs::remove_file(path).await;
     Ok(())
+}
+
+#[cfg(test)]
+mod native_inbox_tests {
+    use super::*;
+    use std::os::unix::fs::MetadataExt;
+
+    #[tokio::test]
+    async fn native_refresh_preserves_the_bound_directory_and_unprivileged_read_access() {
+        let root = tempfile::tempdir().unwrap();
+        let (source, target) = (root.path().join("source"), root.path().join("inbox"));
+        crate::skills::private_dir(&source).await.unwrap();
+        crate::skills::private_dir(&target).await.unwrap();
+        let inode = tokio::fs::metadata(&target).await.unwrap().ino();
+        for message in [b"first".as_slice(), b"follow-up".as_slice()] {
+            tokio::fs::write(source.join("messages.json"), message)
+                .await
+                .unwrap();
+            install_native_inbox(&source, &target).await.unwrap();
+            let metadata = tokio::fs::metadata(&target).await.unwrap();
+            assert_eq!(metadata.ino(), inode);
+            assert_eq!(metadata.permissions().mode() & 0o777, 0o755);
+            assert_eq!(
+                tokio::fs::metadata(target.join("messages.json"))
+                    .await
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o444
+            );
+            assert_eq!(
+                tokio::fs::read(target.join("messages.json")).await.unwrap(),
+                message
+            );
+        }
+    }
 }

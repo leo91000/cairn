@@ -1439,6 +1439,145 @@ abstract class PluginsCases {
     }
 
     @Test
+    fun personalAccountRefreshKeepsLaterPageConsentUntilItFinishes() {
+        val connected = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
+        val shifted = java.util.concurrent.atomic.AtomicBoolean(false)
+        val starts = CopyOnWriteArrayList<String>()
+        val finishes = CopyOnWriteArrayList<String>()
+        fun item(id: String) =
+            PluginPersonalAuthorization(
+                id = id,
+                pluginId = "personal-pages",
+                pluginName = "Personal service",
+                instanceId = "app",
+                instanceName = "Company service",
+                collection = "workspace",
+                resourceId = id,
+                resourceName = id,
+                providerName = "personal",
+                title = "Personal access",
+                scopes = listOf("messages:read"),
+                enabled = true,
+                authorization =
+                    if (id in connected)
+                        PluginOAuthStatus(
+                            status = "authorized",
+                            scopes = listOf("messages:read"),
+                            subject = "U-$id",
+                        )
+                    else PluginOAuthStatus(),
+            )
+        MockWebServer().use { server ->
+            server.dispatcher =
+                dispatcher(
+                    read = { path ->
+                        if (
+                            path.substringBefore('?').endsWith("/plugins/personal-authorizations")
+                        ) {
+                            val ids =
+                                if (shifted.get()) listOf("Intro", "Engineering", "Sales")
+                                else listOf("Engineering", "Sales")
+                            val cursor = path.substringAfter("?cursor=", "")
+                            val index = if (cursor.isEmpty()) 0 else ids.indexOf(cursor) + 1
+                            wireJson.encodeToString(
+                                PluginPage(
+                                    items =
+                                        ids.getOrNull(index)?.let { listOf(item(it)) }.orEmpty(),
+                                    nextCursor =
+                                        ids.getOrNull(index).takeIf { index + 1 < ids.size },
+                                )
+                            )
+                        } else null
+                    }
+                ) { path, body ->
+                    if ("/personal-pages/" !in path) null
+                    else {
+                        val id = path.substringAfter("/workspace/").substringBefore('/')
+                        val value = wireJson.parseToJsonElement(body).jsonObject
+                        if (path.endsWith("/finish")) {
+                            assertEquals("consent-$id", value["state"]?.jsonPrimitive?.content)
+                            finishes += id
+                            connected += id
+                            wireJson.encodeToString(item(id).authorization)
+                        } else {
+                            assertEquals(
+                                listOf("messages:read"),
+                                value["scopes"]?.jsonArray?.map { it.jsonPrimitive.content },
+                            )
+                            starts += id
+                            wireJson.encodeToString(
+                                PluginOAuthConsent(
+                                    state = "consent-$id",
+                                    url = "https://provider.example.test/authorize?resource=$id",
+                                    expiresAt = System.currentTimeMillis() + 600000,
+                                )
+                            )
+                        }
+                    }
+                }
+            server.start()
+            show(server) { vm, state -> PersonalPluginAccountsScreen(vm, state) }
+            compose.waitUntil(10000) {
+                compose.onAllNodesWithText("messages:read").fetchSemanticsNodes().size == 1
+            }
+            compose.onNodeWithText("messages:read").performScrollTo().performClick()
+            compose.onNodeWithText("Connecter", substring = false).performScrollTo().performClick()
+            compose.waitUntil(10000) {
+                compose.onAllNodesWithText("Vérifier l’autorisation").fetchSemanticsNodes().size ==
+                    1
+            }
+            compose
+                .onNodeWithText("Plus de connexions personnelles")
+                .performScrollTo()
+                .performClick()
+            compose.waitUntil(10000) {
+                compose.onAllNodesWithText("messages:read").fetchSemanticsNodes().size == 2
+            }
+            compose.onAllNodesWithText("messages:read")[1].performScrollTo().performClick()
+            compose.onNodeWithText("Connecter", substring = false).performScrollTo().performClick()
+            compose.waitUntil(10000) {
+                compose.onAllNodesWithText("Vérifier l’autorisation").fetchSemanticsNodes().size ==
+                    2
+            }
+            compose
+                .onAllNodesWithText("Vérifier l’autorisation")[0]
+                .performScrollTo()
+                .performClick()
+            compose.waitUntil(10000) {
+                compose
+                    .onAllNodesWithText("Connecté en tant que U-Engineering")
+                    .fetchSemanticsNodes()
+                    .size == 1 &&
+                    compose
+                        .onAllNodes(hasText("Actualiser") and isEnabled())
+                        .fetchSemanticsNodes()
+                        .size == 1
+            }
+            compose.onNodeWithText("Sales", substring = false).assertExists()
+            compose.onNodeWithText("Vérifier l’autorisation", substring = false).assertExists()
+            shifted.set(true)
+            compose.onNodeWithText("Actualiser", substring = false).performScrollTo().performClick()
+            compose.waitUntil(10000) {
+                compose.onAllNodesWithText("Intro", substring = false).fetchSemanticsNodes().size ==
+                    1
+            }
+            compose
+                .onNodeWithText("Vérifier l’autorisation", substring = false)
+                .performScrollTo()
+                .performClick()
+            compose.waitUntil(10000) {
+                compose
+                    .onAllNodesWithText("Connecté en tant que U-Sales")
+                    .fetchSemanticsNodes()
+                    .size == 1
+            }
+            assertEquals(listOf("Engineering", "Sales"), starts.toList())
+            assertEquals(listOf("Engineering", "Sales"), finishes.toList())
+            capture("personal-later-page-consent")
+        }
+    }
+
+    @Test
     fun personalPluginAuthorizationSelectsScopesChecksConsentAndDisconnects() {
         val oauth =
             "/api/installations/fixture/api/plugins/personal-ui/connections/app/resources/workspace/team/oauth/personal"
@@ -1768,10 +1907,17 @@ abstract class PluginsCases {
                 .performScrollTo()
                 .assertIsNotEnabled()
             compose.onNodeWithText("Activer l’instance").performScrollTo().assertIsNotEnabled()
+            compose.waitUntil(10000) {
+                compose
+                    .onAllNodes(hasText("Vérifier l’autorisation") and isEnabled())
+                    .fetchSemanticsNodes()
+                    .size == 2
+            }
             compose
-                .onAllNodesWithText("Vérifier l’autorisation")[0]
+                .onAllNodes(hasText("Vérifier l’autorisation") and isEnabled())[0]
                 .performScrollTo()
                 .performClick()
+            compose.waitUntil(10000) { finishes.get() == 1 }
             compose.waitUntil(10000) {
                 compose
                     .onAllNodesWithText("Terminez l’autorisation dans votre navigateur.")
@@ -3144,6 +3290,162 @@ abstract class PluginsCases {
     }
 
     @Test
+    fun largeGrantInputsUseSmallSavedStateAndRetainExactLimits() = grantInputRestoration(false)
+
+    @Test fun missingLocalGrantInputsCannotRestoreAnUnrestrictedRule() = grantInputRestoration(true)
+
+    private fun grantInputRestoration(dropLocalInputs: Boolean) {
+        val keys = (0 until 8).map { "scope$it" }
+        val operations =
+            listOf(PluginOperation("read", "workspace", PluginAccessProfile.Read, keys))
+        val expected =
+            keys
+                .mapIndexed { n, key ->
+                    key to
+                        (0 until 100).map { i ->
+                            "$n-${i.toString().padStart(3, '0')}-${"x".repeat(172)}"
+                        }
+                }
+                .toMap()
+        val path = "/plugins/grant-draft/connections/app/resources/workspace/engineering/grants"
+        val writes = CopyOnWriteArrayList<JsonObject>()
+        val restoration = StateRestorationTester(compose)
+        val registry = AtomicReference<androidx.compose.runtime.saveable.SaveableStateRegistry>()
+        MockWebServer().use { server ->
+            server.dispatcher =
+                dispatcher(
+                    read = { requested ->
+                        if (requested.endsWith(path)) """{"items":[]}""" else null
+                    }
+                ) { requested, body ->
+                    if (requested.endsWith(path)) {
+                        writes += wireJson.parseToJsonElement(body).jsonObject
+                        "{}"
+                    } else null
+                }
+            server.start()
+            val vm =
+                show(server, restoration) { model, state ->
+                    val current =
+                        androidx.compose.runtime.saveable.LocalSaveableStateRegistry.current
+                    SideEffect { registry.set(checkNotNull(current)) }
+                    PluginResourceGrants(model, state, path, "Engineering", operations, true) {}
+                }
+            val models = ViewModelStore().apply { put("fixture", vm) }
+            fun waitEnabled(label: String) =
+                compose.waitUntil(10000) {
+                    compose
+                        .onAllNodes(hasText(label) and isEnabled())
+                        .fetchSemanticsNodes()
+                        .isNotEmpty()
+                }
+            try {
+                waitEnabled("Accès des agents")
+                compose.onNodeWithText("Accès des agents").performClick()
+                waitEnabled("Ajouter une règle")
+                compose.onNodeWithText("Ajouter une règle").performScrollTo().performClick()
+                compose.onNodeWithContentDescription("Helper").performScrollTo().performClick()
+                compose.onNodeWithContentDescription("Lecture").performScrollTo().performClick()
+                for (key in keys) {
+                    compose
+                        .onNodeWithText("Limiter $key")
+                        .performScrollTo()
+                        .performTextReplacement(expected.getValue(key).joinToString("\n"))
+                }
+                waitEnabled("Enregistrer")
+                val bytes = compose.runOnIdle {
+                    val parcel = android.os.Parcel.obtain()
+                    try {
+                        parcel.writeValue(registry.get().performSave())
+                        parcel.dataSize()
+                    } finally {
+                        parcel.recycle()
+                    }
+                }
+                assertTrue(
+                    "Grant inputs must not inflate activity state: $bytes bytes",
+                    bytes < 65536,
+                )
+                println("Grant input activity state: $bytes bytes")
+                if (dropLocalInputs)
+                    PluginSettingsDraftStore.clear(ApplicationProvider.getApplicationContext())
+                restoration.emulateSavedInstanceStateRestore()
+                if (dropLocalInputs) {
+                    waitEnabled("Ajouter une règle")
+                    compose.onNodeWithText("Enregistrer").assertIsNotEnabled()
+                    compose
+                        .onNodeWithText(
+                            "Les limites saisies n’ont pas pu être récupérées. Recommencez la règle et vérifiez ses périmètres."
+                        )
+                        .assertExists()
+                    assertTrue(
+                        "Missing local limits must not submit a broader rule",
+                        writes.isEmpty(),
+                    )
+                    compose.onNodeWithText("Ajouter une règle").performScrollTo().performClick()
+                    assertEquals(
+                        "",
+                        compose
+                            .onNodeWithText("Limiter scope0")
+                            .fetchSemanticsNode()
+                            .config[SemanticsProperties.EditableText]
+                            .text,
+                    )
+                    compose.onNodeWithText("Enregistrer").assertIsNotEnabled()
+                    capture("lost-grant-input-requires-new-rule")
+                    return
+                }
+                waitEnabled("Enregistrer")
+                for (key in listOf(keys.first(), keys.last())) {
+                    compose
+                        .onNodeWithText("Limiter $key")
+                        .performScrollTo()
+                        .assertTextContains(expected.getValue(key).joinToString("\n"))
+                }
+                assertTrue("Restoration must not submit a rule", writes.isEmpty())
+                compose.onNodeWithText("Enregistrer").performClick()
+                compose.waitUntil(10000) {
+                    compose
+                        .onAllNodes(hasText("Ajouter une règle") and isEnabled())
+                        .fetchSemanticsNodes()
+                        .isNotEmpty() && writes.size == 1
+                }
+                assertTrue(
+                    "This is an allowed native request size",
+                    writes.single().toString().toByteArray().size < 150000,
+                )
+                assertEquals(wireJson.encodeToJsonElement(expected), writes.single()["scopes"])
+                compose.onNodeWithText("Ajouter une règle").performScrollTo().performClick()
+                assertEquals(
+                    "",
+                    compose
+                        .onNodeWithText("Limiter scope0")
+                        .fetchSemanticsNode()
+                        .config[SemanticsProperties.EditableText]
+                        .text,
+                )
+                compose
+                    .onNodeWithText("Limiter scope0")
+                    .performScrollTo()
+                    .performTextReplacement("cancelled-scope")
+                compose.onNodeWithText("Annuler la règle").performScrollTo().performClick()
+                compose.onNodeWithText("Ajouter une règle").performScrollTo().performClick()
+                assertEquals(
+                    "",
+                    compose
+                        .onNodeWithText("Limiter scope0")
+                        .fetchSemanticsNode()
+                        .config[SemanticsProperties.EditableText]
+                        .text,
+                )
+                capture("large-grant-input-restored")
+            } finally {
+                models.clear()
+            }
+        }
+    }
+
+    @Test
     fun largeUnsavedResourceInputsUseSmallSavedStateAndNeverPersistSecrets() {
         val fields =
             (0 until 29).map { n ->
@@ -3774,6 +4076,7 @@ abstract class PluginsCases {
                         "resource" -> "Nom · Workspace"
                         else -> "Nom"
                     }
+                waitEnabled(field)
                 compose
                     .onNodeWithText(field)
                     .performScrollTo()
@@ -3828,7 +4131,7 @@ abstract class PluginsCases {
                     }
                     waitEnabled("Vérifier la sauvegarde")
                     compose.onNodeWithText(save).assertIsNotEnabled()
-                    assertEquals(1, writes.size)
+                    assertEquals("Recorded mutation paths: $writes", 1, writes.size)
                     val beforeRead = resourceReads.get()
                     compose
                         .onNodeWithText("Vérifier la sauvegarde")
@@ -3842,7 +4145,7 @@ abstract class PluginsCases {
                                 .isNotEmpty() &&
                             compose.onAllNodesWithText(save).fetchSemanticsNodes().isEmpty()
                     }
-                    assertEquals(1, writes.size)
+                    assertEquals("Recorded mutation paths: $writes", 1, writes.size)
                     capture("resource-creation-restored-with-read-barrier")
                     return
                 }
@@ -3884,7 +4187,7 @@ abstract class PluginsCases {
                             .text,
                     )
                 }
-                assertTrue("Restoration must not issue a mutation", writes.isEmpty())
+                assertTrue("Restoration recorded mutations: $writes", writes.isEmpty())
                 capture("$kind-draft-restored")
             } finally {
                 releaseRead.countDown()
@@ -3913,6 +4216,14 @@ abstract class PluginsCases {
                     if (request.getHeader("X-CSRF-Token") != "fixture-csrf")
                         return MockResponse().setResponseCode(403)
                 }
+
+                // This synthetic Beacon has no Direct peer to authorize.
+                if (
+                    request.method == "POST" &&
+                        path == "/api/installations/fixture/direct/authorize"
+                )
+                    return MockResponse().setBody("""{"available":false}""")
+
                 if (request.method != "GET" || includeGet) {
                     handle(path, body)?.let {
                         return MockResponse().setBody(it)

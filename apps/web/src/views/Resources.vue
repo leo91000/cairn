@@ -87,6 +87,9 @@ const form = ref<ResourceForm>({
   sourceMode: 'remote',
 })
 const access = computed(() => 'access' in form.value ? form.value.access : undefined)
+const selectableNodes = computed(() => nodes.value.filter(node =>
+  !node.local && !node.revoked && (node.capabilities.backend === 'native') === (access.value?.backend === 'native'),
+))
 const allNodes = computed({
   get: () => access.value?.nodes === null,
   set: (value: boolean) => {
@@ -187,6 +190,7 @@ async function edit(item?: Agent | Project) {
           instructions: '',
           timeoutMinutes: 0,
           access: {
+            backend: 'firecracker',
             nodes: [LOCAL_NODE_ID],
             projects: null,
             skills: null,
@@ -207,6 +211,7 @@ async function edit(item?: Agent | Project) {
   if ('access' in form.value) {
     form.value.provider ??= 'codex'
     form.value.access.installation ??= false
+    form.value.access.backend ??= 'firecracker'
     form.value.access.nodes ??= form.value.access.nodes === null ? null : [LOCAL_NODE_ID]
     try {
       nodes.value = await api<ExecutionNode[]>('/nodes')
@@ -396,7 +401,7 @@ async function remove() {
     :description="
       isAgent
         ? 'Create a profile with the right instructions and model for the job.'
-        : 'Choose a GitHub repository or an existing directory on your server. Agents work on private copies in their VMs.'
+        : 'Choose a GitHub repository or an existing directory on your server. Agents work on private copies in their workspaces.'
     "
   >
     <UiButton v-if="state.installationRole === 'owner'" @click="edit()">
@@ -498,11 +503,21 @@ async function remove() {
             </p>
             <label class="checkbox flex-row items-center gap-2 text-xs font-normal phone:text-xs phone:leading-[1.6] mx-0 my-[9px]"><input v-model="form.access.installation" type="checkbox">Allow access to the current Cairn installation</label>
             <small>Manage agents, projects, skills, MCP connections, tasks and runs on behalf of the installation owner, across the entire installation.</small>
-            <label class="checkbox flex-row items-center gap-2 text-xs font-normal phone:text-xs phone:leading-[1.6] mx-0 my-[9px]"><input v-model="allNodes" type="checkbox">All nodes, including future nodes</label>
+            <VirtualSelect
+              v-model="form.access.backend"
+              label="Agent execution backend"
+              :options="[
+                { value: 'firecracker', label: 'Firecracker VM' },
+                { value: 'native', label: 'Native process · trusted people only' },
+              ]"
+              @update:model-value="form.access.nodes = []"
+            />
+            <small v-if="form.access.backend === 'native'">Uses the host GPU and OS tools with weaker isolation. Choose native nodes explicitly; each node must also authorize the people directing this agent.</small>
+            <label v-if="form.access.backend !== 'native'" class="checkbox flex-row items-center gap-2 text-xs font-normal phone:text-xs phone:leading-[1.6] mx-0 my-[9px]"><input v-model="allNodes" type="checkbox">All VM nodes, including future VM nodes</label>
             <fieldset v-if="!allNodes" class="access-choices">
               <legend>Allowed nodes</legend>
-              <label class="checkbox flex-row items-center gap-2 text-xs font-normal phone:text-xs phone:leading-[1.6] mx-0 my-[9px]"><input v-model="form.access.nodes" type="checkbox" :value="LOCAL_NODE_ID">Current runner</label>
-              <label v-for="node in nodes.filter(n => !n.local && !n.revoked)" :key="node.id" class="checkbox flex-row items-center gap-2 text-xs font-normal phone:text-xs phone:leading-[1.6] mx-0 my-[9px]"><input v-model="form.access.nodes" type="checkbox" :value="node.id">{{ node.name }}</label>
+              <label v-if="form.access.backend !== 'native'" class="checkbox flex-row items-center gap-2 text-xs font-normal phone:text-xs phone:leading-[1.6] mx-0 my-[9px]"><input v-model="form.access.nodes" type="checkbox" :value="LOCAL_NODE_ID">Current runner</label>
+              <label v-for="node in selectableNodes" :key="node.id" class="checkbox flex-row items-center gap-2 text-xs font-normal phone:text-xs phone:leading-[1.6] mx-0 my-[9px]"><input v-model="form.access.nodes" type="checkbox" :value="node.id">{{ node.name }}</label>
             </fieldset>
             <VirtualSelect
               v-model="form.access.sandbox"
@@ -511,7 +526,7 @@ async function remove() {
               :icon="ShieldCheck"
             />
             <p class="muted text-muted">
-              YOLO is the default. Every agent runs in a private VM. Sandboxed runs never bypass denied operations or wait for unattended approvals.
+              YOLO is the default. Execution follows the selected backend and node grants. Sandboxed runs never bypass denied operations or wait for unattended approvals.
             </p>
           </div><label class="checkbox flex-row items-center gap-2">
             <input

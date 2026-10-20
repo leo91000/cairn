@@ -34,9 +34,27 @@ internal fun PluginResourceGrants(
     var agentId by rememberForm("", path)
     var profile by rememberForm<PluginAccessProfile?>(null, path)
     var overrides by rememberForm(emptyMap<String, String>(), path)
-    var limits by rememberForm(emptyMap<String, String>(), path)
     val scope = rememberCoroutineScope()
     val scopeNames = operations.flatMap { it.scopes }.distinct()
+    val limitsDraft =
+        rememberPluginSettingsDraft(
+            scopeNames.toSet(),
+            emptyMap(),
+            wireJson.encodeToString(
+                listOf(state.origin, state.session.account?.id, state.installation?.id, path)
+            ),
+        )
+    var limits by limitsDraft.state
+    var lostDraft by remember(limitsDraft) { mutableStateOf(adding && limitsDraft.notice != null) }
+
+    fun clearDraft() {
+        agentId = ""
+        profile = null
+        overrides = emptyMap()
+        limitsDraft.clear()
+        lostDraft = false
+    }
+
     fun currentRule() =
         PluginResourceGrant(
             agentId = agentId,
@@ -60,7 +78,8 @@ internal fun PluginResourceGrants(
     val draft = currentRule()
     val allowed = operations.filter { draft.permits(it) }
     val controls = ready && enabled && !busy
-    val canGrant = controls && state.agents.any { it.id == agentId } && allowed.isNotEmpty()
+    val canGrant =
+        controls && !lostDraft && state.agents.any { it.id == agentId } && allowed.isNotEmpty()
     suspend fun load(current: Int) {
         ready = false
         val result = vm.api.pluginManagementItems<PluginResourceGrant>(path)
@@ -98,11 +117,12 @@ internal fun PluginResourceGrants(
         ready = false
         opened = false
         adding = false
+        clearDraft()
         removing = null
         activity(false)
     }
     fun mutate(revoking: PluginResourceGrant? = null) {
-        if (busy || !ready || !enabled) return
+        if (busy || !ready || !enabled || (revoking == null && lostDraft)) return
         val input = currentRule()
         if (
             revoking == null &&
@@ -137,6 +157,7 @@ internal fun PluginResourceGrants(
                 pendingWrite = false
                 writing = false
                 adding = false
+                clearDraft()
                 removing = null
                 load(current)
             } catch (e: Exception) {
@@ -145,6 +166,7 @@ internal fun PluginResourceGrants(
                 if (current == generation) {
                     error = "${e.message} Actualisez les règles avant une autre modification."
                     adding = false
+                    clearDraft()
                     removing = null
                 }
             } finally {
@@ -159,6 +181,7 @@ internal fun PluginResourceGrants(
     LaunchedEffect(Unit) {
         if (opened) {
             activity(true)
+            if (lostDraft) adding = false
             if (pendingWrite) {
                 adding = false
                 error = "Actualisez les règles avant une autre modification."
@@ -192,6 +215,10 @@ internal fun PluginResourceGrants(
             valid = adding && canGrant,
             dismissible = !writing,
         ) {
+            if (lostDraft)
+                FormError(
+                    "Les limites saisies n’ont pas pu être récupérées. Recommencez la règle et vérifiez ses périmètres."
+                )
             Text(
                 "Aucun agent n’a accès par défaut. Les règles s’additionnent : un refus ne s’applique qu’à sa règle, une autre peut encore autoriser l’opération."
             )
@@ -244,10 +271,7 @@ internal fun PluginResourceGrants(
                     }
                 }
                 SignalButton("Ajouter une règle", enabled = controls && rules.size < 64) {
-                    agentId = ""
-                    profile = null
-                    overrides = emptyMap()
-                    limits = emptyMap()
+                    clearDraft()
                     adding = true
                 }
             }
@@ -304,7 +328,13 @@ internal fun PluginResourceGrants(
                     "Autorisées par cette règle : ${allowed.joinToString { it.name }.ifEmpty { "Aucune" }}",
                     style = MaterialTheme.typography.bodySmall,
                 )
-                TextButton(onClick = { adding = false }, enabled = !busy) {
+                TextButton(
+                    onClick = {
+                        adding = false
+                        clearDraft()
+                    },
+                    enabled = !busy,
+                ) {
                     Text("Annuler la règle")
                 }
             }

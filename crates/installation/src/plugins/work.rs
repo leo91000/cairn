@@ -115,6 +115,15 @@ pub async fn accept(s: &Service, connection: &Connection, inbound: Inbound) -> R
 
 /// An HTTP or socket transport must only acknowledge temporary saturation as a retry.
 pub async fn deliver(s: &Service, connection: &Connection, inbound: Inbound) -> Result<Admission> {
+    deliver_approved(s, connection, inbound, None).await
+}
+
+async fn deliver_approved(
+    s: &Service,
+    connection: &Connection,
+    inbound: Inbound,
+    digest: Option<&str>,
+) -> Result<Admission> {
     // Allowlists only change with a new revision (or shrink), so this snapshot is a
     // superset: strangers are dropped without touching storage or owner authority.
     if connection.access_mode == AccessMode::Allowlist
@@ -122,10 +131,27 @@ pub async fn deliver(s: &Service, connection: &Connection, inbound: Inbound) -> 
     {
         return Ok(Admission::Denied);
     }
+    let package = registry::approved(s, &connection.plugin_id).await?;
+    let expected_digest = digest.or_else(|| {
+        connection
+            .routing
+            .as_ref()
+            .map(|route| route.digest.as_str())
+    });
+    if expected_digest.is_some_and(|digest| digest != package.package.digest) {
+        return Err(Error::forbidden(
+            "The plugin worker's package approval changed.",
+        ));
+    }
     ensure_owner(s, connection).await?;
+    registry::require_digest(s, &connection.plugin_id, &package.package.digest).await?;
+    let approval = package.snapshot();
     let expected = connection.clone();
     s.store
         .transaction(move |db| {
+            // Approval and admission commit together, including after slow
+            // membership checks or a wait for the store transaction.
+            approval.recheck_in(db)?;
             let current = authorize(db, &expected)?;
             let author = json!({ "id": inbound.author.id, "name": label(&inbound.author.name) });
             // The host's identity fields always win over the package's own.
@@ -259,6 +285,7 @@ pub(crate) async fn inbound(
     context: &Context,
     args: &Value,
     detailed: bool,
+    digest: Option<&str>,
 ) -> Result<Value> {
     let kind = match text(args, "kind") {
         "" => "message",
@@ -306,11 +333,11 @@ pub(crate) async fn inbound(
             .as_str()
             .ok_or_else(|| Error::bad("Name the resource that received this event."))?;
         match super::routes::select(s, &context.connection, resource, &inbound.context).await? {
-            Some(connection) => deliver(s, &connection, inbound).await?,
+            Some(connection) => deliver_approved(s, &connection, inbound, digest).await?,
             None => Admission::Denied,
         }
     } else {
-        deliver(s, &context.connection, inbound).await?
+        deliver_approved(s, &context.connection, inbound, digest).await?
     };
     Ok(if detailed {
         json!({ "status": result })
@@ -700,6 +727,7 @@ pub(crate) async fn submit_approved(
                 &chat_id,
                 message,
                 principal.as_ref(),
+                &crate::native::policy::Origin::default(),
             )?;
             if new_turn {
                 let key = super::turns::key(&chat_id, &message_id);

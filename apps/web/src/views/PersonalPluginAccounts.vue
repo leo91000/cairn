@@ -25,18 +25,30 @@ async function load(more = false) {
   busy.value = true
   error.value = ''
   try {
-    const page = await api<PluginPage<PluginPersonalAuthorization>>(`/plugins/personal-authorizations${more && cursor.value ? `?cursor=${encodeURIComponent(cursor.value)}` : ''}`)
-    if (current !== generation)
-      return
-    items.value = more ? [...items.value, ...page.items] : page.items
-    cursor.value = page.nextCursor
+    // Reconcile every previously visible ID so another row's completion does
+    // not unmount later-page widgets and discard their memory-only consent.
+    const remaining = new Set(items.value.map(item => item.id))
+    const refreshed = more ? [...items.value] : []
+    let nextCursor = more ? cursor.value : undefined
+    for (;;) {
+      const page = await api<PluginPage<PluginPersonalAuthorization>>(`/plugins/personal-authorizations${nextCursor ? `?cursor=${encodeURIComponent(nextCursor)}` : ''}`)
+      if (current !== generation)
+        return
+      refreshed.push(...page.items)
+      for (const item of page.items)
+        remaining.delete(item.id)
+      nextCursor = page.nextCursor
+      if (more || !remaining.size || !nextCursor)
+        break
+    }
+
+    items.value = refreshed
+    cursor.value = nextCursor
     loaded.value = true
   }
   catch (e) {
     if (current !== generation)
       return
-    items.value = []
-    cursor.value = undefined
     error.value = (e as Error).message
   }
   finally {
