@@ -235,7 +235,7 @@ fn vm_alive(state: &Path, record: &Record) -> stdio::Result<bool> {
     Ok(false)
 }
 
-fn retire(
+fn stop_owned(
     state: &Path,
     record: &Record,
     control: &libublk::ctrl::UblkCtrl,
@@ -265,6 +265,16 @@ fn retire(
             return Err(stdio::Error::other("ublk stop is not confirmed"));
         }
     }
+    Ok(())
+}
+
+fn retire(
+    state: &Path,
+    record: &Record,
+    control: &libublk::ctrl::UblkCtrl,
+    reaped: bool,
+) -> stdio::Result<()> {
+    stop_owned(state, record, control, reaped)?;
     control.del_dev().map_err(error).map(|_| ())
 }
 
@@ -327,15 +337,14 @@ fn cleanup(state: &Path, record: &Record, joined: bool) -> stdio::Result<()> {
     forget(state, record)
 }
 
-/// Called only under the controller lock, before removing old jail directories.
-/// Never deletes an unrecorded owner or stops a live crates/installation/VMM.
-pub fn cleanup_stale(state: &Path) -> stdio::Result<()> {
+fn records(state: &Path) -> stdio::Result<Vec<Record>> {
     let directory = state.join("ublk-devices");
     let entries = match fs::read_dir(&directory) {
         Ok(entries) => entries,
-        Err(error) if error.kind() == stdio::ErrorKind::NotFound => return Ok(()),
+        Err(error) if error.kind() == stdio::ErrorKind::NotFound => return Ok(Vec::new()),
         Err(error) => return Err(error),
     };
+    let mut records = Vec::new();
     for entry in entries {
         let entry = entry?;
         if entry
@@ -359,6 +368,57 @@ pub fn cleanup_stale(state: &Path) -> stdio::Result<()> {
                 "ublk registry identity does not match its path",
             ));
         }
+        record.validate()?;
+        records.push(record);
+    }
+    Ok(records)
+}
+
+/// Native recovery owns both disk leases and has requested workload termination.
+/// Abort only dead, nonce-verified backends so blocked consumers can finish exiting;
+/// keep kernel devices and receipts until fencing and unmount are confirmed.
+pub(crate) fn quiesce_stale_host_disk(state: &Path, run: &str) -> stdio::Result<()> {
+    let current_boot = boot_id()?;
+    let mut owned = false;
+    for record in records(state)? {
+        if record.vm_id != run || record.boot_id != current_boot {
+            continue;
+        }
+        let Some(id) = record.device_id else { continue };
+        if record.owner.alive()? || vm_alive(state, &record)? {
+            return Err(stdio::Error::new(
+                stdio::ErrorKind::WouldBlock,
+                "ublk backend or VMM is still active",
+            ));
+        }
+        owned = true;
+        let control = match UblkCtrlBuilder::default().id(id).build() {
+            Ok(control) => control,
+            Err(failure) => {
+                let failure = error(failure);
+                if matches!(failure.raw_os_error(), Some(libc::ENOENT | libc::ENODEV)) {
+                    continue;
+                }
+                return Err(failure);
+            }
+        };
+        if control.dev_info().ublksrv_flags != record.token {
+            return Err(stdio::Error::other("Native ublk ownership changed"));
+        }
+        stop_owned(state, &record, &control, false)?;
+    }
+    if !owned {
+        return Err(stdio::Error::other(
+            "Mounted native disk has no current ownership receipt",
+        ));
+    }
+    Ok(())
+}
+
+/// Called only under the controller lock, after fencing consumers and unmounting
+/// host filesystems. Never retires an unrecorded owner or a live backend/VMM.
+pub fn cleanup_stale(state: &Path) -> stdio::Result<()> {
+    for record in records(state)? {
         cleanup(state, &record, false)?;
     }
     Ok(())

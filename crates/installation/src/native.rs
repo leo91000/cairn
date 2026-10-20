@@ -41,12 +41,21 @@ pub(crate) fn controller_client(path: &std::path::Path) -> crate::error::Result<
         .map_err(crate::error::Error::internal)
 }
 
-/// Run before creating runtime threads so host mounts stay private to this
-/// controller and every journal/control worker can make writeback progress.
+/// Run before runtime threads start. systemd must resolve stable host paths;
+/// only the ublk backend gets a private mount namespace before its device exists.
+/// Every journal/control worker must inherit writeback progress.
 pub fn prepare_storage_process() -> std::io::Result<()> {
     #[cfg(feature = "ublk")]
     {
-        crate::storage::ublk::private_mount_namespace()?;
+        use std::os::unix::fs::MetadataExt;
+
+        if std::fs::metadata("/proc/self/ns/mnt")?.ino()
+            != std::fs::metadata("/proc/1/ns/mnt")?.ino()
+        {
+            return Err(std::io::Error::other(
+                "Native controller must share the system manager's mount namespace.",
+            ));
+        }
         crate::storage::ublk::prepare_io_threads()
     }
     #[cfg(not(feature = "ublk"))]

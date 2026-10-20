@@ -1417,6 +1417,11 @@ pub async fn serve(stop: CancellationToken) -> Result<()> {
     let data = crate::nodes::node_data_dir();
     let state = super::state_dir();
     private_dir(&state).await?;
+    if !state.is_absolute() || tokio::fs::canonicalize(&state).await? != state {
+        return Err(Error::bad(
+            "Native state must use a canonical absolute directory.",
+        ));
+    }
     let _lock = crate::file_lock::exclusive(
         &state.join("controller.lock"),
         "Another native controller owns this storage.",
@@ -1446,9 +1451,16 @@ pub async fn serve(stop: CancellationToken) -> Result<()> {
             uuid(&attempt)?;
             let run = tokio::fs::read_to_string(entry.path()).await?;
             uuid(&run)?;
-            systemd::stop(&attempt).await?;
+            systemd::request_stop(&attempt).await?;
             interrupted.push((attempt, run, entry.path()));
         }
+    }
+    // Host mounts survive controller death. Recovery aborts only verified dead
+    // backends to release blocked I/O, confirms fencing, then unmounts. Complete
+    // all other attributed fences before retiring any kernel device.
+    block::recover_host_mounts(&state).await?;
+    for (attempt, _, _) in &interrupted {
+        systemd::stop(attempt).await?;
     }
     #[cfg(feature = "ublk")]
     {

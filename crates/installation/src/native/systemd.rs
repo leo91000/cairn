@@ -117,6 +117,14 @@ fn supervisor_unit() -> Result<String> {
     Ok(unit)
 }
 
+/// Begin fencing before aborting a dead backend's I/O. Completion is confirmed
+/// separately so a task blocked in that I/O can exit after the device is stopped.
+pub(super) async fn request_stop(attempt: &str) -> Result<()> {
+    let unit = unit(attempt)?;
+    let _ = output("/usr/bin/systemctl", &["--no-block", "stop", &unit]).await?;
+    Ok(())
+}
+
 pub async fn stop_workload(attempt: &str) -> Result<()> {
     let unit = unit(attempt)?;
     let stopped = output("/usr/bin/systemctl", &["stop", &unit]).await?;
@@ -360,11 +368,11 @@ pub fn arguments(launch: &Launch<'_>) -> Result<Vec<String>> {
         };
         property(format!(
             "{key}={}:{}",
-            path_property(&super::block::host_source(source)?)?,
+            path_property(source)?,
             path_property(destination)?
         ));
         if !read_only {
-            property(format!("ReadWritePaths={}", path_property(destination)?));
+            property(format!("ReadWritePaths=+{}", path_property(destination)?));
         }
     }
     let original = crate::microvm::plan::Plan::new(launch.plan.clone());
@@ -384,9 +392,9 @@ pub fn arguments(launch: &Launch<'_>) -> Result<Vec<String>> {
     }
     property(format!(
         "BindPaths={}:/tmp",
-        path_property(&super::block::host_source(launch.temporary)?)?
+        path_property(launch.temporary)?
     ));
-    property("ReadWritePaths=/tmp".into());
+    property("ReadWritePaths=+/tmp".into());
     let bindings: Vec<super::home::Binding> = serde_json::from_value(
         launch
             .plan
@@ -402,12 +410,12 @@ pub fn arguments(launch: &Launch<'_>) -> Result<Vec<String>> {
         };
         property(format!(
             "{key}={}:{}",
-            path_property(&super::block::host_source(&binding.source)?)?,
+            path_property(&binding.source)?,
             path_property(&binding.target)?
         ));
         if !binding.read_only {
             property(format!(
-                "ReadWritePaths={}",
+                "ReadWritePaths=+{}",
                 path_property(&binding.target)?
             ));
         }

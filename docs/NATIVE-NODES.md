@@ -81,8 +81,12 @@ artifacts and shared engine/tool bundles remain available.
 
 Root-private data is under `/var/lib/cairn-native`. Transfer staging is in `data/`;
 journals and clean cache are in `state/disks/<run>/lazy/`. The mounted conversation
-filesystem is `state/native/<run>/data/` inside the controller's private mount
-namespace. Ordinary host paths show an empty mountpoint after execution stops.
+filesystem is `state/native/<run>/data/` under the root-private state directory,
+in the system manager's mount namespace. The unprivileged workload gets only its
+selected directory binds; the ublk backend has a separate private namespace that
+never contains its consumer filesystem. Stopped execution leaves an empty
+mountpoint. Restart fences workloads and verifies/unmounts retained owned mounts
+before device cleanup and journal recovery.
 Temporary files in `state/native/<run>/tmp/` are outside the durable filesystem.
 The root-private controller socket is `state/controller.sock`. Do not mount the
 disk elsewhere or delete ownership/active markers to force a second writer.

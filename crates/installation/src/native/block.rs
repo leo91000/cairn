@@ -21,13 +21,162 @@ pub fn exists(state: &Path, run: &str) -> Result<bool> {
     )?))
 }
 
-/// The block filesystem lives only in the controller's mount namespace.
-/// systemd's host manager can bind its files through this pinned process root.
-pub fn host_source(path: &Path) -> Result<PathBuf> {
-    let relative = path
-        .strip_prefix("/")
-        .map_err(|_| Error::bad("Native mount source must be absolute."))?;
-    Ok(PathBuf::from(format!("/proc/{}/root", std::process::id())).join(relative))
+struct HostMount {
+    path: PathBuf,
+    run: String,
+    device: String,
+}
+
+fn host_mounts(state: &Path, mountinfo: &str) -> Result<Vec<HostMount>> {
+    let native = state.join("native");
+    let mut mounts = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for line in mountinfo.lines() {
+        let Some((mount, filesystem)) = line.split_once(" - ") else {
+            continue;
+        };
+        let fields = mount.split_whitespace().collect::<Vec<_>>();
+        let Some(path) = fields.get(4) else { continue };
+        let path = PathBuf::from(
+            path.replace("\\040", " ")
+                .replace("\\011", "\t")
+                .replace("\\012", "\n")
+                .replace("\\134", "\\"),
+        );
+        let Ok(relative) = path.strip_prefix(&native) else {
+            continue;
+        };
+        let components = relative.components().collect::<Vec<_>>();
+        let [
+            std::path::Component::Normal(run),
+            std::path::Component::Normal(data),
+        ] = components.as_slice()
+        else {
+            continue;
+        };
+        if *data != "data" {
+            continue;
+        }
+        let run = run
+            .to_str()
+            .ok_or_else(|| Error::conflict("Invalid native mount identity."))?
+            .to_owned();
+        crate::validation::uuid(&run)?;
+        if fields[3] != "/"
+            || filesystem.split_whitespace().next() != Some("ext4")
+            || !seen.insert(path.clone())
+        {
+            return Err(Error::conflict(
+                "Unexpected or stacked native filesystem mount.",
+            ));
+        }
+        mounts.push(HostMount {
+            path,
+            run,
+            device: fields[2].into(),
+        });
+    }
+    Ok(mounts)
+}
+
+fn verify_host_mount(state: &Path, mounted: &HostMount) -> Result<()> {
+    use std::os::unix::fs::{FileTypeExt, MetadataExt};
+
+    let root = workspace::directory(state, &mounted.run)?;
+    if !root.join("block-initialized").exists() && !root.join("block-seeding").exists() {
+        return Err(Error::conflict("Unrecognized native filesystem mount."));
+    }
+    let attachment = state
+        .join("native-block")
+        .join(&mounted.run)
+        .join("root/disk.blk");
+    let device = std::fs::symlink_metadata(attachment)?;
+    let identity = format!(
+        "{}:{}",
+        libc::major(device.rdev()),
+        libc::minor(device.rdev())
+    );
+    if !device.file_type().is_block_device() || identity != mounted.device {
+        return Err(Error::conflict(
+            "Native mount does not match its owned block attachment.",
+        ));
+    }
+    Ok(())
+}
+
+/// The controller and system manager share a namespace; host mounts survive a
+/// controller crash. Fence every attributed workload and non-lazily unmount only
+/// verified private attachments before the existing nonce-safe device cleanup.
+pub async fn recover_host_mounts(state: &Path) -> Result<()> {
+    let mounts = host_mounts(state, &std::fs::read_to_string("/proc/self/mountinfo")?)?;
+    #[cfg(not(feature = "ublk"))]
+    if !mounts.is_empty() {
+        return Err(Error::unavailable(
+            "Native mount recovery requires ublk support.",
+        ));
+    }
+    for mounted in mounts {
+        let root = workspace::directory(state, &mounted.run)?;
+        let _workspace = crate::file_lock::exclusive(
+            &root.join("owner.lock"),
+            "Native workspace is still active.",
+        )?;
+        let owner = environment::lock(state, &mounted.run, "Native disk is still owned.").await?;
+        if !storage::runtime::exists(&owner.directory) {
+            return Err(Error::conflict("Mounted native journal is missing."));
+        }
+        verify_host_mount(state, &mounted)?;
+        let identity: Value =
+            serde_json::from_slice(&tokio::fs::read(owner.directory.join("runtime.json")).await?)?;
+        if identity["backend"] != "native" || identity["storage"] != "ublk" {
+            return Err(Error::conflict("Mounted disk is not a native journal."));
+        }
+        let attempt = tokio::fs::read_to_string(root.join("attempt")).await?;
+        crate::validation::uuid(&attempt)?;
+        super::systemd::request_stop(&attempt).await?;
+        let state = state.to_owned();
+        let run = mounted.run.clone();
+        let ownership = tokio::task::spawn_blocking(move || -> Result<_> {
+            // Keep both leases with kernel operations if startup is cancelled.
+            let ownership = (_workspace, owner);
+            #[cfg(feature = "ublk")]
+            storage::ublk::quiesce_stale_host_disk(&state, &run)?;
+            #[cfg(not(feature = "ublk"))]
+            let _ = (state, run);
+            Ok(ownership)
+        })
+        .await
+        .map_err(Error::internal)??;
+        // A dead backend can leave blocked D-state consumers. Abort its I/O
+        // before waiting for their cgroup fence, but never delete it yet.
+        super::systemd::stop(&attempt).await?;
+        tokio::task::spawn_blocking(move || -> Result<()> {
+            let _ownership = ownership;
+            unmount_sync(&mounted.path)?;
+            Ok(())
+        })
+        .await
+        .map_err(Error::internal)??;
+    }
+    Ok(())
+}
+
+fn unmount_sync(path: &Path) -> std::io::Result<()> {
+    use std::os::unix::ffi::OsStrExt;
+
+    let path = std::ffi::CString::new(path.as_os_str().as_bytes())?;
+    if unsafe { libc::umount2(path.as_ptr(), 0) } != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+async fn unmount(path: &Path) -> Result<()> {
+    let path = path.to_owned();
+    tokio::task::spawn_blocking(move || unmount_sync(&path))
+        .await
+        .map_err(Error::internal)??;
+    Ok(())
 }
 
 /// Keep the volume available to crash-consistent publication even while a
@@ -250,17 +399,7 @@ impl Mounted {
             if !self.aborted {
                 sync(&self.target).await?;
             }
-            let target = self.target.clone();
-            tokio::task::spawn_blocking(move || -> std::io::Result<()> {
-                use std::os::unix::ffi::OsStrExt;
-                let target = std::ffi::CString::new(target.as_os_str().as_bytes())?;
-                if unsafe { libc::umount2(target.as_ptr(), 0) } != 0 {
-                    return Err(std::io::Error::last_os_error());
-                }
-                Ok(())
-            })
-            .await
-            .map_err(Error::internal)??;
+            unmount(&self.target).await?;
             self.mounted = false;
         }
         if !self.completed
@@ -825,6 +964,62 @@ pub fn used_bytes(path: &Path) -> Result<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn host_recovery_selects_only_conversation_mounts_and_rejects_stacked_or_foreign_filesystems() {
+        let root = tempfile::tempdir().unwrap();
+        let state = root.path();
+        let run = crate::config::id();
+        let target = state.join("native").join(&run).join("data");
+        let owned = format!(
+            "42 1 259:3 / {} rw - ext4 /owned/disk.blk rw\n",
+            target.display()
+        );
+        let unrelated = format!(
+            "43 1 259:4 / {} rw - ext4 /other/disk rw\n",
+            state.join("unrelated").display()
+        );
+        let child = format!(
+            "44 1 259:3 / {} rw - ext4 /owned/disk.blk rw\n",
+            target.join("home").display()
+        );
+        let mounts = host_mounts(state, &format!("{owned}{unrelated}{child}")).unwrap();
+        assert_eq!(mounts.len(), 1);
+        assert_eq!(mounts[0].path, target);
+        assert_eq!(mounts[0].run, run);
+        assert_eq!(mounts[0].device, "259:3");
+        assert!(host_mounts(state, &format!("{owned}{owned}")).is_err());
+        assert!(host_mounts(state, &owned.replace("- ext4", "- tmpfs")).is_err());
+        assert!(host_mounts(state, &owned.replace("259:3 / ", "259:3 /subdirectory ")).is_err());
+    }
+
+    #[tokio::test]
+    async fn host_recovery_never_unmounts_an_unrecognized_attachment() {
+        let root = tempfile::tempdir().unwrap();
+        let state = root.path();
+        let run = crate::config::id();
+        let workspace = workspace::directory(state, &run).unwrap();
+        private_dir(&workspace).await.unwrap();
+        let mounted = HostMount {
+            path: workspace.join("data"),
+            run: run.clone(),
+            device: "0:0".into(),
+        };
+        assert!(verify_host_mount(state, &mounted).is_err());
+        atomic_write(&workspace.join("block-initialized"), b"1")
+            .await
+            .unwrap();
+        let jail = state.join("native-block").join(run).join("root");
+        private_dir(&jail).await.unwrap();
+        tokio::fs::write(jail.join("disk.blk"), b"unrelated ordinary file")
+            .await
+            .unwrap();
+        assert!(verify_host_mount(state, &mounted).is_err());
+        assert_eq!(
+            tokio::fs::read(jail.join("disk.blk")).await.unwrap(),
+            b"unrelated ordinary file"
+        );
+    }
 
     #[tokio::test]
     async fn attachment_cleanup_refuses_unrelated_files_and_redirects() {

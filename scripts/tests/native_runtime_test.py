@@ -209,6 +209,8 @@ def main():
                 *['--setenv=' + key + '=' + value for key, value in environment.items()], str(binary), 'native-controller')
             eventually(lambda: api('/health', method='GET').get('backend') == 'native')
             assert (state / 'controller.sock').stat().st_mode & 0o777 == 0o600
+            pid = command('systemctl', 'show', supervisor, '--property=MainPID', '--value').stdout.strip()
+            assert Path('/proc/' + pid + '/ns/mnt').stat().st_ino == Path('/proc/1/ns/mnt').stat().st_ino, 'Controller mounts must be visible to the system manager.'
             api('/node-budget', dict(limits=dict(diskMiB=4096, cpu=2, memoryMiB=1024), slots=1))
             api('/storage-policy', contexts[runs[0]]['policy'])
 
@@ -276,6 +278,20 @@ def main():
                 raise AssertionError('Synthetic workload failed before readiness.')
             started_runs.add(run)
             if long:
+                pid = command('systemctl', 'show', supervisor, '--property=MainPID', '--value').stdout.strip()
+                host_namespace = Path('/proc/1/ns/mnt').stat().st_ino
+                private_backends = []
+                for task in (Path('/proc') / pid / 'task').iterdir():
+                    try:
+                        if (task / 'ns/mnt').stat().st_ino != host_namespace:
+                            private_backends.append(task)
+                    except FileNotFoundError:
+                        pass  # An unrelated transient runtime worker may have exited.
+                assert private_backends, 'ublk backend did not isolate its mount namespace.'
+                for task in private_backends:
+                    view = task / 'root' / str(state).lstrip('/') / 'native' / run
+                    assert (view / 'attempt').read_text() == attempt
+                    assert not (view / 'data/workspaces/ready').exists(), 'Backend namespace contains its consumer filesystem.'
                 assert api('/runs/' + attempt + '/artifact', dict(runId=run, path='/tmp/native-artifact'), raw=True) == b'temporary-artifact'
             if measure:
                 before = manager('metrics')['remoteRequests']
@@ -294,7 +310,7 @@ def main():
             assert not (state / (attempt + '.active')).exists()
             active = command('systemctl', 'show', 'cairn-native-' + attempt + '.service', '--property=ActiveState', '--value').stdout.strip()
             assert active not in ('active', 'activating'), 'Descendant escaped cgroup fencing.'
-            assert not (state / 'native' / run / 'data/workspaces/seed').exists(), 'Mount escaped private namespace.'
+            assert not (state / 'native' / run / 'data/workspaces/seed').exists(), 'Stopped conversation filesystem is still mounted.'
             snapshot = api('/disks/' + run + '/snapshot-completed')
             assert snapshot['manifest']['kind'] == 'native-ext4-v1'
             assert snapshot['manifest']['onDemand'] is True

@@ -9,12 +9,16 @@ runtime checks continue to prohibit native/VM or cross-OS environment conversion
 
 ## Ownership and shutdown
 
-The native controller enters a private mount namespace before starting runtime
-threads. Its ublk backend enters a separate private mount namespace before adding
-the device. The backend namespace must never contain the filesystem it serves:
+The native controller shares the system manager's mount namespace so systemd can
+resolve stable bind sources under Cairn's root-private state directory. A source
+through `/proc/<controller>/root` is insufficient: systemd canonicalizes it and
+loses the controller's private mount view. Writable allow-list paths are explicitly
+relative to the unit root. The ublk backend enters a separate private mount
+namespace before adding the device. That namespace must never contain the
+filesystem it serves:
 [upstream describes a self-deadlock on namespace teardown](https://github.com/ublk-org/ublksrv#mount-namespace-caveat-containerpod).
 Journal and control threads retain the existing IO_FLUSHER requirement. The workload
-gets directory bindings through the controller's process root, never a block device
+gets directory bindings from Cairn's root-private state, never a block device
 or a host mount capability. GPU sharing and the trust model are unchanged. Each native attempt activates the
 same bounded synchronization window and atomic storage CPU decision as a VM. A
 separate monitor confirms freeze/thaw of the entire systemd workload cgroup for
@@ -26,8 +30,13 @@ Physical ownership lasts through cgroup fencing, filesystem flush, non-lazy unmo
 completed generation sealing and device retirement. Failure retains ownership and
 the local journal for retry. Kernel device numbers alone never authorize retirement;
 ublk's existing boot, process and immutable token records remain authoritative.
-Controller restart fences its prior workloads before recovering registered devices
-and interrupted journal state. A crash can lose unflushed kernel pages, as it can in
+Controller restart requests workload termination, verifies each retained ext4 mount
+against its owned block attachment and journal, and stops only its nonce-verified
+dead backend to release pending I/O before awaiting complete cgroup fencing. It unmounts without detach before deleting
+the device and recovering interrupted journal state. Both disk leases remain
+held through these kernel operations, including cancellation. Unknown,
+stacked, busy or mismatched mounts prevent admission; recovery never unmounts an
+unrelated filesystem or deletes a device by its numeric identity alone. A crash can lose unflushed kernel pages, as it can in
 a VM; committed journal writes are never replaced with zeros or an initial checkout.
 
 Periodic publication seals a crash-consistent journal prefix without pausing the
