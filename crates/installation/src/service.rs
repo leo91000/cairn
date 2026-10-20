@@ -1051,7 +1051,7 @@ fn save_agent(db: &Db<'_>, mut agent: Value, access: &Value) -> Result<Value> {
             // The current runner only runs Firecracker VMs.
             if access["backend"] == "native" && !held(node) {
                 return Err(Error::bad(
-                    "Choose nodes that use this agent's execution backend.",
+                    "Native agents need explicit native nodes: the current runner only runs Firecracker VMs.",
                 ));
             }
             continue;

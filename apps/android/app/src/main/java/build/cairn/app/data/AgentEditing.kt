@@ -1063,6 +1063,11 @@ fun agentSaveBody(
     reapprove: List<String> = emptyList(),
     /** MCP connections that exist; tool choices of deleted ones are not sent. Null keeps all. */
     mcpIds: Set<String>? = null,
+    /**
+     * False on an older or not yet known installation: live grants and the revision are left out,
+     * so an installation upgraded between load and save never reads them as "none".
+     */
+    liveGrants: Boolean = true,
 ): JsonObject {
     val fields =
         wireJson
@@ -1073,6 +1078,11 @@ fun agentSaveBody(
     fields.remove("grantsOnAgent")
     fields.remove("revision")
     if (agent.revision.isNotBlank()) fields["revision"] = JsonPrimitive(agent.revision)
+    if (!liveGrants) {
+        fields.remove("exclusiveNodes")
+        fields.remove("plugins")
+        fields.remove("revision")
+    }
     fun list(value: List<String>?): JsonElement =
         value?.let { JsonArray(it.map(::JsonPrimitive)) } ?: JsonNull
     val access = fields["access"]!!.jsonObject.toMutableMap()

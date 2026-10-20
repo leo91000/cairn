@@ -487,15 +487,17 @@ fun PluginConnection.agentIdsToKeep(agents: List<Agent>, manifest: PluginManifes
     }
 
 /**
- * [agentIdsToKeep] from the instance as saved now, read again just before saving ([current], null
- * when it no longer exists): a grant revoked from an agent page meanwhile is never restored.
+ * The grants to send back on an older or unknown installation, always read again just before saving
+ * ([current], null when the instance no longer exists) whatever the editor last saw: a grant
+ * revoked meanwhile is never restored, one added meanwhile is never dropped.
  */
 suspend fun PluginConnection.agentIdsToSend(
     agents: List<Agent>,
     manifest: PluginManifest,
     current: suspend () -> List<String>?,
 ): List<String>? {
-    if (agentIdsToKeep(agents, manifest) == null) return null
+    val keeps = manifest.agentAccess != null && (agents.isEmpty() || olderInstallation(agents))
+    if (!keeps) return null
     val fresh = current() ?: return null
     return copy(agentIds = fresh).agentIdsToKeep(agents, manifest)
 }

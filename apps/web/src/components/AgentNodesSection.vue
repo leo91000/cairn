@@ -16,6 +16,8 @@ import {
   runsOn,
   supportsExclusive,
   unknownNode,
+  withBackend,
+  withRun,
 } from '../agent-access'
 import { Info, Search, X } from '../icons'
 import AccessChip from './AccessChip.vue'
@@ -63,9 +65,10 @@ const backendChoice = computed({
   set: (value: string) => {
     if (value === backend.value)
       return
+    const next = withBackend(exclusiveNodes.value, Boolean(props.readOnlyGrants))
     access.value.backend = value as Backend
-    access.value.nodes = []
-    exclusiveNodes.value = []
+    access.value.nodes = next.nodes
+    exclusiveNodes.value = next.exclusiveNodes
   },
 })
 
@@ -89,11 +92,10 @@ function details(node: ExecutionNode) {
 }
 
 function setRun(node: string, on: boolean) {
-  const nodes = access.value.nodes ?? []
-  access.value.nodes = on ? [...nodes.filter(id => id !== node), node] : nodes.filter(id => id !== node)
-  // Without permission to run, an exclusive reservation can never be used.
-  if (!on)
-    setExclusive(node, false)
+  // Without permission to run, an exclusive reservation can never be used, unless it is read-only.
+  const next = withRun(access.value, exclusiveNodes.value, node, on, Boolean(props.readOnlyGrants))
+  access.value.nodes = next.nodes
+  exclusiveNodes.value = next.exclusiveNodes
 }
 
 function setExclusive(node: string, on: boolean) {

@@ -471,6 +471,18 @@ class AgentEditingTest {
     }
 
     @Test
+    fun anOlderOrUnknownInstallationNeverReceivesLiveGrantsOrARevision() {
+        val granted = agent.copy(plugins = listOf("prod"), exclusiveNodes = listOf("gpu"))
+        val current = agentSaveBody(granted)
+        assertTrue("plugins" in current && "exclusiveNodes" in current && "revision" in current)
+        val older = agentSaveBody(granted, liveGrants = false)
+        assertFalse("plugins" in older)
+        assertFalse("exclusiveNodes" in older)
+        assertFalse("revision" in older)
+        assertEquals("Release engineer", older["name"]!!.jsonPrimitive.content)
+    }
+
+    @Test
     fun grantsSentBackAreReadAgainJustBeforeSaving() = runBlocking {
         val account = catalog.connections.first { it.id == "prod" }.copy(agentIds = listOf("agent"))
         val access = catalog.packages.first { it.id == "onepassword" }.manifest!!
@@ -481,6 +493,10 @@ class AgentEditingTest {
             account.agentIdsToSend(emptyList(), access) { listOf("other") },
         )
         assertNull(account.agentIdsToSend(emptyList(), access) { null })
+        // Always read again, whatever the editor last saw: a grant added meanwhile is kept.
+        val none = account.copy(agentIds = emptyList())
+        assertEquals(listOf("late"), none.agentIdsToSend(listOf(agent), access) { listOf("late") })
+        assertNull(none.agentIdsToSend(listOf(agent), access) { emptyList() })
         // A current installation keeps them itself: no extra read.
         var read = false
         assertNull(

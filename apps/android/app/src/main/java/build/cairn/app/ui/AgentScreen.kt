@@ -211,6 +211,9 @@ private fun AgentPage(
     val shown =
         if (legacy) draft.copy(agent = draft.agent.withResourceGrants(catalog, nodes)) else draft
     val issues = agentIssues(shown.agent, resources)
+    // Live grants (and the revision guarding them) are only sent to an installation known to
+    // keep them on the agent.
+    val liveGrants = state.agents.isNotEmpty() && !legacy
     val current = AgentSection.entries.find { it.name == section }
 
     fun update(change: (Agent) -> Agent) {
@@ -253,10 +256,16 @@ private fun AgentPage(
                                         edited.copy(revision = baseline.revision),
                                         approved,
                                         mcpIds,
+                                        liveGrants,
                                     )
                                 },
                                 createValue = {
-                                    agentSaveBody(edited.copy(revision = ""), approved, mcpIds)
+                                    agentSaveBody(
+                                        edited.copy(revision = ""),
+                                        approved,
+                                        mcpIds,
+                                        liveGrants,
+                                    )
                                 },
                                 onCreated = {
                                     baseline = wireJson.decodeFromJsonElement<Agent>(it)
@@ -278,7 +287,7 @@ private fun AgentPage(
                     vm.api.send(
                         "PUT",
                         "/agents/${segment(agentId)}",
-                        agentSaveBody(edited, approved, mcpIds),
+                        agentSaveBody(edited, approved, mcpIds, liveGrants),
                     )
             }
 
@@ -349,7 +358,7 @@ private fun AgentPage(
                             vm.api.send<AgentPreview>(
                                 "POST",
                                 "/agents/${segment(agentId)}/preview",
-                                agentSaveBody(edited, mcpIds = mcpIds),
+                                agentSaveBody(edited, mcpIds = mcpIds, liveGrants = liveGrants),
                             )
                         }
                 val tokenRemoved = draft.tokenChange(tokenSaved, newToken) == ""

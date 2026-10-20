@@ -411,6 +411,24 @@ export function runProblem(id: string, access: AgentAccess, nodes: ExecutionNode
   return nodeBackend(node) === backendOf(access) ? '' : 'backend'
 }
 
+/**
+ * Node access after allowing or forbidding a node: forbidding it also drops its exclusive
+ * reservation, which could never be used, unless reservations are read-only (an older installation
+ * keeps them on its nodes and never receives them from here).
+ */
+export function withRun(access: AgentAccess, exclusiveNodes: string[], node: string, on: boolean, readOnlyGrants = false) {
+  const nodes = (access.nodes ?? []).filter(id => id !== node)
+  return {
+    nodes: on ? [...nodes, node] : nodes,
+    exclusiveNodes: on || readOnlyGrants ? exclusiveNodes : exclusiveNodes.filter(id => id !== node),
+  }
+}
+
+/** Node access for another execution backend: the choices start over, read-only reservations stay. */
+export function withBackend(exclusiveNodes: string[], readOnlyGrants = false) {
+  return { nodes: [] as string[], exclusiveNodes: readOnlyGrants ? exclusiveNodes : [] }
+}
+
 /** Whether the agent may run on a node: listed, or every node allowed. */
 export function runsOn(access: AgentAccess, node: string) {
   return access.nodes === null || access.nodes.includes(node)

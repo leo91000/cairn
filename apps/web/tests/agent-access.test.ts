@@ -31,7 +31,9 @@ import {
   sentDraft,
   skillLabel,
   unknownNode,
+  withBackend,
   withResourceGrants,
+  withRun,
 } from '../src/agent-access'
 
 const gpu = {
@@ -719,4 +721,14 @@ it('re-reads an instance\'s agents right before sending them back', async () => 
   expect(await currentAgentIds([{ grantsOnAgent: true }], onePassword, { id: 'prod', agentIds: ['a'] }, fresh)).toBeUndefined()
   expect(await currentAgentIds([], { manifest: null }, { id: 'prod', agentIds: ['a'] }, fresh)).toBeUndefined()
   expect(reads).toBe(1)
+})
+
+it('keeps read-only exclusive reservations when run permissions or the backend change', () => {
+  const access = { ...newAgentDraft().access, nodes: ['gpu', 'box'] }
+  expect(withRun(access, ['gpu'], 'gpu', false)).toEqual({ nodes: ['box'], exclusiveNodes: [] })
+  // An older installation keeps them on its nodes and never receives them: nothing to remove.
+  expect(withRun(access, ['gpu'], 'gpu', false, true)).toEqual({ nodes: ['box'], exclusiveNodes: ['gpu'] })
+  expect(withRun(access, ['gpu'], 'other', true)).toEqual({ nodes: ['gpu', 'box', 'other'], exclusiveNodes: ['gpu'] })
+  expect(withBackend(['gpu'])).toEqual({ nodes: [], exclusiveNodes: [] })
+  expect(withBackend(['gpu'], true)).toEqual({ nodes: [], exclusiveNodes: ['gpu'] })
 })
