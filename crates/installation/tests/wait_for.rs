@@ -49,7 +49,8 @@ impl Fixture {
         )
         .await
         .unwrap();
-        let instance = github::instance(&s, "Shared", "fixture-shared-token", &[MAIN_AGENT_ID]).await;
+        let instance =
+            github::instance(&s, "Shared", "fixture-shared-token", &[MAIN_AGENT_ID]).await;
         let project = id();
         let path = root.path().join("project");
         std::fs::create_dir(&path).unwrap();
@@ -553,7 +554,9 @@ async fn permissions_origins_and_workflow_commit_mismatches_are_rechecked() {
 #[tokio::test]
 async fn sleep_replaces_condition_waits_and_private_tokens_follow_agent_identity() {
     let f = Fixture::new().await;
-    connections::remove(&f.s, "github", &f.instance).await.unwrap();
+    connections::remove(&f.s, "github", &f.instance)
+        .await
+        .unwrap();
     github::instance(&f.s, "Main's own", "fixture-only-token", &[MAIN_AGENT_ID]).await;
     let wait = f.schedule(f.github_condition()).await;
     assert_eq!(f.calls()[0]["token"], "fixture-only-token");
@@ -907,7 +910,10 @@ async fn all_existing_cancellation_paths_also_invalidate_condition_waits() {
 async fn git_suffixes_and_installation_grant_flags_cannot_change_the_target_scope() {
     let f = Fixture::with_origin("https://github.com/fixture/repo.git.git").await;
     f.schedule(f.github_condition()).await;
-    assert_eq!(f.calls()[0]["path"], "repos/fixture/repo.git/actions/runs/42");
+    assert_eq!(
+        f.calls()[0]["path"],
+        "repos/fixture/repo.git/actions/runs/42"
+    );
     let target = f.target().await;
     let key = format!(
         "mcp-grant:{}",
@@ -1010,7 +1016,9 @@ async fn scoped_agent_token_removal_never_falls_back_to_shared_credentials() {
         .patch_run(text(&run, "id"), json!({ "status": "succeeded" }))
         .await
         .unwrap();
-    connections::remove(&f.s, "github", &dedicated).await.unwrap();
+    connections::remove(&f.s, "github", &dedicated)
+        .await
+        .unwrap();
     conditions::poll_once(&f.s).await.unwrap();
     assert_eq!(f.calls().len(), 1);
     assert_eq!(

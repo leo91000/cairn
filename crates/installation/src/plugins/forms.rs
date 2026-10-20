@@ -97,7 +97,10 @@ pub async fn form(s: &Service, plugin_id: &str, input: &Value) -> Result<Value> 
         Some(id) => Some(connections::get(s, plugin_id, id).await?.id),
         None => None,
     };
-    let signed_in = match input["credentialFlow"].as_str().filter(|flow| !flow.is_empty()) {
+    let signed_in = match input["credentialFlow"]
+        .as_str()
+        .filter(|flow| !flow.is_empty())
+    {
         Some(flow) => Some(s.plugins.device_flows.token(plugin_id, flow, false)?),
         None => None,
     };

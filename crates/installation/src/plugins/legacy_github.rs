@@ -27,15 +27,12 @@ fn shared_token(hosts: &str) -> Option<String> {
     let hosts: Value = serde_yaml_ng::from_str(hosts).ok()?;
     let host = &hosts["github.com"];
     let user = text(host, "user");
-    [
-        &host["oauth_token"],
-        &host["users"][user]["oauth_token"],
-    ]
-    .into_iter()
-    .filter_map(Value::as_str)
-    .map(str::trim)
-    .find(|token| !token.is_empty() && !token.chars().any(char::is_whitespace))
-    .map(str::to_owned)
+    [&host["oauth_token"], &host["users"][user]["oauth_token"]]
+        .into_iter()
+        .filter_map(Value::as_str)
+        .map(str::trim)
+        .find(|token| !token.is_empty() && !token.chars().any(char::is_whitespace))
+        .map(str::to_owned)
 }
 
 fn instance(name: &str, agent_ids: Vec<String>) -> Connection {
@@ -109,9 +106,8 @@ pub async fn migrate(s: &Service) -> Result<()> {
         .ok();
     let shared_token = hosts.as_deref().and_then(shared_token);
 
-    let shared_access = |agent: &Value| {
-        agent["id"] == MAIN_AGENT_ID || agent["access"]["github"] != false
-    };
+    let shared_access =
+        |agent: &Value| agent["id"] == MAIN_AGENT_ID || agent["access"]["github"] != false;
     let shared = shared_token.as_ref().map(|token| {
         let agent_ids = agents
             .iter()
@@ -123,7 +119,11 @@ pub async fn migrate(s: &Service) -> Result<()> {
     let mut created = shared.iter().cloned().collect::<Vec<_>>();
     for (key, token) in &dedicated {
         let agent_id = key.trim_start_matches(DEDICATED);
-        let Some(token) = token.as_str().map(str::trim).filter(|token| !token.is_empty()) else {
+        let Some(token) = token
+            .as_str()
+            .map(str::trim)
+            .filter(|token| !token.is_empty())
+        else {
             continue;
         };
         let Some(agent) = agents.iter().find(|agent| agent["id"] == agent_id) else {
@@ -271,7 +271,10 @@ pub async fn complete(s: std::sync::Arc<Service>) {
             continue;
         }
         if let Err(error) = connections::refresh(&s, &connection).await {
-            tracing::info!(message = error.message, "GitHub instance details not refreshed");
+            tracing::info!(
+                message = error.message,
+                "GitHub instance details not refreshed"
+            );
         }
     }
 }
@@ -282,7 +285,8 @@ mod tests {
 
     #[test]
     fn reads_both_hosts_formats() {
-        let flat = "github.com:\n    oauth_token: gho_flat\n    git_protocol: https\n    user: octo\n";
+        let flat =
+            "github.com:\n    oauth_token: gho_flat\n    git_protocol: https\n    user: octo\n";
         assert_eq!(shared_token(flat).as_deref(), Some("gho_flat"));
         let users = "github.com:\n    users:\n        octo:\n            oauth_token: gho_user\n    git_protocol: https\n    user: octo\n";
         assert_eq!(shared_token(users).as_deref(), Some("gho_user"));

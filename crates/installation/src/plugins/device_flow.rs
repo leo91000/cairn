@@ -127,7 +127,9 @@ async fn post(s: &Service, url: &str, body: String) -> Result<Value> {
 fn short_text(value: &Value, key: &str, max: usize) -> Option<String> {
     value[key]
         .as_str()
-        .filter(|value| !value.is_empty() && value.len() <= max && !value.chars().any(char::is_control))
+        .filter(|value| {
+            !value.is_empty() && value.len() <= max && !value.chars().any(char::is_control)
+        })
         .map(str::to_owned)
 }
 
@@ -147,8 +149,15 @@ pub async fn start(s: &std::sync::Arc<Service>, plugin_id: &str) -> Result<Value
     {
         let mut flows = s.plugins.device_flows.flows.lock().unwrap();
         Flows::prune(&mut flows);
-        if flows.values().filter(|flow| flow.state == "pending").count() >= MAX_FLOWS {
-            return Err(Error::too_many_requests("Too many sign-ins are waiting. Retry shortly."));
+        if flows
+            .values()
+            .filter(|flow| flow.state == "pending")
+            .count()
+            >= MAX_FLOWS
+        {
+            return Err(Error::too_many_requests(
+                "Too many sign-ins are waiting. Retry shortly.",
+            ));
         }
     }
     let manifest = &package.manifest;
@@ -170,7 +179,10 @@ pub async fn start(s: &std::sync::Arc<Service>, plugin_id: &str) -> Result<Value
     .ok_or_else(|| Error::bad_gateway("Invalid sign-in response."))?;
     let verification_uri_complete =
         web_address(short_text(&response, "verification_uri_complete", 1000));
-    let expires_in = response["expires_in"].as_i64().unwrap_or(900).clamp(60, 1800);
+    let expires_in = response["expires_in"]
+        .as_i64()
+        .unwrap_or(900)
+        .clamp(60, 1800);
     let interval = response["interval"].as_u64().unwrap_or(5).clamp(1, 60);
     let flow_id = id();
     let record = Flow {
@@ -194,7 +206,15 @@ pub async fn start(s: &std::sync::Arc<Service>, plugin_id: &str) -> Result<Value
     let token_url = target(s, manifest, &flow.token_url, "https")?;
     let service = s.clone();
     tokio::spawn(async move {
-        poll(&service, &flow_id, &token_url, &flow.client_id, &device_code, interval).await;
+        poll(
+            &service,
+            &flow_id,
+            &token_url,
+            &flow.client_id,
+            &device_code,
+            interval,
+        )
+        .await;
     });
     s.store
         .audit("plugin.sign_in.started", json!({ "plugin": plugin_id }))
@@ -284,7 +304,10 @@ pub fn status(s: &Service, plugin_id: &str, flow_id: &str) -> Result<Value> {
 /// `DELETE /api/plugins/{id}/device-flow/{flow}`: forgets the sign-in and any token.
 pub fn cancel(s: &Service, plugin_id: &str, flow_id: &str) -> Value {
     let mut flows = s.plugins.device_flows.flows.lock().unwrap();
-    if flows.get(flow_id).is_some_and(|flow| flow.plugin == plugin_id) {
+    if flows
+        .get(flow_id)
+        .is_some_and(|flow| flow.plugin == plugin_id)
+    {
         flows.remove(flow_id);
     }
     json!({ "cancelled": true })

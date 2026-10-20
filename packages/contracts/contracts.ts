@@ -14,7 +14,6 @@ export const accessPolicy = z.object({
   mcps: z.array(id).max(100).nullable().default(null),
   mcpTools: z.record(id, z.array(z.string().min(1).max(200)).max(500)).default({}),
   installation: z.boolean().default(false),
-  github: z.boolean().default(true),
   sandbox: z.enum(['yolo', 'workspace-write', 'read-only']).default('yolo'),
 })
 export const agentInput = z.object({
@@ -207,12 +206,20 @@ export interface Skill {
   source?: SkillSource | null
 }
 // Multi-file skill bundles; see docs/SKILLS.md.
+/** Where a skill was imported from: a plugin's skill source, at a version. */
 export interface SkillSource {
-  type: 'github'
-  repository: string
-  path: string
-  ref: string
-  commit: string
+  pluginId: string
+  /** The plugin's skill source name. */
+  source: string
+  instance?: string | null
+  /** What the plugin shows for the location, such as a repository. */
+  label: string
+  /** The location as the plugin resolved it, such as a repository and a ref. */
+  location: Record<string, unknown>
+  url?: string | null
+  /** The skill folder within the location. */
+  folder: string
+  version: string
   importedAt: number
   modified: boolean
 }
@@ -302,21 +309,18 @@ export type RunListItem = Omit<Run, 'snapshot' | 'summary'> & {
   dismissal?: { until: number | null } | null
 }
 
-export interface GithubRepository {
-  fullName: string
+/** A project a plugin's project source offers for import. */
+export interface PluginProject {
+  id: string
   name: string
   description: string
   defaultBranch: string
-  private: boolean
-  archived: boolean
-  fork: boolean
-  owner: string
-  language: string
-  stars: number
-  pushedAt: string
+  badges: string[]
+  updatedAt?: string | null
+  url?: string | null
   imported: boolean
 }
-export interface GithubRepositoryPage {
-  repositories: GithubRepository[]
+export interface PluginProjectPage {
+  items: PluginProject[]
   nextPage: number | null
 }

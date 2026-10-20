@@ -1,5 +1,6 @@
 mod common;
 
+use cairn_installation::plugins::run_credentials::RunCredentials;
 use cairn_installation::{
     config::{Config, MAIN_AGENT_ID, id, now},
     error::{Error, Result},
@@ -163,15 +164,12 @@ async fn restricted_agents_cannot_escalate_projects_skills_or_the_main_policy() 
             "projects": [project["id"]],
             "skills": [],
             "mcps": [],
-            "github": false,
             "sandbox": "read-only",
         },
     });
     let agent = s.agent(restricted, None).await.unwrap();
     assert!(service::isolated(&agent));
-    let escalation = json!({ "name": "Escalation", "access": { "projects": [], "github": true } });
-    assert!(s.agent(escalation, None).await.is_err());
-    let main = json!({ "name": "Main", "access": { "projects": [], "github": false } });
+    let main = json!({ "name": "Main", "access": { "projects": [] } });
     assert!(s.agent(main, Some(MAIN_AGENT_ID)).await.is_err());
     let foreign = json!({
         "name": "Foreign",
@@ -192,7 +190,7 @@ async fn restricted_agents_cannot_escalate_projects_skills_or_the_main_policy() 
         .await
         .unwrap();
     assert!(
-        execution::prepare(&run, &s.config, None, None, None)
+        execution::prepare(&run, &s.config, &RunCredentials::default(), None, None)
             .await
             .is_err(),
         "Restricted execution must never fall back without a runner"
@@ -556,7 +554,7 @@ async fn microvm_migration_preserves_linked_worktree_commits_and_uncommitted_cha
         "isolated": false,
         "workspaces": [{ "projectId": project["id"], "path": old, "kind": "worktree" }],
     });
-    let migrated = execution::restore(&run, prepared, &s.config, None)
+    let migrated = execution::restore(&run, prepared, &s.config, &RunCredentials::default())
         .await
         .unwrap();
     let target = Path::new(migrated["workspaces"][0]["path"].as_str().unwrap());

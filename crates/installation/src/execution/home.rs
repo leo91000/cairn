@@ -72,7 +72,11 @@ async fn write_private(home: &Path, relative: &str, bytes: &[u8]) -> Result<()> 
         .ok_or_else(|| Error::bad("Invalid run credential path."))?;
     // A path the home redirected elsewhere is never followed.
     let mut current = home.to_owned();
-    for part in Path::new(relative).parent().into_iter().flat_map(Path::components) {
+    for part in Path::new(relative)
+        .parent()
+        .into_iter()
+        .flat_map(Path::components)
+    {
         current.push(part);
         match tokio::fs::symlink_metadata(&current).await {
             Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {}

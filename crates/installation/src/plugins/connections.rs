@@ -808,8 +808,14 @@ pub(crate) async fn refresh(s: &Service, connection: &Connection) -> Result<()> 
         credential,
         secrets: secret_values(s, &connection.id).await?,
     };
-    let settings =
-        forms::submit(s, &package, &connection.id, connection.settings.clone(), draft).await?;
+    let settings = forms::submit(
+        s,
+        &package,
+        &connection.id,
+        connection.settings.clone(),
+        draft,
+    )
+    .await?;
     let expected = connection.revision.clone();
     let id_ = connection.id.clone();
     s.store

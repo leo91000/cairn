@@ -3,9 +3,7 @@ name = "GitHub"
 version = "1.0.0"
 description = "Agents clone, push and open pull requests as your account; import repositories and skills, and wait for CI."
 apiVersion = 2
-capabilities = [
-  "http",
-]
+capabilities = [ "http", ]
 hosts = [
   "github.com",
   "api.github.com",
@@ -67,12 +65,8 @@ maxLength = 200
 description = "Off by default, including for Main agent. Granted agents' runs push and use the GitHub CLI as this account, and can wait for its CI. Grant one account per agent; repository access follows the account or token, not the agent's projects."
 
 [runCredentials]
-files = [
-  { path = ".config/gh/hosts.yml", content = "github.com:\n    oauth_token: {{credential}}\n    git_protocol: https\n" },
-]
-git = [
-  { url = "https://github.com", username = "x-access-token", password = "{{credential}}" },
-]
+files = [ { path = ".config/gh/hosts.yml", content = "github.com:\n    oauth_token: {{credential}}\n    git_protocol: https\n" }, ]
+git = [ { url = "https://github.com", username = "x-access-token", password = "{{credential}}" }, ]
 gitIdentity = { name = "{{settings.gitName}}", email = "{{settings.gitEmail}}" }
 
 [[projectSources]]

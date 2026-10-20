@@ -2,13 +2,14 @@ mod common;
 
 use axum::{Router, body::Body, http::StatusCode};
 use base64::{Engine, engine::general_purpose::STANDARD};
+use cairn_installation::plugins::run_credentials::RunCredentials;
 use cairn_installation::{
     config::{Config, MAIN_AGENT_ID},
     service::Service,
     skills::zip,
     validation::text,
 };
-use common::{RelayContext, relay_fixture};
+use common::{RelayContext, github::Github, relay_fixture};
 use serde_json::{Value, json};
 use std::{
     os::unix::fs::PermissionsExt,
@@ -428,10 +429,15 @@ async fn skill_bundle_storage_measurements() {
     for _ in 0..20 {
         let started_cpu = cpu_ms();
         let started = Instant::now();
-        let prepared =
-            cairn_installation::execution::prepare(&run, &api.service.config, None, None, None)
-                .await
-                .unwrap();
+        let prepared = cairn_installation::execution::prepare(
+            &run,
+            &api.service.config,
+            &RunCredentials::default(),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
         wall += started.elapsed().as_secs_f64() * 1000.0;
         cpu += cpu_ms() - started_cpu;
         let installed = Path::new(text(&prepared["skills"][0], "path"))
@@ -883,9 +889,15 @@ async fn runs_install_the_files_frozen_when_they_were_created() {
     assert!(cairn_installation::skills::frozen(&s.config, "../escape").is_none());
 
     // Shared runs get their own writable copy; scripts cannot mutate the canonical revision.
-    let prepared = cairn_installation::execution::prepare(&next, &s.config, None, None, None)
-        .await
-        .unwrap();
+    let prepared = cairn_installation::execution::prepare(
+        &next,
+        &s.config,
+        &RunCredentials::default(),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
     assert_eq!(prepared["isolated"], false);
     let installed = Path::new(text(&prepared["skills"][0], "path"));
     assert_eq!(
@@ -910,9 +922,15 @@ async fn runs_install_the_files_frozen_when_they_were_created() {
     let mut another_run = next.clone();
     another_run["id"] = cairn_installation::config::id().into();
     for run in [&another_run, &next] {
-        let restarted = cairn_installation::execution::prepare(run, &s.config, None, None, None)
-            .await
-            .unwrap();
+        let restarted = cairn_installation::execution::prepare(
+            run,
+            &s.config,
+            &RunCredentials::default(),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
         let path = Path::new(text(&restarted["skills"][0], "path"));
         assert_eq!(
             std::fs::read_to_string(path.with_file_name("scripts/check.sh")).unwrap(),
@@ -924,9 +942,15 @@ async fn runs_install_the_files_frozen_when_they_were_created() {
     let mut malformed = next.clone();
     malformed["snapshot"]["skills"][0]["bundle"] = "../invalid".into();
     assert!(
-        cairn_installation::execution::prepare(&malformed, &s.config, None, None, None)
-            .await
-            .is_err()
+        cairn_installation::execution::prepare(
+            &malformed,
+            &s.config,
+            &RunCredentials::default(),
+            None,
+            None
+        )
+        .await
+        .is_err()
     );
 
     let missing = cairn_installation::skills::frozen(
@@ -936,9 +960,15 @@ async fn runs_install_the_files_frozen_when_they_were_created() {
     .unwrap();
     std::fs::remove_dir_all(missing).unwrap();
     assert!(
-        cairn_installation::execution::prepare(&next, &s.config, None, None, None)
-            .await
-            .is_err()
+        cairn_installation::execution::prepare(
+            &next,
+            &s.config,
+            &RunCredentials::default(),
+            None,
+            None
+        )
+        .await
+        .is_err()
     );
 
     // Only snapshots predating bundle revisions may use the live directory.
@@ -947,9 +977,15 @@ async fn runs_install_the_files_frozen_when_they_were_created() {
         .as_object_mut()
         .unwrap()
         .remove("bundle");
-    let prepared = cairn_installation::execution::prepare(&legacy, &s.config, None, None, None)
-        .await
-        .unwrap();
+    let prepared = cairn_installation::execution::prepare(
+        &legacy,
+        &s.config,
+        &RunCredentials::default(),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
     assert_eq!(
         prepared["skills"][0]["path"],
         api.skill_dir("review")
@@ -1059,59 +1095,53 @@ async fn snapshots_describe_the_manifest_version_that_was_frozen() {
     assert_eq!(selected["description"], "Use the latest branch conventions");
 }
 
-/// A `gh` that serves `fixture/skills` from JSON files named after endpoints.
-fn fake_github(root: &Path) -> PathBuf {
-    let responses = root.join("github");
-    std::fs::create_dir_all(&responses).unwrap();
-    let gh = root.join("gh");
-    std::fs::write(
-        &gh,
-        format!(
-            "#!/bin/sh\nfile=\"{}/$(printf '%s' \"$4\" | tr '/?=%' '____')\"\nif [ -f \"$file\" ]; then cat \"$file\"; else echo 'gh: Not Found (HTTP 404)' >&2; exit 1; fi\n",
-            responses.display()
-        ),
-    )
-    .unwrap();
-    std::fs::set_permissions(&gh, std::fs::Permissions::from_mode(0o700)).unwrap();
-    gh
+/// A local GitHub serving `fixture/skills` through the bundled package and one instance.
+async fn with_github() -> (Api, Github) {
+    let api = Api::new().await;
+    let github = Github::start(api._root.path()).await;
+    github.attach(&api.service);
+    common::github::instance(&api.service, "GitHub", "fixture-token", &[]).await;
+    (api, github)
 }
 
-fn respond(root: &Path, endpoint: &str, value: &Value) {
-    let name = endpoint.replace(['/', '?', '=', '%'], "_");
-    std::fs::write(root.join("github").join(name), value.to_string()).unwrap();
+/// An import request for the repository source of the GitHub package.
+fn import(location: &Value, folder: Option<&str>) -> Value {
+    json!({
+        "source": "plugin",
+        "pluginId": "github",
+        "skillSource": "repository",
+        "location": location,
+        "folder": folder,
+    })
 }
 
 fn sha(seed: char) -> String {
     seed.to_string().repeat(40)
 }
 
-fn blob(root: &Path, id: &str, content: &str) {
-    respond(
-        root,
+fn blob(github: &Github, id: &str, content: &str) {
+    github.respond(
         &format!("repos/fixture/skills/git/blobs/{id}"),
         &json!({ "content": STANDARD.encode(content), "encoding": "base64" }),
     );
 }
 
 /// Commit `commit` whose tree holds `skills/review` with `files` and a sibling skill.
-fn commit(root: &Path, commit: &str, tree: char, files: &[(&str, &str, &str)]) {
+fn commit(github: &Github, commit: &str, tree: char, files: &[(&str, &str, &str)]) {
     let (top, skills, review) = (
         sha(tree),
         format!("{tree}1").repeat(20),
         format!("{tree}2").repeat(20),
     );
-    respond(
-        root,
+    github.respond(
         &format!("repos/fixture/skills/commits/{commit}"),
         &json!({ "sha": commit, "commit": { "tree": { "sha": top }, "message": format!("Release {commit}\n\nBody"), "committer": { "date": "2026-10-01T10:00:00Z" } } }),
     );
-    respond(
-        root,
+    github.respond(
         &format!("repos/fixture/skills/git/trees/{top}"),
         &json!({ "tree": [{ "path": "skills", "type": "tree", "sha": skills }] }),
     );
-    respond(
-        root,
+    github.respond(
         &format!("repos/fixture/skills/git/trees/{skills}"),
         &json!({ "tree": [{ "path": "review", "type": "tree", "sha": review }] }),
     );
@@ -1119,9 +1149,8 @@ fn commit(root: &Path, commit: &str, tree: char, files: &[(&str, &str, &str)]) {
         .iter()
         .map(|(path, mode, id)| json!({ "path": path, "mode": mode, "type": "blob", "sha": id, "size": 20 }))
         .collect::<Vec<_>>();
-    respond(
-        root,
-        &format!("repos/fixture/skills/git/trees/{review}_recursive_1"),
+    github.respond(
+        &format!("repos/fixture/skills/git/trees/{review}?recursive=1"),
         &json!({ "tree": entries, "truncated": false }),
     );
     let mut everything = vec![
@@ -1132,31 +1161,24 @@ fn commit(root: &Path, commit: &str, tree: char, files: &[(&str, &str, &str)]) {
     everything.extend(files.iter().map(|(path, mode, id)| {
         json!({ "path": format!("skills/review/{path}"), "mode": mode, "type": "blob", "sha": id, "size": 20 })
     }));
-    respond(
-        root,
-        &format!("repos/fixture/skills/git/trees/{top}_recursive_1"),
+    github.respond(
+        &format!("repos/fixture/skills/git/trees/{top}?recursive=1"),
         &json!({ "tree": everything, "truncated": false }),
     );
 }
 
 #[tokio::test]
 async fn github_imports_record_their_source_and_preview_updates() {
-    let root = TempDir::new().unwrap();
-    let gh = fake_github(root.path());
-    let api = Api::with(|config| config.gh_bin = gh.to_string_lossy().into_owned()).await;
+    let (api, github) = with_github().await;
     let first = sha('1');
     let second = sha('2');
-    respond(
-        root.path(),
-        "repos/fixture/skills",
-        &json!({ "default_branch": "main" }),
-    );
-    blob(root.path(), &sha('a'), SKILL);
-    blob(root.path(), &sha('b'), "#!/bin/sh\necho v1\n");
-    blob(root.path(), &sha('c'), "#!/bin/sh\necho v2\n");
-    blob(root.path(), &sha('d'), "# New reference\n");
+    github.respond("repos/fixture/skills", &json!({ "default_branch": "main" }));
+    blob(&github, &sha('a'), SKILL);
+    blob(&github, &sha('b'), "#!/bin/sh\necho v1\n");
+    blob(&github, &sha('c'), "#!/bin/sh\necho v2\n");
+    blob(&github, &sha('d'), "# New reference\n");
     commit(
-        root.path(),
+        &github,
         &first,
         '3',
         &[
@@ -1165,7 +1187,7 @@ async fn github_imports_record_their_source_and_preview_updates() {
         ],
     );
     commit(
-        root.path(),
+        &github,
         &second,
         '4',
         &[
@@ -1174,8 +1196,7 @@ async fn github_imports_record_their_source_and_preview_updates() {
             ("references/new.md", "100644", &sha('d')),
         ],
     );
-    respond(
-        root.path(),
+    github.respond(
         "repos/fixture/skills/commits/main",
         &json!({ "sha": first, "commit": { "tree": { "sha": sha('3') }, "message": "Release 1", "committer": { "date": "2026-10-01T10:00:00Z" } } }),
     );
@@ -1184,7 +1205,7 @@ async fn github_imports_record_their_source_and_preview_updates() {
         .ok(
             "POST",
             "/skills/global/import",
-            Some(json!({ "source": "github", "repository": "fixture/skills" })),
+            Some(import(&json!({ "repository": "fixture/skills" }), None)),
         )
         .await;
     assert_eq!(
@@ -1196,12 +1217,17 @@ async fn github_imports_record_their_source_and_preview_updates() {
         .ok(
             "POST",
             "/skills/global/import",
-            Some(json!({ "source": "github", "repository": "fixture/skills", "path": "skills/review" })),
+            Some(import(
+                &json!({ "repository": "fixture/skills" }),
+                Some("skills/review"),
+            )),
         )
         .await["imported"]
         .clone();
-    assert_eq!(imported["source"]["commit"], first);
-    assert_eq!(imported["source"]["ref"], "main");
+    assert_eq!(imported["source"]["version"], first);
+    assert_eq!(imported["source"]["location"]["ref"], "main");
+    assert_eq!(imported["source"]["folder"], "skills/review");
+    assert_eq!(imported["source"]["pluginId"], "github");
     assert_eq!(imported["source"]["modified"], false);
     assert_eq!(
         mode(&api.skill_dir("review").join("scripts/check.sh")),
@@ -1211,8 +1237,7 @@ async fn github_imports_record_their_source_and_preview_updates() {
     assert_eq!(status["current"], true);
 
     // The branch moves: the preview lists upstream changes with line diffs.
-    respond(
-        root.path(),
+    github.respond(
         "repos/fixture/skills/commits/main",
         &json!({ "sha": second, "commit": { "tree": { "sha": sha('4') }, "message": "Release 2\n\nMore", "committer": { "date": "2026-10-02T10:00:00Z" } } }),
     );
@@ -1244,7 +1269,7 @@ async fn github_imports_record_their_source_and_preview_updates() {
         .call(
             "POST",
             "/skills/global/review/source/update",
-            Some(json!({ "commit": second, "base": imported["revision"] })),
+            Some(json!({ "version": second, "base": imported["revision"] })),
         )
         .await;
     assert_eq!(code, StatusCode::CONFLICT);
@@ -1252,64 +1277,69 @@ async fn github_imports_record_their_source_and_preview_updates() {
         .ok(
             "POST",
             "/skills/global/review/source/update",
-            Some(json!({ "commit": second, "base": edited["revision"] })),
+            Some(json!({ "version": second, "base": edited["revision"] })),
         )
         .await;
     assert_eq!(
         paths(&updated),
         ["SKILL.md", "references/new.md", "scripts/check.sh"]
     );
-    assert_eq!(updated["source"]["commit"], second);
+    assert_eq!(updated["source"]["version"], second);
     assert_eq!(updated["source"]["modified"], false);
     let listed = api.ok("GET", "/skills", None).await;
-    assert_eq!(listed[0]["source"]["repository"], "fixture/skills");
+    assert_eq!(
+        listed[0]["source"]["location"]["repository"],
+        "fixture/skills"
+    );
+    // Downloads carried the instance's token, never seen by the package.
+    assert!(github.calls().iter().any(|call| {
+        text(call, "path").contains("/git/blobs/") && call["token"] == "fixture-token"
+    }));
 
     api.ok("DELETE", "/skills/global/review/source", None).await;
     let (code, _) = api.call("GET", "/skills/global/review/source", None).await;
     assert_eq!(code, StatusCode::NOT_FOUND);
     assert!(api.ok("GET", "/skills", None).await[0]["source"].is_null());
 
-    let (code, _) = api
+    let (code, error) = api
         .call(
             "POST",
             "/skills/global/import",
-            Some(json!({ "source": "github", "repository": "fixture/missing" })),
+            Some(import(&json!({ "repository": "fixture/missing" }), None)),
         )
         .await;
-    assert_eq!(code, StatusCode::NOT_FOUND);
+    assert_eq!(code, StatusCode::BAD_GATEWAY);
+    assert!(error.to_string().contains("could not find"), "{error}");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn pending_github_updates_cannot_restore_detached_or_reimported_sources() {
-    use cairn_installation::skills::github;
+    use cairn_installation::skills::sources;
 
     for reimport in [false, true] {
-        let root = TempDir::new().unwrap();
-        let gh = fake_github(root.path());
-        let actual = root.path().join("gh-real");
-        std::fs::rename(&gh, &actual).unwrap();
-        let started = root.path().join("started");
-        let released = root.path().join("released");
+        let (api, github) = with_github().await;
+        let root = api._root.path().to_owned();
+        let started = root.join("started");
+        let released = root.join("released");
         let upstream_blob = sha('e');
-        std::fs::write(&gh, format!(
-            "#!/bin/sh\nif [ \"$4\" = 'repos/fixture/skills/git/blobs/{upstream_blob}' ]; then touch '{}'; while [ ! -f '{}' ]; do sleep 0.01; done; fi\nexec '{}' \"$@\"\n",
-            started.display(), released.display(), actual.display(),
-        )).unwrap();
-        std::fs::set_permissions(&gh, std::fs::Permissions::from_mode(0o700)).unwrap();
-        let api = Api::with(|config| config.gh_bin = gh.to_string_lossy().into_owned()).await;
+        github.state(&json!({ "gate": {
+            "path": format!("repos/fixture/skills/git/blobs/{upstream_blob}"),
+            "started": started,
+            "released": released,
+        } }));
         let first = sha('a');
         let second = sha('b');
         let manifest_blob = sha('c');
         let original_blob = sha('d');
-        blob(root.path(), &manifest_blob, SKILL);
-        blob(root.path(), &original_blob, "Original\n");
-        blob(root.path(), &upstream_blob, "Upstream\n");
+        blob(&github, &manifest_blob, SKILL);
+        blob(&github, &original_blob, "Original\n");
+        blob(&github, &upstream_blob, "Upstream\n");
         for (revision, tree, notes) in [
             (&first, '3', &original_blob),
             (&second, '4', &upstream_blob),
         ] {
             commit(
-                root.path(),
+                &github,
                 revision,
                 tree,
                 &[
@@ -1318,25 +1348,23 @@ async fn pending_github_updates_cannot_restore_detached_or_reimported_sources() 
                 ],
             );
         }
-        let request = json!({
-            "source": "github",
-            "repository": "fixture/skills",
-            "ref": first,
-            "path": "skills/review",
-        });
+        let request = import(
+            &json!({ "repository": "fixture/skills", "ref": first }),
+            Some("skills/review"),
+        );
         let imported = api
             .ok("POST", "/skills/global/import", Some(request.clone()))
             .await;
         let service = api.service.clone();
         let base = imported["imported"]["revision"].clone();
         let updater = tokio::spawn(async move {
-            github::update(
+            sources::update(
                 &service,
                 "global",
                 "review",
                 &json!({
                     "base": base,
-                    "commit": second,
+                    "version": second,
                 }),
                 None,
             )
@@ -1377,21 +1405,20 @@ async fn pending_github_updates_cannot_restore_detached_or_reimported_sources() 
 async fn github_updates_record_the_upstream_revision_before_a_queued_local_edit() {
     use cairn_installation::skills::{
         bundle::{self, Change},
-        github,
+        sources,
     };
-    let root = TempDir::new().unwrap();
-    let gh = fake_github(root.path());
-    let api = Api::with(|config| config.gh_bin = gh.to_string_lossy().into_owned()).await;
+    let (api, github) = with_github().await;
+    let root = api._root.path().to_owned();
     let first = sha('a');
     let second = sha('b');
     let manifest_blob = sha('c');
     let old_blob = sha('d');
     let upstream_blob = sha('e');
-    blob(root.path(), &manifest_blob, SKILL);
-    blob(root.path(), &old_blob, "Old\n");
-    blob(root.path(), &upstream_blob, "Upstream\n");
+    blob(&github, &manifest_blob, SKILL);
+    blob(&github, &old_blob, "Old\n");
+    blob(&github, &upstream_blob, "Upstream\n");
     commit(
-        root.path(),
+        &github,
         &first,
         '3',
         &[
@@ -1408,21 +1435,20 @@ async fn github_updates_record_the_upstream_revision_before_a_queued_local_edit(
             .iter()
             .map(|name| (name.as_str(), "100644", upstream_blob.as_str())),
     );
-    commit(root.path(), &second, '4', &files);
-    let imported = github::import(
+    commit(&github, &second, '4', &files);
+    let imported = sources::import(
         &api.service,
         "global",
-        &json!({
-            "repository": "fixture/skills",
-            "ref": first,
-            "path": "skills/review",
-        }),
+        &import(
+            &json!({ "repository": "fixture/skills", "ref": first }),
+            Some("skills/review"),
+        ),
         None,
     )
     .await
     .unwrap();
 
-    let expected = root.path().join("expected");
+    let expected = root.join("expected");
     std::fs::create_dir_all(expected.join("notes")).unwrap();
     bundle::write_file(&expected.join("SKILL.md"), SKILL.as_bytes(), false)
         .await
@@ -1436,13 +1462,13 @@ async fn github_updates_record_the_upstream_revision_before_a_queued_local_edit(
     let service = api.service.clone();
     let base = imported["imported"]["revision"].clone();
     let updater = tokio::spawn(async move {
-        github::update(
+        sources::update(
             &service,
             "global",
             "review",
             &json!({
                 "base": base,
-                "commit": second,
+                "version": second,
             }),
             None,
         )

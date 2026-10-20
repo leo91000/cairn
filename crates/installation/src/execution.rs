@@ -117,9 +117,16 @@ pub async fn prepare_execution(
     let mut workspaces = Vec::new();
     let mut mounts = Vec::new();
     for project in &projects {
-        let entry =
-            workspace::prepare_project(run, project, config, &root, single, generation, credentials)
-                .await?;
+        let entry = workspace::prepare_project(
+            run,
+            project,
+            config,
+            &root,
+            single,
+            generation,
+            credentials,
+        )
+        .await?;
         if is_isolated {
             mounts.push(Mount::same(&entry.path, read_only));
         }

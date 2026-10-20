@@ -1,5 +1,6 @@
 mod common;
 
+use cairn_installation::plugins::run_credentials::RunCredentials;
 use common::relay_fixture::router;
 
 use axum::{
@@ -1770,10 +1771,15 @@ async fn a_remote_only_agent_prepares_a_private_vm_without_a_local_controller() 
         },
     });
     owner.put("agents", run["snapshot"]["agent"].clone()).await;
-    let prepared =
-        cairn_installation::execution::prepare(&run, &owner.service.config, None, None, None)
-            .await
-            .unwrap();
+    let prepared = cairn_installation::execution::prepare(
+        &run,
+        &owner.service.config,
+        &RunCredentials::default(),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
     assert_eq!(prepared["backend"], "firecracker");
     assert_eq!(prepared["isolated"], true);
     let placement =

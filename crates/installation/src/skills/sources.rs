@@ -207,11 +207,7 @@ async fn files(
 async fn fetch(s: &Service, origin: &Origin, file: &File) -> Result<Vec<u8>> {
     let manifest = &origin.package.manifest;
     let url = target(s, manifest, text(&file.download, "url"), "https")?;
-    let mut request = s
-        .plugins
-        .http
-        .get(url)
-        .timeout(Duration::from_secs(30));
+    let mut request = s.plugins.http.get(url).timeout(Duration::from_secs(30));
     if let Some(headers) = file.download["headers"].as_object() {
         if headers.len() > 4 {
             return Err(invalid());
@@ -219,7 +215,8 @@ async fn fetch(s: &Service, origin: &Origin, file: &File) -> Result<Vec<u8>> {
         for (name, value) in headers {
             let name = name.to_ascii_lowercase();
             let value = value.as_str().unwrap_or("");
-            let allowed = matches!(name.as_str(), "accept" | "user-agent") || name.starts_with("x-");
+            let allowed =
+                matches!(name.as_str(), "accept" | "user-agent") || name.starts_with("x-");
             if !allowed || value.len() > 200 || value.chars().any(char::is_control) {
                 return Err(invalid());
             }
@@ -245,15 +242,17 @@ async fn fetch(s: &Service, origin: &Origin, file: &File) -> Result<Vec<u8>> {
         404 => return Err(Error::not_found("A file of this skill source is missing.")),
         _ => return Err(Error::bad_gateway("The skill source refused a download.")),
     }
-    let limit = file.size.min(super::bundle::FILE_BYTES) as usize;
+    // Listed sizes decide what is downloaded; each body stays within a skill file.
+    let limit = super::bundle::FILE_BYTES as usize;
     let mut bytes = Vec::new();
     let mut stream = response.bytes_stream();
     while let Some(chunk) = stream.next().await {
         let chunk = chunk.map_err(|_| Error::bad_gateway("A download was interrupted."))?;
         if bytes.len() + chunk.len() > limit {
-            return Err(Error::bad_gateway(
-                "A downloaded file is larger than listed.",
-            ));
+            return Err(Error::too_large(format!(
+                "Skill files are limited to {} MiB each.",
+                super::bundle::FILE_BYTES >> 20
+            )));
         }
         bytes.extend_from_slice(&chunk);
     }
@@ -288,6 +287,7 @@ fn public(record: &Value, revision: &str) -> Value {
         "source": record["source"],
         "instance": record["instance"],
         "label": record["label"],
+        "location": record["location"],
         "url": record["url"],
         "folder": record["folder"],
         "version": record["version"],
@@ -326,7 +326,13 @@ pub async fn import(
     project: Option<&Path>,
 ) -> Result<Value> {
     let plugin = text(input, "pluginId");
-    let origin = origin(s, plugin, text(input, "skillSource"), input["instance"].as_str()).await?;
+    let origin = origin(
+        s,
+        plugin,
+        text(input, "skillSource"),
+        input["instance"].as_str(),
+    )
+    .await?;
     let location = input
         .get("location")
         .filter(|value| value.is_object())
@@ -344,7 +350,14 @@ pub async fn import(
         Some(value) if !value.is_empty() => folder(value)?.to_owned(),
         _ => resolved.folder.clone(),
     };
-    let (files, truncated) = files(s, &origin, &resolved.location, &resolved.version, &requested).await?;
+    let (files, truncated) = files(
+        s,
+        &origin,
+        &resolved.location,
+        &resolved.version,
+        &requested,
+    )
+    .await?;
     if truncated {
         return Err(Error::bad(
             "This folder is too large to search. Enter the skill folder path.",
@@ -490,7 +503,14 @@ pub async fn status(
         return Ok(result);
     }
 
-    let (old, _) = files(s, &origin, &record["location"], text(&record, "version"), folder).await?;
+    let (old, _) = files(
+        s,
+        &origin,
+        &record["location"],
+        text(&record, "version"),
+        folder,
+    )
+    .await?;
     let (new, _) = files(s, &origin, &record["location"], &latest.version, folder).await?;
     let old = old
         .into_iter()
@@ -516,8 +536,7 @@ pub async fn status(
             _ => continue,
         };
         let mut change = json!({ "path": path, "status": status, "binary": false });
-        let content_changed =
-            before.is_none_or(|a| after.is_none_or(|b| a.digest != b.digest));
+        let content_changed = before.is_none_or(|a| after.is_none_or(|b| a.digest != b.digest));
         if changes.len() < DIFF_FILES && content_changed {
             let (a, b) = (
                 content(s, &origin, before).await?,

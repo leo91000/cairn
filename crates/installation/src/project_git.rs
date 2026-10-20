@@ -245,11 +245,26 @@ mod tests {
     #[test]
     fn ssh_remotes_have_an_https_form() {
         for (raw, expected) in [
-            ("git@forge.example:team/repo.git", "https://forge.example/team/repo.git"),
-            ("forge.example:team/repo.git", "https://forge.example/team/repo.git"),
-            ("ssh://git@forge.example/team/repo.git", "https://forge.example/team/repo.git"),
-            ("ssh://forge.example/team/repo.git", "https://forge.example/team/repo.git"),
-            ("https://user:pw@forge.example/team/repo.git", "https://forge.example/team/repo.git"),
+            (
+                "git@forge.example:team/repo.git",
+                "https://forge.example/team/repo.git",
+            ),
+            (
+                "forge.example:team/repo.git",
+                "https://forge.example/team/repo.git",
+            ),
+            (
+                "ssh://git@forge.example/team/repo.git",
+                "https://forge.example/team/repo.git",
+            ),
+            (
+                "ssh://forge.example/team/repo.git",
+                "https://forge.example/team/repo.git",
+            ),
+            (
+                "https://user:pw@forge.example/team/repo.git",
+                "https://forge.example/team/repo.git",
+            ),
         ] {
             assert_eq!(https_remote(raw).as_deref(), Some(expected), "{raw}");
         }

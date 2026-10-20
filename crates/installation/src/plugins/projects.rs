@@ -212,7 +212,9 @@ pub async fn import(s: &Service, input: &Value) -> Result<Value> {
     record.insert("source".into(), source.into());
     record.insert("instance".into(), connection.id.clone().into());
     record.insert("id".into(), item_id.into());
-    let saved = s.project_from_source(project, Value::Object(record)).await?;
+    let saved = s
+        .project_from_source(project, Value::Object(record))
+        .await?;
     // The registered project now owns the clone.
     let _ = directory.keep();
     Ok(saved)
@@ -252,7 +254,12 @@ mod tests {
         )
         .unwrap();
         assert_eq!(old["imported"], true);
-        let new = item(&json!({ "id": "team/new", "name": "new" }), &projects, "forge").unwrap();
+        let new = item(
+            &json!({ "id": "team/new", "name": "new" }),
+            &projects,
+            "forge",
+        )
+        .unwrap();
         assert_eq!(new["imported"], true);
         let other = item(&json!({ "id": "team/x", "name": "x" }), &projects, "forge").unwrap();
         assert_eq!(other["imported"], false);

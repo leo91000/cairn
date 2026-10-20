@@ -75,7 +75,11 @@ async fn values(s: &Service, connection: &Connection) -> Result<(Option<String>,
 }
 
 /// Renders one instance. A template naming a missing value leaves its item out.
-async fn render_instance(s: &Service, package: &Package, connection: &Connection) -> Result<Rendered> {
+async fn render_instance(
+    s: &Service,
+    package: &Package,
+    connection: &Connection,
+) -> Result<Rendered> {
     let Some(run) = &package.manifest.run_credentials else {
         return Ok(Rendered {
             files: Vec::new(),
@@ -166,7 +170,10 @@ pub async fn for_run(s: &Service, agent_id: &str, projects: &[Value]) -> Result<
             }
             fetch_order.push((connection.id.clone(), rendered.git));
         }
-        for connection in owned.iter().filter(|c| Some(c.id.as_str()) != granted.map(|g| g.id.as_str())) {
+        for connection in owned
+            .iter()
+            .filter(|c| Some(c.id.as_str()) != granted.map(|g| g.id.as_str()))
+        {
             let rendered = render_instance(s, &package, connection).await?;
             fetch_order.push((connection.id.clone(), rendered.git));
         }
@@ -209,7 +216,11 @@ pub async fn fetch(s: &Service, agent_id: Option<&str>, project: &Value) -> Resu
 }
 
 /// Credentials of one instance for a remote, e.g. to clone a project it resolved.
-pub async fn for_instance(s: &Service, package: &Package, connection: &Connection) -> Result<Vec<GitAccess>> {
+pub async fn for_instance(
+    s: &Service,
+    package: &Package,
+    connection: &Connection,
+) -> Result<Vec<GitAccess>> {
     Ok(render_instance(s, package, connection).await?.git)
 }
 
@@ -258,9 +269,18 @@ mod tests {
     #[test]
     fn the_project_instance_comes_first() {
         let order = vec![
-            ("agent".to_owned(), vec![access("https://forge.example", "agent")]),
-            ("owner".to_owned(), vec![access("https://forge.example", "owner")]),
-            ("other".to_owned(), vec![access("https://other.example", "other")]),
+            (
+                "agent".to_owned(),
+                vec![access("https://forge.example", "agent")],
+            ),
+            (
+                "owner".to_owned(),
+                vec![access("https://forge.example", "owner")],
+            ),
+            (
+                "other".to_owned(),
+                vec![access("https://other.example", "other")],
+            ),
         ];
         let project = json!({
             "id": "p", "origin": "forge.example:team/repo.git",
@@ -268,7 +288,10 @@ mod tests {
         });
         let selected = fetch_access(&project, &order);
         assert_eq!(
-            selected.iter().map(|g| g.password.as_str()).collect::<Vec<_>>(),
+            selected
+                .iter()
+                .map(|g| g.password.as_str())
+                .collect::<Vec<_>>(),
             ["owner", "agent"]
         );
         let local = json!({ "id": "p", "origin": "" });

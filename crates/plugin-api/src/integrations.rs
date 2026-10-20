@@ -198,7 +198,9 @@ fn https_on(manifest: &super::Manifest, raw: &str) -> bool {
             && url.port().is_none()
             && url.query().is_none()
             && url.fragment().is_none()
-            && url.host_str().is_some_and(|host| manifest.allows_host(host))
+            && url
+                .host_str()
+                .is_some_and(|host| manifest.allows_host(host))
     })
 }
 
@@ -445,12 +447,18 @@ mod tests {
         ] {
             let mut invalid = run.clone();
             invalid["files"][0]["path"] = json!(path);
-            assert!(manifest(json!({ "runCredentials": invalid })).is_err(), "{path}");
+            assert!(
+                manifest(json!({ "runCredentials": invalid })).is_err(),
+                "{path}"
+            );
         }
         for content in ["{{env.HOME}}", "{{credential", "{{secrets.}}"] {
             let mut invalid = run.clone();
             invalid["files"][0]["content"] = json!(content);
-            assert!(manifest(json!({ "runCredentials": invalid })).is_err(), "{content}");
+            assert!(
+                manifest(json!({ "runCredentials": invalid })).is_err(),
+                "{content}"
+            );
         }
         let mut invalid = run.clone();
         invalid["git"][0]["url"] = json!("https://undeclared.example");
@@ -505,8 +513,10 @@ mod tests {
         named["name"] = json!("Bad-Name");
         assert!(manifest(json!({ "conditions": [named] })).is_err());
 
-        manifest(json!({ "projectSources": [{ "name": "repositories", "title": "Repositories" }] }))
-            .unwrap();
+        manifest(
+            json!({ "projectSources": [{ "name": "repositories", "title": "Repositories" }] }),
+        )
+        .unwrap();
         let skill = json!({
             "name": "repository", "title": "Repository",
             "fields": [{ "key": "repository", "title": "Repository", "type": "string", "required": true }],

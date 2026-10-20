@@ -131,9 +131,7 @@ pub async fn normalize(s: &Service, agent_id: &str, condition: &Value) -> Result
                 object.remove("pluginId");
             }
             if !jsonschema::is_valid(&schema, &condition) {
-                return Err(Error::bad(format!(
-                    "Provide the fields {kind} requires."
-                )));
+                return Err(Error::bad(format!("Provide the fields {kind} requires.")));
             }
             canonical(&mut condition, &schema);
             condition["pluginId"] = package.manifest.id.clone().into();
@@ -216,10 +214,10 @@ fn waiting_display(raw: &Value) -> Option<Value> {
 
 /// What clients show for a result: `{ tone, title, detail }`.
 fn result_display(raw: &Value) -> Option<Value> {
-    let tone = match raw["tone"].as_str() {
-        Some(tone @ ("ok" | "error" | "warning" | "neutral")) => tone,
-        _ => "neutral",
-    };
+    let tone = raw["tone"]
+        .as_str()
+        .filter(|tone| matches!(*tone, "ok" | "error" | "warning" | "neutral"))
+        .unwrap_or("neutral");
     Some(json!({
         "tone": tone,
         "title": short(&raw["title"], 200)?,
@@ -257,7 +255,9 @@ pub async fn observe(s: &Service, run: &Value, condition: &Value) -> Result<Obse
         .await?
         .into_iter()
         .find(|(package, _)| package.manifest.id == plugin)
-        .ok_or_else(|| Error::forbidden("This agent is no longer granted the plugin of this wait."))?;
+        .ok_or_else(|| {
+            Error::forbidden("This agent is no longer granted the plugin of this wait.")
+        })?;
     let kind = text(condition, "type");
     let declared = package
         .manifest
@@ -287,7 +287,9 @@ pub async fn observe(s: &Service, run: &Value, condition: &Value) -> Result<Obse
     .await
     .map_err(|_| Error::bad_gateway("The condition could not be checked in time."))??;
     if serde_json::to_string(&value)?.len() > MAX_OBSERVATION_BYTES {
-        return Err(Error::bad_gateway("The plugin returned too large a result."));
+        return Err(Error::bad_gateway(
+            "The plugin returned too large a result.",
+        ));
     }
     let check_after = value["checkAfter"]
         .as_i64()

@@ -115,7 +115,7 @@ export class Service {
     validateAccess(item)
     for (const projectId of item.access.projects ?? [])
       requireValue(this.store.get('projects', projectId), 'Allowed project not found')
-    if (existingId === MAIN_AGENT_ID && (item.access.projects !== null || item.access.skills !== null || !item.access.github || item.access.mcps !== null || Object.keys(item.access.mcpTools).length > 0))
+    if (existingId === MAIN_AGENT_ID && (item.access.projects !== null || item.access.skills !== null || (item.access as { github?: boolean }).github === false || item.access.mcps !== null || Object.keys(item.access.mcpTools).length > 0))
       throw new AppError(400, 'The main agent always has access to all resources. Create another agent for restricted access.')
     for (const id of item.access.mcps ?? [])
       this.mcps.get(id)

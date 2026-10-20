@@ -78,7 +78,10 @@ impl Fixture {
     /// Starts the worker process, or the former Node backend when `legacy`.
     async fn start_backend(&mut self, legacy: bool) {
         let file = self.root.path().join("config.json");
-        tokio::fs::write(&file, serde_json::to_vec(&self.service.config).unwrap())
+        let mut config = serde_json::to_value(&self.service.config).unwrap();
+        // The historical backend still runs its own GitHub CLI.
+        config["ghBin"] = "gh".into();
+        tokio::fs::write(&file, serde_json::to_vec(&config).unwrap())
             .await
             .unwrap();
         let mut command = if legacy {

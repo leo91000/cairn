@@ -569,10 +569,11 @@ async fn startup_gives_existing_agents_a_revision_and_keeps_grants_out_of_access
 }
 
 /// The previous release's `policy()`: defaults merged with every saved `access` key.
+/// Since data epoch 8, GitHub is a plugin grant and no longer an `access` key.
 fn previous_policy(agent: &Value) -> Value {
     let mut previous = json!({
         "projects": null, "skills": null, "mcps": null, "mcpTools": {},
-        "installation": false, "github": true, "sandbox": "yolo",
+        "installation": false, "sandbox": "yolo",
         "nodes": [LOCAL_NODE_ID],
     });
     cairn_installation::store::merge(&mut previous, &agent["access"]);
@@ -587,7 +588,6 @@ async fn delegations_stay_approved_for_the_previous_release_whatever_the_live_gr
     let mut agent = owner.create_agent("Bot").await;
     agent["access"]["projects"] = json!([]);
     agent["access"]["nodes"] = json!([LOCAL_NODE_ID, NODE]);
-    agent["access"]["github"] = false.into();
     let (status, agent) = owner.send("PUT", &path(&agent), agent).await;
     assert_eq!(status, StatusCode::OK, "{agent}");
     // A delegation approved for this agent, as the instance editor stores it.

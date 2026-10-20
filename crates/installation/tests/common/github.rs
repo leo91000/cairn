@@ -117,15 +117,17 @@ async fn answer(root: &Path, calls: &Mutex<Vec<Value>>, request: Request<Body>) 
     let method = request.method().to_string();
     let uri = request.uri().clone();
     let path = uri.path().trim_start_matches('/').to_owned();
-    let full = uri
-        .path_and_query()
-        .map_or(path.clone(), |value| value.as_str().trim_start_matches('/').to_owned());
+    let full = uri.path_and_query().map_or(path.clone(), |value| {
+        value.as_str().trim_start_matches('/').to_owned()
+    });
     let headers = request.headers().clone();
     let token = headers
         .get("authorization")
         .and_then(|value| value.to_str().ok())
         .map(|value| value.trim_start_matches("Bearer ").to_owned());
-    let bytes = to_bytes(request.into_body(), 1_000_000).await.unwrap_or_default();
+    let bytes = to_bytes(request.into_body(), 1_000_000)
+        .await
+        .unwrap_or_default();
     let body: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
     calls.lock().unwrap().push(json!({
         "method": method,
@@ -152,7 +154,11 @@ async fn answer(root: &Path, calls: &Mutex<Vec<Value>>, request: Request<Body>) 
         tokio::time::sleep(Duration::from_millis(delay)).await;
     }
     if state["error"] == true {
-        return (StatusCode::INTERNAL_SERVER_ERROR, "fixture-secret-must-not-leak").into_response();
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "fixture-secret-must-not-leak",
+        )
+            .into_response();
     }
 
     // Device sign-in.
@@ -170,7 +176,9 @@ async fn answer(root: &Path, calls: &Mutex<Vec<Value>>, request: Request<Body>) 
     }
     if path == "login/oauth/access_token" {
         let answer = match state["device"].as_str() {
-            Some("approved") => json!({ "access_token": USER_TOKEN, "token_type": "bearer", "scope": "repo,workflow,read:org" }),
+            Some("approved") => {
+                json!({ "access_token": USER_TOKEN, "token_type": "bearer", "scope": "repo,workflow,read:org" })
+            }
             Some("denied") => json!({ "error": "access_denied" }),
             _ => json!({ "error": "authorization_pending" }),
         };
@@ -194,8 +202,14 @@ async fn answer(root: &Path, calls: &Mutex<Vec<Value>>, request: Request<Body>) 
     }
 
     if path == "user" {
-        if token.as_deref().is_some_and(|token| token.starts_with("revoked")) {
-            return json_response(StatusCode::UNAUTHORIZED, &json!({ "message": "Bad credentials" }));
+        if token
+            .as_deref()
+            .is_some_and(|token| token.starts_with("revoked"))
+        {
+            return json_response(
+                StatusCode::UNAUTHORIZED,
+                &json!({ "message": "Bad credentials" }),
+            );
         }
         let user = state
             .get("user")
@@ -220,7 +234,11 @@ async fn answer(root: &Path, calls: &Mutex<Vec<Value>>, request: Request<Body>) 
             None if !query.contains("contexts(") => state["finalPr"].clone(),
             None => state["pr"].clone(),
         };
-        let pr = if pr.is_null() { state["pr"].clone() } else { pr };
+        let pr = if pr.is_null() {
+            state["pr"].clone()
+        } else {
+            pr
+        };
         return json_response(
             StatusCode::OK,
             &json!({ "data": { "repository": { "pullRequest": pr } } }),
@@ -245,7 +263,11 @@ async fn answer(root: &Path, calls: &Mutex<Vec<Value>>, request: Request<Body>) 
         let rules = state["rulePages"]
             .get(&page)
             .cloned()
-            .or_else(|| (earlier > 1).then(|| state["rulesAfter"].clone()).filter(|v| !v.is_null()))
+            .or_else(|| {
+                (earlier > 1)
+                    .then(|| state["rulesAfter"].clone())
+                    .filter(|v| !v.is_null())
+            })
             .or_else(|| state.get("rules").cloned())
             .unwrap_or_else(|| json!([]));
         return json_response(StatusCode::OK, &rules);
