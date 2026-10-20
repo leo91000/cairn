@@ -39,7 +39,8 @@ It does not assert pixel equality between a browser and Material components.
 | Artifacts | Authenticated previews, versions, groups, images/PDF/Markdown, save/share and deep links from replies | Chat journey; artifact and link gesture regressions |
 | Reading | Wrapped long text/URLs, selectable native Markdown, history pagination, stable reading anchors during drag/streaming, jump to latest | Markdown/history suite; real device gesture tests |
 | Chat rendering work | Same transcript, links, tables, selection and event identity on both clients. Web retains unchanged Markdown DOM blocks and code highlighting; timestamps retain native locale/zone formatting and refresh their context on every reader render. Android retains its native lazy reader and Markdown block cache; connection recovery excludes message presentations, including large streamed answers. Neither client truncates or splits long paragraphs to obtain a timing gain. | `message-times.test.ts`, `highlight-cache.test.ts`, Chromium/WebKit `chat-rendering.spec.ts`; Android `TimelineTest` and opt-in `ChatRenderingBenchmarkDeviceTest`; `docs/CHAT-RENDERING-PERFORMANCE.md` |
-| Live catch-up | Following the latest output, a resume past a backlog longer than one page reopens on the recent window; older messages load on scroll. Reading older messages keeps the complete replay and the reading position. Stored backlog pages bypass the live coalescing delay | Backend recent-window, cached-resume, reconnect and history/reset tests; web connection test; Android `LiveTest`, `ScrollResumeTest` and `RecentWindowResumeTest` |
+| Live catch-up | Following the latest output, a resume past a backlog longer than one page reopens on the recent window; older messages load on scroll. When the newest window reaches back to the saved cursor (a backlog of replaced text snapshots), the reader receives only what it lacks and keeps its history and position. Reading older messages keeps the complete replay and the reading position. Stored backlog pages and the opening page bypass the live coalescing delay | Backend recent-window, compacted-resume, cached-resume, reconnect and history/reset tests; web connection test; Android `LiveTest`, `ScrollResumeTest` and `RecentWindowResumeTest` |
+| Opening a conversation | The previous conversation leaves at once. A saved copy the Fil shows as current (same finished turn, no work in progress, no later change) opens immediately; otherwise a centred loader stands in until the stream's first snapshot, which shows in one piece, and the saved copy only resumes the stream from its cursor (it still shows without a connection). Android rechecks retained pager previews when selected, including previously visited pages. The header names the conversation from the Fil meanwhile. Revalidating a saved copy says « Updating… » / « Actualisation… » only after a second. Android follows the conversation list on its own stream beside every conversation; a browser tab asks the conversation's stream to carry it (`list=1`), keeping one stream per tab within the account's stream capacity, and uses the list stream elsewhere | `chat-switch.spec.ts` (switch frames, slow and outdated opens); `SavedConversationTest`, `SavedConversationCases` on JVM/device and the existing Android cache/resume suites; `docs/CONVERSATION-OPENING.md` |
 | Connection loss | A lost connection is a quiet notice that leaves on its own. Android probes the selected installation, reloads after any current action finishes and cancels old recovery when switching installations. The web shares recovery probes separately for Beacon account calls and installation calls, and retries safe HTTP reads; failed writes get a short toast and are never replayed. Local file failures and genuine application errors keep an actionable notice. Web stream errors also clear on recovery. Connection and failed-action feedback stay visible in fixed areas of active dialogs on both platforms | Android shared `ConnectionLostCases` on JVM/device, API transport/local-I/O regression; web API recovery suite and settings browser journey |
 | Appearance | Android-specific « Signal » palette since 0.32.0 (paper/ink with the Cairn blue accent, coral for attention), agent/project identity colours, light/dark/system themes, font scaling, touch-sized labelled actions | Native captures; large-text/keyboard device checks |
 
@@ -67,7 +68,9 @@ coverage used, not a claim that every production account/provider was exercised.
   user taps the tile; Android 14 limited access is supported), which browsers cannot offer; the
   web menu has Photos, Camera and Files. File actions use a long press on Android and a ⋯ menu
   on the web. Message images keep a fixed mosaic size on Android so the history does not move
-  while pictures load. Both viewers zoom images: pinch and pan on Android; an
+  while pictures load. A single image on the web keeps its proportions; the installation records
+  each new image's displayed size at upload, so the web reserves that box before it loads (older
+  uploads without a size still size themselves when they load). Both viewers zoom images: pinch and pan on Android; an
   actual-size toggle with scrolling on the web. Web sharing prepares the original
   while the menu or viewer is open, then enables Share for a fresh user gesture.
   Both apps fetch original attachments through the authenticated binary stream
@@ -116,6 +119,16 @@ resume adapters remain in place. `OlderPagesTest`, the `LiveTest` reconnect prob
 and `OlderPagesScopeTest` cover the Android rules and scope/cache interactions.
 See `docs/research/263-android-older-pages.md` for the discriminating experiment,
 locking decision and limits; no performance gain is asserted.
+
+The two clients fetch older pages at different moments. Android keeps its
+three-screen buffer from the start: its lazy list composes only the rows on screen,
+so a page arriving above costs little. The web renders the whole history, so it
+fetches what the view shows when a conversation opens (more only while the history
+is too short to scroll) and keeps the same three-screen buffer once the reader
+scrolls up. Its « Loading history… » banner then appears only for a reader waiting
+at the start. Both keep the reader's text in place as a page arrives: Compose by
+row key, the browser by scroll anchoring, with the previous manual offset at the
+very top (where browsers do not anchor) and in engines without anchoring.
 
 The paging status matches the web's `role="status"` banner on small screens: like
 its 90% width, the Android pill keeps a 12 dp margin from the screen edges, wraps

@@ -129,12 +129,19 @@ test('claims an installation and sends after relay restarts and beacon session r
     seed.store.updateRun(run.id, { status: 'succeeded', summary: 'The **relayed agent reply** remains readable.', finishedAt: Date.now() })
     seed.store.event(run.id, 'item.completed', 'The **relayed agent reply** remains readable.', { item: { id: 'relayed-reply', type: 'agent_message', text: 'The **relayed agent reply** remains readable.' } })
     seed.store.put('chats', { ...chat, runId: run.id })
-    // The first SSE batch can render before the initial finite compatibility
-    // read finishes. Observe only subsequent delivery when checking for polling.
-    const initialHistory = page.waitForResponse(response => response.url().includes(`/runs/${run.id}/events?after=0&limit=500`) && response.status() === 200)
+    // A relay that streams opens the conversation from its stream alone: the finite
+    // compatibility read is only for installations on the first relay protocol.
+    const compatibilityReads: string[] = []
+    const collectCompatibility = (request: import('@playwright/test').Request) => {
+      if (request.url().includes(`/runs/${run.id}/events?`))
+        compatibilityReads.push(request.url())
+    }
+
+    page.on('request', collectCompatibility)
     await page.reload()
     await expect(page.locator('.activity-message').filter({ hasText: 'The relayed agent reply remains readable.' })).toBeVisible()
-    await (await initialHistory).finished()
+    page.off('request', collectCompatibility)
+    expect(compatibilityReads).toEqual([])
     // An external installation commit reaches the open browser stream without
     // navigation or the old three-second snapshot polling.
     const liveRequests: string[] = []

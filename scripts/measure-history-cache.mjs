@@ -29,6 +29,14 @@ try {
     results[name] = await page.evaluate(async (code) => {
       const moduleUrl = URL.createObjectURL(new Blob([code], { type: 'text/javascript' }))
       const load = () => import(`${moduleUrl}#${crypto.randomUUID()}`)
+      // Each version starts from empty databases.
+      for (const name of ['cairn-history-v1', 'cairn-history-v2']) {
+        await new Promise((resolve) => {
+          const deletion = indexedDB.deleteDatabase(name)
+          deletion.onsuccess = deletion.onerror = deletion.onblocked = resolve
+        })
+      }
+
       let cache = await load()
       await cache.clearHistoryCache()
       const value = {
@@ -65,6 +73,11 @@ try {
         await cache.readHistory('measurement', 'chat')
       })
       const saved = await cache.readHistory('measurement', 'chat')
+      // Saving one conversation while eleven others are already saved, as a reader who
+      // has opened a dozen conversations does while one of them streams.
+      for (let i = 0; i < 11; i++)
+        await cache.writeHistory('measurement', `other-${i}`, value)
+      const fullWriteMs = await sample(() => cache.writeHistory('measurement', 'chat', value))
       await cache.clearHistoryCache()
       URL.revokeObjectURL(moduleUrl)
       return {
@@ -73,6 +86,7 @@ try {
         writeMs,
         warmMs,
         coldMs,
+        fullWriteMs,
       }
     }, code)
     const after = await session.send('SystemInfo.getProcessInfo')
@@ -91,7 +105,7 @@ try {
       logicalCpus: os.cpus().length,
       memoryGiB: Math.round(os.totalmem() / 1024 ** 3),
     },
-    workload: '1250 events, 20 synthetic output lines each; 30 writes, 30 warm reads, 30 fresh-module reads; renderer CPU includes module imports and measurement setup',
+    workload: '1250 events, 20 synthetic output lines each; 30 writes, 30 warm reads, 30 fresh-module reads, then 30 writes with eleven other conversations saved; renderer CPU includes module imports and measurement setup',
     results,
   }, null, 2)}\n`)
 }

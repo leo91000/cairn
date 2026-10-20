@@ -2,7 +2,7 @@ import type { Deliverable } from '../../../packages/contracts/artifacts'
 import type { ChatDetail, ChatView } from '../../../packages/contracts/chats'
 import type { Run, RunEvent } from '../../../packages/contracts/contracts'
 import type { HistoryPage, LiveState } from '../../../packages/contracts/live'
-import type { ReadingPosition } from './history-cache'
+import type { CachedHistory, ReadingPosition } from './history-cache'
 import type { LiveStatus } from './live-connection'
 import {
   computed,
@@ -11,10 +11,11 @@ import {
   watch,
 } from 'vue'
 import { api, ApiError, state } from './api'
-import { publishChats } from './chat-list'
 import {
   cacheScope,
   clearHistoryCache,
+  knownScope,
+  peekHistory,
   readHistory,
   removeHistory,
   writeHistory,
@@ -22,16 +23,38 @@ import {
 import { liveConnection } from './live-connection'
 import { LiveEvents } from './live-events'
 
-// `hold` keeps the previous stream's data on screen until the new stream is ready,
-// so switching views swaps content directly instead of flashing a loading state.
-// `shown` is the path whose data is currently displayed.
-export function useLiveRun(path: () => string, options: { hold?: boolean } = {}) {
+/** A revalidation that takes longer than this says so; a quick one stays silent. */
+const SLOW_UPDATE = 1000
+/** Saving serializes the whole conversation: streaming output saves at most this often. */
+const SAVE_DELAY = 2000
+
+export interface LiveRunOptions {
+  /**
+   * Whether a saved conversation still matches what the server holds. A current one
+   * shows at once; an outdated one only seeds the stream's cursor, and the view waits
+   * for the result instead of showing older output that is about to change.
+   */
+  current?: (saved: CachedHistory) => boolean
+  /** The stream also carries the conversation list, so the tab needs no second stream. */
+  list?: boolean
+  /** Where the stream's state is saved, when another path names it better than the one opened. */
+  savedAs?: (state: LiveState) => string | undefined
+}
+
+// A view shows its own stream only: switching paths clears the previous data at once, so
+// a saved conversation shows immediately and anything else waits for its first snapshot.
+export function useLiveRun(path: () => string | undefined, options: LiveRunOptions = {}) {
   const snapshot = ref<LiveState>()
-  const shown = ref(path())
   const events = ref<RunEvent[]>([])
   const status = ref<LiveStatus>('connecting')
+  const slow = ref(false)
   const catchingUp = ref(true)
   const synced = ref(false)
+  // The snapshot shown comes from the saved conversation, not yet from the server.
+  const restored = ref(false)
+  // A conversation owns the shell's list while connecting, then only while its stream
+  // can deliver it. Terminal failures and finite compatibility reads release that job.
+  const carriesList = ref(false)
   const error = ref('')
   const position = ref<ReadingPosition>()
   const hasOlder = ref(false)
@@ -44,6 +67,7 @@ export function useLiveRun(path: () => string, options: { hold?: boolean } = {})
   let generation = 0
   let persist: (() => void) | undefined
   let saveTimer: ReturnType<typeof setTimeout> | undefined
+  let slowTimer: ReturnType<typeof setTimeout> | undefined
 
   function scheduleSave() {
     if (saveTimer !== undefined)
@@ -51,7 +75,7 @@ export function useLiveRun(path: () => string, options: { hold?: boolean } = {})
     saveTimer = setTimeout(() => {
       saveTimer = undefined
       persist?.()
-    }, 500)
+    }, SAVE_DELAY)
   }
 
   function savePosition(value: ReadingPosition, key?: string) {
@@ -61,52 +85,32 @@ export function useLiveRun(path: () => string, options: { hold?: boolean } = {})
     scheduleSave()
   }
 
-  function show(value: string) {
-    shown.value = value
+  function setStatus(value: LiveStatus) {
+    status.value = value
+    clearTimeout(slowTimer)
+    slow.value = false
+    if (value === 'connecting')
+      slowTimer = setTimeout(() => slow.value = true, SLOW_UPDATE)
   }
 
-  watch([path, () => state.authenticated && !state.signingOut, () => state.csrf], async ([value, enabled, csrf], previous) => {
-    persist?.()
-    const current = ++generation
-    connection?.close()
-    clearTimeout(saveTimer)
-    saveTimer = undefined
-    persist = undefined
-    fetchOlder = undefined
-    loadingOlder.value = false
-    olderError.value = ''
-    position.value = undefined
-    synced.value = false
-    const clear = () => {
-      show(value)
-      hasOlder.value = false
-      snapshot.value = undefined
-      events.value = []
-      catchingUp.value = true
+  async function open(value: string, current: number, session: string) {
+    // A conversation read earlier in this page shows in the same task, before any paint.
+    let scope = knownScope(session)
+    let cached = scope ? peekHistory(scope, value) : undefined
+    if (!cached) {
+      scope = await cacheScope(session).catch(() => undefined)
+      cached = scope ? await readHistory(scope, value) : undefined
+      if (disposed || current !== generation)
+        return
     }
 
-    const holding = options.hold && enabled && snapshot.value && previous?.[0] !== value && previous?.[1]
-    if (!holding)
-      clear()
-    status.value = 'connecting'
-    error.value = ''
-    if (!enabled) {
-      void clearHistoryCache()
-      return
-    }
-
-    const scope = await cacheScope(state.installationId ? `${state.installationId}:${csrf}` : csrf).catch(() => undefined)
-    const cached = scope ? await readHistory(scope, value) : undefined
-    if (disposed || current !== generation)
-      return
     let accumulator = new LiveEvents()
     let rows: RunEvent[] = cached?.events.slice() ?? []
     let detail = cached?.state
-    let restoredState = !!cached
     let cursor = cached?.cursor ?? 0
     let history = cached?.history
     let oldest = cached?.oldest ?? 0
-    // Applied with the complete snapshot, so a held view keeps its own pagination meanwhile.
+    // Applied with the complete snapshot, so a resumed view keeps its own pagination meanwhile.
     let older = cached?.hasOlder ?? false
     let complete = !!cached
     // Counts history replacements: a page requested before one no longer joins the rows.
@@ -114,34 +118,38 @@ export function useLiveRun(path: () => string, options: { hold?: boolean } = {})
     let storedPosition = cached?.position
     position.value = storedPosition
     accumulator.restore(rows, cursor)
-    if (cached) {
-      if (cached.state.chats)
-        publishChats(cached.state.chats, { cached: true })
 
-      show(value)
+    function showSaved(saved: CachedHistory) {
       hasOlder.value = older
-      // Retain the complete saved state for offline persistence, while the
-      // shared list accepts it only when no current Fil is known.
-      snapshot.value = { ...cached.state, chats: undefined }
-      events.value = cached.events
+      restored.value = true
+      snapshot.value = saved.state
+      events.value = saved.events
       catchingUp.value = false
     }
 
+    let waiting = !!cached && options.current?.(cached) === false
+    if (cached && !waiting)
+      showSaved(cached)
+
+    // A copy opened under another path is also saved where other openings look for it.
+    const saved = () => [...new Set([value, (detail && options.savedAs?.(detail)) || value])]
     persist = () => {
       if (!scope || !complete || !detail || !history || current !== generation || !state.authenticated || state.signingOut)
         return
       storedPosition = position.value
-      void writeHistory(scope, value, {
-        version: 1,
+      const record = {
+        version: 1 as const,
         cursor,
         history,
         state: detail,
         events: rows.slice(),
         oldest,
-        hasOlder: hasOlder.value,
+        hasOlder: older,
         savedAt: Date.now(),
         position: storedPosition,
-      })
+      }
+      for (const path of saved())
+        void writeHistory(scope, path, record)
     }
 
     fetchOlder = async () => {
@@ -183,18 +191,16 @@ export function useLiveRun(path: () => string, options: { hold?: boolean } = {})
     let checking = false
     let receivedBatches = 0
     let readingSnapshot = false
-    let fallbackRun = ''
-    let fallbackRows: RunEvent[] = []
-    let fallbackCursor = 0
-    let fallbackAccumulator = new LiveEvents()
+    let readSnapshotOnce = false
+    let finiteRead = false
 
-    // One initial finite read keeps v1 installations readable during deployment.
-    // Live batches own updates and replay; no recurring snapshot polling.
+    // An installation on the first relay protocol cannot stream: when the stream fails
+    // before its first batch, one finite read keeps it readable. Never polled.
     async function readSnapshot() {
-      if (readingSnapshot || document.hidden || status.value === 'live' || disposed || current !== generation)
+      if (readingSnapshot || readSnapshotOnce || receivedBatches || document.hidden || disposed || current !== generation)
         return
       readingSnapshot = true
-      const revision = receivedBatches
+      readSnapshotOnce = true
       try {
         const endpoint = value.replace(/\/stream$/, '')
         const isList = endpoint === '/chats'
@@ -202,33 +208,28 @@ export function useLiveRun(path: () => string, options: { hold?: boolean } = {})
         const result = await api<ChatDetail | ChatView[] | Run>(endpoint)
         const chat = isChat ? result as ChatDetail : null
         const run = isList ? null : isChat ? chat!.run : result as Run
-        const runId = run?.id || ''
-        const nextRows = runId === fallbackRun ? fallbackRows.slice() : []
-        let nextCursor = runId === fallbackRun ? fallbackCursor : 0
-        const accumulator = runId === fallbackRun ? fallbackAccumulator.copy() : new LiveEvents()
+        const nextRows: RunEvent[] = []
+        const fallback = new LiveEvents()
         let files: Deliverable[] = []
-        if (runId) {
-          files = await api<Deliverable[]>(`/runs/${runId}/artifacts`)
+        if (run?.id) {
+          files = await api<Deliverable[]>(`/runs/${run.id}/artifacts`)
           let page: RunEvent[]
           do {
-            page = await api<RunEvent[]>(`/runs/${runId}/events?after=${nextCursor}&limit=500`)
-            accumulator.append(nextRows, page)
-            nextCursor = accumulator.cursor
-            if (disposed || current !== generation || revision !== receivedBatches)
+            page = await api<RunEvent[]>(`/runs/${run.id}/events?after=${fallback.cursor}&limit=500`)
+            fallback.append(nextRows, page)
+            if (disposed || current !== generation || receivedBatches)
               return
           } while (page.length === 500)
         }
 
-        if (disposed || current !== generation || revision !== receivedBatches)
+        if (disposed || current !== generation || receivedBatches)
           return
-        fallbackRun = runId
-        fallbackRows = nextRows
-        fallbackCursor = nextCursor
-        fallbackAccumulator = accumulator
         // HTTP reads have no validated SSE history/cursor and must not replace
         // the stream's persisted snapshot or advance its replay cursor.
         complete = false
-        show(value)
+        finiteRead = true
+        carriesList.value = false
+        restored.value = false
         snapshot.value = {
           chat,
           run,
@@ -241,7 +242,7 @@ export function useLiveRun(path: () => string, options: { hold?: boolean } = {})
         error.value = ''
       }
       catch (cause) {
-        if (!disposed && current === generation && revision === receivedBatches) {
+        if (!disposed && current === generation && !receivedBatches) {
           error.value = cause instanceof Error ? cause.message : 'Unable to reach your installation.'
           catchingUp.value = false
         }
@@ -276,7 +277,7 @@ export function useLiveRun(path: () => string, options: { hold?: boolean } = {})
         position.value = undefined
         olderError.value = ''
         if (scope)
-          void removeHistory(scope, value)
+          saved().forEach(path => void removeHistory(scope, path))
       }
 
       // Persist a complete snapshot only. An interrupted catch-up cannot corrupt it.
@@ -285,10 +286,10 @@ export function useLiveRun(path: () => string, options: { hold?: boolean } = {})
       candidate.append(next, batch.events)
       accumulator = candidate
       rows = next
-      if (batch.state) {
+      if (batch.state)
         detail = batch.state
-        restoredState = false
-      }
+      finiteRead = false
+      carriesList.value = !!options.list && !!detail?.chats
 
       cursor = accepted
       history = batch.history
@@ -301,19 +302,38 @@ export function useLiveRun(path: () => string, options: { hold?: boolean } = {})
 
       complete = !batch.more
       if (complete) {
-        show(value)
+        waiting = false
         hasOlder.value = older
-        snapshot.value = restoredState && detail ? { ...detail, chats: undefined } : detail
+        synced.value = true
+        if (batch.state)
+          restored.value = false
+        snapshot.value = detail
         events.value = rows.slice()
         catchingUp.value = false
-        synced.value = true
         scheduleSave()
       }
 
       error.value = ''
-    }, (connectionStatus) => {
-      status.value = connectionStatus
-      if (connectionStatus !== 'reconnecting' || checking)
+    }, (connectionStatus, opening = false) => {
+      // A finite read lets the shell carry the Fil while streaming is unavailable. Each
+      // retry takes the slot back before connecting, keeping one stream per tab even
+      // when every account slot is occupied; a failed retry gives it back again.
+      if (options.list && (opening || finiteRead))
+        carriesList.value = opening
+      setStatus(connectionStatus)
+      if (connectionStatus === 'live')
+        return
+      // Without a connection, an outdated saved conversation is still better than nothing.
+      if (waiting && cached && connectionStatus !== 'connecting') {
+        waiting = false
+        showSaved(cached)
+      }
+
+      if (connectionStatus !== 'reconnecting')
+        return
+      if (state.installationId && (!cached || value === '/chats/stream'))
+        void readSnapshot()
+      if (checking)
         return
       checking = true
       void api(value.replace(/\/stream$/, '')).catch((e) => {
@@ -321,32 +341,63 @@ export function useLiveRun(path: () => string, options: { hold?: boolean } = {})
           complete = false
           clearTimeout(saveTimer)
           error.value = e.message
+          carriesList.value = false
           connection?.close()
-          show(value)
           snapshot.value = undefined
           events.value = []
           if (scope)
-            void removeHistory(scope, value)
+            saved().forEach(path => void removeHistory(scope, path))
         }
       }).finally(() => { checking = false })
-    }, cached ? { cursor: cached.cursor, history: cached.history } : undefined, () => position.value?.follow ?? true)
-    if (state.installationId && !cached) {
-      void readSnapshot()
+    }, cached ? { cursor: cached.cursor, history: cached.history } : undefined, () => position.value?.follow ?? true, options.list ? '&list=1' : '')
+  }
+
+  watch([path, () => state.authenticated && !state.signingOut, () => state.csrf], ([value, enabled, csrf]) => {
+    persist?.()
+    const current = ++generation
+    connection?.close()
+    clearTimeout(saveTimer)
+    saveTimer = undefined
+    persist = undefined
+    fetchOlder = undefined
+    loadingOlder.value = false
+    olderError.value = ''
+    position.value = undefined
+    synced.value = false
+    restored.value = false
+    hasOlder.value = false
+    snapshot.value = undefined
+    events.value = []
+    catchingUp.value = true
+    setStatus('connecting')
+    error.value = ''
+    carriesList.value = !!value && enabled && !!options.list
+    if (!enabled) {
+      void clearHistoryCache()
+      return
     }
+
+    if (value)
+      void open(value, current, state.installationId ? `${state.installationId}:${csrf}` : csrf)
   }, { immediate: true, flush: 'sync' })
   const leaving = () => persist?.()
+  const hidden = () => document.hidden && persist?.()
   window.addEventListener('pagehide', leaving)
+  document.addEventListener('visibilitychange', hidden)
   onScopeDispose(() => {
     window.removeEventListener('pagehide', leaving)
+    document.removeEventListener('visibilitychange', hidden)
     persist?.()
     clearTimeout(saveTimer)
+    clearTimeout(slowTimer)
     disposed = true
     generation++
     connection?.close()
   })
   return {
     snapshot,
-    shown,
+    restored,
+    carriesList,
     hasOlder,
     loadingOlder,
     olderError,
@@ -357,7 +408,7 @@ export function useLiveRun(path: () => string, options: { hold?: boolean } = {})
     error,
     position,
     savePosition,
-    connectionNotice: computed(() => error.value || shown.value !== path() ? '' : status.value === 'offline' ? (snapshot.value ? 'Offline · showing saved conversation' : 'Offline') : status.value === 'reconnecting' ? 'Reconnecting…' : status.value === 'connecting' && snapshot.value ? 'Updating…' : ''),
+    connectionNotice: computed(() => error.value ? '' : status.value === 'offline' ? (snapshot.value ? 'Offline · showing saved conversation' : 'Offline') : status.value === 'reconnecting' ? 'Reconnecting…' : status.value === 'connecting' && snapshot.value && slow.value ? 'Updating…' : ''),
     reconnect: () => connection?.reconnect(),
   }
 }
